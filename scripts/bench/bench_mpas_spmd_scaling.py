@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
     state_all_finite, tidy_throughput_fields)
-from run_levante_gpu_scaling import hyperdiff_coeff  # noqa: E402
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # Cap on the del4 stability number nu*dt/dx^4 (dx = mean cell spacing),
 # user-approved 2026-09-27.  Measured on the lloyd-0 mesh over 500 steps:
@@ -84,7 +84,7 @@ DEL4_S_MAX = 6e-4
 
 
 def del4_coeff(subdivision: int, dt: float) -> float:
-    """Levante resolution rule for the del4 coefficient, capped at DEL4_S_MAX."""
+    """The shared resolution law (hyperdiff.py), capped at DEL4_S_MAX for this dt."""
     from legoesm import constants
     dx = constants.R_earth * np.sqrt(4.0 * np.pi / (10 * 4 ** subdivision + 2))
     return float(min(hyperdiff_coeff(subdivision, "icosahedral"),
@@ -144,11 +144,10 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method, *,
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
     # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
     # energy-conserving PV flux, SSP-RK3, global mass fixer.  The del4
-    # coefficient follows that lane's resolution rule (5e16 m^4/s at level 5,
-    # scaled with dx^4), capped at the stability limit measured for THIS dt.
-    # It was a fixed 1e16 at every level, which broke the limit from level 7
-    # up (levels 7 and 8 non-finite within 500 steps, 2026-09-27); the plain
-    # rule broke it at levels 3-4 with this bench's automatic dt.
+    # coefficient is the shared resolution law (hyperdiff.py: 1e16 at level 4,
+    # 16x weaker per level), capped at the stability limit measured for THIS
+    # dt.  A fixed 1e16 at every level broke the limit from level 7 up (levels
+    # 7 and 8 non-finite within 500 steps, 2026-09-27).
     nu4 = del4_coeff(subdivision, dt)
     cfg = MPASPrimitiveEquationConfig(
         nu_del4=nu4, nu_del4_ps=nu4, fix_mass=fix_mass,
@@ -568,6 +567,15 @@ def main() -> int:
     hlo_cp = (hlo_census.get("collective_permute")
               if hlo_census else None)
 
+    # A blown-up trajectory times NaN arithmetic, not the model: the fixed
+    # 1e16 del4 went non-finite at s7+ within 4 steps and every such ladder
+    # row serialized as data.  Stamp it; plot_nature_scaling refuses
+    # valid=false / finite_ok=false rows.
+    finite_ok = state_all_finite(s)
+    if not finite_ok and jax.process_index() == 0:
+        print("ERROR: final state is NON-FINITE; the record is marked "
+              "INVALID (finite_ok=false, valid=false).", flush=True)
+
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
         final_global = (gather_voronoi_state_spmd(s, dev_config)
@@ -628,9 +636,9 @@ def main() -> int:
 
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
-    finite = state_all_finite(s)
     rec = dict(
         component="mpas_atm",
+        finite_ok=finite_ok, valid=finite_ok,
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
@@ -654,7 +662,7 @@ def main() -> int:
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
         compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2), finite_ok=finite, valid=finite,
+        steady_median_ms=round(med, 2),
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
@@ -678,10 +686,10 @@ def main() -> int:
         physics_level=args.physics,
         backend=jax.default_backend(),
         **tidy_throughput_fields(
-            dt_seconds=dt, time_per_step_ms=med if finite else None,
+            dt_seconds=dt, time_per_step_ms=med if finite_ok else None,
             total_cells=int(mesh.nCells) * args.nlev),
     )
-    if not finite:
+    if not finite_ok:
         # A timing of a non-finite state is not a measurement.
         for _k in ("steady_median_ms", "steady_min_ms", "scan_median_ms"):
             rec[_k] = None
@@ -711,6 +719,7 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
+            "nu_del4": del4_coeff(args.subdivision, dt),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
             # The NCCL transport the arm ran with: the channel count moves
@@ -749,7 +758,7 @@ def main() -> int:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
                   "hardware scaling — do not report it as a speedup.")
-    return 0 if finite else 3
+    return 0 if finite_ok else 3
 
 
 if __name__ == "__main__":

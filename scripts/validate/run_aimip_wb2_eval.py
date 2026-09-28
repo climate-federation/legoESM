@@ -421,6 +421,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
         if cfg.get("aimip_trainable_schemes"):
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
             )
@@ -428,6 +429,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
                 build_trainable_params,
             )
             _tier = cfg.get("aimip_trainable_schemes")
+            _cloud = str(cfg.get("aimip_cloud", "xu_randall"))
             _keys = aimip_scheme_keys_for(
                 convection=str(cfg.get("aimip_convection", "tiedtke")),
                 turbulence=str(cfg.get("aimip_turbulence", "louis")),
@@ -440,8 +442,9 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
             schemes = build_trainable_params(
                 active_scheme_keys=_keys,
                 tier=(_tier if isinstance(_tier, str) else "extended"),
-                exclude=tuple(sorted(aimip_legacy_owned_fields(
-                    cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall"))))),
+                exclude=tuple(sorted(
+                    aimip_legacy_owned_fields(cloud_scheme=_cloud)
+                    | aimip_inactive_fields(cloud_scheme=_cloud))),
             )
             skeleton = AIMIPTrainableBundle(
                 classical=skeleton, schemes=schemes)

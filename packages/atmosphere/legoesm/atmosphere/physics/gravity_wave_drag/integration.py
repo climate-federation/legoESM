@@ -433,6 +433,12 @@ def _e3sm_source_kwargs(
         from legoesm.atmosphere.physics.gravity_wave_drag.frontogenesis import (
             compute_frontogenesis,
         )
+        if u_grid.ndim == 2 and not hasattr(grid, "cellsOnEdge"):
+            raise ValueError(
+                "gravity_wave_drag frontal source needs horizontal gradients "
+                "(mesh operators); a column model without mesh topology "
+                "(the FV3 duo column view) cannot supply them -- drop "
+                "'frontal' from the GWD sources on this lane.")
         frontgf, _ = compute_frontogenesis(
             u_grid, v_grid, T_grid, p_full_grid, grid,
         )
@@ -720,7 +726,8 @@ def _make_mpas_gwd(
             zero_ps = jnp.zeros_like(state.p_s.data)
             tendencies = HydrostaticTendencies(
                 du_dt=state.u.replace(data=zero_edges),
-                dv_dt=None,
+                dv_dt=(None if state.v is None
+                       else state.v.replace(data=jnp.zeros_like(state.v.data))),
                 dT_dt=state.T.replace(data=zero_cells),
                 dp_s_dt=state.p_s.replace(data=zero_ps),
                 dphis_dt=state.phis.replace(data=zero_ps),
@@ -743,7 +750,19 @@ def _make_mpas_gwd(
         nlev = sigma_coord.n_levels
         nCells = T.shape[0]
 
-        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+        # cell winds handed over directly by a column model (state.v
+        # present: the FV3 duo view); else Perot reconstruction from edges
+        _cell_winds = state.v is not None
+        if _cell_winds:
+            # geographic east/north cell winds, (nCells, nlev) like T: a
+            # staggered lane must never land here by carrying a v leaf
+            if state.v.data.shape != T.shape or u_edge.shape != T.shape:
+                raise ValueError(
+                    "column-model winds must be cell fields shaped like T "
+                    f"{T.shape}; got u {u_edge.shape}, v {state.v.data.shape}")
+            u_cell, v_cell = u_edge, state.v.data
+        else:
+            u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
 
         # Hybrid-aware level pressures (see _make_hydrostatic_gwd).
         p_full = sigma_coord.pressure_at_full(p_s)
@@ -799,18 +818,24 @@ def _make_mpas_gwd(
         # to get per-edge cell-index vectors.
         du_cell = gwd_out.du_dt
         dv_cell = gwd_out.dv_dt
-        c0 = mesh.cellsOnEdge[0]
-        c1 = mesh.cellsOnEdge[1]
-        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
-        angle = mesh.angleEdge[:, None]
-        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+        if _cell_winds:
+            du_edge_normal, _dv_leaf = du_cell, dv_cell
+        else:
+            c0 = mesh.cellsOnEdge[0]
+            c1 = mesh.cellsOnEdge[1]
+            du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+            dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+            angle = mesh.angleEdge[:, None]
+            du_edge_normal = (du_e_east * jnp.cos(angle)
+                              + dv_e_north * jnp.sin(angle))
+            _dv_leaf = None
         dT_cell = gwd_out.dT_dt
 
         zero_ps = jnp.zeros_like(p_s)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_gwd"),
-            dv_dt=None,
+            dv_dt=(None if _dv_leaf is None
+                   else state.v.replace(data=_dv_leaf, name="dv_dt_gwd")),
             dT_dt=state.T.replace(data=dT_cell, name="dT_dt_gwd"),
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_gwd"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_gwd"),

@@ -108,8 +108,6 @@ class IFSAscentConfig(NamedTuple):
     rprcon: float = 1.4e-3            # 1/m, sucumf.F90:175 (RPRCON*RPLRG = ZPRCDGW)
     dnoprc: float = 3.0e-4            # kg/kg, ZDNOPRC cuascn.F90:284
     cldmax: float = 5.0e-3            # kg/kg, Z_CLDMAX cuascn.F90:285 (excluded cap)
-    cwifrac: float = 0.5              # -, Z_CWIFRAC cuascn.F90:286 (excluded; unused,
-                                      #   liquid-only branch => ZALFAW = 1)
     cprc2: float = 0.5                # -, Z_CPRC2 cuascn.F90:287 (excluded)
     ke_wu_floor_conv: float = 0.5     # m2/s2, cuascn.F90:736 (excluded numerics)
     ke_wu_floor_fall: float = 0.1     # m2/s2, cuascn.F90:792 (excluded numerics)
@@ -137,7 +135,6 @@ __param_spec__ = {
             "ptu_min_K": "temperature clamp numerics floor",
             "ptu_max_K": "temperature clamp numerics floor",
             "cldmax": "numerics floor: cloud-water clip cap",
-            "cwifrac": "unused in the liquid-only branch (ZALFAW = 1)",
             "cprc2": "source constant of a faithful port (Z_CPRC2, cuascn.F90:287)",
             "ke_wu_floor_conv": "numerics floor on ZWU inside the conversion term",
             "ke_wu_floor_fall": "numerics floor on ZWU inside the fallout term",

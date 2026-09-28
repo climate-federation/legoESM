@@ -185,8 +185,8 @@ def test_mpas_atmosphere_rows_must_prove_finite_and_match_the_coefficient(tmp_pa
 def test_icosahedral_hyperdiff_rule_scales_with_dx4():
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
-    from run_levante_gpu_scaling import hyperdiff_coeff
-    assert hyperdiff_coeff(5, "icosahedral") == pytest.approx(5e16, rel=1e-12)
-    for lev in (6, 7, 8):   # nCells ~ 4^L, so dx^4 ~ 16^-L
+    from hyperdiff import hyperdiff_coeff       # the one shared law
+    assert hyperdiff_coeff(4, "icosahedral") == pytest.approx(1e16, rel=1e-12)
+    for lev in (5, 6, 7, 8):   # nCells ~ 4^L, so dx^4 ~ 16^-L
         assert hyperdiff_coeff(lev, "icosahedral") == pytest.approx(
             hyperdiff_coeff(lev - 1, "icosahedral") / 16, rel=1e-3)

@@ -63,6 +63,7 @@ _BENCH_DIR = Path(__file__).resolve().parent
 if str(_BENCH_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCH_DIR))
 from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
@@ -883,32 +884,6 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
 # ===========================================================================
 # Hyperdiffusion scaling
 # ===========================================================================
-
-def hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
-    """Scale \\nabla^4 hyperdiffusion coefficient with resolution."""
-    if grid_type == "spectral":
-        ref_n = 42
-        ref_coeff = 2.5e16
-    elif grid_type == "icosahedral":
-        # For icosahedral, n_grid is a subdivision level.  Scale the
-        # coefficient with dx^4 relative to level 5 (~120 km).
-        from legoesm import constants  # lazy: see top-of-file note on JAX init order
-
-        R = constants.R_earth
-        ref_cells = 10 * 4 ** 5 + 2
-        cur_cells = 10 * 4 ** n_grid + 2
-        dx_ref = R * math.sqrt(4.0 * math.pi / ref_cells)
-        dx_cur = R * math.sqrt(4.0 * math.pi / cur_cells)
-        ref_coeff = 5e16
-        return ref_coeff * (dx_cur / dx_ref) ** 4
-    elif grid_type == "latlon":
-        ref_n = 64
-        ref_coeff = 5e16
-    else:
-        ref_n = 48
-        ref_coeff = 5e16
-    return ref_coeff * (ref_n / n_grid) ** 4
-
 
 # ===========================================================================
 # Physics helpers

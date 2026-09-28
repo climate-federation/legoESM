@@ -69,6 +69,25 @@ def test_grad_matches_finite_difference():
             assert abs(float(gi.flatten()[fi]) - fd) < 1e-5
 
 
+def test_grad_with_broadcast_inputs_matches_expanded_inputs():
+    """A shared diagonal (1, n) or a 1-D band (n,) against a batched RHS must
+    differentiate: the cotangent comes back in the PRIMAL's shape, equal to the
+    expanded-input gradient summed over the broadcast axes.  Before the fix the
+    custom_vjp raised on the shape mismatch under jax.grad."""
+    a, b, c, d = _random_dd_system((4, 6))
+    b1 = b[:1]                     # shared diagonal, broadcast over the batch
+    c1 = c[0]                      # 1-D super-diagonal
+    f = lambda b_, c_: jnp.sum(thomas_solve(a, b_, c_, d) ** 2)
+    gb1, gc1 = jax.grad(f, argnums=(0, 1))(b1, c1)
+    assert gb1.shape == b1.shape and gc1.shape == c1.shape
+    gb, gc = jax.grad(f, argnums=(0, 1))(jnp.broadcast_to(b1, b.shape),
+                                         jnp.broadcast_to(c1, c.shape))
+    np.testing.assert_allclose(np.asarray(gb1), np.asarray(gb.sum(0, keepdims=True)),
+                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(gc1), np.asarray(gc.sum(0)),
+                               rtol=1e-12, atol=1e-12)
+
+
 def test_grad_no_regression_vs_raw_autodiff():
     """On a well-conditioned system the analytic adjoint must equal the raw
     element-wise autodiff to machine precision (the existing behaviour)."""

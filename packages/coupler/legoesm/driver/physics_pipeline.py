@@ -1514,8 +1514,7 @@ class PhysicsPipeline:
                         dt=dt, config=_conv_cfg,
                         land_frac=(
                             ad.flatten_2d(self.f_land)
-                            if self.f_land is not None
-                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                            if self.f_land is not None else None),
                         cld_frac=(None if cloud_fraction is None
                                   else cloud_fraction.reshape(T_col.shape)),
                         pref_edge=self.sigma_half * constants.p_ref,
@@ -3722,8 +3721,7 @@ def _resolve_convection(config):
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
-            # coefficients + the quasi-equilibrium heating-ceiling ratio
-            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            # coefficients.  Defaults match BechtoldConfig.
             # The ExperimentConfig field (2026-09-15); the earlier
             # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
             # existed and silently capped every run at 0.02.
@@ -3808,6 +3806,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "zhang_mcfarlane":
+            conv_config = conv_config._replace(
+                land_fraction=config.zm_land_fraction)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
