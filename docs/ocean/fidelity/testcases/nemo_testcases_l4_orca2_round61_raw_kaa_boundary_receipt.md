@@ -51,12 +51,12 @@ Only afterwards does it build and apply the barotropic correction at
 `OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:436-448`.
 
 The private field and conflict guard are
-`ocean_model_latlon_cgrid.py:1273-1277` and
-`ocean_model_latlon_cgrid.py:2763-2788`.  The production capture is immediately
+`ocean_model_latlon_cgrid.py:1277` and
+`ocean_model_latlon_cgrid.py:2763-2787`.  The production capture is immediately
 before the existing deferred correction at
 `ocean_model_latlon_cgrid.py:9336-9343`; the captured U/V replace returned
 diagnostic slots only after the ordinary step at
-`ocean_model_latlon_cgrid.py:9495-9500`.
+`ocean_model_latlon_cgrid.py:9495-9499`.
 
 The direct raw-Kaa row remains 707 / 16,900 unequal in both arms, with maximum
 absolute error `0.04480131363770535` m/s.  That large common error is not an

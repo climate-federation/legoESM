@@ -3675,17 +3675,17 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:11598': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
     'ocean_model_latlon_cgrid.py:11715': ('u_solve_in = u_solve_in - (', 1),
     # ORCA2 round 61: private post-dyn_zdf/pre-barotropic raw-Kaa observer.
-    'ocean_model_latlon_cgrid.py:1273-1277': [
-        'expose_stage3_raw_momentum: bool = False', 5],
-    'ocean_model_latlon_cgrid.py:2763-2788': [
+    'ocean_model_latlon_cgrid.py:1277': (
+        'expose_stage3_raw_momentum: bool = False', 1),
+    'ocean_model_latlon_cgrid.py:2763-2787': [
         '_stage3_rhs_hook = self._nemo_ws_test_hooks.expose_stage3_momentum_rhs',
-        'expose_stage3_raw_momentum cannot be combined with another', 26],
+        'expose_stage3_raw_momentum cannot be combined with another', 25],
     'ocean_model_latlon_cgrid.py:9336-9343': [
         'if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:',
         'if _ws_stage3_correction is not None:', 8],
-    'ocean_model_latlon_cgrid.py:9495-9500': [
+    'ocean_model_latlon_cgrid.py:9495-9499': [
         'if _nemo_ws_exposed_stage3_raw is not None:',
-        'v=state_new.v.replace(data=_raw_v),', 6],
+        ('v=state_new.v.replace(data=_raw_v),', 2), 5],
     'ocean_pe_latlon_cgrid.py:3449-3452': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
