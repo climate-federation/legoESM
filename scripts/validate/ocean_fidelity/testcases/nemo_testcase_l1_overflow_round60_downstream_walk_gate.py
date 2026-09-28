@@ -208,6 +208,38 @@ def _read_sidecar(report: dict) -> dict[str, np.ndarray]:
         return {name: np.asarray(stored[name]) for name in stored.files}
 
 
+def _state_arrays(state) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(value.data)
+        for name, value in zip(state._fields, state, strict=True)
+        if value is not None and hasattr(value, "data")
+    }
+
+
+def _write_entry(path: Path, state) -> dict:
+    arrays = _state_arrays(state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **arrays)
+    return {"path": str(path), "sha256": _sha256(path), "fields": list(arrays)}
+
+
+def _read_entry_state(path: Path, template):
+    require(path.is_file(), f"missing controlled entry {path}")
+    with np.load(path) as stored:
+        expected = _state_arrays(template)
+        require(stored.files == list(expected), "controlled-entry field order drift")
+        replacements = {}
+        for name in stored.files:
+            value = getattr(template, name)
+            array = np.asarray(stored[name])
+            require(array.shape == expected[name].shape,
+                    f"controlled-entry shape drift for {name}")
+            require(array.dtype == expected[name].dtype,
+                    f"controlled-entry dtype drift for {name}")
+            replacements[name] = value.replace(data=array)
+    return template._replace(**replacements)
+
+
 def classify_direction(base, candidate, oracle) -> dict:
     """Exact per-cell movement plus deterministic aggregate direction."""
     base = np.asarray(base, dtype=np.float64)
@@ -289,7 +321,9 @@ def compare(reference_path: Path, candidate_report: dict) -> dict:
     }
 
 
-def run(output: Path, expect_commit: str, reference: Path | None, plant: bool) -> dict:
+def run(output: Path, expect_commit: str, reference: Path | None, plant: bool,
+        entry_input: Path | None, entry_output: Path | None,
+        entry_only: bool) -> dict:
     stamp = worktree_stamp()
     require(stamp["clean"], "producer worktree is dirty")
     require(stamp["commit"] == expect_commit,
@@ -314,10 +348,25 @@ def run(output: Path, expect_commit: str, reference: Path | None, plant: bool) -
             "state dtype is not float64")
     masks = expected_masks(card)
     ordinary = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
-    state = card.recipe.initial_state
-    for _ in range(2):
-        state = ordinary.step(state, dt=card.dt_s)
+    if entry_input is None:
+        state = card.recipe.initial_state
+        for _ in range(2):
+            state = ordinary.step(state, dt=card.dt_s)
+    else:
+        state = _read_entry_state(entry_input, card.recipe.initial_state)
     print("ROUND60_KT3_ENTRY_READY", file=sys.stderr, flush=True)
+    entry_meta = None if entry_output is None else _write_entry(entry_output, state)
+    if entry_only:
+        require(entry_output is not None, "--entry-only requires --entry-output")
+        return {
+            "format": FORMAT,
+            "status": "ENTRY_WRITTEN",
+            "case": "OVERFLOW-zps",
+            "kt": 3,
+            "precision": "cpu-fp64-libm-production-jit",
+            "worktree": stamp,
+            "entry": entry_meta,
+        }
     ordinary_after = ordinary.step(state, dt=card.dt_s)
     print("ROUND60_KT4_ENTRY_READY", file=sys.stderr, flush=True)
     arrays, rows = _collect(card, state, ordinary_after, momentum, masks)
@@ -349,6 +398,10 @@ def run(output: Path, expect_commit: str, reference: Path | None, plant: bool) -
         "compiled_source_order": list(SOURCE_ORDER),
         "rows": rows,
         "plant": plant,
+        "controlled_entry": (
+            {"path": str(entry_input), "sha256": _sha256(entry_input)}
+            if entry_input is not None else entry_meta
+        ),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     report["sidecar"] = _write_sidecar(output, arrays)
@@ -363,9 +416,15 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
+    parser.add_argument("--entry-input", type=Path)
+    parser.add_argument("--entry-output", type=Path)
+    parser.add_argument("--entry-only", action="store_true")
     args = parser.parse_args(argv)
     try:
-        report = run(args.output, args.expect_commit, args.reference, args.plant_entry)
+        report = run(
+            args.output, args.expect_commit, args.reference, args.plant_entry,
+            args.entry_input, args.entry_output, args.entry_only,
+        )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         args.output.write_text(rendered)
         print(rendered, end="")
