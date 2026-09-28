@@ -188,7 +188,7 @@ OPEN mechanism work rather than a selector attribution.  Import receipt:
 | dynldf_lev_lap (+ldf_dyn coeff) | **VERIFIED** — corr 0.998/0.999; ahmt bit-exact |
 | ssh_nxt/div_hor | **VERIFIED** — hdiv corr 1.000000; sign convention confirmed |
 | dom_qco_r3c | **VERIFIED** — r3t corr 1.000000 (r3u/r3v: reader lacks hu_0/hv_0; T-point is load-bearing) |
-| mlf_baro_corr | ALGEBRA-VERIFIED (identical formula, ocean_model_latlon_cgrid.py:3488-3517); empirical isolation needs a _step_impl diagnostics hook (NEMO dumps 8883-8886 ready) |
+| mlf_baro_corr | ALGEBRA-VERIFIED (identical formula, ocean_model_latlon_cgrid.py:3593-3622); empirical isolation needs a _step_impl diagnostics hook (NEMO dumps 8883-8886 ready) |
 | lbc_lnk sign | WAIVED-DEFERRED — needs a different harness |
 
 With these, every routine in the step chain is verified, attributed, or

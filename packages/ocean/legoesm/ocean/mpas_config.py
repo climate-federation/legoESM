@@ -515,7 +515,7 @@ class MPASOceanConfig(NamedTuple):
     # The same mesh at Lloyd 0 measures 120324.32 m, which the cubed law turns
     # into 0.3 % on the coefficient.
     K_zeta_bih_ref: float = 1.0e14                 # [m⁴/s] at the reference spacing
-    K_zeta_bih_ref_dx_m: float = 120194.609375     # [m] ico6 mean dcEdge, Lloyd 50
+    K_zeta_bih_ref_dx_m: float = 120194.60581296285  # [m] ico6 mean dcEdge, Lloyd 50
     # Provenance of a DERIVED coefficient, stamped by the model constructor:
     # the mesh spacing it was derived from (0.0 = pinned, not derived), so a
     # saved configuration records WHICH mesh its coefficient belongs to and a

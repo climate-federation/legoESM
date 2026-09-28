@@ -349,6 +349,8 @@ def make_ocean_physics(
                 z_coord.z_half_ref,
                 J,
                 sw_config,
+                rho_0=config.constants.rho_0,
+                c_sw=config.constants.c_sw,
             )
             dT_dt = dT_dt + sw_tend
 

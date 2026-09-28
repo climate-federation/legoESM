@@ -258,11 +258,11 @@ Probe: `friction_timestep_check.py`.
 
 | | NEMO 5.0.2 (DINO) | legoESM (`nemo_dino_kamm_mlf`) |
 |---|---|---|
-| which velocity the operator reads | the **before** level: `dyn_ldf(kstp, Nbb, Nnn, uu, vv, Nrhs)` (`stpmlf.F90:319`), and the scheme takes `pu_in(...,Kbb)` (`dynldf_lev_rot_scheme.h90:24-25,28-29`) | the **before** level: `_ldf_state=(T_before, S_before, u_before, v_before)` (`ocean_model_latlon_cgrid.py:8516-8518`), routed onto the friction call alone (`ocean_pe_latlon_cgrid.py:4241-4242`) |
+| which velocity the operator reads | the **before** level: `dyn_ldf(kstp, Nbb, Nnn, uu, vv, Nrhs)` (`stpmlf.F90:319`), and the scheme takes `pu_in(...,Kbb)` (`dynldf_lev_rot_scheme.h90:24-25,28-29`) | the **before** level: `_ldf_state=(T_before, S_before, u_before, v_before)` (`ocean_model_latlon_cgrid.py:8656-8658`), routed onto the friction call alone (`ocean_pe_latlon_cgrid.py:4241-4242`) |
 | where it accumulates | `Krhs` | the withheld dissipative increment (`ab2_scope="advective"`) |
-| the timestep | `rDt = 2·rn_Dt = 5400 s` from the second step on (`stpmlf.F90:686`; `:135-136` is the single Euler start), `rn_Dt=2700` (`namelist_cfg:116`) | `rdt = 2.0·dt = 5400 s` (`ocean_model_latlon_cgrid.py:8478`), and the increment is `dt_mom · du_diss` with `dt_mom = dt/dt_mom_ratio` (`:3478`, `:3424`), `dt_mom_ratio` **measured = 1.0** on this card |
+| the timestep | `rDt = 2·rn_Dt = 5400 s` from the second step on (`stpmlf.F90:686`; `:135-136` is the single Euler start), `rn_Dt=2700` (`namelist_cfg:116`) | `rdt = 2.0·dt = 5400 s` (`ocean_model_latlon_cgrid.py:8618`), and the increment is `dt_mom · du_diss` with `dt_mom = dt/dt_mom_ratio` (`:3478`, `:3424`), `dt_mom_ratio` **measured = 1.0** on this card |
 | what it is added to | the **before** velocity: `puu(Kaa) = (puu(Kbb) + rDt·puu(Krhs))·umask` (`dynzdf.F90:137-142`), with **no** thickness weighting — DINO sets `ln_dynadv_vec = .true.` (`namelist_cfg:321`) | the **before** velocity: `u_naa = (ubc_bef + (ubc_exp − ubc_now)) + du_diss_bc + btu_exp` (`:8548`), the depth mean travelling separately (`:3905-3911`) |
-| the time filter | the **plain** `puu(Kmm) + rn_atfp·(puu(Kbb) − 2·puu(Kmm) + puu(Kaa))` (`dynatf_qco.F90:165-166`, the `ln_dynadv_vec` arm selected at `:162`), `rn_atfp = 0.1` (`namelist_ref:73`) | the identical expression (`ocean_model_latlon_cgrid.py:8322-8324`), `asselin_gamma = 0.1` (`dino.py:1490`) |
+| the time filter | the **plain** `puu(Kmm) + rn_atfp·(puu(Kbb) − 2·puu(Kmm) + puu(Kaa))` (`dynatf_qco.F90:165-166`, the `ln_dynadv_vec` arm selected at `:162`), `rn_atfp = 0.1` (`namelist_ref:73`) | the identical expression (`ocean_model_latlon_cgrid.py:8462-8464`), `asselin_gamma = 0.1` (`dino.py:1490`) |
 
 ### Measured, not read
 
@@ -282,7 +282,7 @@ that — those are cells where the probe's re-derivation of the operator and the
 model's own output disagree slightly, not cells running a different timestep.
 Separately, `dt_mom_ratio` **cannot** be anything but 1 on this card: the model
 refuses it unless the barotropic solver is the rigid lid
-(`ocean_model_latlon_cgrid.py:2605`), and this card runs the split-explicit
+(`ocean_model_latlon_cgrid.py:2710`), and this card runs the split-explicit
 solver. That half of the question is closed by construction.
 
 **The composition**, which is the question actually posed: does one operator's
@@ -304,7 +304,7 @@ changed viscosity, which is expected and is not a discrepancy in the slope.
 **The depth mean matters more than the deviation here, and it was nearly
 missed.** legoESM adds only the *baroclinic* part of the friction increment at
 the momentum update and routes the depth mean through the barotropic solver's
-slow forcing (`ocean_model_latlon_cgrid.py:8541-8548`), where NEMO applies the
+slow forcing (`ocean_model_latlon_cgrid.py:8681-8688`), where NEMO applies the
 whole increment in `dyn_zdf` and lets the split-explicit solver divide it. Review
 flagged that as the one place a fraction of the depth-mean friction could go
 missing — which would be a depth-uniform, wall-concentrated loss, i.e. exactly
@@ -346,7 +346,7 @@ the raw leap-frog depth mean. Two models agreeing on multiplier, time level and
 filter coefficient but disagreeing on whether that overwrite runs would deliver
 different effective damping of the depth-mean friction. This card runs it, at
 NEMO's position in the step (`dino.py:1714-1715`,
-`ocean_model_latlon_cgrid.py:8303`).
+`ocean_model_latlon_cgrid.py:8443`).
 
 ---
 
@@ -552,7 +552,7 @@ solve" and is already fenced by three roundoff-level numbers.
 
 **Also closed by measurement, not by argument.** The route by which the depth
 mean of the friction reaches the state. legoESM folds it into the barotropic
-forcing (`ocean_model_latlon_cgrid.py:3905-3911`) with the *same* thickness
+forcing (`ocean_model_latlon_cgrid.py:4010-4016`) with the *same* thickness
 weight the 3-D combine removes it with (`:8543-8548`), so nothing is lost or
 double-counted by construction; and Part 3 measures it arriving at the wall rows
 with slope 0.9987. The campaign's earlier `F_slow == zu_frc` to roundoff is the

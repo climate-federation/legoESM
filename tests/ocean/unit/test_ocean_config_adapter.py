@@ -305,6 +305,16 @@ def test_validate_strict_rejects_bad_eos():
         cfg.validate_strict()
 
 
+def test_validate_strict_rejects_bad_shortwave_penetration_scheme():
+    cfg = OceanExperimentConfig.from_dict({"ocean": {"physics": {
+        "shortwave_penetration": {"scheme": "ln_qsr_typo"},
+    }}})
+    with pytest.raises(
+        ValueError, match="physics.shortwave_penetration.scheme must be one of"
+    ):
+        cfg.validate_strict()
+
+
 def test_validate_strict_rejects_bad_barotropic_solver():
     cfg = OceanExperimentConfig.from_dict(
         {"ocean": {"barotropic_solver": "typo_solver"}}

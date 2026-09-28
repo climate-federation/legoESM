@@ -375,7 +375,7 @@ class GMRediConfig(NamedTuple):
     # of mld_rho_c from the ~10 m reference; "n2_integral" = NEMO's EXACT
     # zdfmxl.F90:91-105 criterion integral(MAX(N^2,0) dz) >= g*mld_rho_c/rho0
     # (in-situ adiabatic N^2 = rn2b, plus the MAX(N^2,0) clamp).  Set on the
-    # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
+    # NEMO-identity DINO and GYRE cards; other recipes keep "rho_c".  Dispatch raises on
     # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
     mld_criterion: str = "rho_c"
     # N^2 fed to the NEMO-native isopycnal slopes (ldf_slp).  NEMO's ldfslp
@@ -406,12 +406,12 @@ class GMRediConfig(NamedTuple):
     # Arithmetic form of ldfslp's horizontal metric application. ``division``
     # is the historical path. ``nemo_reciprocal`` evaluates and carries the
     # reciprocal as a separate fp64 value before multiplying, matching
-    # domhgr.F90:140 + ldfslp.F90:242-243. The DINO NEMO cards opt in.
+    # domhgr.F90:140 + ldfslp.F90:225-226. NEMO-identity DINO and GYRE cards opt in.
     slope_metric_evaluation: str = "division"
     # Vertical face thickness used by ldfslp's 7 km stability limiter.
     # ``static_face`` is the historical partial-cell min construction.
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
-    # full-step face thickness before the limiter. The DINO NEMO cards opt in.
+    # full-step face thickness before the limiter. NEMO-identity DINO and GYRE cards opt in.
     slope_face_thickness_evaluation: str = "static_face"
     # Horizontal face thickness used by traldf_iso's diagonal zA11/zA22
     # flux coefficients. ``tpoint_jacobian`` preserves the historical e3t
@@ -460,7 +460,7 @@ class GMRediConfig(NamedTuple):
     # Arithmetic topology of traldf_iso's A33 slope-square coefficient.
     # ``normalized_square`` preserves the historical exponent form;
     # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
-    # expression. Only the two DINO NEMO cards opt in.
+    # expression. NEMO-identity DINO and GYRE cards opt in.
     redi_a33_evaluation: str = "normalized_square"
     # Stage of the W-position native slopes consumed by the Redi vertical
     # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.

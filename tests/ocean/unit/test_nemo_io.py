@@ -54,12 +54,15 @@ def _write_mesh_mask(path, with_e3uv_0=False, with_e3w_0=False):
 
 def _write_restart(path, with_rhd=True, with_en=False, with_tke_coeffs=False,
                     with_before=False,
-                    with_before_forcing=False):
+                    with_before_forcing=False, with_barotropic_velocity=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     data = {"tn": d3, "sn": d3, "un": d3, "vn": d3, "sshn": d2}
     if with_rhd:
         data["rhd"] = d3
+    if with_barotropic_velocity:
+        data["uu_n"] = d2
+        data["vv_n"] = (("y", "x"), d2[1] + 1000.0)
     if with_en:
         data["en"] = d3
     if with_tke_coeffs:
@@ -150,6 +153,40 @@ def test_restart_without_rhd(tmp_path):
     _write_restart(p, with_rhd=False)
     s = read_nemo_restart(str(p), nn_hls=1)
     assert s.rhd is None
+
+
+def test_restart_reads_prognostic_depth_mean_pair(tmp_path):
+    """restart.F90:175-182 / :304-314 uu_n/vv_n stay separate from un/vn."""
+    p = tmp_path / "restart_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    s = read_nemo_restart(str(p), nn_hls=1)
+    assert s.uu_b.shape == (IY, IX)
+    assert s.vv_b.shape == (IY, IX)
+    assert s.uu_b[1, 2] == (1 + 1) * NX + (2 + 1)
+    assert s.vv_b[1, 2] == 1000.0 + (1 + 1) * NX + (2 + 1)
+
+
+def test_restart_rejects_half_depth_mean_pair(tmp_path):
+    p = tmp_path / "restart_half_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    with xr.open_dataset(p, decode_times=False) as ds:
+        altered = ds.drop_vars("vv_n").load()
+    altered.to_netcdf(p, mode="w")
+    with pytest.raises(ValueError, match="both uu_n and vv_n"):
+        read_nemo_restart(str(p), nn_hls=1)
+
+
+def test_restart_malformed_depth_mean_does_not_use_missing_field_fallback(
+        tmp_path):
+    """restart.F90:311-323 falls back only when uu_n is absent, not unreadable."""
+    p = tmp_path / "restart_bad_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    with xr.open_dataset(p, decode_times=False) as ds:
+        altered = ds.load()
+    altered["uu_n"] = (("y", "x"), np.full((NY, NX), "not-a-real"))
+    altered.to_netcdf(p, mode="w")
+    with pytest.raises((TypeError, ValueError)):
+        read_nemo_restart(str(p), nn_hls=1)
 
 
 def test_restart_before_reads_distinct_tb_sb_ub_vb(tmp_path):

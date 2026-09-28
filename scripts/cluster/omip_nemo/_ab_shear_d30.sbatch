@@ -68,7 +68,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
-  --tke-kappa-convention veros_sqrte --tke-shear-production nemo_face_native_now2 --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --tke-kappa-convention veros_sqrte --tke-shear-production nemo_face_native_nbb2 --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 \
   --output $OUT 2>&1 | tail -25
 run_rc=$?
