@@ -50,6 +50,13 @@ def step_runoff(drainage_state, freshwater, held):
     return np.where(held, 0.0, freshwater - dr), dr
 
 
+def budget_verdict(resid_max, n_checked):
+    """True/False against the tolerance; None when no column-step was budgeted."""
+    if n_checked == 0:
+        return None
+    return resid_max < _BUDGET_TOL_KG_M2
+
+
 def area_mean(x, w):
     return float(np.sum(x * w) / np.sum(w))
 
@@ -135,6 +142,8 @@ def main(argv=None):
     ap.add_argument("--exponent", type=float, default=6.0)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv[:i])
+    if not args.exponent > 0.0:
+        raise SystemExit("--exponent must be > 0 (the comparison arm is e = 0)")
     _self_check()
 
     import jax
@@ -175,7 +184,7 @@ def main(argv=None):
         cfg = cfg0._replace(richards=cfg0.richards._replace(ice_impedance_exponent=e))
         drain = runoff = 0.0
         resid_max = 0.0
-        n_held = 0
+        n_held = n_checked = 0
         for s0, s1, evap, fw, held in _run_arm(d, st0, cfg, idx, n_steps, dt):
             # phase-aware vapour flux (sublimation at L_s) and the tile's total
             # runoff to the ocean (surface incl. snowmelt + drainage)
@@ -184,6 +193,7 @@ def main(argv=None):
                                 np.where(held, 0.0, evap), ro, dr, dt)
             ok = mask & ~held
             n_held += int(np.sum(mask & held))
+            n_checked += int(np.sum(ok))
             if not np.all(np.isfinite(r[ok])):
                 raise SystemExit(f"non-finite water budget in arm e={e:g}")
             if ok.any():
@@ -192,7 +202,8 @@ def main(argv=None):
         res[f"e={e:g}"] = dict(drainage_mm=drain, surface_runoff_mm=runoff,
                                held_column_steps=n_held,
                                max_budget_residual_kg_m2_per_step=resid_max,
-                               budget_within_tol=resid_max < _BUDGET_TOL_KG_M2)
+                               budgeted_column_steps=n_checked,
+                               budget_within_tol=budget_verdict(resid_max, n_checked))
 
     ic = getattr(ra_args, "land_ic", None)
     out = dict(

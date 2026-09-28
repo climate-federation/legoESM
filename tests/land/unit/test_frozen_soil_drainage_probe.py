@@ -42,6 +42,12 @@ def test_held_column_moves_no_water(probe):
     assert ro[0] == pytest.approx(1e-4) and ro[1] == 0.0
 
 
+def test_all_held_arm_is_unmeasured_not_passed(probe):
+    assert probe.budget_verdict(0.0, 0) is None
+    assert probe.budget_verdict(0.0, 5) is True
+    assert probe.budget_verdict(1.0, 5) is False
+
+
 def test_area_mean_weights(probe):
     assert probe.area_mean(np.array([1.0, 3.0]), np.array([3.0, 1.0])) == pytest.approx(1.5)
 
@@ -49,3 +55,8 @@ def test_area_mean_weights(probe):
 def test_usage_without_separator(probe):
     with pytest.raises(SystemExit, match="usage"):
         probe.main(["--days", "1"])
+
+
+def test_zero_exponent_arm_is_refused(probe):
+    with pytest.raises(SystemExit, match="exponent"):
+        probe.main(["--exponent", "0", "--", "--dummy"])
