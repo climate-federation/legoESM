@@ -88,11 +88,10 @@ def test_lloyd_flag_reaches_the_mesh_builder(monkeypatch):
 
 def test_del4_coeff_is_the_shared_law_capped_by_dt():
     sys.path.insert(0, str(_BENCH.parent))
-    from hyperdiff import hyperdiff_coeff
     from legoesm import constants
     mod = _load_bench()
     assert mod.DEL4_S_MAX == 6e-4   # user-approved margin, 2026-09-27
-    assert hyperdiff_coeff(7, "icosahedral") == 1.0e16 / 16.0 ** 3   # shared law
+    assert mod.hyperdiff_coeff(7, "icosahedral") == 1.0e16 / 16.0 ** 3   # shared law
 
     def s_num(level, dt):
         dx = constants.R_earth * (4 * 3.141592653589793 / (10 * 4 ** level + 2)) ** 0.5
@@ -100,7 +99,7 @@ def test_del4_coeff_is_the_shared_law_capped_by_dt():
 
     # On the ladder's own timesteps the law binds (s_num stays under the cap)...
     for level, dt in ((4, 600.0), (7, 30.0), (8, 5.0)):
-        assert mod.del4_coeff(level, dt) == hyperdiff_coeff(level, "icosahedral")
+        assert mod.del4_coeff(level, dt) == mod.hyperdiff_coeff(level, "icosahedral")
         assert s_num(level, dt) < mod.DEL4_S_MAX
     # ...and a long step hits the cap, which then scales as 1/dt.
     assert s_num(4, 6000.0) == pytest.approx(mod.DEL4_S_MAX, rel=1e-12)
@@ -134,8 +133,8 @@ def test_builder_passes_the_capped_coefficient(monkeypatch):
     seen.clear()
     with pytest.raises(RuntimeError, match="stop-at-config"):
         mod.build_model_and_state(4, 4, 1, 1, "sfc", dt=6000.0, lloyd_iterations=0)
-    from hyperdiff import hyperdiff_coeff
-    assert seen["nu_del4"] == mod.del4_coeff(4, 6000.0) < hyperdiff_coeff(4, "icosahedral")
+    assert (seen["nu_del4"] == seen["nu_del4_ps"] == mod.del4_coeff(4, 6000.0)
+            < mod.hyperdiff_coeff(4, "icosahedral"))
 
 
 
