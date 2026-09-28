@@ -28,13 +28,18 @@ copies were correct.  This module pins that, three ways:
 
 import inspect
 
+import jax
 import jax.numpy as jnp
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean import vertical as vertical_module
-from legoesm.ocean.vertical import nemo_qco_live_face_geometry_cgrid
+from legoesm.ocean.vertical import (
+    compute_layer_thickness,
+    nemo_qco_live_face_geometry_cgrid,
+    nemo_qco_live_vorticity_e3f_cgrid,
+)
 
 
 def _synthetic_operands():
@@ -103,6 +108,94 @@ def test_shared_builder_is_nemo_e3u0_times_one_plus_r3u_not_the_min_rule():
     assert gap == pytest.approx(0.25, rel=1e-12), gap
     with pytest.raises(AssertionError):
         np.testing.assert_allclose(reverted, expected, rtol=1e-15, atol=0.0)
+
+
+def test_shared_builder_carries_source_literal_live_face_reciprocal_bits():
+    """Pin ``r1_hu_0/(1+r3u)`` instead of re-dividing summed live e3."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(2218)
+    ny, nx, nz = 2, 5, 4
+    eta = rng.uniform(-0.3, 0.4, (ny, nx)).astype(np.float64)
+    e3u0 = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+    e3v0 = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+    umask = np.ones_like(e3u0)
+    vmask = np.ones_like(e3v0)
+    hu0 = np.sum(e3u0 * umask, axis=-1)
+    hv0 = np.sum(e3v0 * vmask, axis=-1)
+    area_t = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+    area_u = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+    area_v = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+
+    weighted = area_t * eta
+    numerator_u = np.float64(0.5) * (
+        weighted + np.roll(weighted, -1, axis=1))
+    r1_hu0 = np.float64(1.0) / hu0
+    r1_area_u = np.float64(1.0) / area_u
+    r3u = (numerator_u * r1_hu0) * r1_area_u
+    expected = r1_hu0 / (np.float64(1.0) + r3u)
+
+    def build(*args):
+        return nemo_qco_live_face_geometry_cgrid(
+            *args, include_reciprocals=True)[4]
+
+    actual = np.asarray(jax.jit(build)(
+        *map(jnp.asarray, (
+            eta, e3u0, e3v0, umask, vmask, hu0, hv0,
+            area_t, area_u, area_v))))[:, 1:]
+    np.testing.assert_array_equal(
+        actual.view(np.uint64), expected.view(np.uint64))
+
+    # The former stage-transport path reconstructed the same real reciprocal
+    # by summing live e3 and dividing again.  The awkward operands make that
+    # alternative observably non-bit-identical.
+    live_e3u = e3u0 * (np.float64(1.0) + r3u[..., None] * umask)
+    rederived = np.float64(1.0) / np.sum(live_e3u, axis=-1)
+    assert not np.array_equal(rederived.view(np.uint64), expected.view(np.uint64))
+
+
+def test_live_f_thickness_uses_each_cards_own_mesh_without_bridge_operands():
+    """Native and bridged GYRE cards reach one own-mesh F-thickness rule."""
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    native = build_nemo_gyre_recipe()
+    native_h0 = compute_layer_thickness(
+        jnp.zeros_like(native.initial_state.eta.data),
+        native.initial_state.H_bathy.data, native.z_coord,
+        min_water_column_m=native.model_config.min_water_column_m)
+    native_tmask = jnp.broadcast_to(
+        native.initial_state.land_mask.data[..., None], native_h0.shape)
+    native_e3f = nemo_qco_live_vorticity_e3f_cgrid(
+        native.initial_state.eta.data, native.z_coord,
+        native.initial_state.eta.data.dtype, grid=native.grid,
+        e3t_0=native_h0, tmask=native_tmask)
+    assert np.asarray(native_e3f).shape == (23, 33, 30)
+    assert bool(jnp.all(jnp.isfinite(native_e3f)))
+
+    bridged = build_nemo_testcase_card("GYRE-zco").recipe
+    recorded_default = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid)
+    own_mesh = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid,
+        e3t_0=bridged.z_coord.nemo_e3t_0,
+        tmask=bridged.z_coord.is_active)
+    np.testing.assert_array_equal(
+        np.asarray(own_mesh).view(np.uint64),
+        np.asarray(recorded_default).view(np.uint64))
+
+    # PLANTED VIOLATION: removing one consumed mask cell changes a wet F row.
+    changed_mask = bridged.z_coord.is_active.at[10, 15, 0].set(False)
+    changed = nemo_qco_live_vorticity_e3f_cgrid(
+        bridged.initial_state.eta.data, bridged.z_coord,
+        bridged.initial_state.eta.data.dtype, grid=bridged.grid,
+        e3t_0=bridged.z_coord.nemo_e3t_0, tmask=changed_mask)
+    assert not np.array_equal(
+        np.asarray(changed).view(np.uint64), np.asarray(own_mesh).view(np.uint64))
 
 
 def test_ws_rk3_stage_transport_reaches_the_shared_builder():

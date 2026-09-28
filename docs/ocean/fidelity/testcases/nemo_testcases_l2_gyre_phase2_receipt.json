@@ -1,0 +1,92 @@
+{
+  "format": "nemo-testcase-l2-gyre-phase2-receipt-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "base": "3d609df4c413d236325d9319f6d93b97dc16fe2a",
+  "phase1_review_correction_commit": "0667ecad8",
+  "preregistration_commit": "8248a16d3",
+  "implementation_commit": "bef72a8b0b1ca47917fe827a3e95ea602a0d72e3",
+  "case": "GYRE-zco",
+  "status": "VERIFIED_TO_KT1_ENTRY_ONLY",
+  "precision": {
+    "policy": "PrecisionPolicy.fp64()",
+    "backend": "CPU",
+    "pointwise_bar": 1e-15,
+    "exact_bar": 0.0
+  },
+  "card": {
+    "shape": [22, 32, 30],
+    "dummy_bottom_records": 1,
+    "dt_s": 14400.0,
+    "n_steps": 4320,
+    "rk3_identity": "coupled_rk3_ws_momentum_tracer_barotropic",
+    "eos": "nemo_teos10",
+    "pgf": "nemo_sco",
+    "barotropic_filter": "nemo_ab3am4",
+    "barotropic_substeps": 50,
+    "surface_boundary_condition": "gyre_usrdef_sbc"
+  },
+  "mesh_disposition": {
+    "provided": 39,
+    "verified": 35,
+    "waived_aliases": 4,
+    "unmeasured": 0
+  },
+  "geometry": {
+    "rows": 35,
+    "status": "AT-BAR",
+    "max_normalized_abs": 7.554497157404157e-16,
+    "max_row": "geometry.e3w_1d"
+  },
+  "seasonal_forcing": {
+    "samples": ["kt1", "quarter_year", "half_year"],
+    "rows": 21,
+    "status": "AT-BAR",
+    "max_normalized_abs": 3.3881317890172014e-20,
+    "emp_mean_numerator": "unmasked_704_cells",
+    "emp_mean_denominator": "wet_600_cells"
+  },
+  "step1_before": {
+    "time_level_source": "time_level_for_dump",
+    "storage_bits": 64,
+    "informative_exact_rows": ["T", "S"],
+    "uninformative_exact_controls": ["u", "v", "ssh"],
+    "max_error": 0.0
+  },
+  "planted_controls": {
+    "file_side_unaccounted": "RED: missing=['PLANTED_UNACCOUNTED_FILE_ARRAY']",
+    "rotated_glamt_plus_1m": "RED: 0.011672146153025103 > 1e-15",
+    "wet_qsr_plus_1": "RED: 0.0060207666701617753 > 1e-15",
+    "wet_temperature_plus_1c": "RED: exact error inf > 0"
+  },
+  "tests": {
+    "card_and_phase2_gate": 26,
+    "phase1_time_level_and_oracle_regressions": 42,
+    "combined": 68,
+    "status": "PASS"
+  },
+  "artifacts": {
+    "mesh_sha256": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
+    "step1_dump_sha256": "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0",
+    "manifest_sha256": "397f0331086e8e6d8d6ee00425418453e1fe46ac401c435487a2f123eba19918",
+    "full_gate_report_sha256": "66512c808a75841b09cb4099ba7e8b00b512f0880f09b51c99f4f299822ef116",
+    "usrdef_hgr_sha256": "7921aaa7dc9494aa48506f2bd8a6bca3e3952894ef72734fac3e9c050f83011e",
+    "usrdef_sbc_sha256": "a2af8adfa5f640947ee3b407138018daa246bc66c6fe887fec7e535bb08fe140",
+    "usrdef_istate_sha256": "a597a2add7279a5bdbf1e1292ee02702860e940d2685e743cad3dcac0d878220",
+    "usrdef_zgr_sha256": "bfab490058b5a6d685dcccf5e34cea0c71a10cb2533f7c4551fe9939ade40f87"
+  },
+  "unmeasured": [
+    "kt_gt_1_trajectory",
+    "gyre_forced_step",
+    "rk3_stage_tendencies",
+    "teos10_density",
+    "rab",
+    "bn2",
+    "fct_tendency",
+    "adaptive_vertical_advection_partition",
+    "active_up3_vertical_momentum_parity",
+    "oracle_barotropic_time_filters",
+    "tracer_rk3_parity",
+    "bbl_transport",
+    "gyre_post_entry_vector_c2_ene_vs_collapsed_up3_identity"
+  ]
+}

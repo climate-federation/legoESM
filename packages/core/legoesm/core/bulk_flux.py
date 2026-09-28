@@ -73,8 +73,11 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 #   "large_yeager_cesm" — CESM/CIME ``shr_flux_atmOcn`` (Large & Pond 1981/82
 #                         + LY04 neutral coefficients, 2 fixed iterations);
 #                         see ``compute_sam_oceflx_fluxes(variant="cesm")``
-_VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager",
-                       "large_yeager_cesm")
+#   "nemo_si3_constant" — NEMO SI3 constant-coefficient ice/ocean bulk identity
+_VALID_BULK_SCHEMES = (
+    "constant", "most", "coare3", "large_yeager", "large_yeager_cesm",
+    "nemo_si3_constant",
+)
 
 
 # ============================================================================
@@ -1606,6 +1609,52 @@ def compute_sam_oceflx_fluxes(
     fac = (rh / karman) * (alz + al2 - psixh + psix2)
     tref = theta_atm - delt * fac - 0.01 * z_diag  # coeff-ok: CESM 0.01 K/m theta->T
     return tau_x, tau_y, shflx, lhflx, u_star, tref
+
+
+def nemo_si3_constant_fluxes(
+    u_air: jnp.ndarray,
+    v_air: jnp.ndarray,
+    theta_air: jnp.ndarray,
+    q_air: jnp.ndarray,
+    T_ice: jnp.ndarray,
+    p_surface: jnp.ndarray,
+    rho_air: jnp.ndarray,
+    Cd: float,
+    Ch: float,
+    Ce: float,
+) -> tuple[jnp.ndarray, ...]:
+    """Executing constant-coefficient SI3 air--ice bulk core.
+
+    Transcribes NEMO 5.0.2 ``sbcblk.F90:1085-1168,1231-1273`` and
+    ``sbc_phy.F90:321-358,665-790``.  ``theta_air`` is already potential
+    temperature, as at NEMO's ``blk_ice_1/2`` boundary.  Returned stress uses
+    NEMO's air-to-ice sign; callers adapting to legoESM's atmospheric reaction
+    convention negate it explicitly.
+
+    Returns ``(tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+    sensible, latent, dq_sensible_dT, dq_latent_dT)``.
+    """
+    from legoesm.thermo import nemo_si3_saturation_over_ice
+
+    wind = jnp.sqrt(u_air * u_air + v_air * v_air)
+    theta_ice = T_ice * (
+        constants.p_ref / p_surface
+    ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(T_ice, p_surface)
+    rho_wind = rho_air * wind
+    stress_scale = rho_wind * Cd
+    tau_x = stress_scale * u_air
+    tau_y = stress_scale * v_air
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    latent_scale = rho_wind * constants.L_sub_nemo * Ce
+    sensible = sensible_scale * (theta_ice - theta_air)
+    latent = latent_scale * (q_sat - q_air)
+    dq_sensible_dT = sensible_scale
+    dq_latent_dT = latent_scale * dq_sat_dT
+    return (
+        tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+        sensible, latent, dq_sensible_dT, dq_latent_dT,
+    )
 
 
 def simple_bulk_fluxes(

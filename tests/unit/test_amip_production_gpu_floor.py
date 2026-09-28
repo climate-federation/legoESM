@@ -23,6 +23,7 @@ import pytest
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _LEVANTE = _REPO / "scripts" / "cluster" / "levante" / "amip_mpas_gpu_chain.sbatch"
 _GINSBURG = _REPO / "scripts" / "cluster" / "amip" / "amip_ginsburg_production_chain.sbatch"
+_DERECHO = _REPO / "scripts" / "cluster" / "derecho_amip" / "amip_mpas_gpu_chain.pbs"
 _FLOOR = 4
 
 
@@ -40,6 +41,17 @@ def test_batch_request_asks_for_at_least_four_gpus(script) -> None:
         assert n >= _FLOOR, (
             f"{script.name} requests {n} GPU(s); a production AMIP arm runs on "
             f"at least {_FLOOR} (user directive 2026-09-23)")
+
+
+def test_derecho_request_asks_for_at_least_four_gpus_one_rank_each() -> None:
+    text = _DERECHO.read_text()
+    selects = re.findall(r"^#PBS -l select=(\S+)\s*$", text, re.M)
+    assert selects, "the Derecho chain names no PBS select"
+    for sel in selects:
+        kv = dict(item.split("=", 1) for item in sel.split(":")[1:])
+        assert int(kv["ngpus"]) >= _FLOOR
+        assert int(kv["mpiprocs"]) == int(kv["ngpus"])
+    assert re.search(r"AMIP_N_GPUS < 4", text), "floor guard missing"
 
 
 def test_levante_chain_refuses_a_count_below_the_floor() -> None:

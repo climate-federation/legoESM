@@ -125,3 +125,48 @@ class TestIncrementalTwinExperiment:
         rmse_bg = float(jnp.sqrt(jnp.mean((bg_state.h.data - truth_state.h.data) ** 2)))
         rmse_ana = float(jnp.sqrt(jnp.mean((analysis.h.data - truth_state.h.data) ** 2)))
         assert rmse_ana < rmse_bg, f"RMSE bg={rmse_bg}, ana={rmse_ana}"
+
+
+class TestIncrementalOuterLoop:
+    def _setup(self):
+        bg_state = _make_sw_state(h_val=100.0)
+        spec = build_control_spec(bg_state)
+        sigma = jnp.ones(spec.total_size) * 10.0
+        B = DiagonalB(sigma=sigma)
+        idx = (jnp.array([0, 1, 2]), jnp.array([0, 1, 2]))
+        obs = Observation(
+            values=jnp.array([120.0, 90.0, 104.0]),
+            errors=jnp.array([1.0, 5.0, 20.0]),
+            time_index=0, operator=DirectObsOperator("h", idx),
+        )
+        return bg_state, spec, B, obs, idx
+
+    def test_preconditioned_outer_iterations_warm_start(self):
+        """With one CG step per outer iteration, each outer iteration must
+        continue from the current analysis (restarting from the background
+        repeats the same solve, so the cost would stall after outer 1)."""
+        bg_state, spec, B, obs, _ = self._setup()
+        config = IncrementalConfig(
+            n_outer=3, n_inner=1, inner_gtol=1e-10,
+            inner_method="cg", use_preconditioning=True,
+        )
+        _, diag = incremental_4dvar(
+            _IdentityModel(), bg_state, (obs,), B, spec,
+            dt=1.0, n_steps=1, config=config,
+        )
+        c = diag.cost_history
+        assert c[2] < c[1] - 1e-6, c
+
+    def test_innovation_rms_is_obs_minus_analysis(self):
+        bg_state, spec, B, obs, idx = self._setup()
+        config = IncrementalConfig(
+            n_outer=2, n_inner=30, inner_gtol=1e-8,
+            inner_method="lbfgs", use_preconditioning=False,
+        )
+        analysis, diag = incremental_4dvar(
+            _IdentityModel(), bg_state, (obs,), B, spec,
+            dt=1.0, n_steps=1, config=config,
+        )
+        d = obs.values - analysis.h.data[idx]
+        expected = float(jnp.sqrt(jnp.mean(d * d)))
+        assert diag.innovation_rms[-1] == pytest.approx(expected, rel=1e-10)

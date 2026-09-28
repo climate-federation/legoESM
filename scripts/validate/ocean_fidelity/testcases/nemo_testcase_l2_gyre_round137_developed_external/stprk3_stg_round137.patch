@@ -1,0 +1,38 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -99,10 +99,13 @@
+       INTEGER  ::   ji, jj, jk, jn, jtile    ! dummy loop indices
+       INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
+       INTEGER  ::   r123_unit, r123_ios
++      INTEGER  ::   r137_qco_unit, r137_qco_ios
+       CHARACTER(LEN=96) :: l1_filename
+       CHARACTER(LEN=96) :: r123_filename
++      CHARACTER(LEN=96) :: r137_qco_filename
+       CHARACTER(LEN=16) :: l1_magic
+       CHARACTER(LEN=16) :: r123_magic
++      CHARACTER(LEN=16) :: r137_qco_magic
+       LOGICAL :: lr123_write
+       !                    !--- round-40 stage-3 per-operator instrument locals ---!
+       !     A SEPARATE unit and magic from the stage-2 term writer above: the
+@@ -174,6 +177,21 @@
+             !
+             r3fb(:,:) = r3f(:,:)
+             CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )
++            ! Round 137: record the exact developed external SSH operand, the
++            ! static reciprocal depth, and the direct T-point QCO result.
++            ! This write-only stream does not feed a prognostic expression.
++            IF( lwp .AND. kstp == 1081 ) THEN
++               IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round-137 QCO trace requires fp64' )
++               WRITE(r137_qco_filename,'("oracle_stage1_qco_operands_kt",I8.8,".bin")') kstp
++               OPEN( NEWUNIT=r137_qco_unit, FILE=TRIM(r137_qco_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                  & STATUS='REPLACE', ACTION='WRITE', IOSTAT=r137_qco_ios )
++               IF( r137_qco_ios /= 0 )   CALL ctl_stop( 'cannot open round-137 QCO trace' )
++               r137_qco_magic = 'NEMO_L2_R137QCO'
++               WRITE(r137_qco_unit) r137_qco_magic, 1, kstp, kstg, jpi, jpj, STORAGE_SIZE(1._wp), 3
++               WRITE(r137_qco_unit) ssha, r1_ht_0, r3ta
++               CLOSE(r137_qco_unit)
++               WRITE(numout,*) 'ROUND137_QCO_DUMP ', kstp, kstg, TRIM(r137_qco_filename)
++            ENDIF
+             !
+             CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )
+             !                          !

@@ -41,7 +41,10 @@ from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
     bn2_ladder_kwargs,
 )
-from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+    tke_vertical_mixing,
+)
 
 
 def fesom_zgeom(mesh) -> SimpleNamespace:
@@ -109,8 +112,10 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
     _iwm_cfg = (config.iwm if (getattr(config, "iwm", None) is not None
                                and config.iwm.enabled) else None)
     _eice = int(getattr(cfg, "eice", 0))
-    if _eice not in (0, 1, 3):
-        raise ValueError(f"Unknown TKEConfig.eice={_eice!r}; expected 0, 1 or 3.")
+    if _eice not in (0, 1, 2, 3):
+        raise ValueError(
+            f"Unknown TKEConfig.eice={_eice!r}; expected NEMO nn_eice "
+            "0, 1, 2 or 3.")
 
     from legoesm.ocean.eos import compute_ocean_rho
 
@@ -151,7 +156,11 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
                 f"TKEConfig.eice={_eice} requires surface_forcing.ice_concentration "
                 "on FESOM (attach it as the host loop does for MPAS) or set eice=0.")
         if ice_frac is not None:
-            ice_frac = ice_frac if _eice == 1 else jnp.minimum(4.0 * ice_frac, 1.0)
+            # One meaning per nn_eice value: the shared transcription of
+            # zdftke.F90:246,253-258 (mode 1 = tanh(10*fr_i), mode 2 = raw
+            # fr_i, mode 3 = min(4*fr_i, 1)).  Before decision 46 this file
+            # carried its own mode-1 expression, which was NEMO's mode 2.
+            ice_frac = nemo_tke_effective_ice_fraction(ice_frac, _eice)
         # Interface mask for legoESM half-levels: interface k (between layers
         # k and k+1) is active when layer k+1 is wet.
         half_mask = layer_mask[:, 1:]

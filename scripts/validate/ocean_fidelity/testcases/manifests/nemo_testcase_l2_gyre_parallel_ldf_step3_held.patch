@@ -1,0 +1,133 @@
+PARALLEL LDF STEP-3 CANDIDATE (2026-09-16; requested tip
+3e7a15c1e64e036e2e066dcfceaa663f25406f24; documentation-only proof tip
+5d2d7e44208dd8c345801314b4d6c88ca51ae351; measured scratch candidate
+6e0386627c29b1eab2e284fcee673a5523712df4): LANDED BY ROUND 110 UNDER
+DECISION 43 AT 5004884fb49445af4149ad822f2cba3f826d5d0c. The diff below is
+retained as historical provenance and is no longer an applicable held patch.
+
+COMPILED STATEMENT. The selected NEMO stage clears tracer Krhs, accumulates
+advection and SBC, then in stage 3 calls QSR, tra_ldf, and tra_zdf in that
+order (compiled stprk3_stg.f90:824-868,917-965). traldf_iso.f90:175-305
+reads Kbb tracers, uses Kmm metrics, and adds its signed divergence to Krhs.
+trazdf.f90:547-565 consumes that Krhs in the thickness-weighted content RHS.
+This patch routes legoESM's already-computed signed dT_gm/dS_gm arrays through
+the existing WS helper's stage-3 source tuple and removes the private selector.
+
+LOCAL RE-PROOF. The old Round-69 absolute dictionaries do not reproduce at
+the current tip: T/S content maxima are 5.743498263655056e-5 /
+7.387909136014059e-6 and kt3 maxima are 8.600420500215478e-7 /
+6.979443156751586e-8, so the old 5.954039670541533e-5 /
+7.651457053725608e-6 and 8.916073106490785e-7 /
+7.235656340753849e-8 targets are retained as REFUTED after the Round-85
+upstream landing. The narrower current-tip implementation proof is exact:
+both complete content dictionaries and both complete kt3 dictionaries equal
+the existing private ldf_only arm bit-for-bit, and both source-injection rows
+have zero unequal cells. The same Round-64 Krhs producer
+3b3b045bd9e03b60330204e7590e4c4470b7a0ca and Round-46 stage records were
+used. Candidate/local artifact SHA-256 is
+c51ad1e7a3aed0821997193e3d6a6076ce0747283883f9efbe5cde849846a60f;
+current-tip private-arm artifact SHA-256 is
+4d3496ee73a0cf24774d1525f11aec3f4ae9c4308d68157cd395ab7a79c3ba45.
+
+STAGE TWIN. The existing Decision-41 stage-twin gate passes at both clean
+commits. Given NEMO's recorded entry, no output row becomes BIT. Only kt2
+stage-3 T/S move: T 7.97034157194787e-3 -> 7.975082879060125e-3 and S
+1.0668958712400922e-3 -> 1.064355106770165e-3; both remain DEBT. In the
+model-chained table, only kt2 stage-3 T/S move: T
+1.627497246303733e-4 -> 8.600419718618468e-7 and S
+6.327735185607253e-6 -> 6.97944244620885e-8. The other 122 output rows and
+all 98 entry rows are unchanged. Baseline/candidate artifact SHA-256 values
+are ab6075ea9dc9935c749ec1c2910eff710192f40cef6f9cb70670f23c0568552a /
+7afff473d08eff1dba288a2fd3e8ceb5b0f25292b8660e8864dc795ccf06eb83.
+
+TRAJECTORY VETO. The full Rule-12 gate compares all 954 registered rows. It
+finds 53 moved rows, all 53 with a cell worsening by more than two row-scale
+binary64 ULPs; no row changes class and first-over-bar stays kt2 U/V. The
+first moved boundary is kt3-before T/S. Baseline/candidate ladder SHA-256
+values are ad698f14fce4bf80a586be4b50149d006273f359a7e077be557c8becd091e28a /
+594c861f37b33f7dafa60fb917c48c4d3ee144f82cf7ecd36c500ba3091db742;
+the full comparison SHA-256 is
+7f2c2309f5f7ee55de3ce8c5a180570195cc607ab4038a3cf566529681743ff5.
+
+HISTORICAL DISPOSITION. Rule 12 was FAIL, and Decision 41 independently
+prohibited a stage-3 landing while the autopilot owned the earlier kt=1
+stage-1 walk. Decision 43 superseded both restrictions for the magnitude-first
+programme while preserving first-over-bar and kt1 AT-BAR protections.
+
+ROUND-110 LANDING. Re-proof at incoming tip 51a4d088c confirmed exact complete
+content/kt3 dictionaries against the same-tip private arm under production
+JIT, with production eager identical. The exact immutable-before comparison
+has 53/70 moved endpoint rows, no status changes, and first-over-bar kt2 U/V
+on both arms. The complete 954-row table has 82 moved rows and no status
+changes. Day-30 T RMS decreases from 1.2397011296352737e-2 K to
+6.890484901489568e-5 K (179.91x). The Decision-43 gate passes and its planted
+no-improvement arm prints STATUS PLANT-FIRED and exits 1. DINO uses the Euler
+tracer lane; LOCK_EXCHANGE and OVERFLOW have no GM/Redi operator, so none
+executes this WS-plus-GM/Redi route. No configuration, coefficient, timestep,
+carry, stabilizer, NEMO source, or public API changes.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 3c1d99ba85ed..c26ba4e1aa0e 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -1309,10 +1309,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
+     # already-materialized stage-3 complete-advection content before its
+     # ordinary source association; no public card can construct this hook.
+     stage3_advection_content_override: object = None
+-    # Route the already-computed GM/Redi rate into the same stage-3 source
+-    # tuple. NEMO calls tra_ldf before tra_zdf
+-    # (stprk3_stg.F90:950-965); this is private causal evidence only.
+-    route_gm_redi_stage3_source: bool = False
+     # One-variable ablation of the stage-3 ZDF thickness time level.  The
+     # faithful WS program uses N+1/2/Kmm; this private hook restores the former
+     # whole-step-entry operand for the causal discriminator only.
+@@ -2414,18 +2410,12 @@ class LatLonCGridOceanModel:
+                 "momentum exposure: they share the returned u/v slots")
+         self.config = self._validate_config(
+             config or LatLonCGridOceanConfig.from_flat())
+-        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
+-                or self._nemo_ws_test_hooks
++        if (self._nemo_ws_test_hooks
+                 .stage3_advection_content_override is not None):
+             if self.config.tracer_time_integrator != "rk3_ws":
+                 raise ValueError(
+                     "stage-3 FCT/LDF pair hooks require "
+                     "tracer_time_integrator='rk3_ws'")
+-        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
+-                and self.config.gm_redi is None):
+-            raise ValueError(
+-                "route_gm_redi_stage3_source requires an executing GM/Redi "
+-                "operator")
+         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
+         # All downstream operators see the enriched geometry with per-cell
+         # metric arrays.  For a plain LatLonGrid this is a no-op on field
+@@ -7720,7 +7710,10 @@ class LatLonCGridOceanModel:
+                 _pair_divs = (None, None)
+             elif _tti == "rk3_ws":
+                 _ws_stage_source_rates = _stage_source_rates
+-                if self._nemo_ws_test_hooks.route_gm_redi_stage3_source:
++                if _cfg_b.gm_redi is not None:
++                    # NEMO accumulates the signed lateral-diffusion rate into
++                    # Krhs before tra_zdf forms its thickness-weighted content
++                    # RHS (stprk3_stg.F90:950-965; trazdf.F90:547-565).
+                     _ws_stage_source_rates = (
+                         _stage_source_rates[0],
+                         _stage_source_rates[1],
+diff --git a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round67_ldf_order.py b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round67_ldf_order.py
+index 89d0f1cac1fe..d3f2473ae0a2 100644
+--- a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round67_ldf_order.py
++++ b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round67_ldf_order.py
+@@ -119,10 +119,10 @@ def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
+-def test_round70_pair_hooks_remain_private():
++def test_landed_native_source_route_has_no_private_selector():
+     module = _module()
+     hooks = module.model_module._NEMOWSRK3TestHooks
+-    assert "route_gm_redi_stage3_source" in hooks._fields
++    assert "route_gm_redi_stage3_source" not in hooks._fields
+     assert "stage3_advection_content_override" in hooks._fields
+     source = inspect.getsource(
+         module.model_module.LatLonCGridOceanModel._step_impl)
+-    assert "if self._nemo_ws_test_hooks.route_gm_redi_stage3_source" in source
++    assert "if _cfg_b.gm_redi is not None" in source
+     assert source.count("_stage_source_rates[2][0] + dT_gm * active_3d") == 1
+     assert source.count("_stage_source_rates[2][1] + dS_gm * active_3d") == 1

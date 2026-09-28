@@ -1514,8 +1514,7 @@ class PhysicsPipeline:
                         dt=dt, config=_conv_cfg,
                         land_frac=(
                             ad.flatten_2d(self.f_land)
-                            if self.f_land is not None
-                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                            if self.f_land is not None else None),
                         cld_frac=(None if cloud_fraction is None
                                   else cloud_fraction.reshape(T_col.shape)),
                         pref_edge=self.sigma_half * constants.p_ref,
@@ -3722,8 +3721,7 @@ def _resolve_convection(config):
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
-            # coefficients + the quasi-equilibrium heating-ceiling ratio
-            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            # coefficients.  Defaults match BechtoldConfig.
             # The ExperimentConfig field (2026-09-15); the earlier
             # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
             # existed and silently capped every run at 0.02.
@@ -3808,6 +3806,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "zhang_mcfarlane":
+            conv_config = conv_config._replace(
+                land_fraction=config.zm_land_fraction)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
@@ -4003,8 +4004,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
     _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
+    _graupel = getattr(config, "morrison_do_graupel",
+                       _ExpCfg._field_defaults["morrison_do_graupel"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
-                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict),
+                    ("morrison_do_graupel", _graupel)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4021,8 +4025,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_max = (None if _sed_max
                 == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
                 else _sed_max)
+    _graupel = (None if _graupel
+                is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4031,7 +4037,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
-        morrison_sed_cfl_substeps_strict=_sed_strict)
+        morrison_sed_cfl_substeps_strict=_sed_strict,
+        morrison_do_graupel=_graupel)
 
 
 def _resolve_microphysics(config):

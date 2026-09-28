@@ -50,6 +50,7 @@ from legoesm.ocean.physics.vertical_mixing.k_profiles import (
     compute_vertical_K_profiles,
 )
 from legoesm.ocean.physics.vertical_mixing.tke import (
+    _mixing_length_floor,
     _solve_tke_backward_euler,
     compute_mixing_lengths,
 )
@@ -58,7 +59,8 @@ from legoesm.ocean.vertical import (
     create_partial_cell_coordinate,
 )
 
-RMXL_MIN = 0.01     # NEMO rmxl_min = 1e-6/(rn_ediff*sqrt(rn_emin)) for DINO
+RMXL_MIN = np.float64(1.0e-6) / (
+    np.float64(0.1) * np.sqrt(np.float64(1.0e-6)))
 DZ = 50.0
 NLEV = 12
 BOT = 6             # deepest ACTIVE T-cell index (0-based) -> NEMO mbkt
@@ -423,5 +425,6 @@ class TestConfigWiring:
         _model_cfg, physics = dino_lat_lon_model_config(grid, cfg)
         tke = physics.vertical_mixing.tke
         assert tke.tke_dry_wmask is True
-        assert tke.mxl_min == pytest.approx(RMXL_MIN)
+        assert np.float64(_mixing_length_floor(tke)).view(np.uint64) == \
+            RMXL_MIN.view(np.uint64)
         assert tke.tke_mxl_choice == 3

@@ -1,0 +1,3492 @@
+{
+  "entries": {
+    "mesh": {
+      "e1f": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e1t": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e1u": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e1v": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e2f": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e2t": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e2u": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e2v": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e3t_1d": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "e3w_1d": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "ff_f": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "ff_t": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "fmask": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gdept_1d": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gdepw_1d": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "glamf": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "glamt": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "glamu": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "glamv": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gphif": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gphit": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gphiu": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "gphiv": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "mbathy": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "misf": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "nav_lat": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "nav_lev": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "nav_lon": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "time_counter": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "tmask": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "tmaskutil": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "umask": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "umaskutil": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "vmask": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      },
+      "vmaskutil": {
+        "reason": "file-loaded, finite, and covered by geometry checks",
+        "status": "VERIFIED"
+      }
+    },
+    "namelist_dyn": {
+      "nambdy.cn_coords_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.cn_dyn2d": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.cn_dyn3d": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.cn_ice": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.cn_mask_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.cn_tra": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_bdy": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_coords_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_dyn3d_dmp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_mask_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_tra_dmp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.ln_vol": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nb_bdy": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_dyn2d_dta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_dyn3d_dta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_ice_dta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_rimwidth": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_tra_dta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.nn_volctl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.rn_time_dmp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nambdy.rn_time_dmp_out": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.cn_dir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.cn_icbrst_in": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.cn_icbrst_indir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.cn_icbrst_out": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.cn_icbrst_outdir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_bergdia": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_icb_grd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_icebergs": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_m2016": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_operator_splitting": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_passive_mode": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_time_average_weight": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.ln_use_calving": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.nn_sample_rate": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.nn_test_icebergs": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.nn_verbose_level": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.nn_verbose_write": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_bits_erosion_fraction": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_distribution": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_initial_mass": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_initial_thickness": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_low_ratio": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_mass_scaling": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_rho_bergs": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_sicn_shift": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_speed_limit": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.rn_test_box": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namberg.sn_icb%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namcfg.cn_domcfg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namcfg.cn_domcfg_out": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namcfg.ln_closea": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namcfg.ln_read_cfg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namcfg.ln_write_cfg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.ln_diacfl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.ln_timing": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_ictle": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_ictls": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_isplt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_jctle": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_jctls": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_jsplt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.nn_npfchk": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_layout": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_oasout": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_obsstat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_oceout": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_prtctl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_prttrc": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_runstat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%l_trcstat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%procincr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%procmax": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%procmin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namctl.sn_cfctl%ptimincr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdom.ln_c1d": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdom.ln_meshmask": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdom.ln_shuman": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdom.rn_atfp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdom.rn_dt": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nameos.ln_eos80": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.ln_seos": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.ln_teos10": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_a0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_b0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_lambda1": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_lambda2": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_mu1": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_mu2": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_nu": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_s0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nameos.rn_t0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namlbc.ln_vorlat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namlbc.rn_shlat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.jpni": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.jpnj": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.ln_listonly": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.ln_mppdelay": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.ln_nnogather": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.nn_comm": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nammpp.nn_hls": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namnc4.ln_nc4zip": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namnc4.nn_nchunks_i": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namnc4.nn_nchunks_j": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namnc4.nn_nchunks_k": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.cn_exp": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namrun.cn_ocerst_in": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.cn_ocerst_indir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.cn_ocerst_out": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.cn_ocerst_outdir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_1st_euler": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_cfmeta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_clobber": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_mskland": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_rst_list": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_rstart": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_top": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.ln_xios_read": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_chunksz": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_date0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_istate": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_it000": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_itend": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namrun.nn_leapy": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_no": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_rstctl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_stock": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namrun.nn_stocklist": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_time0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_write": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namrun.nn_wxios": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_abl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_apr_dyn": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_blk": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_cpl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_dm2dc": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_flx": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_ice_embd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_mixcpl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_rnf": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_ssr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_traqsr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_usr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_wave": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_components": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_fsbc": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namsbc.nn_fwb": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_ice": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namsbc.nn_lsm": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.cn_dir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_depth": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_depth_ini": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_icb": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_mouth": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_sal": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.ln_rnf_tem": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.nn_rnf_depth_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.rn_avt_rnf": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.rn_dep_max": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.rn_hrnf": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.rn_rfact": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.rn_rnf_max": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_cnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_dep_rnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_i_rnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_rnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_s_rnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_rnf.sn_t_rnf%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.cn_dir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.l_sasread": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namsbc_sas.ln_3d_uve": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.ln_read_frq": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_e3t%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_frq%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ial%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ifr%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_sal%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_ssh%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tem%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_tic%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_usp%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc_sas.sn_vsp%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namtile.ln_tile": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namtile.nn_ltile_i": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namtile.nn_ltile_j": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namusr_def.ln_corio": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namusr_def.rn_dx": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namusr_def.rn_dy": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namusr_def.rn_ppgphi0": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      }
+    },
+    "namelist_ice": {
+      "namalb.rn_alb_dpnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_hpiv": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_idry": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_imlt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_lpnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_sdry": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namalb.rn_alb_smlt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdia.iiceprt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdia.jiceprt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdia.ln_icectl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdia.ln_icediachk": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdia.rn_icechk_cel": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdia.rn_icechk_glo": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.cn_dir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.ln_dynadv1d": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn.ln_dynadv2d": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn.ln_dynall": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn.ln_dynrhgadv": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn.ln_landfast_l16": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_ishlat": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_lf_bfr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_lf_depfra": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_lf_relax": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_lf_tensile": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_uice": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.rn_vice": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_fastmsk%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn.sn_icbmsk%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_adv.ln_adv_pra": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn_adv.ln_adv_umx": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "namdyn_adv.nn_umx": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_distf_exp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_distf_lin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_partf_exp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_partf_lin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_rafting": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_ridging": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_str_cst": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_str_h79": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_str_r75": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.ln_str_smooth": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_astar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_craft": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_crhg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_csrdg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_fpndrdg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_fpndrft": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_fsnwrdg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_fsnwrft": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_gstar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_hraft": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_hstar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_murdg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_pe_rdg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_porordg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_pstar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rdgrft.rn_str": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.ln_aevp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.ln_rhg_eap": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.ln_rhg_evp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.ln_rhg_vp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.nn_nevp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.nn_rhg_chkcvg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.nn_vp_chkcvg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.nn_vp_ninn": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.nn_vp_nout": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.rn_creepl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.rn_ecc": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namdyn_rhg.rn_relast": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.cn_dir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.ln_iceini": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.nn_iceini_file": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_apd_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_apd_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_ati_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_ati_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hld_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hld_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hpd_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hpd_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hti_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hti_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hts_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_hts_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_smi_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_smi_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_thres_sst": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tmi_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tmi_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tms_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tms_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tsu_ini_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.rn_tsu_ini_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_apd%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_ati%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hld%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hpd%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hti%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_hts%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_smi%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tmi%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tms%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%clftyp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%clname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%clvar": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%freqh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%ln_clim": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%ln_tint": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%lname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%vcomp": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namini.sn_tsu%wname": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.ln_cat_hfn": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.ln_cat_usr": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.rn_catbnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.rn_himax": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.rn_himean": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namitd.rn_himin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.cn_icerst_in": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.cn_icerst_indir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.cn_icerst_out": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.cn_icerst_outdir": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.jpl": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nampar.ln_icedyn": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nampar.ln_icethd": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nampar.ln_virtual_itd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.nlay_i": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nampar.nlay_s": {
+        "reason": "resolved rung selector verified against the shipped case plus declared overlay",
+        "status": "VERIFIED"
+      },
+      "nampar.rn_amax_n": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "nampar.rn_amax_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_cndemulate": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.ln_cndflx": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_flxdist": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_qtrice": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.nn_snwfra": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.rn_cd_io": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namsbc.rn_snwblow": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd.ln_iceda": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd.ln_icedh": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd.ln_icedo": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd.ln_leadhfx": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_da.rn_beta": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_da.rn_dmin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_do.ln_frazil": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_do.rn_cfraz": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_do.rn_hinew": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_do.rn_maxfraz": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_do.rn_vfraz": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_alb": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_cst": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_lev": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_lids": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_rain": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.ln_pnd_topo": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_apnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_apnd_max": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_apnd_min": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_hpnd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_pnd_flush": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_pnd_hl_max": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_pnd.rn_pnd_hl_min": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.ln_drainage": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.ln_flushing": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.ln_sal_chk": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.nn_drainage": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.nn_flushing": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.nn_icesal": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.nn_liquidus": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.nn_sal_scheme": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_alpha_cw": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_alpha_gn": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_alpha_rjw": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_flushrate": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_icesal": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_rc_gn": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_rc_rjw": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_sal_fl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_sal_gd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_sal_himin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_simin": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_sinew": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_time_fl": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_time_gd": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_sal.rn_vbrc": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.ln_cndi_p07": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.ln_cndi_u64": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.ln_zdf_bl99": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.ln_zdf_chkcvg": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.rn_cnd_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.rn_kappa_i": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.rn_kappa_s": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.rn_kappa_sdry": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      },
+      "namthd_zdf.rn_kappa_smlt": {
+        "reason": "resolved NEMO default outside the rung claim; full file hash pinned",
+        "status": "WAIVED"
+      }
+    },
+    "restart": {
+      "DELAY__r8_cflice": {
+        "reason": "iom delayed-reduction restart buffer (icerst.F90:140, iom.F90:1939-1955), not an Appendix-A prognostic; file-loaded and finite",
+        "status": "VERIFIED"
+      },
+      "a_i": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "a_ip": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_i_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_i_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_i_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_s_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_s_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "e_s_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "kt_ice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "nav_lat": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "nav_lon": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "nn_fsbc": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "numcat": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "oa_i": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "snwice_mass": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "snwice_mass_b": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sv_i": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxa": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxage": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxap": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxc0_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxc0_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxc0_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxe_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxe_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxe_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxsi_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxsi_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxsi_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxsn": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxvl": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxvp": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxa": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxage": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxap": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxc0_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxc0_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxc0_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxe_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxe_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxe_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxsi_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxsi_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxsi_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxsn": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxvl": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxxvp": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxya": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyage": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyap": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyc0_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyc0_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyc0_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxye_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxye_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxye_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxysi_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxysi_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxysi_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxysn": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyvl": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sxyvp": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sya": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syage": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syap": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syc0_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syc0_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syc0_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sye_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sye_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sye_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sysi_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sysi_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sysi_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "sysn": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syvl": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syvp": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syya": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyage": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyap": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyc0_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyc0_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyc0_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syye_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syye_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syye_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syysi_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syysi_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syysi_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syysn": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyvl": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "syyvp": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "szv_i_l01": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "szv_i_l02": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "szv_i_l03": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "t_su": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "time_counter": {
+        "reason": "coordinate/time metadata; explicitly waived",
+        "status": "WAIVED"
+      },
+      "u_ice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "v_i": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "v_ice": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "v_il": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "v_ip": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      },
+      "v_s": {
+        "reason": "file-loaded final SI3 restart state in fp64",
+        "status": "VERIFIED"
+      }
+    }
+  },
+  "files": {
+    "mesh": "a74a6cd55b11084715b0e4e964f820ea9c2e222a73bd02f960edf73b58970503",
+    "namelist_dyn": "54d6721465269330f434743551e61091198a6195292bc4c4504e25332a7e5990",
+    "namelist_ice": "70755ff89192cef49dbcda9c24f4263c43527fefb488971fdd9a49e6c5454f3c",
+    "ocean_output": "cd1bf063da6801ffe97febb7bfaacb22e61e813ff17fb7bf4c6a753004e77fb6",
+    "restart": "bbbecb7eae63ebc014f4b868cf11bde319b6b3716e5e38a92d5ff88da71f33cf"
+  },
+  "format": "nemo-si3-l3-coverage-v1",
+  "git_sha": "b4adf7d7734549c835e9b106a85319e0b3748f6f",
+  "restart_contract": {
+    "a_i": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "a_ip": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "cnd_ice": {
+      "reason": "WAIVED-INACTIVE: ln_cpl=F; icerst.F90:178-181",
+      "status": "WAIVED"
+    },
+    "e_i_l01": {
+      "reason": "Appendix A ice-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "e_i_l02": {
+      "reason": "Appendix A ice-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "e_i_l03": {
+      "reason": "Appendix A ice-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "e_s_l01": {
+      "reason": "Appendix A snow-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "e_s_l02": {
+      "reason": "Appendix A snow-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "e_s_l03": {
+      "reason": "Appendix A snow-enthalpy layer",
+      "status": "VERIFIED"
+    },
+    "kt_ice": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "nn_fsbc": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "oa_i": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "snwice_mass": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "snwice_mass_b": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "stress12_i": {
+      "reason": "WAIVED-INACTIVE: advection-only rung never calls ice_dyn_rhg",
+      "status": "WAIVED"
+    },
+    "stress1_i": {
+      "reason": "WAIVED-INACTIVE: advection-only rung never calls ice_dyn_rhg",
+      "status": "WAIVED"
+    },
+    "stress2_i": {
+      "reason": "WAIVED-INACTIVE: advection-only rung never calls ice_dyn_rhg",
+      "status": "WAIVED"
+    },
+    "sv_i": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "sxa": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxage": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxap": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxc0_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxc0_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxc0_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxe_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxe_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxe_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxice": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxsal": {
+      "reason": "WAIVED-INACTIVE: nn_icesal=4 selects layer moments",
+      "status": "WAIVED"
+    },
+    "sxsi_l01": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxsi_l02": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxsi_l03": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxsn": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxvl": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxvp": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxa": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxage": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxap": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxc0_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxc0_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxc0_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxe_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxe_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxe_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxice": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxsal": {
+      "reason": "WAIVED-INACTIVE: nn_icesal=4 selects layer moments",
+      "status": "WAIVED"
+    },
+    "sxxsi_l01": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxsi_l02": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxsi_l03": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxsn": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxvl": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxxvp": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxya": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyage": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyap": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyc0_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyc0_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyc0_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxye_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxye_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxye_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyice": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxysal": {
+      "reason": "WAIVED-INACTIVE: nn_icesal=4 selects layer moments",
+      "status": "WAIVED"
+    },
+    "sxysi_l01": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxysi_l02": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxysi_l03": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxysn": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyvl": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sxyvp": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "sya": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syage": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syap": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "syc0_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syc0_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syc0_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sye_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sye_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "sye_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syice": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "sysal": {
+      "reason": "WAIVED-INACTIVE: nn_icesal=4 selects layer moments",
+      "status": "WAIVED"
+    },
+    "sysi_l01": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sysi_l02": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sysi_l03": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "sysn": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syvl": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "syvp": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "syya": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyage": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyap": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyc0_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyc0_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyc0_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syye_l01": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syye_l02": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syye_l03": {
+      "reason": "Appendix A layered Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyice": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syysal": {
+      "reason": "WAIVED-INACTIVE: nn_icesal=4 selects layer moments",
+      "status": "WAIVED"
+    },
+    "syysi_l01": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "syysi_l02": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "syysi_l03": {
+      "reason": "Appendix A layer-salinity Prather moment",
+      "status": "VERIFIED"
+    },
+    "syysn": {
+      "reason": "Appendix A mandatory Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyvl": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "syyvp": {
+      "reason": "Appendix A active pond Prather moment",
+      "status": "VERIFIED"
+    },
+    "szv_i_l01": {
+      "reason": "Appendix A layer salt-content field; file-loaded even when inert",
+      "status": "VERIFIED"
+    },
+    "szv_i_l02": {
+      "reason": "Appendix A layer salt-content field; file-loaded even when inert",
+      "status": "VERIFIED"
+    },
+    "szv_i_l03": {
+      "reason": "Appendix A layer salt-content field; file-loaded even when inert",
+      "status": "VERIFIED"
+    },
+    "t1_ice": {
+      "reason": "WAIVED-INACTIVE: ln_cpl=F; icerst.F90:178-181",
+      "status": "WAIVED"
+    },
+    "t_s_l01": {
+      "reason": "WAIVED-NOT-RESTARTED: Appendix A t_s(l) is reconstructed; icerst.F90:153-159 writes e_s(l)",
+      "status": "WAIVED"
+    },
+    "t_s_l02": {
+      "reason": "WAIVED-NOT-RESTARTED: Appendix A t_s(l) is reconstructed; icerst.F90:153-159 writes e_s(l)",
+      "status": "WAIVED"
+    },
+    "t_s_l03": {
+      "reason": "WAIVED-NOT-RESTARTED: Appendix A t_s(l) is reconstructed; icerst.F90:153-159 writes e_s(l)",
+      "status": "WAIVED"
+    },
+    "t_su": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "u_ice": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "v_i": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "v_ice": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "v_il": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "v_ip": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    },
+    "v_s": {
+      "reason": "Appendix A active restart prognostic; loaded from final SI3 restart",
+      "status": "VERIFIED"
+    }
+  },
+  "rung": "3.2"
+}
