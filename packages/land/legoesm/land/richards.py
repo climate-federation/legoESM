@@ -59,7 +59,18 @@ __param_spec__ = {
             "~15 bare RichardsConfig() call sites that rely on the 0.0=off default, so it is "
             "left a config knob.)",
         },
-        "params": {},
+        "params": {
+            "ice_impedance_exponent": {
+                "units": "1",
+                "bounds": (0.0, 10.0),
+                "tunable_tier": 2,
+                "transform": "sigmoid",
+                "category": "hydraulics",
+                "reference": "CLM5 e_ice, SoilWaterMovementMod IceImpedance "
+                             "(Swenson et al. 2012)",
+                "shape": None,
+            },
+        },
     },
 }
 
@@ -120,6 +131,11 @@ class RichardsConfig(NamedTuple):
     # zone retains realistic water.  0.0 = OFF (unbounded gravity drainage, backward-
     # compatible).  ~0.5-0.6 = a loam-like effective field capacity.
     fc_drain_saturation: float = 0.0
+    # --- hydraulics: frozen-soil ice impedance (CLM5 e_ice, Swenson et al. 2012) ---
+    # Conductivity multiplier 10**(-e * ice fraction), ice fraction = ice volume at
+    # ice density over porosity.  Read only when the caller passes log_impedance
+    # (MultiLayerLand does so whenever soil freeze/thaw is on).  CLM5 value 6.
+    ice_impedance_exponent: float = 6.0
 
 
 class RichardsOutput(NamedTuple):
@@ -142,6 +158,7 @@ def solve_richards(
     sink: jnp.ndarray,
     dt: float,
     surface_water: jnp.ndarray | None = None,
+    log_impedance: jnp.ndarray | None = None,
 ) -> RichardsOutput:
     """Solve the Richards equation for one time step.
 
@@ -164,6 +181,15 @@ def solve_richards(
         Root water uptake [m3/m3/s], shape (ncol, n_layers).
     dt : float
         Time step [s].
+    surface_water : jnp.ndarray, optional
+        Surface ponding depth at time n [m], shape (ncol,).
+    log_impedance : jnp.ndarray, optional
+        Natural log of a per-layer conductivity multiplier, shape (ncol, n_layers)
+        (frozen-soil ice impedance, -e ln10 * ice fraction).  Held fixed through the
+        Picard loop.  Applied to the interface conductivity (log-form geometric
+        mean), the surface infiltration conductance (top layer's factor) and the
+        free-drainage bottom flux (bottom layer's factor).  None = no factor, the
+        original code path.
 
     Returns
     -------
@@ -204,6 +230,8 @@ def solve_richards(
     # layer 0 — this handles scalar, (ncol,1), (ncol,nlayers) and (nlayers,) configs
     # identically and never mis-maps layer variation onto columns (codex).
     _Ksat = jnp.broadcast_to(hydro_config.K_sat, theta.shape)[:, 0] * _kdecay[0]  # (ncol,)
+    if log_impedance is not None:
+        _Ksat = _Ksat * jnp.exp(log_impedance[:, 0])   # frozen top layer impedes infiltration
     # CFL cap on the surface infiltration conductivity (stability at high K_sat).
     # The Robin infiltration q01 = _Ksat*((h_s-psi0)/half0 + 1) drives the layer-0
     # Schur update EXPLICITLY (rhs_0 += q01/dz0) and its linearized conductance
@@ -278,6 +306,15 @@ def solve_richards(
     # soil (floor ~ -1e6 >> -1e30).
     _psi_dry_floor = jnp.maximum(_psi_dry_floor, _PSI_FLOOR_MIN)
 
+    def _bottom_drain_K(K_m):
+        """Free-drainage bottom conductivity, CFL-capped: ONE expression shared by
+        the rhs debit, the carried runoff diagnostic and its pre-loop seed, so the
+        reported drainage is the debited drainage."""
+        K_b = K_m[:, -1]
+        if log_impedance is not None:
+            K_b = K_b * jnp.exp(log_impedance[:, -1])
+        return jnp.minimum(K_b, _CFL_SAFETY * dz[-1] / dt)
+
     def picard_body(m, carry):
         h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)
 
@@ -286,7 +323,11 @@ def solve_richards(
         C_m = moisture_capacity(psi_m, theta_m, hydro_config)       # (ncol, nlayers)
 
         # Interblock conductivity (geometric mean)
-        K_half = interblock_K(K_m[:, :-1], K_m[:, 1:])  # (ncol, nlayers-1)
+        if log_impedance is None:
+            K_half = interblock_K(K_m[:, :-1], K_m[:, 1:])  # (ncol, nlayers-1)
+        else:
+            K_half = interblock_K(K_m[:, :-1], K_m[:, 1:],
+                                  log_impedance[:, :-1], log_impedance[:, 1:])
 
         # CFL flux limiter (stability at high K_sat).  The gravity-drainage flux
         # is applied EXPLICITLY (grav_flux term in the rhs below), so it must not
@@ -401,7 +442,7 @@ def solve_richards(
             # exactly as the interior grav flux and the surface infiltration above.
             # dz_N is the thick bottom layer, so this rarely bites, but keeps every
             # explicit K path bounded so a high-K profile cannot drain > one cell/step.
-            K_bot = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+            K_bot = _bottom_drain_K(K_m)
             if _f_drain is not None:
                 K_bot = K_bot * _f_drain[:, -1]   # field-capacity limit at the bottom too
             rhs = rhs.at[:, -1].add(-K_bot / dz[-1])
@@ -445,7 +486,7 @@ def solve_richards(
         # Diagnostic bottom drainage MUST equal the flux the rhs actually debited above
         # (incl. the field-capacity limiter), else runoff_subsurface over-reports and the
         # water budget (in - out - dstorage) leaves a residual.
-        _k_bot_diag = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+        _k_bot_diag = _bottom_drain_K(K_m)
         if _f_drain is not None:
             _k_bot_diag = _k_bot_diag * _f_drain[:, -1]
         return h_s_new, psi_new, theta_new, _k_bot_diag
@@ -465,7 +506,8 @@ def solve_richards(
     # whose hydraulics are wider than ``dz`` (codex).  Byte-identical for a
     # uniform float64 / true float32 run.
     _work_dtype = jnp.result_type(
-        psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink)
+        psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink,
+        *(() if log_impedance is None else (log_impedance,)))
     _psi_c0 = psi_m.astype(_work_dtype)
     _theta_c0 = theta_m_init.astype(_work_dtype)
     # Seed for the K_bot diagnostic carry: the bottom-layer drainage K at the
@@ -473,9 +515,8 @@ def solve_richards(
     # applied, then CFL-capped) so its dtype matches the loop output (carry
     # input/output dtypes must agree).  Overwritten on the first iteration; only
     # reachable as-is for the degenerate max_iter=0.
-    _K_bot0 = jnp.minimum(
-        hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config)[:, -1] * _kdecay[-1],
-        _CFL_SAFETY * dz[-1] / dt)
+    _K_bot0 = _bottom_drain_K(
+        hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config) * _kdecay[None, :])
     h_s_final, psi_final, theta_final, K_bot_solve = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,

@@ -1163,6 +1163,10 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Frozen-soil ice impedance exponent e (CLM5 e_ice): soil conductivity is
+    # multiplied by 10**(-e * ice fraction).  Active only with
+    # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
+    land_soil_ice_impedance_exponent: float = 6.0
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -2136,6 +2140,10 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
                 "multilayer soil has a freeze/thaw scheme — the knob would be "
                 "silently inert.")
+        if not (0.0 <= self.land_soil_ice_impedance_exponent <= 10.0):
+            errors.append(
+                "land_soil_ice_impedance_exponent must be finite in [0, 10] "
+                f"(its declared range), got {self.land_soil_ice_impedance_exponent}")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "

@@ -236,6 +236,18 @@ def resolve_land_config(land_mode: str, land_config=None):
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
 
 
+def inactive_land_param_names(config: MultiLayerLandConfig) -> frozenset:
+    """Registry-qualified land tunables that carry no gradient in ``config``.
+
+    A trainable-parameter collector over the multilayer land must drop these
+    (no inert parameters): the ice impedance exponent is read only when soil
+    freeze/thaw is on.
+    """
+    if config.thermal.enable_freeze_thaw:
+        return frozenset()
+    return frozenset({"land.richards.ice_impedance_exponent"})
+
+
 LAND_MODELS = ("none", "slab", "multilayer")
 
 
