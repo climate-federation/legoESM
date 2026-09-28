@@ -94,6 +94,10 @@ FILES = {
         _OVERFLOW_R50PAIR_COMPILED / "eosbn2.f90"),
     "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90": (
         _OVERFLOW_R50PAIR_COMPILED / "dynhpg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynadv.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynadv_up3.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
@@ -876,6 +880,23 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 56: admitted OVERFLOW stage-2 UP3 boundary ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-145': [
+        'SELECT CASE( n_dynadv )',
+        'CALL dyn_adv_up3     ( kt       , Kbb, Kmm, puu, pvv, Krhs, pau, pav, paw )',
+        12],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:150-158': [
+        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        '&             - ( pvv(ji  ,jj  ,jk,Kbb) - pvv(ji-1,jj  ,jk,Kbb) )    * fmask(ji-1,jj  ,jk)',
+        9],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:174-219': [
+        'DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)',
+        '&                                    / (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        46],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:278-359': [
+        'DO jk = 1, jpk-2                    != divergence of advective fluxes =!',
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - zFv_t(ji,jj) * r1_e1e2v(ji,jj) / (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        82],
     # --- ORCA2 round 52: admitted OVERFLOW stage-2 vorticity replay ---
     'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:343-358': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
