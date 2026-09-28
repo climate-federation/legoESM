@@ -1275,6 +1275,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # replacement (stprk3_stg.F90:430-448).  The ordinary step and replacement
     # still complete before the captured U/V are placed in the returned state.
     expose_stage3_raw_momentum: bool = False
+    # WRITE-only observer for the four source-ordered stage-3 dyn_zdf
+    # boundaries: explicit update, barotropic subtraction, explicit drag,
+    # and implicit solve.  The callback receives eight arrays after the
+    # production-jitted step has materialized them; no public card constructs
+    # this private fidelity hook.
+    zdf_momentum_observer: object = None
     # Private diagnostic controls for WS-RK3 stage-1 source boundaries.
     # Round 119's tuple drives compiled HPG -> LDF -> VOR -> KEG -> ZAD;
     # optional KEG fields are Round-120 arms.  Round 121 may replace only W at
@@ -2786,6 +2792,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_stage3_raw_momentum cannot be combined with another "
                 "momentum exposure: they share the returned u/v slots")
+        _zdf_momentum_observer = (
+            self._nemo_ws_test_hooks.zdf_momentum_observer)
+        if (_zdf_momentum_observer is not None
+                and not callable(_zdf_momentum_observer)):
+            raise ValueError("zdf_momentum_observer must be callable or None")
         _config_input = config or LatLonCGridOceanConfig.from_flat()
         _oracle_endpoint_diagnostic_eos_bypass = bool(
             (self._nemo_ws_test_hooks.expose_stage1_wzv
@@ -11408,6 +11419,7 @@ class LatLonCGridOceanModel:
         # with at least two wet levels.
         u_new, v_new = state.u.data, state.v.data
         u_solve_in, v_solve_in = state.u.data, state.v.data
+        _zdf_explicit_u, _zdf_explicit_v = u_solve_in, v_solve_in
         if do_momentum and getattr(_cfg_b, "surface_stress_implicit",
                                    False) and surface_forcing is not None:
             # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
@@ -11597,6 +11609,8 @@ class LatLonCGridOceanModel:
                     "both uu_b and vv_b, or neither")
             u_solve_in = u_solve_in - _u_bt_mean
             v_solve_in = v_solve_in - _v_bt_mean
+        _zdf_baro_subtract_u, _zdf_baro_subtract_v = (
+            u_solve_in, v_solve_in)
 
         # zdf_drag_in_matrix: NEMO's semi-implicit bottom friction goes INTO
         # the tridiagonal diagonal at each face-column's deepest wet cell
@@ -11718,6 +11732,7 @@ class LatLonCGridOceanModel:
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
+        _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static
@@ -11879,6 +11894,15 @@ class LatLonCGridOceanModel:
             T_new = jnp.where(_tracer_apply_mask, T_new, state.T.data)
             S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
         if do_momentum:
+            if _zdf_momentum_observer is not None:
+                jax.debug.callback(
+                    _zdf_momentum_observer,
+                    _zdf_explicit_u, _zdf_explicit_v,
+                    _zdf_baro_subtract_u, _zdf_baro_subtract_v,
+                    _zdf_baro_drag_u, _zdf_baro_drag_v,
+                    u_new, v_new,
+                    ordered=True,
+                )
             if _zdf_baroclinic_only:
                 # Re-add the SAME depth mean that was subtracted before the
                 # solve (dynzdf.F90's barotropic component re-enters via
