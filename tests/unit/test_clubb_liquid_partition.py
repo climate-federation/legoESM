@@ -297,12 +297,11 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     np.testing.assert_allclose(lhs, rhs, rtol=1e-11, atol=1e-18)
 
 
-def test_mismatched_pairing_raises_both_ways():
-    """A caller that forgets q_c, or passes it with the lever off, is refused.
+def test_kernel_exchanges_liquid_iff_q_c_is_supplied():
+    """The kernel has no flag of its own: handing it q_c IS the selection.
 
-    Silence here is the dangerous outcome: the first would replace the host's
-    liquid with a closure that never saw it, the second would tell the caller the
-    liquid was exchanged when it was not.
+    Without q_c the vapour-only bridge runs and publishes no liquid tendency;
+    with it the exchange runs and the tendency is published in q_c's shape.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import clubb_step
     col = _column(q_c_amp=1.0e-4)
@@ -552,22 +551,49 @@ def test_mpas_lane_refuses_a_state_missing_either_tracer():
 
     The vapour block substitutes zeros for a missing ``q_v`` and the tendency
     section then emits nothing for it, so a state carrying liquid but no vapour
-    would evaporate liquid into a tendency nothing applies (codex).
+    would evaporate liquid into a tendency nothing applies (codex).  Exercised
+    by CALLING the MPAS lane (a source grep cannot see a dead selector): with
+    the flag on and both tracers carried it publishes the liquid tendency;
+    missing either one, it refuses.
     """
     import pytest
     from legoesm.atmosphere.physics.turbulence.integration import (
         make_turbulence_physics,
     )
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    import inspect
+    from legoesm.core.field import Field
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    nlev = 16
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    ncol = mesh.nCells
+    sigma = create_sigma_coordinate(nlev)
+    T = jnp.broadcast_to(jnp.linspace(300.0, 220.0, nlev)[None, :], (ncol, nlev))
+    q_v = jnp.broadcast_to(jnp.linspace(0.017, 1e-5, nlev)[None, :], (ncol, nlev))
+    q_c = jnp.full((ncol, nlev), 1.0e-4)
+
+    def state(**tracers):
+        return MPASHydrostaticState(
+            u=Field(jnp.full((mesh.nEdges, nlev), 4.0)), T=Field(T),
+            p_s=Field(jnp.full((ncol,), 1.0e5)), phis=Field(jnp.zeros((ncol,))),
+            tracers={k: Field(v) for k, v in tracers.items()})
 
     fn = make_turbulence_physics(
-        TurbulenceConfig(scheme="clubb", clubb=_ON), model_type="mpas")
-    src = inspect.getsource(fn)
-    # The refusal names BOTH tracers; a guard that only required q_c would leave
-    # the vapour half to be silently zero-filled.
-    assert '("q_v", "q_c")' in src
-    assert "is not carried" in src
+        TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True),
+        model_type="mpas", dt=300.0)
+    tends, _ = fn(state(q_v=q_v, q_c=q_c), mesh, sigma)
+    assert tends.tracer_tendencies["q_c"].data.shape == (ncol, nlev)
+    assert bool(jnp.any(tends.tracer_tendencies["q_c"].data != 0.0))
+    for missing, kept in (("q_c", {"q_v": q_v}), ("q_v", {"q_c": q_c})):
+        with pytest.raises(ValueError, match=rf"\['{missing}'\] is not carried"):
+            fn(state(**kept), mesh, sigma)
+    # Flag off: the same states are accepted and no liquid tendency is published.
+    off = make_turbulence_physics(
+        TurbulenceConfig(scheme="clubb", clubb=_ON), model_type="mpas", dt=300.0)
+    tends_off, _ = off(state(q_v=q_v), mesh, sigma)
+    assert not (tends_off.tracer_tendencies or {}).get("q_c")
 
 
 def test_public_wrapper_publishes_liquid_iff_the_host_supplies_it():

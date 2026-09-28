@@ -203,18 +203,17 @@ def main():
         # it in rt, so the closure REPARTITIONS instead of condensing, which is
         # the quantity the lever actually delivers.
         if a.partition and q_c is not None:
-            liq_cfg = clubb_cfg     # the kernel keys the partition on q_c being supplied
             _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
             _T = T; _q = q_v; _m = moments; _rho = rho; _ql = q_c
             for _i in range(_ns):
                 _du, _dv, _dT, _dq, _m, _dg = clubb_step(
                     _u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
-                    T_sfc, q_sfc, _rho, _dts, liq_cfg, q_c=_ql)
+                    T_sfc, q_sfc, _rho, _dts, clubb_cfg, q_c=_ql)
                 _ql = _ql + _dts * _dg["dq_c_dt"]
                 if _i < _ns - 1:
                     _u = _u + _dts * _du; _v = _v + _dts * _dv
                     _T = _T + _dts * _dT; _q = _q + _dts * _dq
-                    _tv = jnp.maximum(virtual_temperature(_T, _q), liq_cfg.T0 * 0.5)
+                    _tv = jnp.maximum(virtual_temperature(_T, _q), clubb_cfg.T0 * 0.5)
                     _rho = p_full / (constants.R_d * _tv)
             q_c_partitioned = jnp.maximum(_ql, 0.0)
             _p0 = colint(q_c)
