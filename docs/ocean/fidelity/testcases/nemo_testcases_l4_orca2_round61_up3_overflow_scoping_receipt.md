@@ -43,7 +43,7 @@ fraction of the residual that row already carries.
 |---|---|---|
 | (A) the two cards select different momentum-advection switches | **HELD** | ORCA2 `ln_dynadv_vec = .true.`; OVERFLOW `ln_dynadv_up3 = .true.`. Constructed cards: ORCA2-zps and GYRE-zco `vector_invariant`; OVERFLOW-zps and LOCK-zco `flux_form` + `nemo_up3`. ORCA2 ladder under the candidate: 40 checkpoints, 0 moved rows. |
 | (B) the candidate is wrong on the tank's partial-step / closed-wall cells | **not the blocker; stays open on the OVERFLOW card** | 0 of the 20 violating rows is `AT-BAR`; all 20 are `DEBT`. Largest worsening / reference-residual ratio 0.3101, median 0.0054, all below 1. |
-| (C) the tank's certified record came from a different NEMO build | **REFUTED** | Instrumented `MY_SRC/dynadv_up3.F90` differs from the shipped file by 38 diff lines, every one an addition (one `USE` and eleven writer `CALL`s). The two decks' `namelist_cfg` and the two `cpp_*.fcm` are byte-identical. |
+| (C) the tank's certified record came from a different NEMO build | **REFUTED, on binary provenance** | The two runs use BYTE-IDENTICAL namelists. Their executables differ: the certified reference run's own binary hashes `08d83236dd7f5b92bb4f194e414e2ef5`, equal to the uninstrumented `OVERFLOW_OMIP_L1` build, whose `MY_SRC` carries NO `dynadv_up3` override at all, so the certified record ran the SHIPPED UP3; the walk record's binary hashes `59da10f439b2316b72778440d8e11ff2`, the instrumented build, whose `dynadv_up3.F90` differs from the shipped file by additions only (one `USE` and eleven writer `CALL`s) at the same `-O3`. Round 57's source-order replay of the recorded operands reproduced the recorded flux bit-exactly, which is not what a re-associated statement looks like. |
 | (D) the candidate changes something upstream that the tank runs | **REFUTED** | The edited routine has exactly one production call site, `ocean_pe_latlon_cgrid.py:5247`, inside the guard at `ocean_pe_latlon_cgrid.py:5229`; the sibling branch is the vector-invariant ENE/EEN operator. The other references are unit tests and probes. |
 
 ## Compiled statements and the card that runs them
@@ -52,10 +52,13 @@ NEMO forms the masked horizontal curvature at
 `OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166`, selects it
 by the sign of the advected-velocity pair at `:182-192`, and forms the T-face
 flux at `:194-195`. The deck that reaches those lines selects
-`OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83` and `:89`. The deck that does not
+`OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83` and `:89`, and the certified
+reference run's own namelist makes the same two selections at
+`overflow_kt1_10/namelist_cfg:86` and `:92`. The deck that does not reach them
 selects `ORCA2_OMIP_L4/EXP00/namelist_cfg:346` and `:352`. legoESM pins the
-same split on the card: `nemo_testcase_recipe.py:1599` refuses to build
-ORCA2-zps or GYRE-zco with anything but the vector-invariant selection.
+same split on the card: the condition at `nemo_testcase_recipe.py:1596`
+refuses, at `:1599`, to build ORCA2-zps or GYRE-zco with anything but the
+vector-invariant selection.
 
 ## Measured results
 
@@ -76,46 +79,57 @@ OVERFLOW reference report (round 47), read through the committed
 `DEBT`, `bar` `1e-15`, `first_over_bar` `{"fields": ["T", "u"], "kt": 2}`; the
 four measured `kt = 1` rows are exact at `normalized_max_abs` `0.0`.
 
-The 20 violating rows, worsening against the residual each row already carries:
+The 20 violating rows. Both sides of every ratio below are the SAME
+quantity, the absolute distance from NEMO, recomputed through the committed
+probe; an earlier version of this table divided an absolute worsening by a
+NORMALIZED residual and so overstated every `T` row by the factor 20, that
+row family's oracle scale. The `ssh` and `u` rows were unaffected because
+their oracle scale is below 1.
 
-| row | reference status | reference residual | worsening | ratio |
-|---|---|---:|---:|---:|
-| kt4 ssh | `DEBT` | `2.897004e-10` | `9.091877e-13` | 0.0031 |
-| kt4 u | `DEBT` | `2.332317e-08` | `4.050436e-14` | 0.0000 |
-| kt5 ssh | `DEBT` | `1.179436e-08` | `1.269041e-10` | 0.0108 |
-| kt6 ssh | `DEBT` | `1.053242e-07` | `2.834538e-09` | 0.0269 |
-| kt7 ssh | `DEBT` | `3.896376e-07` | `2.189887e-08` | 0.0562 |
-| kt8 ssh | `DEBT` | `7.518260e-07` | `8.072998e-08` | 0.1074 |
-| kt9 ssh | `DEBT` | `8.261121e-07` | `1.640471e-07` | 0.1986 |
-| kt10 ssh | `DEBT` | `6.265025e-07` | `1.942932e-07` | 0.3101 |
-| kt10 u | `DEBT` | `5.422695e-06` | `2.902065e-08` | 0.0054 |
-| kt10 T | `DEBT` | `1.522592e-09` | `1.666756e-10` | 0.1095 |
+| row | reference residual | worsening | row ratio | cellwise ratio at the worst cell | cells moving by more than their own residual |
+|---|---:|---:|---:|---:|---:|
+| kt4 ssh | `2.897004e-10` | `9.091877e-13` | 0.0031 | 0.0727 | 0 |
+| kt4 u | `2.332317e-08` | `4.050436e-14` | 0.0000 | 0.0843 | 26 |
+| kt5 T | `2.367280e-09` | `1.065814e-14` | 0.0000 | 1.00 | 18 |
+| kt5 ssh | `1.179436e-08` | `1.269041e-10` | 0.0108 | 0.2332 | 0 |
+| kt5 u | `4.624389e-08` | `5.826245e-12` | 0.0001 | 0.2527 | 0 |
+| kt6 T | `4.741183e-09` | `2.842171e-14` | 0.0000 | **8.00** | 71 |
+| kt6 ssh | `1.053242e-07` | `2.834538e-09` | 0.0269 | 0.3849 | 0 |
+| kt6 u | `3.184359e-07` | `1.474591e-10` | 0.0005 | 0.4289 | 73 |
+| kt7 T | `7.450669e-09` | `2.273737e-13` | 0.0000 | 0.0001 | 34 |
+| kt7 ssh | `3.896376e-07` | `2.189887e-08` | 0.0562 | 0.4670 | 0 |
+| kt7 u | `1.262631e-06` | `1.392228e-09` | 0.0011 | 0.5573 | 0 |
+| kt8 T | `1.096826e-08` | `3.431921e-12` | 0.0003 | 0.0096 | 77 |
+| kt8 ssh | `7.518260e-07` | `8.072998e-08` | 0.1074 | 0.4957 | 0 |
+| kt8 u | `2.837862e-06` | `6.541136e-09` | 0.0023 | 0.6030 | 0 |
+| kt9 T | `1.926472e-08` | `3.015188e-11` | 0.0016 | 0.0252 | 85 |
+| kt9 ssh | `8.261121e-07` | `1.640471e-07` | 0.1986 | 0.4778 | 0 |
+| kt9 u | `4.344091e-06` | `1.754177e-08` | 0.0040 | 0.5996 | 1 |
+| kt10 T | `3.045184e-08` | `1.666756e-10` | 0.0055 | 0.3209 | 93 |
+| kt10 ssh | `6.265025e-07` | `1.942932e-07` | 0.3101 | 0.4202 | 0 |
+| kt10 u | `5.422695e-06` | `2.902065e-08` | 0.0054 | 0.5756 | 103 |
 
-The remaining ten violating rows (kt5-kt9 `T` and `u`) have ratios between
-`0.0001` and `0.0313`. Round 59's headline `875,018,892` ULP is the kt10 `ssh`
-row: `1.942932e-07` m of sea level expressed in units of
-`numpy.spacing(1.0)` = `2.220446e-16`. The row it worsens is already
-`6.265025e-07` m from the oracle.
+Seven `ssh` rows, seven `u` rows and six `T` rows. As a ROW statistic every
+worsening is a fraction of the residual its row already carries: maximum
+0.3101 at kt10 `ssh`, median 0.0027.
 
-**That ratio is a row statistic, and the cellwise form of it is weaker.** The
-row maximum of the worsening and the row maximum of the residual are in
-general at DIFFERENT cells, so the table above does not say that every cell
-moves by less than its own error. Re-derived per cell, at the cell where each
-row's worsening is largest:
+**The cellwise form of that sentence is weaker, and on some rows it is
+false.** A row's largest worsening and its largest residual are in general at
+DIFFERENT cells. Taken at the same cell: no `ssh` cell anywhere moves by more
+than it was already wrong by, but 13 of the 20 rows contain cells that do —
+up to 103 of 16,900 on kt10 `u`, and with a worst cellwise ratio of 8.00 on
+kt6 `T`. Those cells are the smallest ones in absolute terms: kt6 `T`'s worst
+cell is a worsening of `2.84e-14` K against a prior error of `3.6e-15` K, i.e.
+8 row-scale ULP against 1. So the bar is plainly non-discriminating on the
+sea-level rows and is a real, if few-ULP, signal on parts of the `T` and `u`
+rows.
 
-| row family | cellwise ratio at the worst cell | cells where the worsening exceeds that cell's own residual |
-|---|---|---|
-| six `ssh` rows (kt4-kt10) | `0.0727` to `0.4957` | **0** on every one |
-| five `u` rows (kt4-kt10) | `0.0843` to `0.6030` | 0 to 103 of 16,900 |
-| five `T` rows (kt5-kt10) | `6.3e-05` to **`8.0`** | 18 to 93 of 17,000 |
-
-So on the two large-amplitude fields the candidate never dominates a cell's
-existing error, but on 10 of the 20 rows some cells do move by more than they
-were already wrong by. Those cells are the smallest ones in absolute terms:
-the worst of them, kt6 `T`, is a worsening of 8 row-scale ULP at a cell whose
-prior residual was 1 ULP. The honest summary is that the bar is plainly
-non-discriminating on the `ssh` rows and is a real, if tiny, signal on parts
-of the `T` and `u` rows.
+Reproducer for both statistics, and for the card table above:
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_up3_card_scope.py`
+(`card_scope` / `row_move_ratios`), tested in
+`tests/ocean/fidelity/test_nemo_testcase_up3_card_scope.py`, whose fourth test
+is a synthetic case built so the row ratio reads 0.4 while the cellwise ratio
+at the same cell is 4.0 — the failure mode this table had.
 
 Of the 31 rows that move at all, 7 are `AT-BAR` salinity rows; their largest
 move is `1.421085e-14`, which is two row-scale ULP at a salinity row scale,
@@ -128,12 +142,17 @@ never fires.
   the reference report flips "all violating rows are `DEBT`" from true to
   false and "any `AT-BAR` row among violators" from false to true. The claim
   is not vacuous.
-- Ratio plant: setting one ratio to `1.5` flips "all ratios below 1" from true
-  to false.
-- Cellwise re-derivation of the ratio claim directly from the two residual
-  arrays (`round47/overflow_tip.residuals.npz` and
-  `round59/iterm_1/overflow_trajectory_tip.residuals.npz`), which is what
-  exposed that the row-maximum ratio is not the cellwise ratio.
+- Ratio instrument: the earlier "plant" merely set a derived ratio to `1.5`,
+  which could never detect a wrong ratio computation and is recorded as
+  VACUOUS, not as evidence. It is replaced by a synthetic case in the
+  committed test, built so the row ratio reads 0.4 while the cellwise ratio at
+  the same cell is 4.0; that case is what exposed the unit error in the first
+  table.
+- Cellwise re-derivation of the ratio claim through the committed probe,
+  directly from the two residual arrays (`round47/overflow_tip.residuals.npz`
+  and `round59/iterm_1/overflow_trajectory_tip.residuals.npz`), after checking
+  that the stored `residual` array is bit-identical to `|candidate - oracle|`
+  so both sides of every ratio are the same quantity.
 - Two parsed rows re-read by eye in the raw reference report:
   `kt2.before.T` (`DEBT`, `7.815970093361103e-15`) and `kt10.before.ssh`
   (`DEBT`, `6.265025088159071e-07`).
@@ -155,6 +174,13 @@ never fires.
 - **"The OVERFLOW card is certified bit-exact against NEMO's own OVERFLOW
   record."** Retracted. The card's own report is `DEBT` from `kt = 2` onward;
   only `kt = 1` is exact.
+- **"On each violating row the worsening is smaller than the row's own
+  residual."** Retracted as a statement about cells. It holds for row maxima
+  and it is what R61-P4 froze, but the maxima are at different cells; taken
+  cell by cell it is false on 13 of the 20 rows.
+- **The first version of this receipt's ratio table.** Retracted: it divided
+  an absolute worsening by a normalized residual, overstating every `T` row by
+  the factor 20. The table above puts the same quantity on both sides.
 - An intermediate reading of this round's own evidence treated
   `largest_previous_legoesm_field_move_in_row_scale_oracle_ulps`
   (`24,736,344,919`) as a previously accepted trajectory move. It is not: the
@@ -168,8 +194,39 @@ never fires.
 | R61-P1 | **CONFIRMED** | The four constructed cards carry the predicted selections; each matches its deck's switch. |
 | R61-P2 | **CONFIRMED** | One production call site, under the `flux_form` guard, with the vector-invariant operator in the sibling branch. |
 | R61-P3 | **CONFIRMED** | 20 violating rows, all `DEBT`; no `AT-BAR` row among them; the plant fires. |
-| R61-P4 | **CONFIRMED as preregistered, REFINED against itself** | As frozen (row maxima): maximum ratio 0.3101, median 0.0054, all below 1; the plant fires. The cellwise form of the same sentence is FALSE on 10 of the 20 rows, worst cellwise ratio 8.0 at kt6 `T`. The refinement was found by this round, not by a reviewer, and the row-maximum wording of the prediction is recorded as too strong. |
+| R61-P4 | **CONFIRMED as preregistered, REFUTED cellwise** | As frozen (row maxima, consistent units): maximum ratio 0.3101, median 0.0027, all below 1. Cellwise the same sentence is FALSE on 13 of the 20 rows, worst cellwise ratio 8.00 at kt6 `T`. The prediction's row-maximum wording is recorded as too strong, and its first numeric table was unit-inconsistent; both are retracted above. |
 | R61-P5 | **CONFIRMED** | The `packages/` tree is byte-identical to base `1bbf37814553`; this round's commits touch documentation and the citation map only. |
+
+## Reviews
+
+Two independent adversarial reviews, both run on the committed round.
+
+**codex** (read-only, quota guard 68% used, exit 0). One BLOCKING: hypothesis
+C's "additions only" proves source preservation, not binary equivalence.
+ACCEPTED and fixed — the round then hashed the executables and found the
+certified record was produced by the uninstrumented build, which is stronger
+evidence than the diff and is what the table now cites. Three SHOULD-FIX:
+wrong row cardinalities (six/five/five for what is seven/seven/six) ACCEPTED
+and fixed; results presented without a committed reproducer, and a vacuous
+ratio plant, ACCEPTED — a probe and its direct test are now committed and the
+vacuous plant is labelled as such; the retraction section omitting the
+row-to-cell inference ACCEPTED and added. One NIT on citing the validator's
+condition rather than its message text, ACCEPTED and added.
+
+**Claude code-reviewer** (independent, fresh context). Agreed with codex's
+blocking finding and went further, supplying the binary-hash provenance this
+receipt now uses. Its own BLOCKING finding — that the row ratio is a
+reduction-versus-reduction comparison across different cells, with two rows
+locally at or above 1.0 — was already being corrected when the review landed
+and is now the cellwise table above. It independently re-derived and confirmed
+R61-P1, R61-P2, the single guarded call site, the 40-checkpoint ORCA2 result,
+the moved-row census, the citation gate and its plants, and the untouched
+`packages/` tree. Its NIT on "38 diff lines" being raw diff output rather than
+added physics lines is accepted: that count is `diff` output lines; the added
+content is one `USE` and eleven writer `CALL`s.
+
+Both reviewers state that the round's headline conclusion — the UP3 statement
+is unreachable from ORCA2 — survives their checks.
 
 ## Scope ledger
 
@@ -179,7 +236,9 @@ fix at the root, and record the finding.
 **UNASKED and unchanged.** No configuration field, default, scheme selection,
 threshold, forcing, resolution, timestep, carried state, ORCA2 entry, or
 sea-ice field changed. No model file is edited. The citation map gained seven
-entries and two deck paths, which add citations and change no behaviour.
+entries and two deck paths, and the round adds one probe under
+`scripts/validate/` with its direct test; all three are additions that change
+no model behaviour.
 
 ## OPEN
 

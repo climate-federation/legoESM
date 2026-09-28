@@ -112,6 +112,9 @@ FILES = {
         NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg"),
     "OVERFLOW_OMIP_L1/EXP00/namelist_cfg": (
         NEMO / "tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg"),
+    # The namelist the CERTIFIED OVERFLOW reference run actually used, which
+    # is the zps variant and not the deck's EXP00 copy.
+    "overflow_kt1_10/namelist_cfg": OVERFLOW_RUN / "namelist_cfg",
     "OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90": (
         _OVERFLOW_R62ZDF_COMPILED / "dynzdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
@@ -904,6 +907,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:352': 'ln_dynvor_een = .true.',
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83': 'ln_dynadv_up3 = .true.',
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
+    'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
+    'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
+    'nemo_testcase_recipe.py:1596':
+        'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5229': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5247': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
