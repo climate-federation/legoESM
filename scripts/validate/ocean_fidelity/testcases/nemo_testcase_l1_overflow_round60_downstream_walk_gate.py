@@ -293,8 +293,8 @@ def run(output: Path, expect_commit: str, reference: Path | None, plant: bool) -
     card = build_nemo_testcase_card("OVERFLOW-zps")
     cfg = card.recipe.model_config
     require((cfg.outer_integrator, cfg.momentum_time_integrator,
-             cfg.momentum_advection, cfg.pgf_scheme)
-            == ("forward_euler", "rk3_ws", "nemo_up3", "nemo_sco"),
+             cfg.momentum_advection, cfg.momentum_flux_scheme, cfg.pgf_scheme)
+            == ("forward_euler", "rk3_ws", "flux_form", "nemo_up3", "nemo_sco"),
             "resolved OVERFLOW program drift")
     require(str(card.recipe.initial_state.u.data.dtype) == "float64",
             "state dtype is not float64")
