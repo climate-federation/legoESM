@@ -63,9 +63,17 @@ def _score(name: str, oracle, candidate, *, plant: bool = False) -> dict:
                 f"{name}: plant did not move")
     unequal = _bits(tested) != _bits(oracle)
     absolute = np.abs(tested - oracle)
-    spacing = np.abs(np.spacing(oracle))
-    require(np.all(spacing > 0.0), f"{name}: invalid fp64 spacing")
-    scale = np.maximum(np.abs(oracle), np.finfo(np.float64).tiny)
+    nonzero_reference = oracle != 0.0
+    scored_nonzero = unequal & nonzero_reference
+    if scored_nonzero.any():
+        spacing = np.abs(np.spacing(oracle[scored_nonzero]))
+        require(np.all(spacing > 0.0), f"{name}: invalid fp64 spacing")
+        relative_max = float(np.max(
+            absolute[scored_nonzero] / np.abs(oracle[scored_nonzero])))
+        row_scale_ulp_max = float(np.max(absolute[scored_nonzero] / spacing))
+    else:
+        relative_max = None
+        row_scale_ulp_max = None
     return {
         "name": name,
         "status": "BIT_EXACT" if not unequal.any() else "NON_BIT",
@@ -74,8 +82,12 @@ def _score(name: str, oracle, candidate, *, plant: bool = False) -> dict:
         "baseline_n_unequal": int(np.count_nonzero(baseline)),
         "n_unequal": int(np.count_nonzero(unequal)),
         "absolute_max": float(np.max(absolute)),
-        "relative_max": float(np.max(absolute / scale)),
-        "row_scale_ulp_max": float(np.max(absolute / spacing)),
+        "relative_max_nonzero_reference": relative_max,
+        "row_scale_ulp_max_nonzero_reference": row_scale_ulp_max,
+        "zero_reference_to_nonzero": int(np.count_nonzero(
+            unequal & ~nonzero_reference & (tested != 0.0))),
+        "signed_zero_only": int(np.count_nonzero(
+            unequal & ~nonzero_reference & (tested == 0.0))),
         "plant": plant,
         "planted_flat_index": planted_index,
     }

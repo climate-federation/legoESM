@@ -49,7 +49,7 @@ def test_face_flux_plant_adds_exactly_one_refusal():
     baseline = gate._score("flux", oracle, candidate)
     planted = gate._score("flux", oracle, candidate, plant=True)
     assert baseline["baseline_n_unequal"] == 1
-    assert baseline["row_scale_ulp_max"] == 1.0
+    assert baseline["row_scale_ulp_max_nonzero_reference"] == 1.0
     assert planted["n_unequal"] == 2
 
 
