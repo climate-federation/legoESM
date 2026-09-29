@@ -178,8 +178,6 @@ __param_spec__ = {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
             "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
             "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; bounds bracket that plus one decade up", "shape": None},
-            "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way", "shape": None},
             "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
             "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "sigmoid", "category": "number_concentration", "reference": "Seifert & Beheng (2001)", "shape": None},
             "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
@@ -255,6 +253,8 @@ __param_spec__ = {
             "graupel_embryo_mass": {"units": "kg", "bounds": (5e-11, 5e-10), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; lower bound covers that CAM6-equivalent range; upper bound 20 leaves room for enhancement tests", "shape": None},
+            "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way. MG2 pairs it with the cloud-number sink npra=pra*nc/qc, which this port lacks (N_c is not evolved when predict_Nc=False)", "shape": None},
         },
     },
     "P3Config": {
@@ -551,13 +551,6 @@ class MorrisonConfig(NamedTuple):
     #     fixed nu (0.4315) is an approximation of gSAM's spatially-diagnosed
     #     pgam, and the SB2001-specific cloud-NUMBER sinks are not represented.
     warm_rain_scheme: str = "kk2000"
-    # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch:
-    # autocon_fact scales the KK2000 autoconversion rate before the number
-    # caps (rain-number source and cloud-number sink follow it);
-    # accre_enhan_fact scales KK2000 accretion (MG2 ``accre_enhan``,
-    # micro_mg_utils.F90 accrete_cloud_water_rain).  1.0 = unscaled.
-    autocon_fact: float = 1.0
-    accre_enhan_fact: float = 1.0
     predict_Nc: bool = False         # SAM M2005 dopredictNc. False (SAM DEFAULT) =
                                      # SPECIFIED constant droplet number Nc_0: the
                                      # size distribution uses Nc_0 and cloud number is
@@ -980,6 +973,14 @@ class MorrisonConfig(NamedTuple):
     # common factor, so terms re-derived outside the scheme are PRE-clamp and
     # cannot close the budget.  NOT a tunable: it selects no physics.
     publish_qc_budget: bool = False
+    # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch
+    # (appended at the END: positional ABI).  autocon_fact scales the KK2000
+    # autoconversion rate before the SAM number caps, so the rain-number
+    # source and cloud-number sink follow it; accre_enhan_fact scales KK2000
+    # accretion (MG2 accre_enhan, micro_mg_utils.F90 accrete_cloud_water_rain;
+    # MG2's paired cloud-number sink npra is absent here).  1.0 = unscaled.
+    autocon_fact: float = 1.0
+    accre_enhan_fact: float = 1.0
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
