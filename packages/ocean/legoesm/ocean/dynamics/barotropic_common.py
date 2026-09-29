@@ -1195,14 +1195,20 @@ def _fixed_iteration_pcg_single_reduce(
     init = _CGSRState(
         x=x0, r=r0, p=z0, s=w0, rho=rho0, t=t0, alpha=alpha0, rr=rr0,
     )
-    # Each body call applies one α-update then prepares the next α —
-    # ``max_iter`` calls ⇒ exactly ``max_iter`` x/r updates and
-    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter
-    # + 1`` for the standard body.  The final iteration's prepared
-    # (p, s, α) are discarded — its reduction still ran, keeping the
-    # collective schedule static.
-    final = jax.lax.fori_loop(0, int(max_iter), body, init)
-    return final.x, final.rr
+    # Each body call applies one α-update then prepares the next α.  The
+    # last update needs no next α, so it runs outside the loop without the
+    # preconditioner, the operator (a halo exchange on distributed paths)
+    # and the rho/mu dots it would discard: ``max_iter`` x/r updates and
+    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter + 1``
+    # for the standard body.
+    n_iter = int(max_iter)
+    if n_iter <= 0:
+        return init.x, init.rr
+    st = jax.lax.fori_loop(0, n_iter - 1, body, init)
+    x_last = st.x + st.alpha * st.p
+    r_last = st.r - st.alpha * st.s
+    (rr_last,) = _global_dot_batch([(r_last * W, r_last)])
+    return x_last, rr_last
 
 
 def global_rel_residual(
