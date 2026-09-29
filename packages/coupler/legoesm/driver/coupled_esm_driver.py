@@ -1597,7 +1597,13 @@ class CoupledESMDriver:
                     "couple_surface_fluxes: the surface response carries no "
                     "surface_mass_flux; the atmosphere's moisture source must be "
                     "the tile mass flux, not lhflx / L_v.")
-            return r.shflx, r.surface_mass_flux * constants.L_v
+            # Energy closes too: the tiles lost shflx + lhflx with
+            # lhflx = L_vap(SST)*E, the atmosphere books L_v*E as latent, so
+            # the remainder (L_vap(SST) - L_v)*E = lhflx - L_v*E goes into the
+            # sensible heat it receives. All fluxes positive upward (surface
+            # into the atmosphere) [W/m^2]; the ocean's own fluxes are unchanged.
+            lh_atm = r.surface_mass_flux * constants.L_v
+            return r.shflx + (r.lhflx - lh_atm), lh_atm
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(

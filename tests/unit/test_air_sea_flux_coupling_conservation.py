@@ -431,13 +431,37 @@ class TestCoupledDriverWiring:
             _atm=atm, _last_sfc_response=resp)
         CoupledESMDriver._override_sfc_fluxes(drv)
         shflx, lhflx = atm.get_sfc_flux_override(0.0)
-        np.testing.assert_array_equal(shflx, resp.shflx)
+        # sensible carries the (L_vap - L_v)*E remainder (energy closure)
+        np.testing.assert_allclose(
+            shflx, resp.shflx + evap * (2.44e6 - constants.L_v), rtol=1e-12)
         np.testing.assert_allclose(lhflx / constants.L_v, evap, rtol=1e-12)
         assert not np.allclose(lhflx, resp.lhflx)
         drv._last_sfc_response = SimpleNamespace(shflx=resp.shflx, lhflx=resp.lhflx,
                                                  surface_mass_flux=None)
         with pytest.raises(ValueError, match="surface_mass_flux"):
             atm.get_sfc_flux_override(0.0)
+
+    def test_hook_closes_water_and_energy_together(self):
+        """The atmosphere's turbulent energy input (sensible + latent it is
+        handed) must equal the ocean tile's turbulent heat loss
+        (shflx + lhflx), while its moisture source stays the tile mass flux."""
+        from types import SimpleNamespace
+        from legoesm import constants
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        sh_atm, lh_atm = atm.get_sfc_flux_override(0.0)
+        np.testing.assert_allclose(lh_atm / constants.L_v, evap, rtol=1e-12)
+        np.testing.assert_allclose(sh_atm + lh_atm, resp.shflx + resp.lhflx,
+                                   rtol=1e-12)
 
     def test_assemble_ocean_forcing_sw_down_is_net(self):
         """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,
