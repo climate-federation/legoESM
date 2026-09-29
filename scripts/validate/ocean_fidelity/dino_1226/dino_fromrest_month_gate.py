@@ -49,10 +49,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 # The certified day-30 wet 3-D temperature rms against NEMO's RUN_TRAJ kt=960
 # record, in kelvin.  Provenance: the 2026-09-29 repair measurement in
@@ -104,20 +104,25 @@ def run_month(work_dir: Path, nemo_run: str) -> float:
     root = repo_root()
     run_dir = work_dir / "run"
     score_dir = work_dir / "score"
+    # The certified protocol is fp64.  run_dino.py only WARNS when x64 is off,
+    # so an opted-in call that forgot the variable would quietly score a
+    # different model; set it here rather than document it.
+    env = dict(os.environ, JAX_ENABLE_X64="1")
+    env.setdefault("JAX_PLATFORMS", "cuda,cpu")
     subprocess.run(
         [sys.executable, "scripts/run/run_dino.py", "--config", CARD,
          "--grid", "latlon", "--recipe", RECIPE, "--n-lon", "50",
          "--nemo-faithful-grid", "--allow-multiyear", "--dt", str(DT_SECONDS),
          "--days", str(DAYS), "--snapshot-every-days", str(DAYS),
          "--output-dir", str(run_dir)],
-        cwd=root, check=True)
+        cwd=root, check=True, env=env)
     subprocess.run(
         [sys.executable,
          "scripts/validate/ocean_fidelity/dino_1226/twin_nemo_ts_maps.py",
          "--run-dino-dir", str(run_dir), "--day", str(DAYS),
          "--nemo-kt", str(NEMO_KT), "--nemo-run", nemo_run,
          "--output-dir", str(score_dir)],
-        cwd=root, check=True)
+        cwd=root, check=True, env=env)
     sidecar = score_dir / f"twin_nemo_ts_maps_day{DAYS}_kt{NEMO_KT}.json"
     report = json.loads(sidecar.read_text())
     return float(report["statistics"]["T3D"]["rms_difference"])

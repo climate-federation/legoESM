@@ -73,9 +73,11 @@ round 184's closed-face repair so the run completes.
 Two things fall straight out of that table.
 
 **The number is flat across the whole lane.**  From 09-05 to 09-29 — three
-weeks and several hundred commits of NEMO-literal transcription — the day-30
-rms moves only in its sixth digit.  Whatever happened, happened once, early,
-and nothing since has touched it.
+weeks and several hundred commits of NEMO-literal transcription — the four
+lane measurements are `6.982443716e-03`, `6.982425950e-03`, `6.982426887e-03`
+and `6.981690958e-03` K: a total spread of `1.1e-04` of the value, against a
+step from main of a factor 3.42.  Whatever happened, happened once, early, and
+nothing since has moved it by anything comparable.
 
 **The crash and the number are not the same defect.**  The lane crashed on
 this card from before 09-16 until round 184 repaired it on 09-27, so the
@@ -303,10 +305,101 @@ read wrongly; the quantity was simply never computed.
 
 ---
 
-## 8.  A finding this round is NOT acting on
+## 8.  What else this repair moves, and what it does not
+
+**DINO's DEVELOPED-STATE numbers will move, and this round did not re-measure
+them.**  The config, not the state, decides whether the carried pair is used
+(`_carried_nemo_depth_mean` returns `None` on a card that does not select it,
+even when the state holds the pair), and
+`nemo_state_bridge.py:275,917` still builds bridged states with the pair
+allocated.  So nothing raises and nothing is left half-initialised — but the
+90-day developed twin (`kamm_twin_90d.py` + `acceptance_gate_90d.py`), whose
+certified rows were last recorded as `ACC 65.390274 Sv`, upper contrast
+`-0.288146`, deep contrast `-0.011261`, southern sigma max `0.909348`, was
+measured WITH the pair active.  Those rows are expected to move and are
+**NOT re-certified here**.  They should be re-run and re-pinned on the next
+DINO round; the direction is toward the pre-2026-09-05 behaviour, which is the
+behaviour every earlier DINO certification used, but that is an expectation,
+not a measurement.
+
+**The forward-Euler DINO card** inherits the same recipe value from the shared
+base dict and was not measured either: it has its own step-5 implicit-solve
+instability (round 184) and cannot complete the month, so there is no number
+to take.  Written down at the line rather than left implicit.
+
+---
+
+## 9.  A finding this round is NOT acting on
 
 `nemo_testcase_recipe.py`'s card validator requires
 `nemo_prognostic_barotropic_state=True` for every NEMO test-case card.  That is
 correct for GYRE and both tanks, which compile `key_RK3`.  It would be wrong
 for any future card that does not — ORCA2's build was not checked here.  One
 line, reported, not started.
+
+---
+
+## 10.  Review
+
+Both reviewers ran adversarially on the diff, and both came back negative on
+the first pass.  Everything they found is fixed or written down; nothing was
+argued with.
+
+**Claude `code-reviewer`, fresh context: DO-NOT-SHIP on the first pass.**
+One blocker: the new companion test reached for `card.config`, which
+`NEMOTestcaseCard` does not have (its configuration is at
+`recipe.model_config`), so it raised `AttributeError` before ever reaching the
+validator — the non-vacuity it claimed for the GYRE side was not there at all.
+It ran both tests by hand to establish that.  Fixed, and both tests were then
+run directly: the DINO row passes and FAILS when the recipe value is planted
+back to `True`; the companion passes and its planted card does reach the
+validator.  Two more, both accepted: the gate is not wired to anything, and
+the receipt it cites did not exist at the time.  It independently re-derived
+every NEMO citation — including the load-bearing `stpmlf.f90` rotation — and
+called the mechanism CONFIRMED rather than correlated.  On the repair
+direction it argued for disabling the pair now and deferring a second MLF slot
+as unmeasured physics.
+
+**codex `exec --sandbox read-only`: DO NOT SHIP**, six findings.  It agreed on
+the broken companion test, the unwired gate, and the missing receipt, and it
+independently confirmed the mechanism from the compiled sources.  Three
+additions, all acted on:
+
+* the gate documented `JAX_ENABLE_X64=1` instead of setting it, and
+  `run_dino.py` only WARNS when x64 is off — an opted-in call that forgot the
+  variable would have scored a different model against the bar.  The gate now
+  sets it for both child processes.
+* *"single slot is correct only under RK3"* is overclaimed: a forward scheme
+  could also carry after-to-next-now correctly.  The comment now says what was
+  actually checked — right under RK3's `Nbb <==> Naa` swap, wrong under the
+  MLF rotation — and quotes both statements.
+* the shared base dict also turns the pair off for the forward-Euler DINO
+  card, which was not measured.  Written down at the line, with the reason
+  (that card has its own step-5 implicit-solve instability and cannot complete
+  the month).
+
+**Where the two reviewers DISAGREE, named rather than averaged.**  codex holds
+that disabling the pair is *"a sound emergency rollback ... but not the
+faithful final repair"*, because NEMO really does carry the pair
+prognostically and fidelity would need a second slot rotated with the MLF time
+levels.  The Claude reviewer holds that growing that slot now is *"scope creep
+against an unfalsified design"*.  They agree on what to do today and differ on
+what to call it.  The discriminating fact is that the reduction-based fallback
+is what produced every certified DINO number to date, including the pinned
+#1728 artifact this repair lands on — so it is the known-good path, and the
+second slot is real follow-up debt with no measurement behind it yet.  The
+receipt calls the repair a rollback to the certified path and names the second
+slot as open work; nobody should read this round as having transcribed NEMO's
+prognostic pair for an MLF card.
+
+---
+
+## 11.  Choices made this round
+
+| choice | status |
+|---|---|
+| turn `nemo_prognostic_barotropic_state` off on the DINO cards — which removes a prognostic pair from DINO's carried state | **ASKED**: the round's instruction was to fix the regression at the root and prove DINO's day-30 returns to at or below the pre-regression value |
+| add a from-rest DINO month gate, opt-in behind an environment variable | **ASKED**: instructed |
+| bar = certified value + 10 % | **UNASKED**, offered for revert.  Any bar is a choice; this one is three times tighter than the regression and loose enough for a driver rebuild.  Name a different one and it is a one-line edit |
+| bisect by replaying the lane's own 09-16 main merge at each point, rather than by cherry-picking the card backwards | UNASKED, method not physics; it changes which commits are testable, not what any of them computes |
+| scoring the archived round-9 campaign state with the certified comparator to settle where `6.889e-04` came from | UNASKED, pure measurement of an existing artifact |

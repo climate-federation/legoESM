@@ -1571,21 +1571,33 @@ DINO_RECIPES: dict[str, dict] = {
         # stepper DINO compiles.  legoESM's carried pair has ONE slot: the
         # substep loop commits the window-averaged external solution at the
         # end of a step and reads it back at the start of the next one.  That
-        # is the RK3 stepper's storage contract, where stprk3.F90:213 swaps
-        # the slot so the committed pair IS the next step's Kbb.  DINO
-        # compiles no key_RK3 (cfgs/DINO/cpp_DINO.fcm declares only
-        # "key_qco key_vco_3d"), so it runs stp_MLF
-        # (cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185); the modified leap-frog
-        # rotation puts a value committed at the end of step n at Kmm on step
-        # n+1, not Kbb.  DINO also sets ln_bt_fw = .false., so its window seed
-        # reads puu_b(:,:,Kbb) -- the BEFORE level, one rotation older
+        # is right under the RK3 stepper, whose end-of-step swap is
+        # "Nrhs = Nbb ; Nbb = Naa ; Naa = Nrhs" (src/OCE/stprk3.F90:213,
+        # compiled ppsrc line 216), so the committed pair IS the next step's
+        # Kbb.  It is WRONG under the modified leap-frog, whose rotation is
+        # "Nrhs = Nbb ; Nbb = Nnn ; Nnn = Naa ; Naa = Nrhs"
+        # (cfgs/DINO/BLD/ppsrc/nemo/stpmlf.f90:577-580), which puts a value
+        # committed at the end of step n at the NOW level on step n+1, not the
+        # BEFORE level.  DINO compiles no key_RK3 (cfgs/DINO/cpp_DINO.fcm
+        # declares only "key_qco key_vco_3d") and therefore runs stp_MLF
+        # (cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185).  DINO also sets
+        # ln_bt_fw = .false. (RUN_TRAJ/ocean.output:1074), so its window seed
+        # takes the CENTRED branch and reads puu_b(:,:,Kbb) -- the BEFORE
+        # level, one rotation older
         # (cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:489-491).  A one-slot carry
         # cannot deliver that level, so selecting the RK3 arrangement here fed
-        # the seed a state one time level too new.  MEASURED COST on the
+        # the seed a state one time level too new.  This is a rollback to the
+        # reduction-based seed that produced every certified DINO number, not
+        # the faithful end state: NEMO does carry the pair prognostically, and
+        # doing that on an MLF card needs a SECOND slot rotated with Nbb/Nnn.
+        # That is named follow-up work, not started here.  MEASURED COST on the
         # certified from-rest month: day-30 wet 3-D temperature rms against
         # NEMO's RUN_TRAJ kt=960 went 2.040e-03 K -> 6.982e-03 K, a factor
         # 3.42, and stayed there for three weeks because no landing gate ran
-        # DINO from rest.  See docs/ocean/fidelity/testcases/
+        # DINO from rest.  This dict is the shared NEMO-DINO base, so the
+        # forward-Euler card inherits the same value; only the MLF card was
+        # measured, because the Euler card has its own step-5 implicit-solve
+        # instability (round 184) and cannot complete the month.  See docs/ocean/fidelity/testcases/
         # nemo_testcases_l2_gyre_dino_month_regression_receipt.md.  The GYRE
         # testcase cards DO compile key_RK3 and keep the carried pair.
         "nemo_prognostic_barotropic_state": False,
