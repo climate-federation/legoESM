@@ -21,6 +21,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round43_tracer_handoff_gate as handoff,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_stage1_transport_gate as record_gate,
 )
 
@@ -70,6 +73,12 @@ ROUND73_ZFU = {
     "max_abs": 321212.60790659266,
     "status": "DEBT",
     "unequal": 221640,
+}
+EXPECTED_SUPPORT = {
+    "card_active": 251670,
+    "oracle_active": 226236,
+    "card_not_oracle": 30030,
+    "oracle_not_card": 4596,
 }
 PLANTS = (
     "none",
@@ -221,7 +230,8 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "zFu": exposed_zfu,
     }
     oracle_mask = np.asarray(oracle["umask"])[..., :NLEV]
-    active3 = oracle_mask != 0.0
+    oracle_active3 = oracle_mask != 0.0
+    active3 = handoff._support_masks(card)["u"]
     active2 = np.any(active3, axis=-1)
     oracle_zub = np.asarray(oracle["zub"])
     oracle_corrected = nemo_source_round(
@@ -245,11 +255,15 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "zFu": np.asarray(oracle["zFu"])[..., :NLEV],
     }
     two_d = {"un_adv", "inverse_depth", "uu_b_Kmm", "zub", "e2u"}
-    rows = {
-        name: _score(live[name], expected[name],
-                     active2 if name in two_d else active3)
-        for name in ORDER
-    }
+    rows = {}
+    for name in ORDER:
+        if name in two_d:
+            mask = active2
+        elif name == "umask":
+            mask = np.ones_like(active3, dtype=bool)
+        else:
+            mask = active3
+        rows[name] = _score(live[name], expected[name], mask)
     calibration = {
         "derived_thickness_matches_exposure": _score(
             np.asarray(h_u)[s3], exposed_thickness, active3),
@@ -271,6 +285,12 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "rows": rows,
         "first_non_bit": first,
         "first_non_bit_derived": first_derived,
+        "support": {
+            "card_active": int(active3.sum()),
+            "oracle_active": int(oracle_active3.sum()),
+            "card_not_oracle": int((active3 & ~oracle_active3).sum()),
+            "oracle_not_card": int((oracle_active3 & ~active3).sum()),
+        },
         "record_replay": replay["rows"],
         "production_exposure_calibration": calibration,
         "record": {
@@ -319,6 +339,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     scope = {name: tuple(values) for name, values in report["card_scope"].items()}
     require(scope == EXPECTED_CARD_SCOPE, "resolved stage-transport scope changed")
     require(report.get("order") == list(ORDER), "source order changed")
+    require(report.get("support") == EXPECTED_SUPPORT,
+            "round-73 U support census changed")
     require(all(row["status"] == "AT_BAR" and int(row["unequal"]) == 0
                 for row in report["record_replay"]),
             "recorded-operand source replay is not exact")

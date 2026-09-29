@@ -95,3 +95,17 @@ non-bit operand or arithmetic statement.
 
 UNASKED: model arithmetic, configuration, new NEMO output, selectors, sea ice,
 and the held shared tracer QCO/RK candidate.
+
+## Addendum after the first fail-closed run
+
+The first committed run reached classification and refused the frozen round-73
+reproduction row before emitting a report: scoring on the record's own
+`umask` produced 226,236 cells, not round 73's 251,670-cell card support. The
+support assumption is therefore **REFUTED**. A direct census gives 30,030
+card-active/NEMO-dry cells and 4,596 NEMO-active/card-dry cells.
+
+The rerun preserves round 73's card support for every scalar/transport row so
+its frozen `zFu` tuple is comparable, reports the four-way support census, and
+scores `umask` itself over the full owned rank-0 array. The existing
+recorded-operand replay remains separately labelled on the record's own mask.
+No prediction, model path, or production operand changed.

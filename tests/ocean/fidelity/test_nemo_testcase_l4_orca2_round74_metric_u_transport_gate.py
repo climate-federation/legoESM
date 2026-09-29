@@ -49,6 +49,7 @@ def _report() -> dict[str, object]:
         },
         "record_replay": [_row(exact=True), _row(exact=True)],
         "rows": rows,
+        "support": dict(gate.EXPECTED_SUPPORT),
     }
 
 
