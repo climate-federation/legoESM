@@ -4,9 +4,10 @@ Date 2026-09-29. Lane tip `5301122fe2ef`. Preregistered in
 `PREREG_nemo_testcases_l1_vortex_round2.md`, frozen before the round-2 record
 is read.
 
-Status: **ACQUISITION_NEEDED.** The card now executes; the record it must be
-scored against does not exist yet, because round 1's record was produced on a
-deck that selected a different equation of state.
+Status: **SCORED.** The acquisition ran and was admitted; the card executes,
+its initial state enters the ladder at the bar, and it leaves the bar at
+kt=2 on temperature, both velocities and sea surface height together.
+Section 6c is the ladder. Nobody is named as its owner: that is round 3.
 
 ## 0. Round 1 was never landed
 
@@ -57,25 +58,38 @@ so the planetary term enters exactly once. The triad is the one the
 vector-invariant cards already run; it is fed a zero relative vorticity. Every
 composition that was not read off the source raises.
 
-| statement | source | lines |
-|---|---|---|
-| simplified-EOS density | `eosbn2.F90` | 295-302 |
-| its expansion coefficients | `eosbn2.F90` | 1161-1173 |
-| unset reference temperature and salinity | `eosbn2.F90` | 89-90 |
-| the namelist is read whichever law is selected | `eosbn2.F90` | 1890-1895 |
-| the case's own coefficients | `namelist_cfg` | 130-138 |
-| the vorticity scheme selector | `dynvor.F90` | 874 |
-| the flux-form arm's vorticity choice | `dynvor.F90` | 891-893 |
-| the triad's Coriolis-only vertex field | `dynvor.F90` | 750-752 |
-| the triad's Coriolis-plus-metric vertex field | `dynvor.F90` | 780-783 |
-| the metric coefficients, as scale-factor differences | `dynvor.F90` | 905-908 |
-| the triad's transport weighting | `dynvor.F90` | 791-792, 804-806 |
-| the matching barotropic arm | `dynspg_ts.F90` | 1326-1345 |
-| the mesh's constant scale factors | `usrdef_hgr.F90` | 160-163 |
+Citations are now against the COMPILED sources of the round-2 build
+`VORTEX_OMIP_L1`, which exists as of this step; the shipped-source line numbers
+round 1 used are superseded. `namelist_cfg` is the deck, which is not
+preprocessed, so it is cited as shipped.
 
-Citations are against the SHIPPED sources. The round-1 build's preprocessed
-sources exist but were produced for a deck this round changes; the round-2
-build's will be cited when it exists.
+| statement | compiled source | lines |
+|---|---|---|
+| the simplified-EOS operands, with the LIVE stretched depth | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:359-361` | 3 |
+| the simplified-EOS density itself | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:364-366` | 3 |
+| its thermal expansion coefficient | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1217` | 1 |
+| its haline contraction coefficient | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1220` | 1 |
+| the unset reference temperature and salinity | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:100-101` | 2 |
+| the namelist is read whichever law is selected | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1938` | 1 |
+| the case's own coefficients, from the RUN's own resolved deck | `vortex_round2/namelist_cfg:128-138` | 11 |
+| the vorticity scheme selector | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:849` | 1 |
+| the flux-form arm's vorticity choice | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:865-868` | 4 |
+| the call that passes it | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:256-257` | 2 |
+| the triad's Coriolis-only vertex field | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:725-727` | 3 |
+| the triad's Coriolis-plus-metric vertex field | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:755-758` | 4 |
+| the metric coefficients, as scale-factor differences | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:882-883` | 2 |
+| the reciprocal vertex thickness the triad divides by | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720` | 1 |
+| the triad's transport and its twelfths | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:766-779` | 14 |
+| the matching barotropic arm | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960` | 1 |
+| the mesh's constant scale factors | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158,161` | 2 |
+
+Two of these are worth reading twice. `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720` is the divisor the
+triad applies, and it is the live `e3f_0vor*(1+r3f)` the card's own helper
+builds -- so the two sides divide by the same thing, which a reviewer asked be
+shown rather than asserted. And `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960` shows the barotropic arm
+forming its coefficients from `ff_f` over that same thickness with no relative
+vorticity and no metric term at all, which is why the card may select it
+without a second transcription.
 
 ## 2. The finding: the initial state is not bit-exact
 
@@ -152,7 +166,12 @@ moved hash.
 | citation gate, the lane's own receipt | `PASS`, 274 citations, 0 unmapped -- unchanged in count by this round |
 | citation gate, planted-shift self-tests | all fire |
 | acquisition preflight, after the deck change | `PREFLIGHT_OK`, exit 0 |
-| push-gate battery, the six autopilot files plus the card test, the constructibility tripwire and the dispatch ratchet | `194 passed in 1170.66s` |
+| push-gate battery, the six autopilot files plus the card test, the constructibility tripwire and the dispatch ratchet | `196 passed in 1099.79s` at the final pre-step-D tree |
+| kt=1..10 ladder, VORTEX | scored; see section 6c |
+| kt=1..3 ladder, both tanks, through the SAME modified gate | unchanged; see section 6c |
+| ladder gate non-vacuity plant | first-over-bar kt=1, normalized 4.877e-02, exit 1 |
+| citation gate, this receipt, against the COMPILED build | `PASS`, 17 citations, 0 unmapped, 0 map entries failing |
+| citation gate, this receipt, planted shift | exit 1 |
 | DINO month gate (note BI; this round changes `packages/`) | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS` |
 
 **What the battery line does and does not cover.** It was taken at
@@ -232,6 +251,106 @@ still a choice, it is on the UNASKED list in section 3, and it is offered for
 revert here rather than buried: splitting it into its own round means this
 card does not execute until that round lands.
 
+## 6c. Step D: the record, the initial state, and the kt=1..10 ladder
+
+The acquisition ran and was ADMITTED (`phase3/vortex/round2`, restart
+byte-identical). Preregistered in
+`PREREG_nemo_testcases_l1_vortex_round2_ladder.md`, frozen before scoring.
+
+**The initial state, against BOTH records.**
+
+| field | cells unequal | of | worst |
+|---|---|---|---|
+| temperature | 0 | 37210 | exact |
+| salinity | 0 | 37210 | exact |
+| zonal velocity | 788 | 36600 | 2 last bits |
+| meridional velocity | 788 | 36600 | 2 last bits |
+| sea surface height | 104 | 3721 | 2 last bits |
+
+Round 2's preregistration predicted the new record would reproduce round 1's
+five rows exactly. It does, and the reason is stronger than the prediction: the
+two kt=1 records are **byte-identical**. The equation-of-state switch provably
+did not touch the initial state, so the last-bit residual cannot be blamed on
+it and the compiled-exponential explanation stands unchallenged.
+
+**The ladder**, normalized maximum absolute error against the bar `1.0e-15`:
+
+| kt | T | S | u | v | ssh |
+|---|---|---|---|---|---|
+| 1 | 0 AT-BAR | 0 AT-BAR | 2.220e-16 AT-BAR | 2.220e-16 AT-BAR | 1.355e-20 AT-BAR |
+| 2 | 1.643e-09 DEBT | 4.060e-16 AT-BAR | 1.136e-07 DEBT | 1.135e-07 DEBT | 3.709e-08 DEBT |
+| 3 | 5.510e-09 DEBT | 6.090e-16 AT-BAR | 2.582e-07 DEBT | 2.143e-07 DEBT | 6.503e-06 DEBT |
+| 4 | 1.128e-08 DEBT | 6.090e-16 AT-BAR | 1.073e-06 DEBT | 9.892e-07 DEBT | 8.218e-06 DEBT |
+| 5 | 1.698e-08 DEBT | 8.120e-16 AT-BAR | 1.061e-06 DEBT | 1.041e-06 DEBT | 7.978e-06 DEBT |
+| 6 | 2.075e-08 DEBT | 8.120e-16 AT-BAR | 1.288e-06 DEBT | 1.199e-06 DEBT | 8.024e-06 DEBT |
+| 7 | 2.154e-08 DEBT | 1.015e-15 DEBT | 1.834e-06 DEBT | 1.629e-06 DEBT | 5.160e-06 DEBT |
+| 8 | 2.028e-08 DEBT | 1.015e-15 DEBT | 2.167e-06 DEBT | 1.898e-06 DEBT | 5.950e-06 DEBT |
+| 9 | 2.075e-08 DEBT | 1.015e-15 DEBT | 2.360e-06 DEBT | 2.096e-06 DEBT | 4.537e-06 DEBT |
+| 10 | 2.103e-08 DEBT | 1.218e-15 DEBT | 2.464e-06 DEBT | 2.192e-06 DEBT | 5.336e-06 DEBT |
+
+**First over the bar: kt=2, on temperature, both velocities and sea surface
+height simultaneously.** Salinity survives to kt=7.
+
+Read plainly: the card enters the ladder at the bar and leaves it at the very
+first step it takes. The momentum fields lead by magnitude -- velocity at
+1.1e-7 and height at 3.7e-8 against temperature's 1.6e-9, two orders smaller --
+which is what a rotation or a barotropic defect looks like and is not what a
+tracer defect looks like. Nothing here attributes it to a named operator; that
+is round 3's job and the ladder is the instrument it will use.
+
+The error then GROWS by roughly a factor of twenty on velocity over eight
+steps and flattens on temperature after kt=6. It is not a blow-up.
+
+**Two of this step's own predictions were wrong, and are retracted.**
+
+*Prediction 1 said kt=1 would be DEBT on velocity and height.* It is AT-BAR on
+all five. The reason is that the gate normalizes by the field's own scale, and
+a two-last-bit residual on an order-one field normalizes to 2.2e-16, comfortably
+under a 1e-15 bar. The entry row is therefore AT-BAR and the per-cell table
+above is the sharper statement of the same fact. Nothing about the card
+changed; the prediction was about the instrument and was made without reading
+it carefully enough.
+
+*Prediction 4 said salinity would be marked UNINFORMATIVE from kt=2 on,*
+because it starts spatially uniform. It is not, and the gate is right not to:
+NEMO's advected salinity is not exactly uniform after a step, so the gate's
+uniqueness test correctly declines to downgrade the row -- and the row goes on
+to earn real DEBT at kt=7. A vacuous control was expected and a live one was
+found.
+
+Predictions 2 and 3 held: the first-over-bar step is kt=2, not kt=1, and no
+tracer left the bar before the velocities.
+
+**Every other card is unchanged**, re-run through the same modified gate, which
+is the check that matters because this step edited the gate itself:
+
+| card | kt=1 | kt=2 | first over bar |
+|---|---|---|---|
+| LOCK_EXCHANGE-zco | all AT-BAR | all AT-BAR | none through kt=3 |
+| OVERFLOW-zps | all AT-BAR | T 7.816e-15 DEBT, u 7.069e-12 DEBT | kt=2, T and u |
+
+OVERFLOW's kt=2 debt is its OWN known one, which decision 71 assigns to a
+separate tank round; this step neither moved it nor touched it. Both tanks'
+meridional velocity row reports UNMEASURED, which is the gate correctly saying
+their three-row closed geometry has no active meridional face -- a
+pre-existing, documented statement, not something this step introduced.
+
+**The gate's own non-vacuity.** Run with `--plant`, the ladder reports
+first-over-bar at kt=1 on temperature with a normalized error of 4.88e-02 and
+exits non-zero -- so it can fail. The citation gate likewise exits non-zero
+under a planted line shift.
+
+**Note BD compliance.** The ladder gate used to carry a hard-coded header
+tuple per case, and this card would have been a third. Five acquisitions in
+this campaign have now been refused by a checker that predicted a size by
+hand, so the tuple check is replaced by PARSING for every case: the shape comes
+from the record's own header, only the magic string, format version, tracer
+count and word size are asserted, and the payload length is checked against
+what the header itself asks for. Two further claims that used to be implicit
+are now assertions that refuse rather than slice silently: the record's
+interior must match the card's, and its level count must equal the card's
+executed levels plus its dummy bottom record.
+
 ## 7. How to acquire
 
 ```
@@ -243,9 +362,41 @@ The deck now selects the shipped equation of state, and the preflight refuses
 a deck that does not, or that selects a second one alongside it. Evidence
 should land in a round-2 directory, beside round 1's.
 
-## 8. OPEN for round 3
+## 8. OPEN
 
-* The kt=1..10 ladder, which cannot be scored until the record exists.
-* Whether the barotropic arm should have been its own round (section 3).
-* Whether the last-bit floor on velocity and height is worth closing at all;
-  it is a property of two exponential functions, so probably not.
+**Round 3 — the vector-EEN VORTEX card (decision 73, note BJ).** A second
+VORTEX card with the same geometry, the same simplified equation of state and
+the same eddy, but ORCA2's and GYRE's momentum scheme set: vector-invariant
+advection with the energy-and-enstrophy vorticity, so that code runs in a clean
+rotating flow for the first time. It needs its own build, its own
+preregistration, its own kt=1..10 ladder and its own receipt, and both VORTEX
+cards are kept as permanent gates. Note that this card will route NEMO to the
+Coriolis-plus-RELATIVE-vorticity selector rather than this one's
+Coriolis-plus-metric, so it exercises a genuinely different branch of the same
+routine -- and legoESM already has an arm for it, so it should not need new
+numerics.
+
+**Round 4 — the resolution ladder (decision 74, note BK).** Once both cards are
+at bar at 30 km, the same cards at 15 km and 10 km without AGRIF, each with its
+own record and ladder, and one receipt putting the three resolutions side by
+side. The point is to find any hidden grid-size dependence in the
+transcription and to watch the residual as the eddy becomes resolved. This
+round's first-over-bar at kt=2 makes that more interesting, not less: if the
+residual scales with resolution it is truncation, and if it does not it is a
+transcription gap.
+
+**The owner of this round's kt=2 debt is not named.** The momentum fields lead
+by two orders of magnitude, which points at the rotation or the barotropic
+path, but this round measured rather than attributed and the ladder is the
+instrument the attributing round will use. Naming an owner here on the strength
+of a magnitude ordering would be the exact mistake this campaign has paid for
+before.
+
+**Carried from before step D:** whether the split-explicit barotropic arm
+should have been its own round (section 6b), and the mesh guard being stricter
+than the source needs (section 6).
+
+**Not worth closing:** the one-to-two-last-bit floor on the initial velocity
+and height. It is two exponential functions disagreeing in their last bit, and
+the two records being byte-identical across the equation-of-state switch rules
+out every other candidate.

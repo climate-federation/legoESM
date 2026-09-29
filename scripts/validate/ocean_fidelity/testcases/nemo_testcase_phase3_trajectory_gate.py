@@ -40,7 +40,13 @@ DEFAULT_ORACLE_ROOTS = {
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"),
     "OVERFLOW-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"),
+    "VORTEX-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2"),
 }
+
+# NEMO writes its records with a halo of this width on every side; the gate
+# strips it to reach the local interior.  It is the same for all three cases.
+_HALO = 2
 
 
 class GateError(RuntimeError):
@@ -52,33 +58,54 @@ def require(ok: bool, message: str) -> None:
         raise GateError(message)
 
 
-def read_entry(path: Path, case: str) -> dict:
+def read_entry(path: Path, case: str, *, expect_interior=None) -> dict:
+    """Parse the record's OWN header; never predict its shape (note BD).
+
+    This used to carry a hard-coded ``(nx, ny, nz)`` tuple per case, and a
+    third case would have meant a third tuple.  Five acquisitions in a row have
+    now been refused by a checker that predicted a size by hand, so the shape
+    is read from the header and only the parts that are genuinely fixed -- the
+    magic string, the format version, the tracer count and the word size -- are
+    asserted.  ``expect_interior``, when given, is the INTERIOR shape the
+    caller's card carries, which is a claim about the card rather than about
+    the record and is checked separately and loudly.
+    """
     with path.open("rb") as fh:
         magic = fh.read(16).decode("ascii").rstrip()
         version, step, nbb, nx, ny, nz, ntr, bits = struct.unpack(
             "=8i", fh.read(32))
         data = np.fromfile(fh, dtype=np.float64)
-    expected = (206, 7, 101) if case == "OVERFLOW-zps" else (134, 7, 21)
     require(magic == "NEMO_L1_ENTRY_1", f"{path}: bad magic")
-    require(
-        (version, nx, ny, nz, ntr, bits) == (1, *expected, 2, 64),
-        f"{path}: bad header")
+    require((version, ntr, bits) == (1, 2, 64),
+            f"{path}: unsupported record format "
+            f"(version={version}, ntr={ntr}, bits={bits})")
+    require(min(nx, ny, nz) > 0, f"{path}: nonpositive extent in header")
+    require(nx > 2 * _HALO and ny > 2 * _HALO,
+            f"{path}: {nx}x{ny} is not wider than two halos on each side")
     count = nx * ny * nz
-    require(data.size == 4 * count + nx * ny, f"{path}: bad payload length")
+    require(data.size == 4 * count + nx * ny,
+            f"{path}: payload is {data.size} doubles, but its own header "
+            f"({nx}x{ny}x{nz}, {ntr} tracers) asks for {4 * count + nx * ny}")
+    if expect_interior is not None:
+        interior = (ny - 2 * _HALO, nx - 2 * _HALO)
+        require(tuple(expect_interior) == interior,
+                f"{path}: record interior {interior} does not match the "
+                f"card's {tuple(expect_interior)}")
 
     def xyz(values):
         return values.reshape((nx, ny, nz), order="F")[
-            2:-2, 2:-2].transpose(1, 0, 2)
+            _HALO:-_HALO, _HALO:-_HALO].transpose(1, 0, 2)
 
     return {
         "step": step,
         "Nbb": nbb,
+        "nz": nz,
         "T": xyz(data[:count]),
         "S": xyz(data[count:2 * count]),
         "u": xyz(data[2 * count:3 * count]),
         "v": xyz(data[3 * count:4 * count]),
         "ssh": data[4 * count:].reshape((nx, ny), order="F")[
-            2:-2, 2:-2].T,
+            _HALO:-_HALO, _HALO:-_HALO].T,
     }
 
 
@@ -266,8 +293,18 @@ def run(
     for kt in range(1, max_step + 1):
         path = oracle_root / f"oracle_step_entry_kt{kt:08d}.bin"
         require(path.is_file(), f"missing {path}")
-        oracle = read_entry(path, case)
+        oracle = read_entry(
+            path, case,
+            expect_interior=np.asarray(
+                card.recipe.initial_state.T.data).shape[:2])
         require(oracle["step"] == kt, f"{path}: step mismatch")
+        # NEMO's record carries jpk levels where the card executes jpkm1 of
+        # them; the last is the permanently dry dummy bottom.  Assert the
+        # relation rather than trimming blindly, so a record with the WRONG
+        # number of levels is a refusal and not a silent slice.
+        require(oracle["nz"] == nlev + card.dummy_bottom_records,
+                f"{path}: {oracle['nz']} levels, card executes {nlev} plus "
+                f"{card.dummy_bottom_records} dummy bottom record(s)")
         candidate = lego_fields(state)
         rows = []
         for field in ("T", "S", "u", "v", "ssh"):

@@ -64,6 +64,22 @@ FILES = {
     "tests/VORTEX/MY_SRC/usrdef_istate.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_istate.F90",
     "tests/VORTEX/MY_SRC/usrdef_sbc.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_sbc.F90",
     "restart.F90": _OCE / "IOM/restart.F90",
+    # --- VORTEX card, round 2: the COMPILED sources of the S-EOS build,
+    # which exists as of the round-2 acquisition.  Round 1 could only cite
+    # the shipped sources because no build existed yet; these supersede
+    # them for every statement the run actually executes. ---
+    # The RUN's own resolved deck, which is a stronger citation than the
+    # shipped one: it is what the record was produced from.
+    "vortex_round2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2/namelist_cfg"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90"),
     "eosbn2.F90": _OCE / "TRA/eosbn2.F90",
     "domzgr_substitute.h90": _OCE / "DOM/domzgr_substitute.h90",
     "dynspg_ts.F90": _DYN / "dynspg_ts.F90",
@@ -828,6 +844,27 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- VORTEX card, round 2: the COMPILED build's own lines.  Round 1
+    # cited the shipped sources because no build existed; these replace
+    # them for every statement the run executes. ---
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:359-361': [('zt  = pts  (ji,jj,jk,jp_tem,Knn) - rn_T0', 1), ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn)))', 2), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:364-366': [('zn =  - rn_a0 * ( 1._wp + 0.5_wp*rn_lambda1*zt + rn_mu1*zh ) * zt', 1), ('&  - rn_nu * zt * zs', 1), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1217': ('zn  = rn_a0 * ( 1._wp + rn_lambda1*zt + rn_mu1*zh ) + rn_nu*zs', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1220': ('zn  = rn_b0 * ( 1._wp - rn_lambda2*zs - rn_mu2*zh ) - rn_nu*zt', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:100-101': ['REAL(wp), PUBLIC ::   rn_T0      = 10._wp', 'REAL(wp), PUBLIC ::   rn_S0      = 35._wp', 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1938': ('NAMELIST/nameos/ ln_TEOS10, ln_EOS80, ln_SEOS', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:849': ('IF( ln_dynvor_een ) THEN', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:865-868': ['CASE( np_FLX_c2 , np_FLX_up3 )', 'ntot = np_CME', 4],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:256-257': [('CASE( np_EEN )', 3), ('CALL vor_een( kt, Kmm, ntot,', 1), 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:725-727': [('CASE ( np_COR )', 4), ('zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)', 1), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:755-758': [('CASE ( np_CME )', 4), ('dj_e1u_2e1e2f(ji,jj)   ) * z1_e3f(ji,jj)', 2), 4],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:882-883': ['di_e2v_2e1e2f(ji,jj) = ( e2v(ji+1,jj  ) - e2v(ji,jj) )', 'dj_e1u_2e1e2f(ji,jj) = ( e1u(ji  ,jj+1) - e1u(ji,jj) )', 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720': ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:766-779': [('zwx(ji,jj) = e2u(ji,jj) *', 3), 'zua = + r1_12 * r1_e1u(ji,jj)', 14],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960': ('zpvo_nw = ff_f(ji-1,jj  ) / (e3f_0vor(ji-1,jj  ,jk)', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158,161': ['pe1t(:,:) = rn_dy', 'pe1f(:,:) = rn_dy', 2],
+    'vortex_round2/namelist_cfg:128-138': ['&nameos', 'rn_nu       =  0.', 11],
+
     # --- VORTEX card, round 1: transcription + acquisition ---
     'tests/VORTEX/MY_SRC/usrdef_nam.F90:96-97': [
         'kpi = NINT( 1800.e3  / rn_dx ) + 3',
