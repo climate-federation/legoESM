@@ -45,10 +45,6 @@ set -euo pipefail
 #
 # DELIBERATE DECK DEVIATIONS, all in the committed namelist patch and all
 # visible in the diff it prints:
-#   * TEOS-10 instead of the shipped S-EOS (campaign decision 64, note BF).
-#     rn_a0 = 0.28 is LEFT IN PLACE because usrdef_istate.F90:19,88 reads it
-#     from nameos to build the initial temperature, and eosbn2.F90:1890-1895
-#     reads nameos whichever EOS is selected.
 #   * nn_itend = nn_stock = 10 (the tanks' own kt1_10 cadence) instead of 3000.
 #   * ln_meshmask = .true., so the geometry receipt is written.
 #
@@ -122,11 +118,20 @@ patch -s "$dry/namelist_cfg" <"$DECK" \
 grep -q 'NEMO_L1_ENTRY_1' "$dry/stprk3.F90" \
   || { printf 'REFUSE: the patched stprk3 carries no step-record writer\n' >&2
        rm -rf "$dry"; exit 67; }
-grep -q 'ln_teos10   = .true.' "$dry/namelist_cfg" \
-  || { printf 'REFUSE: the patched deck does not select TEOS-10 (decision 64)\n' >&2
+# Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
+# of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
+# temperature is defined by inverting this law (usrdef_istate.F90:83-88), so a
+# deck that switched it would not be this experiment.  Refuse any deck that
+# leaves the shipped selection or its coefficients behind.
+grep -q 'ln_seos     = .true.' "$dry/namelist_cfg" \
+  || { printf 'REFUSE: the patched deck does not select S-EOS (decision 69)\n' >&2
        rm -rf "$dry"; exit 67; }
+if grep -qE 'ln_teos10|ln_eos80' "$dry/namelist_cfg"; then
+  printf 'REFUSE: the deck selects a second equation of state alongside S-EOS\n' >&2
+  rm -rf "$dry"; exit 67
+fi
 grep -q 'rn_a0       =  0.28' "$dry/namelist_cfg" \
-  || { printf 'REFUSE: rn_a0 was dropped; usrdef_istate needs it for T\n' >&2
+  || { printf 'REFUSE: rn_a0 was dropped; usrdef_istate and the S-EOS need it\n' >&2
        rm -rf "$dry"; exit 67; }
 # The card transcribes ln_zad_Aimp = .false., which this deck gets by LEAVING
 # IT UNSET.  The tanks' own campaign decks set it .true.; if anyone copies that

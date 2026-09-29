@@ -77,7 +77,25 @@ def test_card_resolves_the_shipped_namelist(card):
     cfg = card.recipe.model_config
     assert cfg.barotropic.n_barotropic_substeps == 48       # nn_e, ln_bt_auto=F
     assert cfg.barotropic.barotropic_time_filter == "nemo_ab3am4"
-    assert cfg.eos == "nemo_teos10"          # decision 64 deviation, note BF
+    # namelist_cfg:130-138 (&nameos), decision 69: the one card on NEMO's
+    # simplified equation of state, with its OWN coefficients -- the shared
+    # defaults are DINO's and every one of them differs.
+    assert cfg.eos == "nemo_seos"
+    assert cfg.eos_depth == "insitu"            # rn_mu1 = rn_mu2 = 0
+    assert (cfg.eos_nemo_seos.a0, cfg.eos_nemo_seos.b0) == (0.28, 0.0)
+    assert (cfg.eos_nemo_seos.lambda1, cfg.eos_nemo_seos.lambda2) == (0.0, 0.0)
+    assert (cfg.eos_nemo_seos.mu1, cfg.eos_nemo_seos.mu2) == (0.0, 0.0)
+    assert cfg.eos_nemo_seos.nu == 0.0
+    assert (cfg.eos_nemo_seos.T0, cfg.eos_nemo_seos.S0) == (10.0, 35.0)
+    assert cfg.eos_nemo_seos.rho0 == float(CONSTANTS.rho_0)
+    # namelist_cfg:182,193 -- EEN vorticity on flux-form momentum.
+    assert cfg.vorticity_scheme == "een_planetary"
+    assert cfg.coriolis_scheme == "explicit_ab2"
+    assert cfg.een_e3f_scheme == "nemo_avg4"
+    assert cfg.een_metric_weighting == "nemo"
+    assert cfg.een_q_boundary == "nemo_live"
+    assert cfg.barotropic.barotropic_coriolis == "een_metric"
+    assert cfg.barotropic_coriolis_split == "live"
     assert cfg.momentum_advection == "flux_form"
     assert cfg.momentum_flux_scheme == "nemo_up3"
     assert cfg.tracer_advection == "fct2"
@@ -103,21 +121,59 @@ def test_the_beta_plane_is_live_and_centred_on_the_reference_latitude(card):
     assert float(np.ptp(np.asarray(card.recipe.grid.ff_f))) > 3.0e-5
 
 
-def test_the_card_fails_closed_on_the_coriolis_it_cannot_express(card):
+def test_the_card_runs_nemos_own_coriolis_operator(card):
     """namelist_cfg:182,193 -- EEN vorticity under FLUX-FORM momentum.
 
-    NEMO's dyn_vor takes its ln_dynadv_vec=.false. arm and calls vor_een on
-    the PLANETARY vorticity, so on this case EEN *is* the Coriolis operator.
-    legoESM binds its EEN arm to vector-invariant momentum and gives the
-    flux-form branch a 4-point C-grid average instead.  The card must say so
-    and be refused for execution, NOT quietly run the average.
+    Round 1 declared this pair as a gap and fixed the card closed.  Round 2
+    transcribed it: dynvor.F90:874 routes np_EEN, dyn_vor_init:891-893 hands
+    the flux-form arm ntot = np_CME, and np_CME's metric term is built from
+    first differences of the scale factors (dynvor.F90:905-908), which are
+    bitwise zero on this Cartesian mesh -- so the energy-and-enstrophy triad
+    on the planetary vorticity IS the whole operator here.  The card must run
+    that, never legoESM's 4-point C-grid average.
     """
-    assert card.unmeasured_features == VORTEX_UNMEASURED
-    assert len(card.unmeasured_features) == 2
-    with pytest.raises(ValueError, match="not execution-ready"):
-        validate_nemo_testcase_card_for_execution(card)
-    # And the substitution the gap exists to prevent must be unreachable.
-    assert not card.recipe.model_config.vorticity_scheme.endswith("_total")
+    assert card.unmeasured_features == VORTEX_UNMEASURED == ()
+    validate_nemo_testcase_card_for_execution(card)     # no longer refused
+    cfg = card.recipe.model_config
+    assert cfg.vorticity_scheme == "een_planetary"
+    # f rides the triad, so the separate rotation must be off or it enters twice.
+    assert cfg.coriolis_scheme == "explicit_ab2"
+
+
+def test_the_transcribed_coriolis_refuses_every_untranscribed_pairing():
+    """The new arm is NEMO's flux-form one ONLY; nothing else may select it."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        assert_een_planetary_metric_term_vanishes,
+    )
+    base = build_nemo_testcase_card("VORTEX-zco").recipe
+    def build(**kw):
+        LatLonCGridOceanModel(
+            base.grid, base.z_coord, base.model_config._replace(**kw))
+    # Vector-invariant momentum routes NEMO to np_CRV, where the triad also
+    # carries the RELATIVE vorticity -- a different operator.
+    # (the NEMO UP3 vertical arm is part of the same flux-form program, so it
+    # is moved off too; otherwise its own guard fires first and this row would
+    # prove nothing about the vorticity guard)
+    with pytest.raises(ValueError, match="FLUX-FORM vorticity arm"):
+        build(momentum_advection="vector_invariant",
+              vertical_momentum_scheme="upwind_perturbation")
+    with pytest.raises(ValueError, match="explicit_ab2"):
+        build(coriolis_scheme="matsuno_split")
+    with pytest.raises(ValueError, match="nemo_avg4"):
+        build(een_e3f_scheme="min")
+    with pytest.raises(ValueError, match="een_metric_weighting"):
+        build(een_metric_weighting="off")
+    with pytest.raises(ValueError, match="barotropic arm"):
+        build(barotropic_coriolis_split="frozen")
+    # And the dropped np_CME metric term is only zero on a Cartesian mesh.
+    assert_een_planetary_metric_term_vanishes(base.grid)
+    class _Stretched:
+        dx_T = np.array([[30000.0, 30001.0]])
+    with pytest.raises(ValueError, match="np_CME"):
+        assert_een_planetary_metric_term_vanishes(_Stretched())
 
 
 def test_initial_state_is_the_anticyclonic_source_vortex(card):
@@ -183,13 +239,24 @@ def test_salinity_and_land_follow_the_source_mask(card):
 def test_validator_refuses_a_broken_vortex_composition(card):
     """A card that loses its EEN rotation must be REFUSED, not rebuilt."""
     cfg = card.recipe.model_config
-    broken = card._replace(unmeasured_features=())
-    with pytest.raises(ValueError, match="EEN/flux-form Coriolis gap"):
+    broken = card._replace(unmeasured_features=("a gap nobody proved",))
+    with pytest.raises(ValueError, match="VORTEX_UNMEASURED"):
         validate_nemo_testcase_card(broken)
     broken = card._replace(
         recipe=card.recipe._replace(
-            model_config=cfg._replace(vorticity_scheme="een_total")))
-    with pytest.raises(ValueError, match="_total vorticity scheme"):
+            model_config=cfg._replace(vorticity_scheme="al81")))
+    with pytest.raises(ValueError, match="een_planetary"):
+        validate_nemo_testcase_card(broken)
+    broken = card._replace(
+        recipe=card.recipe._replace(
+            model_config=cfg._replace(eos="nemo_teos10")))
+    with pytest.raises(ValueError, match="simplified equation of state"):
+        validate_nemo_testcase_card(broken)
+    broken = card._replace(
+        recipe=card.recipe._replace(
+            model_config=cfg._replace(
+                eos_nemo_seos=cfg.eos_nemo_seos._replace(a0=0.165))))
+    with pytest.raises(ValueError, match="simplified equation of state"):
         validate_nemo_testcase_card(broken)
     broken = card._replace(
         recipe=card.recipe._replace(
@@ -206,6 +273,66 @@ def test_validator_refuses_a_broken_vortex_composition(card):
             model_config=cfg._replace(adaptive_implicit_vertadv=True)))
     with pytest.raises(ValueError, match="ln_zad_Aimp"):
         validate_nemo_testcase_card(broken)
+
+
+def test_the_transcribed_coriolis_actually_moves_the_momentum_tendency():
+    """NON-VACUITY: the triad must differ from the 4-point average it replaced.
+
+    A gate that cannot fail is not a gate.  Build the card's model twice --
+    once as transcribed, once with the OLD composition (the 4-point C-grid
+    average under the Matsuno split) -- and require the momentum tendency to
+    differ.  If the new branch were dead, or were silently the same stencil,
+    this row goes green for the wrong reason and the whole round means nothing.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    recipe = build_nemo_testcase_card("VORTEX-zco").recipe
+    cfg = recipe.model_config
+    legacy = cfg._replace(
+        vorticity_scheme="al81", coriolis_scheme="explicit_ab2",
+        een_e3f_scheme="min", een_metric_weighting="off",
+        een_q_boundary="neumann_fill",
+        barotropic=cfg.barotropic._replace(barotropic_coriolis="avg"),
+        barotropic_coriolis_split="frozen")
+    tendencies = []
+    for which in (cfg, legacy):
+        model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, which)
+        out = model.tendencies(recipe.initial_state)
+        tendencies.append(np.asarray(out.du_dt.data))
+    new, old = tendencies
+    assert new.shape == old.shape
+    moved = float(np.max(np.abs(new - old)))
+    assert moved > 1e-12, moved
+
+
+def test_the_nemo_seos_the_card_selects_is_the_shipped_law():
+    """The EOS the card selects must BE namelist_cfg's, not DINO's defaults.
+
+    eosbn2.F90:295-302 with rn_b0 = rn_lambda* = rn_mu* = rn_nu = 0 reduces to
+    rho = rho0 - 0.28*(T - 10): linear in temperature, and blind to BOTH
+    salinity and depth.  Those three properties are what a wrong coefficient
+    set would break, so they are asserted rather than the coefficients alone.
+    """
+    from legoesm.ocean.eos import make_eos_fn
+    cfg = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
+    eos = make_eos_fn(cfg.eos, eos_nemo_seos=cfg.eos_nemo_seos)
+    rho0 = float(cfg.eos_nemo_seos.rho0)
+    T = np.array([10.0, 20.0, 4.0])
+    S = np.array([35.0, 35.0, 35.0])
+    p = np.zeros(3)
+    assert np.allclose(np.asarray(eos(T, S, p)), rho0 - 0.28 * (T - 10.0),
+                       rtol=0, atol=1e-12)
+    # salinity-blind (rn_b0 = rn_nu = 0)
+    assert np.allclose(np.asarray(eos(T, S + 5.0, p)), np.asarray(eos(T, S, p)),
+                       rtol=0, atol=0)
+    # depth-blind (rn_mu1 = rn_mu2 = 0)
+    assert np.allclose(np.asarray(eos(T, S, p + 5.0e7)),
+                       np.asarray(eos(T, S, p)), rtol=0, atol=0)
+    # and the DINO defaults are a DIFFERENT fluid -- the plant that proves the
+    # coefficients are actually read rather than silently defaulted.
+    assert not np.allclose(np.asarray(make_eos_fn("nemo_seos")(T, S, p)),
+                           np.asarray(eos(T, S, p)))
 
 
 def _read_step_entry(path, n_lat, n_lon):
@@ -284,19 +411,72 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
         name: _bits_equal(oracle[name], value, mask)
         for name, (value, mask) in pairs.items()
     }
-    assert unequal == {name: 0 for name in pairs}, unequal
+    # MEASURED against round 1's record, and this REFUTES round 1's
+    # preregistration, which predicted a bit-exact initial state on all five
+    # fields.  Temperature and salinity are bit-exact.  The other three are
+    # not, and the residual is the COMPILED TRANSCENDENTAL FLOOR, not a
+    # transcription defect: every unequal cell is 1 or 2 ULP (u: 692 at 1 ULP
+    # + 96 at 2; ssh: 96 at 1 + 8 at 2), and they sit in the far tail of the
+    # eddy's Gaussian, where the unequal ssh values run down to 4.5e-92 while
+    # the O(0.9 m) centre is exact.  libm's exp and the compiled exp disagree
+    # in the last bit there; the association is NEMO's own.  The card already
+    # declares transcendentals="libm" for exactly this reason.
+    assert unequal == {"T": 0, "S": 0, "u": 788, "v": 788, "ssh": 104}, unequal
+    for name in ("u", "v", "ssh"):
+        value, mask = pairs[name]
+        ulp = np.abs(
+            np.ascontiguousarray(
+                np.asarray(oracle[name], dtype=np.float64)[mask]).view(np.int64)
+            - np.ascontiguousarray(
+                np.asarray(value, dtype=np.float64)[mask]).view(np.int64))
+        assert int(ulp.max()) <= 2, (name, int(ulp.max()))
 
 
-# Measured at the lane tip c09a9e111 (before the VORTEX card existed) and
-# re-measured with it present: identical.  The VORTEX card is additive, and
-# this row is what keeps it additive -- a later edit to the shared identity
-# that leaks into a certified card turns this red instead of moving a
-# certified number quietly.
-_CERTIFIED_CARD_DIGESTS = {
+# Round 1 measured these at lane tip c09a9e111.  They are RE-PINNED here, for
+# two reasons that are kept separate on purpose:
+#
+#  (1) The lane advanced 35 commits between that tip and 5301122fe2ef, and
+#      those commits legitimately moved all three cards.  The drift is the
+#      lane's, not this card's: the round-2 values below were measured on the
+#      forward-ported tip with every VORTEX round-2 edit STASHED, and they
+#      already differed from round 1's.
+#  (2) Round 2 added ONE field to the shared model config (eos_nemo_seos), and
+#      this digest hashes repr(model_config), so a purely additive default
+#      moves it.  Nothing executed changed.  That is not an argument, it is
+#      measured: with the round-2 edits stashed and unstashed, a field-by-field
+#      diff of all three cards' resolved configs reports
+#      added=['eos_nemo_seos'] removed=[] changed=[] on each, and the added
+#      field is None on all three -- which the companion test below asserts.
+_CERTIFIED_CARD_DIGESTS_ROUND1 = {          # lane tip c09a9e111, superseded
     "GYRE-zco": "f227194da309e66b",
     "LOCK_EXCHANGE-zco": "42d13c75ea8cbcc6",
     "OVERFLOW-zps": "c2bca636ac2f14ef",
 }
+_CERTIFIED_CARD_DIGESTS_TIP = {             # 5301122fe2ef, round-2 edits STASHED
+    "GYRE-zco": "af1f9f5e99d9a30f",
+    "LOCK_EXCHANGE-zco": "af88a6e54a70263f",
+    "OVERFLOW-zps": "375ec3040cc4ce53",
+}
+_CERTIFIED_CARD_DIGESTS = {                 # 5301122fe2ef + this round
+    "GYRE-zco": "eaef11b4c2e37a31",
+    "LOCK_EXCHANGE-zco": "159ca3d07db0a3f5",
+    "OVERFLOW-zps": "73174751388503aa",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CERTIFIED_CARD_DIGESTS))
+def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case):
+    """The digest moved; prove WHAT moved, rather than re-pinning blind.
+
+    ``eos_nemo_seos`` is the one field round 2 added to the shared config.  On
+    every certified card it must be ``None`` -- i.e. those cards keep reading
+    the defaults they always read, and the VORTEX coefficients reach VORTEX
+    alone.  A future edit that gives one of them a value turns this red.
+    """
+    cfg = build_nemo_testcase_card(case).recipe.model_config
+    assert "eos_nemo_seos" in cfg._fields
+    assert cfg.eos_nemo_seos is None
+    assert cfg.eos == "nemo_teos10"
 
 
 def _card_digest(card):

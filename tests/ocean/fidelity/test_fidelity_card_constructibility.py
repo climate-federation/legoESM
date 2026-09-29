@@ -81,18 +81,26 @@ def test_nemo_testcase_card_constructs(case):
     validate_nemo_testcase_card(card)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    assert model.config.eos == "nemo_teos10"
-    assert model.config.eos_depth == "geometric"
-    # VORTEX is the first card on this identity with a LIVE rotation
-    # operator, and building the model is what discovered that the model
-    # REFUSES the scheme pair its namelist selects (EEN vorticity with
-    # flux-form momentum).  The card now declares that gap instead of
-    # substituting another Coriolis operator, so what this row checks is
-    # that the declared-gap card still builds a model at all.
     if case == "VORTEX-zco":
-        assert card.unmeasured_features
-        assert not model.config.vorticity_scheme.endswith("_total")
+        # VORTEX is the one card whose &nameos selects NEMO's simplified
+        # equation of state (decision 69); every other card runs TEOS-10.
+        # Its S-EOS is depth-blind, so it needs no geometric-depth ladder.
+        assert model.config.eos == "nemo_seos"
+        assert model.config.eos_depth == "insitu"
+        assert model.config.eos_nemo_seos is not None
+        assert model.config.eos_nemo_seos.a0 == 0.28
+        # VORTEX is the first card on this identity with a LIVE rotation
+        # operator, and building the model is what discovered that the model
+        # used to REFUSE the scheme pair its namelist selects.  It now runs
+        # NEMO's energy-and-enstrophy triad on the planetary vorticity, with
+        # the Matsuno rotation off so f enters exactly once.
+        assert model.config.vorticity_scheme == "een_planetary"
+        assert model.config.momentum_advection == "flux_form"
+        assert model.config.coriolis_scheme == "explicit_ab2"
         assert not model.config.adaptive_implicit_vertadv
+    else:
+        assert model.config.eos == "nemo_teos10"
+        assert model.config.eos_depth == "geometric"
 
 
 def test_l2_gyre_testcase_card_constructs():

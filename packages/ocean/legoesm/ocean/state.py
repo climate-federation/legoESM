@@ -2049,6 +2049,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
+    # Coefficients for eos="nemo_seos" (NEMO's simplified/linear law, the
+    # ``ln_seos`` branch of ``eosbn2.F90``).  ``None`` keeps
+    # ``NemoSEOSConfig()``'s DINO defaults, which is what every card that
+    # selected this EOS before relied on; a card whose ``&nameos`` block
+    # differs from DINO's (VORTEX) MUST pass its own here, because a defaulted
+    # physical coefficient is a hidden choice.
+    eos_nemo_seos: object = None  # NemoSEOSConfig when eos="nemo_seos"
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),

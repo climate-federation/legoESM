@@ -417,7 +417,8 @@ def apply_balanced_init(state, grid, z_coord, config,
     rho_0 = float(config.rho_0)
     g_val = float(config.g)
     is_pc = isinstance(z_coord, OceanPartialCellCoordinate)
-    eos_fn = make_eos_fn(config.eos, getattr(config, "eos_linear", None))
+    eos_fn = make_eos_fn(config.eos, getattr(config, "eos_linear", None),
+                         eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
     h_actual = z_coord.h_partial if is_pc else None
 
     _, _, p_prime = iterate_eos_and_pressure_anomaly(

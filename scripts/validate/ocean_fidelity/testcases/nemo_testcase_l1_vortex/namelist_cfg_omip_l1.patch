@@ -24,14 +24,3 @@
  /
  !-----------------------------------------------------------------------
  &namcfg        !   parameters of the configuration                      (default: use namusr_def in namelist_cfg)
-@@ -127,7 +127,9 @@
- !-----------------------------------------------------------------------
- &nameos        !   ocean Equation Of Seawater                           (default: NO selection)
- !-----------------------------------------------------------------------
--   ln_seos     = .true.         !  = Use simplified equation of state (S-EOS)
-+   ln_teos10   = .true.         !  OMIP-style TEOS-10 (campaign decision 64)
-+   ln_eos80    = .false.
-+   ln_seos     = .false.        !  shipped VORTEX selects S-EOS; documented deviation
-    !                            !  rd(T,S,Z)*rho0 = -a0*(1+.5*lambda*dT+mu*Z+nu*dS)*dT+b0*dS
-    rn_a0       =  0.28        !  thermal expension coefficient (for simplified equation of state)
-    rn_b0       =  0.          !  saline  expension coefficient (for simplified equation of state)
