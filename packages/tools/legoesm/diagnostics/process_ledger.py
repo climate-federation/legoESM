@@ -46,10 +46,9 @@ Rows (fixed order, ``LEDGER_PROCESSES``):
   flux-form tracer transport).
 
 All helpers are pure ``jnp`` (JIT/scan-safe, no host transfers).  Global
-means are UNWEIGHTED column means (documented limitation: exact closure
-holds for any weighting since every row uses the same mean; on the
-cubed-sphere production grid cells are near-equal-area so the numbers read
-as global means to a few %).
+means are AREA-weighted when the caller passes ``area`` (the model drivers
+do); ``area=None`` gives an unweighted mean, exact only on an equal-area
+grid.  Closure holds for any weighting since every row uses the same mean.
 """
 
 from __future__ import annotations
@@ -476,7 +475,17 @@ def reduce_ledger_global(ledger_column, area=None):
             / jnp.sum(w))
 
 
-def ledger_entry(dq_total_dt, dT_dt, p_s, dsigma):
+def _global_mean(col, area):
+    """Area-weighted mean of a per-column field; ``area`` must hold the same
+    number of columns (native or flattened layout).  ``None`` = unweighted,
+    correct only on an equal-area grid."""
+    if area is None:
+        return jnp.mean(col)
+    w = jnp.reshape(jnp.asarray(area, dtype=col.dtype), col.shape)
+    return jnp.sum(col * w) / jnp.sum(w)
+
+
+def ledger_entry(dq_total_dt, dT_dt, p_s, dsigma, *, area=None):
     """One ledger row ``[water, energy]`` from per-level tendencies.
 
     Parameters
@@ -491,6 +500,9 @@ def ledger_entry(dq_total_dt, dT_dt, p_s, dsigma):
         Surface pressure [Pa] (...).
     dsigma : array-like
         Sigma layer thicknesses (nlev,).
+    area : array-like or None
+        Horizontal cell areas, one per column of ``p_s``; ``None`` =
+        unweighted mean (exact only on an equal-area grid).
 
     Returns
     -------
@@ -500,23 +512,24 @@ def ledger_entry(dq_total_dt, dT_dt, p_s, dsigma):
     """
     zero = jnp.zeros((), dtype=jnp.result_type(p_s.dtype, jnp.float32))
     water = (
-        jnp.mean(column_mass_integral(dq_total_dt, p_s, dsigma))
+        _global_mean(column_mass_integral(dq_total_dt, p_s, dsigma), area)
         if dq_total_dt is not None else zero
     )
     energy = (
-        constants.c_pd * jnp.mean(column_mass_integral(dT_dt, p_s, dsigma))
+        constants.c_pd * _global_mean(
+            column_mass_integral(dT_dt, p_s, dsigma), area)
         if dT_dt is not None else zero
     )
     return jnp.stack([water, energy]).astype(water.dtype)
 
 
-def column_store_snapshot(p_s, dsigma, T, *species):
+def column_store_snapshot(p_s, dsigma, T, *species, area=None):
     """Snapshot ``[water_store, enthalpy_store]`` global means.
 
     ``water_store`` = mean ∫(Σ species) dp/g [kg/m²]; ``enthalpy_store`` =
     c_pd · mean ∫T dp/g [J/m²].  ``None`` species are skipped.  Pair two
     snapshots as ``(after − before)/dt`` to fill the ``dynamics`` /
-    ``clips`` rows.
+    ``clips`` rows.  ``area`` as in :func:`ledger_entry`.
     """
     total_q = None
     for s in species:
@@ -524,10 +537,11 @@ def column_store_snapshot(p_s, dsigma, T, *species):
             continue
         total_q = s if total_q is None else total_q + s
     water = (
-        jnp.mean(column_mass_integral(total_q, p_s, dsigma))
+        _global_mean(column_mass_integral(total_q, p_s, dsigma), area)
         if total_q is not None else jnp.zeros(())
     )
-    enthalpy = constants.c_pd * jnp.mean(column_mass_integral(T, p_s, dsigma))
+    enthalpy = constants.c_pd * _global_mean(
+        column_mass_integral(T, p_s, dsigma), area)
     return jnp.stack([water, jnp.asarray(enthalpy, dtype=water.dtype)])
 
 

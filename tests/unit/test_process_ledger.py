@@ -52,6 +52,23 @@ class TestLedgerHelpers:
         np.testing.assert_allclose(entry[0], expect_w, rtol=1e-12)
         np.testing.assert_allclose(entry[1], expect_e, rtol=1e-12)
 
+    def test_area_weighted_global_mean(self):
+        """Lat-lon-like cos-lat areas: a tendency confined to polar rows must
+        count by its AREA share, not its column-count share."""
+        nlev = 2
+        dsigma = jnp.full(nlev, 0.5)
+        lat = jnp.linspace(-80.0, 80.0, 9)
+        area = jnp.broadcast_to(jnp.cos(jnp.deg2rad(lat))[:, None], (9, 4))
+        p_s = jnp.full((9, 4), 1.0e5)
+        dq = jnp.zeros((9, 4, nlev)).at[0].set(1.0e-9)
+        col = 1.0e-9 * 1.0e5 / constants.g
+        expect = col * float(jnp.sum(area[0]) / jnp.sum(area))
+        entry = np.asarray(ledger_entry(dq, None, p_s, dsigma, area=area))
+        np.testing.assert_allclose(entry[0], expect, rtol=1e-12)
+        snap = np.asarray(column_store_snapshot(
+            p_s, dsigma, jnp.zeros((9, 4, nlev)), dq, area=area))
+        np.testing.assert_allclose(snap[0], expect, rtol=1e-12)
+
     def test_none_inputs_zero(self):
         dsigma = jnp.full(3, 1 / 3)
         p_s = jnp.full((2, 2), 1.0e5)

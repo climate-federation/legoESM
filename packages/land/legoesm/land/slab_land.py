@@ -162,6 +162,7 @@ def step_land(
         Q_net=Q_net,
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
+        snow_age_activation_K=config.land_albedo.snow_age_activation_K,
     )
 
     # --- Energy balance: dT/dt ---
@@ -500,6 +501,7 @@ def _step_land_canopy(
         Q_net=G_surface,
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
+        snow_age_activation_K=config.land_albedo.snow_age_activation_K,
     )
     melt_energy = snow_melt * constants.L_f / dt
 

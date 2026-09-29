@@ -1057,6 +1057,12 @@ def shortwave_penetration_tendency(
     return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)
 
 
+# --- top_layer_absorbed_fraction evaluation column (numerics, not physics) ---
+# Thickness of the second layer of the two-layer probe column [m]; deep
+# enough that every band is fully absorbed before the bottom.
+_TOP_FRACTION_DEEP_LAYER_M = 1.0e4
+
+
 def top_layer_absorbed_fraction(dz_top, chl_surface=None,
                                 config: ShortwavePenetrationConfig | None = None):
     """Fraction of the net surface shortwave absorbed in the TOP ocean layer
@@ -1068,9 +1074,7 @@ def top_layer_absorbed_fraction(dz_top, chl_surface=None,
     the sea-ice lead heat budget (NEMO icesbc zqld adds ``(1-A)*qsr*frq_m``).
     """
     dz_top = jnp.asarray(dz_top, dtype=jnp.float64)
-    # A numerics device, not an optical coefficient: the lower layer of the
-    # two-layer probe column stands in for the rest of the ocean.
-    deep = 1.0e4  # coeff-ok: synthetic semi-infinite lower layer [m]
+    deep = _TOP_FRACTION_DEEP_LAYER_M
     if chl_surface is not None:
         chl = jnp.asarray(chl_surface, dtype=jnp.float64)
         shape = jnp.broadcast_shapes(chl.shape, dz_top.shape)

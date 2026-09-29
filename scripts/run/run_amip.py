@@ -48,6 +48,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -346,6 +347,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "below 1 are honoured and are how a blow-up gets "
                              "localised in time: the reported failure day is the "
                              "first SAMPLE, not the first bad step.")
+    parser.add_argument("--corner-fill", dest="corner_fill",
+                        choices=CORNER_FILL_MODES,
+                        default=_DYCORE_DEFAULTS.corner_fill,
+                        help="Cubed-sphere cube-vertex halo corner fill "
+                             "(inert on other grids). avg = 2-point average.")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
@@ -941,7 +947,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
-                             "None = 0.0 = off (calendar clock, byte-identical).")
+                             "None = the LandAlbedoConfig default (5000 K); 0 = "
+                             "calendar clock.")
     parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
@@ -2259,6 +2266,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_window_pad=args.fv3_duo_window_pad,
         fv3_duo_column_lane=args.fv3_duo_column_lane,
         hyperdiff_scale=args.hyperdiff_scale,
+        corner_fill=args.corner_fill,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,

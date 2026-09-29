@@ -163,7 +163,7 @@ def energy_consistent_water_floor(tracers, T):
 
 
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           sum_fn=None):
+                           area, sum_fn=None):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -171,7 +171,10 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       per-mass species (:func:`conservative_positive_clip_global` with the
       ``dp`` layer-mass weight), plain floor for anything not borrow-eligible.
       ``T`` is returned untouched — the borrow is frozen-MSE-neutral for every
-      species (it preserves each column integral).  ``sum_fn`` defaults to
+      species (it preserves each column integral).  ``area`` is the
+      horizontal cell area (``dp`` minus its trailing level axis); the global
+      net-negative-column residual is conserved in ``sum(area*dp*q)``, the
+      physical mass.  ``sum_fn`` defaults to
       serial ``jnp.sum``; the MPI lane passes an allreduce-SUM reduction so the
       redistribution factor is decomposition-independent.  Iterates SORTED so
       every rank issues the per-tracer collectives in the same order.
@@ -188,7 +191,7 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
             data = f.data if hasattr(f, "data") else f
             if is_borrow_eligible_tracer(name):
                 clipped = conservative_positive_clip_global(
-                    data, dp, axis=-1, sum_fn=sum_fn)[0]
+                    data, dp, axis=-1, sum_fn=sum_fn, area=area)[0]
             else:
                 clipped = jnp.maximum(data, 0.0)
             out[name] = (f.replace(data=clipped) if hasattr(f, "replace")
@@ -311,7 +314,7 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
 
 
 def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
-                                      sum_fn=None):
+                                      sum_fn=None, area=None):
     """Column-local borrow PLUS global residual redistribution.
 
     :func:`conservative_positive_clip` zeroes a net-negative column (nothing
@@ -332,9 +335,15 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     factor is identical on every rank (decomposition-independent, and
     allreduce-SUM is the one AD-safe collective).  AD: one extra guarded
     quotient, same double-``where`` pattern as the column fixer.
+
+    ``area`` (horizontal cell area, ``q``'s shape minus the trailing axis)
+    weights the global sums so the conserved total is the physical mass on a
+    non-equal-area grid; ``None`` means equal-area columns.
     """
     q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
     w = jnp.asarray(weight, dtype=q.dtype)
+    if area is not None:
+        w = w * jnp.asarray(area, dtype=q.dtype)[..., None]
     s = sum_fn if sum_fn is not None else jnp.sum
     eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
     # ONE reduction per quantity (two total): pos_total reused for the

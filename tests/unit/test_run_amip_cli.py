@@ -4571,6 +4571,29 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
                                  create_sigma_coordinate(5))
 
 
+def test_corner_fill_flag_round_trip_and_production_pin(capsys):
+    parser = build_arg_parser()
+    default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert default.dycore.corner_fill == "avg"
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--corner-fill", "fv3_bgrid_xdir"]), parser))
+    assert cfg.dycore.corner_fill == "fv3_bgrid_xdir"
+    cfg.validate_strict()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical", "--corner-fill", "fv3_bgrid"])
+    assert "invalid choice" in capsys.readouterr().err
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = Path(__file__).resolve().parents[2] / "config/amip/amip_production.yaml"
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    assert keys["corner_fill"] == "avg"                          # deck -> loader
+    parser.set_defaults(**keys)
+    cfg = build_config_from_args(parser.parse_args([]))           # loader -> config
+    assert cfg.dycore.corner_fill == "avg"
+
+
 def test_zm_land_fraction_flows_to_config_and_kernel():
     """--zm-land-fraction threads CLI -> ExperimentConfig -> ZhangMcFarlaneConfig;
     the default requires a land fraction; validate_strict refuses anything else."""
