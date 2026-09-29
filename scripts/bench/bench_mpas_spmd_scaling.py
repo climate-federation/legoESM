@@ -276,8 +276,8 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
-                   help="timestep [s]; default auto: 600 * 4**(4-L) "
-                        "(CFL: dx halves per level), min 30 s.")
+                   help="timestep [s]; default auto: 300 * 2**(4-L) "
+                        "(fixed Courant: dt halves with dx, no floor).")
     p.add_argument("--out", type=str,
                    default="results/a1/mpas_spmd_scaling.jsonl")
     p.add_argument(
