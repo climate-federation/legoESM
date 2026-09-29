@@ -243,7 +243,7 @@ One battery at a time on this host; every log under
 | gate | result |
 |---|---|
 | card gates: both DINO recipes, both tanks, the tank zero-diffusion removal, the DINO mesh / from-rest / step-1 / rank-dump gates | `221 passed, 9 warnings in 578.29s` |
-| the six-file push gate plus this round's own test file | `153 passed in 967.69s (0:16:07)` |
+| the six-file push gate plus this round's own test file, on the FINAL committed tip | `154 passed in 963.13s (0:16:03)` |
 | the seven CI ratchets (constants, saturation, dispatch, validate-strict, param specs, inline coefficients, private imports) | `4 failed, 10560 passed, 4 skipped in 100.71s` |
 | receipt citation gate, cumulative default receipt | `PASS`, 274 citations, 0 failures, 0 unmapped, 0 map-audit failures, all 9 self-tests fired |
 | receipt citation gate, THIS receipt | `PASS`, 3 citations, 0 failures, 0 unmapped |
