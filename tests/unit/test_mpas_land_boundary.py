@@ -433,3 +433,48 @@ def test_validate_bounds():
         _mpas_cfg(mpas_land_lapse_K_per_km=-1.0).validate_strict()
     with pytest.raises(ValueError, match="mpas_land_lapse_K_per_km"):
         _mpas_cfg(mpas_land_lapse_K_per_km=25.0).validate_strict()
+
+
+def test_land_latent_heat_without_its_water_is_refused(mpas_mesh, sigma_coord,
+                                                       mpas_state):
+    """The pair rule: a land latent heat flux must arrive with the land's own
+    water flux.  Inverting it with the ocean's L_v(T_sfc) would lose the
+    snow-sublimation and canopy shares of the water."""
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+    f = _land_forcing(ncell, 40.0, 90.0)
+    del f["evap_land"]
+    with pytest.raises(ValueError, match="must come with"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=f)
+
+
+def test_undefined_land_fluxes_over_ocean_cells_do_not_poison(mpas_mesh,
+                                                              sigma_coord,
+                                                              mpas_state):
+    """Land values over pure-ocean cells may be NaN (the land model never solved
+    them).  ``(1 - f) * ocean + f * NaN`` is NaN even at f = 0, so every land
+    member of the blend (heat, latent heat AND water) is masked before it is
+    weighted.  Ocean cells must be bit-identical to the no-land run."""
+    ncell = mpas_state.T.data.shape[0]
+    f_land = jnp.asarray((np.arange(ncell) < ncell // 2).astype(np.float64))
+    fn_land = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                                    f_land=f_land)
+    fn_none = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0)
+    land = np.asarray(f_land) > 0.5
+    nan_over_ocean = jnp.where(f_land > 0.0, 1.0, jnp.nan)
+    f = {"T_sfc": jnp.full((ncell,), 300.0),
+         "shflx_land": 40.0 * nan_over_ocean,
+         "lhflx_land": 90.0 * nan_over_ocean,
+         "evap_land": 90.0 / constants.L_v * nan_over_ocean}
+    with_land = fn_land(mpas_state, mpas_mesh, sigma_coord, forcing=f)
+    without = fn_none(mpas_state, mpas_mesh, sigma_coord,
+                      forcing={"T_sfc": f["T_sfc"]})
+    if isinstance(with_land, tuple):
+        with_land, without = with_land[0], without[0]
+    for name, a, b in (("dT_dt", with_land.dT_dt.data, without.dT_dt.data),
+                       ("q_v", with_land.tracer_tendencies["q_v"],
+                        without.tracer_tendencies["q_v"])):
+        a, b = np.asarray(a), np.asarray(b)
+        assert np.isfinite(a).all(), f"{name}: NaN leaked through the land blend"
+        np.testing.assert_array_equal(a[~land], b[~land], err_msg=name)

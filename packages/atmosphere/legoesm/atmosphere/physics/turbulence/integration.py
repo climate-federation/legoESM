@@ -1048,10 +1048,12 @@ def _make_mpas_turbulence(
             _ev_land = jnp.asarray(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
+            _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
             _ev_blend = ((1.0 - _fl) * _lh / _lv_T(T_sfc) + _fl * _ev_land)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
-            _sh_land = jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells)
+            _sh_land = jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,

@@ -858,11 +858,13 @@ def run(args) -> int:
         # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
         # reported albedo/lw_up already reflect the canopy RT).
         if surf_out is not None and surf_out.LE_canopy is not None:
-            # Inverse of the L_v(T) the canopy charged (two_leaf_canopy: T_soil_top
-            # = the land's surface temperature).
+            # Inverse of the L_v(T) the canopy charged: two_leaf_canopy's lam is
+            # L_v(T_soil_top), the PRE-step top-soil temperature (resp.T_sfc is
+            # the canopy-air temperature, a different number).
             from legoesm.thermo import latent_heat_vaporization as _lv_T
-            transp = surf_out.LE_canopy / _lv_T(resp.T_sfc) * _SEC_PER_DAY
-            soil_evap = surf_out.LE_soil / _lv_T(resp.T_sfc) * _SEC_PER_DAY
+            _L_charge = _lv_T(state.T_soil[:, 0])
+            transp = surf_out.LE_canopy / _L_charge * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / _L_charge * _SEC_PER_DAY
         else:
             transp = _ZEROS
             soil_evap = _ZEROS

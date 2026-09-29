@@ -371,3 +371,44 @@ def test_prescribed_heat_is_a_convection_surface_source_without_a_turbulence_sch
     # bulk path has no surface config to draw the flux from)
     with pytest.raises(ValueError):
         _step(pipe)
+
+
+def test_tiled_water_is_folded_even_without_any_override(monkeypatch):
+    """The mosaic's per-tile-inverted water is the kernel's moisture BC
+    whenever the surface is tiled -- not only when the coupler prescribes
+    something.  A fold gated on the override branch discarded it on the plain
+    tiled path (the ordinary AMIP step), and a stress-only override tripped
+    the pair rule because the tiled heat was never passed alongside."""
+    from legoesm.atmosphere.physics.turbulence import integration as integ
+    seen = []
+    real = integ.fold_prescribed_surface_fluxes
+
+    def spy(cfg, **kw):
+        seen.append(kw)
+        return real(cfg, **kw)
+
+    monkeypatch.setattr(integ, "fold_prescribed_surface_fluxes", spy)
+    pipe = _pipeline(create_cubed_sphere(4), turbulence="louis")
+    _, s2 = _inputs(pipe)
+    pipe.f_land = jnp.full(s2, 0.5)
+    pipe.albedo_land = jnp.full(s2, 0.2)
+    pipe.surface_tiled = True
+    _step(pipe, T_land=jnp.full(s2, 285.0))
+    assert len(seen) == 1, "no fold happened on the plain tiled path"
+    kw = seen[-1]
+    assert kw["evap_kg_m2_s"] is not None and kw["lhflx_w_m2"] is not None
+    assert kw["shflx_w_m2"] is None and kw["tau_x_pa"] is None
+    water = np.asarray(kw["evap_kg_m2_s"])
+    lh = np.asarray(kw["lhflx_w_m2"])
+    assert np.isfinite(water).all() and (np.abs(water) > 0).any()
+    # It is the per-tile water, not the blended heat over one L at the
+    # blended temperature (ocean 295 K / land 285 K, half each).
+    from legoesm.thermo import latent_heat_vaporization as L
+    assert np.max(np.abs(water / (lh / float(L(290.0))) - 1.0)) > 1e-5
+    # A stress-only override on the tiled path must not trip the pair rule.
+    seen.clear()
+    out = _step(pipe, T_land=jnp.full(s2, 285.0),
+                sfc_taux_override=jnp.full(s2, 0.05),
+                sfc_tauy_override=jnp.zeros(s2))
+    assert np.isfinite(np.asarray(out.dT_dt)).all()
+    assert seen[-1]["evap_kg_m2_s"] is not None and seen[-1]["lhflx_w_m2"] is not None

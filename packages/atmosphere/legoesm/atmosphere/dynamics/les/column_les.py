@@ -580,9 +580,12 @@ def column_surface_kinematic_fluxes(
     # θ-flux = (sensible heat flux)/(ρ·c_p) · 1/Π, with the canonical Exner helper
     # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
     exner_inv = 1.0 / exner_function(p_s)
-    w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
     from legoesm.thermo import latent_heat_vaporization
+    from legoesm.atmosphere.physics.turbulence.surface_layer import latent_enthalpy_correction
     w_qv_s = lhflx[0] / (rho_1 * latent_heat_vaporization(sst_K))
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    w_th_s = ((shflx[0] + latent_enthalpy_correction(lhflx[0], w_qv_s * rho_1))
+              / (rho_1 * constants.c_pd) * exner_inv)
     return w_th_s, w_qv_s
 
 

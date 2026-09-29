@@ -90,26 +90,32 @@ def test_kernel_moisture_bc_is_the_prescribed_water_or_the_exact_inverse():
 
 
 def test_bulk_charge_and_kernel_inverse_round_trip_exactly():
-    """The atmosphere's OWN bulk law (compute_surface_fluxes, every convention)
-    charges L_v(T_sfc); the kernel's fallback inverse recovers the water it
-    moved, so a standalone lane neither gains nor loses water (GLM P1)."""
+    """The atmosphere's OWN bulk law (compute_surface_fluxes) charges L_v(T_sfc)
+    and the kernel's fallback inverse recovers the water it moved.  The water
+    reference is INDEPENDENT of the temperature-dependent branch: the same
+    constant-coefficient law evaluated with an explicit constant L, divided by
+    that constant -- so a charge reverted to the constant fails here (the
+    inverse would then return E * L_v / L_v(T), 2 % off at 28 degC)."""
     from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
+    from legoesm.core.bulk_flux import simple_bulk_fluxes
     n = 4
     T_sfc = jnp.array([301.0, 295.0, 285.0, 271.0])
-    q_v = jnp.full((n,), 0.008)
-    for scheme in ("constant", "coare3"):
-        cfg = SurfaceLayerConfig(bulk_scheme=scheme)
-        for conv in ("legoesm", "aerobulk"):
-            c = cfg._replace(thermo_convention=conv) if "thermo_convention" in cfg._fields else cfg
-            _, _, _, lhflx, _ = compute_surface_fluxes(
-                jnp.full((n,), 5.0), jnp.zeros((n,)), T_sfc - 1.5, q_v, T_sfc,
-                jnp.full((n,), 0.02), jnp.full((n,), 1.15), c)
-            assert float(jnp.min(jnp.abs(lhflx))) > 1.0
-            E = surface_moisture_flux(c, lhflx, T_sfc)
-            # The bulk law's water is lhflx / L_v(T_sfc) by construction: the
-            # round trip is exact, and it is NOT lhflx / L_v (2 % at 28 degC).
-            np.testing.assert_allclose(np.asarray(E * latent_heat_vaporization(T_sfc)), np.asarray(lhflx), rtol=1e-13)
-            assert float(jnp.abs(E[0] * constants.L_v / lhflx[0] - 1.0)) > 0.02
+    u, v = jnp.full((n,), 5.0), jnp.zeros((n,))
+    T_air, q_v, q_sfc, rho = T_sfc - 1.5, jnp.full((n,), 0.008), jnp.full((n,), 0.02), jnp.full((n,), 1.15)
+    for conv in ("legoesm", "aerobulk"):
+        cfg = SurfaceLayerConfig(bulk_scheme="constant", thermo_convention=conv)
+        _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg)
+        assert float(jnp.min(jnp.abs(lhflx))) > 1.0
+        E = surface_moisture_flux(cfg, lhflx, T_sfc)
+        # Independent water: the constant-coefficient law with an EXPLICIT constant L.
+        wind = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)
+        _, _, _, lh_const = simple_bulk_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, wind,
+                                               cfg.Cd_neutral, cfg.Ch_neutral, L_latent=constants.L_v)
+        E_ref = lh_const / constants.L_v
+        np.testing.assert_allclose(np.asarray(E), np.asarray(E_ref), rtol=1e-12)
+        # ...and the charge itself is L_v(T_sfc) * E_ref, not L_v * E_ref.
+        np.testing.assert_allclose(np.asarray(lhflx), np.asarray(E_ref * latent_heat_vaporization(T_sfc)), rtol=1e-12)
+        assert float(jnp.abs(lhflx[0] / (constants.L_v * E_ref[0]) - 1.0)) > 0.02
 
 
 def test_coupled_hook_hands_the_tiles_water_flux():

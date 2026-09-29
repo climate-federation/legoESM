@@ -613,6 +613,12 @@ def compute_tiled_surface_fluxes(
     # ITS OWN surface temperature (what its bulk law charged), then area
     # weighted.  Dividing the blended heat by one L_v(T_blend) is not the same
     # number on a mixed cell; the kernel takes this as its moisture BC.
+    # Each tile is inverted with the L its law CHARGED.  All three tile laws
+    # run through _single_tile_flux, which never passes ``L_latent``, so the
+    # ice tile (``constant`` scheme, tiled_surface_tile_configs) charged
+    # L_v(T_ice) like the others -- the atmosphere-side mosaic has no phase
+    # information; the coupled lane's sea-ice model charges L_s itself and
+    # hands its water down the coupler's evaporation channel instead.
     from legoesm.thermo import latent_heat_vaporization
     water = (tiles.frac_ocean * f_ocean[3] / latent_heat_vaporization(tiles.T_ocean)
              + tiles.frac_ice * f_ice[3] / latent_heat_vaporization(tiles.T_ice)

@@ -1248,8 +1248,6 @@ def compute_most_fluxes(
     # latent heat is the Kirchhoff L_v(T_sfc) in BOTH (user decision
     # 2026-09-28); an explicit ``L_latent`` always wins (ice passes L_s, the
     # OMIP NEMO-parity path and the oracle tests inject their own).
-    # One latent heat for the codebase (user decision 2026-09-28): Kirchhoff
-    # L_v(T_sfc) in EVERY convention; an explicit ``L_latent`` (ice: L_s) wins.
     from legoesm.thermo import latent_heat_vaporization
     _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     if thermo_convention == "aerobulk":

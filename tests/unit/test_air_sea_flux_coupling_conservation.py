@@ -450,7 +450,7 @@ class TestCoupledDriverWiring:
         tile = types.SimpleNamespace(
             albedo=jnp.full(shape, 0.06), lw_up=jnp.full(shape, 400.0),
             shflx=jnp.full(shape, 12.0), lhflx=jnp.full(shape, 60.0),
-            surface_mass_flux=jnp.full(shape, 2.4e-5),
+            surface_mass_flux=jnp.full(shape, 2.0e-5),   # clearly NOT lhflx / L_v (2.4e-5)
             tau_x=z, tau_y=z,
         )
         sst = jnp.full(shape, 290.0)

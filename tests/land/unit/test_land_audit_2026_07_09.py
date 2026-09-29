@@ -399,7 +399,12 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         self.assertLess(lhflx, 0.0, "expected condensation (lhflx<0) for this forcing")
         # Deposition accretes on the snowpack (frost, charged at L_s)...
         self.assertGreater(float(ns.snow_depth[0]), float(s0.snow_depth[0]))
-        npt.assert_allclose(float(resp.surface_mass_flux[0]), lhflx / constants.L_s, rtol=1e-6)
+        # ...charged at the Kirchhoff L_s of the PRE-step top-soil temperature (the
+        # land's T_surface), so the water is that inverse, not lhflx / constant L_s.
+        from legoesm.thermo import latent_heat_sublimation
+        npt.assert_allclose(float(resp.surface_mass_flux[0]),
+                            lhflx / float(latent_heat_sublimation(s0.T_soil[0, 0])), rtol=1e-6)
+        self.assertGreater(abs(lhflx / constants.L_s / float(resp.surface_mass_flux[0]) - 1.0), 1e-5)
         # ...and does NOT inject liquid water into the soil top.
         self.assertLessEqual(float(jnp.sum(dz * ns.theta_soil[0])), W0 + 1e-9)
 

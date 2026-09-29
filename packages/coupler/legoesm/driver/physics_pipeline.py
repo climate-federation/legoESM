@@ -2031,14 +2031,30 @@ class PhysicsPipeline:
             # surface flux.  A tiled-surface bulk ``surface_flux`` tuple formed
             # above is exactly what the prescribed flux replaces — drop it
             # (injecting both would double-count / silently disagree).
-            if _prescribed_sfc_flux:
+            #
+            # The moisture BC: the coupler's water when it prescribes it; else,
+            # on the mosaic path, the per-tile-inverted water blend (a mixed
+            # cell's blended heat over one L_v(T_blend) is not the summed tile
+            # water) -- folded EVEN WITH NO OVERRIDES, paired with the tiled
+            # blended heat the kernel reads from the tuple; a heat override
+            # keeps the kernel's own L_v(T_sfc) inverse of that override.
+            _fold_lhflx = (None if sfc_lhflx_override is None
+                           else ad.flatten_2d(sfc_lhflx_override))
+            if sfc_evap_override is not None:
+                _fold_evap = ad.flatten_2d(sfc_evap_override)
+            elif _tiled_water is not None and sfc_lhflx_override is None:
+                _fold_evap = _tiled_water
+                _fold_lhflx = _turb_kwargs["surface_flux"][3]
+            else:
+                _fold_evap = None
+            if _prescribed_sfc_flux or _fold_evap is not None:
                 from legoesm.atmosphere.physics.turbulence.integration import (
                     fold_prescribed_surface_fluxes
                 )
                 from legoesm.atmosphere.physics.turbulence.surface_layer import (
                     prescribed_into_surface_flux,
                 )
-                if "surface_flux" in _turb_kwargs:
+                if _prescribed_sfc_flux and "surface_flux" in _turb_kwargs:
                     # The tiled tuple is what the kernel will read, so the
                     # prescribed components replace THEIR slots in it and
                     # the unprescribed ones (e.g. the tiled stress when the
@@ -2047,8 +2063,7 @@ class PhysicsPipeline:
                         _turb_kwargs["surface_flux"], rho_col_phys[:, -1],
                         shflx=(None if sfc_shflx_override is None
                                else ad.flatten_2d(sfc_shflx_override)),
-                        lhflx=(None if sfc_lhflx_override is None
-                               else ad.flatten_2d(sfc_lhflx_override)),
+                        lhflx=_fold_lhflx,
                         tau_x=(None if sfc_taux_override is None
                                else ad.flatten_2d(sfc_taux_override)),
                         tau_y=(None if sfc_tauy_override is None
@@ -2060,22 +2075,8 @@ class PhysicsPipeline:
                         None if sfc_shflx_override is None
                         else ad.flatten_2d(sfc_shflx_override)
                     ),
-                    lhflx_w_m2=(
-                        None if sfc_lhflx_override is None
-                        else ad.flatten_2d(sfc_lhflx_override)
-                    ),
-                    # The moisture BC: the coupler's water when it prescribes it;
-                    # else, on the mosaic path, the per-tile-inverted water blend
-                    # (a mixed cell's blended heat over one L_v(T_blend) is not the
-                    # summed tile water); a heat-only override keeps the kernel's
-                    # own L_v(T_sfc) inverse of that override.
-                    evap_kg_m2_s=(
-                        ad.flatten_2d(sfc_evap_override)
-                        if sfc_evap_override is not None
-                        else (_tiled_water if (sfc_lhflx_override is None
-                                               and _tiled_water is not None)
-                              else None)
-                    ),
+                    lhflx_w_m2=_fold_lhflx,
+                    evap_kg_m2_s=_fold_evap,
                     tau_x_pa=(
                         None if sfc_taux_override is None
                         else ad.flatten_2d(sfc_taux_override)
