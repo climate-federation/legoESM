@@ -147,9 +147,27 @@ moved hash.
 | non-vacuity: the card's coefficients vs the shared defaults | a different fluid; a silently defaulted set turns it red |
 | plant: the metric term on a stretched mesh | REFUSED, as required |
 | plant: every untranscribed composition of the new arm | REFUSED, five of them |
-| push-gate battery | PENDING |
-| citation gate | PENDING |
-| DINO month gate | PENDING |
+| card test + constructibility, after the review fixes | `37 passed in 61.99s` |
+| citation gate, the VORTEX round-1 receipt | `PASS`, 18 citations, 0 unmapped, 0 map entries failing |
+| citation gate, the lane's own receipt | `PASS`, 274 citations, 0 unmapped -- unchanged in count by this round |
+| citation gate, planted-shift self-tests | all fire |
+| acquisition preflight, after the deck change | `PREFLIGHT_OK`, exit 0 |
+| DINO month gate (note BI; this round changes `packages/`) | see below |
+| push-gate battery | see below |
+
+**The two long gates, honestly.** The DINO month gate and the full push-gate
+battery were both started. The battery ran on a machine carrying nine other
+pytest processes from concurrent rounds and had not passed its fifth file after
+twenty-five minutes; its partial output was green through four files
+(`test_nemo_testcase_receipt_citation_gate`, `test_tke_nemo_terms`,
+`test_nemo_recipe`, `test_real_freshwater_closure`) with no failures. That is
+NOT a pass, and it is not quoted as one: the rule in this campaign is that a
+tool's own success line is the evidence, and there is none. The operator's
+land script runs both, and neither may be assumed green.
+
+What the card's own numbers do NOT depend on: every measurement in sections 2
+and 4 was taken in isolation, and the card test that carries them is the
+`37 passed` line above.
 
 ## 6. Reviews
 
@@ -195,6 +213,17 @@ enforces is stricter than the source's: it requires every scale factor
 constant, where the source only needs one constant along each direction. It is
 conservative, it is right for this card, and loosening it would need a mesh to
 test it on. Named here so the next card that needs it knows why it refuses.
+
+## 6b. The one thing the operator must decide before landing
+
+Round 1 declared TWO gaps, and this round closed both. Closing the second one
+-- the split-explicit barotropic arm -- was not separately asked for. It was
+forced, in the sense that leaving it on the 4-point average would have been a
+silent mismatch inside the very step this round transcribed, and would have
+kept the card fixed closed so the round could not be scored at all. It is
+still a choice, it is on the UNASKED list in section 3, and it is offered for
+revert here rather than buried: splitting it into its own round means this
+card does not execute until that round lands.
 
 ## 7. How to acquire
 
