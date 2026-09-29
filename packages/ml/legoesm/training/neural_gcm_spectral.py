@@ -1002,30 +1002,6 @@ def make_turbulence_only_spectral_physics(dt,
 SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
 
 
-def assert_spectral_physics_params_reachable(params, make_physics_fn, grid,
-                                             sigma, ic_states):
-    """No-inert-parameters gate for the spectral physics trainer.
-
-    Differentiates the sum of squares of the physics output on EVERY IC with
-    respect to each trainable leaf and raises (``assert_no_inert``) on a leaf
-    whose gradient is zero on all of them.  The parameters act only through
-    the physics (the dycore reads none of them), so a leaf zero on every IC
-    is inert in the training loss too; one zero IC is not evidence (the SBM
-    trigger may simply not fire there).
-    """
-    from legoesm.training.inert_params import assert_no_inert_over
-
-    def _probe(p, ic_state):
-        out = make_physics_fn(p, grid)(ic_state, grid, sigma)
-        # Squares, so tendencies cannot cancel in the sum; real + imaginary
-        # parts because spectral coefficients are complex.
-        return sum(jnp.sum(jnp.abs(x) ** 2) for x in
-                   jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
-
-    _grad = eqx.filter_grad(_probe)
-    assert_no_inert_over(_grad(params, ic).raw_values for ic in ic_states)
-
-
 def make_physics_params_spectral_physics(params, grid, dt, *,
                                          radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
@@ -3367,9 +3343,15 @@ def _train_spectral_loop(
     n_samples_total: int | None = None,
     resume_from_dir=None,
     host_staged: bool = False,
+    assert_no_inert_params: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``assert_no_inert_params=True`` (physics-parameter models with
+    ``raw_values``) runs the no-inert gate before the first update of a fresh
+    run: the gradient of THIS loop's rollout loss on every sample, and any
+    leaf zero on all of them aborts (``assert_no_inert_over``).
 
     ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
     ``target_carries`` / ``sample_forcings`` were built host-resident
@@ -3963,6 +3945,26 @@ def _train_spectral_loop(
     # the prefetch consumer.
     _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
+
+    if (assert_no_inert_params and n_epochs_total > 0
+            and start_epoch == 0 and resume_chunk == 0):
+        # Judged on the training objective itself (the rollout loss the first
+        # epoch differentiates), so a parameter that only acts later in the
+        # rollout counts as live, and no proxy can cancel a real dependence.
+        from legoesm.training.inert_params import assert_no_inert_over
+        _gate_step = _dp_grad_step_for(epoch_plan[0])
+
+        def _gate_grads():
+            for c_ics, c_tgts, c_forc in _iter_epoch_data():
+                for i, (ic, tgt) in enumerate(zip(c_ics, c_tgts)):
+                    fb = c_forc[i] if c_forc is not None else None
+                    if _host_staged:
+                        ic = _stage_tree(ic, _compute_dev)
+                        tgt = _stage_tree(tgt, _compute_dev)
+                        fb = None if fb is None else _stage_tree(fb, _compute_dev)
+                    yield _gate_step(model, ic, tgt, fb)[2].raw_values
+
+        assert_no_inert_over(_gate_grads())
 
     best_loss = float("inf")
     patience_counter = 0
@@ -5935,11 +5937,9 @@ def train_physics_params_spectral(
     def _make_physics_fn(p, grid_):
         return make_physics_params_spectral_physics(p, grid_, dt)
 
-    assert_spectral_physics_params_reachable(
-        params, _make_physics_fn, grid, sigma, ic_states)
-
     return _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        assert_no_inert_params=True,
     )

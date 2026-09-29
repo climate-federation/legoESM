@@ -678,46 +678,100 @@ class TestPhysicsParamsSpectral:
         assert has_nonzero, "All physics param gradients are zero"
 
 
-    def test_no_inert_gate_rejects_unconsumed_params(self):
-        """The spectral physics forward reads only SPECTRAL_PHYSICS_TRAINABLE;
-        the full default set carries inert leaves the gate must reject, and the
-        restricted set passes."""
+    # --- no-inert gate: judged on the rollout loss the loop trains -------
+    @staticmethod
+    def _params(names):
         from legoesm.training.trainable_params import (
             DEFAULT_TRAINABLE, TrainablePhysicsParams,
         )
-        from legoesm.training.neural_gcm_spectral import (
-            SPECTRAL_PHYSICS_TRAINABLE,
-            assert_spectral_physics_params_reachable,
-            carry_to_spectral_state,
-            make_physics_params_spectral_physics,
-        )
-        # Warm, humid column so SBM convection is active (its knobs are gated
-        # on convection firing).
-        state = carry_to_spectral_state(
-            _make_gaussian_carry(T_val=300.0, q_v_val=0.02), _GRID)
+        return TrainablePhysicsParams.from_defaults(
+            [c for c in DEFAULT_TRAINABLE if c.name in names])
 
-        def mk(p, g):
-            return make_physics_params_spectral_physics(p, g, dt=1800.0)
+    @staticmethod
+    def _ic():
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        return carry_to_spectral_state(_make_gaussian_carry(T_val=280.0), _GRID)
+
+    def _gate_run(self, names, heat, tmp_path):
+        """Run ``_train_spectral_loop`` (gate on) with a toy physics whose T
+        tendency on the global-mean mode is ``heat(p, T_hat_mean)``; two
+        dycore steps, scored against a warmer target."""
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.training.neural_gcm_spectral import (
+            NeuralGCMSpectralConfig, _train_spectral_loop,
+        )
+        params, ic = self._params(names), self._ic()
+
+        def mk(p, grid_):
+            d = p.as_dict()
+
+            def physics_fn(state, g, s, forcing=None):
+                tend = jax.tree.map(jnp.zeros_like, state)
+                amp = heat(d, state.T_hat.data[0, 0].real)
+                return tend._replace(T_hat=jax.tree.map(
+                    lambda x: x.at[0].add(amp), tend.T_hat))
+            return physics_fn
+
+        cfg = NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            n_epochs=1, lr=1e-4, warmup_steps=0,
+            loss_config=LossConfig(multi_step_hours=(1,),
+                                   multi_step_weights=(1.0,)),
+            log_every=1, checkpoint_dir=str(tmp_path))
+        _train_spectral_loop(
+            params, mk, _GRID, _SIGMA, [ic],
+            [(_make_gaussian_carry(T_val=282.0),)], cfg,
+            assert_no_inert_params=True)
+        return params, mk, ic
+
+    @staticmethod
+    def _proxy_grads(params, mk, ic):
+        """The retired gate's probe: d/dp of sum |physics output|^2 at the IC."""
+        def probe(p):
+            out = mk(p, _GRID)(ic, _GRID, _SIGMA)
+            return sum(jnp.sum(jnp.abs(x) ** 2) for x in
+                       jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
+        return eqx.filter_grad(probe)(params).raw_values
+
+    def test_no_inert_gate_keeps_a_param_that_acts_later_in_the_rollout(
+            self, tmp_path):
+        """sbm_RH_ref acts only once the heating from sbm_tau_c has warmed the
+        state past a threshold, i.e. after the first stage: zero at the IC,
+        live in the rollout loss.  The gate must keep it."""
+        names = ("sbm_tau_c", "sbm_RH_ref")
+        p0 = {k: float(v) for k, v in self._params(names).as_dict().items()}
+        ic_T = float(self._ic().T_hat.data[0, 0].real)
+        rate = 1.0e-3                 # T_hat[0] units per second
+
+        def heat(d, T_mean):
+            late = jnp.where(T_mean > ic_T + 0.5 * rate * 1800.0,
+                             rate * d["sbm_RH_ref"] / p0["sbm_RH_ref"], 0.0)
+            return rate * d["sbm_tau_c"] / p0["sbm_tau_c"] + late
+
+        params, mk, ic = self._gate_run(names, heat, tmp_path)
+        # the retired probe saw nothing: it would have aborted this run
+        assert float(self._proxy_grads(params, mk, ic)["sbm_RH_ref"]) == 0.0
+
+    def test_no_inert_gate_is_not_fooled_by_a_squared_output_at_zero(
+            self, tmp_path):
+        """Tendency proportional to (p - p0): its square has zero derivative
+        at p0, yet the rollout loss depends on p.  The gate must keep it."""
+        p0 = float(self._params(("albedo_ocean",)).as_dict()["albedo_ocean"])
+
+        def heat(d, T_mean):
+            return 1.0e-2 * (d["albedo_ocean"] - p0)
+
+        params, mk, ic = self._gate_run(("albedo_ocean",), heat, tmp_path)
+        assert float(self._proxy_grads(params, mk, ic)["albedo_ocean"]) == 0.0
+
+    def test_no_inert_gate_rejects_a_param_the_loss_never_reads(self, tmp_path):
+        def heat(d, T_mean):
+            return 1.0e-3 * d["sbm_tau_c"]                  # C_H never read
 
         with pytest.raises(ValueError, match="C_H"):
-            assert_spectral_physics_params_reachable(
-                TrainablePhysicsParams.from_defaults(), mk, _GRID, _SIGMA,
-                [state])
-        live = TrainablePhysicsParams.from_defaults(
-            [c for c in DEFAULT_TRAINABLE
-             if c.name in SPECTRAL_PHYSICS_TRAINABLE])
-        assert set(live.raw_values) == set(SPECTRAL_PHYSICS_TRAINABLE)
-        assert_spectral_physics_params_reachable(
-            live, mk, _GRID, _SIGMA, [state])
-        # A dry IC alone leaves the SBM knobs gated off; the gate must judge
-        # every IC, so a dry FIRST IC followed by a convecting one passes.
-        dry = carry_to_spectral_state(
-            _make_gaussian_carry(T_val=250.0, q_v_val=1e-6), _GRID)
-        with pytest.raises(ValueError, match="sbm_"):
-            assert_spectral_physics_params_reachable(
-                live, mk, _GRID, _SIGMA, [dry])
-        assert_spectral_physics_params_reachable(
-            live, mk, _GRID, _SIGMA, [dry, state])
+            self._gate_run(("sbm_tau_c", "C_H"), heat, tmp_path)
 
     def test_trainer_trains_only_consumed_params(self, monkeypatch):
         """Executed: the trainer hands the loop only the consumed parameters."""
@@ -733,12 +787,14 @@ class TestPhysicsParamsSpectral:
             lambda *a, **k: ([state], [None], [None]))
         monkeypatch.setattr(
             ngs, "_train_spectral_loop",
-            lambda params, *a, **k: seen.setdefault("params", params))
+            lambda params, *a, **k: seen.update(params=params, kw=k))
         ngs.train_physics_params_spectral(
             NeuralGCMSpectralConfig(n_max=N_MAX, n_levels=NLEV,
                                     sigma_top=0.1, dt=1800.0))
         assert set(seen["params"].raw_values) == set(
             ngs.SPECTRAL_PHYSICS_TRAINABLE)
+        # ...and turns on the loop's rollout-loss no-inert gate.
+        assert seen["kw"].get("assert_no_inert_params") is True
 
 
 class TestAreaWeightedLoss:
