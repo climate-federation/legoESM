@@ -1144,6 +1144,20 @@ def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
     return N_i + jnp.minimum(d_n_raw, headroom)
 
 
+def mpas_land_step_params(update, base_params, theta_top, doy, year):
+    """Two-leaf land params for one land step: the per-step updater's rebuild
+    (LAI / canopy height at ``doy`` [days since Jan 1, 0-based, as the offline
+    calibration passes it], soil albedo at ``theta_top``, cover at ``year``),
+    with every field the rebuild leaves None carried from ``base_params`` --
+    the setup-time params, whose root-zone fields may come from the CLM map
+    when no calibrated root tables are selected."""
+    params, _ = update(theta_top, doy, year)
+    carry = {f: getattr(base_params, f) for f in params._fields
+             if getattr(params, f) is None
+             and getattr(base_params, f, None) is not None}
+    return params._replace(**carry) if carry else params
+
+
 def _cell_winds(state, grid, *, level=None, u_override=None):
     """Geographic cell-centre winds of an MPAS-lane state: the Perot
     reconstruction of the edge-normal ``u`` on a Voronoi mesh, or the
@@ -3506,11 +3520,37 @@ class ModelDriver:
                     biophysics_lmip_glacier_albedo)
                 _pft_root = biophysics_lmip_pft_root_params()
                 _glacier_alb = biophysics_lmip_glacier_albedo()
-            _, params, _ = init_land_surface_data(
+            _, params, _gsd = init_land_surface_data(
                 _sd_path, self.grid, cfg, float(self.config.start_day),
                 year=(None if getattr(self.config, "start_year", None) is None
                       else float(self.config.start_year)),
                 pft_root_params=_pft_root, glacier_alb=_glacier_alb)
+            # Per-step rebuild of the same parameters (seasonal LAI / canopy
+            # height, wet-soil albedo), built from the SAME gsd, root tables and
+            # glacier pair as ``params`` -- the offline calibration's updater
+            # (run_lmip_biophys) -- so a refresh cannot revert the calibration.
+            # Two-leaf only: the CLM-ML canopy's params carry SAI/htop the
+            # updater does not build.
+            if isinstance(cfg.surface_scheme, CanopyConfig):
+                _upd_scheme = cfg.surface_scheme
+                _upd_start_year = getattr(self.config, "start_year", None)
+
+                def _build_params_update(_gsd=_gsd, _scheme=_upd_scheme,
+                                         _alb=_glacier_alb, _roots=_pft_root,
+                                         _y0=_upd_start_year):
+                    if _y0 is None and int(np.asarray(_gsd.years).size) > 1:
+                        raise ValueError(
+                            "mpas_land_params_refresh needs start_year with a "
+                            "transient surfdata: the start-day parameters are "
+                            "the cover's year-MEAN, which the per-step rebuild "
+                            "(one calendar year per step) cannot reproduce.")
+                    from legoesm.land.boundary_data import (
+                        make_step_land_params_updater)
+                    return make_step_land_params_updater(
+                        _gsd, _scheme, glacier_alb=_alb, pft_root_params=_roots)
+
+                # Built lazily by the lane that consumes it (the MPAS land step).
+                self.physics.land_ml_params_update_factory = _build_params_update
             # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
             # Replacing the parameter object wholesale also dropped the CLM
             # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
@@ -10985,6 +11025,27 @@ class ModelDriver:
             # exactly the lane the AMIP campaign runs.  None on every other
             # configuration, which keeps those runs byte-identical.
             _lml_carbon = getattr(self.physics, "land_ml_carbon", None)
+            # Per-step canopy-parameter rebuild (seasonal LAI etc.), as the
+            # offline calibration runs it; refused, not skipped, when the
+            # config asks for it and the scheme has no updater.
+            _lml_update = None
+            if bool(getattr(cfg, "mpas_land_params_refresh", False)):
+                _lml_update = getattr(self.physics, "land_ml_params_update", None)
+                _factory = getattr(
+                    self.physics, "land_ml_params_update_factory", None)
+                if _lml_update is None and _factory is not None:
+                    _lml_update = _factory()
+                if _lml_update is None:
+                    raise ValueError(
+                        "mpas_land_params_refresh=True but the land tile has no "
+                        "per-step parameter updater: it is built only for the "
+                        "two-leaf canopy on per-PFT surfdata parameters "
+                        f"(land_surface_scheme={cfg.land_surface_scheme!r}). Set "
+                        "mpas_land_params_refresh=false to keep the start-day "
+                        "parameters knowingly.")
+            _lml_year0 = (float(cfg.start_year)
+                          if getattr(cfg, "start_year", None) is not None
+                          else 0.0)
 
             # Land fraction as a closure constant of the compiled land step,
             # for the land-weighted held count below.
@@ -11050,16 +11111,25 @@ class ModelDriver:
 
             def _make_land_step(_dt_land):
               @jax.jit
-              def _land_step(land_state, a2s, doy):
+              def _land_step(land_state, a2s, doy, lai_doy, lai_year):
                 from legoesm.land.multilayer_land import (
                     step_multilayer_land_with_diagnostics)
                 _state_in = (_land_pack(land_state) if _land_pack_on
                              else land_state)
                 _a2s_in = _land_pack(a2s) if _land_pack_on else a2s
+                if _lml_update is not None:
+                    # Full-grid rebuild, then the same pack as the static
+                    # params: identical column set, the packed gather only.
+                    _p = mpas_land_step_params(
+                        _lml_update, _lml_params,
+                        land_state.theta_soil[:, 0], lai_doy, lai_year)
+                    _params_in = _land_pack(_p) if _land_pack_on else _p
+                else:
+                    _params_in = _lml_params_p
                 new_state, resp, _carbon, _sfc = (
                     step_multilayer_land_with_diagnostics(
                         _state_in, _a2s_in, _lml_cfg_p, _lml_umin, _dt_land,
-                        lat=_lml_lat_p, doy=doy, land_params=_lml_params_p,
+                        lat=_lml_lat_p, doy=doy, land_params=_params_in,
                         carbon_state=_lml_carbon_p))
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
@@ -12078,7 +12148,13 @@ class ModelDriver:
                      _land_shflx_step, _land_lhflx_step,
                      _land_n_held_step, _land_n_held_land_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
-                        jnp.asarray(_doy, dtype=jnp.float64))
+                        jnp.asarray(_doy, dtype=jnp.float64),
+                        # 0-based days since Jan 1 (the calibration's clock)
+                        # and the cover year, same formula as the transient
+                        # cover rebuild.  Traced: no retrace per step.
+                        jnp.asarray(_doy - 1.0, dtype=jnp.float64),
+                        jnp.asarray(_lml_year0 + _force_day / 365.0,
+                                    dtype=jnp.float64))
                     # Mirror the land tile's skin and surface humidity onto
                     # the driver, the same way the ice skin above is mirrored:
                     # the CMOR ``tas`` diagnostic runs in a different method and
