@@ -58,8 +58,9 @@ import tempfile
 # record, in kelvin.  Provenance: the 2026-09-29 repair measurement in
 # docs/ocean/fidelity/testcases/
 # nemo_testcases_l2_gyre_dino_month_regression_receipt.md, taken with exactly
-# the protocol below.  It also matches the pinned #1728 artifact (2.039e-03 K)
-# to the printed digits.
+# the protocol below.  The pinned #1728 artifact prints 2.039e-03 K, which is
+# 0.06 % away -- close, but NOT equal, and the bar is set from the number
+# measured here rather than from that one.
 CERTIFIED_T3D_K = 2.040288765e-03
 # Run-to-run reproducibility on one pinned GPU is bit-exact for this card, so
 # the tolerance only has to absorb a driver/XLA rebuild.  10 % of the

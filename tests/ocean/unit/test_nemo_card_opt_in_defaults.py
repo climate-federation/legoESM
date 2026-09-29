@@ -394,14 +394,16 @@ def test_the_nemo_testcase_cards_still_require_the_carried_pair():
 
     card = build_gyre_zco_card()
     validate_nemo_testcase_card(card)
-    assert card.config.barotropic.nemo_prognostic_barotropic_state is True
+    cfg = card.recipe.model_config
+    assert cfg.barotropic.nemo_prognostic_barotropic_state is True
 
     # Non-vacuity: the validator, not a source string, is what refuses the
     # DINO arrangement on a key_RK3 card.
     planted = card._replace(
-        config=card.config._replace(
-            barotropic=card.config.barotropic._replace(
-                nemo_prognostic_barotropic_state=False)))
+        recipe=card.recipe._replace(
+            model_config=cfg._replace(
+                barotropic=cfg.barotropic._replace(
+                    nemo_prognostic_barotropic_state=False))))
     with pytest.raises(ValueError,
                        match="nemo_prognostic_barotropic_state"):
         validate_nemo_testcase_card(planted)
