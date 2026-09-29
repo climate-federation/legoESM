@@ -196,11 +196,16 @@ the insertion and did not move at all.  Each shift was accepted only after the
 cited text at the old lines in the lane parent was verified byte-identical to
 the text at the new lines in the merged tree.
 
-| citation | before | after | extent |
+All three are in the shared lat-lon C-grid step.  The "before" column gives
+the lane parent's line numbers as bare numbers, deliberately: written in
+`file.py:NNNN` form they would read as live citations to lines that no longer
+carry that text, and the gate would (correctly) flag them.
+
+| citation | lane-parent lines | citation after the merge | extent |
 |---|---|---|---:|
-| ZAD operand barriers | `ocean_pe_latlon_cgrid.py:4968-4990` | `:4973-4995` | 23 lines, unchanged |
-| the lateral-friction velocity operands | `:5307-5308` | `:5312-5313` | 2 lines, unchanged |
-| the `rho_prime` / `h_k` argument | `:5330` | `:5335` | 1 line, unchanged |
+| ZAD operand barriers | 4968 to 4990 | `ocean_pe_latlon_cgrid.py:4973-4995` | 23 lines, unchanged |
+| the lateral-friction velocity operands | 5307 to 5308 | `ocean_pe_latlon_cgrid.py:5312-5313` | 2 lines, unchanged |
+| the `rho_prime` / `h_k` argument | 5330 | `ocean_pe_latlon_cgrid.py:5335` | 1 line, unchanged |
 
 Applied to `CITATION_MAP` and to the round-8 receipt's prose.  No NEMO
 compiled-source citation moved — the merge does not touch the oracle builds.
