@@ -1529,6 +1529,12 @@ class ExperimentConfig(NamedTuple):
     # measured to deliver about a tenth of the solved flux.  With it off the mesh
     # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
+    # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
+    # surface parameters (LAI, canopy height, soil-colour albedo from the top
+    # soil layer's wetness) from the surfdata climatology at every land step,
+    # as the offline LMIP calibration of those tables does.  Off = the start
+    # day's parameters for the whole run (January leaf area all year).
+    mpas_land_params_refresh: bool = True
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -3011,6 +3017,16 @@ class ExperimentConfig(NamedTuple):
                         f"{self.turbulence!r} takes no 'surface_flux' argument "
                         f"and refuses them at run time. Use one of {_flux_ok}."
                     )
+            if (self.mpas_land_params_refresh and self.use_multilayer_land
+                    and self.land_surface_scheme != "two_leaf"):
+                errors.append(
+                    "mpas_land_params_refresh=True rebuilds the two-leaf "
+                    "canopy's parameters from the surfdata climatology each "
+                    f"land step; land_surface_scheme={self.land_surface_scheme!r} "
+                    "takes its parameters from another provider, which this "
+                    "refresh does not rebuild. Set mpas_land_params_refresh="
+                    "false for this scheme."
+                )
             if self.mpas_land_beta_soil:
                 # Traced beta_soil needs the multilayer land producing it and
                 # the turbulence surface flux consuming it (inert-corner
