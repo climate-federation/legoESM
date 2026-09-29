@@ -24,7 +24,7 @@ class MinimizationResult(NamedTuple):
     history: jax.Array        # Cost at each iteration, shape (max_iter,)
     # True when the minimizer stopped because the line search found no step
     # meeting the Armijo condition (x is the last accepted point). L-BFGS stops
-    # on the first such failure; CG first retries a unit-length steepest step.
+    # on the first such failure; CG first retries a steepest step capped at unit length.
     line_search_failed: jax.Array = jnp.array(False)
 
 
@@ -188,14 +188,15 @@ def minimize_lbfgs(
 
         # Initial Hessian approximation: gamma * I
         # gamma = (s_{k-1} . y_{k-1}) / (y_{k-1} . y_{k-1}); with no pairs yet,
-        # a unit-length first step (gamma = 1/||g||, as in L-BFGS-B) so a
-        # badly scaled cost does not exhaust the backtracking on step one.
+        # cap the first step at unit length (gamma = min(1, 1/||g||)) so a
+        # badly scaled cost does not exhaust the backtracking on step one,
+        # without enlarging a small gradient past -g.
         last_idx = (state.n_pairs - 1) % m
         gamma = jnp.where(
             state.n_pairs > 0,
             jnp.sum(state.S[last_idx] * state.Y[last_idx])
             / jnp.maximum(jnp.sum(state.Y[last_idx] * state.Y[last_idx]), _TINY),
-            1.0 / jnp.maximum(jnp.linalg.norm(state.g), _TINY),
+            jnp.minimum(1.0, 1.0 / jnp.maximum(jnp.linalg.norm(state.g), _TINY)),
         )
         r = gamma * q
 
@@ -308,8 +309,8 @@ def minimize_cg(
         k: jax.Array
         history: jax.Array
         converged: jax.Array
-        retry: jax.Array    # previous step was rejected; d = -z, tried at unit length
-        stalled: jax.Array  # line search failed on that unit-length retry
+        retry: jax.Array    # previous step was rejected; d = -z, tried capped at unit length
+        stalled: jax.Array  # line search failed on that retry
 
     init_state = CGState(
         x=x0, f=f0, g=g0, z=z0, d=d0,
@@ -326,13 +327,15 @@ def minimize_cg(
 
     def body_fn(state):
         # Line search. A step without sufficient decrease is rejected: keep
-        # the current point and retry along steepest descent scaled to unit
+        # the current point and retry along steepest descent capped at unit
         # length (a badly scaled cost can exhaust the backtracking from
-        # alpha = 1); if that retry also fails, stop (``stalled``). Steps that
-        # pass on the first try are unchanged.
+        # alpha = 1; a short direction is not enlarged); if that retry also
+        # fails, stop (``stalled``). Steps that pass on the first try are
+        # unchanged.
         d_try = jnp.where(
             state.retry,
-            state.d / jnp.maximum(jnp.linalg.norm(state.d), _TINY),
+            state.d * jnp.minimum(
+                1.0, 1.0 / jnp.maximum(jnp.linalg.norm(state.d), _TINY)),
             state.d,
         )
         _, f_ls, g_ls, x_ls, armijo_ok = _backtracking_line_search(
@@ -354,7 +357,7 @@ def minimize_cg(
         beta = jnp.maximum(beta, 0.0)  # Restart if beta < 0
         beta = jnp.where(armijo_ok, beta, 0.0)  # restart after a rejected step
 
-        d_new = -z_new + beta * state.d
+        d_new = -z_new + beta * d_try  # the direction actually stepped along
 
         new_k = state.k + 1
         history_new = state.history.at[jnp.minimum(new_k, max_iter - 1)].set(f_new)
