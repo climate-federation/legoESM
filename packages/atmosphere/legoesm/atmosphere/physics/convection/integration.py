@@ -72,7 +72,8 @@ def land_fraction_for_columns(grid, ncol, scheme_config=None):
         # callbacks, so this is a tripwire, not a guarantee, off that path.
         if lf is not None:
             if isinstance(lf, jax.core.Tracer):
-                jax.debug.callback(_refuse_aquaplanet_land, lf)
+                # one bool to host per call, not the whole mask
+                jax.debug.callback(_refuse_aquaplanet_land, jnp.any(lf > 0))
             else:
                 _refuse_aquaplanet_land(lf)
         return None

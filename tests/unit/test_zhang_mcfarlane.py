@@ -462,24 +462,24 @@ def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
     assert "q_r" not in tt
     dq_c = tt["q_c"].data
     assert bool((dq_c >= 0.0).all()), "q_c must receive only the detrained cloud water"
-    # Ratchet at the measured residual (1.19e-7 of the precipitation, x64):
-    # any growth fails here. The exact budget is asserted, and currently
-    # xfails, in the test below, which names the open defect.
+    # This fixture is float32; its residual (1.19e-7 of the precipitation) is
+    # float32 roundoff, hence ~8 float32 ulps here. The exact budget is
+    # asserted in float64 below.
     dp = sigma.layer_thickness_dp(state.p_s.data)
     sink = -jnp.sum((tt["q_v"].data + dq_c) * dp, axis=-1) / constants.g
-    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=2e-7, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-6, atol=1e-14)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "OPEN: the ZM water budget misses by 1.19e-7 of the precipitation on the "
-    "hydro-bridge fixture (x64). NOT the zm_conv_evap flux clip: removing it "
-    "leaves the residual unchanged. It is already inside zm_convr: column "
-    "rain production sum(rprd) differs from the moisture removed "
-    "-sum(dqdt + dlf) by 3.3e-8 (and from its prec by 1.1e-7). Cause not "
-    "yet identified."))
-def test_zm_convr_rain_production_closes_the_moisture_budget():
+def test_zm_column_water_budget_closes_in_float64():
+    """The fixture above is float32 (its 1.19e-7 residual is float32
+    roundoff, measured: every ZM field is float32 there). Cast to float64 the
+    budget must close to 1e-9."""
     n, nlev = 4, 12
     state, grid, sigma = _convecting_3d_state(n, nlev)
+    state = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.float64)
+        if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x, state)
+    assert state.p_s.data.dtype == jnp.float64
     physics_fn = make_physics(_make_zm_only_config(), model_type="hydrostatic", dt=300.0)
     ps = init_physics_state(6 * n * n, nlev, _make_zm_only_config())
     tend, _ = physics_fn(state, grid, sigma, phys_state=ps)
