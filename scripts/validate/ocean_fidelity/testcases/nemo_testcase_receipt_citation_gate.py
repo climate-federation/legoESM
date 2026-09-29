@@ -814,6 +814,18 @@ FILES = {
         NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90"),
     "VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90": (
         NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynzdf.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynzdf.f90"),
+    # --- The vector-EEN VORTEX card's own build (decision 73, round 3). ---
+    "VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90"),
+    "VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90"),
+    "vortex_round3/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3/"
+        "namelist_cfg"),
     "eosbn2.F90": _OCE / "TRA/eosbn2.F90",
     "restart.F90": _OCE / "IOM/restart.F90",
     "tests/VORTEX/MY_SRC/usrdef_hgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_hgr.F90",
@@ -3829,6 +3841,18 @@ CITATION_MAP = {
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:955-968': ['SELECT CASE( nvor_scheme )', ('& ff_f(ji-1,jj-1) / (e3f_0vor(ji-1,jj-1,jk)', 1), 14],
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158-161': ['pe1t(:,:) = rn_dy', 'pe1f(:,:) = rn_dy', 4],
     'vortex_round2/namelist_cfg:128-138': ['&nameos', 'rn_nu       =  0.', 11],
+    # --- VORTEX round 3 (decision 73): the vector-EEN card, and the walk that
+    # attributes the flux card's second step. ---
+    'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:184-190': [('ioptio = 0                      ! parameter control and set n_dynadv', 1), ("IF( ioptio /= 1 )   CALL ctl_stop( 'choose ONE and only ONE advection scheme' )", 1), 7],
+    'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:135-138': [('CASE( np_VEC_c2  )                                                         != vector form =!', 1), ('CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 1), 4],
+    'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:861-864': [('CASE( np_VEC_c2  )', 1), ('ntot = np_CRV        ! relative + planetary vorticity', 1), 4],
+    'vortex_round3/namelist_cfg:182-185': [('ln_dynadv_vec = .true.  !  decision 73: ORCA2/GYRE vector-invariant momentum', 1), ('ln_dynadv_up3 = .false. !  decision 73: exactly one advection form (dynadv.F90:190)', 1), 4],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:239': ('r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )   ! at N+1/2 (Kmm)', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:405': ('IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:412-418': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)             ! barotropic velocity correction', 1), ('vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 1), 7],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynzdf.f90:143-147': [('ELSE                                      ! applied on thickness weighted velocity', 1), ('&              /          ( 1._wp + r3u(ji,jj,Kaa) ) * umask(ji,jj,jk)', 1), 5],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynzdf.f90:159-161': [('DO jk =      1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)      ! remove barotropic velocities', 1), ('pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji,jj,jk)', 1), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynzdf.f90:191-195': [('DO jk =    2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)            ! inner values', 1), ('&           / ( (e3t_1d(jk  ) *(1._wp+r3u(ji  ,jj,Kaa)*umask(ji  ,jj,jk  ))) * (e3w_1d(jk+1) *(1._wp+r3u(ji,jj,Kmm))) ) * wumask(ji,jj,jk+1)', 1), 5],
     'tests/VORTEX/MY_SRC/usrdef_nam.F90:96-97': [
         'kpi = NINT( 1800.e3  / rn_dx ) + 3',
         'kpj = NINT( 1800.e3  / rn_dy ) + 3',
