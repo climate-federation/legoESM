@@ -462,17 +462,32 @@ def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
     assert "q_r" not in tt
     dq_c = tt["q_c"].data
     assert bool((dq_c >= 0.0).all()), "q_c must receive only the detrained cloud water"
-    dq_v = tt["q_v"].data
+    # This fixture is float32; its residual (1.19e-7 of the precipitation) is
+    # float32 roundoff, hence ~8 float32 ulps here. The exact budget is
+    # asserted in float64 below.
     dp = sigma.layer_thickness_dp(state.p_s.data)
-    sink = -jnp.sum((dq_v + dq_c) * dp, axis=-1) / constants.g
-    # rtol 1e-6, not 1e-9: CAM's zm_conv_evap caps evaporation at the falling
-    # flux, then clips the flux at 0 after adding the net production
-    # (zm_conv_evap.F90:224; oracle transcription kept in the port) without
-    # adjusting the tendency, so where a negative net production (rprd)
-    # empties the flux the column gains that water.  Measured on this state: 1.2e-7 of the
-    # precipitation with CAM's specific-humidity qsat (the clip did not bind
-    # with the former mixing-ratio qsat).  A real booking error is O(1).
+    sink = -jnp.sum((tt["q_v"].data + dq_c) * dp, axis=-1) / constants.g
     np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-6, atol=1e-14)
+
+
+def test_zm_column_water_budget_closes_in_float64():
+    """The fixture above is float32 (its 1.19e-7 residual is float32
+    roundoff, measured: every ZM field is float32 there). Cast to float64 the
+    budget must close to 1e-9."""
+    n, nlev = 4, 12
+    state, grid, sigma = _convecting_3d_state(n, nlev)
+    state = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.float64)
+        if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x, state)
+    assert state.p_s.data.dtype == jnp.float64
+    physics_fn = make_physics(_make_zm_only_config(), model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(6 * n * n, nlev, _make_zm_only_config())
+    tend, _ = physics_fn(state, grid, sigma, phys_state=ps)
+    tt = tend.tracer_tendencies
+    dp = sigma.layer_thickness_dp(state.p_s.data)
+    sink = -jnp.sum((tt["q_v"].data + tt["q_c"].data) * dp, axis=-1) / constants.g
+    np.testing.assert_allclose(np.asarray(tend.precip.data), np.asarray(sink),
+                               rtol=1e-9, atol=1e-14)
 
 
 def test_cubed_sphere_grid_carries_land_frac_to_zm():
@@ -565,6 +580,28 @@ def test_combined_physics_lane_aquaplanet_runs_under_none_and_refuses_land():
     state, grid_land, sigma = _convecting_3d_state(n, nlev, land_frac=1.0)
     with pytest.raises(ValueError, match="aquaplanet"):
         physics_fn(state, grid_land, sigma, phys_state=ps)
+
+
+def test_combined_physics_lane_aquaplanet_refuses_land_under_jit():
+    """With the grid a jit argument its land mask is traced; the aquaplanet
+    guard must still refuse land (at run time) instead of running ocean
+    coefficients everywhere."""
+    import equinox as eqx
+
+    n, nlev = 4, 12
+    cfg = _make_zm_only_config("none")
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    ps = init_physics_state(6 * n * n, nlev, cfg)
+
+    @eqx.filter_jit
+    def step(s, g, p):
+        return physics_fn(s, g, sigma, phys_state=p)[0].dT_dt.data
+
+    state, grid_ocean, sigma = _convecting_3d_state(n, nlev, land_frac=0.0)
+    assert bool(jnp.isfinite(step(state, grid_ocean, ps)).all())
+    state, grid_land, sigma = _convecting_3d_state(n, nlev, land_frac=1.0)
+    with pytest.raises(Exception, match="aquaplanet"):
+        jax.block_until_ready(step(state, grid_land, ps))
 
 
 def _zm_driver_config(grid_type, resolution, dycore_kw):
