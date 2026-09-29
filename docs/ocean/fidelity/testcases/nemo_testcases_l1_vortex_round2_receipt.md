@@ -342,6 +342,14 @@ is the check that matters because this step edited the gate itself:
 | LOCK_EXCHANGE-zco | all AT-BAR | all AT-BAR | none through kt=3 |
 | OVERFLOW-zps | all AT-BAR | T 7.816e-15 DEBT, u 7.069e-12 DEBT | kt=2, T and u |
 
+Both were re-run AGAIN after the review fixes, and OVERFLOW the second time
+with its owner-hunt arm switched ON -- which is the only way to execute the
+record-reader call site both reviewers flagged. It returns the same three
+numbers to every digit: `T 7.816e-15`, `u 7.069e-12`, first over bar at kt=2
+on T and u, with sea surface height at `4.163e-17` and still at bar. So the
+repaired path runs and the repair is inert on the certified numbers, which is
+what a correctness fix to a checker should be.
+
 OVERFLOW's kt=2 debt is its OWN known one, which decision 71 assigns to a
 separate tank round; this step neither moved it nor touched it. Both tanks'
 meridional velocity row reports UNMEASURED, which is the gate correctly saying
