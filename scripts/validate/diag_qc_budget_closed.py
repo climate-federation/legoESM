@@ -255,7 +255,7 @@ def main():
         #    hybrid lane, so report what the model USES and what it would give.
         from legoesm.grids.vertical import (
             vertical_advection_hybrid, vertical_advection_hybrid_sb,
-            compute_mass_flux_from_cumsum, HybridSigmaPressureCoordinate)
+            vertical_advection_hybrid_van_leer, compute_mass_flux_from_cumsum, HybridSigmaPressureCoordinate)
         from legoesm.core.operators_voronoi import (
             divergence_cell_3d, cell_to_edge_avg_3d)
         u_3d = jnp.asarray(state.u.data)
@@ -264,6 +264,9 @@ def main():
         if isinstance(sc, HybridSigmaPressureCoordinate):
             mf = compute_mass_flux_from_cumsum(cumsum_dp, cumsum_dp[..., -1:], sc)
             u["vertical transport (in use)"] = band_rate(
+                np.asarray(vertical_advection_hybrid_van_leer(q_c, mf, p_s, sc)),
+                dp, A, g, band) * _DAY
+            u["vertical transport (old upwind)"] = band_rate(
                 np.asarray(vertical_advection_hybrid(q_c, mf, p_s, sc)),
                 dp, A, g, band) * _DAY
             u["vertical transport (conservative)"] = band_rate(

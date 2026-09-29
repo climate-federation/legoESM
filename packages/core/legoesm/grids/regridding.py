@@ -1090,8 +1090,12 @@ def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
     v = field if has_layers else field[:, :, None]            # (ns_lat, ns_lon, L)
 
     # Latitude weight uses sin(lat) (true cell-area measure); longitude is periodic.
-    w_lat = _overlap_matrix(np.sin(np.deg2rad(_cell_edges(src_lat))),
-                            np.sin(np.deg2rad(_cell_edges(tgt_lat))))   # (n_tgt_lat, n_src_lat)
+    # Edges clipped to the poles: a pole-centred row extrapolates to +/-90.5,
+    # where sin folds back and the cap would get zero width.
+    def _sin_lat_edges(lat):
+        return np.sin(np.deg2rad(np.clip(_cell_edges(lat), -90.0, 90.0)))
+    w_lat = _overlap_matrix(_sin_lat_edges(src_lat),
+                            _sin_lat_edges(tgt_lat))   # (n_tgt_lat, n_src_lat)
     w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon),
                             periodic_span=360.0)                        # (n_tgt_lon, n_src_lon)
 

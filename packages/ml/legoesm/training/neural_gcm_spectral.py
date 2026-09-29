@@ -1695,7 +1695,7 @@ def spectral_rollout(
         else:
             _rad_accepts = set(_sig.parameters)
 
-    def _call_rad(s, t_seconds, step_idx=None):
+    def _call_rad(s, t_seconds, step_idx=None, phys_state=None):
         # ``forcing_base`` (when the caller supplies one) carries the
         # prescribed surface temperature and the scene's real calendar; the
         # per-step dict advances that calendar by the elapsed rollout time,
@@ -1708,9 +1708,21 @@ def spectral_rollout(
                 _rad_accepts is None or "forcing" in _rad_accepts):
             _kw["forcing"] = _forcing_at(
                 jnp.asarray(0.0 if step_idx is None else step_idx))
+        # The LAGGED physics carry (CLUBB cloud fraction, CAM6 deepcu
+        # inputs) for a radiation fn that reads it; a stateless caller
+        # passes None and the kwarg is omitted so older signatures still
+        # bind.
+        if phys_state is not None and (
+                _rad_accepts is None or "phys_state" in _rad_accepts):
+            _kw["phys_state"] = phys_state
         return rad_physics_fn(s, grid, sigma_coord, **_kw)
 
-    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds, 0.0)
+    # Deferred: the stateful branch below must seed the physics carry
+    # FIRST and hand it to this call, because a radiation fn that reads
+    # the carry (cam6_clubb) refuses to run without it.
+    def _init_rad(phys_state=None):
+        return _call_rad(initial_state, sim_time_offset_seconds, 0.0,
+                         phys_state)
 
     # Cast the (Python-float) offset into the same dtype the gated
     # branch uses, so the radiation diurnal cycle sees a single
@@ -1764,7 +1776,7 @@ def spectral_rollout(
             new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
         return new_state
 
-    def _rad_refresh(state, cached_rad_tendency, step_idx):
+    def _rad_refresh(state, cached_rad_tendency, step_idx, phys_state=None):
         # Refresh rad tendency at the start of every gating window.
         # ``lax.cond`` retains backward-mode differentiability through
         # the rad branch; on skipped steps the cached tensor flows
@@ -1779,7 +1791,7 @@ def spectral_rollout(
         sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
         return jax.lax.cond(
             should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds, step_idx),
+            lambda _: _call_rad(state, sim_time_seconds, step_idx, phys_state),
             lambda _: cached_rad_tendency,
             operand=None,
         )
@@ -1800,7 +1812,11 @@ def spectral_rollout(
 
     def step_fn_gated_stateful(carry, step_idx):
         state, cached_rad_tendency, phys_state = carry
-        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+        # Radiation reads the carry ENTERING the step (lagged, as the
+        # hydrostatic chain does): the previous step's published cloud
+        # fraction and deep-convection carries.
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx,
+                                        phys_state)
 
         # Harvest the updated prognostic physics state ONCE per step, on
         # the PRE-STEP state (operator-split convention: all RK stages of
@@ -1891,6 +1907,34 @@ def spectral_rollout(
                 _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
                 phys0 = _ps_init(_ncol, _nlev)
         phys0 = _with_prescribed_sfc(phys0)
+        # FILL THE CARRY FIRST (owner decision 2026-09-24).  A radiation fn
+        # that reads the carry (cam6_clubb: CLUBB's PDF cloud fraction, ZM's
+        # mass flux / in-cloud water) would otherwise see the ZERO seed for
+        # its whole first gating window -- at cadence 6 that is 3 h of a 6 h
+        # training sample with no liquid or deep cloud in radiation.  One
+        # non-radiative physics pass on the initial state publishes real
+        # values before the first radiation call.  Only for a FRESH seed (a
+        # chained caller's carry already holds the previous segment's values)
+        # and only when radiation actually reads the carry, so every other
+        # stateful arm is byte-identical.  Production AMIP cold-starts from the
+        # zero seed too; this is a deliberate departure for the training lane,
+        # where the transient would be half of every sample.
+        # The WHOLE carry from that pass is kept (owner decision 2026-09-24,
+        # after the reviewers split): the alternative -- taking only the
+        # three fields radiation reads -- would hand step 0 a carry whose
+        # cloud fraction was diagnosed from moments the carry then does not
+        # hold.  The cost of the whole pass is one extra relaxation step of
+        # every prognostic carry (CLUBB moments, convection profile, GWD
+        # spectrum) and one extra draw of the stochastic key, on an
+        # atmosphere that has not moved.
+        if phys_state_in is None and getattr(
+                rad_physics_fn, "_wants_phys_state_ro", False):
+            _warm = jax.checkpoint(
+                lambda ps: _ps_entry(initial_state, grid, sigma_coord, ps)[1],
+                prevent_cse=True,
+                policy=jax.checkpoint_policies.nothing_saveable,
+            )
+            phys0 = _warm(phys0)
         step_fn_ckpt = jax.checkpoint(
             step_fn_gated_stateful,
             prevent_cse=True,
@@ -1898,7 +1942,7 @@ def spectral_rollout(
         )
         (final_state, _, final_ps), _ = jax.lax.scan(
             step_fn_ckpt,
-            (initial_state, init_rad_tendency, phys0),
+            (initial_state, _init_rad(phys0), phys0),
             jnp.arange(n_steps),
         )
         if return_phys_state:
@@ -1920,7 +1964,7 @@ def spectral_rollout(
 
     (final_state, _), _ = jax.lax.scan(
         step_fn_ckpt,
-        (initial_state, init_rad_tendency),
+        (initial_state, _init_rad()),
         jnp.arange(n_steps),
     )
     return final_state

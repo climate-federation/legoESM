@@ -369,36 +369,32 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         return sum(f.coeffs.size for f in self.fields.values())
 
 
-def land_mask_from_phis(
-    phis: jax.Array,
-    *,
-    smooth: bool = True,
-    sharpness: float = 1.0e-2,
-) -> jax.Array:
-    """Derive a (soft) land mask from surface geopotential.
+def era5_land_fraction(grid, era5_config=None, *, ds=None) -> jax.Array:
+    """ERA5 land-sea mask on ``grid``, shape (n_lat, n_lon).
 
-    ``phis = g * z_s`` so positive ``phis`` indicates surface above sea
-    level (land).  For differentiability we default to a smooth
-    sigmoid in ``phis`` with a sharpness chosen so the transition zone
-    is roughly one model layer wide (~10 m elevation).
-
-    Parameters
-    ----------
-    phis : jax.Array
-        Surface geopotential, shape ``(n_lat, n_lon)`` [m^2/s^2].
-    smooth : bool
-        If True, use a sigmoid (differentiable).  If False, use a
-        hard step (non-differentiable).
-    sharpness : float
-        Sigmoid sharpness in 1/(m^2/s^2).  At ``sharpness=1e-2`` the
-        transition width in elevation is ~10 m (since
-        d(sigmoid)/d(phis)|_0 = sharpness/4 and phis = g*z_s).
-
-    Returns
-    -------
-    jax.Array
-        Land fraction in [0, 1], shape ``(n_lat, n_lon)``.
+    Read from ``era5_config``'s store (default: the WB2 store) or from an
+    already-open ``ds``, and regridded exactly as the WB classical arm feeds
+    it to ZM.  Not ``phis > 0``: on the smoothed orography that marked 72 %
+    of T21 columns as land.
     """
-    if smooth:
-        return jax.nn.sigmoid(sharpness * phis)
-    return jnp.where(phis > 0.0, 1.0, 0.0)
+    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+    from legoesm.training.scale_build import prescribed_surface_planes
+
+    cfg = (era5_config or TrainingERA5Config())._replace(load_land_frac=True)
+    sl = load_era5_slice(cfg, 0, ds=ds)
+    return prescribed_surface_planes(sl, grid)["land_frac"]
+
+
+def grid_with_zm_land_fraction(grid, convection_scheme: str, land=None):
+    """``grid`` carrying the column land fraction Zhang-McFarlane needs.
+
+    ZM picks its autoconversion coefficient per column from the land fraction
+    and refuses to run without one; the AIMIP Gaussian grid carries none.
+    ``land`` is :func:`era5_land_fraction` (loaded here when not given).  Any
+    other convection scheme gets ``grid`` back unchanged, with no store access.
+    """
+    if convection_scheme != "zhang_mcfarlane":
+        return grid
+    if land is None:
+        land = era5_land_fraction(grid)
+    return grid._replace(land_frac=jnp.asarray(land).reshape(-1))

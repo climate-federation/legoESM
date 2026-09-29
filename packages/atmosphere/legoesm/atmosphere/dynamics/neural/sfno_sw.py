@@ -35,6 +35,7 @@ from legoesm.ml.normalization import (
 )
 from legoesm.ml.channel_packing import pack_sw_state, unpack_sw_output
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.atmosphere.dynamics.neural.sfno_pe import check_state_update_dt
 
 
 class SFNOShallowWaterConfig(NamedTuple):
@@ -48,8 +49,8 @@ class SFNOShallowWaterConfig(NamedTuple):
         "state_update" or "hybrid_tendencies".
     dt_sfno : float
         Time step for SFNO predictions [s]. In state_update mode,
-        this is the interval between SFNO calls. In hybrid mode,
-        this is the SFNO tendency evaluation interval.
+        this is the interval between SFNO calls, and ``step`` refuses any
+        other ``dt``. Unused in hybrid mode (the integrator uses ``dt``).
     g : float
         Gravitational acceleration [m/s^2].
     use_normalization : bool
@@ -127,6 +128,7 @@ class SFNOShallowWaterModel:
             Advanced state.
         """
         if self.config.mode == "state_update":
+            check_state_update_dt(dt, self.config.dt_sfno)
             return self._step_state_update(state)
         elif self.config.mode == "hybrid_tendencies":
             return self._step_hybrid(state, dt)

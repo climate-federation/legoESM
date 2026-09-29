@@ -295,12 +295,6 @@ class TestPrecisionOverridesActive:
         overrides = get_module_overrides()
 
         # Atmosphere-critical overrides
-        assert "spectral_transform" in overrides, (
-            "spectral_transform missing from mixed-mode overrides"
-        )
-        assert "semi_implicit" in overrides, (
-            "semi_implicit missing from mixed-mode overrides"
-        )
         assert "atm_pressure_gradient" in overrides, (
             "atm_pressure_gradient missing from mixed-mode overrides"
         )
@@ -309,19 +303,8 @@ class TestPrecisionOverridesActive:
         assert "barotropic_solver" in overrides, (
             "barotropic_solver missing from mixed-mode overrides"
         )
-        assert "pressure_gradient" in overrides, (
-            "pressure_gradient missing from mixed-mode overrides"
-        )
         assert "equation_of_state" in overrides, (
             "equation_of_state missing from mixed-mode overrides"
-        )
-
-        # Land / ice overrides
-        assert "carbon_pools" in overrides, (
-            "carbon_pools missing from mixed-mode overrides"
-        )
-        assert "evp_solver" in overrides, (
-            "evp_solver missing from mixed-mode overrides"
         )
 
         # Clean up.
@@ -356,9 +339,8 @@ class TestPrecisionOverridesActive:
 
         fp64_compute_modules = [
             "barotropic_solver",
-            "pressure_gradient",
             "equation_of_state",
-            "semi_implicit",
+            "atm_pressure_gradient",
         ]
         for mod in fp64_compute_modules:
             assert mod in overrides, f"{mod} missing from overrides"

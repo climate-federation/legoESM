@@ -116,7 +116,6 @@ __param_spec__ = {
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
-            "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
             "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
@@ -853,7 +852,6 @@ class KPPConfig(NamedTuple):
     K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
-    c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
     # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
     # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so

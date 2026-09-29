@@ -202,6 +202,32 @@ __param_spec__ = {
     "CLUBBParams": {
         "scheme_key": "atm.turb.CLUBBParams",
         "excluded": {
+            "C10": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C13": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C7_Lscale0": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_N2": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_N2_wp2": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_N2_xp2": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_bkgnd": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_sfc": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_shear": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_wpxp_N2_thresh": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "C_invrs_tau_wpxp_Ri": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "Lscale_mu_coef": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "Lscale_pert_coef": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "alpha_corr": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "c_K10h": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "coef_spread_DG_means_rt": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "coef_spread_DG_means_thl": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "mult_coef": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "omicron": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "pdf_component_stdev_factor_w": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "slope_coef_spread_DG_means_w": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "upsilon_precip_frac_rat": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "wpxp_Ri_exp": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "xp3_coef_base": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "xp3_coef_slope": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "z_displace": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
             "C8b": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
             "C_invrs_tau_N2_clear_wp3": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
             "C_invrs_tau_N2_wpxp": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
@@ -229,12 +255,10 @@ __param_spec__ = {
         },
         "params": {
             "C1": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 1, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
-            "C10": {"units": "1", "bounds": (1.0, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C11": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C11b": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C11c": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C12": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
-            "C13": {"units": "1", "bounds": (0.02, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C14": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 1, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C1b": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C1c": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
@@ -251,61 +275,37 @@ __param_spec__ = {
             "C6thlb": {"units": "1", "bounds": (1.0, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C6thlc": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C7": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
-            "C7_Lscale0": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "lscale_zero_blend", "reference": "CLUBB Lscale->0 pressure-term blending coefficients (parameters_tunable.F90)", "shape": None},
             "C7b": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C7c": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C8": {"units": "1", "bounds": (1.0, 8.0), "tunable_tier": 1, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
-            "C_invrs_tau_N2": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_N2_wp2": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_N2_xp2": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_bkgnd": {"units": "1", "bounds": (0.1, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_sfc": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_shear": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_wpxp_N2_thresh": {"units": "1/s^2", "bounds": (1e-05, 0.001), "tunable_tier": 3, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
-            "C_invrs_tau_wpxp_Ri": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB inverse dissipation-time-scale coefficients C_invrs_tau_* (Guo et al. 2021 tau reformulation)", "shape": None},
             "C_uu_buoy": {"units": "1", "bounds": (0.05, 0.8), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C_uu_shr": {"units": "1", "bounds": (0.05, 0.8), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
             "C_wp3_pr_turb": {"units": "1", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "pressure_correlation", "reference": "Golaz, Larson & Cotton (2002) CLUBB pressure/return-to-isotropy C-coefficients (parameters_tunable.F90)", "shape": None},
-            "Lscale_mu_coef": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
-            "Lscale_pert_coef": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
             "Skw_max_mag": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "a_const": {"units": "1", "bounds": (1.0, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "alpha_corr": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "beta": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 1, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "bv_efold": {"units": "1", "bounds": (1.0, 20.0), "tunable_tier": 3, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
             "c_K": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K1": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K10": {"units": "1", "bounds": (0.05, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
-            "c_K10h": {"units": "1", "bounds": (0.05, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K2": {"units": "1", "bounds": (0.01, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K6": {"units": "1", "bounds": (0.05, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K8": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
             "c_K9": {"units": "1", "bounds": (0.02, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB eddy-diffusivity coefficients c_K* (Km = c_K*·L·sqrt(TKE); parameters_tunable.F90)", "shape": None},
-            "coef_spread_DG_means_rt": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
-            "coef_spread_DG_means_thl": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "gamma_coef": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 1, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "gamma_coefb": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "gamma_coefc": {"units": "1", "bounds": (1.0, 10.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "lambda0_stability_coef": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
             "lmin_coef": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
             "mu": {"units": "1/m", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
-            "mult_coef": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB parcel buoyant-sorting mixing-length coefficients (Larson et al.; parameters_tunable.F90)", "shape": None},
             "nu1": {"units": "m^2/s", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu2": {"units": "m^2/s", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu6": {"units": "m^2/s", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu8": {"units": "m^2/s", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu9": {"units": "m^2/s", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
-            "omicron": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "pdf_component_stdev_factor_w": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
-            "slope_coef_spread_DG_means_w": {"units": "1", "bounds": (5.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pdf_closure", "reference": "Larson & Golaz (2005) ADG1 assumed-PDF spread/skewness coefficients", "shape": None},
             "thlp2_rad_coef": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "radiation_coupling", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
             "up2_sfc_coef": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "upsilon_precip_frac_rat": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
             "wpxp_L_thresh": {"units": "m", "bounds": (10.0, 200.0), "tunable_tier": 3, "transform": "sigmoid", "category": "lscale_zero_blend", "reference": "CLUBB Lscale->0 pressure-term blending coefficients (parameters_tunable.F90)", "shape": None},
-            "wpxp_Ri_exp": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "dissipation_timescale", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "xp3_coef_base": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "xp3_coef_slope": {"units": "1", "bounds": (0.0, 0.1), "tunable_tier": 3, "transform": "sigmoid", "category": "pdf_closure", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
-            "z_displace": {"units": "m", "bounds": (0.0, 100.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing_length", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
         },
     },
     "CLUBBConfig": {
@@ -1479,8 +1479,12 @@ def _compute_lscale_up_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, nzt,
 ):
-    """``Lscale_up`` for a single column (outer scan over launch levels)."""
-    def outer_step(max_alt, k_py):
+    """``Lscale_up`` for a single column.
+
+    Launch levels are independent, so they run together (``vmap``); only the
+    running-max smoother is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k + CAPE_incr_1_up[k_py + 1]
 
@@ -1513,15 +1517,18 @@ def _compute_lscale_up_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_up_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(max_alt, k_and_l):
+        k_py, Lscale_up_k = k_and_l
         k_alt = zt[k_py] + Lscale_up_k
         Lscale_up_k_smooth = jnp.where(k_alt < max_alt, max_alt - zt[k_py], Lscale_up_k)
         new_max_alt = jnp.where(k_alt < max_alt, max_alt, k_alt)
         return new_max_alt, Lscale_up_k_smooth
 
+    ks = jnp.arange(nzt - 2)
     _, vals = jax.lax.scan(
-        outer_step, jnp.zeros((), dtype=zt.dtype), jnp.arange(nzt - 2))
+        smooth_step, jnp.zeros((), dtype=zt.dtype), (ks, jax.vmap(lscale_k)(ks)))
     return jnp.concatenate([vals, jnp.full(2, _ZLMIN, dtype=zt.dtype)])
 
 
@@ -1579,10 +1586,12 @@ def _compute_lscale_down_col(
     grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
     dzm, invrs_dzm, zt, k_ub_zt_py, k_lb_zt_py, nzt,
 ):
-    """``Lscale_down`` for a single column (outer scan descending from the top)."""
-    def outer_step(min_alt, i):
-        k_py = nzt - 1 - i
+    """``Lscale_down`` for a single column.
 
+    Launch levels run together (``vmap``); only the running-min smoother,
+    descending from the top, is sequential.
+    """
+    def lscale_k(k_py):
         tke_i_k = tke_i_col[k_py]
         tke_0 = tke_i_k - CAPE_incr_1_down[k_py - 1]
 
@@ -1613,15 +1622,19 @@ def _compute_lscale_down_col(
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
-        Lscale_down_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+        return jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
 
+    def smooth_step(min_alt, k_and_l):
+        k_py, Lscale_down_k = k_and_l
         k_alt = zt[k_py] - Lscale_down_k
         Lscale_down_k_smooth = jnp.where(k_alt > min_alt, zt[k_py] - min_alt, Lscale_down_k)
         new_min_alt = jnp.where(k_alt > min_alt, min_alt, k_alt)
         return new_min_alt, (k_py, Lscale_down_k_smooth)
 
+    ks = nzt - 1 - jnp.arange(nzt - 1)
     init_min_alt = zt[k_ub_zt_py]
-    _, (k_indices, vals) = jax.lax.scan(outer_step, init_min_alt, jnp.arange(nzt - 1))
+    _, (k_indices, vals) = jax.lax.scan(
+        smooth_step, init_min_alt, (ks, jax.vmap(lscale_k)(ks)))
     col = jnp.full(nzt, _ZLMIN, dtype=zt.dtype)
     return col.at[k_indices].set(vals)
 

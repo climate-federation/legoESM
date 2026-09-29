@@ -33,7 +33,6 @@ __param_spec__ = {
         "excluded": {
             "B_h_momentum": "default 0 = disabled/off (enable via config, not training)",
             "B_h_tracer": "default 0 = disabled/off (enable via config, not training)",
-            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
@@ -67,6 +66,7 @@ __param_spec__ = {
             "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
             "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
+            "redi_aht0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO 5.0.1 ldftra.F90:415-441 nn_aht_ijk_t=21 (Treguier 1997 scaling); aht0 = 1/2*rn_Ud*rn_Ld; ORCA1 = 900 (0.5*0.018 m/s*100 km); bounds as the eddy-induced aei0", "shape": None},
         },
     },
 }
@@ -109,8 +109,7 @@ class BiharmonicConfig(NamedTuple):
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
-    enforce_cfl: bool = False
-    cfl_dt_estimate: float = 3600.0
+    enforce_cfl: bool = True    # Cap B at the explicit limit for the run's dt
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
     compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 

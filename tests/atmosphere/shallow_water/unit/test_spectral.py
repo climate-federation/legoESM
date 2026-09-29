@@ -430,3 +430,37 @@ class TestSpectralSW:
         grad_fn = jax.grad(loss_fn)
         g = grad_fn(state.vor_hat.data)
         assert jnp.all(jnp.isfinite(g))
+
+
+class TestTruncationScaledHyperdiffDefault:
+    """Default hyperdiff_coeff = 2.338e15 * (21/n_max)**4 (repo convention)."""
+
+    def test_t21_is_historical_value_bit_for_bit(self):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        assert default_hyperdiff_coeff(create_gaussian_grid(21)) == 2.338e15
+
+    @pytest.mark.parametrize("n, expected", [(42, 1.46125e14), (5, 7.275145248e17)])
+    def test_scales_as_inverse_fourth_power(self, n, expected):
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        assert default_hyperdiff_coeff(create_gaussian_grid(n)) == pytest.approx(
+            expected, rel=1e-14)
+
+    def test_model_resolves_default_and_keeps_explicit(self):
+        grid_t10 = create_gaussian_grid(n_max=10)
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        m = SpectralShallowWaterModel(grid_t10)
+        assert m.config.hyperdiff_coeff == default_hyperdiff_coeff(grid_t10)
+        m0 = SpectralShallowWaterModel(grid_t10, SpectralSWConfig(hyperdiff_coeff=0.0))
+        assert m0.config.hyperdiff_coeff == 0.0
+        m1 = SpectralShallowWaterModel(grid_t10, SpectralSWConfig(hyperdiff_coeff=1.0e16))
+        assert m1.config.hyperdiff_coeff == 1.0e16
+
+    def test_tendency_default_equals_explicit_resolved(self):
+        grid_t10 = create_gaussian_grid(n_max=10)
+        from legoesm.atmosphere.dynamics.gcm.spectral_sw import default_hyperdiff_coeff
+        state = williamson_test5_spectral(grid_t10)
+        t_def = spectral_sw_tendencies(state, grid_t10, SpectralSWConfig())
+        t_exp = spectral_sw_tendencies(state, grid_t10, SpectralSWConfig(
+            hyperdiff_coeff=default_hyperdiff_coeff(grid_t10)))
+        np.testing.assert_array_equal(np.asarray(t_def.vor_hat.data),
+                                      np.asarray(t_exp.vor_hat.data))

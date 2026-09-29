@@ -81,25 +81,6 @@ def test_conservative_operator_conserves_in_flux_form_and_advective_does_not():
         "two operators have become identical and the lever is inert")
 
 
-def test_tracer_path_on_the_hybrid_lane_ignores_the_scheme_selector():
-    """Source check: the conservative lever reaches temperature, not tracers.
-
-    Reading the source rather than the tendency because the defect IS the
-    absence of an argument.  If someone routes tracers through the selector
-    this test goes red and should be deleted along with the defect.
-    """
-    root = Path(__file__).resolve().parents[2]
-    src = (root / "packages" / "atmosphere" / "legoesm" / "atmosphere"
-           / "dynamics" / "gcm" / "primitive_eq_mpas.py").read_text()
-    # Temperature consumes it.
-    assert 'conservative=(_vert_scheme == "sb")' in src, (
-        "the temperature path no longer reads the scheme selector")
-    # The hybrid tracer call still takes no scheme argument.
-    assert "lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord)" in src, (
-        "the hybrid tracer vertical advection call changed; re-check whether "
-        "tracers now honour vert_advection_scheme and update this test")
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
 
@@ -123,7 +104,7 @@ def test_conservative_operator_is_not_positivity_preserving_on_sparse_condensate
     import jax.numpy as jnp
     from legoesm.grids.vertical import (
         make_cam6_l32_levels, vertical_advection_hybrid,
-        vertical_advection_hybrid_sb)
+        vertical_advection_hybrid_sb, vertical_advection_hybrid_van_leer)
 
     coord = make_cam6_l32_levels()
     nlev = coord.A_full.shape[0]
@@ -141,3 +122,7 @@ def test_conservative_operator_is_not_positivity_preserving_on_sparse_condensate
     assert float(jnp.min(q_sb)) < 0.0, (
         "if this passes, the conservative form has gained a limiter and the "
         "positivity caveat on rerouting tracers can be dropped")
+    q_vl = q + dt * vertical_advection_hybrid_van_leer(q, mf, p_s, coord)
+    assert float(jnp.min(q_vl)) >= 0.0, (
+        "the limited conservative operator the MPAS tracer path now uses must "
+        "stay non-negative on the case that defeats the centered one")

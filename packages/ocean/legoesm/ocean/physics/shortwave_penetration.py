@@ -937,6 +937,7 @@ def shortwave_penetration_tendency(
     rho_0: float = _RHO_0_DEFAULT,
     c_sw: float = _C_SW_DEFAULT,
     z_half_stretch: jnp.ndarray | None = None,
+    dz_live: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute 3D temperature tendency from subsurface SW absorption.
 
@@ -969,6 +970,15 @@ def shortwave_penetration_tendency(
         kt=57601 twin (#1226 ``tra_sbc_tem_piece_decompose.py`` Part 2b): the
         live ladder shrinks the all-levels pointwise-|rel| err_norm median
         2.022e-05 -> 4.979e-07 (~40x, below the c_p-truncation floor).
+    dz_live : array, shape (..., nlev) or None
+        Live (z*/partial-cell) layer thickness [m], zero below the seabed
+        (``vertical.compute_layer_thickness``).  When given, the profile is
+        evaluated at the live interface depths, cells with ``dz_live = 0``
+        receive nothing, and the light reaching the seabed is deposited in
+        the deepest WET cell (same face masking as the rgb_chl/sweeney
+        kernels).  Without it, the reference ladder is used and the remainder
+        goes to array level ``nlev-1``, which on partial cells is below the
+        seabed.  ``dz_ref``/``z_half_ref``/``jacobian`` are then unused.
 
     Returns
     -------
@@ -1000,6 +1010,19 @@ def shortwave_penetration_tendency(
     R = params.R
     zeta1 = params.zeta1
     zeta2 = params.zeta2
+
+    if dz_live is not None:
+        if z_half_stretch is not None:
+            raise ValueError("pass either dz_live or z_half_stretch, not both")
+        dz_live = jnp.asarray(dz_live)
+        z_face = -jnp.concatenate(
+            [jnp.zeros_like(dz_live[..., :1]), jnp.cumsum(dz_live, axis=-1)],
+            axis=-1)                                           # (..., nlev+1), <= 0
+        I_face = R * precision_exp(z_face / zeta1) + (1.0 - R) * precision_exp(z_face / zeta2)
+        wet = jnp.asarray(dz_live > 0.0, dtype=dz_live.dtype)
+        return _absorbed_tendency_from_faces(
+            I_face, jnp.asarray(sw_down, dtype=dz_live.dtype), wet, dz_live,
+            rho_0, c_sw)
 
     # Interface depths (negative), shape (nlev+1,) for the STATIC reference
     # ladder, or (..., nlev+1) once a per-column live stretch is applied.
@@ -1057,6 +1080,12 @@ def shortwave_penetration_tendency(
     return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)
 
 
+# --- top_layer_absorbed_fraction evaluation column (numerics, not physics) ---
+# Thickness of the second layer of the two-layer probe column [m]; deep
+# enough that every band is fully absorbed before the bottom.
+_TOP_FRACTION_DEEP_LAYER_M = 1.0e4
+
+
 def top_layer_absorbed_fraction(dz_top, chl_surface=None,
                                 config: ShortwavePenetrationConfig | None = None):
     """Fraction of the net surface shortwave absorbed in the TOP ocean layer
@@ -1068,9 +1097,7 @@ def top_layer_absorbed_fraction(dz_top, chl_surface=None,
     the sea-ice lead heat budget (NEMO icesbc zqld adds ``(1-A)*qsr*frq_m``).
     """
     dz_top = jnp.asarray(dz_top, dtype=jnp.float64)
-    # A numerics device, not an optical coefficient: the lower layer of the
-    # two-layer probe column stands in for the rest of the ocean.
-    deep = 1.0e4  # coeff-ok: synthetic semi-infinite lower layer [m]
+    deep = _TOP_FRACTION_DEEP_LAYER_M
     if chl_surface is not None:
         chl = jnp.asarray(chl_surface, dtype=jnp.float64)
         shape = jnp.broadcast_shapes(chl.shape, dz_top.shape)

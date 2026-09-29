@@ -103,6 +103,40 @@ class FV3DuoConfig(NamedTuple):
     #: automatically by Kessler in the driver (user 2026-09-24), never a
     #: knob there.
     moist: bool = False
+    #: Vertical coordinate table (2026-09-27, route A M4): "analytic" is
+    #: the certified set_eta_analytic branch (km in {5, 10}, fv_eta.F90:
+    #: 334-344); "cam6_l32" is CAM6's L32 hybrid table (CESM2
+    #: cam_vcoords_L32_c180105: ak = A*1e5 Pa, bk = B, top 225.5 Pa,
+    #: 15 pure-pressure interfaces), km must be 32.  The step reads
+    #: ak/bk/ptop generically (no ks); the L32 deck is NOT
+    #: Fortran-certified -- rung 4 gates it (rest states, DCMIP16 km=32).
+    eta: str = "analytic"
+
+
+def duo_eta_table(eta: str, km: int):
+    """``(ak [Pa], bk, ptop [Pa])`` for :class:`FV3DuoConfig.eta`.
+
+    ``"analytic"``: :func:`set_eta_analytic` (km in {5, 10}, raises
+    otherwise).  ``"cam6_l32"``: the CAM6 L32 interface table, km == 32;
+    the top 15 interfaces are pure pressure (bk exactly 0.0, so
+    ``pe = ak + bk*ps`` is ps-independent there without any ``ks``
+    branch -- gated by a test that perturbs ps).
+    """
+    if eta == "analytic":
+        ak, bk, ptop, _ks = set_eta_analytic(km)
+        return np.asarray(ak, dtype=np.float64), np.asarray(bk, dtype=np.float64), float(ptop)
+    if eta == "cam6_l32":
+        from legoesm import constants
+        from legoesm.grids.vertical import CAM6_L32_HYAI, CAM6_L32_HYBI
+        if km != 32:
+            raise ValueError(
+                f"FV3DuoConfig(eta='cam6_l32') is the 32-level table; got "
+                f"km={km}")
+        ak = np.asarray(CAM6_L32_HYAI, dtype=np.float64) * constants.p_ref
+        bk = np.asarray(CAM6_L32_HYBI, dtype=np.float64)
+        return ak, bk, float(ak[0])
+    raise ValueError(
+        f"FV3DuoConfig.eta={eta!r}: expected 'analytic' or 'cam6_l32'")
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
@@ -219,8 +253,7 @@ class FV3DuoDynamicsModel:
             raise ValueError(
                 f"k_split={config.k_split} / n_split={config.n_split} must "
                 f"both be >= 1 (fv_dynamics.F90:451 / dyn_core.F90:337).")
-        # km in {5, 10} — set_eta_analytic raises with the fv_eta citation.
-        ak, bk, ptop, _ks = set_eta_analytic(config.km)
+        ak, bk, ptop = duo_eta_table(config.eta, config.km)
 
         self.grid = grid
         self.config = config
@@ -321,6 +354,21 @@ class FV3DuoDynamicsModel:
             batched=step_face_batched,
             zvir=self.zvir, sphum_index=(0 if config.moist else None),
         )
+
+    @property
+    def ak(self) -> np.ndarray:
+        """Hybrid ``ak`` interface coefficients [Pa], ``(km+1,)``."""
+        return self._ak
+
+    @property
+    def bk(self) -> np.ndarray:
+        """Hybrid ``bk`` interface coefficients, ``(km+1,)``."""
+        return self._bk
+
+    @property
+    def ptop(self) -> float:
+        """Model-top pressure [Pa] (``ak[0]``)."""
+        return self._ptop
 
     @property
     def zvir(self) -> float:

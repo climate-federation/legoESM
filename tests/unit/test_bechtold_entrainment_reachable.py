@@ -130,35 +130,26 @@ def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
     assert defaults.delta_deep != 1.8e-4
 
 
-def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
-    """`cape_relaxation_sink` and the ratio it scales have no consumer.
-
-    Nothing in the scheme reads them, so a tunable entry would be a search
-    dimension that can move nothing — a zero-gradient leaf handed to an
-    optimiser. The fields stay (the driver pipeline passes them to the
-    constructor); the tunable classification does not.
+def test_the_unread_cape_sink_fields_are_gone():
+    """`cape_relaxation_sink` and the ratio it scaled had no consumer, so they
+    were deleted rather than left as a lever that moves nothing (a
+    zero-gradient leaf for an optimiser, an inert switch for a deck).  Scanned
+    across the whole convection package so a reintroduction anywhere trips.
     """
-    import inspect
+    import pathlib
 
     import legoesm.atmosphere.physics.convection.bechtold as bechtold
     import legoesm.atmosphere.physics.convection.config as cc
 
     blk = _bechtold_spec()
-    assert "cape_sink_heating_ratio" not in blk["params"]
-    assert "cape_sink_heating_ratio" in blk["excluded"]
-    # And the reason is still true: promote it only together with a consumer.
-    # Scanned across the whole convection package, not just the one module, so
-    # a reader landing in a sibling file still trips this.
-    import pathlib
+    for name in ("cape_relaxation_sink", "cape_sink_heating_ratio"):
+        assert not hasattr(cc.BechtoldConfig(), name)
+        assert name not in blk["params"] and name not in blk["excluded"]
     pkg = pathlib.Path(bechtold.__file__).parent
     for path in sorted(pkg.rglob("*.py")):
-        if path.name == "config.py":
-            continue                     # where the fields are declared
         src = path.read_text(errors="replace")
         assert "cape_relaxation_sink" not in src, path.name
         assert "cape_sink_heating_ratio" not in src, path.name
-    assert inspect.ismodule(bechtold)
-    assert hasattr(cc.BechtoldConfig(), "cape_sink_heating_ratio")
 
 
 def test_the_unread_polar_cap_flag_is_gone():

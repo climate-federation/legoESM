@@ -210,6 +210,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     config: OceanConfig = OceanConfig(),
     physics_fn=None,
     surface_forcing=None,
+    dt: float | None = None,
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies using C-D grid operators.
 
@@ -743,7 +744,12 @@ def ocean_baroclinic_tendencies_cdgrid(
 
     # --- 17b. Physics tendencies (surface forcing, bottom drag, etc.) ---
     if physics_fn is not None:
-        phys = physics_fn(state, grid, z_coord, surface_forcing)
+        # dt (the run's timestep) is forwarded only when known, so custom
+        # physics_fns without a dt argument keep working on dt-free calls.
+        if dt is None:
+            phys = physics_fn(state, grid, z_coord, surface_forcing)
+        else:
+            phys = physics_fn(state, grid, z_coord, surface_forcing, dt=dt)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data
