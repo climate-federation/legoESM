@@ -126,6 +126,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/traadv_cen.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/fldread.f90"),
@@ -1310,6 +1316,19 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:670-680': [
         ('SELECT CASE( kstg )', 4),
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 11],
+    # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
+        '! FCT at last stage only with RK3',
+        'CALL tra_adv_cen ( kt, nit000', 45],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:149-155': [
+        'CASE(  2  )',
+        'ztFv(ji,jj) = 0.5_wp * pV', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:157-161': [
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) -',
+        '/ (e3t_3d(ji,jj,jk)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:202-228': [
+        'IF( lk_linssh ) THEN',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) - ztFu', 27],
     # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
