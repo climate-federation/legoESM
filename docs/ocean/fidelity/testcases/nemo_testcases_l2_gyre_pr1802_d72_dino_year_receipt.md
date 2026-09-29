@@ -1,16 +1,15 @@
 # PR #1802 — decision 72, and the DINO year re-run
 
-**Status: D72 LANDED.  THE DINO YEAR RE-RUN WAS ATTEMPTED AND IS STILL
-REFUSED — and the refusal is neither a mesh defect nor a guard defect.**
+**Status: D72 LANDED.  THE DINO FROM-REST YEAR RE-RAN AND COMPLETED on the
+card the certification actually uses.**
 
 Decision 72 is done and proven by value on the three columns it is about.
-The DINO year certification was then re-run as asked; it refuses, and this
-round measured WHY rather than repairing the detector.  The answer changes the
-question: the geometry operand the guard rejects is finite and positive at
-every call through the fifth step, the model's own STATE goes non-finite at
-the output of that fifth step, and GitHub `main` does the same thing silently.
-The guard is doing its job; the DINO from-rest run is what is broken, and it
-was broken before this branch existed.
+The DINO year certification was re-run; on its own card, the MLF one, it
+completes all 360 days at this tip.  A first attempt used the Euler card
+through a different driver, hit that card's already-registered fifth-step
+instability, and its "the year cannot run" conclusion is RETRACTED below.
+This round's change is measured bit-inert on both DINO cards, so no DINO
+number here is attributable to it.
 
 Nothing in the certified set moved.  GYRE's ladder, all 360 of its daily year
 snapshots and both tank ladders are byte-identical to the previous round's
@@ -91,78 +90,68 @@ coincidence.
 
 ## The DINO year certification — re-run, refused, and diagnosed
 
-**The protocol.**  `dino_year_screen_fullframe.py nemo_dino_kamm <out.npz>`,
-11,520 steps of 2,700 s from the analytic rest state on NEMO's own DINO mesh,
-scored by `compare_fullframe.py`; the year-5 form of it is the table in
-`docs/ocean/fidelity/dino_handoff_2026_07.md` (ACC 65.6 Sv, SST correlation
-0.995, bias −0.17 K, sea-surface-height small-scale ratio 0.86).
+**RETRACTION, kept loud.**  An earlier draft of this section said the DINO
+from-rest year "cannot complete on either tree".  That is WRONG, and the
+coordinator caught it.  It ran the wrong card through the wrong driver.  The
+certified from-rest year artifact
+(`/data/abyssal/dbalwada/dino_fromrest_y1/verdict360_fromrest/phase0_floor.json`)
+names its own producer: `run_dino.py` with the deck
+`scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml` and the recipe
+`nemo_dino_kamm_mlf` — the MLF card, not the Euler card — recorded in that
+run's `run_metadata.json`.  The first attempt used
+`dino_year_screen_fullframe.py` with `nemo_dino_kamm`, the EULER card, which
+is a different card and a different driver.
 
-**The guard that refuses.**  The fail-closed positivity check on the raw-mesh
-thickness operand inside the shared NEMO `bn2` routine,
-packages/ocean/legoesm/ocean/eos.py
-(`compute_buoyancy_frequency_nemo_bn2`, the `e3w_source="mesh_reference"`
-arm): *"raw-mesh e3w_int must contain only finite values > 0"*.
+**What the Euler card's failure actually was, and why it is not news.**  On
+`nemo_dino_kamm` the operand the geometry guard rejects is finite and positive
+at all six of its call sites through step 5; the model's own state goes
+non-finite at the OUTPUT of step 5 (T 268 cells, S 268, u 334, v 333), with the
+peak current running 0.034 → 0.050 → 0.062 → 1.126 → 4.737e24 m/s; the guard
+fires at step 6 as a downstream detector.  Round 184 had already registered
+exactly this — "the `nemo_dino_kamm` Euler card's shared fifth-step
+implicit-solve instability" — and had already recorded the MLF card as stable.
+So the measurement reproduced a known, owned defect on a card the year
+certification does not use.  The guard is behaving correctly and was not
+loosened.  Evidence: `logs/dino_fromrest_trace.log`.  For completeness, the
+same Euler screen on GitHub `main` reaches day 30 entirely non-finite without
+stopping (`logs/dino_main_fromrest.log`), so that card's instability is not
+this branch's either.
 
-**The measurement.**  The round-182 instrument was reused rather than
-re-written; it needed one argument (`--script`) so it could wrap the from-rest
-year screen as well as the developed-state 90-day twin it already wrapped.  It
-labels every Python call site that reaches that routine and prints, per
-execution, the operand's minimum and its non-finite / zero / negative counts,
-alongside a non-finite census of the model state at the step boundaries.
-Log: `phase3/pr1802_dino_year/logs/dino_fromrest_trace.log`.
+**The certified protocol, re-run on the card it actually uses.**  `run_dino.py
+--config scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml --grid latlon
+--recipe nemo_dino_kamm_mlf --n-lon 50 --nemo-faithful-grid --allow-multiyear
+--days 360 --snapshot-every-days 30 --dt 2700`, on this round's final tip.
+**It completes all 11,520 steps and writes all thirteen snapshots.**  Scored by
+`twin_nemo_ts_maps.py --run-dino-dir` against NEMO's own from-rest year, the
+same comparator and the same NEMO records the pinned artifact used
+(`RUN_TRAJ` kt 960 for day 30, `RUN_FROMREST_Y1` kt 11520 for day 360).
 
-Six call sites reach the routine per step: the TKE step-entry N² bundle, and
-five GM/Redi native-slope sites (the Tréguier kappa, the slope N², and the K33
-assembly).  Per step, in execution order:
+| wet 3-D temperature rms vs NEMO [K] | pinned artifact | this tip |
+|---|---|---|
+| day 30 | `2.039e-03` | `6.982e-03` |
+| day 360 | `3.924e-03` | `7.590e-03` |
 
-| step | operand non-finite cells, all six calls | state at step OUT | max abs u [m/s] |
-|---|---|---|---|
-| 1 | 0 | all finite | `3.405e-02` |
-| 2 | 0 | all finite | `5.024e-02` |
-| 3 | 0 | all finite | `6.175e-02` |
-| 4 | 0 | all finite | `1.126e+00` |
-| 5 | 0 | **T 268, S 268, u 334, v 333 non-finite** | `4.737e+24` |
-| 6 | 347,200 | — | refusal |
+**Those two columns are NOT a controlled pair, and the difference is NOT
+attributable to this round.**  The pinned artifact was produced at PR #1728,
+many lane commits ago, by a tree this round did not run; the year receipt
+itself already records a later re-measurement of day 30 on the fixed card at
+`6.889e-04` K, so the pinned day-30 number had already moved twice before this
+round began.  What IS attributable is measured directly and by value: **this
+round's change is bit-inert on both DINO cards.**  Both select NEMO's overwrite
+(`tke_nemo_mxl0_rmxl_min_overwrite=True`), so their anchor floor resolves to
+`0.009999999999999998` m — exactly the value the unconditional pre-change code
+computed, since it equals `_mixing_length_floor` on those cards to the last
+bit.  No DINO trajectory can move, and no before-arm year run is needed to say
+so.
 
-**So: NEITHER.**  The raw-mesh operand is genuinely finite and positive
-wherever the model is; it is not a DINO mesh defect, and the guard is not
-reading the wrong operand.  It is reading the right operand one step after the
-model destroyed itself.  The velocity grows by a factor of eighteen between
-steps 3 and 4 and overflows at step 5: that is an explosive numerical
-instability in the from-rest DINO run, and the guard is its first detector.
-**The guard was therefore not loosened and no geometry "fix" was written.**
-
-**The control that settles ownership.**  The identical screen, same recipe,
-same NEMO mesh, same environment, run from the GitHub `main` checkout
-(`d7109d9b0`) with main's own committed harness:
-
-> `y1 day  30.0  T[nan,nan] usurf[nan,nan] max|u|=nan max|v|=nan max|eta|=nan finite=False`
-
-`main` reaches day 30 with the whole field NaN and does not stop.
-
-Stated no more strongly than it was measured, because the second reviewer
-pushed back on exactly this:
-
-* **CONFIRMED** — the lane's state is non-finite at the output of step 5, and
-  `main`'s whole field is non-finite by day 30 on the same card, the same
-  mesh and the same harness.  So a from-rest DINO run that completes a year
-  does not exist on either tree, and the year certification is not blocked by
-  something this round or this branch introduced.
-* **PLAUSIBLE, not measured** — that `main` fails at step 5 too, and by the
-  same mechanism.  Only the lane arm was instrumented, and the two trees
-  differ in far more than this guard; `main` simply has no fail-closed
-  positivity check on this path to stop it.  Attributing the two failures to
-  one cause would need `main` instrumented as well, which is the first step of
-  the follow-up round named in OPEN.
-
-Log: `logs/dino_main_fromrest.log`.
-
-**What this means for the DINO numbers.**  There are no new DINO year numbers
-to report, old or new: the run cannot complete on either tree, so no ACC,
-correlation or ratio exists to compare against the certified 65.6 Sv / 0.995 /
-0.86.  The DINO evidence that DOES exist at this tip is the developed-state
-90-day twin, re-run here on the after arm (below).  The year certification
-stays BLOCKED, now with its root named instead of attributed to geometry.
+**CONFIRMED / PLAUSIBLE, kept separate.**  CONFIRMED: the certified card runs
+the full from-rest year at this tip; the Euler card's state is non-finite at
+the output of step 5; this round's change resolves to the identical anchor
+floor on both DINO cards.  PLAUSIBLE, not measured: that the day-30 and
+day-360 differences from the pinned table are owned by intervening lane work
+rather than by anything in this PR — nothing here was run at the pinned tree's
+commit, so that is an inference, and the follow-up is a controlled before/after
+year pair if anyone wants the attribution.
 
 ---
 
@@ -310,9 +299,10 @@ Carried forward unchanged from the previous round, each pre-existing:
   a reference-salinity literal, same ratchet.
 * `tests/ocean/unit/test_tke_carried_coefficients.py::test_step_entry_n2_bundle_*`
   (two).
-* **NEW, and it is a finding rather than a red test: the DINO from-rest year
-  screen goes non-finite at step 5 on this tree and on GitHub `main`.**  See
-  the DINO section.
+* The `nemo_dino_kamm` Euler card's fifth-step implicit-solve instability,
+  already registered by round 184 and reproduced here on this tree and on
+  GitHub `main`.  It does not touch the certified from-rest year, which runs on
+  the MLF card.
 
 ## Behaviour changes for the PR body
 
@@ -326,18 +316,25 @@ Carried forward unchanged from the previous round, each pre-existing:
 2. **No other production behaviour changes.**  GYRE, both tanks, ORCA2 and both
    DINO cards take NEMO's overwrite exactly as before; their certified numbers
    are byte-identical.
-3. **The DINO year certification is still not re-run, and the reason is now
-   measured.**  The from-rest DINO run destroys its own state at step 5 on this
-   branch AND on GitHub `main`; this branch refuses loudly where main produces
-   NaN silently.  No geometry guard was loosened.
+3. **The DINO from-rest year certification was re-run and completes.**  On its
+   own card (the MLF one) it runs all 360 days at this tip; its temperature gap
+   against NEMO is `6.982e-03` K at day 30 and `7.590e-03` K at day 360.  Those
+   differ from the pinned table, but the pinned table predates this branch by
+   many commits and the gap had already been re-measured once before this
+   round, so nothing here is attributable to this PR — and this round's change
+   is measured bit-inert on both DINO cards.  The separate Euler-card
+   fifth-step instability round 184 registered is reproduced, unchanged, on
+   this tree and on GitHub main.
 
 ## OPEN
 
-1. **The from-rest DINO instability.**  Its own round: bisect the first step
-   whose tendency is already wrong (the state is clean through step 3 and
-   visibly wrong by step 4), on both trees, and decide whether the certified
-   year-5 numbers can be reproduced at all on the current card.  Until then the
-   DINO evidence for this PR is the 90-day developed twin.
-2. The three items the previous round left open: decision 67's real statement
+1. **The `nemo_dino_kamm` Euler card's fifth-step instability**, already
+   registered by round 184: bisect the first step whose tendency is wrong (the
+   state is clean through step 3 and visibly wrong by step 4) on both trees.
+   It does not block the year certification, which runs on the MLF card.
+2. **Attribute the DINO from-rest year's drift from the pinned table**, if it
+   matters: a controlled before/after year pair, since the pinned numbers come
+   from a tree many commits old and were already re-measured once.
+3. The two items the previous round left open: decision 67's real statement
    (the velocity-sum branch), and refreshing the two committed tank trajectory
    reference documents, which are older than the tip they are compared against.
