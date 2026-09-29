@@ -1730,6 +1730,12 @@ def set_corner_fill_mode(mode: str) -> None:
             f"Unknown corner fill mode: {mode!r}.  "
             f"Choose from {CORNER_FILL_MODES}."
         )
+    if _corner_fill_claimed is not None and mode != _corner_fill_claimed:
+        raise ValueError(
+            f"corner fill mode {mode!r} conflicts with corner_fill="
+            f"{_corner_fill_claimed!r} of a model already built in this "
+            f"process; the mode is process-global, so run them in separate "
+            f"processes.")
     _corner_fill_mode = mode
 
 

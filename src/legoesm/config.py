@@ -345,6 +345,7 @@ class Config:
         sub-config assembly and field defaulting belong to ``from_dict``.
         """
         from legoesm.driver.config import experiment_config_from_dict
+        from legoesm.runtime.config import precision_mode_from_yaml_config
 
         d = self._data
         atm = d.get("atmosphere", {})
@@ -435,6 +436,7 @@ class Config:
                 "checkpoint_format": output_cfg.get("checkpoint_format", "npz"),
             },
             "days": int(time_cfg.get("duration_hours", 120) / 24),
+            "precision": precision_mode_from_yaml_config(self),
             "start_day": float(time_cfg.get("start_day", 0.0)),
             "seed": int(d.get("seed", 0)),  # master RNG seed (reproducibility)
             "dataset": forcing.get("dataset", "analytical"),

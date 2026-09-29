@@ -1245,9 +1245,11 @@ class ModelDriver:
             )
         self.config = config
         # Cube-vertex halo fill is a module global read at trace time, so it
-        # is applied here, before anything is traced.
-        from legoesm.grids.halo import apply_corner_fill_config
-        apply_corner_fill_config(config.dycore.corner_fill)
+        # is applied here, before anything is traced.  Only the cubed-sphere
+        # grid has cube vertices; other grids neither use nor claim it.
+        if canonical_grid_type == "cubed_sphere":
+            from legoesm.grids.halo import apply_corner_fill_config
+            apply_corner_fill_config(config.dycore.corner_fill)
         # Snapshot the INPUT config (post grid-normalization, which is
         # idempotent) before setup() mutates self.config in place — e.g. the
         # CFL-driven dt reduction in _create_dycore.  The run manifest records

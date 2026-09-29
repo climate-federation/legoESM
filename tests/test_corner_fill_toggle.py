@@ -327,8 +327,9 @@ def test_traced_corner_fill_mode_reaches_the_run_manifest(monkeypatch, tmp_path)
     monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
     monkeypatch.setattr(halo, "_corner_fill_claimed", None)
     monkeypatch.setattr(halo, "_corner_fill_traced", set())
-    driver = ModelDriver(ExperimentConfig())
-    set_corner_fill_mode("fv3_agrid_xdir")          # changed after the build
+    from legoesm.driver.config import DycoreConfig
+    driver = ModelDriver(ExperimentConfig(
+        dycore=DycoreConfig(corner_fill="fv3_agrid_xdir")))
     jax.jit(halo.fill_corners_h1)(jnp.zeros((6, 6, 6)))
     driver._output_dir = tmp_path
     driver._mpi_rank = None
@@ -338,3 +339,34 @@ def test_traced_corner_fill_mode_reaches_the_run_manifest(monkeypatch, tmp_path)
     assert manifest["result"]["corner_fill_traced"] == ["fv3_agrid_xdir"]
     from legoesm.driver.restart import validate_run_manifest
     validate_run_manifest(manifest)               # the extra key stays valid
+
+
+def test_setter_cannot_change_a_mode_a_model_claimed(monkeypatch):
+    """After a model claimed its mode, the public setter must not retarget the
+    fill under it (codex review of #1811); re-setting the same mode is fine."""
+    import legoesm.grids.halo as halo
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+    monkeypatch.delenv("LEGOESM_CORNER_FILL", raising=False)
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    ModelDriver(ExperimentConfig(dycore=DycoreConfig(corner_fill="avg")))
+    with pytest.raises(ValueError, match="already built in this process"):
+        set_corner_fill_mode("fv3_agrid_xdir")
+    set_corner_fill_mode("avg")
+    assert get_corner_fill_mode() == "avg"
+
+
+def test_non_cube_driver_neither_checks_nor_claims_corner_fill(monkeypatch):
+    """The cube-vertex fill does nothing off the cubed sphere, so an MPAS model
+    must build even with a conflicting env var or another claimed mode."""
+    import legoesm.grids.halo as halo
+    from legoesm.driver.config import ExperimentConfig, GridConfig
+    from legoesm.driver.model_driver import ModelDriver
+    monkeypatch.setenv("LEGOESM_CORNER_FILL", "fv3_agrid_xdir")
+    monkeypatch.setattr(halo, "_corner_fill_mode", halo._corner_fill_mode)
+    ModelDriver(ExperimentConfig(grid=GridConfig(grid_type="mpas")))
+    assert halo._corner_fill_claimed is None
+    monkeypatch.delenv("LEGOESM_CORNER_FILL")
+    monkeypatch.setattr(halo, "_corner_fill_claimed", "fv3_bgrid_xdir")
+    ModelDriver(ExperimentConfig(grid=GridConfig(grid_type="mpas")))
+    assert halo._corner_fill_claimed == "fv3_bgrid_xdir"
