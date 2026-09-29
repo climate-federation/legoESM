@@ -1319,16 +1319,16 @@ CITATION_MAP = {
     # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
         '! FCT at last stage only with RK3',
-        'CALL tra_adv_cen ( kt, nit000', 45],
+        ('ENDIF', 27), 45],
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:149-155': [
-        'CASE(  2  )',
-        'ztFv(ji,jj) = 0.5_wp * pV', 7],
+        ('CASE(  2  )                         !* 2nd order centered', 1),
+        ('END DO   ;   END DO', 1), 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:157-161': [
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) -',
-        '/ (e3t_3d(ji,jj,jk)', 5],
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)                     ! Horizontal divergence of advective fluxes',
+        ('END DO   ;   END DO', 2), 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:202-228': [
-        'IF( lk_linssh ) THEN',
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) - ztFu', 27],
+        'IF( lk_linssh ) THEN                !* top value   (linear free surf. only as zwz is multiplied by wmask)',
+        ('END DO   ;   END DO', 9), 27],
     # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
