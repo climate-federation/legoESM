@@ -1034,16 +1034,23 @@ def _make_mpas_turbulence(
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
-            if forcing.get("evap_land") is not None:
-                # The land model's own water flux: blend it with the ocean
-                # half's bulk water (lhflx / L_v(T_sfc), the same inverse the
-                # kernel applies) and hand the kernel the mass flux directly.
-                from legoesm.thermo import latent_heat_vaporization as _lv_T
-                _ev_land = jnp.asarray(
-                    forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
-                _ev_blend = ((1.0 - _fl) * _lh / _lv_T(T_sfc) + _fl * _ev_land)
-                step_config = step_config._replace(surface=step_config.surface._replace(
-                    prescribed_evap_kg_m2_s=_ev_blend))
+            if forcing.get("evap_land") is None:
+                raise ValueError(
+                    "MPAS land coupling: forcing['lhflx_land'] must come with "
+                    "forcing['evap_land'] (the land's own water flux); inverting "
+                    "the land latent heat with the ocean's L_v(T_sfc) loses the "
+                    "snow-sublimation and canopy shares of the water.")
+            # The land model's own water flux, blended with the ocean half's bulk
+            # water (lhflx / L_v(T_sfc): the exact inverse of the bulk charge,
+            # taken BEFORE the heat blend), handed to the kernel as mass.  Land
+            # values over pure-ocean cells may be NaN/undefined: masked out.
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _ev_land = jnp.asarray(
+                forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
+            _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
+            _ev_blend = ((1.0 - _fl) * _lh / _lv_T(T_sfc) + _fl * _ev_land)
+            step_config = step_config._replace(surface=step_config.surface._replace(
+                prescribed_evap_kg_m2_s=_ev_blend))
             _sh_land = jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells)
             _surface_flux = (
                 _tx, _ty,

@@ -523,7 +523,8 @@ def compute_tiled_surface_fluxes(
     config_ice: SurfaceLayerConfig,
     config_land: SurfaceLayerConfig,
     z_low=None,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    return_water: bool = False,
+):
     """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
 
     Computes the turbulent surface fluxes SEPARATELY on each tile (each
@@ -606,4 +607,14 @@ def compute_tiled_surface_fluxes(
     tau_mag = jnp.sqrt(tau_x ** 2 + tau_y ** 2)
     ustar = jnp.sqrt(tau_mag / jnp.maximum(rho, 1e-6))  # coeff-ok: density floor [kg/m^3]
 
-    return tau_x, tau_y, shflx, lhflx, ustar
+    if not return_water:
+        return tau_x, tau_y, shflx, lhflx, ustar
+    # The blended WATER flux: each tile's latent heat inverted with the L_v of
+    # ITS OWN surface temperature (what its bulk law charged), then area
+    # weighted.  Dividing the blended heat by one L_v(T_blend) is not the same
+    # number on a mixed cell; the kernel takes this as its moisture BC.
+    from legoesm.thermo import latent_heat_vaporization
+    water = (tiles.frac_ocean * f_ocean[3] / latent_heat_vaporization(tiles.T_ocean)
+             + tiles.frac_ice * f_ice[3] / latent_heat_vaporization(tiles.T_ice)
+             + tiles.frac_land * f_land[3] / latent_heat_vaporization(tiles.T_land))
+    return (tau_x, tau_y, shflx, lhflx, ustar), water

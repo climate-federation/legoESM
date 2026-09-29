@@ -1005,7 +1005,7 @@ class PhysicsPipeline:
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None,
-                           q_sfc_land_override=None, z_low=None):
+                           q_sfc_land_override=None, z_low=None, return_water=False):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -1097,6 +1097,7 @@ class PhysicsPipeline:
         return compute_tiled_surface_fluxes(
             u_low, v_low, T_low, q_low, rho_low,
             tiles, ocean_cfg, ice_cfg, land_cfg, z_low=z_low,
+            return_water=return_water,
         )
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
@@ -2002,6 +2003,7 @@ class PhysicsPipeline:
             # tuple (louis / clubb_lite / clubb) by ExperimentConfig.validate_strict.
             # ``beta_land`` (None unless the soil-water bucket is active)
             # soil-moisture-limits the land tile's latent flux.
+            _tiled_water = None
             if (self.surface_tiled and self.f_land is not None
                     and T_land is not None):
                 # MULTILAYER land: override the land-tile surface humidity with
@@ -2012,11 +2014,12 @@ class PhysicsPipeline:
                                                land_ml_params=land_ml_params)
                     if land_ml is not None else None
                 )
-                _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
+                _turb_kwargs["surface_flux"], _tiled_water = self._tiled_surface_flux(
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
                     z_low=_lowest_level_height(z_full_col, z_half_col),
+                    return_water=True,
                 )
             # --- prescribed surface flux = the scheme's lower BC -------------
             # Fold the coupler/ERA5 overrides (grid-shaped; flattened to
@@ -2061,9 +2064,17 @@ class PhysicsPipeline:
                         None if sfc_lhflx_override is None
                         else ad.flatten_2d(sfc_lhflx_override)
                     ),
+                    # The moisture BC: the coupler's water when it prescribes it;
+                    # else, on the mosaic path, the per-tile-inverted water blend
+                    # (a mixed cell's blended heat over one L_v(T_blend) is not the
+                    # summed tile water); a heat-only override keeps the kernel's
+                    # own L_v(T_sfc) inverse of that override.
                     evap_kg_m2_s=(
-                        None if sfc_evap_override is None
-                        else ad.flatten_2d(sfc_evap_override)
+                        ad.flatten_2d(sfc_evap_override)
+                        if sfc_evap_override is not None
+                        else (_tiled_water if (sfc_lhflx_override is None
+                                               and _tiled_water is not None)
+                              else None)
                     ),
                     tau_x_pa=(
                         None if sfc_taux_override is None

@@ -21,6 +21,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from legoesm import constants
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -202,6 +204,8 @@ def _land_forcing(ncell, shflx=None, lhflx=None):
     if shflx is not None:
         f["shflx_land"] = jnp.full((ncell,), shflx)
         f["lhflx_land"] = jnp.full((ncell,), lhflx)
+        # The land's own water flux must accompany its latent heat (pair rule).
+        f["evap_land"] = jnp.full((ncell,), lhflx / constants.L_v)
     return f
 
 

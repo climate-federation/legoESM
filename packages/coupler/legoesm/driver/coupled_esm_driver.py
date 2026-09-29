@@ -2114,7 +2114,9 @@ class CoupledESMDriver:
         sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
         tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
         tau_y = f_ocean * tile.tau_y
-        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # The tile's own water flux (charged at L_v(SST) with its lhflx): the
+        # SAME mass the atmosphere receives through the water channel.
+        evap = f_ocean * tile.surface_mass_flux       # [kg/m²/s], +up (open water)
         # Precip over the ice fraction: WHERE it is counted depends on whether
         # the active ice model owns a snow reservoir.  Sign: +into ocean.  The
         # LAND and LAKE fractions are ALWAYS excluded here -- their precip is the

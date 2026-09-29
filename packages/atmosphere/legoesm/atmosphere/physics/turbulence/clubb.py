@@ -6425,8 +6425,10 @@ def clubb_step(
         tau_x, tau_y, shflx_b, lhflx_b, ustar_b = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
-        wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
         wprtp_b = surface_moisture_flux(config.surface, lhflx_b, T_sfc) / rho_sfc   # w'rt'  [kg/kg m/s]
+        # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+        wpthlp_b = ((shflx_b + latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc))
+                    / (rho_sfc * constants.c_pd * exner_sfc))  # w'thl' [K m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
         # momentum transported downward / drag), NOT -tau_x/rho.
@@ -6642,9 +6644,12 @@ def clubb_turbulence_prognostic(
             return sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp
         tau_x_sf, tau_y_sf, shflx_sf, lhflx_sf, _ = surface_flux
         rho_s = rho_local[:, -1]
+        _E_sf = surface_moisture_flux(config.surface, lhflx_sf, T_sfc)
         return (
-            shflx_sf / (rho_s * constants.c_pd * exner_sfc),   # w'thl' [K m/s]
-            surface_moisture_flux(config.surface, lhflx_sf, T_sfc) / rho_s,   # w'rt'  [kg/kg m/s]
+            # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+            (shflx_sf + latent_enthalpy_correction(lhflx_sf, _E_sf))
+            / (rho_s * constants.c_pd * exner_sfc),           # w'thl' [K m/s]
+            _E_sf / rho_s,                                     # w'rt'  [kg/kg m/s]
             tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
         )

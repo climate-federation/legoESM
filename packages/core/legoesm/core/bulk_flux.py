@@ -1243,12 +1243,11 @@ def compute_most_fluxes(
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
     # bulk wind incl. gust/floor, one raw wind component for direction and
     # magnitude); reduces to u/|U| exactly when U_eff == wind_speed.
-    # Thermodynamic convention (#762): the constants converting MOST scales
-    # into fluxes are part of the transcribed schemes' definitions.
-    # 'aerobulk' = the NEMO/AeroBulk/COARE set (SST-dependent L_vap, moist
-    # cp_air(q)); 'legoesm' = the historical constant L_v / dry c_pd
-    # (default, byte-identical).  An explicit ``L_latent`` always wins
-    # (the OMIP NEMO-parity path and the oracle tests inject their own).
+    # Thermodynamic convention (#762) now selects only the heat capacity:
+    # 'aerobulk' = NEMO/AeroBulk moist cp_air(q); 'legoesm' = dry c_pd.  The
+    # latent heat is the Kirchhoff L_v(T_sfc) in BOTH (user decision
+    # 2026-09-28); an explicit ``L_latent`` always wins (ice passes L_s, the
+    # OMIP NEMO-parity path and the oracle tests inject their own).
     # One latent heat for the codebase (user decision 2026-09-28): Kirchhoff
     # L_v(T_sfc) in EVERY convention; an explicit ``L_latent`` (ice: L_s) wins.
     from legoesm.thermo import latent_heat_vaporization
