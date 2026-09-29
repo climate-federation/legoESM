@@ -2812,7 +2812,7 @@ CITATION_MAP = {
     # the ln_zdfiwm arm that forces the rmxl_min it is replaced WITH.
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:828-831': [
         ('IF( ln_mxl0 ) THEN', 4),
-        ('rn_mxl0 = rmxl_min', 2), 5],
+        ('rn_mxl0 = rmxl_min', 2), 4],
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:810-812': [
         'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
         'rmxl_min = 1.e-03_wp             ! associated avt minimum = molecular salt diffusivity (10^-9 m2/s)',
