@@ -663,11 +663,20 @@ class DiagnosticCollector:
         p_s : array, shape (...)
             Surface pressure [Pa].
 
-        Returns (..., 19) numpy array on CMIP6 standard pressure levels,
-        or None if sigma_full is not available.
+        Returns (..., 19) numpy array on CMIP6 standard pressure levels.
+        Several fields at one ``p_s``: build :meth:`_plev19_weights` once and
+        :meth:`_apply_plev19` per field (same result, bit for bit).
+        """
+        return self._apply_plev19(field_3d, self._plev19_weights(p_s))
+
+    def _plev19_weights(self, p_s):
+        """Bracketing levels and log-p weights for plev19 at ``p_s``.
+
+        Returns ``(idx_lo, idx_hi, alpha)``, each of shape
+        ``p_s.shape + (19,)``; valid only for fields whose leading shape
+        matches the ``p_s`` they were built from.
         """
         p_s_np = np.asarray(p_s)
-        field_np = np.asarray(field_3d)
 
         # Model pressure at each level, from the ACTUAL vertical coordinate:
         # p_k = A_k p_ref + B_k p_s (hybrid) or sigma_k p_s (pure sigma).
@@ -704,14 +713,21 @@ class DiagnosticCollector:
         idx_hi = np.clip(idx_hi, 1, p_model.shape[-1] - 1)
         idx_lo = idx_hi - 1
 
-        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
-        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
         lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
         lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
 
         log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
         denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+        return idx_lo, idx_hi, alpha
+
+    @staticmethod
+    def _apply_plev19(field_3d, weights) -> np.ndarray:
+        """Apply :meth:`_plev19_weights` to one field on model levels."""
+        idx_lo, idx_hi, alpha = weights
+        field_np = np.asarray(field_3d)
+        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
         return f_lo + alpha * (f_hi - f_lo)
 
     def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
@@ -1985,6 +2001,7 @@ class DiagnosticCollector:
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
+            _plev_w = None  # shared by every field: one p_s
             for _name, _src in (
                 ('ta', T_np),
                 ('hus', q_v_np),
@@ -1997,9 +2014,9 @@ class DiagnosticCollector:
             ):
                 if _src is None or not include_state:
                     continue
-                _plev = self._interp_to_plev19(_src, p_s_np)
-                if _plev is None:
-                    continue
+                if _plev_w is None:
+                    _plev_w = self._plev19_weights(p_s_np)
+                _plev = self._apply_plev19(_src, _plev_w)
                 r = self._regrid_to_latlon_3d(_plev)
                 if r is not None:
                     fields_3d[_name] = r
