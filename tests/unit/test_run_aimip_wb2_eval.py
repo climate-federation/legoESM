@@ -226,3 +226,52 @@ def test_valid_variants_tuple_matches_config_dir():
     for v in mod.VALID_VARIANTS:
         assert (cfg_dir / f"variant_{v}.yaml").exists(), (
             f"missing config/aimip/wbcompare/variant_{v}.yaml for variant {v!r}")
+
+
+# ---------------------------------------------------- ZM land mask (#1812) ---
+def test_classical_zm_rollout_gets_the_era5_land_mask(monkeypatch):
+    """The standalone evaluator's classical ZM lane runs on the ERA5 land-sea
+    mask (the one run_aimip trains on); without it ZM refuses the grid."""
+    import jax
+    import jax.numpy as jnp
+
+    import legoesm.training.aimip_spatial as sp
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    ra_spec = importlib.util.spec_from_file_location(
+        "run_aimip_for_wb2_eval_test", _ROOT / "scripts" / "run" / "run_aimip.py")
+    run_aimip = importlib.util.module_from_spec(ra_spec)
+    ra_spec.loader.exec_module(run_aimip)
+    cfg = run_aimip._merge(
+        run_aimip._load_yaml(_ROOT / "config" / "aimip" / "aimip_era5.yaml"),
+        {"n_max": 8, "aimip_variant": "classical",
+         "aimip_spatial_surface": False, "aimip_radiation": "gray",
+         "aimip_rad_update_interval": 1, "aimip_convection": "zhang_mcfarlane",
+         "aimip_turbulence": "louis", "aimip_microphysics": "sundqvist",
+         "aimip_cloud": "xu_randall"})
+    spec_cfg = run_aimip._build_spectral_config(cfg)
+    grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
+    sig = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
+    calls = []
+
+    def fake_era5(g):
+        calls.append(g.n_lat)
+        return jnp.where(jnp.asarray(g.lat2d) > 0.0, 1.0, 0.0)
+
+    monkeypatch.setattr(sp, "era5_land_fraction", fake_era5)
+    rollout_fn, _dt = mod._build_rollout_fn(
+        "classical", AIMIPClassicalParams.from_defaults(), cfg, spec_cfg,
+        grid, sig, spec_cfg.pe_config, None, None)
+    assert calls == [grid.n_lat]
+    shp = (grid.n_lat, grid.n_lon, spec_cfg.n_levels)
+    state = isothermal_rest_state_spectral(
+        grid, sig, T_init=290.0, p_s_init=1.0e5,
+        tracers={"q_v": jnp.full(shp, 1.2e-2), "q_c": jnp.full(shp, 1e-5),
+                 "q_i": jnp.full(shp, 1e-6)})
+    out = rollout_fn(state, None, None, None, None, None, 1)
+    assert all(bool(jnp.all(jnp.isfinite(x)))
+               for x in jax.tree_util.tree_leaves(out)
+               if jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact))

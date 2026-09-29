@@ -519,13 +519,23 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
     )
 
     if variant == "classical":
+        # The ERA5 land-sea mask run_aimip trains on: ZM requires it on the
+        # grid, and the spatial surface fields are gated by it.
+        from legoesm.training.aimip_spatial import (
+            era5_land_fraction, grid_with_zm_land_fraction,
+        )
+        conv = str(cfg.get("aimip_convection", "tiedtke"))
+        spatial = parse_bool_flag(cfg.get("aimip_spatial_surface", False))
+        land = (era5_land_fraction(grid)
+                if spatial or conv == "zhang_mcfarlane" else None)
+        grid = grid_with_zm_land_fraction(grid, conv, land)
         rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=rad_update_interval,
-            convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+            convection_scheme=conv,
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(
                 cfg.get("aimip_surface_bulk_scheme", "constant")),
@@ -535,7 +545,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
             allow_unfilled_families=parse_bool_flag(
     cfg.get("aimip_allow_unfilled_families", False)),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
-            land_mask=None,
+            land_mask=land if spatial else None,
             split_rad=split_rad,
         )
         if isinstance(built, tuple):
