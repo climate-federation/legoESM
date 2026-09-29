@@ -235,7 +235,9 @@ def _geometry_arms(card, oracle: dict, live_un_adv: np.ndarray) -> dict[str, obj
     return {"arms": arms, "active2": active2, "active3": active3}
 
 
-def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
+def run_walk(
+    deck_root: Path, record_root: Path, round75_json: Path,
+) -> dict[str, object]:
     jax.config.update("jax_enable_x64", True)
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -243,7 +245,8 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
     require(not jax.config.jax_disable_jit, "production JIT is disabled")
     require(get_policy() == policy, "fp64 + scalar-libm policy is not active")
 
-    pair_proof = round75.classify(round75.run_pair(deck_root, record_root))
+    require(round75_json.is_file(), f"missing round-75 report {round75_json}")
+    pair_proof = round75.classify(json.loads(round75_json.read_text()))
     require(pair_proof["status"] == "PASS_HYBRID_CORRECTION_PAIR",
             "round-75 baseline gate did not pass")
     card = build_orca2_zps_card(deck_root)
@@ -444,6 +447,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--record-root", type=Path)
+    parser.add_argument(
+        "--round75-json", type=Path,
+        default=Path(
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+            "orca2_rounds/round75/hybrid_pair.json"),
+    )
     parser.add_argument("--classify-json", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
@@ -455,7 +464,7 @@ def main() -> int:
             require(args.plant == "none", "runtime plants require --classify-json")
             require(args.deck_root is not None and args.record_root is not None,
                     "run mode requires --deck-root and --record-root")
-            raw = run_walk(args.deck_root, args.record_root)
+            raw = run_walk(args.deck_root, args.record_root, args.round75_json)
         report = classify(raw, plant=args.plant)
     except (GateError, round74.GateError, round75.GateError,
             record_gate.GateError, KeyError, OSError, TypeError, ValueError) as error:
