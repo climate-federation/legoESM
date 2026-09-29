@@ -153,7 +153,7 @@ moved hash.
 | citation gate, planted-shift self-tests | all fire |
 | acquisition preflight, after the deck change | `PREFLIGHT_OK`, exit 0 |
 | push-gate battery, the six autopilot files plus the card test, the constructibility tripwire and the dispatch ratchet | `194 passed in 1170.66s` |
-| DINO month gate (note BI; this round changes `packages/`) | see below |
+| DINO month gate (note BI; this round changes `packages/`) | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS` |
 
 **What the battery line does and does not cover.** It was taken at
 `abc0c51c8`, BEFORE the three review-fix commits, so it is not the whole
@@ -164,10 +164,13 @@ re-run green at the final tree), the acquisition script's prose, and this
 receipt. A re-run of the whole battery at the final tree was started; the
 operator's land script runs it too, and it is the authority.
 
-**The DINO month gate has NOT completed** and is not claimed. Note BI makes it
-mandatory for any round that changes `packages/`, which this one does, so the
-operator must see it green before landing. It is a thirty-day run and was
-started here; it had not printed a verdict when this receipt was written.
+**The DINO month gate PASSES, and the round is inert on DINO.** Note BI makes
+it mandatory for any round that changes `packages/`, which this one does. The
+day-30 wet three-dimensional temperature error against NEMO is
+`2.040288957e-03 K`, where the certified value is `2.040288765e-03 K`: they
+differ by 1.9e-10 K, which is the harness's own run-to-run floor (round 129
+measured ~2e-10 K). So this is not an improvement and not a regression -- it is
+the same number, and that is what an additive round should produce.
 
 What the card's own numbers do NOT depend on: every measurement in sections 2
 and 4 was taken in isolation, and the card test that carries them is the
