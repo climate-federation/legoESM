@@ -50,16 +50,41 @@ _SIDECAR_SAMPLING_KEY = "meta.lat_sampling"
 
 
 class _StructuredRegridWeights:
-    """Precomputed bilinear interpolation weights for structured grids."""
-    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
+    """Precomputed bilinear interpolation weights for structured grids.
 
-    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon):
-        self.i_lo = i_lo
-        self.j_lo = j_lo
-        self.wi = wi
-        self.wj = wj
-        self.src_nlat = src_nlat
-        self.src_nlon = src_nlon
+    ``i_lo``/``i_hi`` index the native latitude axis and ``j_lo``/``j_hi``
+    the native longitude axis in the field's OWN order; ``j_hi`` wraps
+    periodically."""
+    __slots__ = ('i_lo', 'i_hi', 'j_lo', 'j_hi', 'wi', 'wj')
+
+    def __init__(self, i_lo, i_hi, j_lo, j_hi, wi, wj):
+        self.i_lo, self.i_hi = i_lo, i_hi
+        self.j_lo, self.j_hi = j_lo, j_hi
+        self.wi, self.wj = wi, wj
+
+
+def _bracket(src: np.ndarray, tgt: np.ndarray, period: float | None):
+    """Indices (into ``src`` as given) bracketing each ``tgt`` value, and the
+    linear weight of the upper one.  ``period`` wraps the axis (longitude);
+    otherwise targets outside the source range take the edge value."""
+    if period is not None:
+        src = np.mod(src, period)
+        tgt = np.mod(tgt, period)
+    order = np.argsort(src, kind="stable")
+    s = src[order]
+    n = s.size
+    k = np.searchsorted(s, tgt, side="right") - 1
+    if period is None:
+        k = np.clip(k, 0, n - 2)
+        s_lo, s_hi = s[k], s[k + 1]
+        lo, hi = k, k + 1
+    else:
+        lo, hi = np.mod(k, n), np.mod(k + 1, n)
+        s_lo = np.where(k < 0, s[-1] - period, s[lo])
+        s_hi = np.where(k + 1 >= n, s[0] + period, s[hi])
+    w = np.clip((tgt - s_lo) / np.where(s_hi == s_lo, 1.0, s_hi - s_lo),
+                0.0, 1.0)
+    return order[lo], order[hi], w
 
 
 def _build_structured_regrid_weights(
@@ -67,42 +92,25 @@ def _build_structured_regrid_weights(
     src_lon_rad: np.ndarray,
     tgt_nlat: int,
     tgt_nlon: int,
+    tgt_lat_deg: np.ndarray | None = None,
+    tgt_lon_deg: np.ndarray | None = None,
 ) -> _StructuredRegridWeights:
-    """Build bilinear interpolation weights from a native structured grid
-    to a regular CMIP lat-lon grid.
+    """Bilinear weights from a native structured grid (either latitude order)
+    to the CMIP lat-lon target, periodic in longitude.
 
-    Parameters
-    ----------
-    src_lat_rad : (n_lat_src,) — source latitudes in radians, S→N
-    src_lon_rad : (n_lon_src,) — source longitudes in radians, [0, 2π)
-    tgt_nlat, tgt_nlon : target CMIP grid dimensions
+    Targets default to the regular cell centres the CMOR files are labelled
+    with (``-90+dlat/2 ..``, ``dlon/2 ..``); callers pass the labels so the
+    two cannot drift.
     """
-    src_lat = np.degrees(src_lat_rad)  # S→N
-    src_lon = np.degrees(src_lon_rad)  # [0, 360)
-
     dlat = 180.0 / tgt_nlat
     dlon = 360.0 / tgt_nlon
-    tgt_lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
-    tgt_lon = np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
-
-    # For each target lat, find bracketing source lat indices + weight
-    i_lo = np.searchsorted(src_lat, tgt_lat) - 1
-    i_lo = np.clip(i_lo, 0, len(src_lat) - 2)
-    denom_i = src_lat[i_lo + 1] - src_lat[i_lo]
-    denom_i = np.where(denom_i == 0, 1.0, denom_i)
-    wi = np.clip((tgt_lat - src_lat[i_lo]) / denom_i, 0.0, 1.0)
-
-    # For each target lon, find bracketing source lon indices + weight
-    j_lo = np.searchsorted(src_lon, tgt_lon) - 1
-    j_lo = np.clip(j_lo, 0, len(src_lon) - 2)
-    denom_j = src_lon[j_lo + 1] - src_lon[j_lo]
-    denom_j = np.where(denom_j == 0, 1.0, denom_j)
-    wj = np.clip((tgt_lon - src_lon[j_lo]) / denom_j, 0.0, 1.0)
-
-    return _StructuredRegridWeights(
-        i_lo=i_lo, j_lo=j_lo, wi=wi, wj=wj,
-        src_nlat=len(src_lat), src_nlon=len(src_lon),
-    )
+    tgt_lat = (np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
+               if tgt_lat_deg is None else np.asarray(tgt_lat_deg, np.float64))
+    tgt_lon = (np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
+               if tgt_lon_deg is None else np.asarray(tgt_lon_deg, np.float64))
+    i_lo, i_hi, wi = _bracket(np.degrees(src_lat_rad), tgt_lat, None)
+    j_lo, j_hi, wj = _bracket(np.degrees(src_lon_rad), tgt_lon, 360.0)
+    return _StructuredRegridWeights(i_lo, i_hi, j_lo, j_hi, wi, wj)
 
 
 def _apply_structured_regrid_2d(
@@ -111,21 +119,12 @@ def _apply_structured_regrid_2d(
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 2-D field (nlat_src, nlon_src)
     → (nlat_tgt, nlon_tgt)."""
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi
-    wj = w.wj
-    # Bilinear: f = (1-wi)(1-wj)*f00 + wi*(1-wj)*f10 + (1-wi)*wj*f01 + wi*wj*f11
-    f00 = field[np.ix_(i0, j0)]
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return ((1 - wi[:, None]) * (1 - wj[None, :]) * f00
-            + wi[:, None] * (1 - wj[None, :]) * f10
-            + (1 - wi[:, None]) * wj[None, :] * f01
-            + wi[:, None] * wj[None, :] * f11)
+    wi = w.wi[:, None]
+    wj = w.wj[None, :]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 def _apply_structured_regrid_3d(
@@ -133,29 +132,13 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev).
-
-    Vectorised over the level axis — gather the four bilinear
-    neighbours once and apply the per-cell weights with NumPy
-    broadcasting instead of looping ``nlev`` times.  At T63L49 with
-    ~50 levels this turns 50 separate per-level NumPy calls into one.
-    """
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
-    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
-    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return (
-        (1 - wi) * (1 - wj) * f00
-        + wi * (1 - wj) * f10
-        + (1 - wi) * wj * f01
-        + wi * wj * f11
-    )
+    → (nlat_tgt, nlon_tgt, nlev), vectorised over levels."""
+    wi = w.wi[:, None, None]
+    wj = w.wj[None, :, None]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 # --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
@@ -497,23 +480,33 @@ class DiagnosticCollector:
             if self.cf_writer is not None:
                 self.cf_writer.require_centre_sampling_on_append = True
         elif grid_type in ("latlon", "gaussian") and grid is not None:
-            # For structured grids, store native 1-D coordinates (degrees)
-            # for bilinear regridding when native shape != CMIP target.
+            # Structured grids: native 1-D coordinates are radians.
             native_lat = np.asarray(grid.lat)  # radians, 1-D
             native_lon = np.asarray(grid.lon)  # radians, 1-D
             n_lat_native = native_lat.shape[0]
             n_lon_native = native_lon.shape[0]
-            if (n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon):
-                # Native grid matches CMIP target — no regridding needed.
+            if ((n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon)
+                    and np.allclose(np.degrees(native_lat), _lat_labels,
+                                    rtol=0.0, atol=1e-6)
+                    and np.allclose(np.degrees(native_lon) % 360.0,
+                                    _lon_labels, rtol=0.0, atol=1e-6)):
+                # Native grid IS the labelled CMIP target — no regridding.
                 self._structured_regrid = None
             else:
-                # Precompute regridding from native → CMIP lat-lon.
+                # Interpolate to the labelled cell centres.  A same-SHAPE
+                # grid is not enough: the lat-lon grid's lon 0..355 sits half
+                # a cell off the 2.5..357.5 labels, a Gaussian grid's rows
+                # off the regular ones.
                 self._structured_regrid = _build_structured_regrid_weights(
                     src_lat_rad=native_lat,
                     src_lon_rad=native_lon,
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
+                    tgt_lat_deg=_lat_labels,
+                    tgt_lon_deg=_lon_labels,
                 )
+                if self.cf_writer is not None:
+                    self.cf_writer.require_centre_sampling_on_append = True
         elif grid_type in ("mpas", "voronoi") and grid is not None:
             # SCVT/Voronoi unstructured cells → regular lat-lon via IDW
             # k-nearest weights (the AMIP forcing path does the inverse,
