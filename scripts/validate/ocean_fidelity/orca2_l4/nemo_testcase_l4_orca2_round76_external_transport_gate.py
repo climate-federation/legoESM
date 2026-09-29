@@ -260,8 +260,12 @@ def run_walk(
             expose_barotropic_substeps=True))
     trace = jax.device_get(model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    ordinary = round74._step_operand(
-        card, freshwater, surface, "transport_average")
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True))
+    ordinary = jax.device_get(ordinary_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
 
     adv_path = record_root / "oracle_bt_advmean_operands_kt00000001.bin"
     fields = advmean.read_advmean(
@@ -314,11 +318,12 @@ def run_walk(
         }
     endpoint = _score(
         _trace_u(np.asarray(trace.transport_average[0])[None, ...])[0],
-        np.asarray(ordinary.u.data[..., 0])[:, 1:][..., :OWNED_NX], active2)
+        np.asarray(ordinary.barotropic_targets[2])[:, 1:][..., :OWNED_NX],
+        active2)
     replay = _record_replay(fields, card, active2, np.asarray(oracle["e2u"]))
     geometry = _geometry_arms(
         card, oracle,
-        np.asarray(ordinary.u.data[..., 0])[:, 1:][..., :OWNED_NX])
+        _trace_u(np.asarray(trace.transport_average[0])[None, ...])[0])
     return {
         "format": "nemo-testcase-l4-orca2-round76-external-transport-v1",
         "claim_label": "independent",
@@ -465,6 +470,9 @@ def main() -> int:
             require(args.deck_root is not None and args.record_root is not None,
                     "run mode requires --deck-root and --record-root")
             raw = run_walk(args.deck_root, args.record_root, args.round75_json)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
         report = classify(raw, plant=args.plant)
     except (GateError, round74.GateError, round75.GateError,
             record_gate.GateError, KeyError, OSError, TypeError, ValueError) as error:
