@@ -136,7 +136,9 @@ with the same normalized maximum the ladder gate reports.
 
 Four findings, each a measurement:
 
-**The initial state owns NONE of it.** Arm 1 equals arm 0 to every digit. The
+**The initial state owns NONE of it.** Arm 1 reproduces arm 0's temperature
+and both velocities BIT FOR BIT, and its height row differs only in the last
+three digits (`3.7087937716461764e-08` against `3.708793771648887e-08`). The
 one-to-two-last-bit residual on the initial velocity and height is exonerated;
 round 2's "not worth closing" verdict stands. (Prediction B1 confirmed.)
 
@@ -226,6 +228,14 @@ card is a finding, not a formality, and the pin was deliberately NOT re-set
 here: re-pinning a digest without proving what moved is what the test's own
 docstring forbids, and the decision of whether that default belongs on this
 lane is the user's.
+
+That same default flip is ALREADY an open item in the merge receipt
+(`nemo_testcases_l2_gyre_merge_main_2026-09-29_receipt.md`), which reported it
+as pre-existing on main and made the separate point that it now makes any
+lat-lon card selecting the factory biharmonic mixing raise. What is new here is
+only that it also moved a certified card's configuration digest, which that
+round's gates did not run. So this is one finding with two consequences, not
+two findings, and it stays reported rather than fixed.
 
 ## 9. Gates
 
