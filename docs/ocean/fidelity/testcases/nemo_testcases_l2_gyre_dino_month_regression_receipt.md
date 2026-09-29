@@ -426,3 +426,44 @@ prognostic pair for an MLF card.
 | bar = certified value + 10 % | **UNASKED**, offered for revert.  Any bar is a choice; this one is three times tighter than the regression and loose enough for a driver rebuild.  Name a different one and it is a one-line edit |
 | bisect by replaying the lane's own 09-16 main merge at each point, rather than by cherry-picking the card backwards | UNASKED, method not physics; it changes which commits are testable, not what any of them computes |
 | scoring the archived round-9 campaign state with the certified comparator to settle where `6.889e-04` came from | UNASKED, pure measurement of an existing artifact |
+
+---
+
+## 13.  Gate results
+
+One battery at a time on this host; every log under
+`phase3/dino_regression/`.
+
+| gate | result |
+|---|---|
+| the seven CI ratchets | `4 failed, 10564 passed, 4 skipped in 96.48s` |
+| the six-file push gate plus the two test files this round touches, on the final committed tip | `162 passed in 1001.29s (0:16:41)` |
+| card gates: both DINO recipes, the DINO mesh / from-rest / step-1 / rank-dump gates, the two tank ZDF rounds, the NEMO test-case recipe | `234 passed, 9 warnings in 203.85s` |
+| receipt citation gate, cumulative default receipt | `PASS`, 274 citations, 0 failures, 0 unmapped, 0 map-audit failures, all 9 self-tests fired |
+
+**The four ratchet failures are not this round's**, and each names a file the
+diff does not contain: the Earth-radius literal in
+`scripts/validate/cg_helmholtz_mixed_precision_1675.py`, the parameter-spec
+rows in `lateral_mixing/config.py` and `shortwave_penetration.py`, and the
+inline coefficient in `vertical_mixing/fesom_integration.py`.  They are the
+same four the previous round recorded.
+
+**The push gate was RED on its first run, and this round caused it.**  Three
+tests in `test_nemo_testcase_receipt_citation_gate.py` failed because the
+comment added beside the DINO recipe line pushed two mapped symbols thirty-two
+lines down: the tracer-combine selection moved from `dino.py:1706` to `:1738`
+and its config routing from `:3913` to `:3945`.  The map entry and the
+round-8 receipt prose that cites it were moved together, which is what the
+gate requires, and the gate then passed on the cumulative receipt with all
+nine of its own plants firing.  That is the gate doing exactly the job it was
+built for, so it is recorded rather than quietly fixed.
+
+**This receipt's own citations are NOT certified by that gate.**  It found
+twelve of them and all twelve are unmapped, because `CITATION_MAP` pins every
+citation a receipt may make and nothing was added to it here.  Each of the
+twelve was checked by hand against the compiled DINO program or the shipped
+NEMO source, and both reviewers independently re-derived the load-bearing ones
+(`cpp_DINO.fcm`, `nemogcm.f90:185`, `dynspg_ts.f90:489-491`, the `stpmlf.f90`
+rotation and the `stprk3.F90:213` swap).  Mapping them is one line each and is
+left to whoever next edits that map; until then this receipt's citations carry
+hand-checking plus two independent re-derivations, not the gate.
