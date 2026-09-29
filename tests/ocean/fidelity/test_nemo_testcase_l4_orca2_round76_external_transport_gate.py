@@ -58,6 +58,7 @@ def _report() -> dict[str, object]:
             name: list(values)
             for name, values in gate.round74.EXPECTED_CARD_SCOPE.items()
         },
+        "external_card_scope": copy.deepcopy(gate.EXPECTED_EXTERNAL_CARD_SCOPE),
         "round75_status": "PASS_HYBRID_CORRECTION_PAIR",
         "round75_observed": copy.deepcopy(gate.EXPECTED_ROUND75),
         "support": {"active_u_columns": 8568, "active_u_3d": 226236},

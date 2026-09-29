@@ -126,6 +126,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/traadv.f90"),
@@ -1323,6 +1326,16 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:274-284': [
         ('CASE ( np_LIN, np_HYB )', 2),
         ('END DO   ;   END DO   ;   END DO', 1), 11],
+    # --- ORCA2 card round 76: independent external U-transport producer ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:530-536': [
+        '! resulting flux at mid-step (not over the full domain)',
+        ('END DO   ;   END DO', 8), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:563-580': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        "& l4_canon_2d(vn_adv,'V')", 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:829-847': [
+        '! Finalize sums:',
+        "WRITE(l2_adv_unit) l4_canon_2d(un_adv,'U'), l4_canon_2d(vn_adv,'V')", 19],
     # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
         '! FCT at last stage only with RK3',

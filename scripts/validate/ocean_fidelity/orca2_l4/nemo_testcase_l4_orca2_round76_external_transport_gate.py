@@ -55,7 +55,10 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     _nemo_ws_qco_stage_faces,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
+    build_gyre_zco_card,
+    build_lock_exchange_zco_card,
     build_orca2_zps_card,
+    build_overflow_zps_card,
 )
 from legoesm.ocean.vertical import compute_layer_thickness  # noqa: E402
 
@@ -75,6 +78,12 @@ GEOMETRY_ARM_SOURCES = {
 EXPECTED_ROUND75 = {
     "live_pair_rms": 1.971885366122676e-11,
     "oracle_inverse_only_rms": 0.790927819646436,
+}
+EXPECTED_EXTERNAL_CARD_SCOPE = {
+    "ORCA2-zps": ["explicit_substep", 65, "nemo_ab3am4"],
+    "GYRE-zco": ["explicit_substep", 50, "nemo_ab3am4"],
+    "OVERFLOW-zps": ["explicit_substep", 3, "nemo_boxcar1_ab3"],
+    "LOCK-zco": ["explicit_substep", 1, "nemo_ab3am4"],
 }
 PLANTS = (
     "none",
@@ -116,6 +125,24 @@ def _first_boundary(seed: dict, rows: list[dict]) -> dict | None:
             if result["status"] != "AT_BAR":
                 return {"substep": row["substep"], "boundary": boundary, **result}
     return None
+
+
+def _external_card_scope(deck_root: Path) -> dict[str, list[object]]:
+    builders = {
+        "ORCA2-zps": lambda: build_orca2_zps_card(deck_root),
+        "GYRE-zco": build_gyre_zco_card,
+        "OVERFLOW-zps": build_overflow_zps_card,
+        "LOCK-zco": build_lock_exchange_zco_card,
+    }
+    scope = {}
+    for name, builder in builders.items():
+        config = builder().recipe.model_config.barotropic
+        scope[name] = [
+            config.barotropic_solver,
+            config.n_barotropic_substeps,
+            config.barotropic_time_filter,
+        ]
+    return scope
 
 
 def _record_replay(
@@ -328,6 +355,7 @@ def run_walk(
         "format": "nemo-testcase-l4-orca2-round76-external-transport-v1",
         "claim_label": "independent",
         "card_scope": pair_proof["card_scope"],
+        "external_card_scope": _external_card_scope(deck_root),
         "round75_status": pair_proof["status"],
         "round75_observed": {
             "live_pair_rms": pair_proof["arms"]["oracle_un_adv"]["rows"]["zFu"]["rms_abs"],
@@ -392,6 +420,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     scope = {name: tuple(value) for name, value in report["card_scope"].items()}
     require(scope == round74.EXPECTED_CARD_SCOPE,
             "resolved stage-transport scope changed")
+    require(report.get("external_card_scope") == EXPECTED_EXTERNAL_CARD_SCOPE,
+            "resolved external-transport scope changed")
     require(report.get("round75_status") == "PASS_HYBRID_CORRECTION_PAIR",
             "round-75 proof is absent")
     require(report.get("round75_observed") == EXPECTED_ROUND75,
