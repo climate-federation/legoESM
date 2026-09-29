@@ -101,6 +101,36 @@ def test_woa_sss_real_file_surface_2d_and_lon_wrapped(tmp_path):
     np.testing.assert_array_equal(sss[0], lon_o)
 
 
+def test_woa_sss_real_file_coastal_missing_values_do_not_reach_targets(tmp_path):
+    """_FillValue land points decode to NaN; a target whose bilinear stencil
+    touches one must still get a finite salinity (filled from the nearest
+    observed point), and an all-missing file must raise."""
+    xr = pytest.importorskip("xarray")
+    import jax.numpy as jnp
+    from legoesm.ocean.forcing.sss_restoring import interp_woa_sss_to_grid
+    lat = np.arange(-89.5, 90.0, 1.0)
+    lon = np.arange(0.5, 360.0, 1.0)
+    s = np.full((1, 1, lat.size, lon.size), 35.0)
+    s[0, 0, 90:95, 100:105] = np.nan              # a "continent" of 5x5 cells
+    xr.Dataset({"s_an": (("time", "depth", "lat", "lon"), s)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(
+        tmp_path / "woa_sss_annual.nc")
+    sss, lat_o, lon_o = load_woa_sss(cache_dir=tmp_path, allow_synthetic=False)
+    assert np.isfinite(sss).all()
+    # coastal ocean target at (0.25 N, 99.75 E): its stencil includes the NaN
+    # corner at (0.5 N, 100.5 E)
+    out = interp_woa_sss_to_grid(jnp.asarray(sss), jnp.asarray(lat_o),
+                                 jnp.asarray(lon_o), jnp.array([0.25]),
+                                 jnp.array([99.75]))
+    np.testing.assert_allclose(np.asarray(out), 35.0, rtol=1e-12)
+    s[:] = np.nan
+    xr.Dataset({"s_an": (("time", "depth", "lat", "lon"), s)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(
+        tmp_path / "woa_sss_annual.nc")
+    with pytest.raises(ValueError, match="no valid values"):
+        load_woa_sss(cache_dir=tmp_path, allow_synthetic=False)
+
+
 @pytest.mark.parametrize("bad,match", [
     ("descending_lat", "latitude must be ascending"),
     ("nonuniform_lat", "latitude must be ascending and uniform"),

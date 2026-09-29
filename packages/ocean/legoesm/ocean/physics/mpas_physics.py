@@ -345,6 +345,13 @@ def make_mpas_ocean_physics(
             if _sf_q_net is not None:
                 from legoesm.ocean.eos import c_sw
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
+                # Live (z*/partial-cell) thickness, zero below the seabed. The
+                # non-solar surface deposit and every shortwave kernel use it,
+                # so a partial TOP cell (seabed inside the top reference
+                # layer) closes the column heat budget; on plain z* it equals
+                # dz_ref*jacobian.
+                _h_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                dz_0_cell_q = _h_live[:, 0]
 
                 # RGB only when no explicit scheme was selected (lat-lon lane
                 # order): otherwise an attached chl silently replaced the
@@ -357,7 +364,6 @@ def make_mpas_ocean_physics(
                     # of net SW across IR + R/G/B bands, so there is NO 0.94
                     # "skin" pre-split here: the FULL sw is the penetrating qsr
                     # and the non-solar surface flux is q_net - sw.
-                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
                     inv_rho_csw_dz = 1.0 / (
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     q_nonsolar = _sf_q_net - _sf_sw
@@ -377,7 +383,7 @@ def make_mpas_ocean_physics(
                     # unchanged.  wet_cell = h_k>0 excludes below-seabed cells and
                     # is the RGB kernel's safe-denominator guard; a dry column has
                     # thickness 0 -> wet_cell 0 (masked anyway).
-                    dz_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                    dz_live = _h_live
                     wet_cell = jnp.asarray(dz_live > 0.0, dtype=T_3d.dtype)
                     sw_tend = apply_shortwave_penetration(
                         ShortwavePenetrationConfig(scheme="rgb_chl"),
@@ -432,19 +438,8 @@ def make_mpas_ocean_physics(
                             "expected 'auto', 'jerlov_2band' or 'sweeney_2band'")
                     q_nonsolar = _sf_q_net - sw_absorbed
 
-                    # Live thickness of the lane's coordinate (z-star OR
-                    # partial cells with ETOPO): dry levels carry h = 0, so
-                    # wetness and the deposit of the remainder in the deepest
-                    # wet cell follow the same geometry the dynamics integrate
-                    # against (every scheme; dz_ref*jacobian would put light
-                    # below the seabed on partial cells).
-                    _h_live = compute_layer_thickness(
-                        state.eta.data, state.H_bathy.data, z_coord)
                     if _sw_scheme == "sweeney_2band":
                         _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
-                        dz_0_cell_q = _h_live[:, 0]
-                    else:
-                        dz_0_cell_q = z_coord.dz_ref[0] * jacobian
 
                     # Non-solar part: surface cell only
                     inv_rho_csw_dz = 1.0 / (
@@ -471,7 +466,6 @@ def make_mpas_ocean_physics(
                     dT_dt = dT_dt + sw_tend * mask[:, None]
                 else:
                     # No SW field — all heat into surface (legacy)
-                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
                     inv_rho_csw_dz = 1.0 / (
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     dT_dt = dT_dt.at[:, 0].add(

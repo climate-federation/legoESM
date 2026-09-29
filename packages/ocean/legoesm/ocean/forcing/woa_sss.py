@@ -154,7 +154,22 @@ def load_woa_sss(
             raise ValueError(
                 f"{nc_path}: WOA SSS longitude must be global with uniform "
                 f"spacing 360/{lon.size} deg")
-        return sss[:, order], lat, lon
+        sss = sss[:, order]
+        # _FillValue (land / no observation) decodes to NaN, and a bilinear
+        # stencil touching one propagates it into coastal restoring targets
+        # even at zero weight: fill each gap from the nearest observed point.
+        missing = ~np.isfinite(sss)
+        if missing.all():
+            raise ValueError(f"{nc_path}: WOA SSS surface field has no valid values")
+        if missing.any():
+            from legoesm.grids.regridding import fill_missing_nearest_valid
+            from legoesm.ocean.forcing.curvilinear_regrid import unit_sphere_xyz
+            lon2d, lat2d = np.meshgrid(lon, lat)
+            sss = fill_missing_nearest_valid(
+                sss.reshape(1, -1),
+                unit_sphere_xyz(lon2d.ravel(), lat2d.ravel()),
+            ).reshape(sss.shape)
+        return sss, lat, lon
 
     if not allow_synthetic:
         raise FileNotFoundError(

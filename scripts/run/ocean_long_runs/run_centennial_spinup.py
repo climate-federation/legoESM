@@ -238,6 +238,10 @@ def main() -> int:
             sss_config = None
             S_target_on_grid = None
         if S_target_on_grid is not None:
+            if not np.isfinite(S_target_on_grid).all():
+                raise ValueError(
+                    "SSS restoring target has non-finite values on the model "
+                    "grid; the WOA SSS field must be finite everywhere")
             print(
                 f"   SSS target range: "
                 f"{float(np.min(S_target_on_grid)):.2f}"
