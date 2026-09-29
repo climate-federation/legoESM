@@ -4210,6 +4210,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -4396,6 +4397,7 @@ def make_voronoi_sharded_step(
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
