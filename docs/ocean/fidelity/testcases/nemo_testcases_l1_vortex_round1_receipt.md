@@ -18,6 +18,19 @@ Two things a reader must take away before anything else:
    depend on the momentum scheme, so the bit-exactness claim stands, and the
    record is what a later round needs to measure the new arm the day it exists.
 
+**ROUND-2 CORRECTIONS TO THIS RECEIPT, recorded here so nobody builds on the
+superseded text.** (a) Item 1's gap is CLOSED: round 2 transcribed the
+operator, and the card executes. (b) Item 1's description of the routing is
+WRONG and is retracted: NEMO does not call the vorticity routine on the
+planetary vorticity alone here. It routes Coriolis PLUS a metric term, and the
+metric term is zero only because this mesh's scale factors are a single
+repeated constant -- a condition round 1 never stated and round 2 now proves
+against the grid. (c) The bit-exactness prediction in item 2 is REFUTED:
+temperature and salinity are bit-exact, velocity and sea surface height are
+not, by 1 to 2 last bits in the far tail of the eddy's Gaussian. That is the
+compiled floor between two exponential functions, not a transcription defect;
+round 2's receipt carries the counts.
+
 The kt=1..10 rows are empty because NEMO has not been run: MPI is refused in
 the agent's sandbox, so round 1 wrote the acquisition and stopped.
 
@@ -70,8 +83,8 @@ difference.
 
 | choice | ASKED or UNASKED | note |
 |---|---|---|
-| TEOS-10 instead of the shipped S-EOS | ASKED (decision 64, operator note BF) | but see the FINDING below, which is new information the decision did not have |
-| the oracle deck leaves the Courant-dependent implicit vertical advection OFF, unlike the two tanks' decks | UNASKED, and stated as a finding | it is the shipped VORTEX default and the card now matches it, so deck and card agree with no new deviation; the tanks' decks turn it on, so this diverges from their convention. One line for the operator: leave it off (my pick, no deviation) or match the tanks? |
+| TEOS-10 instead of the shipped S-EOS | ASKED (decision 64, operator note BF) | SUPERSEDED by decision 69 (note BG) after the FINDING below reached the user: round 2 runs the shipped S-EOS on this card and re-acquires the record |
+| the oracle deck leaves the Courant-dependent implicit vertical advection OFF, unlike the two tanks' decks | ANSWERED: decision 70 (note BG) keeps it OFF, as the shipped deck says | it is the shipped VORTEX default and the card matches it, so deck and card agree with no new deviation |
 | the AGRIF zoom is out of scope; parent grid only | ASKED (the round's own task) | both oracle builds drop the nesting key |
 | ten-step run cadence for the oracle run | UNASKED, precedent-based | it is the tanks' own kt1_10 cadence, and the shipped 3000-step length is preserved on the card itself |
 | mesh receipt written by the oracle run | UNASKED, precedent-based | the tanks' kt1_10 decks do the same |
@@ -89,6 +102,13 @@ variant of VORTEX, not the published balanced-vortex experiment. This is
 acceptable for an oracle-match ladder and would not be acceptable as a physics
 result. One line for the operator: keep TEOS-10 (the campaign default, my pick)
 or run this one card on its shipped equation of state?
+
+**ANSWERED, and the deviation is GONE.** Decision 69 (operator note BG) chose
+the shipped equation of state for this card, the one narrow exception to the
+campaign's TEOS-10. Round 2 transcribed it, the deck no longer switches it, and
+round 1's record -- which was acquired on the TEOS-10 deck -- is superseded from
+step 1 onward. The initial state itself is unaffected, as predicted, so that
+record remains usable for the initial-state gate and round 2 used it there.
 
 **Correction to the ladder survey.** The survey listed VORTEX as running a
 horizontal Laplacian on momentum. It does not: the namelist sets the operator
