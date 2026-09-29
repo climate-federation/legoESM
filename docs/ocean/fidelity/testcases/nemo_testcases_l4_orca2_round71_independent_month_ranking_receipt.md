@@ -59,7 +59,7 @@ census remains valid.
 NEMO writes the terminal before fields `sshn`, `un`, `vn`, `tn`, and `sn` at
 `ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/restart.f90:170-184`.
 The stage-3 swap makes `Nbb` the completed state before that restart call at
-`ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:223-271`.
+`ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:223-272`.
 Both restart shards' float32 longitude/latitude arrays are bit-identical to
 the card orientation, and the terminal shard digests match the admitted
 ledger.
