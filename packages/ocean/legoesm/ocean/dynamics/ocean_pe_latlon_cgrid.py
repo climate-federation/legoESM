@@ -1334,6 +1334,7 @@ def _bc_geometry_and_density(
     # exact gdept).  Default "insitu" -> no rho0 kwarg -> byte-identical.
     _eos_mk_kw = {"rho0": rho_0} if _eos_depth == "geometric" else {}
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None),
+                         eos_nemo_seos=getattr(config, 'eos_nemo_seos', None),
                          **_eos_mk_kw)
     _pgf_quadrature = getattr(config, "pgf_quadrature", "cell_integral")
     _eos_geometric_depth = (
@@ -2473,10 +2474,11 @@ def _bc_pv_flux(
     """
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
-    if vorticity_scheme not in ("al81", "ene", "ene_total", "een_total"):
+    if vorticity_scheme not in (
+            "al81", "ene", "ene_total", "een_total", "een_planetary"):
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
-            f"'al81', 'ene', 'ene_total', or 'een_total'"
+            f"'al81', 'ene', 'ene_total', 'een_total', or 'een_planetary'"
         )
     # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
     # config value) — see the h_vtx construction below for the two rules.
@@ -2510,7 +2512,19 @@ def _bc_pv_flux(
     # is replaced by WENO-Z reconstruction (Silvestri et al. 2024).
 
     # Vorticity from TOTAL velocity (not perturbation u')
-    if (een_metric_weighting == "nemo"
+    if vorticity_scheme == "een_planetary":
+        # NEMO dyn_vor's FLUX-FORM arm (dynvor.F90:891-893) selects
+        # ntot = np_CME, and vor_een's np_CME branch (dynvor.F90:780-783)
+        # forms zwz from ff_f PLUS a metric term built out of
+        # di_e2v_2e1e2f / dj_e1u_2e1e2f (dynvor.F90:905-908).  Those two
+        # gradients are differences of the grid's own scale factors, so on a
+        # Cartesian mesh whose e1/e2 are a single repeated constant they are
+        # EXACTLY zero and np_CME collapses onto np_COR (dynvor.F90:750-752):
+        # the triad carries the planetary vorticity alone.  The model config
+        # validator refuses this scheme on any grid where that is not true, so
+        # no relative vorticity is dropped silently here.
+        zeta = jnp.zeros_like(curl_vertex_cgrid(u, v, grid))
+    elif (een_metric_weighting == "nemo"
             and vorticity_scheme in ("ene", "ene_total")):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             nemo_vor_ene_vorticity_cgrid,
@@ -2730,7 +2744,7 @@ def _bc_pv_flux(
             from legoesm.grids.latlon import ensure_geometry
             _g = ensure_geometry(grid)
             _mw = (_g.dx_u, _g.dx_v, _g.dy_u, _g.dy_v)
-        if vorticity_scheme in ("al81", "een_total"):
+        if vorticity_scheme in ("al81", "een_total", "een_planetary"):
             # "een_total" = NEMO ln_dynvor_een (dyn_vor EEN, kvor=total): the
             # planetary Coriolis f rides the SAME 12-point Arakawa-Lamb-81 / EEN
             # triad as the relative vorticity, so the RHS carries the ABSOLUTE
@@ -2742,7 +2756,7 @@ def _bc_pv_flux(
             # "al81" (f_vtx=None) stays relative-only (planetary Coriolis handled
             # in the matsuno_split / explicit_ab2 face-f path).
             _f_vtx_al = None
-            if vorticity_scheme == "een_total":
+            if vorticity_scheme in ("een_total", "een_planetary"):
                 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                     nemo_een_ene_vertex_coriolis,
                 )
@@ -5124,6 +5138,53 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 up3_upwind_selector=up3_upwind_selector,
             )
         )
+        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+            # NEMO runs dyn_vor and dyn_adv as two separate subroutines even in
+            # flux form: the energy-and-enstrophy triad supplies the ROTATION
+            # (dynvor.F90:711-814 under ln_dynvor_een), and dynadv_up3 supplies
+            # the advection.  legoESM's flux-form arm has only ever had the
+            # 4-point C-grid average for rotation; this branch gives it NEMO's
+            # operator instead.  The triad is the SAME one the vector-invariant
+            # cards already run -- it is fed a zero relative vorticity (see
+            # _bc_pv_flux) so what it transports is ff_f/e3f alone.  Stage 7b'
+            # below is gated off for this scheme, so f enters exactly once.
+            _h_vtx_ov = None
+            _f_vtx_ov = None
+            if config.een_e3f_scheme == "nemo_avg4":
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    nemo_een_ene_vertex_coriolis,
+                    vertex_coriolis,
+                )
+                from legoesm.ocean.vertical import (
+                    nemo_qco_live_vorticity_e3f_cgrid,
+                )
+                _h_vtx_ov = nemo_qco_live_vorticity_e3f_cgrid(
+                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
+                _f_vtx_ov = (
+                    vertex_coriolis(grid) if ene_generic_f_vtx
+                    else nemo_een_ene_vertex_coriolis(grid)
+                )
+            _h_vtx_operand = _h_vtx_ov
+            du_dt, dv_dt, _cor_u, _cor_v = _bc_pv_flux(
+                du_dt, dv_dt, u, v, _h_u_adv, _h_v_adv, h_k,
+                u_mask_3d, v_mask_3d, mask, grid, "vector_invariant",
+                config.weno_smoothness,
+                vertex_mask=vertex_mask,
+                enstrophy_metric=config.vortcor_enstrophy_metric,
+                reconstruct_zeta=config.vortcor_reconstruct_zeta,
+                vorticity_scheme="een_planetary",
+                een_q_boundary=getattr(config, "een_q_boundary",
+                                       "neumann_fill"),
+                een_e3f_scheme=config.een_e3f_scheme,
+                een_metric_weighting=getattr(
+                    config, "een_metric_weighting", "off"),
+                dz_ref=z_coord.dz_ref,
+                h_vtx_override=_h_vtx_ov,
+                f_vtx_override=_f_vtx_ov,
+                metric_reciprocals=ene_metric_reciprocals,
+            )
+            diag_vortcor_u = diag_vortcor_u + _cor_u
+            diag_vortcor_v = diag_vortcor_v + _cor_v
     else:
         # NEMO's vector-invariant ENE/EEN operators multiply velocity by the
         # same e3u/e3v(Kmm) face thickness as the stage transport
@@ -5186,7 +5247,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # is not traced at all.
     if (getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2"
             and getattr(config, "vorticity_scheme", "al81")
-            not in ("ene_total", "een_total")):
+            not in ("ene_total", "een_total", "een_planetary")):
         # (ene_total / een_total carry the planetary term INSIDE the vorticity
         # flux — NEMO np_CRV (ENE) / ln_dynvor_een (EEN) — so the separate
         # face-f add would double-count f.)
