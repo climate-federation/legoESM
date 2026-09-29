@@ -778,7 +778,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # OVERWRITES rn_mxl0 with the active mixing-length floor whenever
         # ln_mxl0 is true -- 1.0e-3 m on this ORCA1 arm, because ln_zdfiwm
         # forces rmxl_min = 1.0e-3 (shipped zdftke.F90:859-862 and :841-843;
-        # GYRE ppsrc:829-832 and :810-812) -- and that transcription stays
+        # GYRE ppsrc:828-832 and :810-812) -- and that transcription stays
         # available, but only to the NEMO-literal cards, which select it with
         # nemo_mxl0_rmxl_min_overwrite=True.  The two arms differ ONLY where
         # the wind anchor does not already exceed the floor, i.e. on calm and

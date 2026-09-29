@@ -250,7 +250,7 @@ def _nemo_tke_config() -> TKEConfig:
         # :640-642 is the rn_mxl0 floor that follows it.
         nemo_mxl0_surface_tmask=True,
         # ln_mxl0=.TRUE. here, so zdf_tke_init OVERWRITES the namelist rn_mxl0
-        # with rmxl_min (shipped zdftke.F90:859-862; GYRE ppsrc:829-832) and
+        # with rmxl_min (shipped zdftke.F90:859-862; GYRE ppsrc:828-832) and
         # the anchor's floor is the mixing-length floor, not rn_mxl0.  This is
         # the NEMO-literal arm; DECISION 72 keeps the ORCA1 OMIP card off it.
         nemo_mxl0_rmxl_min_overwrite=True,
