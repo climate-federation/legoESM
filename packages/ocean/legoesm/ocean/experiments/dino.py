@@ -1567,8 +1567,28 @@ DINO_RECIPES: dict[str, dict] = {
         # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
         # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
-        # (oce.F90:39,99); this card allocates that prognostic pair.
-        "nemo_prognostic_barotropic_state": True,
+        # (oce.F90:39,99) -- but NOT ON THIS CARD, and the reason is the
+        # stepper DINO compiles.  legoESM's carried pair has ONE slot: the
+        # substep loop commits the window-averaged external solution at the
+        # end of a step and reads it back at the start of the next one.  That
+        # is the RK3 stepper's storage contract, where stprk3.F90:213 swaps
+        # the slot so the committed pair IS the next step's Kbb.  DINO
+        # compiles no key_RK3 (cfgs/DINO/cpp_DINO.fcm declares only
+        # "key_qco key_vco_3d"), so it runs stp_MLF
+        # (cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185); the modified leap-frog
+        # rotation puts a value committed at the end of step n at Kmm on step
+        # n+1, not Kbb.  DINO also sets ln_bt_fw = .false., so its window seed
+        # reads puu_b(:,:,Kbb) -- the BEFORE level, one rotation older
+        # (cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:489-491).  A one-slot carry
+        # cannot deliver that level, so selecting the RK3 arrangement here fed
+        # the seed a state one time level too new.  MEASURED COST on the
+        # certified from-rest month: day-30 wet 3-D temperature rms against
+        # NEMO's RUN_TRAJ kt=960 went 2.040e-03 K -> 6.982e-03 K, a factor
+        # 3.42, and stayed there for three weeks because no landing gate ran
+        # DINO from rest.  See docs/ocean/fidelity/testcases/
+        # nemo_testcases_l2_gyre_dino_month_regression_receipt.md.  The GYRE
+        # testcase cards DO compile key_RK3 and keep the carried pair.
+        "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic

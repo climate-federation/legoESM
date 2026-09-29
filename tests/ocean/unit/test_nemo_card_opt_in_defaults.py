@@ -338,10 +338,22 @@ def test_carried_seed_is_selected_by_config_not_by_state_presence():
         _carried_nemo_depth_mean(bare, jnp.float64, nemo)
 
 
-def test_non_nemo_dino_recipes_allocate_no_new_prognostic_state():
-    """Resolved state and resolved config, not dictionary keys."""
+def test_no_dino_recipe_allocates_the_rk3_carried_barotropic_pair():
+    """Resolved state and resolved config, not dictionary keys.
+
+    The carried external-mode pair is the RK3 stepper's storage contract: one
+    slot, committed at the end of a step and read at the start of the next,
+    which is only the window seed's level because ``stprk3.F90:213`` swaps the
+    slot.  DINO compiles no ``key_RK3`` and runs ``stp_MLF``, whose rotation
+    puts that value one level too new for its ``ln_bt_fw = .false.`` seed.
+    Selecting it on the DINO cards cost a measured 3.42x on the certified
+    from-rest month; see
+    ``docs/ocean/fidelity/testcases/
+    nemo_testcases_l2_gyre_dino_month_regression_receipt.md``.
+    """
     from legoesm.ocean.experiments.dino import (
         DINOConfig,
+        DINO_RECIPES,
         dino_config_for_recipe,
         dino_lat_lon_grid,
         dino_lat_lon_state,
@@ -349,15 +361,50 @@ def test_non_nemo_dino_recipes_allocate_no_new_prognostic_state():
     from legoesm.ocean.vertical import create_ocean_z_star
 
     assert DINOConfig().nemo_prognostic_barotropic_state is False
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        # Written down in the card, not merely left at the library default, so
+        # that re-selecting it is a visible edit and this row goes red.
+        assert DINO_RECIPES[recipe]["nemo_prognostic_barotropic_state"] is False
+        assert dino_config_for_recipe(
+            recipe).nemo_prognostic_barotropic_state is False
+
     plain = dino_config_for_recipe("legoesm_default")
-    nemo = dino_config_for_recipe("nemo_dino_kamm")
     assert plain.nemo_prognostic_barotropic_state is False
-    assert nemo.nemo_prognostic_barotropic_state is True
 
     grid = dino_lat_lon_grid(plain, n_lon=6)
     z = create_ocean_z_star(n_levels=3, H_max=float(plain.H_deep))
-    state = dino_lat_lon_state(grid, z, plain)
-    assert state.uu_b is None and state.vv_b is None
+    for cfg in (plain, dino_config_for_recipe("nemo_dino_kamm_mlf")):
+        state = dino_lat_lon_state(grid, z, cfg)
+        assert state.uu_b is None and state.vv_b is None
+
+
+def test_the_nemo_testcase_cards_still_require_the_carried_pair():
+    """The other half, so the DINO row above cannot pass by deleting it.
+
+    GYRE and both tanks compile ``key_RK3`` (their ``cpp_*.fcm`` files), so
+    for them the one-slot carry IS the window seed's level and the identity
+    stays required.
+    """
+    import pytest
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        validate_nemo_testcase_card,
+    )
+
+    card = build_gyre_zco_card()
+    validate_nemo_testcase_card(card)
+    assert card.config.barotropic.nemo_prognostic_barotropic_state is True
+
+    # Non-vacuity: the validator, not a source string, is what refuses the
+    # DINO arrangement on a key_RK3 card.
+    planted = card._replace(
+        config=card.config._replace(
+            barotropic=card.config.barotropic._replace(
+                nemo_prognostic_barotropic_state=False)))
+    with pytest.raises(ValueError,
+                       match="nemo_prognostic_barotropic_state"):
+        validate_nemo_testcase_card(planted)
 
 
 # --------------------------------------------------------------------------
