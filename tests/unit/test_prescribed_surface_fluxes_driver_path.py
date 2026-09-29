@@ -237,7 +237,17 @@ def test_prescribed_flux_enters_the_column_exactly_once(grid, turbulence):
     dp = inp["p_s"][..., None] * (pipe.sigma_half[1:] - pipe.sigma_half[:-1])
     water = jnp.sum(out.dq_v_dt * dp, axis=-1) / constants.g   # kg m-2 s-1
     momentum = jnp.sum(out.du_dt * dp, axis=-1) / constants.g   # Pa
-    np.testing.assert_allclose(np.asarray(water), lhf / constants.L_v, rtol=1e-3)
+    # Heat-only override: the water is lhf / L_v(T_sfc) -- the inverse of the
+    # bulk law's own temperature-dependent latent heat (sst = 295 K here), not
+    # the constant (2 % apart).
+    from legoesm.thermo import latent_heat_vaporization
+    np.testing.assert_allclose(np.asarray(water),
+                               lhf / float(latent_heat_vaporization(jnp.asarray(295.0))), rtol=1e-3)
+    # With the coupler's water channel the column gains exactly that water.
+    out_w = _step(pipe, sfc_shflx_override=jnp.zeros(s2), sfc_lhflx_override=jnp.full(s2, lhf),
+                  sfc_evap_override=jnp.full(s2, 2.5e-5))
+    water_w = jnp.sum(out_w.dq_v_dt * dp, axis=-1) / constants.g
+    np.testing.assert_allclose(np.asarray(water_w), 2.5e-5, rtol=1e-3)
     np.testing.assert_allclose(np.asarray(momentum), tau, rtol=1e-3)
 
 

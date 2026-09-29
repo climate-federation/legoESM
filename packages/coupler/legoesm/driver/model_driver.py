@@ -14007,9 +14007,9 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx = (None, None)
+            _shflx, _lhflx, _evap = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx = self.get_sfc_flux_override(day)
+                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -14020,6 +14020,7 @@ class ModelDriver:
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+                sfc_evap_override=_evap,
             )
 
             if seg_idx == 0:
@@ -14589,9 +14590,9 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx = (None, None)
+            _shflx, _lhflx, _evap = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx = self.get_sfc_flux_override(day)
+                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -14602,6 +14603,7 @@ class ModelDriver:
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+                sfc_evap_override=_evap,
             )
             forcing = shard_operator_split_forcing(forcing, mesh)
 
@@ -15667,9 +15669,9 @@ class ModelDriver:
             # (None unless a coupled driver wired the shared-flux feedback).
             # When present the atmosphere consumes these instead of its own
             # bulk fluxes so the air-sea heat+water budget closes.
-            _sfc_shflx_ovr, _sfc_lhflx_ovr = (None, None)
+            _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _sfc_shflx_ovr, _sfc_lhflx_ovr = self.get_sfc_flux_override(day)
+                _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = self.get_sfc_flux_override(day)
 
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
@@ -15684,6 +15686,7 @@ class ModelDriver:
                 sfc_emissivity_override=_sfc_emis_ovr,
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
+                sfc_evap_override=_sfc_evap_ovr,
                 # Transient land-use cover: this segment's re-weighted multilayer
                 # land params (None unless transient_land_cover is active), fed as a
                 # traced arg so the jitted step follows the cover — the 5th-issue fix.

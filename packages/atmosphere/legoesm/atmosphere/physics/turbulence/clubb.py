@@ -132,6 +132,8 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -6197,8 +6199,9 @@ def clubb_turbulence(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     sflx_u, sflx_v = tau_x, tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)   # [kg/m^2/s]
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # ---- Implicit vertical diffusion of the mean state ----
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
@@ -6423,7 +6426,7 @@ def clubb_step(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
         wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
-        wprtp_b = lhflx_b / (rho_sfc * constants.L_v)                # w'rt'  [kg/kg m/s]
+        wprtp_b = surface_moisture_flux(config.surface, lhflx_b, T_sfc) / rho_sfc   # w'rt'  [kg/kg m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
         # momentum transported downward / drag), NOT -tau_x/rho.
@@ -6641,7 +6644,7 @@ def clubb_turbulence_prognostic(
         rho_s = rho_local[:, -1]
         return (
             shflx_sf / (rho_s * constants.c_pd * exner_sfc),   # w'thl' [K m/s]
-            lhflx_sf / (rho_s * constants.L_v),                # w'rt'  [kg/kg m/s]
+            surface_moisture_flux(config.surface, lhflx_sf, T_sfc) / rho_s,   # w'rt'  [kg/kg m/s]
             tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
         )

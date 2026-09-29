@@ -309,7 +309,11 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         le_canopy = le_tot - le_soil
         # Deep pack + moist soil -> no reservoir cap, so both components pass at
         # their demanded rate and phase.
-        expected = le_soil / constants.L_s + le_canopy / constants.L_v
+        # Phase-split at the temperature-dependent latent heats the land
+        # charged (surface temperature of the step = the initial top-soil T).
+        from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+        _T = jnp.asarray(283.0)
+        expected = le_soil / float(latent_heat_sublimation(_T)) + le_canopy / float(latent_heat_vaporization(_T))
         npt.assert_allclose(mass, expected, rtol=1e-5)
         # Non-vacuous: the below-canopy ground component is a real positive
         # fraction routed to L_s (sublimation), not folded into L_v soil evap.
@@ -363,7 +367,8 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         mass = float(resp.surface_mass_flux[0])
         lhflx = float(resp.lhflx[0])
         if abs(lhflx) > 1e-6:
-            npt.assert_allclose(mass, lhflx / constants.L_s, rtol=1e-6)
+            from legoesm.thermo import latent_heat_sublimation
+            npt.assert_allclose(mass, lhflx / float(latent_heat_sublimation(jnp.asarray(283.0))), rtol=1e-6)
 
     def test_canopy_dew_over_snow_frosts_snow_not_soil(self):
         """A NEGATIVE canopy latent flux over snow (dew/frost) must accrete on the

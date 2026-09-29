@@ -243,6 +243,43 @@ def compute_surface_fluxes(
 _PRESCRIBED_TAU_FLOOR_PA = 1.0e-12  # coeff-ok: numerical floor for a 0/0 gradient
 
 
+def surface_moisture_flux(config, lhflx, T_sfc):
+    """Surface water flux [kg/m2/s, positive up] for a kernel's moisture BC.
+
+    The coupler's prescribed mass flux (``config.prescribed_evap_kg_m2_s``)
+    when one was folded in -- the tiles' water leaves the surface exactly as
+    it enters the atmosphere, whatever latent heat each tile charged for it.
+    Otherwise the latent heat flux is converted back with the SAME
+    temperature-dependent ``L_v(T_sfc)`` the bulk laws charged, so the two
+    are exact inverses (a constant ``L_v`` here against an ``L_v(T)`` there
+    lost ~2 % of warm-ocean evaporation).  Standalone lanes without a coupler
+    have no phase information here: sublimation over their prescribed ice is
+    charged at ``L_v`` on both sides, consistently.
+    """
+    evap = getattr(config, "prescribed_evap_kg_m2_s", None)
+    if evap is not None:
+        return jnp.broadcast_to(jnp.asarray(evap, dtype=jnp.asarray(lhflx).dtype),
+                                jnp.shape(lhflx))
+    from legoesm.thermo import latent_heat_vaporization
+    return lhflx / latent_heat_vaporization(T_sfc)
+
+
+def latent_enthalpy_correction(lhflx, evap):
+    """Heat [W/m2, positive up] the atmosphere must ADD to its sensible flux so
+    that its energy intake equals the physical ``shflx + lhflx``.
+
+    The atmosphere's moist enthalpy credits every kilogram of vapour with the
+    reference ``constants.L_v`` (its constant-L convention, see
+    core.conservation), while the surface charged ``L(T_sfc, phase) * E`` --
+    at 30 degC about 3 % less.  ``lhflx - L_v * E`` is that difference, the
+    enthalpy carried by the water itself (user decision 2026-09-28, 4a):
+    booked into the diffusion's heat lower BC, never into the reported
+    ``shflx``/``lhflx`` (those stay the physical fluxes).  Exactly zero when
+    the surface charged the constant.
+    """
+    return lhflx - constants.L_v * evap   # latent-ok: moist-enthalpy reference L_v of the atmosphere
+
+
 def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
                                  lhflx=None, tau_x=None, tau_y=None):
     """Replace the prescribed components of a ``(tau_x, tau_y, shflx, lhflx,

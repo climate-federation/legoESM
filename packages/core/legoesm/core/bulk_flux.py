@@ -1249,13 +1249,10 @@ def compute_most_fluxes(
     # cp_air(q)); 'legoesm' = the historical constant L_v / dry c_pd
     # (default, byte-identical).  An explicit ``L_latent`` always wins
     # (the OMIP NEMO-parity path and the oracle tests inject their own).
-    if L_latent is not None:
-        _L = L_latent
-    elif thermo_convention == "aerobulk":
-        from legoesm.thermo import latent_heat_vaporization
-        _L = latent_heat_vaporization(T_sfc)
-    else:
-        _L = constants.L_v
+    # One latent heat for the codebase (user decision 2026-09-28): Kirchhoff
+    # L_v(T_sfc) in EVERY convention; an explicit ``L_latent`` (ice: L_s) wins.
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     if thermo_convention == "aerobulk":
         from legoesm.thermo import moist_air_cp
         _cp = moist_air_cp(q_atm)
@@ -1702,7 +1699,8 @@ def simple_bulk_fluxes(
     lhflx : array
         Latent heat flux [W/m2] (positive upward = surface moister).
     """
-    _L = constants.L_v if L_latent is None else L_latent
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     tau_x = -rho * Cd * wind_speed * u_lowest
     tau_y = -rho * Cd * wind_speed * v_lowest
     shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)

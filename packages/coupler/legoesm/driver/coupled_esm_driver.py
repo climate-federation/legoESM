@@ -1579,8 +1579,15 @@ class CoupledESMDriver:
             # conservation tests).
             r = self._last_sfc_response
             if r is None or getattr(r, "shflx", None) is None:
-                return None, None
-            return r.shflx, r.lhflx
+                return None, None, None
+            if getattr(r, "surface_mass_flux", None) is None:
+                raise ValueError(
+                    "couple_surface_fluxes: the surface response carries no "
+                    "surface_mass_flux; the atmosphere's moisture source must be "
+                    "the tiles' water flux, never lhflx re-divided by a latent heat.")
+            # Physical latent heat (each tile's own L(T, phase)) for the heat
+            # consumers, and the tiles' WATER flux for the moisture source.
+            return r.shflx, r.lhflx, r.surface_mass_flux
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(

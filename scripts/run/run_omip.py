@@ -2953,7 +2953,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
-    fw = jra55_to_freshwater(slc, tile_resp.lhflx)
+    fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
         q_net=q_net,

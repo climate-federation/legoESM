@@ -581,7 +581,8 @@ def column_surface_kinematic_fluxes(
     # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
     exner_inv = 1.0 / exner_function(p_s)
     w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
-    w_qv_s = lhflx[0] / (rho_1 * constants.L_v)
+    from legoesm.thermo import latent_heat_vaporization
+    w_qv_s = lhflx[0] / (rho_1 * latent_heat_vaporization(sst_K))
     return w_th_s, w_qv_s
 
 
