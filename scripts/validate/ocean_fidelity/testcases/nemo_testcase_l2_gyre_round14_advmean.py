@@ -64,7 +64,8 @@ def _xy(
 
 
 def read_advmean(
-    path: Path, *, expected_kt: int = 1, include_halo: bool = False
+    path: Path, *, expected_kt: int = 1, include_halo: bool = False,
+    expected_dims: tuple[int, int] = DIMS[:2], expected_ncycle: int = 50,
 ) -> dict:
     """Read ``NEMO_L2_BTADV_2`` with strict header and EOF checks."""
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
@@ -76,7 +77,8 @@ def read_advmean(
         version, kt, ncycle, nx, ny, bits = header
         require(
             (magic, version, kt, ncycle, nx, ny, bits)
-            == ("NEMO_L2_BTADV_2", 2, expected_kt, 50, *DIMS[:2], 64),
+            == ("NEMO_L2_BTADV_2", 2, expected_kt, expected_ncycle,
+                *expected_dims, 64),
             f"{path}: bad header {(magic, *header)}",
         )
         n2 = nx * ny
