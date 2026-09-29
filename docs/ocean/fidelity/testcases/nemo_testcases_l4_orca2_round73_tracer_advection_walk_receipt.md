@@ -93,7 +93,9 @@ boundary predicates are separate.
   `MY_SRC` provenance, four worktree-stamp emitters, missing
   `hires_lane_surface` case-board row, and round-129 stale phase-3
   certification. No round-73 failure appeared in the wide run;
-- separate read-only Codex review: pending final validation.
+- separate read-only Codex review: **independent review unavailable
+  in-sandbox**; `codex exec --sandbox read-only` exited 1 with
+  `failed to initialize in-process app-server client: Read-only file system`.
 
 No `packages/` file changed. GYRE, DINO, and tank trajectories cannot move;
 trajectory landing gates do not apply to this diagnostic round.
