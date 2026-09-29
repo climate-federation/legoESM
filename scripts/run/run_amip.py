@@ -1806,6 +1806,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(the model reached 288%% at 228 K). Treats the "
                              "cause of the supersaturation pile-up rather "
                              "than draining it after the fact.")
+    parser.add_argument("--morrison-warm-rain-scheme",
+                        choices=["kk2000", "seifert_beheng",
+                                 "seifert_beheng_sb2001"],
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_scheme"],
+                        dest="morrison_warm_rain_scheme",
+                        help="Morrison warm-rain autoconversion/accretion "
+                             "law (kk2000 = Khairoutdinov-Kogan 2000).")
+    parser.add_argument("--morrison-autocon-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_autocon_fact"],
+                        dest="morrison_autocon_fact",
+                        help="Multiplier on the kk2000 autoconversion rate "
+                             "(CAM6 MG2-style; 1.0 = unscaled, <1 keeps "
+                             "more cloud liquid). kk2000 only.")
+    parser.add_argument("--morrison-accre-enhan-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_accre_enhan_fact"],
+                        dest="morrison_accre_enhan_fact",
+                        help="Multiplier on kk2000 accretion of cloud by "
+                             "rain (MG2 accre_enhan; 1.0 = unscaled). "
+                             "kk2000 only.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -2514,6 +2536,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
+        morrison_warm_rain_scheme=args.morrison_warm_rain_scheme,
+        morrison_autocon_fact=args.morrison_autocon_fact,
+        morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

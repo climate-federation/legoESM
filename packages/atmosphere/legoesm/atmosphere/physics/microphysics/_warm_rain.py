@@ -818,7 +818,7 @@ _RAIN_EVAP_VENT_EXP = 0.525      # Marshall-Palmer rain-evaporation ventilation 
 
 
 
-def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
+def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
     """Khairoutdinov–Kogan (2000) warm-rain autoconversion — the SAM
     M2005 DEFAULT (``IRAIN=0``, ``module_mp_graupel.f90:1813``):
 
@@ -853,8 +853,10 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
+    # ``fact`` (MorrisonConfig.autocon_fact) scales PRC before both caps,
+    # so the rain-number source and cloud-number sink follow it.
     prc = (
-        _KK2000_AUTOCONV_PREFACTOR
+        (fact * _KK2000_AUTOCONV_PREFACTOR)
         * safe_pow(q_c_pos, _KK2000_AUTOCONV_QC_EXPONENT)
         * safe_pow(n_c_cm3, _KK2000_AUTOCONV_NC_EXPONENT)
     )
@@ -873,7 +875,7 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     return prc, dN_r_au, x_c
 
 
-def accretion_kk2000(q_c, q_r):
+def accretion_kk2000(q_c, q_r, fact=1.0):
     """Khairoutdinov–Kogan (2000) warm-rain accretion — SAM M2005
     (``module_mp_graupel.f90:1952``; identical to gSAM P3
     ``module_mp_p3.f90:3615``, iparam=3):
@@ -895,7 +897,8 @@ def accretion_kk2000(q_c, q_r):
     ``d/dx x^1.15 = 1.15·x^0.15 -> 0``, so this is NOT replacing a singular slope).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
-    return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
+    return (fact * _KK2000_ACCRETION_PREFACTOR) * safe_pow(
+        dum, _KK2000_ACCRETION_EXPONENT)
 
 
 def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, nu=_SB2001_NU_CLOUD):

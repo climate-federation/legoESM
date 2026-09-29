@@ -197,6 +197,8 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
     "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
     "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
+    "atm.micro.MorrisonConfig.autocon_fact": "morrison_autocon_fact",
+    "atm.micro.MorrisonConfig.accre_enhan_fact": "morrison_accre_enhan_fact",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
