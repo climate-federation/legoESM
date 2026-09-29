@@ -2807,6 +2807,16 @@ CITATION_MAP = {
     # so NEMO's own anchor floor is rmxl_min, not rn_mxl0=0.04.
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:831':
         ('rn_mxl0 = rmxl_min', 2),
+    # D72: the whole guarded overwrite block -- the IF that decides whether
+    # rn_mxl0 is replaced at all, and the assignment that replaces it -- and
+    # the ln_zdfiwm arm that forces the rmxl_min it is replaced WITH.
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:828-832': [
+        ('IF( ln_mxl0 ) THEN', 3),
+        ('rn_mxl0 = rmxl_min', 2), 5],
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:810-812': [
+        'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
+        'rmxl_min = 1.e-03_wp             ! associated avt minimum = molecular salt diffusivity (10^-9 m2/s)',
+        3],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:824-827': [
         'IF(.NOT.ll_bt_av ) THEN', 'pssh (:,:,Kaa) = ssha_e(:,:)', 4],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:456-480': [
