@@ -152,18 +152,22 @@ moved hash.
 | citation gate, the lane's own receipt | `PASS`, 274 citations, 0 unmapped -- unchanged in count by this round |
 | citation gate, planted-shift self-tests | all fire |
 | acquisition preflight, after the deck change | `PREFLIGHT_OK`, exit 0 |
+| push-gate battery, the six autopilot files plus the card test, the constructibility tripwire and the dispatch ratchet | `194 passed in 1170.66s` |
 | DINO month gate (note BI; this round changes `packages/`) | see below |
-| push-gate battery | see below |
 
-**The two long gates, honestly.** The DINO month gate and the full push-gate
-battery were both started. The battery ran on a machine carrying nine other
-pytest processes from concurrent rounds and had not passed its fifth file after
-twenty-five minutes; its partial output was green through four files
-(`test_nemo_testcase_receipt_citation_gate`, `test_tke_nemo_terms`,
-`test_nemo_recipe`, `test_real_freshwater_closure`) with no failures. That is
-NOT a pass, and it is not quoted as one: the rule in this campaign is that a
-tool's own success line is the evidence, and there is none. The operator's
-land script runs both, and neither may be assumed green.
+**What the battery line does and does not cover.** It was taken at
+`abc0c51c8`, BEFORE the three review-fix commits, so it is not the whole
+round. What the review fixes touch, and how each is covered at the final tree:
+the card test (`37 passed`, above, which includes the constructibility
+tripwire), the tendency probe (no citation anchors, and the citation gate is
+re-run green at the final tree), the acquisition script's prose, and this
+receipt. A re-run of the whole battery at the final tree was started; the
+operator's land script runs it too, and it is the authority.
+
+**The DINO month gate has NOT completed** and is not claimed. Note BI makes it
+mandatory for any round that changes `packages/`, which this one does, so the
+operator must see it green before landing. It is a thirty-day run and was
+started here; it had not printed a verdict when this receipt was written.
 
 What the card's own numbers do NOT depend on: every measurement in sections 2
 and 4 was taken in isolation, and the card test that carries them is the
