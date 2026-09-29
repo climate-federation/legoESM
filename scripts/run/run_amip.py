@@ -36,7 +36,9 @@ if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed()
 
 from legoesm.driver.config import (
+    CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
+    ZM_SCALAR_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
@@ -895,6 +897,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
                              "above it. Default: the scheme's own 0 = no limit.")
+    for _f, _leaf in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}.items():
+        _cls = ("ZhangMcFarlaneConfig" if _f.startswith("zm_")
+                else "CLUBBParams")
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"{_cls}.{_leaf} (legal range: the scheme's "
+                                 "__param_spec__). Default: the scheme's own "
+                                 "value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -2398,6 +2408,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
+        **{_f: getattr(args, _f)
+           for _f in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
                                        if args.clubb_q_flux_scale_sigma_band

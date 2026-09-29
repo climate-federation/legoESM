@@ -538,6 +538,38 @@ def _sed_substeps_cap_limit() -> int:
     return SED_CFL_SUBSTEPS_MAX_LIMIT
 
 
+# Flat ExperimentConfig scalar -> scheme leaf for the Zhang-McFarlane and CLUBB
+# tunables.  The MPAS / spectral lanes rebuild their scheme configs from the
+# flat ExperimentConfig, so the post-setup --params class router cannot reach
+# these there; the flat scalars (and their --params scalar-map entries) can.
+# None = keep the scheme's own default.  Legal ranges come from the scheme's
+# ``__param_spec__`` (one range per parameter), read in ``validate_strict``.
+ZM_SCALAR_FIELDS = {
+    "zm_c0_lnd": "c0_lnd",
+    "zm_c0_ocn": "c0_ocn",
+    "zm_ke": "ke",
+    "zm_dmpdz": "dmpdz",
+    "zm_tau": "tau",
+    "zm_capelmt": "capelmt",
+}
+CLUBB_SCALAR_FIELDS = {
+    "clubb_c14": "C14",
+    "clubb_c8": "C8",
+    "clubb_c11": "C11",
+    "clubb_c11b": "C11b",
+    "clubb_gamma_coef": "gamma_coef",
+    "clubb_gamma_coefb": "gamma_coefb",
+    "clubb_beta": "beta",
+    "clubb_c_k10": "c_K10",
+}
+# Read only by the prognostic CLUBB path (advance_clubb_core and its
+# advance_xp2_xpyp / advance_wp2_wp3 / compute_clubb_diagnostics); the
+# diagnostic path (clubb_turbulence) reads gamma_coef and beta only.
+CLUBB_PROGNOSTIC_ONLY = frozenset({
+    "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
+    "clubb_c_k10"})
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -1828,6 +1860,23 @@ class ExperimentConfig(NamedTuple):
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
 
+    # --- ZM / CLUBB tunables (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS) ------
+    # APPENDED AT THE TUPLE END (positional ABI).  None = the scheme default.
+    zm_c0_lnd: float | None = None
+    zm_c0_ocn: float | None = None
+    zm_ke: float | None = None
+    zm_dmpdz: float | None = None
+    zm_tau: float | None = None
+    zm_capelmt: float | None = None
+    clubb_c14: float | None = None
+    clubb_c8: float | None = None
+    clubb_c11: float | None = None
+    clubb_c11b: float | None = None
+    clubb_gamma_coef: float | None = None
+    clubb_gamma_coefb: float | None = None
+    clubb_beta: float | None = None
+    clubb_c_k10: float | None = None
+
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
 
@@ -2532,6 +2581,39 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
+        from legoesm.atmosphere.physics.convection.config import (
+            __param_spec__ as _conv_spec,
+        )
+        from legoesm.atmosphere.physics.turbulence.clubb import (
+            __param_spec__ as _clubb_spec,
+        )
+        for _table, _active, _what, _spec in (
+                (ZM_SCALAR_FIELDS, self.convection == "zhang_mcfarlane",
+                 f"convection={self.convection!r}",
+                 _conv_spec["ZhangMcFarlaneConfig"]["params"]),
+                (CLUBB_SCALAR_FIELDS,
+                 self.turbulence == "clubb" and self.turbulence_override is None,
+                 f"turbulence={self.turbulence!r} (refused with a "
+                 "turbulence_override too, which bypasses the threading)",
+                 _clubb_spec["CLUBBParams"]["params"])):
+            for _f, _leaf in _table.items():
+                _v = getattr(self, _f)
+                if _v is None:
+                    continue
+                if not _active:
+                    errors.append(f"{_f} sets {_leaf} of a scheme this run "
+                                  f"does not select; got {_what}")
+                if _f in CLUBB_PROGNOSTIC_ONLY and not self.clubb_prognostic:
+                    errors.append(f"{_f} is read only by prognostic CLUBB; "
+                                  "set clubb_prognostic=True")
+                _lo, _hi = _spec[_leaf]["bounds"]
+                try:
+                    _ok = _lo <= float(_v) <= _hi
+                except (TypeError, ValueError):
+                    _ok = False
+                if not _ok:
+                    errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
+                                  f"(the scheme's __param_spec__), got {_v!r}")
         if (self.clubb_trop_cloud_top_press is not None
                 and self.turbulence != "clubb"):
             errors.append(
