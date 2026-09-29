@@ -4402,9 +4402,13 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                              f"by up to {max(_dlat.max(), _dlon.max()):.3g} deg")
         out[:, :ny, 1:nx + 1] = total
         if ocean is not None:
-            _dry = (out[:, :, 1:nx + 1].sum(axis=0) > 0) & ~ocean[:, 1:nx + 1]
+            # NEMO sbcrnf.F90:128: rnf = sf_rnf * smask0 -- discharge on land is dropped silently.
+            _dry = (out.sum(axis=0) > 0) & ~ocean
             if _dry.any():
-                raise ValueError(f"runoff native: {int(_dry.sum())} discharge cells are land in the model mask")
+                _lost = float((out.mean(axis=0) * A_tgt)[_dry].sum()) / 1.0e9
+                print(f"[setup] runoff native: {int(_dry.sum())} discharge cells on land dropped "
+                      f"(NEMO rnf*smask0), {_lost:.2e} Sv")
+            out[:, ~ocean] = 0.0
         _src = float((total.mean(axis=0) * A_src).sum()) / 1.0e9
         _tgt = float((out.mean(axis=0) * A_tgt).sum()) / 1.0e9
         print(f"[setup] runoff: NATIVE eORCA1 field, {int(src_valid.sum())} discharge cells, "

@@ -148,7 +148,7 @@ def test_unknown_runoff_regrid_raises():
                     reason="NEMO Dai-Trenberth runoff file not on this host")
 def test_native_runoff_is_the_nemo_field_on_eorca1():
     """'native' hands the tripole NEMO's own field: interior bit-identical,
-    cyclic halos and top row zero; land discharge cell or shifted coords raise."""
+    cyclic halos and top row zero; land discharge dropped (NEMO rnf*smask0); shifted coords raise."""
     import types
     import xarray as xr
     A = R._load_nemo_cell_area_m2()
@@ -171,9 +171,11 @@ def test_native_runoff_is_the_nemo_field_on_eorca1():
                               land_mask=wet, spread_passes=0, regrid="native")
     j, i = np.unravel_index(np.argmax(src.sum(0)), src.shape[1:])
     wet[j, i + 1] = 0.0
-    with pytest.raises(ValueError, match="land in the model mask"):
-        R.load_runoff_monthly(grid, "tripole", la, lo, None, land_mask=wet,
-                              spread_passes=0, regrid="native")
+    out2 = R.load_runoff_monthly(grid, "tripole", la, lo, None, land_mask=wet,
+                                 spread_passes=0, regrid="native")
+    assert not out2[:, j, i + 1].any()  # NEMO rnf*smask0
+    out2[:, j, i + 1] = out[:, j, i + 1]
+    np.testing.assert_array_equal(out2, out)
 
 
 def test_native_runoff_refuses_other_grids_and_spreading():
