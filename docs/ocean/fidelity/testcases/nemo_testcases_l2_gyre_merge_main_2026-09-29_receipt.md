@@ -282,7 +282,18 @@ worktree `clean: true`.  The planted control `FAIL`s and exits 1.
 **Push gate** (the six files named in `autopilot/autopilot_max.sh`), at the
 FINAL tip on a clean committed tree:
 
-> PLACEHOLDER_PUSHGATE
+> `135 passed in 925.09s (0:15:25)` at `1c9db3c62`, and again
+> `135 passed in 917.74s (0:15:17)` at the final tip `9c9cb889c`
+
+Same count as the 2026-09-25 merge round's push gate.  The citation gate was
+re-run at the final tip as well — `status PASS`, 274 citations, 0 failures, 0
+map entries failing audit, 0 unmapped, 9 of 9 plants fired, worktree
+`clean: true` — and this receipt's own citations pass their own run of the
+gate: `PASS`, 3 citations, 0 failures, 0 unmapped.  The first run against this
+receipt returned `FAIL` with 3 unmapped, which is the gate doing its job: the
+shift table's pre-merge line numbers were written in `file:line` form and so
+read as live citations to text that had moved.  Recorded rather than quietly
+fixed; the table now gives those as plain numbers and says why.
 
 
 ## Independent reviews
