@@ -105,7 +105,11 @@ predicates are separate.
 - metric-U gate: `PASS_METRIC_U_TRANSPORT_WALK`; production CPU/JIT/fp64/libm;
 - card-scope, record-replay, exposure-calibration, first-classification, and
   round-73-boundary plants: all five FIRED;
-- focused gate and default citation-map tests: `24 passed`;
+- focused round-71/72/73/74 and citation tests: `50 passed`;
+- default citation gate: PASS, 274 citations, zero failures, zero unmapped,
+  and zero map-audit failures; this receipt's gate: PASS, two citations,
+  zero failures, zero unmapped, and zero map-audit failures; the shifted
+  hybrid-transport citation plant FIRES with `SYMBOL-NOT-AT-LINE`;
 - shared-card battery: `160 passed` with nine dtype warnings;
 - tank battery: `10 passed`;
 - wide `tests/ocean/fidelity -n 12`: 2,065 collected; reached 99% with 2,041
