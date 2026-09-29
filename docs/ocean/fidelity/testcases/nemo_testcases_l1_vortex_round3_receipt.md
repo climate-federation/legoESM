@@ -268,10 +268,23 @@ two findings, and it stays reported rather than fixed.
 | kt=2 walk | five arms; section 6 |
 | kt=2 walk plant | exit 1 |
 | walk record readers, three planted malformations | `5 passed` |
-| card test and constructibility | see below |
-| citation gate, this receipt | see below |
-| citation gate, planted shift | see below |
-| DINO month gate (note BI; this round changes `packages/`) | see below |
+| card test and constructibility, plus the recipe, barotropic-state and stage-face-mask tests | `1 failed, 80 passed in 996.00s` — the ONE failure is the pre-existing certified-card digest red of section 8, reproduced with every round-3 edit reverted |
+| citation gate, this receipt | `PASS`, 10 citations, 0 unmapped, 0 map entries failing |
+| citation gate, round 2's receipt and the lane's own | `PASS` on both, unchanged in count |
+| citation gate, planted shift | exit 2 |
+| DINO month gate (note BI; this round changes `packages/`) | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS` |
+
+**The DINO month gate needed a second run, and the reason is worth recording.**
+Its first run finished the thirty-day model integration and then REFUSED at the
+scoring step, because the gate writes into one shared directory and another
+session's output from that morning was already sitting in it. Nothing was
+deleted; the gate was re-run against a private directory under this round's own
+evidence folder, which is why the number above can be attributed to this tree at
+all. The gate as written cannot be run by two sessions at once, and until it
+takes a per-caller directory it has to be run alone. The value is
+`1.9e-10 K` from the certified one, which is the harness's own run-to-run floor
+(round 129 measured about `2e-10 K`), so this round is INERT on DINO — neither
+an improvement nor a regression, which is what an additive round should give.
 
 ## 10. Choices made this round
 
