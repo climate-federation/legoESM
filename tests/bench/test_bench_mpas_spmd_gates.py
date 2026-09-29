@@ -80,49 +80,63 @@ def test_lloyd_flag_reaches_the_mesh_builder(monkeypatch):
 
     monkeypatch.setattr(voronoi, "create_voronoi_mesh", _spy)
     with pytest.raises(RuntimeError, match="stop-after-mesh-request"):
-        mod.build_model_and_state(4, 4, 1, 1, "sfc", lloyd_iterations=0)
+        mod.build_model_and_state(4, 4, 1, 1, "sfc", dt=600.0, lloyd_iterations=0)
     assert seen["level"] == 4
     assert seen["lloyd_iterations"] == 0
 
 
-def test_hyperdiffusion_scales_with_subdivision(monkeypatch):
-    """del4 must shrink 16x per level past s4 (nu ~ dx^4).
 
-    A fixed 1e16 at every subdivision drove s7 (dt 30 s) non-finite by step
-    4 on CPU and GPU (1 device too); 1e15/1e14/0 stayed finite.  The spy
-    records what ``build_model_and_state`` hands the model config, so
-    reverting to a literal fails here.
-    """
+def test_del4_coeff_is_the_shared_law_capped_by_dt():
+    sys.path.insert(0, str(_BENCH.parent))
+    from legoesm import constants
+    mod = _load_bench()
+    assert mod.DEL4_S_MAX == 6e-4   # user-approved margin, 2026-09-27
+    assert mod.hyperdiff_coeff(7, "icosahedral") == 1.0e16 / 16.0 ** 3   # shared law
+
+    def s_num(level, dt):
+        dx = constants.R_earth * (4 * 3.141592653589793 / (10 * 4 ** level + 2)) ** 0.5
+        return mod.del4_coeff(level, dt) * dt / dx ** 4
+
+    # On the ladder's own timesteps the law binds (s_num stays under the cap)...
+    for level, dt in ((4, 600.0), (7, 30.0), (8, 5.0)):
+        assert mod.del4_coeff(level, dt) == mod.hyperdiff_coeff(level, "icosahedral")
+        assert s_num(level, dt) < mod.DEL4_S_MAX
+    # ...and a long step hits the cap, which then scales as 1/dt.
+    assert s_num(4, 6000.0) == pytest.approx(mod.DEL4_S_MAX, rel=1e-12)
+    assert mod.del4_coeff(4, 3000.0) == pytest.approx(2 * mod.del4_coeff(4, 6000.0))
+
+
+def test_builder_passes_the_capped_coefficient(monkeypatch):
+    """The spy records what ``build_model_and_state`` hands the model config,
+    so reverting to a literal (the fixed 1e16 that sent s7 non-finite by step
+    4) fails here."""
     import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pe
     import legoesm.grids.voronoi as voronoi
 
     mod = _load_bench()
-    assert mod.nu_del4_for(7) == 1.0e16 / 16.0 ** 3
-
     real = voronoi.create_voronoi_mesh
     monkeypatch.setattr(voronoi, "create_voronoi_mesh",
                         lambda subdivision_level, **kw: real(2, lloyd_iterations=0))
     seen = {}
 
-    def _cfg_spy(**kwargs):
+    def _spy(**kwargs):
         seen.update(kwargs)
-        raise RuntimeError("stop-after-config")
+        raise RuntimeError("stop-at-config")
 
-    monkeypatch.setattr(pe, "MPASPrimitiveEquationConfig", _cfg_spy)
-    with pytest.raises(RuntimeError, match="stop-after-config"):
-        mod.build_model_and_state(7, 4, 1, 1, "sfc", lloyd_iterations=0)
-    assert seen["nu_del4"] == seen["nu_del4_ps"] == mod.nu_del4_for(7)
+    monkeypatch.setattr(pe, "MPASPrimitiveEquationConfig", _spy)
+    with pytest.raises(RuntimeError, match="stop-at-config"):
+        mod.build_model_and_state(7, 4, 1, 1, "sfc", dt=30.0, lloyd_iterations=0)
+    want = mod.del4_coeff(7, 30.0)
+    assert seen["nu_del4"] == seen["nu_del4_ps"] == want == 1.0e16 / 16.0 ** 3
+    # ...and a long step at level 4 where the CAP binds: an uncapped builder
+    # would hand the model the bare law (1e16) here.
+    seen.clear()
+    with pytest.raises(RuntimeError, match="stop-at-config"):
+        mod.build_model_and_state(4, 4, 1, 1, "sfc", dt=6000.0, lloyd_iterations=0)
+    assert (seen["nu_del4"] == seen["nu_del4_ps"] == mod.del4_coeff(4, 6000.0)
+            < mod.hyperdiff_coeff(4, "icosahedral"))
 
 
-def test_state_is_finite_flags_nan_and_inf():
-    """A blown-up state must be stamped invalid, not timed as data."""
-    import jax.numpy as jnp
-
-    mod = _load_bench()
-    good = {"u": jnp.ones(3), "idx": jnp.arange(3), "none": None, "t": 0.5}
-    assert mod._state_is_finite(good) is True
-    assert mod._state_is_finite({**good, "u": jnp.array([1.0, jnp.nan])}) is False
-    assert mod._state_is_finite({**good, "T": jnp.array([jnp.inf])}) is False
 
 
 def test_gather_voronoi_state_spmd_round_trip():

@@ -10,10 +10,9 @@
 #   ./submit_nature_ladder.sh ocean_cpu 1024 12:00:00
 #   ./submit_nature_ladder.sh atm_gpu    512
 #
-# Four ranks per node either way: on the GPU nodes that is one rank per A100,
-# on the CPU nodes it is the rank density Levante measured as the optimum,
-# four ranks of thirty-two cores. So the node count is the device count over
-# four, and 1024 devices is 256 nodes.
+# GPU nodes: four ranks per node, one per A100, so 1024 devices is 256 nodes.
+# CPU nodes: sixteen ranks of eight cores (the Derecho optimum measured
+# 2026-09-25, see nature_ladder.pbs), so 1024 ranks is 64 nodes.
 #
 # Arms needing more nodes than the allocation are skipped and a valid receipt
 # is never re-run, so resubmitting into the same output directory resumes
@@ -28,19 +27,20 @@ case "$MATRIX" in atm_gpu|atm_cpu|ocean_gpu|ocean_cpu) ;;
   *) echo "unknown matrix '$MATRIX'" >&2; exit 2 ;; esac
 [[ "$DEVICES" =~ ^[0-9]+$ ]] && (( DEVICES > 0 )) || {
   echo "devices must be a positive integer, got '$DEVICES'" >&2; exit 2; }
-(( DEVICES % 4 == 0 )) || {
-  echo "devices must be a multiple of 4 (four ranks per node), got $DEVICES" >&2
+BACKEND="${MATRIX##*_}"
+if [[ "$BACKEND" == gpu ]]; then PPN=4; else PPN=16; fi
+(( DEVICES % PPN == 0 )) || {
+  echo "devices must be a multiple of $PPN ($PPN ranks per $BACKEND node), got $DEVICES" >&2
   exit 2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NODES=$(( DEVICES / 4 ))
-BACKEND="${MATRIX##*_}"
+NODES=$(( DEVICES / PPN ))
 
 if [[ "$BACKEND" == gpu ]]; then
   SELECT="select=${NODES}:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB"
   WALLTIME="${WALLTIME:-04:00:00}"
 else
-  SELECT="select=${NODES}:ncpus=128:mpiprocs=4:mem=200GB"
+  SELECT="select=${NODES}:ncpus=128:mpiprocs=16:mem=200GB"
   WALLTIME="${WALLTIME:-08:00:00}"
 fi
 

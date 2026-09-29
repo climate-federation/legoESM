@@ -348,7 +348,17 @@ class MPASOceanConfig(NamedTuple):
     # different mesh and stays at 60 until measured.
     barotropic_implicit_pcg_fixed_iters: int = 20
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    barotropic_implicit_pcg_variant: str = "standard"
+    # "single_reduce" (Chronopoulos-Gear, one batched allreduce per
+    # iteration instead of two) since 2026-09-26, owner-approved after two
+    # checks: convergence on the REAL captured systems is identical (s7 L40,
+    # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
+    # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
+    # Derecho CPU with the butterfly global sum, s7 16 ranks/node, 313 vs 315
+    # ms/step at 1 node, 167 vs 171 at 2, 110 vs 118 at 4, 86.9 vs 97.2 at 8.
+    # float32 checked too (same systems): both recurrences reach the f32
+    # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
+    # GPU (NCCL) was not re-measured with it; "standard" stays selectable.
+    barotropic_implicit_pcg_variant: str = "single_reduce"
     # Distributed-only preconditioner for the fixed-iteration PCG.
     # "jacobi" (default) or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no

@@ -30,7 +30,7 @@ import os
 import sys
 
 _RAW = ("n_lat", "n_lon", "n_cells", "subdivision", "resolution", "kt", "nlev",
-        "n_levels")
+        "n_levels", "nu_del4", "dt", "dt_seconds", "use_polar_filter")
 
 
 def _plotter():
