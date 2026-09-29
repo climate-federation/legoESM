@@ -57,28 +57,70 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
-# Round 2 writes BESIDE round 1, never over it.  Round 1's record was produced
-# on a deck that selected a different equation of state, so it is superseded
-# from step 1 onward -- but its INITIAL STATE is the reference the round-2 gate
-# compares against, and overwriting it would destroy the only control that can
-# tell a deck change from a transcription defect.
-readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2}
 readonly TEST_CASE=VORTEX
-readonly REF_CFG=VORTEX_OMIP_L1
-readonly RUN_CFG=VORTEX_OMIP_L1_P3
-readonly RESTART=VORTEX_OMIP_L1_ZCO_00000010_restart.nc
 readonly STEPS=10
 
+# TWO CARDS, ONE SCRIPT (decision 73, operator note BJ).  The vector-EEN card is
+# the SAME experiment -- same geometry, same simplified equation of state, same
+# eddy, no forcing, no implicit vertical advection -- with ONE thing changed:
+# the momentum scheme set becomes ORCA2's and GYRE's, vector-invariant advection
+# with the energy-and-enstrophy vorticity.  Everything else in this script is
+# shared deliberately, so the two records differ by exactly that one deck hunk
+# and nothing about the build, the writer or the admission can drift between
+# them.
+#
+#   --variant flux (default)  the round-2 card: flux-form UP3, EEN on Coriolis
+#                             plus the (bitwise zero) metric term
+#   --variant vec             the round-3 card: vector-invariant, EEN on
+#                             Coriolis plus RELATIVE vorticity
+#
+# Each variant writes its OWN evidence directory beside the other and builds its
+# OWN pair of NEMO configurations.  Nothing is ever overwritten: the acquire arm
+# refuses a target that already exists, and moving an old build aside is the
+# operator's call, never this script's.
+variant=flux
 do_run=0
-case "${1:-}" in
-  --run) do_run=1 ;;
-  "") ;;
-  *) printf 'Usage: %s [--run]\n' "$0" >&2 ; exit 64 ;;
-esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run) do_run=1 ;;
+    --variant) shift; variant=${1:-} ;;
+    --variant=*) variant=${1#--variant=} ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec]\n' "$0" >&2 ; exit 64 ;;
+  esac
+  shift
+done
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+case "$variant" in
+  flux)
+    # Round 2 writes BESIDE round 1, never over it.  Round 1's record was
+    # produced on a deck that selected a different equation of state, so it is
+    # superseded from step 1 onward -- but its INITIAL STATE is the reference
+    # the round-2 gate compares against, and overwriting it would destroy the
+    # only control that can tell a deck change from a transcription defect.
+    deck_basename=namelist_cfg_omip_l1.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2
+    ref_name=VORTEX_OMIP_L1
+    tag=round2
+    ;;
+  vec)
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3
+    ref_name=VORTEX_VEC_OMIP_L1
+    tag=round3_vec
+    ;;
+  *)
+    printf 'REFUSE: unknown variant %s; expected flux or vec\n' "$variant" >&2
+    exit 64
+    ;;
+esac
+readonly EVIDENCE=${EVIDENCE:-$default_evidence}
+readonly REF_CFG=$ref_name
+readonly RUN_CFG=${ref_name}_P3
+readonly RESTART=${ref_name}_ZCO_00000010_restart.nc
+readonly TAG=$tag
 readonly INSTRUMENT=$here/stprk3_step_record.patch
-readonly DECK=$here/namelist_cfg_omip_l1.patch
+readonly DECK=$here/$deck_basename
 readonly CHECKER=$here/check_records.py
 readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
 readonly SHIPPED_CFG=$NEMO_ROOT/tests/$TEST_CASE/EXPREF/namelist_cfg
@@ -149,10 +191,44 @@ if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
   printf 'REFUSE: the deck now sets ln_zad_Aimp; the card transcribes the unset default\n' >&2
   rm -rf "$dry"; exit 67
 fi
+# THE ONE THING THE TWO CARDS DISAGREE ON (decision 73).  NEMO counts the
+# advection-form switches and stops unless EXACTLY ONE is true
+# (dynadv.F90:184-190), and the vorticity routine reads that count to decide
+# what the vorticity operator is handed: flux form gets Coriolis plus the metric
+# term, vector form gets Coriolis plus the RELATIVE vorticity
+# (dynvor.F90:855-868).  So this pair of lines IS the experiment's identity, and
+# a deck that silently carried the other card's pair would run the other card
+# under this card's name.  Refuse rather than discover it in the ladder.
+case "$variant" in
+  flux) want_vec='.false.' ; want_up3='.true.'  ;;
+  vec)  want_vec='.true.'  ; want_up3='.false.' ;;
+esac
+if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
+  printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
+  rm -rf "$dry"; exit 67
+fi
+if ! grep -qE "^ *ln_dynadv_up3 *= *${want_up3//./\.}" "$dry/namelist_cfg"; then
+  printf 'REFUSE: variant %s needs ln_dynadv_up3 = %s\n' "$variant" "$want_up3" >&2
+  rm -rf "$dry"; exit 67
+fi
+# NEMO's own rule, applied here so a two-form deck is refused before makenemo:
+# count the advection forms the deck leaves true.
+forms=$(grep -cE "^ *ln_dynadv_(vec|cen2|up3) *= *\.true\." "$dry/namelist_cfg")
+if [[ "$forms" -ne 1 ]]; then
+  printf 'REFUSE: the deck selects %s momentum advection forms; NEMO needs exactly one\n' \
+    "$forms" >&2
+  rm -rf "$dry"; exit 67
+fi
+# Both cards run the energy-and-enstrophy vorticity; only what it is HANDED
+# differs.  A deck that changed the scheme would be a third card.
+if ! grep -qE "^ *ln_dynvor_een *= *\.true\." "$dry/namelist_cfg"; then
+  printf 'REFUSE: both VORTEX cards require ln_dynvor_een = .true.\n' >&2
+  rm -rf "$dry"; exit 67
+fi
 rm -rf "$dry"
 python "$CHECKER" --help >/dev/null \
   || { printf 'REFUSE: the record checker does not run\n' >&2; exit 67; }
-printf 'PREFLIGHT_OK  instrument and deck patches apply to the shipped sources\n'
+printf 'PREFLIGHT_OK  variant %s: instrument and deck patches apply to the shipped sources\n' "$variant"
 printf '  reference config : %s\n  instrumented cfg : %s\n  evidence         : %s\n' \
   "$ref_cfg" "$run_cfg" "$EVIDENCE"
 printf '  deck deviations  :\n'
@@ -275,16 +351,16 @@ cp "$manifest"/*.sha256 "$EVIDENCE/"
 # MUST turn it red, or it proves nothing.
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$STEPS" \
-  --output "$EVIDENCE/vortex_round2_admission.json"
+  --output "$EVIDENCE/vortex_${TAG}_admission.json"
 if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
      --restart "$RESTART" --steps "$STEPS" --plant \
-     >"$EVIDENCE/vortex_round2_admission_plant.json" 2>&1; then
+     >"$EVIDENCE/vortex_${TAG}_admission_plant.json" 2>&1; then
   printf 'REFUSE: the planted control did not turn the checker red\n' >&2
   exit 70
 fi
 (
   cd "$EVIDENCE"
-  sha256sum oracle_*.bin vortex_round2_admission.json "$RESTART" mesh_mask.nc \
-    >vortex_round1_outputs.sha256
+  sha256sum oracle_*.bin vortex_${TAG}_admission.json "$RESTART" mesh_mask.nc \
+    >vortex_${TAG}_outputs.sha256
 )
-printf 'VORTEX_ROUND1_KT1_10_ORACLE_READY %s\n' "$EVIDENCE"
+printf 'VORTEX_%s_KT1_10_ORACLE_READY %s\n' "$TAG" "$EVIDENCE"

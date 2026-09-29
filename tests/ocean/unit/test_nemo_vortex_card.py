@@ -616,3 +616,60 @@ def _card_digest(card):
 def test_the_certified_cards_are_untouched_by_the_vortex_card(case):
     assert _card_digest(build_nemo_testcase_card(case)) == \
         _CERTIFIED_CARD_DIGESTS[case]
+
+
+# --------------------------------------------------------------------------
+# The two VORTEX decks (decision 73).  The vector-EEN card is the flux card
+# with ONE thing changed: the momentum scheme set.  That claim is what makes
+# the pair a one-variable comparison, so it is asserted from the two committed
+# patches rather than described in prose.
+_DECKS = (
+    "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex")
+_SHIPPED_DECK = (
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/VORTEX/EXPREF/"
+    "namelist_cfg")
+
+
+def _resolved_deck(patch_name, tmp_path):
+    """Apply one committed deck patch to the shipped namelist and return it."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "namelist_cfg"
+    shutil.copy(_SHIPPED_DECK, target)
+    patch = Path(__file__).resolve().parents[3] / _DECKS / patch_name
+    subprocess.run(["patch", "-s", str(target)], check=True,
+                   stdin=patch.open("rb"))
+    return target.read_text().splitlines()
+
+
+@pytest.mark.skipif(
+    not glob.glob(_SHIPPED_DECK),
+    reason="NEMO's shipped VORTEX namelist is not on this machine")
+def test_the_vector_deck_differs_from_the_flux_deck_only_in_the_momentum_set(
+        tmp_path):
+    """dynadv.F90:184-190 counts the forms; dynvor.f90:855-868 reads the count.
+
+    So these two lines, and the experiment name that keeps the two records
+    apart, are the WHOLE difference between the two VORTEX cards.  A third
+    differing line would mean the pair is not a controlled comparison.
+    """
+    flux = _resolved_deck("namelist_cfg_omip_l1.patch", tmp_path / "a")
+    vec = _resolved_deck("namelist_cfg_vec_een.patch", tmp_path / "b")
+    assert len(flux) == len(vec)
+    moved = [(a, b) for a, b in zip(flux, vec) if a != b]
+    keys = sorted(line.split("=")[0].strip() for line, _ in moved)
+    assert keys == ["cn_exp", "ln_dynadv_up3", "ln_dynadv_vec"], moved
+    resolved = {key: value for key, value in
+                (line.split("=", 1) for line in vec if "=" in line)}
+    assert ".true." in resolved["   ln_dynadv_vec "]
+    assert ".false." in resolved["   ln_dynadv_up3 "]
+    # Both cards run the SAME vorticity scheme; only what it is handed differs.
+    assert any(line.strip().startswith("ln_dynvor_een") and ".true." in line
+               for line in vec)
+    assert sum(1 for line in vec
+               if line.strip().startswith(("ln_dynadv_vec", "ln_dynadv_cen2",
+                                           "ln_dynadv_up3"))
+               and ".true." in line) == 1
