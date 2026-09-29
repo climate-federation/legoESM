@@ -1865,10 +1865,6 @@ class ExperimentConfig(NamedTuple):
     # carries no graupel; False routes frozen rain to snow and drops the
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
-    # Morrison warm rain (appended at the END: positional ABI).
-    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
-    morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
-    morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
 
     # --- ZM / CLUBB tunables (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS) ------
     # APPENDED AT THE TUPLE END (positional ABI).  None = the scheme default.
@@ -1886,6 +1882,10 @@ class ExperimentConfig(NamedTuple):
     clubb_gamma_coefb: float | None = None
     clubb_beta: float | None = None
     clubb_c_k10: float | None = None
+    # Morrison warm rain (appended at the END: positional ABI).
+    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
+    morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
+    morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
