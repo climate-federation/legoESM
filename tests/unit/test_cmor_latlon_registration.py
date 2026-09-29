@@ -125,3 +125,54 @@ def test_regridder_rejects_bad_row_latitudes():
         compute_voronoi_to_latlon_weights(
             np.zeros(3), np.zeros(3), n_lon=4, n_lat=3,
             lat_cent=np.array([0.0, np.nan, 20.0]))
+
+
+def _structured(lat_deg, lon_deg):
+    grid = types.SimpleNamespace(lat=np.radians(lat_deg), lon=np.radians(lon_deg))
+    dc = _collector()
+    dc.set_cmip_grid_info(grid_type="latlon", grid=grid, start_year=1979)
+    return dc
+
+
+def test_latlon_lane_interpolates_same_shape_grid_to_labels():
+    """The lat-lon grid has the target SHAPE (5 deg: centred rows, lon
+    0..355) but its columns sit half a cell west of the 2.5..357.5 labels:
+    it must be interpolated, periodically across 360/0."""
+    nlat, nlon = int(180 / RES), int(360 / RES)
+    lat = np.linspace(-90 + RES / 2, 90 - RES / 2, nlat)
+    lon = np.arange(nlon) * RES
+    dc = _structured(lat, lon)
+    f = lambda la, lo: la[:, None] + 10.0 * np.sin(np.radians(lo))[None, :]
+    out = dc._regrid_to_latlon_2d(f(lat, lon))
+    lat_l, lon_l = dc._cmip_target_latlon()
+    # Bilinear error on 10*sin at 5 deg spacing <= 10*(0.0873**2)/8 ~ 0.0095;
+    # the half-cell passthrough was off by up to 10*0.0436 = 0.436.
+    np.testing.assert_allclose(out, f(lat_l, lon_l), atol=0.011)
+    # Wrap column (label 357.5) interpolates 355 and 360==0, not clamps.
+    np.testing.assert_allclose(out[:, -1], lat + 10.0 * np.sin(np.radians(357.5)),
+                               atol=0.011)
+    out3 = dc._regrid_to_latlon_3d(np.stack([f(lat, lon)] * 2, axis=-1))
+    np.testing.assert_allclose(out3[..., 1], out, atol=1e-12)
+    assert dc.cf_writer.require_centre_sampling_on_append
+
+
+def test_latlon_lane_descending_rows_land_on_labels():
+    """North-to-south native rows (either order is legal) interpolate onto
+    the ascending labels; a field linear in latitude is exact."""
+    lat = np.linspace(90.0, -90.0, 37)
+    lon = np.arange(72) * 5.0 + 2.5          # already the labelled columns
+    dc = _structured(lat, lon)
+    out = dc._regrid_to_latlon_2d(np.broadcast_to(lat[:, None], (37, 72)))
+    lat_l, _ = dc._cmip_target_latlon()
+    np.testing.assert_allclose(out, np.broadcast_to(lat_l[:, None], out.shape),
+                               atol=1e-9)
+
+
+def test_latlon_lane_exact_label_grid_passes_through():
+    nlat, nlon = int(180 / RES), int(360 / RES)
+    lat = np.linspace(-90 + RES / 2, 90 - RES / 2, nlat)
+    lon = np.arange(nlon) * RES + RES / 2
+    dc = _structured(lat, lon)
+    assert dc._structured_regrid is None
+    field = np.arange(nlat * nlon, dtype=float).reshape(nlat, nlon)
+    np.testing.assert_array_equal(dc._regrid_to_latlon_2d(field), field)
