@@ -841,6 +841,9 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
         Air density [kg/m³].
     dt : float
         Time step [s] (caps the rain-number source at ``N_c/dt``).
+    fact : float
+        Multiplier on PRC (``MorrisonConfig.autocon_fact``, CAM6 MG2-style),
+        applied before both number caps. 1.0 = unscaled, bit-identical.
 
     Returns
     -------
@@ -881,6 +884,9 @@ def accretion_kk2000(q_c, q_r, fact=1.0):
     ``module_mp_p3.f90:3615``, iparam=3):
 
         PRA = 67 · (q_c · q_r)^1.15      [kg/kg/s]
+
+    times ``fact`` (``MorrisonConfig.accre_enhan_fact``, MG2 ``accre_enhan``;
+    1.0 = unscaled, bit-identical).
 
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
 

@@ -669,7 +669,7 @@ def _spectral_micro_config(cfg):
     from legoesm.driver.physics_pipeline import thread_morrison_scalars
     mc = MicrophysicsConfig(scheme=cfg.microphysics)
     leaf = getattr(mc, cfg.microphysics, None)
-    if leaf is None:
+    if leaf is None:   # 'none': no scheme leaf; validate_strict refuses morrison_* there
         return mc
     return mc._replace(**{cfg.microphysics: thread_morrison_scalars(
         cfg, cfg.microphysics, leaf)})
