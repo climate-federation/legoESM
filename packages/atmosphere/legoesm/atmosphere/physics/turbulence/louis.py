@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
@@ -207,7 +207,7 @@ def louis_turbulence(
     T_sfc : jax.Array
         Surface temperature [K], shape (ncol,).
     q_sfc : jax.Array
-        Surface saturation mixing ratio [kg/kg], shape (ncol,).
+        Surface saturation specific humidity [kg/kg], shape (ncol,).
     rho : jax.Array
         Air density at full levels [kg/m^3], shape (ncol, nlev).
     dt : float
@@ -315,7 +315,7 @@ def louis_turbulence(
     # a marine-Sc value; retune if applied to other regimes.
     dq_v_dz = (q_v[:, :-1] - q_v[:, 1:]) / dz_half
     rh_below = q_v[:, 1:] / jnp.maximum(
-        saturation_mixing_ratio(T[:, 1:], p_full[:, 1:]), 1.0e-12
+        saturation_specific_humidity(T[:, 1:], p_full[:, 1:]), 1.0e-12
     )
     K_ent = _cloudtop_entrainment_diffusivity(
         dz_half, dq_v_dz, dtheta_v_dz, rh_below, config,

@@ -60,9 +60,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_specific_humidity, saturation_mixing_ratio, saturation_mixing_ratio_dT,
-)
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import virtual_temperature
 
 

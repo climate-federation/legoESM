@@ -117,7 +117,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import compute_rho
 from legoesm.atmosphere.physics.thermodynamics import (
     parcel_profile_and_cape,
@@ -274,7 +274,7 @@ def tiedtke_convection(
     # launch humidity conserved on the dry leg, saturation-capped above
     # the LCL.
     q_v_parcel_ma = jnp.minimum(
-        q_base[:, None], saturation_mixing_ratio(T_moist, p_full)
+        q_base[:, None], saturation_specific_humidity(T_moist, p_full)
     )
     k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
         T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel_ma,
@@ -334,7 +334,7 @@ def tiedtke_convection(
     # otherwise (argument None) fall back to a saturation-EXCESS proxy
     # that is qualitatively similar (positive in moist columns, vanishing
     # in dry ones).
-    q_sat_env = saturation_mixing_ratio(T, p_full)
+    q_sat_env = saturation_specific_humidity(T, p_full)
     dp = p_half[:, 1:] - p_half[:, :-1]
     if moisture_convergence is not None:
         # Real MC — column-integrate per (kg/m^2/s).

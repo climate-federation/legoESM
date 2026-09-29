@@ -542,6 +542,39 @@ def saturation_specific_humidity(
     return w_sat / (1.0 + w_sat)
 
 
+def saturation_specific_humidity_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation specific humidity over ICE: ``r_i / (1 + r_i)`` with
+    ``r_i`` from :func:`saturation_mixing_ratio_ice` (the reference a
+    specific-humidity tracer is compared with in mixed-phase schemes)."""
+    w_sat = saturation_mixing_ratio_ice(T, p)
+    return w_sat / (1.0 + w_sat)
+
+
+def saturation_specific_humidity_dT(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """``d(q_sat)/dT`` for the SPECIFIC-humidity saturation: the exact
+    (forward-mode) derivative of :func:`saturation_specific_humidity`, so
+    value and slope share ONE floor convention (the softplus floor of
+    ``saturation_mixing_ratio``) and a Newton saturation adjustment lands on
+    the curve it is measured against even where ``e_sat`` approaches ``p``
+    (the mixing-ratio slope helper uses a hard ``max(p - e_sat, 1)`` clip
+    and disagrees with its own value function there: MEASURED 2026-09-29,
+    0.9 % off-curve at q_v = 0.6, p = 100 Pa).  Equals
+    ``saturation_mixing_ratio_dT / (1 + r)^2`` away from that regime.
+    Differentiable (a JVP of a smooth function); T and p broadcast.
+    """
+    T = jnp.asarray(T)
+    p = jnp.asarray(p)
+    T_b, p_b = jnp.broadcast_arrays(T, p)
+    return jax.jvp(lambda t: saturation_specific_humidity(t, p_b),
+                   (T_b,), (jnp.ones_like(T_b),))[1]
+
+
 def vapor_pressure_from_specific_humidity(
     q: jax.Array,
     p: jax.Array,

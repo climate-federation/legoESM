@@ -27,6 +27,7 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
 )
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import (
+    mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio_goff,
     saturation_vapor_pressure_goff,
     saturation_vapor_pressure_ice_flatau,
@@ -44,7 +45,7 @@ STRADDLE_K = 3   # column 0's layer spanning 24000-30000 Pa (tP = 24548 Pa)
 # ---------------------------------------------------------------------------
 def _aist_fortran(qv, T, p, qi, rhmini, rhmaxi):
     """cldfrc2m.F90 aist_vector, iceopt=5 branch (lines 844-895)."""
-    qs = float(saturation_mixing_ratio_goff(jnp.asarray(T), jnp.asarray(p)))
+    qs = float(mixing_ratio_to_specific_humidity(saturation_mixing_ratio_goff(jnp.asarray(T), jnp.asarray(p))))
     esl = float(saturation_vapor_pressure_goff(jnp.asarray(T)))
     esi = float(saturation_vapor_pressure_ice_flatau(jnp.asarray(T)))
     minice, mincld, qist_min, qist_max = 1.0e-12, 1.0e-4, 1.0e-7, 5.0e-3
@@ -90,7 +91,7 @@ def _grid(seed=0):
     p = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
     T = 200.0 + 90.0 * (p / 1.0e5) + rng.uniform(-5.0, 5.0, (NCOL, NLEV))
     T[0, STRADDLE_K] = 220.0
-    qs = np.asarray(saturation_mixing_ratio_goff(jnp.asarray(T), jnp.asarray(p)))
+    qs = np.asarray(mixing_ratio_to_specific_humidity(saturation_mixing_ratio_goff(jnp.asarray(T), jnp.asarray(p))))
     # RH spanning below / inside / above the [0.80, 1.0] ramp
     q_v = qs * rng.uniform(0.5, 1.3, (NCOL, NLEV))
     q_i = rng.choice([0.0, 5.0e-13, 1.0e-9, 1.0e-6, 1.0e-4, 2.0e-2],
@@ -171,7 +172,7 @@ def test_aist_step_when_ramp_is_degenerate():
     # q_i chosen so the in-cloud ice limiters (qist_min/qist_max) stay
     # inactive: icimr = 2e-7/1e-4 = 2e-3 and 2e-7/0.999, both inside.
     q_i = jnp.full((1, 2), 2.0e-7)
-    qs = saturation_mixing_ratio_goff(T, p)
+    qs = mixing_ratio_to_specific_humidity(saturation_mixing_ratio_goff(T, p))
     esl = saturation_vapor_pressure_goff(T)
     esi = saturation_vapor_pressure_ice_flatau(T)
     # rhi just below / above 0.9

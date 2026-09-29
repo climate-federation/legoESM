@@ -49,7 +49,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz,
@@ -760,7 +760,7 @@ def mass_flux_convection_from_closure(
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
     q_v_sfc = q_v[:, -1:]
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_moist = saturation_specific_humidity(T_moist, p_full)
     q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
     q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
     q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
@@ -949,7 +949,7 @@ def edmf_convection(
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
     q_v_sfc = q_v[:, -1:]
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_moist = saturation_specific_humidity(T_moist, p_full)
     q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
     q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
     q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v

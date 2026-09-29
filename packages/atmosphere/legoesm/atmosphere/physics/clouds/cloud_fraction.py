@@ -63,9 +63,11 @@ from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import (
+    mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
     saturation_mixing_ratio_goff,
     saturation_mixing_ratio_ice,
+    saturation_specific_humidity,
     saturation_vapor_pressure_goff,
     saturation_vapor_pressure_ice_flatau,
 )
@@ -260,10 +262,10 @@ def _ice_fraction(T: jnp.ndarray, config: CloudConfig) -> jnp.ndarray:
     return jnp.clip(frac, 0.0, 1.0)
 
 
-def cover_saturation_mixing_ratio(
+def cover_saturation_specific_humidity(
     T: jnp.ndarray, p_full: jnp.ndarray, config: CloudConfig,
 ) -> jnp.ndarray:
-    """Saturation mixing ratio [kg/kg] the cloud-COVER schemes measure RH
+    """Saturation SPECIFIC humidity [kg/kg] the cloud-COVER schemes measure RH
     against, per ``config.saturation_scheme`` (the single dispatch point; the
     diagnostics that rebuild the cover's RH call this, never a copy).
 
@@ -275,11 +277,12 @@ def cover_saturation_mixing_ratio(
     Unknown scheme raises (dispatch-hardening; never a silent default).
     """
     if config.saturation_scheme == "liquid":
-        return saturation_mixing_ratio(T, p_full)
+        return saturation_specific_humidity(T, p_full)
     if config.saturation_scheme == "mixed_phase":
         f_ice = _ice_fraction(T, config)
-        return ((1.0 - f_ice) * saturation_mixing_ratio(T, p_full)
-                + f_ice * saturation_mixing_ratio_ice(T, p_full))
+        r_blend = ((1.0 - f_ice) * saturation_mixing_ratio(T, p_full)
+                   + f_ice * saturation_mixing_ratio_ice(T, p_full))
+        return mixing_ratio_to_specific_humidity(r_blend)
     raise ValueError(
         f"Unknown cloud saturation_scheme: {config.saturation_scheme!r}. "
         f"Valid schemes: 'liquid' (legacy, liquid saturation at all T), "
@@ -825,7 +828,7 @@ def cam6_ice_stratus_fraction(
     inert.  Port it with the CLUBB ``trop_cloud_top_press`` taper if a
     higher-top grid is ever run with this scheme.
     """
-    q_s = saturation_mixing_ratio_goff(T, p_full)
+    q_s = mixing_ratio_to_specific_humidity(saturation_mixing_ratio_goff(T, p_full))
     esl = saturation_vapor_pressure_goff(T)
     esi = saturation_vapor_pressure_ice_flatau(T)
     rhi = (q_v + q_i) / jnp.maximum(q_s, 1.0e-30) * (esl / jnp.maximum(esi, 1.0e-30))
@@ -959,7 +962,7 @@ def compute_cloud_properties(
     #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
     #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
     #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
-    q_sat = cover_saturation_mixing_ratio(T, p_full, config)
+    q_sat = cover_saturation_specific_humidity(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
     # --- Cloud fraction ---

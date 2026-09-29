@@ -45,7 +45,7 @@ from legoesm.atmosphere.physics.microphysics.kessler import (
     kessler_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 from legoesm import constants
 
@@ -76,7 +76,7 @@ def _run(T, q_v, q_c, q_r, cfg, p=8.0e4, rho=1.0, dz=1000.0, dt=1.0):
 
 
 def _q_sat(T, p):
-    return float(np.asarray(saturation_mixing_ratio(jnp.array(T), jnp.array(p))).ravel()[0])
+    return float(np.asarray(saturation_specific_humidity(jnp.array(T), jnp.array(p))).ravel()[0])
 
 
 def _s(x):

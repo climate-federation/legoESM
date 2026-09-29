@@ -22,14 +22,14 @@ from legoesm.atmosphere.physics.microphysics.pdf_condensation import (  # noqa: 
     pdf_saturation_adjustment,
     uniform_pdf_cloud,
 )
-from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
+from legoesm.thermo import saturation_specific_humidity  # noqa: E402
 
 RH_C = 0.85
 DT = 112.5
 
 
 def _sat(T, p):
-    return float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    return float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
 
 
 def _equilibrium(c, T=280.0, p=7.0e4, rh_c=RH_C):
@@ -84,10 +84,10 @@ def test_c_thermodynamic_response_signs_and_positivity():
 def test_d_cover_after_adjustment_is_the_sundqvist_relation():
     rng = np.random.default_rng(1)
     T = jnp.asarray(265.0 + 30.0 * rng.random(200)); p = jnp.asarray(5.0e4 + 5.0e4 * rng.random(200))
-    s = saturation_mixing_ratio(T, p)
+    s = saturation_specific_humidity(T, p)
     q_t = s * (0.5 + 0.8 * rng.random(200)); q_c = q_t * 0.3 * rng.random(200); q_v = q_t - q_c
     x, c, T_new = pdf_saturation_adjustment(T, q_v, q_c, p, DT, RH_C)
-    rh = np.asarray((q_v - x) / saturation_mixing_ratio(T_new, p)); c = np.asarray(c)
+    rh = np.asarray((q_v - x) / saturation_specific_humidity(T_new, p)); c = np.asarray(c)
     m = (c > 0.02) & (c < 0.98)
     assert m.sum() > 20
     np.testing.assert_allclose(c[m], 1.0 - np.sqrt((1.0 - rh[m]) / (1.0 - RH_C)), rtol=1e-6)
@@ -96,7 +96,7 @@ def test_d_cover_after_adjustment_is_the_sundqvist_relation():
 def _random_columns(n, seed):
     rng = np.random.default_rng(seed)
     T = jnp.asarray(250.0 + 50.0 * rng.random(n)); p = jnp.asarray(3.0e4 + 7.0e4 * rng.random(n))
-    s = saturation_mixing_ratio(T, p)
+    s = saturation_specific_humidity(T, p)
     q_t = s * (0.4 + 1.0 * rng.random(n)); q_c = q_t * 0.4 * rng.random(n)
     return T, q_t - q_c, q_c, p
 

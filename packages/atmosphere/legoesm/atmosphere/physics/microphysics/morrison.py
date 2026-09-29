@@ -55,7 +55,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
@@ -399,7 +399,7 @@ def morrison_microphysics(
     #    (module_mp_graupel.f90:3387-3398).
     # Target number kc2 = min(N_i0·exp(cooper_a·(T_f−T)), N_i_nuc_max)/ρ
     # (canonical Cooper 0.005 L⁻¹ = N_i0=5 m⁻³ base; cap 500 L⁻¹).
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    q_sat_i = _saturation_specific_humidity_ice(T, p_full)
     # DEPOSITION target only. IFS/SAM homogeneous-freezing allowance: pristine
     # air below 235 K may hold ice supersaturation up to rh_homo (gSAM
     # cloud.f90), withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor). The NUCLEATION gates below

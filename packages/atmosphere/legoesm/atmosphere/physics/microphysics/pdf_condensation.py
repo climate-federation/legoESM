@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 __all__ = ["pdf_saturation_adjustment", "uniform_pdf_cloud"]
 
@@ -47,13 +47,13 @@ __physics_contract__ = {
 }
 
 
-def uniform_pdf_cloud(q_t, T, p, rh_crit, sat_fn=saturation_mixing_ratio):
+def uniform_pdf_cloud(q_t, T, p, rh_crit, sat_fn=saturation_specific_humidity):
     """Sundqvist-equivalent uniform-PDF cloud closure (elementwise).
 
     With s = sat_fn(T, p), half-width D = min((1 - rh_crit) * s, q_t) (floored)
     and z = q_t - s, returns (c, Q, s): cloud fraction c = clip((z + D)/(2D), 0, 1);
     grid-box condensate Q = 0 for z <= -D, (z + D)**2/(4D) = D c**2 for |z| < D,
-    z for z >= D; and the saturation mixing ratio s.
+    z for z >= D; and the saturation specific humidity s.
     """
     s = sat_fn(T, p)
     D = jnp.maximum(jnp.minimum((1.0 - rh_crit) * s, q_t), 1e-12)
@@ -67,7 +67,7 @@ _BISECT_ITERS = 24   # coeff-ok: bisection depth (2^-24 of the bracket), numeric
 
 
 def pdf_saturation_adjustment(T, q_v, q_c, p, dt, rh_crit, n_iter=_BISECT_ITERS,
-                              sat_fn=saturation_mixing_ratio, l_over_cp=None):
+                              sat_fn=saturation_specific_humidity, l_over_cp=None):
     """Signed liquid saturation adjustment over one step (Sundqvist-compatible).
 
     Holds q_t = q_v + q_c fixed and solves, on [-q_c, q_v] (F is monotone

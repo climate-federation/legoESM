@@ -8,7 +8,7 @@ allocated with a dummy index 0 so the Fortran indices can be used verbatim.
 
 Independent of the JAX port except for the two shared physical inputs it
 must agree on to be comparable at 1e-10: the saturation curve
-(``legoesm.thermo.saturation_mixing_ratio``, CLAUDE.md) and the constants
+(``legoesm.thermo.saturation_specific_humidity``, CLAUDE.md) and the constants
 (``legoesm.constants``).  The entropy inversion here is scipy ``brentq``
 (the oracle's Brent, run to 1e-13) so it is an independent root finder from
 the port's Newton iteration.
@@ -23,9 +23,9 @@ import numpy as np
 from scipy.optimize import brentq
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
+from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 
-_qsat_jit = jax.jit(saturation_mixing_ratio)
+_qsat_jit = jax.jit(saturation_specific_humidity)   # CAM qsat is SPECIFIC humidity: eps*es/(p-(1-eps)es)
 
 
 def qsat_hpa(t, p_hpa):

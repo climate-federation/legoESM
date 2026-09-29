@@ -63,7 +63,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
@@ -254,7 +254,7 @@ def thompson_microphysics(
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # === Ice depositional growth / sublimation ===
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    q_sat_i = _saturation_specific_humidity_ice(T, p_full)
     # DEPOSITION target only (see morrison.py): pristine air below 235 K may
     # hold ice supersaturation up to the IFS/SAM homogeneous-freezing ramp.
     q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(

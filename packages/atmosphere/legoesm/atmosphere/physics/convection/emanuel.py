@@ -37,7 +37,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
@@ -155,8 +155,8 @@ def _mixture_buoyancy(T_e, q_e, T_u, q_u, q_c_u, p, fractions):
     # negative evaporates condensate (entrained dry air) and cools.
     # Bounded to [−q_c, q_v] so we never make negative condensate or
     # negative vapor; ``clip`` keeps finite subgradients (AD-safe).
-    q_sat_m = saturation_mixing_ratio(T_m0, pe)
-    dqs_dT = saturation_mixing_ratio_dT(T_m0, pe)
+    q_sat_m = saturation_specific_humidity(T_m0, pe)
+    dqs_dT = saturation_specific_humidity_dT(T_m0, pe)
     L_over_cp = constants.L_v / constants.c_pd
     delta_q = jnp.clip(
         (q_m0 - q_sat_m) / (1.0 + L_over_cp * dqs_dT), -qc_m0, q_m0,

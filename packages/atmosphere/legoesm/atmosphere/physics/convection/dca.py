@@ -76,7 +76,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_cape,
@@ -250,8 +250,8 @@ def _adjust_one_iteration(
         T_adj_below = T_below + blend * (T_new_below - T_below)
 
         # Moisture adjustment: saturate at the new temperature
-        q_sat_upper = saturation_mixing_ratio(T_adj_upper, p_upper)
-        q_sat_below = saturation_mixing_ratio(T_adj_below, p_below)
+        q_sat_upper = saturation_specific_humidity(T_adj_upper, p_upper)
+        q_sat_below = saturation_specific_humidity(T_adj_below, p_below)
 
         # Remove excess moisture (precipitation)
         q_new_upper = jnp.minimum(q_upper, q_sat_upper)
@@ -549,13 +549,13 @@ def _compute_BL(
     # Moist enthalpy fields (ANA20 after eq 6).  ``q_sat`` is the saturation
     # MIXING RATIO, matching the model's ``q_v`` convention: legoESM
     # initialises and carries ``q_v`` as a mixing ratio (it is built from
-    # ``saturation_mixing_ratio``), so e = T + (L_v/c_p)·q_v and
+    # ``saturation_specific_humidity``), so e = T + (L_v/c_p)·q_v and
     # e* = T + (L_v/c_p)·q_sat use the SAME water variable.  (ANA20 writes
     # ``q`` loosely as "specific humidity"; at tropical q≈20 g/kg the
     # mixing-ratio vs specific-humidity difference is ~2% in e and far
     # smaller in B_L, but using one consistent variable avoids a spurious
     # systematic offset between e and e* — codex review-1 finding.)
-    q_sat = saturation_mixing_ratio(T, p_full)  # [kg/kg] mixing ratio
+    q_sat = saturation_specific_humidity(T, p_full)  # [kg/kg] mixing ratio
     e = T + Lv_cp * q_v          # [K]
     e_star = T + Lv_cp * q_sat   # [K]
     Pi = _exner(p_full)          # [-]

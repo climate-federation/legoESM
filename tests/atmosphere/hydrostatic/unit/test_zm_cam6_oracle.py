@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
+from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 from legoesm.atmosphere.physics.convection import _zm_cam6 as Z
 from legoesm.atmosphere.physics.convection._zm_dilute import LWMAX
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
@@ -56,7 +56,7 @@ def _column(T_sfc, lapse, rh, p_s=1.0e5, p_top=2.0e3, nlev=NLEV):
     pf = 0.5 * (ph[:, :-1] + ph[:, 1:])
     z = -8000.0 * jnp.log(pf / p_s)
     T = jnp.maximum(T_sfc - lapse * 1e-3 * z, 200.0)
-    q = rh * saturation_mixing_ratio(T, pf)
+    q = rh * saturation_specific_humidity(T, pf)
     return T, q, pf, ph
 
 
