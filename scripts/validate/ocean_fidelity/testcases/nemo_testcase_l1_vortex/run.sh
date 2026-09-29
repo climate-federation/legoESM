@@ -57,7 +57,12 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
-readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round1}
+# Round 2 writes BESIDE round 1, never over it.  Round 1's record was produced
+# on a deck that selected a different equation of state, so it is superseded
+# from step 1 onward -- but its INITIAL STATE is the reference the round-2 gate
+# compares against, and overwriting it would destroy the only control that can
+# tell a deck change from a transcription defect.
+readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2}
 readonly TEST_CASE=VORTEX
 readonly REF_CFG=VORTEX_OMIP_L1
 readonly RUN_CFG=VORTEX_OMIP_L1_P3
@@ -270,16 +275,16 @@ cp "$manifest"/*.sha256 "$EVIDENCE/"
 # MUST turn it red, or it proves nothing.
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$STEPS" \
-  --output "$EVIDENCE/vortex_round1_admission.json"
+  --output "$EVIDENCE/vortex_round2_admission.json"
 if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
      --restart "$RESTART" --steps "$STEPS" --plant \
-     >"$EVIDENCE/vortex_round1_admission_plant.json" 2>&1; then
+     >"$EVIDENCE/vortex_round2_admission_plant.json" 2>&1; then
   printf 'REFUSE: the planted control did not turn the checker red\n' >&2
   exit 70
 fi
 (
   cd "$EVIDENCE"
-  sha256sum oracle_*.bin vortex_round1_admission.json "$RESTART" mesh_mask.nc \
+  sha256sum oracle_*.bin vortex_round2_admission.json "$RESTART" mesh_mask.nc \
     >vortex_round1_outputs.sha256
 )
 printf 'VORTEX_ROUND1_KT1_10_ORACLE_READY %s\n' "$EVIDENCE"

@@ -30,8 +30,14 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     vortex_horizontal_coordinates,
 )
 
-# The acquisition script writes here (round 1 of the VORTEX card).
-_ORACLE = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round1/"
+# The acquisition script writes one directory per round.  BOTH are compared,
+# whichever exist: round 1's was produced on a deck that selected a different
+# equation of state, and the preregistration's claim is that this makes NO
+# difference to the initial state, because nothing in it reads the equation of
+# state.  So a round-2 record that disagrees with round 1's on these five rows
+# is the finding, and testing only the newest one would hide it.
+_ORACLE_DIRS = ("round1", "round2")
+_ORACLE = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/*/"
            "oracle_step_entry_kt00000001.bin")
 
 
@@ -470,8 +476,9 @@ def _bits_equal(left, right, mask):
 @pytest.mark.skipif(
     not glob.glob(_ORACLE),
     reason="VORTEX kt=1 step-entry record not acquired on this machine")
-def test_initial_state_is_bit_exact_against_the_nemo_record(card):
-    oracle = _read_step_entry(glob.glob(_ORACLE)[0], 63, 63)
+@pytest.mark.parametrize("record", sorted(glob.glob(_ORACLE)))
+def test_initial_state_is_bit_exact_against_the_nemo_record(card, record):
+    oracle = _read_step_entry(record, 63, 63)
     assert oracle["step"] == 1
     state = card.recipe.initial_state
     n_lev = int(card.recipe.z_coord.n_levels)
