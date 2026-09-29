@@ -96,12 +96,67 @@ def _model_config(
 
     if whole_step_identity not in {
         "lane1_flux_up3", "gyre_vector_ene_c2", "orca2_vector_een_c2",
-        "vortex_flux_up3_een",
+        "vortex_flux_up3_een", "vortex_vector_een_c2",
     }:
         raise ValueError(
             "unknown whole_step_identity; expected 'lane1_flux_up3' or "
             "'gyre_vector_ene_c2' or 'orca2_vector_een_c2' or "
-            "'vortex_flux_up3_een'"
+            "'vortex_flux_up3_een' or 'vortex_vector_een_c2'"
+        )
+
+    if whole_step_identity == "vortex_vector_een_c2":
+        # DECISION 73 (operator note BJ).  The second VORTEX card is the first
+        # one with ONE thing changed: namelist_cfg:182,185 select vector-
+        # invariant momentum instead of the flux-form third-order upstream
+        # scheme, and NEMO's own resolved run says what that means --
+        # "vector form : keg + zad + vor is used" and "total vorticity =
+        # Coriolis + relative vorticity" (round-3 ocean.output:723,739).
+        #
+        # So three things move together, and all three are NEMO's, read from
+        # the compiled dispatch rather than chosen here:
+        #   * dynadv.f90:135-138 replaces the flux-form momentum advection
+        #     with the kinetic-energy gradient plus the vertical advection of
+        #     momentum;
+        #   * dynvor.f90:861-864 hands the SAME energy-and-enstrophy triad the
+        #     relative vorticity as well as the planetary one, where the flux
+        #     card's arm gets the planetary one plus a metric term;
+        #   * namelist_cfg:183 nn_dynkeg = 0 selects the mean-of-squares
+        #     kinetic-energy gradient, not the Hollingsworth correction.
+        # Nothing else about the card moves: it is built from the flux card's
+        # own configuration and only these fields are replaced, so "one
+        # variable" is structural here and not a claim in prose.
+        base = _model_config(
+            barotropic_time_filter=barotropic_time_filter,
+            n_barotropic_substeps=n_barotropic_substeps,
+            bbl_adv_option=bbl_adv_option,
+            bbl_gamma_s=bbl_gamma_s,
+            bbl_diffusive_option=bbl_diffusive_option,
+            bbl_aht_m2_s=bbl_aht_m2_s,
+            whole_step_identity="vortex_flux_up3_een",
+            tke_langmuir_evaluation=tke_langmuir_evaluation,
+        )
+        return base._replace(
+            momentum_advection="vector_invariant",
+            # dyn_adv no longer carries the momentum flux, so the flux-form
+            # scheme selector must not be left behind pointing at the routine
+            # the other card runs.  The field has no "unused" value, so this
+            # card carries the SAME inert value GYRE's and ORCA2's
+            # vector-invariant cards carry (the library default), which is the
+            # existing convention for a selector NEMO never reaches on a
+            # vector-form deck.
+            momentum_flux_scheme="upwind",
+            # dynadv.f90:138 CALL dyn_zad: the vertical advection of momentum
+            # is the advective form, not the flux-form UP3 vertical flux the
+            # other card runs.
+            vertical_momentum_scheme="nemo_advective",
+            # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
+            # mean-of-squares arm, not the Hollingsworth correction.
+            ke_gradient_scheme="c2",
+            # dynvor.f90:861-864, n_dynadv = np_VEC_c2: ntot = np_CRV, so the
+            # triad is handed the relative vorticity PLUS the planetary one.
+            # This is the arm the ORCA2 card already selects; nothing new is
+            # written for it here.
+            vorticity_scheme="een_total",
         )
 
     if whole_step_identity == "vortex_flux_up3_een":
@@ -1752,8 +1807,23 @@ def _vortex_barotropic_velocity(ssh, u, v, tmask):
 VORTEX_UNMEASURED: tuple[str, ...] = ()
 
 
-def build_vortex_zco_card() -> NEMOTestcaseCard:
-    """VORTEX root grid: 63x63x10 beta-plane box, flat 5000 m zco bottom."""
+def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
+    """VORTEX root grid: 63x63x10 beta-plane box, flat 5000 m zco bottom.
+
+    ``momentum`` picks which of the two VORTEX decks this card is (decision
+    73).  ``"flux"`` is the shipped deck -- flux-form third-order upstream
+    momentum, where the energy-and-enstrophy triad degenerates to a Coriolis
+    operator.  ``"vector"`` is the ORCA2/GYRE momentum scheme set, where the
+    same triad runs on the live relative vorticity and the kinetic-energy
+    gradient and vertical momentum advection join the step.  Everything else
+    -- geometry, initial state, equation of state, tracer program, free
+    surface, vertical physics -- is shared, which is what makes the pair a
+    controlled comparison.
+    """
+    if momentum not in ("flux", "vector"):
+        raise ValueError(
+            f"unknown VORTEX momentum deck {momentum!r}; expected 'flux' "
+            "(ln_dynadv_up3) or 'vector' (ln_dynadv_vec)")
 
     source = vortex_horizontal_coordinates()
     grid = _vortex_grid(source)
@@ -1846,7 +1916,8 @@ def build_vortex_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=48,
         bbl_adv_option=0, bbl_gamma_s=0.0,
         bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
-        whole_step_identity="vortex_flux_up3_een",
+        whole_step_identity=("vortex_flux_up3_een" if momentum == "flux"
+                             else "vortex_vector_een_c2"),
         tke_langmuir_evaluation=None,
     )
     recipe = NEMORecipe(
@@ -1859,7 +1930,8 @@ def build_vortex_zco_card() -> NEMOTestcaseCard:
     )
     # namelist_cfg:32,41: nn_itend = 3000 at rn_Dt = 2880 s.
     card = NEMOTestcaseCard(
-        "VORTEX-zco", recipe, 2880.0, 3000, 1, 0, 0, 0.0, 0.0,
+        "VORTEX-zco" if momentum == "flux" else "VORTEX_VEC-zco",
+        recipe, 2880.0, 3000, 1, 0, 0, 0.0, 0.0,
         unmeasured_features=VORTEX_UNMEASURED,
     )
     validate_nemo_testcase_card(card)
@@ -1879,6 +1951,9 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0, 0, 0.0),
         "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
         "VORTEX-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # The vector-EEN deck differs from the flux deck only in the momentum
+        # scheme set, so every row this table checks is the same row.
+        "VORTEX_VEC-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
     }
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
@@ -2023,7 +2098,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                     "remain unmeasured"
                 )
         return
-    if card.case == "VORTEX-zco":
+    if card.case in ("VORTEX-zco", "VORTEX_VEC-zco"):
+        vector = card.case == "VORTEX_VEC-zco"
         # VORTEX is the first card on this identity with a LIVE rotation
         # operator, so the structural-elimination escape below must not be
         # reachable for it.  Round 1 declared the operator as a gap; round 2
@@ -2035,7 +2111,40 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 "VORTEX-zco's declared gaps must match VORTEX_UNMEASURED "
                 "exactly; a card that declares a different set has not been "
                 "checked against what this validator proves")
-        if cfg.vorticity_scheme != "een_planetary":
+        # The two decks differ in exactly what the vorticity routine is
+        # handed, which is decided by the momentum advection form, not by the
+        # vorticity namelist: both select ln_dynvor_een (namelist_cfg:193).
+        # dynvor.f90:855-868 reads the resolved advection form and sets the
+        # total vorticity to Coriolis plus the metric term under flux form and
+        # to Coriolis plus the RELATIVE vorticity under vector form.
+        if vector:
+            if cfg.vorticity_scheme != "een_total":
+                raise ValueError(
+                    "VORTEX_VEC-zco requires vorticity_scheme='een_total': "
+                    "namelist_cfg:182 selects vector form, so dynvor.f90:"
+                    "861-864 sets ntot = np_CRV and the triad runs on the "
+                    "relative vorticity as well as the planetary one")
+            if cfg.momentum_advection != "vector_invariant":
+                raise ValueError(
+                    "VORTEX_VEC-zco requires vector-invariant momentum "
+                    "(namelist_cfg:182 ln_dynadv_vec)")
+            if cfg.ke_gradient_scheme != "c2":
+                raise ValueError(
+                    "VORTEX_VEC-zco requires the mean-of-squares kinetic "
+                    "energy gradient (namelist_cfg:183 nn_dynkeg = 0), not "
+                    "the Hollingsworth correction")
+            if cfg.vertical_momentum_scheme != "nemo_advective":
+                raise ValueError(
+                    "VORTEX_VEC-zco runs dyn_zad for the vertical advection "
+                    "of momentum (dynadv.f90:138); the flux-form vertical UP3 "
+                    "flux is not called on this deck")
+            if cfg.momentum_flux_scheme != "upwind":
+                raise ValueError(
+                    "VORTEX_VEC-zco must not leave the OTHER card's flux-form "
+                    "momentum scheme selected; dyn_adv never calls one on a "
+                    "vector-form deck, so this carries the same inert value "
+                    "the GYRE and ORCA2 vector cards carry")
+        elif cfg.vorticity_scheme != "een_planetary":
             raise ValueError(
                 "VORTEX-zco requires vorticity_scheme='een_planetary': "
                 "namelist_cfg:193 selects ln_dynvor_een and :182 selects "
@@ -2043,6 +2152,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 "vor_een on np_CME, whose metric term vanishes on this "
                 "Cartesian mesh. Any other scheme substitutes a different "
                 "Coriolis operator for NEMO's")
+        if not vector and cfg.momentum_advection != "flux_form":
+            raise ValueError(
+                "VORTEX-zco requires flux-form momentum "
+                "(namelist_cfg:185 ln_dynadv_up3)")
         if cfg.coriolis_scheme != "explicit_ab2":
             raise ValueError(
                 "VORTEX-zco carries f inside the triad, so the Matsuno "
@@ -2058,10 +2171,17 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             assert_een_planetary_metric_term_vanishes,
         )
-        assert_een_planetary_metric_term_vanishes(card.recipe.grid)
+        if not vector:
+            # The np_CME metric term is DROPPED on the flux card only because
+            # this mesh makes it bitwise zero.  Under vector form NEMO never
+            # forms it at all (dynvor.f90:861-864), so the proof belongs to
+            # the flux card; running it here would assert something the
+            # vector card does not rely on.
+            assert_een_planetary_metric_term_vanishes(card.recipe.grid)
         if not np.any(np.asarray(card.recipe.grid.ff_f) != 0.0):
             raise ValueError(
-                "VORTEX-zco requires a live beta-plane Coriolis at F points")
+                f"{card.case} requires a live beta-plane Coriolis at F "
+                "points")
         if np.count_nonzero(np.any(wet, axis=1)) != 61:
             raise ValueError(
                 "VORTEX-zco requires the 61 wet rows of its closed 63x63 box")
@@ -2131,6 +2251,7 @@ def build_nemo_testcase_card(
         "OVERFLOW-zps": build_overflow_zps_card,
         "GYRE-zco": build_gyre_zco_card,
         "VORTEX-zco": build_vortex_zco_card,
+        "VORTEX_VEC-zco": lambda: build_vortex_zco_card("vector"),
     }
     if case == "ORCA2-zps":
         if deck_root is None:

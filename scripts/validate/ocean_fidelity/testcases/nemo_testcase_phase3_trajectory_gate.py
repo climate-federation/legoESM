@@ -42,6 +42,10 @@ DEFAULT_ORACLE_ROOTS = {
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"),
     "VORTEX-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2"),
+    # The same experiment with the ORCA2/GYRE momentum scheme set
+    # (decision 73); its own NEMO run, beside the flux card's.
+    "VORTEX_VEC-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
