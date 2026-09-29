@@ -167,7 +167,7 @@ def test_orca1_card_keeps_mains_rn_mxl0_surface_floor(iwm_enabled):
     (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
     zdftke.f90:610), and ``zdf_tke_init`` has already OVERWRITTEN that
     namelist ``rn_mxl0`` with the active mixing-length floor because
-    ``ln_mxl0`` is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-832) —
+    ``ln_mxl0`` is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) —
     1.0e-3 m on this ORCA1 arm, since ``ln_zdfiwm`` forces rmxl_min = 1.0e-3
     (shipped zdftke.F90:841-843).  The user's decision is that Pierre's card
     keeps the namelist value main used, and NEMO's overwrite stays behind the

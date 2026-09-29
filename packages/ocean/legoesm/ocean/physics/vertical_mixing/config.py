@@ -295,7 +295,7 @@ class TKEConfig(NamedTuple):
     # zdftke.f90:610), so on a CALM column the anchor IS this value.
     # ``zdf_tke_init`` then OVERWRITES the namelist ``rn_mxl0`` with the
     # active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
-    # (shipped zdftke.F90:859-862; GYRE ppsrc zdftke.f90:828-832).
+    # (shipped zdftke.F90:859-862; GYRE ppsrc zdftke.f90:828-831).
     # ``False`` (DEFAULT, main's behaviour): NO overwrite -- the floor is the
     #   card's own ``mxl0_min_m``, i.e. the namelist ``rn_mxl0``.  DECISION 72
     #   (user, 2026-09-28) keeps the ORCA1 OMIP card on this arm.

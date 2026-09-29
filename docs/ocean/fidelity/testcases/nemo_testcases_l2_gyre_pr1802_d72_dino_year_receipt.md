@@ -30,7 +30,7 @@ certified arm.
 anchor IS that value.  `zdf_tke_init` has already OVERWRITTEN the namelist
 `rn_mxl0` with the active mixing-length floor `rmxl_min`, because `ln_mxl0` is
 true: the whole guarded block is
-`GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:828-832` (shipped
+`GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:828-831` (shipped
 src/OCE/ZDF/zdftke.F90:859-862), whose last statement is
 `rn_mxl0 = rmxl_min`.  On ORCA1 that floor is `1.0e-3 m`, because `ln_zdfiwm`
 forces `rmxl_min = 1.e-03_wp` at
@@ -72,7 +72,7 @@ mixing-length and diffusivity column now hashes identically to `main`
 not, and that is a DIFFERENT, already-decided item, reported here so it is not
 read as this round's: `main`'s ORCA1 card does not set NEMO's forced
 `rn_emin`/`rmxl_min` pair at all (it resolves `1e-6`/`1e-8`), while the lane
-sets `1e-10`/`1e-3` from `zdftke.f90:810-812`.  That is the 2026-08-27
+sets `1e-10`/`1e-3` from `GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:810-812`.  That is the 2026-08-27
 equatorial-undercurrent fix and PR #1749; decision 72 names the surface
 anchor's floor, not the interior mixing-length floor, and only the former was
 moved back.

@@ -9560,16 +9560,16 @@ question.  **The premise is FALSE and is retracted here.**  The grep:
 ```
 packages/ocean/legoesm/ocean/state.py:2156       tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1004    tracer_combine: str = "concentration"
-packages/ocean/legoesm/ocean/experiments/dino.py:1702    "tracer_combine": "thickness_weighted",
-packages/ocean/legoesm/ocean/experiments/dino.py:3908        tracer_combine=cfg.tracer_combine,
+packages/ocean/legoesm/ocean/experiments/dino.py:1706    "tracer_combine": "thickness_weighted",
+packages/ocean/legoesm/ocean/experiments/dino.py:3913        tracer_combine=cfg.tracer_combine,
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12151  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12537  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
 test-case cards run the WS-RK3 stage ladder, which reads neither — that is why
-it is inert on them.  But `dino.py:1702` is inside `DINO_RECIPES`, and it
-SELECTS `"thickness_weighted"`; `dino.py:3908` routes it into the config those
+it is inert on them.  But `dino.py:1706` is inside `DINO_RECIPES`, and it
+SELECTS `"thickness_weighted"`; `dino.py:3913` routes it into the config those
 steps read.  So something does select it, on another card family, and neither
 "delete" nor "wire" is the right disposition.  The correct row is: the field is
 LIVE on the leapfrog and modified-leapfrog paths and simply not on the path
@@ -9933,7 +9933,7 @@ the pre-change model.
 | GYRE-zco, kt=2 | YES | the round-38 record, `ah_wslp2` absolute maximum `3.3898494597440722e-08` | given NEMO's OWN before state: **DEBT**, 17400 / 17400 wet faces, max `3.3884e-08`, max relative `2.63`; legoESM's fold reaches `1.1728064666279615e-10`, 289x smaller.  Owner: the isoneutral SLOPE TRANSCRIPTION, which this round did not touch |
 | LOCK_EXCHANGE-zco | NO | legoESM resolves `gm_redi = None`; NEMO resolves `ln_traldf_OFF = T`, `ln_traldf_iso = F` (`lock_kt1_10/ocean.output:578`, `lock_kt1_10/ocean.output:584`), so `l_ldfslp = F` and `ldf_slp` is never called | kt=1..10 **BIT-IDENTICAL** before and after: the residual artifact's SHA-256 is the same on both arms, all 20 scored rows unmoved |
 | OVERFLOW-zps | NO | same, `overflow_kt1_10/ocean.output:690`, `overflow_kt1_10/ocean.output:696` | kt=1..10 **BIT-IDENTICAL**, same residual SHA-256, all 10 scored rows unmoved |
-| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:956`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
+| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:961`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
 | ORCA2 | UNKNOWN | no card on this branch | **UNMEASURED WITH SPEC**, unchanged |
 | DINO / every other integrator | NO | `_ldf_state` wins, and no other lane sets `tracer_time_integrator = "rk3_ws"` | untouched by construction; a test asserts the guard keeps both conditions |
 

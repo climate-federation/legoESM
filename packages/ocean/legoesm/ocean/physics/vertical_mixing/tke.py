@@ -212,7 +212,7 @@ def _mxl0_anchor_floor(cfg: "TKEConfig"):
     (GYRE ppsrc ``zdftke.f90:610``), so on a CALM column the anchor IS this
     value.  ``zdf_tke_init`` OVERWRITES the namelist ``rn_mxl0`` with the
     active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
-    (shipped ``zdftke.F90:859-862``; GYRE ppsrc ``zdftke.f90:828-832``).
+    (shipped ``zdftke.F90:859-862``; GYRE ppsrc ``zdftke.f90:828-831``).
 
     ``nemo_mxl0_rmxl_min_overwrite`` selects that overwrite.  It is False by
     default, which is main's behaviour: the floor is the card's own
@@ -231,7 +231,7 @@ def _mxl0_surface_anchor(
     """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
 
     zdf_tke_init overwrites rn_mxl0 with the derived rmxl_min when ln_mxl0
-    is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-832) -- that
+    is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) -- that
     overwrite is what nemo_mxl0_rmxl_min_overwrite selects
     (:func:`_mxl0_anchor_floor`); the default arm keeps the card's own
     rn_mxl0 (mxl0_min_m), which is main's behaviour.  tke_avn then evaluates
@@ -861,7 +861,7 @@ def compute_mixing_lengths(
         # (GYRE ppsrc zdftke.f90:614-615), not rmxl_min; fail closed because
         # legoESM exposes only the ln_mxl0=T NEMO path.
         # With ln_mxl0, NEMO overwrites the namelist rn_mxl0 with rmxl_min at
-        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:828-832).
+        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:828-831).
         if l_surface_anchor is not None:
             l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
         else:
