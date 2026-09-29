@@ -2811,7 +2811,7 @@ CITATION_MAP = {
     # rn_mxl0 is replaced at all, and the assignment that replaces it -- and
     # the ln_zdfiwm arm that forces the rmxl_min it is replaced WITH.
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:828-832': [
-        ('IF( ln_mxl0 ) THEN', 3),
+        ('IF( ln_mxl0 ) THEN', 4),
         ('rn_mxl0 = rmxl_min', 2), 5],
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/zdftke.f90:810-812': [
         'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
