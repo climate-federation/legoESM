@@ -153,7 +153,48 @@ moved hash.
 
 ## 6. Reviews
 
-PENDING.
+Two independent adversarial reviews ran on the diff. They disagreed on the
+verdict, which is the useful outcome: one read the PHYSICS and found it right,
+the other read the TESTS and found them weak, and both are correct.
+
+| reviewer | verdict | what it found |
+|---|---|---|
+| codex, adversarial, read-only | DO NOT SHIP | both non-vacuity plants can pass while the feature is broken |
+| a fresh Claude code-reviewer | SHIP | the routing and the mesh condition check out against the source, independently re-derived |
+
+**The two blocking findings, and what they turned into.**
+
+*The rotation plant could pass with the rotation MISSING.* The first draft only
+asked that the transcribed operator differ from the 4-point average it
+replaced. Delete the new branch and the card has no rotation at all -- the
+separate face-Coriolis add is switched off for this scheme -- which also
+differs from the average, by far more. The plant now pins a BAND against the
+natural scale of the rotation itself, and the two failure modes are four orders
+of magnitude apart, so the band is not delicate: two stencils of the SAME
+rotation differ by 1.2e-4 of that scale, a card with the rotation gone by 0.76.
+
+*The equation-of-state plant never touched the model.* It called the factory
+directly with the card's coefficients, so reverting all three production call
+sites would have left it green. It now goes through the model, against a
+control carrying the shared defaults.
+
+*A fourth place builds the equation of state.* BOTH reviewers found this
+independently, which is the strongest signal either could have given: the
+tendency probe builds its own density and did not read the coefficients. It is
+not reachable from this card today, but it is the exact failure this round
+exists to fix, so it is threaded now rather than left for the round that would
+have hit it.
+
+*The last-bit metric was wrong off this card.* Raw floating-point bit patterns
+are not ordered across zero, so a future card whose unequal cells straddle zero
+would have reported a nonsense distance. This card's do not, so the number in
+section 2 stands; the metric is corrected anyway.
+
+One finding is recorded and NOT acted on. The mesh condition this round
+enforces is stricter than the source's: it requires every scale factor
+constant, where the source only needs one constant along each direction. It is
+conservative, it is right for this card, and loosening it would need a mesh to
+test it on. Named here so the next card that needs it knows why it refuses.
 
 ## 7. How to acquire
 

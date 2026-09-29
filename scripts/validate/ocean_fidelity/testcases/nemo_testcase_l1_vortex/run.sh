@@ -18,15 +18,18 @@ set -euo pipefail
 # ln_dynvor_een=.true.  The tanks have f=0 and one wet row, so their vorticity
 # operator is dead.
 #
-# READ THIS BEFORE YOU RUN IT.  That last switch is also the reason the legoESM
-# VORTEX card is NOT execution-ready: on flux-form momentum NEMO applies the
-# energy-and-enstrophy scheme to the planetary vorticity alone, so on this case
-# it IS the Coriolis operator, and legoESM has no such arm (it binds its own
-# implementation to vector-invariant momentum).  The card declares that gap and
-# its execution gate refuses it.  This acquisition is still worth running: the
-# initial state does not depend on the momentum scheme, so the bit-exactness
-# comparison is live today, and the record is what the round that builds the
-# missing arm will measure against.
+# READ THIS BEFORE YOU RUN IT.  That last switch is why this case needed its own
+# operator.  Under flux-form momentum NEMO hands the energy-and-enstrophy scheme
+# Coriolis plus a metric term, and that metric term is built from differences of
+# the mesh's scale factors -- which this Cartesian mesh makes exactly zero, so
+# the scheme IS the Coriolis operator here.  Round 1 declared that as a gap and
+# fixed the card closed; round 2 transcribed it, and the card now executes.
+#
+# Round 2 also re-acquires: the deck below no longer overrides the shipped
+# equation of state (decision 69), so round 1's record is superseded from step 1
+# onward.  The INITIAL STATE is unaffected -- nothing in it reads the equation of
+# state -- so this run must reproduce round 1's initial-state comparison exactly,
+# and a difference there is the finding rather than the ladder.
 #
 # TWO CONFIGURATIONS, DELIBERATELY.  A brand-new card has no un-instrumented
 # reference to judge its writer against, so this script builds BOTH:

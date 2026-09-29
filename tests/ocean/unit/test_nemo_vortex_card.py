@@ -275,39 +275,107 @@ def test_validator_refuses_a_broken_vortex_composition(card):
         validate_nemo_testcase_card(broken)
 
 
-def test_the_transcribed_coriolis_actually_moves_the_momentum_tendency():
-    """NON-VACUITY: the triad must differ from the 4-point average it replaced.
-
-    A gate that cannot fail is not a gate.  Build the card's model twice --
-    once as transcribed, once with the OLD composition (the 4-point C-grid
-    average under the Matsuno split) -- and require the momentum tendency to
-    differ.  If the new branch were dead, or were silently the same stencil,
-    this row goes green for the wrong reason and the whole round means nothing.
-    """
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-    )
-    recipe = build_nemo_testcase_card("VORTEX-zco").recipe
-    cfg = recipe.model_config
-    legacy = cfg._replace(
+def _vortex_legacy_config(cfg):
+    """The composition this round replaced: 4-point C-grid average Coriolis."""
+    return cfg._replace(
         vorticity_scheme="al81", coriolis_scheme="explicit_ab2",
         een_e3f_scheme="min", een_metric_weighting="off",
         een_q_boundary="neumann_fill",
         barotropic=cfg.barotropic._replace(barotropic_coriolis="avg"),
         barotropic_coriolis_split="frozen")
-    tendencies = []
-    for which in (cfg, legacy):
-        model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, which)
-        out = model.tendencies(recipe.initial_state)
-        tendencies.append(np.asarray(out.du_dt.data))
-    new, old = tendencies
-    assert new.shape == old.shape
-    moved = float(np.max(np.abs(new - old)))
+
+
+def _vortex_momentum_tendency(recipe, cfg):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
+    out = model.tendencies(recipe.initial_state)
+    return np.asarray(out.du_dt.data), np.asarray(out.dv_dt.data)
+
+
+def test_the_transcribed_coriolis_is_a_rotation_and_not_a_missing_one():
+    """NON-VACUITY, and it must fail BOTH ways the feature can break.
+
+    A first draft of this row only asked that the transcribed arm differ from
+    the 4-point average it replaced.  A reviewer pointed out that this passes
+    for the worst possible regression: delete the new branch and the card has
+    NO rotation at all (the separate face-Coriolis add is gated off for this
+    scheme), which also differs from the average -- by far more.  So the row
+    now pins a BAND, against the natural scale f*|u|.
+
+    Measured on this card: two stencils of the SAME rotation differ by 1.2e-4
+    of f*|u|, while a card with the rotation missing differs by 0.76 of it --
+    four orders of magnitude apart, so the band is not delicate.
+    """
+    recipe = build_nemo_testcase_card("VORTEX-zco").recipe
+    cfg = recipe.model_config
+    f_max = float(np.max(np.abs(np.asarray(recipe.grid.ff_f))))
+    u_max = max(float(np.max(np.abs(np.asarray(recipe.initial_state.u.data)))),
+                float(np.max(np.abs(np.asarray(recipe.initial_state.v.data)))))
+    scale = f_max * u_max
+    assert scale > 0.0
+    new_u, new_v = _vortex_momentum_tendency(recipe, cfg)
+    old_u, old_v = _vortex_momentum_tendency(recipe, _vortex_legacy_config(cfg))
+    moved = max(float(np.max(np.abs(new_u - old_u))),
+                float(np.max(np.abs(new_v - old_v))))
+    # It is a DIFFERENT operator: a dead branch, or the same stencil under a
+    # new name, turns this red.
     assert moved > 1e-12, moved
+    # It is still a ROTATION: a dropped f x u turns this red.
+    assert moved < 1e-2 * scale, (moved, scale)
+    # And the rotation is actually there, at the right order of magnitude.
+    assert float(np.max(np.abs(new_u))) > 0.1 * scale
+
+
+def test_the_matching_barotropic_arm_is_executed_not_only_declared():
+    """NON-VACUITY for the SECOND arm, which a tendency call never reaches.
+
+    The baroclinic trend above is one of the two places NEMO runs this
+    operator; the other is inside the split-explicit substeps.  Only a STEP
+    executes those, so this row takes one and requires the result to depend on
+    which barotropic Coriolis was selected.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    card = build_nemo_testcase_card("VORTEX-zco")
+    recipe, cfg = card.recipe, card.recipe.model_config
+    states = []
+    for which in (cfg, _vortex_legacy_config(cfg)):
+        model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, which)
+        states.append(np.asarray(
+            model.step(recipe.initial_state, card.dt_s).u.data))
+    assert states[0].shape == states[1].shape
+    assert float(np.max(np.abs(states[0] - states[1]))) > 0.0
+
+
+def test_the_nemo_seos_the_card_selects_reaches_the_model():
+    """NON-VACUITY for the equation of state, through the MODEL.
+
+    A first draft called the equation-of-state factory directly with the
+    card's coefficients.  A reviewer pointed out that this proves nothing
+    about the three production call sites this round threaded: revert all
+    three and the row still passes, because the test supplies the
+    coefficients itself.  So it goes through the model instead, and the
+    control is a card carrying the SHARED defaults -- which are another
+    experiment's.  If the coefficients stop reaching the model, the two
+    tendencies coincide and this turns red.
+    """
+    from legoesm.ocean.eos import NemoSEOSConfig
+    recipe = build_nemo_testcase_card("VORTEX-zco").recipe
+    cfg = recipe.model_config
+    assert cfg.eos_nemo_seos is not None
+    mine_T, mine_S = _vortex_momentum_tendency(recipe, cfg)
+    defaults = cfg._replace(eos_nemo_seos=NemoSEOSConfig())
+    theirs_T, theirs_S = _vortex_momentum_tendency(recipe, defaults)
+    # The pressure-gradient force is built from density, so a different fluid
+    # is a different momentum tendency.
+    assert float(np.max(np.abs(mine_T - theirs_T))) > 0.0
 
 
 def test_the_nemo_seos_the_card_selects_is_the_shipped_law():
-    """The EOS the card selects must BE namelist_cfg's, not DINO's defaults.
+    """And the law itself is namelist_cfg's, not DINO's.
 
     eosbn2.F90:295-302 with rn_b0 = rn_lambda* = rn_mu* = rn_nu = 0 reduces to
     rho = rho0 - 0.28*(T - 10): linear in temperature, and blind to BOTH
@@ -329,8 +397,7 @@ def test_the_nemo_seos_the_card_selects_is_the_shipped_law():
     # depth-blind (rn_mu1 = rn_mu2 = 0)
     assert np.allclose(np.asarray(eos(T, S, p + 5.0e7)),
                        np.asarray(eos(T, S, p)), rtol=0, atol=0)
-    # and the DINO defaults are a DIFFERENT fluid -- the plant that proves the
-    # coefficients are actually read rather than silently defaulted.
+    # and the shared defaults are a DIFFERENT fluid
     assert not np.allclose(np.asarray(make_eos_fn("nemo_seos")(T, S, p)),
                            np.asarray(eos(T, S, p)))
 
@@ -363,6 +430,25 @@ def _read_step_entry(path, n_lat, n_lon):
         "ssh": data[4 * count:].reshape((nx, ny), order="F")[
             halo_x:nx - halo_x, halo_y:ny - halo_y].T,
     }
+
+
+def _ulp_distance(left, right):
+    """Representable floats between two arrays, correct ACROSS ZERO.
+
+    Raw IEEE-754 bit patterns are not monotonic across the sign boundary:
+    subtracting them calls a pair straddling zero about 2**63 apart.  This
+    card's unequal cells are all one-signed, so the naive form happened to be
+    right here -- a reviewer flagged it as an instrument that would mislead the
+    next card rather than a defect in this one.  Mapping negatives onto the
+    two's-complement continuation fixes it for every case.
+    """
+    def key(x):
+        bits = np.ascontiguousarray(
+            np.asarray(x, dtype=np.float64)).view(np.int64).copy()
+        neg = bits < 0
+        bits[neg] = np.int64(np.uint64(0x8000000000000000)) - bits[neg]
+        return bits
+    return np.abs(key(left).astype(object) - key(right).astype(object))
 
 
 def _bits_equal(left, right, mask):
@@ -424,11 +510,7 @@ def test_initial_state_is_bit_exact_against_the_nemo_record(card):
     assert unequal == {"T": 0, "S": 0, "u": 788, "v": 788, "ssh": 104}, unequal
     for name in ("u", "v", "ssh"):
         value, mask = pairs[name]
-        ulp = np.abs(
-            np.ascontiguousarray(
-                np.asarray(oracle[name], dtype=np.float64)[mask]).view(np.int64)
-            - np.ascontiguousarray(
-                np.asarray(value, dtype=np.float64)[mask]).view(np.int64))
+        ulp = _ulp_distance(oracle[name][mask], np.asarray(value)[mask])
         assert int(ulp.max()) <= 2, (name, int(ulp.max()))
 
 
