@@ -87,6 +87,9 @@ rewrites the original preregistration.
   `b0aef68e2072b821018ad84df82c517183716c3aa9fd7570f4a88507dd2dd2b6`;
 - six month classifier plants: all FIRED (initial mode, frame count, ten-step
   calibration, restart orientation, terminal digest, and non-finite field);
+- default citation gate: PASS, 274 citations, zero failures and zero unmapped;
+  this receipt's gate: PASS, three citations, zero failures and zero unmapped;
+  the shifted `fldread` citation plant FIRES with `SYMBOL-NOT-AT-LINE`;
 - focused round-71 tests: `12 passed`;
 - shared-card battery: `160 passed` with nine dtype warnings;
 - tank battery: `10 passed`;
@@ -106,10 +109,10 @@ Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round71/`.
 
 The required separate `codex exec --sandbox read-only` review was attempted
-twice. Its terminal verdict was `Error: failed to initialize in-process
-app-server client: Read-only file system (os error 30)`; therefore
-**independent review unavailable in-sandbox**. Both attempts are retained in
-the evidence directory.
+three times, including once on the final committed diff. Its terminal verdict
+was `Error: failed to initialize in-process app-server client: Read-only file
+system (os error 30)`; therefore **independent review unavailable in-sandbox**.
+All attempts are retained in the evidence directory.
 
 ## Scope ledger
 
