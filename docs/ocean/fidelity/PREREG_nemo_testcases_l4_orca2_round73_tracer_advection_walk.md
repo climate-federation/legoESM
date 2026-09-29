@@ -120,3 +120,14 @@ Before rerunning, the calibration is tightened to report both arms separately:
 
 The production arm and its frozen first-operand/first-statement predictions
 are unchanged and remain independent.
+
+### Second fail-closed calibration refinement
+
+The endpoint-plus-transport arm also refused. The external endpoint supplies
+the completed barotropic `Kaa` sea surface, but stage-1 CEN2 divides by
+`e3t(Kmm)`, whose `Kmm` sea surface is the step-entry value. The complete
+calibration therefore additionally bridges only entry SSH to the admitted
+record, exactly as the already-certified Decision-52 twin does. The gate keeps
+all three arms visible: transport-only non-bit, endpoint-plus-transport
+non-bit, and entry-SSH-plus-endpoint-plus-transport exact. The independent
+production arm remains untouched.

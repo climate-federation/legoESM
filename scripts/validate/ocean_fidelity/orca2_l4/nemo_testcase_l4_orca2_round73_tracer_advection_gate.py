@@ -184,8 +184,18 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
     recorded_transport_after = np.asarray(
         recorded_transport_state.T.data)[:, :OWNED_NX, :NLEV]
     endpoint = handoff._endpoint_override(card, oracle_entry, record_root)
-    recorded_full_state = _run(
+    recorded_endpoint_state = _run(
         card, state, freshwater, surface, "after_advection",
+        endpoint=endpoint,
+        transport_override=tuple(map(jnp.asarray, (zfu, zfv, zfw))),
+    )
+    recorded_endpoint_after = np.asarray(
+        recorded_endpoint_state.T.data)[:, :OWNED_NX, :NLEV]
+    recorded_entry_state = state._replace(
+        eta=state.eta.replace(
+            data=jnp.asarray(oracle_entry["ssh"], dtype=jnp.float64)))
+    recorded_full_state = _run(
+        card, recorded_entry_state, freshwater, surface, "after_advection",
         endpoint=endpoint,
         transport_override=tuple(map(jnp.asarray, (zfu, zfv, zfw))),
     )
@@ -206,6 +216,8 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
     }
     recorded_transport_replay = _score(
         recorded_transport_after, oracle_after, masks["T"])
+    recorded_endpoint_replay = _score(
+        recorded_endpoint_after, oracle_after, masks["T"])
     recorded_full_replay = _score(
         recorded_full_after, oracle_after, masks["T"])
     first_operand = next(
@@ -225,6 +237,7 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "first_non_bit_operand": first_operand,
         "first_non_bit_arithmetic": first_arithmetic,
         "recorded_transport_only_replay": recorded_transport_replay,
+        "recorded_endpoint_transport_replay": recorded_endpoint_replay,
         "recorded_full_operand_replay": recorded_full_replay,
         "record": {
             "root": str(record_root),
@@ -283,6 +296,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     }, "independent kt=1 Kmm temperature is not exact")
     require(report["recorded_transport_only_replay"].get("bit_exact") is False,
             "transport-only replay unexpectedly became bit-exact")
+    require(report["recorded_endpoint_transport_replay"].get("bit_exact") is False,
+            "endpoint-plus-transport replay unexpectedly became bit-exact")
     require(report["recorded_full_operand_replay"].get("bit_exact") is True,
             "complete recorded-operand source replay is not bit-exact")
     require(report["rows"]["after_advection_T"] == ROUND72_AFTER_ADV,
@@ -312,6 +327,7 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "observed": first_arithmetic,
         },
         "recorded_transport_only_replay_exact": {"status": "REFUTED"},
+        "recorded_endpoint_transport_replay_exact": {"status": "REFUTED"},
         "recorded_full_operand_replay_exact": {"status": "CONFIRMED"},
         "round72_boundary_reproduced": {"status": "CONFIRMED"},
         "disposition_held": {"status": "CONFIRMED"},

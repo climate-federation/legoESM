@@ -40,6 +40,8 @@ def _report() -> dict:
         "order": list(gate.ORDER),
         "recorded_transport_only_replay": _row(
             exact=False, count=228641, maximum=1.0e-9, unequal=10),
+        "recorded_endpoint_transport_replay": _row(
+            exact=False, count=228641, maximum=1.0e-9, unequal=10),
         "recorded_full_operand_replay": _row(
             exact=True, count=228641, maximum=0.0, unequal=0),
         "rows": rows,
