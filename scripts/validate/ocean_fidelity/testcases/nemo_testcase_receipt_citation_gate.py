@@ -123,6 +123,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/fldread.f90"),
@@ -1297,6 +1300,16 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:223-272': [
         '! Stage 3 :',
         'IF( ln_sto_eos )   CALL sto_rst_write( kstp )', 50],
+    # --- ORCA2 card round 72: independent temperature source walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
+        'IF( ln_tile )   CALL dom_tile_start',
+        "& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:645-651': [
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )',
+        "& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:670-680': [
+        'SELECT CASE( kstg )',
+        '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 11],
     # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
