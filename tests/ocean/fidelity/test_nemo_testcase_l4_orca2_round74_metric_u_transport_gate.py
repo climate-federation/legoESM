@@ -26,10 +26,7 @@ def _report() -> dict[str, object]:
     rows["e3u_Kmm"] = _row(exact=False)
     rows["corrected_velocity"] = _row(exact=False)
     rows["metric_thickness"] = _row(exact=False)
-    rows["zFu"] = {
-        **_row(exact=False),
-        **gate.ROUND73_ZFU,
-    }
+    rows["zFu"] = _row(exact=False)
     return {
         "claim_label": "independent",
         "card_scope": {
@@ -48,6 +45,8 @@ def _report() -> dict[str, object]:
             "derived_zFu_matches_exposure": _row(exact=True),
         },
         "record_replay": [_row(exact=True), _row(exact=True)],
+        "round73_support_zFu": {
+            **_row(exact=False), **gate.ROUND73_ZFU},
         "rows": rows,
         "support": dict(gate.EXPECTED_SUPPORT),
     }

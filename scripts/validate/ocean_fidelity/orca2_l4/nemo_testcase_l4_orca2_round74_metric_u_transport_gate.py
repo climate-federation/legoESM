@@ -75,10 +75,10 @@ ROUND73_ZFU = {
     "unequal": 221640,
 }
 EXPECTED_SUPPORT = {
-    "card_active": 251670,
-    "oracle_active": 226236,
-    "card_not_oracle": 30030,
-    "oracle_not_card": 4596,
+    "round73_broadcast_column_support": 251670,
+    "oracle_3d_active": 226236,
+    "round73_support_not_oracle_active": 30030,
+    "oracle_active_not_round73_support": 4596,
 }
 PLANTS = (
     "none",
@@ -230,8 +230,8 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "zFu": exposed_zfu,
     }
     oracle_mask = np.asarray(oracle["umask"])[..., :NLEV]
-    oracle_active3 = oracle_mask != 0.0
-    active3 = handoff._support_masks(card)["u"]
+    active3 = oracle_mask != 0.0
+    round73_support = handoff._support_masks(card)["u"]
     active2 = np.any(active3, axis=-1)
     oracle_zub = np.asarray(oracle["zub"])
     oracle_corrected = nemo_source_round(
@@ -266,12 +266,13 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         rows[name] = _score(live[name], expected[name], mask)
     calibration = {
         "derived_thickness_matches_exposure": _score(
-            np.asarray(h_u)[s3], exposed_thickness, active3),
+            np.asarray(h_u)[s3], exposed_thickness, round73_support),
         "derived_corrected_matches_exposure": _score(
-            np.asarray(live_corrected)[s3], exposed_corrected, active3),
+            np.asarray(live_corrected)[s3], exposed_corrected, round73_support),
         "derived_zFu_matches_exposure": _score(
-            np.asarray(live_zfu_replay)[s3], exposed_zfu, active3),
+            np.asarray(live_zfu_replay)[s3], exposed_zfu, round73_support),
     }
+    round73_zfu = _score(live["zFu"], expected["zFu"], round73_support)
     first = next(
         (name for name in ORDER if rows[name]["status"] != "AT_BAR"), None)
     first_derived = next(
@@ -286,11 +287,14 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "first_non_bit": first,
         "first_non_bit_derived": first_derived,
         "support": {
-            "card_active": int(active3.sum()),
-            "oracle_active": int(oracle_active3.sum()),
-            "card_not_oracle": int((active3 & ~oracle_active3).sum()),
-            "oracle_not_card": int((oracle_active3 & ~active3).sum()),
+            "round73_broadcast_column_support": int(round73_support.sum()),
+            "oracle_3d_active": int(active3.sum()),
+            "round73_support_not_oracle_active": int(
+                (round73_support & ~active3).sum()),
+            "oracle_active_not_round73_support": int(
+                (active3 & ~round73_support).sum()),
         },
+        "round73_support_zFu": round73_zfu,
         "record_replay": replay["rows"],
         "production_exposure_calibration": calibration,
         "record": {
@@ -304,9 +308,14 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
             "dtype": "float64",
             "transcendentals": get_policy().transcendentals,
         },
-        "compiled_citation": (
-            "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/"
-            "stprk3_stg.f90:265-280"),
+        "compiled_citations": {
+            "active_selector": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:45-49"),
+            "active_hybrid_transport": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:274-284"),
+        },
     }
 
 
@@ -327,8 +336,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         report["rows"]["un_adv"]["status"] = "AT_BAR"
         report["rows"]["un_adv"]["unequal"] = 0
     elif plant == "round73-boundary":
-        report["rows"]["zFu"]["max_abs"] = math.nextafter(
-            float(report["rows"]["zFu"]["max_abs"]), math.inf)
+        row = report["round73_support_zFu"]
+        row["max_abs"] = math.nextafter(float(row["max_abs"]), math.inf)
 
     require(report.get("claim_label") == "independent",
             "claim is not independent")
@@ -347,7 +356,7 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(all(row["status"] == "AT_BAR" and int(row["unequal"]) == 0
                 for row in report["production_exposure_calibration"].values()),
             "derived production exposure did not reproduce")
-    zfu = report["rows"]["zFu"]
+    zfu = report["round73_support_zFu"]
     for key, expected in ROUND73_ZFU.items():
         require(zfu[key] == expected,
                 f"round-73 zFu {key} changed: {zfu[key]} != {expected}")

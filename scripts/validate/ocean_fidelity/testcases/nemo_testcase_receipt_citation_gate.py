@@ -1316,6 +1316,13 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:670-680': [
         ('SELECT CASE( kstg )', 4),
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 11],
+    # --- ORCA2 card round 74: independent metric-U transport walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:45-49': [
+        'INTEGER,  PUBLIC, PARAMETER ::   np_LIN = 0',
+        'INTEGER  :: n_baro_upd =  np_HYB', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:274-284': [
+        ('CASE ( np_LIN, np_HYB )', 2),
+        ('END DO   ;   END DO   ;   END DO', 1), 11],
     # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
         '! FCT at last stage only with RK3',

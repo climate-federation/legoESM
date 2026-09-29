@@ -38,8 +38,10 @@ and then
 
 `zFu = e2u * e3u(Kmm) * (uu(Kmm) + zub * umask)`
 
-at
-`ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:265-280`.
+The compiled selector fixes `n_baro_upd=np_HYB` at
+`ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:45-49`,
+so the executed assignments are the hybrid branch at
+`ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:274-284`.
 The gate walks U before V and scores these source-ordered boundaries:
 
 1. `un_adv`, live inverse depth, and `uu_b(Kmm)`;
@@ -109,3 +111,16 @@ its frozen `zFu` tuple is comparable, reports the four-way support census, and
 scores `umask` itself over the full owned rank-0 array. The existing
 recorded-operand replay remains separately labelled on the record's own mask.
 No prediction, model path, or production operand changed.
+
+### Correction to the addendum's support label
+
+The phrase `card-active` above is **RETRACTED**. Source inspection of the
+round-43 support builder shows that it broadcasts the card's 2-D U mask across
+all 30 levels; it is a comparison support, not a 3-D activity mask. The model's
+actual 3-D `umask` is raw-bit exact to NEMO on all 399,600 owned values.
+
+The final rerun therefore uses NEMO's recorded 3-D `umask` for the headline
+source walk and retains the broadcast 251,670-cell support only for a
+separately labelled reproduction of round 73's frozen `zFu` tuple. The support
+census and failed label remain in the record rather than being silently
+rewritten.
