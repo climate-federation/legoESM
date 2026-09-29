@@ -94,9 +94,20 @@ Execution is CPU, production JIT, fp64, scalar-libm.
 
 - pair gate: `PASS_EXTERNAL_TRANSPORT_PAIR`;
 - all five plants: `PLANT-FIRED`;
-- classifier/control tests: 7 passed;
-- citation gates, focused battery, permitted wide battery, and independent
-  review: recorded below after final-tip execution.
+- citation gate: this receipt PASS at 4 / 4 mapped citations; default receipt
+  PASS at 274 / 274, with zero failures, unmapped citations, or map-audit
+  failures; the shifted metric-transport citation plant FAILS as required;
+- focused round-75 through round-77 and citation battery: 37 passed;
+- the one permitted `tests/ocean/fidelity -n 12` battery collected 2,086
+  tests, reached 99%, and passed all seven round-77 tests before the standing
+  no-summary wrapper stall after all pytest workers exited. Its five observed
+  failures reproduce in one serial isolation battery: the round-129 certified
+  phase-3 stepping stamp moved, the round-51 private trace tuple accumulated
+  newer fields, SI3 `MY_SRC` A is not verbatim, `hires_lane_surface` is absent
+  from the case board, and four older report emitters lack worktree stamps;
+- required separate read-only Codex review: **independent review unavailable
+  in-sandbox**; the app-server client could not initialize on the read-only
+  filesystem. Exact output is retained in `codex_review.log`.
 
 No `packages/` file changed. ORCA2, GYRE, DINO, OVERFLOW, and LOCK trajectories
 cannot move, so shared trajectory landing gates do not apply to this diagnostic
