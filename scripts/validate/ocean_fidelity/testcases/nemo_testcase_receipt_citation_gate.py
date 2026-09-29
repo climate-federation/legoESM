@@ -861,8 +861,8 @@ CITATION_MAP = {
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:882-883': ['di_e2v_2e1e2f(ji,jj) = ( e2v(ji+1,jj  ) - e2v(ji,jj) )', 'dj_e1u_2e1e2f(ji,jj) = ( e1u(ji  ,jj+1) - e1u(ji,jj) )', 2],
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720': ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:766-779': [('zwx(ji,jj) = e2u(ji,jj) *', 3), 'zua = + r1_12 * r1_e1u(ji,jj)', 14],
-    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960': ('zpvo_nw = ff_f(ji-1,jj  ) / (e3f_0vor(ji-1,jj  ,jk)', 1),
-    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158,161': ['pe1t(:,:) = rn_dy', 'pe1f(:,:) = rn_dy', 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:955-968': ['SELECT CASE( nvor_scheme )', ('& ff_f(ji-1,jj-1) / (e3f_0vor(ji-1,jj-1,jk)', 1), 14],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158-161': ['pe1t(:,:) = rn_dy', 'pe1f(:,:) = rn_dy', 4],
     'vortex_round2/namelist_cfg:128-138': ['&nameos', 'rn_nu       =  0.', 11],
 
     # --- VORTEX card, round 1: transcription + acquisition ---

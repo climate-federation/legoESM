@@ -80,16 +80,28 @@ preprocessed, so it is cited as shipped.
 | the metric coefficients, as scale-factor differences | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:882-883` | 2 |
 | the reciprocal vertex thickness the triad divides by | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720` | 1 |
 | the triad's transport and its twelfths | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:766-779` | 14 |
-| the matching barotropic arm | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960` | 1 |
-| the mesh's constant scale factors | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158,161` | 2 |
+| the matching barotropic arm, its whole selector and all four triads | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:955-968` | 14 |
+| the mesh's constant scale factors, ALL FOUR pairs | `VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158-161` | 4 |
 
-Two of these are worth reading twice. `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720` is the divisor the
-triad applies, and it is the live `e3f_0vor*(1+r3f)` the card's own helper
-builds -- so the two sides divide by the same thing, which a reviewer asked be
-shown rather than asserted. And `VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:960` shows the barotropic arm
-forming its coefficients from `ff_f` over that same thickness with no relative
-vorticity and no metric term at all, which is why the card may select it
-without a second transcription.
+Three of these are worth reading twice, and a reviewer corrected all three.
+
+`VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720` is the divisor the triad
+applies. It is `1/(e3f_0vor*(1 + r3f*fe3mask))` -- the masked surface-height
+ratio matters and an earlier draft of this line dropped `fe3mask` from the
+paraphrase. That is the same quantity the card's own helper builds, so the two
+sides divide by the same thing.
+
+The mesh citation now spans all FOUR scale-factor pairs
+(`VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158-161`), not the first and last. The metric term is built
+from `e2v` and `e1u` specifically, which are on the two lines an earlier draft
+skipped, so the narrower citation did not support the claim it was attached to.
+
+`VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:955-968` is the whole
+energy-and-enstrophy branch of the barotropic Coriolis, not one line of it:
+the selector plus all four triads, every one of them `ff_f` over that same
+thickness with no relative vorticity and no metric term anywhere. That is what
+lets the card select it without a second transcription, and one line could not
+have shown it.
 
 ## 2. The finding: the initial state is not bit-exact
 
@@ -98,8 +110,8 @@ against round 1's own record, that is **refuted**:
 
 | field | cells unequal | of | worst |
 |---|---|---|---|
-| temperature | 0 | 36600 | — |
-| salinity | 0 | 36600 | — |
+| temperature | 0 | 37210 | — |
+| salinity | 0 | 37210 | — |
 | zonal velocity | 788 | 36600 | 2 last bits |
 | meridional velocity | 788 | 36600 | 2 last bits |
 | sea surface height | 104 | 3721 | 2 last bits |
@@ -335,10 +347,29 @@ meridional velocity row reports UNMEASURED, which is the gate correctly saying
 their three-row closed geometry has no active meridional face -- a
 pre-existing, documented statement, not something this step introduced.
 
+**GYRE, and a preregistered promise this step could not keep as written.** The
+preregistration says "the two tanks and GYRE are re-run through the same gate
+afterwards". That was a drafting error and is corrected here rather than left
+silent: GYRE is not wired into this ladder gate at all and never has been --
+the gate's case list has two entries, and adding a third for GYRE would be a
+new card's worth of work, not a re-run. GYRE's own regression is the decade
+climate pin, and it is green at this tree: `14 passed in 3.90s`, which holds
+its day-30 value at 2.327677e-06 K among others. So the claim GYRE needed --
+that this step did not move it -- is supported; the instrument named in the
+preregistration was simply the wrong one. A reviewer caught this, not the
+author.
+
 **The gate's own non-vacuity.** Run with `--plant`, the ladder reports
 first-over-bar at kt=1 on temperature with a normalized error of 4.88e-02 and
 exits non-zero -- so it can fail. The citation gate likewise exits non-zero
 under a planted line shift.
+
+**A blind spot this step did NOT introduce, named because it is cheap to name.**
+The new interior check compares shapes, and VORTEX's grid is square, so a
+record with its two horizontal axes transposed would pass it. The hard-coded
+tuple it replaced had exactly the same blind spot for the same reason, so this
+is not a regression -- but "an array's layout is an API" has cost this campaign
+before, and the next card with a non-square grid gets the check for free.
 
 **Note BD compliance.** The ladder gate used to carry a hard-coded header
 tuple per case, and this card would have been a third. Five acquisitions in
@@ -350,6 +381,38 @@ what the header itself asks for. Two further claims that used to be implicit
 are now assertions that refuse rather than slice silently: the record's
 interior must match the card's, and its level count must equal the card's
 executed levels plus its dummy bottom record.
+
+## 6d. Reviews of step D
+
+Both reviewers were given this step's commit alone and told to attack the gate
+change first, because it is shared with two certified cards.
+
+| reviewer | verdict | its leading finding |
+|---|---|---|
+| codex, adversarial, read-only | DO NOT SHIP | one call site of the record reader opts out of the new checks, so that path is WEAKER than before this step |
+| a fresh Claude code-reviewer | DO NOT SHIP | the same call site, found independently; plus a preregistered promise about GYRE that this gate cannot keep |
+
+They agreed on the leading finding, which is the strongest signal either could
+have given, and it is the one that mattered: replacing a hard-coded check that
+applied to every call site with an opt-in keyword left one caller unprotected.
+It does not run in this round -- it is an OVERFLOW-only diagnostic arm that is
+off by default -- but it is a regression sitting in shared code, and a future
+run would have inherited it silently. Both checks now apply at every call site.
+
+The rest, each fixed rather than argued with:
+
+| finding | disposition |
+|---|---|
+| the mesh citation named the first and last scale-factor lines, but the metric term is built from the two in between | FIXED: it spans all four. The narrower citation did not support the claim attached to it |
+| the paraphrase of the triad's divisor dropped the live mask factor | FIXED |
+| one line was cited for the whole barotropic branch | FIXED: the selector and all four triads, fourteen lines |
+| the preregistration promised a GYRE re-run this gate cannot do | ACKNOWLEDGED above, with GYRE's own green regression in its place |
+| the shape check cannot see transposed axes | NAMED above, not fixed: the check it replaced had the same blind spot, so it is not a regression |
+| this step's own dual review was not recorded | this section |
+
+One thing neither reviewer raised, found while fixing their findings: section 2
+of this receipt gave the temperature and salinity denominators as 36600, which
+is the velocity count. They are 37210. Corrected.
 
 ## 7. How to acquire
 

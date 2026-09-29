@@ -396,8 +396,19 @@ def run(
                 "stprk3_stg.F90:468,588"),
         }
         if owner_controls:
+            # Every read_entry call gets the card's own shape and the level
+            # relation, not only the one in the walk: a reviewer found that
+            # this owner-controls path could admit a record with the right
+            # interior but the WRONG number of levels, which the old
+            # hard-coded tuple would have refused.
             oracle2 = read_entry(
-                oracle_root / "oracle_step_entry_kt00000002.bin", case)
+                oracle_root / "oracle_step_entry_kt00000002.bin", case,
+                expect_interior=np.asarray(
+                    card.recipe.initial_state.T.data).shape[:2])
+            require(oracle2["nz"] == nlev + card.dummy_bottom_records,
+                    "owner-controls kt=2 record has "
+                    f"{oracle2['nz']} levels, card executes {nlev} plus "
+                    f"{card.dummy_bottom_records} dummy bottom record(s)")
             oracle_T = oracle2["T"][..., :nlev]
             active_T = masks["T"]
             faithful_T = np.asarray(faithful_kt2.T.data)
