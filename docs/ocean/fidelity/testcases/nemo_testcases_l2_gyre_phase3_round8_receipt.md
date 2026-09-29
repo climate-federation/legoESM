@@ -9560,16 +9560,16 @@ question.  **The premise is FALSE and is retracted here.**  The grep:
 ```
 packages/ocean/legoesm/ocean/state.py:2156       tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1004    tracer_combine: str = "concentration"
-packages/ocean/legoesm/ocean/experiments/dino.py:1706    "tracer_combine": "thickness_weighted",
-packages/ocean/legoesm/ocean/experiments/dino.py:3913        tracer_combine=cfg.tracer_combine,
+packages/ocean/legoesm/ocean/experiments/dino.py:1738    "tracer_combine": "thickness_weighted",
+packages/ocean/legoesm/ocean/experiments/dino.py:3945        tracer_combine=cfg.tracer_combine,
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12151  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12537  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
 test-case cards run the WS-RK3 stage ladder, which reads neither — that is why
-it is inert on them.  But `dino.py:1706` is inside `DINO_RECIPES`, and it
-SELECTS `"thickness_weighted"`; `dino.py:3913` routes it into the config those
+it is inert on them.  But `dino.py:1738` is inside `DINO_RECIPES`, and it
+SELECTS `"thickness_weighted"`; `dino.py:3945` routes it into the config those
 steps read.  So something does select it, on another card family, and neither
 "delete" nor "wire" is the right disposition.  The correct row is: the field is
 LIVE on the leapfrog and modified-leapfrog paths and simply not on the path

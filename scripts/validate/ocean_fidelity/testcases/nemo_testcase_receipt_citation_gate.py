@@ -2970,8 +2970,8 @@ CITATION_MAP = {
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1706': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3913': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1738': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3945': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
