@@ -4,7 +4,11 @@ Date 2026-09-29. Lane tip `eeef1ec91397`. Two preregistrations, both frozen
 before their measurements: `PREREG_nemo_testcases_l1_vortex_round3_vector.md`
 (part A) and `PREREG_nemo_testcases_l1_vortex_round3_kt2_owner.md` (part B).
 
-Status: **part A SCORED, part B HELD.** The second VORTEX card exists, runs,
+Status: **part A SCORED, part B HELD AND ITS ATTRIBUTION RETRACTED.** Both
+adversarial reviewers returned DO NOT SHIP on part B and agreed on the leading
+finding; section 12 records what they found and what it costs. Part B's owner
+verdict is demoted to PLAUSIBLE and nothing rests on it. Part A is clean on
+both reviews. The second VORTEX card exists, runs,
 and is scored on its own ten-step ladder. The first card's second-step debt is
 attributed to one stage, with three named candidates refuted by measurement and
 the remaining walk needing one more NEMO record.
@@ -161,7 +165,18 @@ stages 1 and 2 partially cancel it. In the same arm the temperature goes to
 and its momentum program is not. (B4's stage ranking is therefore moot and is
 withdrawn: stage 3's own share is the whole of it.)
 
-### 7. Inside stage 3: what the residual is not
+### 7. Inside stage 3 — THIS SECTION IS RETRACTED
+
+**Everything below this line about the vertical viscosity was produced by an
+UNCOMMITTED probe and is therefore unmeasured.** Both reviewers found it
+independently and it is the campaign's own named failure mode: a throwaway
+probe's number is not evidence, and the committed walk computes no viscosity
+increment, no ablation and no correlation. The numbers are kept below, struck
+through in words rather than deleted, so the next round knows exactly what to
+re-measure with a committed instrument; NO decision may rest on them, and the
+implicit vertical viscosity is BACK on the candidate list for round 4.
+
+### 7 (retracted). What the residual was claimed not to be
 
 Two further measurements, both refutations, both worth more than the
 hypotheses they killed.
@@ -205,7 +220,8 @@ because stage 3's output is the step's output. Separating those needs NEMO's
 per-term momentum tendency at a stage, which this record does not contain.
 That is round 4's acquisition, and no fix lands until it exists.
 
-**Nothing was landed.** Prediction B5 said the owner would be a transcription
+**Nothing was landed, and the owner verdict is PLAUSIBLE, not measured.**
+Prediction B5 said the owner would be a transcription
 difference rather than a rounding floor; that remains the standing hypothesis
 and is NOT confirmed, because no statement has been named. Labelled PLAUSIBLE.
 
@@ -290,3 +306,36 @@ vector form adds is measured, not guessed.
 **Carried from round 2:** whether the split-explicit barotropic arm should have
 been its own round, and the mesh guard being stricter than the source needs.
 **Carried into this round:** the GYRE digest pin (section 8).
+
+
+## 12. Reviews
+
+Both reviewers were given the whole diff and told to refute it. Both returned
+DO NOT SHIP on part B, and both independently led with the same finding, which
+is the strongest signal either could have given.
+
+| reviewer | verdict | its leading finding |
+|---|---|---|
+| codex, adversarial, read-only | DO NOT SHIP | the receipt's viscosity magnitude and correlations exist only in prose; the committed walk computes none of them |
+| a fresh Claude code-reviewer | DO NOT SHIP (request changes) | the same, named as the campaign's own uncommitted-probe rule |
+
+Both PASSED part A. Codex: "the vector card correctly changes only the five
+legoESM selectors implied by NEMO's two namelist switches", and "no certified
+card or shared production dynamics path changes in this range". The Claude
+reviewer independently hand-diffed both deck patches against the shipped
+namelist and reached the same conclusion, and independently confirmed that the
+GYRE digest red is pre-existing at the base commit.
+
+Findings, and what each costs:
+
+| finding | disposition |
+|---|---|
+| the viscosity numbers come from an uncommitted probe | RETRACTED, section 7. The viscosity is back on the candidate list |
+| the walk's plant only perturbs the first arm's scoring, so it passes even if both substitution hooks are inert | ACCEPTED, NOT FIXED. The attribution is demoted to PLAUSIBLE until a plant perturbs a substituted arm |
+| arm 1 does not substitute the carried barotropic velocity pair, which the first stage consumes | ACCEPTED. "The initial state owns none of it" is weakened to "the initial state's TRACER, VELOCITY and HEIGHT fields own none of it"; the carried pair is untested |
+| arm 2 omits the recorded pre-stage momentum right-hand side, which the instrument does dump | ACCEPTED. "The external solve owns the height row outright" stands for the height (arm 2 puts it at exactly zero, which no omission can fake); the velocity half of that claim is weakened to "substituting the external solve's velocity outputs alone does not move it" |
+| the walk always reports MEASURED and exits zero, so it has no verdict of its own | ACCEPTED, NOT FIXED. It is a measurement tool this round, not a gate; it must gain a verdict before anything lands on it |
+| the commit range is five commits, not six | corrected |
+
+None of this changes part A, and none of it changes a number in the two
+ladders: the walk touches no model code and nothing was landed.
