@@ -117,6 +117,22 @@ def test_bulk_charge_and_kernel_inverse_round_trip_exactly():
         np.testing.assert_allclose(np.asarray(lhflx), np.asarray(E_ref * latent_heat_vaporization(T_sfc)), rtol=1e-12)
         assert float(jnp.abs(lhflx[0] / (constants.L_v * E_ref[0]) - 1.0)) > 0.02
 
+    # The iterative MOST/COARE law too: its explicit-L evaluation is the
+    # independent water reference (compute_most_fluxes(L_latent=...) wins).
+    from legoesm.core.bulk_flux import compute_most_fluxes
+    for conv in ("legoesm", "aerobulk"):
+        cfg = SurfaceLayerConfig(bulk_scheme="coare3", z0=1e-4, z_ref=10.0, bulk_n_iter=5,
+                                 thermo_convention=conv)
+        _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg)
+        E = surface_moisture_flux(cfg, lhflx, T_sfc)
+        lh_const = compute_most_fluxes(
+            u, v, T_air, q_v, T_sfc, q_sfc, rho, z_ref=cfg.z_ref, z0_init=cfg.z0,
+            scheme="coare3", n_iter=cfg.bulk_n_iter, thermo_convention=conv,
+            L_latent=constants.L_v)[3]
+        E_ref = lh_const / constants.L_v
+        np.testing.assert_allclose(np.asarray(E), np.asarray(E_ref), rtol=1e-10)
+        np.testing.assert_allclose(np.asarray(lhflx), np.asarray(E_ref * latent_heat_vaporization(T_sfc)), rtol=1e-10)
+
 
 def test_coupled_hook_hands_the_tiles_water_flux():
     """The coupled driver's hook returns (shflx, physical lhflx, mass flux) and

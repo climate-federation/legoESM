@@ -656,7 +656,9 @@ def test_column_surface_kinematic_fluxes_sign_and_reuse():
     # Heat: the moist-enthalpy correction lh - L_v * E rides on the heat BC
     # (the LES credits vapour at the constant L_v); ~3 % of lh at 300 K, negative.
     corr = lh[0] - constants.L_v * evap
-    assert float(corr) < 0.0 and float(jnp.abs(corr)) > 0.02 * float(lh[0])
+    assert float(corr) < 0.0
+    np.testing.assert_allclose(float(corr / lh[0]),
+                               1.0 - constants.L_v / float(latent_heat_vaporization(sst)), rtol=1e-12)
     np.testing.assert_allclose(
         float(w_th), float((sh[0] + corr) / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
 

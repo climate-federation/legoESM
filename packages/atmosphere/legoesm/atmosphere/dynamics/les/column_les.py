@@ -546,6 +546,13 @@ def column_surface_kinematic_fluxes(
     * **Constant flux.**  Computed ONCE from the time-mean column (the ``prescribe="fluxes"``
       design, iter 151) — appropriate for the short worst-column spin-off; an over-warming
       run is caught by the realism gate (``theta_drift``).
+
+    ``w_th_s`` is the LES heat LOWER BOUNDARY CONDITION, not a reported
+    surface flux: it carries the moist-enthalpy correction ``lhflx - L_v*E``
+    (the bulk law charged Kirchhoff L_v(SST) per kg, the LES credits the
+    constant L_v), exactly like the GCM turbulence kernels' ``sflx_T``.  The
+    physical sensible heat flux is ``compute_surface_fluxes``' ``shflx``; do
+    not read the θ flux back as one.
     """
     from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
