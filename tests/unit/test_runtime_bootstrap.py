@@ -612,6 +612,7 @@ class TestCubedSphereLevelFallbackBootstrap:
     ({"dynamics": "float64"}, "fp64"),
     ({"dynamics": "float32", "conservation": "float64"}, "mixed"),
     ({"dynamics": "float32"}, "fp32"),
+    ({"conservation": "float64"}, "mixed"),
     ({"mode": "fp32", "dynamics": "float64"}, "fp32"),
 ])
 def test_yaml_precision_honours_per_component_keys(precision, expected):

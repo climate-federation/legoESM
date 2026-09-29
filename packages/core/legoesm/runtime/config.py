@@ -260,16 +260,16 @@ def precision_mode_from_yaml_config(config) -> str:
     """Precision mode a YAML ``Config`` asks for.
 
     An explicit ``hardware.precision.mode`` wins; otherwise the per-component
-    ``hardware.precision.dynamics`` / ``conservation`` keys decide; nothing set
+    ``hardware.precision.dynamics`` / ``conservation`` keys decide (fp64
+    dynamics -> ``fp64``; fp64 conservation alone -> ``mixed``); nothing set
     gives ``fp32``.
     """
     explicit_mode = config.get("hardware.precision.mode", None)
     if explicit_mode is not None:
         return str(explicit_mode).strip().lower()
     dynamics_prec = config.get("hardware.precision.dynamics", None)
-    if dynamics_prec is None:
-        return "fp32"
-    if str(dynamics_prec).strip().lower() in ("float64", "fp64", "double"):
+    if dynamics_prec is not None and str(dynamics_prec).strip().lower() in (
+            "float64", "fp64", "double"):
         return "fp64"
     cons = config.get("hardware.precision.conservation", None)
     if cons is not None and str(cons).strip().lower() in ("float64", "fp64"):
