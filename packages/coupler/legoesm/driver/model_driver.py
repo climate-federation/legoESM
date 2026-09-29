@@ -6,6 +6,7 @@ checkpointing into a single reusable class.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import sys
@@ -680,6 +681,57 @@ def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
                                     mid_refresh=halo_refresh,
                                     owned_mask=owned_mask)
     return smooth
+
+
+def mpas_land_forcing(sd_sw, sd_lw, sd_pr, T3, qv3, ps_in, u3, doy, sod,
+                      v3=None, *,
+                      mesh, sigma, lat, lon, co2_ppmv):
+    """Land forcing (AtmToSurface) from the radiation export and the state.
+
+    Pure and array-in/array-out so the MPAS driver compiles it once per run
+    (mesh, vertical coordinate, cell lat/lon and CO2 bound as constants).
+    ``sd_pr`` / ``qv3`` may be None (no precip export / dry run): zeros.
+    Same conventions as the coupled tile: p_lowest ~ 0.99 p_s, ideal-gas rho
+    at the lowest level, snow split at T_freeze.  The zenith is the REAL
+    per-cell sun (same doy/seconds the radiation uses this step): the
+    two-leaf canopy's radiation partitioning is zenith-driven, so a fixed sun
+    would give it neither a diurnal cycle nor night.
+    """
+    from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+    from legoesm.land.forcing.solar import cos_solar_zenith
+
+    sw_down = jnp.asarray(sd_sw).reshape(-1)
+    lw_down = jnp.asarray(sd_lw).reshape(-1)
+    precip = (jnp.asarray(sd_pr).reshape(-1)
+              if sd_pr is not None else jnp.zeros_like(sw_down))
+    T_air = T3[:, -1]  # pure slice: rain/snow split stays bitwise (knife-edge test)
+    q_air = qv3[:, -1] if qv3 is not None else jnp.zeros_like(T_air)
+    p_s = jnp.asarray(ps_in).reshape(-1)
+    # Same winds as _cell_winds(level=-1): a column-model state (v3 given)
+    # carries cell winds; a Voronoi state carries edge-normal u (Perot).
+    if v3 is not None:
+        u_c, v_c = u3[:, -1], v3[:, -1]
+    else:
+        u_c, v_c = reconstruct_cell_velocity(u3[:, -1], mesh)
+    z_lowest = lowest_level_height(
+        T_air, sigma.pressure_at_half(p_s), sigma.pressure_at_full(p_s))
+    return AtmToSurface(
+        z_lowest=z_lowest,
+        sw_down=sw_down, lw_down=lw_down,
+        precip_total=precip,
+        precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
+        T_lowest=T_air, q_lowest=q_air,
+        u_lowest=u_c, v_lowest=v_c,
+        p_lowest=0.99 * p_s, p_surface=p_s,
+        rho_lowest=p_s / (constants.R_d * T_air),
+        cos_zenith=cos_solar_zenith(
+            lat, lon, jnp.asarray(doy, dtype=jnp.float64),
+            jnp.asarray(sod, dtype=jnp.float64) / 3600.0),
+        co2_ppmv=jnp.full_like(T_air, co2_ppmv),
+        has_radiation=jnp.ones_like(T_air),
+        has_precipitation=jnp.ones_like(T_air),
+    )
 
 
 def clear_sky_pass_effective(
@@ -11189,12 +11241,7 @@ class ModelDriver:
             self._land_n_held_total = 0
             self._land_n_held_steps = 0
 
-            from legoesm.land.forcing.solar import cos_solar_zenith as _csz
             _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
-
-            @jax.jit
-            def _cos_zen_fn(doy, hour_utc):
-                return _csz(_lml_lat, _lml_lon, doy, hour_utc)
 
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
@@ -11216,46 +11263,22 @@ class ModelDriver:
                 if (_sd is None or len(_sd) < 10
                         or _sd[8] is None or _sd[9] is None):
                     return None
-                sw_down = jnp.asarray(_sd[8].data).reshape(-1)
-                lw_down = jnp.asarray(_sd[9].data).reshape(-1)
-                precip = (jnp.asarray(_sd[2].data).reshape(-1)
-                          if _sd[2] is not None else jnp.zeros_like(sw_down))
-                T_air = self.state.T.data[:, -1]
                 _qv_tr = (self.state.tracers or {}).get("q_v")
-                q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
-                         else jnp.zeros_like(T_air))
-                p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
-                u_c, v_c = _cell_winds(self.state, self.grid, level=-1)
-                # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
-                # ideal-gas rho at the lowest level, snow split at T_freeze.
-                # The zenith is the REAL per-cell sun (same doy/seconds the
-                # radiation uses this step): it was a fixed 0.5 when only the
-                # bulk scheme ran here (which never reads it), but the two-leaf
-                # canopy now runs on this lane and its radiation partitioning
-                # is zenith-driven -- a fixed sun would give the canopy neither
-                # a diurnal cycle nor night.
-                from legoesm.core.coupling_fields import lowest_level_height
-                z_lowest = lowest_level_height(
-                    T_air, self.sigma.pressure_at_half(p_s),
-                    self.sigma.pressure_at_full(p_s))
-                return AtmToSurface(
-                    z_lowest=z_lowest,
-                    sw_down=sw_down, lw_down=lw_down,
-                    precip_total=precip,
-                    precip_snow=jnp.where(
-                        T_air < constants.T_freeze, precip, 0.0),
-                    T_lowest=T_air, q_lowest=q_air,
-                    u_lowest=u_c, v_lowest=v_c,
-                    p_lowest=0.99 * p_s, p_surface=p_s,
-                    rho_lowest=p_s / (constants.R_d * T_air),
-                    cos_zenith=_cos_zen_fn(
-                        jnp.asarray(_doy, dtype=jnp.float64),
-                        jnp.asarray(_sod, dtype=jnp.float64) / 3600.0),
-                    co2_ppmv=jnp.full_like(T_air, float(
-                        getattr(cfg, "co2_ppmv", 412.0))),
-                    has_radiation=jnp.ones_like(T_air),
-                    has_precipitation=jnp.ones_like(T_air),
-                )
+                # One compiled call per step (eager it was ~15 dispatches,
+                # ~14 ms of host time; 2026-09-27 profile).  doy/sod are
+                # numpy scalars: a stable cache key, no retrace per step.
+                return _marshal_land_forcing_jit(
+                    _sd[8].data, _sd[9].data,
+                    None if _sd[2] is None else _sd[2].data,
+                    self.state.T.data, None if _qv_tr is None else _qv_tr.data,
+                    self.state.p_s.data, self.state.u.data,
+                    np.float64(_doy), np.float64(_sod),
+                    v3=None if self.state.v is None else self.state.v.data)
+
+            _marshal_land_forcing_jit = jax.jit(functools.partial(
+                mpas_land_forcing, mesh=self.grid, sigma=self.sigma,
+                lat=_lml_lat, lon=_lml_lon,
+                co2_ppmv=float(getattr(cfg, "co2_ppmv", 412.0))))
             logger.info(
                 "  Interactive multilayer land (MPAS): %d columns, "
                 "f_land mean=%.3f — skin T -> forcing['T_sfc'] blend, "

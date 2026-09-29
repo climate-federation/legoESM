@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+
 from types import SimpleNamespace as NS
 
 import jax
@@ -31,23 +32,21 @@ def _forcing():
 
 
 @pytest.mark.parametrize('coordinate', [make_cam6_l32_levels, lambda: create_sigma_coordinate(36)])
-def test_driver_land_closure_uses_grid_height(coordinate):
-    """Execute the REAL nested closure; it cannot be imported as a top-level API."""
-    tree = ast.parse(inspect.getsource(inspect.getmodule(ModelDriver)))
-    node, = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-             and n.name == '_marshal_land_forcing']
+def test_driver_land_forcing_uses_grid_height(coordinate, monkeypatch):
+    """The driver's land forcing (compiled as the driver compiles it)."""
+    import functools
+    import legoesm.grids.voronoi as voronoi
+    from legoesm.driver.model_driver import mpas_land_forcing
+    monkeypatch.setattr(voronoi, 'reconstruct_cell_velocity',
+                        lambda u, grid: (u, u * 0))
     T = jnp.array([[270., 290.], [265., 280.]])
     ps = jnp.array([100000., 72000.])  # pressure/topography must not become altitude
     sigma = coordinate()
-    driver = NS(state=NS(T=NS(data=T), p_s=NS(data=ps), tracers={},
-                         u=NS(data=jnp.ones_like(T))), sigma=sigma, grid=None,
-                model=NS(_sfc_diag=tuple(NS(data=jnp.ones(2)) for _ in range(10))))
-    env = dict(self=driver, cfg=NS(co2_ppmv=412.), jnp=jnp, constants=constants,
-               AtmToSurface=AtmToSurface, _doy=32., _sod=3600.,
-               reconstruct_cell_velocity=lambda u, grid: (u, u * 0),
-               _cos_zen_fn=lambda day, hour: jnp.ones(2))
-    exec(compile(ast.Module(body=[node], type_ignores=[]), '<driver closure>', 'exec'), env)
-    forcing = env['_marshal_land_forcing']()
+    fn = jax.jit(functools.partial(
+        mpas_land_forcing, mesh=None, sigma=sigma, lat=jnp.zeros(2),
+        lon=jnp.zeros(2), co2_ppmv=412.))
+    forcing = fn(jnp.ones(2), jnp.ones(2), jnp.ones(2), T, None, ps,
+                 jnp.ones_like(T), np.float64(32.), np.float64(3600.))
     expected = (constants.R_d * T[:, -1] / constants.g
                 * jnp.log(sigma.pressure_at_half(ps)[:, -1]
                           / sigma.pressure_at_full(ps)[:, -1]))
