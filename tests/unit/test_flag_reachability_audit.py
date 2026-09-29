@@ -65,7 +65,11 @@ from legoesm.atmosphere.physics.convection.config import BechtoldConfig, SBMConf
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.microphysics.morrison import MorrisonConfig
 from legoesm.driver import physics_pipeline as pp
-from legoesm.driver.config import ExperimentConfig
+from legoesm.driver.config import (
+    CLUBB_SCALAR_FIELDS,
+    ZM_SCALAR_FIELDS,
+    ExperimentConfig,
+)
 
 from tests import _ratchet_audit
 
@@ -78,7 +82,8 @@ _RESOLVERS = {
     "turbulence_config_for": (
         lambda c: pp.turbulence_config_for(c),
         [{"turbulence": "louis"}, {"turbulence": "tke"},
-         {"turbulence": "holtslag_boville"}],
+         {"turbulence": "holtslag_boville"},
+         {"turbulence": "clubb", "clubb_prognostic": True}],
     ),
     "convection_config_for": (
         lambda c: pp.convection_config_for(c),
@@ -191,6 +196,10 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
                 and node.value.id in _CFG_NAMES
                 and node.attr in fields):
             out.add(node.attr)
+        elif isinstance(node, ast.Name) and node.id in _FIELD_TABLES:
+            # Table-driven reads (``getattr(config, f)`` over a
+            # field->leaf table) are invisible to the literal matches below.
+            out |= set(_FIELD_TABLES[node.id])
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if (node.func.id == "getattr" and len(node.args) >= 2
                     and isinstance(node.args[0], ast.Name)
@@ -207,6 +216,23 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 
 
 _CFG_NAMES = ("config", "cfg")
+_FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
+                 "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
+
+
+def _spec_midpoint(field):
+    """Midpoint of a table-mapped field's __param_spec__ range, or None."""
+    from legoesm.atmosphere.physics.convection.config import (
+        __param_spec__ as conv)
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        __param_spec__ as clubb)
+    for table, params in ((ZM_SCALAR_FIELDS,
+                           conv["ZhangMcFarlaneConfig"]["params"]),
+                          (CLUBB_SCALAR_FIELDS, clubb["CLUBBParams"]["params"])):
+        if field in table:
+            lo, hi = params[table[field]]["bounds"]
+            return 0.5 * (lo + hi)
+    return None
 
 
 def _shadows_config(node) -> bool:
@@ -301,7 +327,9 @@ def _candidates(field, value) -> list:
         other = [a for a in args if a not in _SCALARS and a is not type(None)]
         if len(scalars) != 1 or other:
             return []
-        return {bool: [True], float: [0.5, 1.5], int: [2]}[scalars[0]]
+        vals = {bool: [True], float: [0.5, 1.5], int: [2]}[scalars[0]]
+        mid = _spec_midpoint(field)
+        return vals if mid is None else [mid, *vals]
     return []
 
 
@@ -523,6 +551,8 @@ def _production_scan() -> frozenset:
                   and isinstance(node.args[1], ast.Constant)
                   and node.args[1].value in fields):
                 read.add(node.args[1].value)
+            elif isinstance(node, ast.Name) and node.id in _FIELD_TABLES:
+                read |= set(_FIELD_TABLES[node.id])
     return frozenset(read)
 
 
