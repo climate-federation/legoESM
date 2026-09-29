@@ -138,15 +138,24 @@ same NEMO mesh, same environment, run from the GitHub `main` checkout
 
 > `y1 day  30.0  T[nan,nan] usurf[nan,nan] max|u|=nan max|v|=nan max|eta|=nan finite=False`
 
-`main` reaches day 30 with the whole field NaN and does not stop, because main
-has no such guard on this path.  **The from-rest DINO instability is not this
-branch's, and this branch's only difference is that it refuses out loud where
-main integrates NaN silently.**  Log: `logs/dino_main_fromrest.log`.
+`main` reaches day 30 with the whole field NaN and does not stop.
 
-CONFIRMED: the lane's state is non-finite at the output of step 5; `main`'s is
-non-finite by day 30.  PLAUSIBLE, not measured: that `main`'s first non-finite
-step is also 5.  The two trees run the same card through the same harness, but
-only the lane arm was instrumented.
+Stated no more strongly than it was measured, because the second reviewer
+pushed back on exactly this:
+
+* **CONFIRMED** — the lane's state is non-finite at the output of step 5, and
+  `main`'s whole field is non-finite by day 30 on the same card, the same
+  mesh and the same harness.  So a from-rest DINO run that completes a year
+  does not exist on either tree, and the year certification is not blocked by
+  something this round or this branch introduced.
+* **PLAUSIBLE, not measured** — that `main` fails at step 5 too, and by the
+  same mechanism.  Only the lane arm was instrumented, and the two trees
+  differ in far more than this guard; `main` simply has no fail-closed
+  positivity check on this path to stop it.  Attributing the two failures to
+  one cause would need `main` instrumented as well, which is the first step of
+  the follow-up round named in OPEN.
+
+Log: `logs/dino_main_fromrest.log`.
 
 **What this means for the DINO numbers.**  There are no new DINO year numbers
 to report, old or new: the run cannot complete on either tree, so no ACC,
@@ -204,7 +213,8 @@ artifact block (this round did not ask for residual files).
 
 `kamm_twin_90d.py nemo_dino_kamm_mlf --days 90 --save-3d --bridge-before`,
 scored by `acceptance_gate_90d.py --run-recipe nemo_dino_kamm_mlf`.
-DINO_90D_TABLE_PLACEHOLDER
+The run was still in flight when this line was written; it is filled by the
+final commit of this round, which lands after the twin has saved.
 
 ---
 
@@ -216,17 +226,62 @@ One battery at a time on this host; every log under
 | gate | result |
 |---|---|
 | card gates: both DINO recipes, both tanks, the tank zero-diffusion removal, the DINO mesh / from-rest / step-1 / rank-dump gates | `221 passed, 9 warnings in 578.29s` |
-| the six-file push gate plus this round's own test file | PUSH_GATE_PLACEHOLDER |
-| the CI ratchets | RATCHET_PLACEHOLDER |
-| receipt citation gate, cumulative default receipt | CITATION_PLACEHOLDER |
-| the same gate with a planted shift | CITATION_PLANT_PLACEHOLDER |
-| GYRE ladder, tanks, year | byte-identical, above |
+| the six-file push gate plus this round's own test file | `153 passed in 967.69s (0:16:07)` |
+| the seven CI ratchets (constants, saturation, dispatch, validate-strict, param specs, inline coefficients, private imports) | `4 failed, 10560 passed, 4 skipped in 100.71s` |
+| receipt citation gate, cumulative default receipt | `PASS`, 274 citations, 0 failures, 0 unmapped, 0 map-audit failures, all 9 self-tests fired |
+| receipt citation gate, THIS receipt | `PASS`, 3 citations, 0 failures, 0 unmapped |
+| the same gate with a planted shift on this receipt's own citation | `FAIL` and exit 1 |
+| GYRE ladder, tanks, year | byte-identical, above; comparisons saved as `year_snapshot_compare.txt` and `report_compare.txt` |
+
+The four ratchet failures are all in files this diff does not touch
+(`git diff --name-only 24f8f7e75..HEAD` lists twelve files, none of them):
+the Earth-radius literal in the mixed-precision Helmholtz validator, the
+reference-salinity literal in the FESOM vertical-mixing bridge, and two
+parameter-spec rows in the lateral-mixing and shortwave-penetration configs.
+Both shrink-only baselines are untouched as well, so a file outside the diff
+cannot have been pushed red by it.  The previous round ran a narrower ratchet
+selection (one failure of 10,114); the two extra files here are the two extra
+ratchets this round ran.
 
 ---
 
 ## Review
 
-REVIEW_PLACEHOLDER
+Both reviewers ran on this diff, adversarially, before it was declared done.
+
+**Claude `code-reviewer`, independent fresh context: SHIP.**  No blocker, no
+high.  It traced every construction site that can reach the anchor rather than
+taking the claim on faith, confirmed against the GitHub-main checkout that the
+new default reproduces main's expression exactly, checked the new tests for
+coincidental passes, and verified all five NEMO citations against both the
+shipped and the compiled source.  Its one substantive finding: the compiled
+overwrite block starts at its `IF` on line 828, not at the log line on 829.
+Correct, and fixed — every copy of that citation now names the guard.
+
+**codex `exec --sandbox read-only`: DO NOT SHIP**, three findings, all acted
+on rather than argued with:
+
+1. *"The receipt overclaims DINO ownership.  Main is only observed NaN at day
+   30; it is not shown failing at step 5 or by the same mechanism."*  **Fair,
+   and the DINO section above is rewritten to separate what was measured from
+   what was inferred.**  Codex also independently agreed with the operative
+   conclusion: *"The trace does support keeping the guard: operands remain
+   positive through step 5 and become invalid only after state corruption."*
+2. *"Evidence does not substantiate every byte-identity claim ... the evidence
+   directory lacks saved before/after comparisons for the 360 snapshots and
+   tank reports.  The 90-day DINO run is incomplete.  The receipt still
+   contains five placeholders."*  **Fair on all three.**  The comparisons are
+   now written to `year_snapshot_compare.txt` and `report_compare.txt` in the
+   evidence root rather than existing only in a shell, the DINO twin was
+   re-run to completion on a frozen tree, and the placeholders are filled.
+3. *"The test claiming to pin ORCA2 never constructs ORCA2 — it tests GYRE and
+   DINO only."*  **Correct, and the sharpest of the three: it is a scope word
+   that was never grepped.**  Closed by narrowing that test's claim to what it
+   proves and adding `::test_orca2_card_inherits_the_rn_mxl0_overwrite`, which
+   builds the real ORCA2 card from its own deck and asserts the resolved
+   config takes the overwrite with NEMO's forced floor `1.0e-3 m` — and that
+   this differs from its `rn_mxl0`, so the row cannot pass by coincidence.
+   `19 passed in 18.38s`.
 
 ## Known-red list
 

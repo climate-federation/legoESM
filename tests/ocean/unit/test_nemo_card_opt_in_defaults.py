@@ -196,10 +196,11 @@ def test_orca1_card_keeps_mains_rn_mxl0_surface_floor(iwm_enabled):
 
 
 def test_nemo_literal_cards_take_the_rn_mxl0_overwrite():
-    """The other half: GYRE, the DINO NEMO cards and ORCA2 DO select it.
+    """The other half: GYRE and the two NEMO DINO cards DO select it.
 
     Their certified trajectories are pinned to the overwrite arm, so this is
-    what keeps decision 72 from moving them.
+    what keeps decision 72 from moving them.  ORCA2 is a separate test below,
+    because building it needs its external deck.
     """
     from legoesm.ocean.experiments.dino import DINO_RECIPES
     from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
@@ -212,6 +213,33 @@ def test_nemo_literal_cards_take_the_rn_mxl0_overwrite():
     assert float(_mxl0_anchor_floor(gyre)) != gyre.mxl0_min_m
     for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         assert DINO_RECIPES[recipe]["tke_nemo_mxl0_rmxl_min_overwrite"] is True
+
+
+def test_orca2_card_inherits_the_rn_mxl0_overwrite():
+    """ORCA2 takes the overwrite by inheriting the GYRE identity it specialises.
+
+    It is asserted on the RESOLVED card rather than on the source, because the
+    inheritance is the whole claim: the ORCA2 builder replaces several TKE
+    fields and must not disturb this one.  Its floor is NEMO's forced
+    rmxl_min = 1e-3 (ln_zdfiwm true on that deck), not rn_mxl0.  The external
+    deck is a campaign input; skip where it is absent, as the neighbouring
+    ORCA2 card test does.
+    """
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    tke = (build_orca2_zps_card(deck)
+           .recipe.model_config.physics.vertical_mixing.tke)
+    assert tke.nemo_mxl0_rmxl_min_overwrite is True
+    assert float(_mxl0_anchor_floor(tke)) == 1.0e-3
+    assert float(_mxl0_anchor_floor(tke)) != tke.mxl0_min_m
 
 
 # --------------------------------------------------------------------------
