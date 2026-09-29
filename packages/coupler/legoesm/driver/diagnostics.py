@@ -45,6 +45,10 @@ def _frozen_condensate(state):
     return total
 
 
+# Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
+_SIDECAR_SAMPLING_KEY = "meta.lat_sampling"
+
+
 class _StructuredRegridWeights:
     """Precomputed bilinear interpolation weights for structured grids."""
     __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
@@ -477,6 +481,10 @@ class DiagnosticCollector:
         if self._spatial_monthly is None:
             return
 
+        # Sample at the SAME row latitudes the files are labelled with
+        # (cell centres); the regridders' default is pole-to-pole, which put
+        # every row up to half a cell off its label.
+        _lat_labels, _lon_labels = self._cmip_target_latlon()
         if grid_type == "cubed_sphere" and grid is not None:
             from legoesm.grids.regridding import (
                 get_cubedsphere_to_latlon_weights,
@@ -484,7 +492,10 @@ class DiagnosticCollector:
             n = grid.n
             self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
                 n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
         elif grid_type in ("latlon", "gaussian") and grid is not None:
             # For structured grids, store native 1-D coordinates (degrees)
             # for bilinear regridding when native shape != CMIP target.
@@ -514,7 +525,10 @@ class DiagnosticCollector:
             self._voronoi_regrid_weights = compute_voronoi_to_latlon_weights(
                 np.asarray(grid.latCell), np.asarray(grid.lonCell),
                 n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
 
     def set_fixed_fields(
         self,
@@ -2318,6 +2332,9 @@ class DiagnosticCollector:
                 merged[prefix + key] = arr
         if not merged:
             return
+        if getattr(self.cf_writer, "require_centre_sampling_on_append", False):
+            from legoesm.io.cmor_output import LAT_SAMPLING_CENTRES
+            merged[_SIDECAR_SAMPLING_KEY] = np.array(LAT_SAMPLING_CENTRES)
         path = Path(path)
         tmp_path = path.parent / (path.name + ".tmp")
         try:
@@ -2350,6 +2367,18 @@ class DiagnosticCollector:
         }
         substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
         with np.load(str(path), allow_pickle=False) as npz:
+            stamp = (str(npz[_SIDECAR_SAMPLING_KEY])
+                     if _SIDECAR_SAMPLING_KEY in npz.files else None)
+            from legoesm.io.cmor_output import (
+                LAT_SAMPLING_CENTRES, LatSamplingMismatchError)
+            if (stamp != LAT_SAMPLING_CENTRES and getattr(
+                    self.cf_writer, "require_centre_sampling_on_append", False)):
+                raise LatSamplingMismatchError(
+                    f"{path}: CMOR accumulators written before lat-lon output "
+                    "was sampled at its labelled cell centres (rows were "
+                    "pole-to-pole). Resuming would mix both grids in the open "
+                    "month. Resume with the code that wrote it, or delete the "
+                    "sidecar to drop the partial month.")
             for full_key in npz.files:
                 for prefix in namespaced:
                     if full_key.startswith(prefix):
