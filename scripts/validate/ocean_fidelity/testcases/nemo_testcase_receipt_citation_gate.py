@@ -802,6 +802,27 @@ FILES = {
     "zdf_oce.f90": _R35 / "zdf_oce.f90",
     "stprk3_stg.f90": _R35 / "stprk3_stg.f90",
     "domain.f90": _R35 / "domain.f90",
+    # --- restored from the lane tip (980cc6369) after the merge conflict on
+    # this file was resolved to HEAD's side, which silently dropped every
+    # entry the VORTEX-card rounds had added.  Paths only; none of these
+    # NEMO/VORTEX sources shifted in the merge. ---
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90"),
+    "VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90": (
+        NEMO / "tests/VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90"),
+    "eosbn2.F90": _OCE / "TRA/eosbn2.F90",
+    "restart.F90": _OCE / "IOM/restart.F90",
+    "tests/VORTEX/MY_SRC/usrdef_hgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_hgr.F90",
+    "tests/VORTEX/MY_SRC/usrdef_istate.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_istate.F90",
+    "tests/VORTEX/MY_SRC/usrdef_nam.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_nam.F90",
+    "tests/VORTEX/MY_SRC/usrdef_sbc.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_sbc.F90",
+    "tests/VORTEX/MY_SRC/usrdef_zgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_zgr.F90",
+    "vortex_round2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2/namelist_cfg"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -3770,6 +3791,83 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:6993-7041': [
         ('if _return_tracer_process_trace:', 1),
         'process_qsr_rate=_nemo_ws_process_qsr_rate,', 49],
+    # --- restored from the lane tip (980cc6369) after the merge conflict on
+    # this file was resolved to HEAD's side, which silently dropped every
+    # entry the VORTEX-card rounds had added.  None of these NEMO/VORTEX
+    # sources shifted in the merge, so the line numbers are unchanged.
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:359-361': [('zt  = pts  (ji,jj,jk,jp_tem,Knn) - rn_T0', 1), ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn)))', 2), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:364-366': [('zn =  - rn_a0 * ( 1._wp + 0.5_wp*rn_lambda1*zt + rn_mu1*zh ) * zt', 1), ('&  - rn_nu * zt * zs', 1), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1217': ('zn  = rn_a0 * ( 1._wp + rn_lambda1*zt + rn_mu1*zh ) + rn_nu*zs', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1220': ('zn  = rn_b0 * ( 1._wp - rn_lambda2*zs - rn_mu2*zh ) - rn_nu*zt', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:100-101': ['REAL(wp), PUBLIC ::   rn_T0      = 10._wp', 'REAL(wp), PUBLIC ::   rn_S0      = 35._wp', 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1938': ('NAMELIST/nameos/ ln_TEOS10, ln_EOS80, ln_SEOS', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:849': ('IF( ln_dynvor_een ) THEN', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:865-868': ['CASE( np_FLX_c2 , np_FLX_up3 )', 'ntot = np_CME', 4],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:256-257': [('CASE( np_EEN )', 3), ('CALL vor_een( kt, Kmm, ntot,', 1), 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:725-727': [('CASE ( np_COR )', 4), ('zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)', 1), 3],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:755-758': [('CASE ( np_CME )', 4), ('dj_e1u_2e1e2f(ji,jj)   ) * z1_e3f(ji,jj)', 2), 4],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:882-883': ['di_e2v_2e1e2f(ji,jj) = ( e2v(ji+1,jj  ) - e2v(ji,jj) )', 'dj_e1u_2e1e2f(ji,jj) = ( e1u(ji  ,jj+1) - e1u(ji,jj) )', 2],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:720': ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:766-779': [('zwx(ji,jj) = e2u(ji,jj) *', 3), 'zua = + r1_12 * r1_e1u(ji,jj)', 14],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/dynspg_ts.f90:955-968': ['SELECT CASE( nvor_scheme )', ('& ff_f(ji-1,jj-1) / (e3f_0vor(ji-1,jj-1,jk)', 1), 14],
+    'VORTEX_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:158-161': ['pe1t(:,:) = rn_dy', 'pe1f(:,:) = rn_dy', 4],
+    'vortex_round2/namelist_cfg:128-138': ['&nameos', 'rn_nu       =  0.', 11],
+    'tests/VORTEX/MY_SRC/usrdef_nam.F90:96-97': [
+        'kpi = NINT( 1800.e3  / rn_dx ) + 3',
+        'kpj = NINT( 1800.e3  / rn_dy ) + 3',
+        2],
+    'tests/VORTEX/MY_SRC/usrdef_nam.F90:121': [
+        'kpk = NINT( 5000._wp / rn_dz ) + 1'],
+    'tests/VORTEX/MY_SRC/usrdef_hgr.F90:83-84': [
+        'zroffsetx = (-REAL(Ni0glo-1, wp) + 1._wp) * 0.5_wp * 1.e-3 * rn_dx',
+        'zroffsety = (-REAL(Nj0glo-1, wp) + 1._wp) * 0.5_wp * 1.e-3 * rn_dy',
+        2],
+    'tests/VORTEX/MY_SRC/usrdef_hgr.F90:174-177': [
+        'zbeta = 2._wp * omega * COS( rad * rn_ppgphi0 ) / ra',
+        'pff_t(:,:) = zf0 + zbeta * pphit(:,:) * 1.e+3',
+        4],
+    'tests/VORTEX/MY_SRC/usrdef_zgr.F90:126': [
+        'zd = 5000._wp/REAL(jpkm1,wp)'],
+    'tests/VORTEX/MY_SRC/usrdef_zgr.F90:187-193': [
+        'z2d(:,:) = REAL( jpkm1 , wp )          ! flat bottom',
+        'k_top(:,:) = MIN( 1 , k_bot(:,:) )     ! = 1    over the ocean point, =0 elsewhere',
+        7],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:69-75': [
+        ('zf0   = 2._wp * omega * SIN( rad * rn_ppgphi0 )', 1),
+        ('zP0 = rho0 * zf0 * zumax * zlambda * SQRT(EXP(1._wp)/2._wp)', 1),
+        7],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:83-88': [
+        'zrho1 = rho0 * (1._wp + zn2*zdt/grav)',
+        'pts(ji,jj,jk,jp_tem) = (20._wp + (rho0-zrho1) / rn_a0 ) * ptmask(ji,jj,jk)',
+        6],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:101-105': [
+        'zdu = 0.5_wp * (pdept(ji  ,jj,jk) + pdept(ji+1,jj,jk))',
+        'pu(ji,jj,jk) = (za * zf * zy * EXP(-(zx**2+zy**2)/zlambda**2)) * ptmask(ji,jj,jk) * ptmask(ji+1,jj,jk)',
+        5],
+    'tests/VORTEX/MY_SRC/usrdef_istate.F90:177-182': [
+        'za = -zP0 * (1._wp-EXP(-zH)) / (grav*(zH-1._wp + EXP(-zH)))',
+        'pssh(ji,jj) = zP0 * EXP(-(zx**2+zy**2)/zlambda**2)/(zrho1*grav) * ptmask(ji,jj,1)',
+        6],
+    'tests/VORTEX/MY_SRC/usrdef_sbc.F90:60-68': [
+        'utau(:,:) = 0._wp',
+        'qsr (:,:) = 0._wp',
+        9],
+    'restart.F90:461': [
+        ('CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )', 2)],
+    'DOM/istate.F90:127-130': [
+        'DO jk = 1, jpk',
+        'CALL usr_def_istate( zgdept, tmask, ts(:,:,:,:,Kbb), uu(:,:,:,Kbb), vv(:,:,:,Kbb) )',
+        4],
+    'DOM/istate.F90:149-154': [
+        'uu_b(:,:,Kbb) = 0._wp   ;   vv_b(:,:,Kbb) = 0._wp',
+        'uu_b(:,:,Kbb) = uu_b(:,:,Kbb) * r1_hu(:,:,Kbb)',
+        6],
+    'eosbn2.F90:1890-1895': [
+        'NAMELIST/nameos/ ln_TEOS10, ln_EOS80, ln_SEOS, rn_T0, rn_S0, rn_a0, rn_b0, rn_lambda1, rn_mu1, &',
+        'READ_NML_CFG(numnam,nameos)',
+        6],
+    'dynvor.F90:874': [
+        'IF( ln_dynvor_een ) THEN   ;   ioptio = ioptio + 1   ;   nvor_scheme = np_EEN   ;   ENDIF'],
 }
 
 
