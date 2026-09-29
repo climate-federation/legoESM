@@ -78,11 +78,21 @@ boundary predicates are separate.
 ## Validation
 
 - tracer-advection gate: `PASS_TRACER_ADVECTION_WALK`; production CPU/JIT/fp64/libm;
-- card-scope, entry-ULP, complete-replay-ULP, and round-72-boundary plants: all FIRED;
-- focused tests: pending final validation;
-- citation gates: pending final validation;
-- shared-card/tank batteries: pending final validation;
-- wide ocean-fidelity battery: pending final validation;
+- card-scope, entry-ULP, recorded-replay-ULP, and round-72-boundary plants: all FIRED;
+- focused round-71/72/73 and citation tests: `42 passed`;
+- default citation gate: PASS, 274 citations, zero failures, zero unmapped,
+  and zero map-audit failures; this receipt's gate: PASS, four citations,
+  zero failures, zero unmapped, and zero map-audit failures; the shifted
+  `traadv_cen` citation plant FIRES with `SYMBOL-NOT-AT-LINE`;
+- shared-card battery: `160 passed` with nine dtype warnings; tank battery:
+  `10 passed`;
+- wide `tests/ocean/fidelity -n 12`: 2,057 collected and reached 98% with
+  five registered failures and seven skips before reproducing round 72's
+  no-summary wrapper stall. The five failing IDs were rerun serially and
+  reproduced the standing signatures: round-51 private trace registry, SI3
+  `MY_SRC` provenance, four worktree-stamp emitters, missing
+  `hires_lane_surface` case-board row, and round-129 stale phase-3
+  certification. No round-73 failure appeared in the wide run;
 - separate read-only Codex review: pending final validation.
 
 No `packages/` file changed. GYRE, DINO, and tank trajectories cannot move;
