@@ -38,7 +38,9 @@ def _report() -> dict:
         "first_non_bit_arithmetic": "u_face_flux_line153",
         "first_non_bit_operand": "metric_pU",
         "order": list(gate.ORDER),
-        "recorded_operand_replay": _row(
+        "recorded_transport_only_replay": _row(
+            exact=False, count=228641, maximum=1.0e-9, unequal=10),
+        "recorded_full_operand_replay": _row(
             exact=True, count=228641, maximum=0.0, unequal=0),
         "rows": rows,
     }

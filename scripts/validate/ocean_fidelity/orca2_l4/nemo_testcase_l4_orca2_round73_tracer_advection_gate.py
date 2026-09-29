@@ -109,9 +109,9 @@ def _score(candidate: np.ndarray, oracle: np.ndarray,
 
 
 def _run(card, state, freshwater, surface, exposure: str,
-         *, transport_override=None):
+         *, endpoint=None, transport_override=None):
     return handoff._run(
-        card, state, freshwater, surface, endpoint=None, exposure=exposure,
+        card, state, freshwater, surface, endpoint=endpoint, exposure=exposure,
         transport_override=transport_override,
     )
 
@@ -176,12 +176,21 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
     zfw = np.zeros(full_shape[:-1] + (full_shape[-1] + 1,), dtype=np.float64)
     zfu[:, :OWNED_NX, :NLEV] = oracle_pu
     zfv[:, :OWNED_NX, :NLEV] = oracle_pv
-    zfw[:, :OWNED_NX, :NLEV] = np.asarray(tracer["zFw"])[..., :NLEV]
-    recorded_state = _run(
+    zfw[:, :OWNED_NX] = np.asarray(tracer["zFw"])
+    recorded_transport_state = _run(
         card, state, freshwater, surface, "after_advection",
         transport_override=tuple(map(jnp.asarray, (zfu, zfv, zfw))),
     )
-    recorded_after = np.asarray(recorded_state.T.data)[:, :OWNED_NX, :NLEV]
+    recorded_transport_after = np.asarray(
+        recorded_transport_state.T.data)[:, :OWNED_NX, :NLEV]
+    endpoint = handoff._endpoint_override(card, oracle_entry, record_root)
+    recorded_full_state = _run(
+        card, state, freshwater, surface, "after_advection",
+        endpoint=endpoint,
+        transport_override=tuple(map(jnp.asarray, (zfu, zfv, zfw))),
+    )
+    recorded_full_after = np.asarray(
+        recorded_full_state.T.data)[:, :OWNED_NX, :NLEV]
 
     rows = {
         "entry_T": _score(
@@ -195,7 +204,10 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "after_advection_T": _score(
             actual_after, oracle_after, masks["T"]),
     }
-    recorded_replay = _score(recorded_after, oracle_after, masks["T"])
+    recorded_transport_replay = _score(
+        recorded_transport_after, oracle_after, masks["T"])
+    recorded_full_replay = _score(
+        recorded_full_after, oracle_after, masks["T"])
     first_operand = next(
         (name for name in ("metric_pU", "metric_pV", "metric_pW")
          if not rows[name]["bit_exact"]), None)
@@ -212,7 +224,8 @@ def run_walk(deck_root: Path, record_root: Path) -> dict[str, object]:
         "rows": rows,
         "first_non_bit_operand": first_operand,
         "first_non_bit_arithmetic": first_arithmetic,
-        "recorded_operand_replay": recorded_replay,
+        "recorded_transport_only_replay": recorded_transport_replay,
+        "recorded_full_operand_replay": recorded_full_replay,
         "record": {
             "root": str(record_root),
             "tracer_sha256": handoff.sha256(tracer_path),
@@ -247,8 +260,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         report["rows"]["entry_T"]["bit_exact"] = False
         report["rows"]["entry_T"]["unequal"] = 1
     elif plant == "recorded-replay-ulp":
-        report["recorded_operand_replay"]["bit_exact"] = False
-        report["recorded_operand_replay"]["unequal"] = 1
+        report["recorded_full_operand_replay"]["bit_exact"] = False
+        report["recorded_full_operand_replay"]["unequal"] = 1
     elif plant == "round72-boundary":
         report["rows"]["after_advection_T"]["max_abs"] = math.nextafter(
             float(report["rows"]["after_advection_T"]["max_abs"]), math.inf)
@@ -268,8 +281,10 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         "bit_exact": True, "count": 228641, "max_abs": 0.0,
         "status": "AT_BAR", "unequal": 0,
     }, "independent kt=1 Kmm temperature is not exact")
-    require(report["recorded_operand_replay"].get("bit_exact") is True,
-            "recorded-operand source replay is not bit-exact")
+    require(report["recorded_transport_only_replay"].get("bit_exact") is False,
+            "transport-only replay unexpectedly became bit-exact")
+    require(report["recorded_full_operand_replay"].get("bit_exact") is True,
+            "complete recorded-operand source replay is not bit-exact")
     require(report["rows"]["after_advection_T"] == ROUND72_AFTER_ADV,
             "round-72 after-advection boundary did not reproduce")
     first_operand = report.get("first_non_bit_operand")
@@ -296,7 +311,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
                 else "REFUTED"),
             "observed": first_arithmetic,
         },
-        "recorded_operand_replay_exact": {"status": "CONFIRMED"},
+        "recorded_transport_only_replay_exact": {"status": "REFUTED"},
+        "recorded_full_operand_replay_exact": {"status": "CONFIRMED"},
         "round72_boundary_reproduced": {"status": "CONFIRMED"},
         "disposition_held": {"status": "CONFIRMED"},
     }

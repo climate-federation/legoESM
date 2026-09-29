@@ -98,3 +98,25 @@ the first non-bit compiled arithmetic statement after printing card scope.
 
 UNASKED: model arithmetic, configuration, new NEMO output, selectors, sea ice,
 and the held shared tracer QCO/RK candidate.
+
+## Addendum after the first fail-closed run
+
+The first committed instrument run refused at prediction 5 before writing a
+report: recorded Kmm T plus recorded metric transports alone did **not** make
+the after-advection accumulator exact. Prediction 5 is therefore retained as
+**REFUTED**, not rewritten. Source inspection shows why the control was
+incomplete: the horizontal and vertical divergence statements divide by live
+`e3t_3d(Kmm)` at `traadv_cen.f90:157-161,214-228`; independent ORCA2's entry
+SSH is already non-bit, so the recorded external endpoint/live thickness is a
+distinct required operand.
+
+Before rerunning, the calibration is tightened to report both arms separately:
+
+- recorded transports with independent live thickness predict non-bit and
+  retain the failed prediction;
+- recorded transports plus the admitted recorded external endpoint/live
+  thickness predict raw-bit equality. Failure of this complete-operand arm
+  invalidates the arithmetic walk.
+
+The production arm and its frozen first-operand/first-statement predictions
+are unchanged and remain independent.
