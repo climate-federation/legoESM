@@ -467,3 +467,55 @@ NEMO source, and both reviewers independently re-derived the load-bearing ones
 rotation and the `stprk3.F90:213` swap).  Mapping them is one line each and is
 left to whoever next edits that map; until then this receipt's citations carry
 hand-checking plus two independent re-derivations, not the gate.
+
+---
+
+## 14.  ADDENDUM — the 90-day developed-state twin, re-certified
+
+Section 8 above flagged the developed-state 90-day twin's certified rows as
+**expected to move and NOT re-certified**, because they were last measured
+with `nemo_prognostic_barotropic_state=True` and this round turned that pair
+off for both DINO cards.  This addendum runs that measurement.
+
+**Command**, the same one the previous two certifications used
+(`nemo_testcases_l2_gyre_pr1802_final_recertification_receipt.md` §DINO,
+`nemo_testcases_l2_gyre_pr1802_d72_dino_year_receipt.md` §DINO): candidate
+produced by `kamm_twin_90d.py nemo_dino_kamm_mlf <out.npz> --days 90
+--save-3d --bridge-before` (invoked internally by `--run-recipe`), scored by
+
+```
+acceptance_gate_90d.py <out.npz> --run-recipe nemo_dino_kamm_mlf
+```
+
+Run once, one model run at a time (`pgrep`/`nvidia-smi` checked idle first),
+on lane tip `1fc4925cf8` in a fresh worktree at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/dino_twin_recert/tree`,
+`JAX_ENABLE_X64=1`, GPU 0, interpreter
+`/home/dbalwada/legoESM/.venv/bin/python`.  Both instrument self-checks
+passed: `NEMO y10 ACC through THIS harness: 121.07 Sv vs recorded 121.07 Sv`;
+band volume `2.694775e+16 m3` (rel `4.98e-08`).
+
+| metric, 90-day twin from NEMO's day-180 state | this tip | NEMO day 90 | 5x threshold | status |
+|---|---|---|---|---|
+| ACC [Sv] | `65.359517` | `65.369204` | `4.550e-01` | PASS |
+| upper contrast < 1400 m [kg/m3] | `-0.288137` | `-0.288182` | `5.500e-04` | PASS |
+| deep contrast > 1400 m [kg/m3] | `-0.011256` | `-0.011258` | `2.250e-04` | PASS |
+| southern-band surface sigma MAX [kg/m3] | `0.909327` | `0.909343` | `4.750e-04` | PASS |
+| southern-band surface sigma MEAN [kg/m3] | `0.802911` | `0.802915` | `4.750e-04` | PASS |
+| verdict | `PASS 5 / FAIL 0` | — | level 5x | **RE-CERTIFIED** |
+
+**Transport, old (pair active) to new (pair off, this tip):** `65.390274 Sv`
+(the number certified through `nemo_testcases_l2_gyre_pr1802_d72_dino_year_receipt.md`,
+measured with the now-removed barotropic pair) moved to `65.359517 Sv` — a
+`3.08e-02` Sv shift, `0.047x` of the gate's own `4.550e-01` Sv 5x threshold
+and well inside the noise floor it is staged from.  Both the before and after
+numbers pass against NEMO's own day-90 value (`65.369204` Sv), which this
+round did not touch.  The move is CONFIRMED attributable to this round's
+`nemo_prognostic_barotropic_state=False` repair: it is the only production
+line this round changed that the 90-day twin's card reads, and the twin's
+southern-band surface sigma MEAN diff also moved (`1.023e-06` to
+`4.311e-06` |diff| from NEMO) consistent with the same state change.
+
+**Section 8's "expected to move" is now measured, not just predicted, and the
+developed-state twin is RE-CERTIFIED at this tip: PASS 5 / FAIL 0 at level
+5x.**
