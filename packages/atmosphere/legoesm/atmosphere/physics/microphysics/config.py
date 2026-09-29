@@ -891,40 +891,6 @@ class MorrisonConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
-    # --- Who supplies the cloud liquid: this scheme, or the turbulence closure
-    # Default False keeps this scheme's saturation adjustment as the liquid
-    # SOURCE, which is what every run before this field did.
-    #
-    # True says an assumed-PDF closure (CLUBB) already diagnosed the layer's
-    # cloud liquid and handed it to the host, so the saturation adjustment here
-    # is switched OFF ENTIRELY -- both signs.  This is the CAM6 arrangement, not
-    # an invention: micro_mg2_0.F90:2688-2730 carries a residual
-    # "remove any excess over-saturation" block, it is gated on
-    # ``allow_sed_supersat`` at :2700, and micro_mg_cam.F90:668-672 sets that
-    # flag ``.false.`` whenever ``do_clubb_sgs``.  Enumerating every write to
-    # ``qctend`` in MG2 (:2634 ice melt, :2680 homogeneous freezing -- a sink,
-    # :2718 the gated residual) leaves MG2 with NO vapour-to-liquid
-    # condensation at all in a CLUBB configuration.
-    #
-    # POSITIVE BRANCH ONLY.  An earlier version said "both signs"; that was
-    # wrong twice.  CAM's block is guarded by ``qtmp > qvn``
-    # (micro_mg2_0.F90:2700), so it fires on positive supersaturation and has
-    # no evaporation branch to switch off.  And our default
-    # ``wbf_scheme="emergent"`` has no explicit Bergeron rate: the mixed-phase
-    # cloud-water sink IS that negative branch.  Every genuine sink
-    # (autoconversion, accretion, the emergent WBF, riming, sedimentation) is
-    # untouched.
-    #
-    # WHY IT MATTERS: the adjustment removes the whole supersaturation on every
-    # call, so running microphysics N times inside one physics step adjusts N
-    # times.  A 3/6/15 sub-step sweep moved band liquid monotonically by 21%,
-    # which is a step-count sensitivity a liquid SOURCE should not have.
-    #
-    # Turning this on without the closure actually delivering liquid removes the
-    # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
-    # that pairing rather than letting it run.
-    liquid_from_closure: bool = False
-
     # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
     # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
     # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
@@ -971,6 +937,43 @@ class MorrisonConfig(NamedTuple):
     # common factor, so terms re-derived outside the scheme are PRE-clamp and
     # cannot close the budget.  NOT a tunable: it selects no physics.
     publish_qc_budget: bool = False
+
+    # --- Who supplies the cloud liquid: this scheme, or the turbulence closure
+    # APPENDED AT THE TUPLE END (it was inserted mid-tuple on 2026-09-24,
+    # re-binding every later positional value; moved here so the pre-insertion
+    # prefix binds as before).
+    # Default False keeps this scheme's saturation adjustment as the liquid
+    # SOURCE, which is what every run before this field did.
+    #
+    # True says an assumed-PDF closure (CLUBB) already diagnosed the layer's
+    # cloud liquid and handed it to the host, so the saturation adjustment here
+    # is switched OFF ENTIRELY -- both signs.  This is the CAM6 arrangement, not
+    # an invention: micro_mg2_0.F90:2688-2730 carries a residual
+    # "remove any excess over-saturation" block, it is gated on
+    # ``allow_sed_supersat`` at :2700, and micro_mg_cam.F90:668-672 sets that
+    # flag ``.false.`` whenever ``do_clubb_sgs``.  Enumerating every write to
+    # ``qctend`` in MG2 (:2634 ice melt, :2680 homogeneous freezing -- a sink,
+    # :2718 the gated residual) leaves MG2 with NO vapour-to-liquid
+    # condensation at all in a CLUBB configuration.
+    #
+    # POSITIVE BRANCH ONLY.  An earlier version said "both signs"; that was
+    # wrong twice.  CAM's block is guarded by ``qtmp > qvn``
+    # (micro_mg2_0.F90:2700), so it fires on positive supersaturation and has
+    # no evaporation branch to switch off.  And our default
+    # ``wbf_scheme="emergent"`` has no explicit Bergeron rate: the mixed-phase
+    # cloud-water sink IS that negative branch.  Every genuine sink
+    # (autoconversion, accretion, the emergent WBF, riming, sedimentation) is
+    # untouched.
+    #
+    # WHY IT MATTERS: the adjustment removes the whole supersaturation on every
+    # call, so running microphysics N times inside one physics step adjusts N
+    # times.  A 3/6/15 sub-step sweep moved band liquid monotonically by 21%,
+    # which is a step-count sensitivity a liquid SOURCE should not have.
+    #
+    # Turning this on without the closure actually delivering liquid removes the
+    # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
+    # that pairing rather than letting it run.
+    liquid_from_closure: bool = False
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
