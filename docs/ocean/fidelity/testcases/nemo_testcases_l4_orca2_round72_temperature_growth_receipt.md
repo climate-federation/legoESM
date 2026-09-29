@@ -134,10 +134,10 @@ Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round72/`.
 
 The required separate `codex exec --sandbox read-only` review was attempted
-before measurement. It returned `Error: failed to initialize in-process
-app-server client: Read-only file system (os error 30)`. A final-diff attempt
-is required below; if it has the same result, **independent review unavailable
-in-sandbox**.
+before measurement and again on the final committed diff. Both returned
+`Error: failed to initialize in-process app-server client: Read-only file
+system (os error 30)`; therefore **independent review unavailable
+in-sandbox**. Both logs are retained in the evidence directory.
 
 ## Scope ledger
 
