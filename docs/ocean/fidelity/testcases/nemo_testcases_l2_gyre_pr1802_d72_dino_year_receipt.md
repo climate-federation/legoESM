@@ -213,8 +213,25 @@ artifact block (this round did not ask for residual files).
 
 `kamm_twin_90d.py nemo_dino_kamm_mlf --days 90 --save-3d --bridge-before`,
 scored by `acceptance_gate_90d.py --run-recipe nemo_dino_kamm_mlf`.
-The run was still in flight when this line was written; it is filled by the
-final commit of this round, which lands after the twin has saved.
+Run to completion on a FROZEN tree at `e26971fa8` (the harness refuses to save
+if the checkout changes mid-integration, and it refused twice here before the
+tree was frozen — that is the guard doing its job, and both refused runs were
+discarded rather than reported).  Both instrument self-checks passed:
+`NEMO y10 ACC through THIS harness: 121.07 Sv vs recorded 121.07 Sv`.
+
+| metric, 90-day twin from NEMO's day-180 state | previous round, the arm that ships | this tip | NEMO day 90 | 5x threshold |
+|---|---|---|---|---|
+| ACC [Sv] | `65.390274` | `65.390274` | `65.369204` | `4.550e-01` |
+| upper contrast < 1400 m [kg/m3] | `-0.288146` | `-0.288146` | `-0.288182` | `5.500e-04` |
+| deep contrast > 1400 m [kg/m3] | `-0.011261` | `-0.011261` | `-0.011258` | `2.250e-04` |
+| southern-band surface sigma MAX [kg/m3] | `0.909348` | `0.909348` | `0.909343` | `4.750e-04` |
+| southern-band surface sigma MEAN, \|diff\| from NEMO | `1.023e-06` | `1.023e-06` | — | `4.750e-04` |
+| verdict | `PASS 5 / FAIL 0` | `PASS 5 / FAIL 0` | — | level 5x |
+
+Every printed digit matches the previous round's BEFORE arm — the arm that
+ships, since decision 67 was built, measured and then held.  So decision 72
+moves no DINO number either, which is what the DINO cards selecting NEMO's
+overwrite predicts.
 
 ---
 
