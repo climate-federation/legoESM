@@ -178,7 +178,8 @@ moved hash.
 | citation gate, the lane's own receipt | `PASS`, 274 citations, 0 unmapped -- unchanged in count by this round |
 | citation gate, planted-shift self-tests | all fire |
 | acquisition preflight, after the deck change | `PREFLIGHT_OK`, exit 0 |
-| push-gate battery, the six autopilot files plus the card test, the constructibility tripwire and the dispatch ratchet | `196 passed in 1099.79s` at the final pre-step-D tree |
+| push-gate battery, the six autopilot files plus the card test, the constructibility tripwire, the dispatch ratchet and GYRE's decade pin | `211 passed in 1146.79s` at the FINAL tree, after both review fixes |
+| GYRE decade climate pin, standing in for the re-run the preregistration misnamed | `14 passed in 3.90s` |
 | kt=1..10 ladder, VORTEX | scored; see section 6c |
 | kt=1..3 ladder, both tanks, through the SAME modified gate | unchanged; see section 6c |
 | ladder gate non-vacuity plant | first-over-bar kt=1, normalized 4.877e-02, exit 1 |
