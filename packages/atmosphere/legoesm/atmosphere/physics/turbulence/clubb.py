@@ -6498,6 +6498,20 @@ def clubb_step(
         # total water and the temperature carries that liquid's latent heat.
         # rcm is clip_rcm'd against rtm inside the closure, so q_v stays >= 0.
         rcm_new = flip_vertical(diags["rcm_grid"])
+        if config.trop_cloud_top_press > 0.0:
+            # CAM never runs CLUBB above top_lev, so the host liquid there is
+            # left alone: blend back to q_c with the same log-pressure taper as
+            # the cloud fraction. Total water still closes (q_v takes the rest).
+            _w_top = jax.nn.sigmoid(
+                (jnp.log(jnp.clip(p_full, 1.0, None))
+                 - jnp.log(config.trop_cloud_top_press))
+                / config.trop_cloud_taper_lnp_width)
+            # Bounded by the updated total water: the untapered moment mixing
+            # can dry a layer below the retained host liquid, and q_v = rtm -
+            # rcm must stay >= 0 (the PDF branch is already clip_rcm'd).
+            rcm_new = jnp.minimum(
+                _w_top * rcm_new + (1.0 - _w_top) * q_c,
+                jnp.maximum(flip_vertical(new_state.rtm), 0.0))
         q_new = flip_vertical(new_state.rtm) - rcm_new
         T_new = (flip_vertical(new_state.thlm) * exner
                  + (constants.L_v / constants.c_pd) * rcm_new)
