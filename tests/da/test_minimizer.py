@@ -196,5 +196,6 @@ class TestLineSearchScaling:
             return 0.5e8 * jnp.sum(x ** 2), 1e8 * x
 
         mz.minimize_cg(vg, jnp.array([0.75]), max_iter=4, gtol=1e-12)
+        jax.effects_barrier()  # debug callbacks are asynchronous
         assert len(slopes) >= 3, slopes
         assert all(v < 0.0 for v in slopes), slopes
