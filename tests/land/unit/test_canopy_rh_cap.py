@@ -93,7 +93,7 @@ def test_width_reaches_both_the_solve_and_the_reported_fluxes():
     assert bool(ok1) and bool(ok5)
     assert float(jnp.max(jnp.abs(x1 - x5))) > 1e-6
     fwd = lambda x, c: canopy_forward(x, b, c.LE_module, c.stomatal_model, c.le_cap_mode,
-                                      c.use_ta_for_photosynthesis, c.rh_cap_smoothing_width)
+                                      c.use_ta_for_photosynthesis, c.rh_cap_smoothing_width, c.zeta_cap_smoothing_width)
     assert float(fwd(x1, c1)["LE_Sun"]) != float(fwd(x1, c5)["LE_Sun"])
 
 

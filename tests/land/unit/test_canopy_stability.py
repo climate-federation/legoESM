@@ -59,7 +59,8 @@ def test_most_finite_after_kb_inv_zero():
     one = jnp.array([1.0])
     ustar, rah, raw, uav, _zeta = monin_obukhov_stability(
         ur=3.0 * one, Ta=300.0 * one, Tv_atm=300.5 * one, Tc=301.0 * one,
-        q_atm=0.010 * one, q_c=0.011 * one, zldis=10.0 * one, z0m=0.5 * one)
+        q_atm=0.010 * one, q_c=0.011 * one, zldis=10.0 * one, z0m=0.5 * one,
+        zeta_cap_width=CanopyConfig().zeta_cap_smoothing_width)
     for v in (ustar, rah, raw, uav):
         assert bool(jnp.all(jnp.isfinite(v)))
     assert float(ustar[0]) > 0.0
@@ -77,7 +78,8 @@ def test_resistances_are_continuous_through_neutral_stability():
     out = jax.vmap(lambda t: monin_obukhov_stability(
         jnp.asarray(3.0), jnp.asarray(300.0), jnp.asarray(300.5), t,
         jnp.asarray(0.010), jnp.asarray(0.011), jnp.asarray(30.0),
-        jnp.asarray(0.1)))(Tc)
+        jnp.asarray(0.1),
+        zeta_cap_width=CanopyConfig().zeta_cap_smoothing_width))(Tc)
     zeta = out[4]
     assert bool(jnp.any(zeta > 0)) and bool(jnp.any(zeta < 0))   # sweep crosses neutral
     for name, v in (("ustar", out[0]), ("rah", out[1])):
@@ -118,8 +120,9 @@ def test_stable_zeta_cap_is_smooth_bounded_and_near_identity_below():
     import jax
     import numpy as np
     from legoesm.land.canopy.stability import (
-        _ZETA_CAP_SMOOTHING_WIDTH as W, _ZETA_MAX_STABLE as ZMAX, _cap_stable_zeta)
-    cap = lambda z: float(_cap_stable_zeta(jnp.asarray(z)))
+        _ZETA_MAX_STABLE as ZMAX, _cap_stable_zeta)
+    W = CanopyConfig().zeta_cap_smoothing_width
+    cap = lambda z: float(_cap_stable_zeta(jnp.asarray(z), W))
     assert abs(cap(0.1) - 0.1) < W * np.exp(-(ZMAX - 0.1) / W)
     assert abs(cap(ZMAX) - (ZMAX - W * np.log(2.0))) < 1e-6
     assert ZMAX - 1e-6 < cap(50.0) <= ZMAX
@@ -130,7 +133,7 @@ def test_stable_zeta_cap_is_smooth_bounded_and_near_identity_below():
         assert cap(z) >= 1e-6
     assert abs(cap(1e-3) - 1e-3) < 1e-5
     # derivative continuous through the cap (the hard clip jumped 1 -> 0 here)
-    d = jax.grad(_cap_stable_zeta)
+    d = jax.grad(lambda z: _cap_stable_zeta(z, W))
     lo, hi = float(d(jnp.asarray(ZMAX - 1e-9))), float(d(jnp.asarray(ZMAX + 1e-9)))
     assert abs(lo - 0.5) < 1e-6 and abs(hi - 0.5) < 1e-6
 
@@ -156,19 +159,24 @@ _ZCAP_COL = dict(
     r_soil_surface=1331.4987749450343, fwet=0.0)
 
 
-def test_stable_column_converges_only_with_the_smooth_zeta_cap(monkeypatch):
-    import jax
-    import legoesm.land.canopy.stability as stb
+def test_stable_column_converges_only_with_the_smooth_zeta_cap():
     from legoesm.land.canopy.solver import CanopyForcingBundle, solve_canopy_closure
     b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _ZCAP_COL.items()})
     x0 = jnp.asarray(_ZCAP_X0)
     _, n, conv = solve_canopy_closure(x0, b, CanopyConfig())
     assert bool(conv) and int(n) < 10
-    monkeypatch.setattr(stb, "_ZETA_CAP_SMOOTHING_WIDTH", 1e-9)  # ~hard clip
-    jax.clear_caches()
-    try:
-        _, _, conv_hard = solve_canopy_closure(x0, b, CanopyConfig())
-    finally:
-        monkeypatch.undo()
-        jax.clear_caches()
+    _, _, conv_hard = solve_canopy_closure(          # ~hard clip
+        x0, b, CanopyConfig(zeta_cap_smoothing_width=1e-9))
     assert not bool(conv_hard)
+
+
+def test_zeta_cap_width_is_validated_and_reaches_the_solve():
+    import pytest
+    from legoesm.land.canopy.solver import CanopyForcingBundle, solve_canopy_closure
+    for bad in (0.0, 1.0):
+        with pytest.raises(ValueError, match="zeta_cap_smoothing_width"):
+            CanopyConfig(zeta_cap_smoothing_width=bad).validate()
+    b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _ZCAP_COL.items()})
+    with pytest.raises(ValueError, match="zeta_cap_smoothing_width"):
+        solve_canopy_closure(jnp.asarray(_ZCAP_X0), b,
+                             CanopyConfig(zeta_cap_smoothing_width=0.0))

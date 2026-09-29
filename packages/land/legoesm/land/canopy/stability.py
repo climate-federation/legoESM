@@ -67,7 +67,7 @@ reverse-mode gradient.  The scalar oracle does NOT reproduce this floor — it
 evaluates only the in-regime branch (if/elif) and so never touches the discarded
 args; the floor is instead exercised by the AD test (eager ``where`` evaluates
 every regime).  ``zeta`` is clamped to ``[1e-6, 0.5]`` (stable; the 0.5 cap is a
-smooth min, see ``_ZETA_CAP_SMOOTHING_WIDTH`` — CLM5 clips hard) / ``[-100,
+smooth min, see ``CanopyConfig.zeta_cap_smoothing_width`` — CLM5 clips hard) / ``[-100,
 -1e-6]`` (unstable) each iterate (CLM5: 0.01, see ``_ZETA_NEUTRAL_FLOOR``); wind floors (0.1, 1e-3 m/s) and resistance
 floors (1e-9) guard calm/degenerate columns.
 """
@@ -85,11 +85,6 @@ from legoesm.thermo import saturation_vapor_pressure_aerk
 # Module-local numerics / stability parameters (not physical constants —
 # those come from ``legoesm.constants``).
 _ZETA_MAX_STABLE = 0.5
-# Smooth-min width on the stable cap: a hard clip at 0.5 is a derivative kink
-# in zeta (and ustar, rah, Rb) that stalls the canopy Newton solve for tall
-# rough canopies in stable low-wind air.  zeta approaches 0.5 asymptotically;
-# at zeta = 0.5 it reads 0.5 - w*ln2.
-_ZETA_CAP_SMOOTHING_WIDTH = 0.05
 # Near-neutral |zeta| floor (keeps obu = zldis/zeta finite).  CLM5 uses 0.01,
 # which makes zeta, ustar and the resistances JUMP by that much at neutral
 # stability; the canopy Newton solve then stalls whenever its root sits at
@@ -291,20 +286,21 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     return ch
 
 
-def _cap_stable_zeta(zeta: jax.Array) -> jax.Array:
+def _cap_stable_zeta(zeta: jax.Array, width: float) -> jax.Array:
     """Smooth cap at ``_ZETA_MAX_STABLE`` (no kink), then the neutral floor.
 
     Floor LAST: the softplus leaks ~w*exp(-0.5/w) below the cap, which would
     push a floored 1e-6 negative (into the unstable forms).
     """
-    w = _ZETA_CAP_SMOOTHING_WIDTH
+    w = width
     z = zeta - w * jax.nn.softplus((zeta - _ZETA_MAX_STABLE) / w)
     return jnp.maximum(z, _ZETA_NEUTRAL_FLOOR)
 
 
 def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
                         dthv: jax.Array, zldis: jax.Array,
-                        z0m: jax.Array) -> tuple[jax.Array, jax.Array]:
+                        z0m: jax.Array,
+                        zeta_cap_width: float) -> tuple[jax.Array, jax.Array]:
     """Initialise MOST via bulk Richardson number (Zeng et al. 1998)."""
     wc  = 0.5
     um  = jnp.where(dthv >= 0.0, jnp.maximum(ur, 0.1), jnp.sqrt(ur**2 + wc**2))  # coeff-ok: 0.1 m/s wind floor
@@ -317,7 +313,7 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
     )
     zeta = jnp.where(
         rib >= 0.0,
-        _cap_stable_zeta(zeta),
+        _cap_stable_zeta(zeta, zeta_cap_width),
         jnp.clip(zeta, -100.0, -_ZETA_NEUTRAL_FLOOR),  # coeff-ok: very-unstable bound on ζ
     )
     obu = zldis / zeta
@@ -325,7 +321,8 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
 
 
 def _stability_step(carry: jax.Array, _xs: None,
-                    forcing: jax.Array) -> tuple[jax.Array, jax.Array]:
+                    forcing: jax.Array,
+                    zeta_cap_width: float) -> tuple[jax.Array, jax.Array]:
     """Single Monin-Obukhov fixed-point iteration.
 
     carry : [z0h, obu, um]
@@ -346,7 +343,7 @@ def _stability_step(carry: jax.Array, _xs: None,
 
     zeta  = zldis * constants.kappa_vk * constants.g * thvstar / (ustar**2 * Tv_atm)
 
-    zeta_stable = _cap_stable_zeta(zeta)
+    zeta_stable = _cap_stable_zeta(zeta, zeta_cap_width)
     um_stable   = jnp.maximum(ur, 0.1)                     # coeff-ok: 0.1 m/s wind floor
     zeta_unstable = jnp.clip(zeta, -100.0, -_ZETA_NEUTRAL_FLOOR)  # coeff-ok: very-unstable bound on ζ
     # Floor the cbrt argument to a POSITIVE value, not 0: cbrt'(0)=inf and the
@@ -377,6 +374,8 @@ def monin_obukhov_stability(
     zldis: jax.Array,
     z0m: jax.Array,
     n_iters: int = 5,
+    *,
+    zeta_cap_width: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Above-canopy MOST iteration via jax.lax.scan.
 
@@ -391,6 +390,8 @@ def monin_obukhov_stability(
     zldis  : reference height minus displacement height [m]
     z0m    : roughness length for momentum [m]
     n_iters: number of fixed-point iterations
+    zeta_cap_width: smoothing width of the stable zeta <= 0.5 cap
+                    (``CanopyConfig.zeta_cap_smoothing_width``)
 
     Returns
     -------
@@ -408,11 +409,12 @@ def monin_obukhov_stability(
     dq   = q_atm - q_c
     dthv = (Ta - Tc) * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * (q_atm - q_c)
 
-    um, obu = _monin_obukhov_init(ur, Tv_atm, dthv, zldis, z0m)
+    um, obu = _monin_obukhov_init(ur, Tv_atm, dthv, zldis, z0m, zeta_cap_width)
 
     init    = jnp.array([z0h, obu, um])
     forcing = jnp.array([Ta, Tv_atm, q_atm, q_atm, zldis, z0m, dq, dth, ur])
-    step_fn = partial(_stability_step, forcing=forcing)
+    step_fn = partial(_stability_step, forcing=forcing,
+                      zeta_cap_width=zeta_cap_width)
 
     final_carry, outputs = jax.lax.scan(step_fn, init, xs=None, length=n_iters)
 

@@ -159,6 +159,8 @@ VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 # Largest accepted smooth-RH-cap width: at 0.1, RH_c at saturation is 7% low.
 RH_CAP_WIDTH_MAX = 0.1
+# Same guard for the stable-stability cap width (zeta <= 0.5).
+ZETA_CAP_WIDTH_MAX = 0.1
 
 
 class CanopyConfig(NamedTuple):
@@ -255,6 +257,13 @@ class CanopyConfig(NamedTuple):
     # Static under jit (excluded from __param_spec__ tuning).  Appended at the
     # end of the tuple (positional ABI).
     rh_cap_smoothing_width: float = 0.01
+    # Smoothing width [-] of the stable Monin-Obukhov cap zeta <= 0.5 (CLM5
+    # clips hard).  The hard clip is a derivative kink in zeta, ustar, rah and
+    # Rb that stalls the canopy Newton solve in stable low-wind air; 857
+    # captured slow production columns converged 697 -> 746 at 0.05.  zeta at
+    # the cap reads 0.5 - w*ln2.  Must be > 0.  Static under jit (excluded
+    # from __param_spec__ tuning).  Appended at the end of the tuple.
+    zeta_cap_smoothing_width: float = 0.05
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -280,6 +289,11 @@ class CanopyConfig(NamedTuple):
                 f"rh_cap_smoothing_width must be in (0, {RH_CAP_WIDTH_MAX}] (the smooth "
                 "relative-humidity cap divides by it), got "
                 f"{self.rh_cap_smoothing_width!r}")
+        if not 0.0 < self.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+            raise ValueError(
+                f"zeta_cap_smoothing_width must be in (0, {ZETA_CAP_WIDTH_MAX}] "
+                "(the smooth stability cap divides by it), got "
+                f"{self.zeta_cap_smoothing_width!r}")
         return self
 
 
@@ -294,6 +308,9 @@ __param_spec__ = {
             "rh_cap_smoothing_width": "numerics: smoothing width of the "
                                       "RH_c <= 1 cap (keeps the canopy "
                                       "Newton residual differentiable)",
+            "zeta_cap_smoothing_width": "numerics: smoothing width of the "
+                                        "stable zeta <= 0.5 cap (keeps the "
+                                        "canopy Newton residual differentiable)",
         },
         "params": {
             "epsf": {

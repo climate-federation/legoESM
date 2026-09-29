@@ -46,6 +46,7 @@ class TestStabilityGradFinite(unittest.TestCase):
     """F5: MOST stability grad must be finite in every regime."""
 
     def _rah_grad(self, obu_sign_temp):
+        from legoesm.land.canopy.config import CanopyConfig
         from legoesm.land.canopy.stability import monin_obukhov_stability
 
         def rah(Ta):
@@ -55,6 +56,7 @@ class TestStabilityGradFinite(unittest.TestCase):
                 ur=jnp.array(3.0), Ta=Ta, Tv_atm=Ta * 1.01, Tc=jnp.array(290.0),
                 q_atm=jnp.array(5e-3), q_c=jnp.array(6e-3),
                 zldis=jnp.array(10.0), z0m=jnp.array(0.05), n_iters=5,
+                zeta_cap_width=CanopyConfig().zeta_cap_smoothing_width,
             )
             return jnp.sum(jnp.asarray(out[-1]))  # last field = a resistance
 

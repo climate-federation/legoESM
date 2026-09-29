@@ -40,7 +40,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from legoesm.core.nonlinear import make_implicit_newton_solver
-from legoesm.land.canopy.config import RH_CAP_WIDTH_MAX, VALID_LE_MODULES, CanopyConfig
+from legoesm.land.canopy.config import (
+    RH_CAP_WIDTH_MAX, VALID_LE_MODULES, ZETA_CAP_WIDTH_MAX, CanopyConfig)
 from legoesm.land.canopy.energy_balance import (
     canopy_air_update,
     canopy_met_variables,
@@ -190,6 +191,7 @@ def _canopy_residual(
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
+    zeta_cap_width: float,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
 
@@ -211,7 +213,8 @@ def _canopy_residual(
 
     # ---- MOST stability ----
     ustar, rah_above, raw_above, uav, _ = monin_obukhov_stability(
-        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
+        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
+        zeta_cap_width=zeta_cap_width)
 
     # ---- Boundary and below-canopy resistances ----
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
@@ -373,6 +376,7 @@ def canopy_forward(
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
+    zeta_cap_width: float,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
 
@@ -389,7 +393,8 @@ def canopy_forward(
     zldis = b.z0 - b.displa
 
     ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
-        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
+        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
+        zeta_cap_width=zeta_cap_width)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -544,12 +549,17 @@ def solve_canopy_closure(
         raise ValueError("rh_cap_smoothing_width must be in "
                          f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
                          f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+        raise ValueError("zeta_cap_smoothing_width must be in "
+                         f"(0, {ZETA_CAP_WIDTH_MAX}] (the smooth stability "
+                         f"cap divides by it), got {config.zeta_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         rh_cap_width=config.rh_cap_smoothing_width,
+        zeta_cap_width=config.zeta_cap_smoothing_width,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -582,12 +592,17 @@ def solve_canopy_closure_diag(
         raise ValueError("rh_cap_smoothing_width must be in "
                          f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
                          f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+        raise ValueError("zeta_cap_smoothing_width must be in "
+                         f"(0, {ZETA_CAP_WIDTH_MAX}] (the smooth stability "
+                         f"cap divides by it), got {config.zeta_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         rh_cap_width=config.rh_cap_smoothing_width,
+        zeta_cap_width=config.zeta_cap_smoothing_width,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -604,6 +619,7 @@ def _make_implicit_newton_solver(
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
+    zeta_cap_width: float,
     max_iters: int,
     tol: float,
 ):
@@ -618,6 +634,7 @@ def _make_implicit_newton_solver(
             le_cap_mode=le_cap_mode,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
             rh_cap_width=rh_cap_width,
+            zeta_cap_width=zeta_cap_width,
         )
 
     return make_implicit_newton_solver(

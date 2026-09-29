@@ -60,8 +60,10 @@ from legoesm.land.canopy.stability import (                           # noqa: E4
     _MOST_MOM_CONV_COEF, _MOST_HEAT_CONV_COEF, _RIB_MAX, _VIRT_T_COEF,
     _Z0MG_BARE, _NU_AIR, _CS_DENSE, _CS_BARE_COEF, _CS_BARE_EXP,
     _ZETA_MAX_STABLE,
-    _ZETA_CAP_SMOOTHING_WIDTH,
 )
+from legoesm.land.canopy.config import CanopyConfig                  # noqa: E402
+
+_ZW = CanopyConfig().zeta_cap_smoothing_width
 
 # --- independent CLM5 FrictionVelocityMod oracle literals ----------------------
 # (canaried in test_most_constants_match_clm5).
@@ -267,7 +269,7 @@ def test_kb_minus_one_is_zero_not_two_departure():
     ur, Ta, Tv, Tc = 4.0, 300.0, 300.5, 301.0              # unstable column
     ustar, rah, raw, uav, zeta = monin_obukhov_stability(
         _a(ur), _a(Ta), _a(Tv), _a(Tc), _a(0.01), _a(0.011), _a(_ZLDIS), _a(z0m),
-        n_iters=40)
+        n_iters=40, zeta_cap_width=_ZW)
     ch_solver = 1.0/(float(rah)*float(ustar))
     ch_at_zeta_kb0 = _ch_oracle(_ZLDIS, z0m, _ZLDIS/float(zeta))
     ch_at_zeta_kb2 = _ch_oracle(_ZLDIS, z0m/math.e**2, _ZLDIS/float(zeta))
@@ -279,7 +281,7 @@ def test_kb_minus_one_is_zero_not_two_departure():
 def test_bulk_richardson_init_matches_zeng1998():
     """_monin_obukhov_init reproduces the Zeng-1998 bulk-Ri first guess."""
     ur, Tv_atm, dthv, z0m = 3.0, 300.0, 1.2, 0.1           # stable (dthv>0)
-    um_got, obu_got = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m))
+    um_got, obu_got = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m), _ZW)
     g = float(constants.g)
     um = max(ur, 0.1)                                       # dthv>=0 branch
     rib = g*_ZLDIS*dthv/(Tv_atm*um**2)
@@ -288,7 +290,7 @@ def test_bulk_richardson_init_matches_zeng1998():
     # width w (a hard kink stalls the canopy Newton solve).  This stable column
     # drives the cap active (raw > 0.5), so it pins both the formula and that
     # the departure from CLM5 stays inside w*ln2.
-    w = _ZETA_CAP_SMOOTHING_WIDTH
+    w = _ZW
     zeta = zeta_raw - w*math.log1p(math.exp((zeta_raw - _O_ZETA_MAX_STABLE)/w))
     assert zeta_raw > _O_ZETA_MAX_STABLE
     assert _O_ZETA_MAX_STABLE - w*math.log(2.0) < zeta < _O_ZETA_MAX_STABLE
@@ -299,7 +301,7 @@ def test_bulk_richardson_init_matches_zeng1998():
 def test_monin_obukhov_init_unstable_gustiness():
     """Unstable init adds convective gustiness um = sqrt(ur^2 + wc^2), wc=0.5."""
     ur, Tv_atm, dthv, z0m = 2.0, 300.0, -0.8, 0.1          # unstable (dthv<0)
-    um_got, _ = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m))
+    um_got, _ = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m), _ZW)
     assert float(um_got) == pytest.approx(math.sqrt(ur**2 + 0.5**2), rel=1e-9, abs=0.0)
 
 
@@ -314,7 +316,7 @@ def test_solver_converges_full_state(Tc):
     args = (_a(4.0), _a(300.0), _a(300.5), _a(Tc), _a(0.01), _a(0.011), _a(_ZLDIS), _a(z0m))
 
     def _state(k):
-        return jnp.array([float(x) for x in monin_obukhov_stability(*args, n_iters=k)])
+        return jnp.array([float(x) for x in monin_obukhov_stability(*args, n_iters=k, zeta_cap_width=_ZW)])
 
     s2, s4, s8, s16, s40 = (_state(k) for k in (2, 4, 8, 16, 40))
     for got, exp in zip(s8.tolist(), s40.tolist()):        # all 5 outputs, not just ustar
@@ -385,7 +387,7 @@ def test_solver_grad_finite_x64_and_float32():
         for Tc in (301.0, 299.0):                          # unstable / stable
             args = lambda ur: monin_obukhov_stability(
                 ur, _a(300.0), _a(300.5), _a(Tc), _a(0.01), _a(0.011),
-                _a(_ZLDIS), _a(z0m), n_iters=8)[0]
+                _a(_ZLDIS), _a(z0m), n_iters=8, zeta_cap_width=_ZW)[0]
             gr = jax.grad(args)(_a(4.0))
             assert bool(jnp.isfinite(gr)) and float(gr) > 0.0
 
