@@ -82,9 +82,28 @@ No scientific prediction was scored by either failed attempt.
 
 The five plants all fire: false card scope, one-row accumulator debt, moved
 first boundary, aliased geometry sources, and changed round-75 baseline. The
-focused round-74 through round-76 tests pass. The citation gate, shared-card
-and tank batteries, wide ocean-fidelity battery, and independent review are
-recorded in the final validation ledger below.
+focused round-71 through round-76 and citation tests pass, 64 / 64.
+
+The citation gate passes this receipt at 3 / 3 mapped citations and passes the
+default receipt at 274 / 274. Its shifted-line plant refuses as required.
+
+The one allowed `tests/ocean/fidelity -n 12` battery collected 2,079 tests and
+reached 99% before the known no-summary wrapper stall, after all pytest workers
+had exited. Five failures were observed and each reproduced in isolation:
+
+- the round-129 spread-floor record says the certified stepping gate moved;
+- the round-51 private live-trace tuple has accumulated newer fields;
+- the standing SI3 scalar-math provenance gate says MY_SRC A is not verbatim;
+- the standing worktree-stamp ratchet names four older emitters (not the
+  round-76 gate); and
+- the recipe case-board ratchet names the pre-existing `hires_lane_surface`
+  omission.
+
+No `packages/` file changed, so shared-card trajectory and tank batteries are
+not applicable. The required separate `codex exec --sandbox read-only` review
+was attempted; independent review is unavailable in-sandbox because its
+in-process app-server client could not initialize on the read-only filesystem.
+The exact output is retained as `codex_review.log`.
 
 No `packages/` file changed. ORCA2, GYRE, DINO, OVERFLOW, and LOCK trajectories
 cannot move, so trajectory landing gates do not apply to this diagnostic
