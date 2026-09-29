@@ -60,6 +60,7 @@ from legoesm.land.canopy.stability import (                           # noqa: E4
     _MOST_MOM_CONV_COEF, _MOST_HEAT_CONV_COEF, _RIB_MAX, _VIRT_T_COEF,
     _Z0MG_BARE, _NU_AIR, _CS_DENSE, _CS_BARE_COEF, _CS_BARE_EXP,
     _ZETA_MAX_STABLE,
+    _ZETA_CAP_SMOOTHING_WIDTH,
 )
 
 # --- independent CLM5 FrictionVelocityMod oracle literals ----------------------
@@ -283,10 +284,14 @@ def test_bulk_richardson_init_matches_zeng1998():
     um = max(ur, 0.1)                                       # dthv>=0 branch
     rib = g*_ZLDIS*dthv/(Tv_atm*um**2)
     zeta_raw = rib*math.log(_ZLDIS/z0m)/(1.0 - _O_BETA*min(rib, _O_RIB_MAX))
-    zeta = min(max(zeta_raw, 0.01), _O_ZETA_MAX_STABLE)
-    # this stable column drives the upper zeta-clamp active (raw > 0.5), so the
-    # test also exercises the _ZETA_MAX_STABLE guard.
-    assert zeta_raw > _O_ZETA_MAX_STABLE and zeta == _O_ZETA_MAX_STABLE
+    # Deliberate departure from CLM5's hard min(zeta, 0.5): a smooth min of
+    # width w (a hard kink stalls the canopy Newton solve).  This stable column
+    # drives the cap active (raw > 0.5), so it pins both the formula and that
+    # the departure from CLM5 stays inside w*ln2.
+    w = _ZETA_CAP_SMOOTHING_WIDTH
+    zeta = zeta_raw - w*math.log1p(math.exp((zeta_raw - _O_ZETA_MAX_STABLE)/w))
+    assert zeta_raw > _O_ZETA_MAX_STABLE
+    assert _O_ZETA_MAX_STABLE - w*math.log(2.0) < zeta < _O_ZETA_MAX_STABLE
     assert float(um_got) == pytest.approx(um, rel=1e-9, abs=0.0)
     assert float(obu_got) == pytest.approx(_ZLDIS/zeta, rel=1e-9, abs=0.0)
 

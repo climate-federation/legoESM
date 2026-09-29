@@ -112,3 +112,63 @@ def test_dense_canopy_night_column_from_amip_now_has_a_root():
     x, _n, converged = solve_canopy_closure(x0, b, CanopyConfig())
     assert bool(converged)
     assert float(jnp.max(jnp.abs(x[:2] - x[4]))) < 5.0
+
+
+def test_stable_zeta_cap_is_smooth_bounded_and_near_identity_below():
+    import jax
+    import numpy as np
+    from legoesm.land.canopy.stability import (
+        _ZETA_CAP_SMOOTHING_WIDTH as W, _ZETA_MAX_STABLE as ZMAX, _cap_stable_zeta)
+    cap = lambda z: float(_cap_stable_zeta(jnp.asarray(z)))
+    assert abs(cap(0.1) - 0.1) < W * np.exp(-(ZMAX - 0.1) / W)
+    assert abs(cap(ZMAX) - (ZMAX - W * np.log(2.0))) < 1e-6
+    assert ZMAX - 1e-6 < cap(50.0) <= ZMAX
+    assert ZMAX - W * np.log(2.0) < cap(0.6) < ZMAX
+    # the neutral floor survives the cap (softplus leakage must not push the
+    # stable branch negative, into the unstable forms)
+    for z in (0.0, 1e-6, 2e-6, 1e-4):
+        assert cap(z) >= 1e-6
+    assert abs(cap(1e-3) - 1e-3) < 1e-5
+    # derivative continuous through the cap (the hard clip jumped 1 -> 0 here)
+    d = jax.grad(_cap_stable_zeta)
+    lo, hi = float(d(jnp.asarray(ZMAX - 1e-9))), float(d(jnp.asarray(ZMAX + 1e-9)))
+    assert abs(lo - 0.5) < 1e-6 and abs(hi - 0.5) < 1e-6
+
+
+# Captured production AMIP column (2026-09-28, 40962-cell mesh): stable air at
+# sunset over a short C4 canopy; 55 iterations without converging under the
+# hard stable-zeta clip, 3 with the smooth cap.
+_ZCAP_X0 = [297.2393324175292, 293.68368599247435, 247.52055596565017,
+            373.49999999999994, 294.92259259851295, 0.005930197400070915]
+_ZCAP_COL = dict(
+    LAI=0.6471436963540378, SZA=88.6781908115728, La=301.63646125793457,
+    epsf=0.97, epss=0.96, fSun=0.0712566808433442, APAR_Sun=198.74736326526045,
+    APAR_Sh=9.593855714286633, Vcmax25_Sun=0.0, Vcmax25_Sh=0.0,
+    Vcmax25_C4Sun=0.7914995066910798, Vcmax25_C4Sh=9.363296419511164,
+    ASW_Sun=60.46099740968655, ASW_Sh=26.749205460570906,
+    ASW_Soil=13.209926935248177, Ts_bc=293.7946313501537, Ca=415.0,
+    Ps=99697.46758811206, Ta=295.31354669894745, lam=constants.L_v,
+    Cp=constants.c_pd, rhoa=1.1786080175081368, Tv_atm=296.06634429267206,
+    q_atm=0.004194271465023573, m=1.894397743108224, b0=0.01894397743108224,
+    alf=0.3, TgC=25.0, fC4=1.0, fStress_soil=0.017304065895086675,
+    ur=2.946329212745357, CI=0.75, z0m=0.026840399618048596,
+    displa=0.18735207624146172, z0=64.45224515471612, cv=0.0135, d_leaf=0.025,
+    r_soil_surface=1331.4987749450343, fwet=0.0)
+
+
+def test_stable_column_converges_only_with_the_smooth_zeta_cap(monkeypatch):
+    import jax
+    import legoesm.land.canopy.stability as stb
+    from legoesm.land.canopy.solver import CanopyForcingBundle, solve_canopy_closure
+    b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _ZCAP_COL.items()})
+    x0 = jnp.asarray(_ZCAP_X0)
+    _, n, conv = solve_canopy_closure(x0, b, CanopyConfig())
+    assert bool(conv) and int(n) < 10
+    monkeypatch.setattr(stb, "_ZETA_CAP_SMOOTHING_WIDTH", 1e-9)  # ~hard clip
+    jax.clear_caches()
+    try:
+        _, _, conv_hard = solve_canopy_closure(x0, b, CanopyConfig())
+    finally:
+        monkeypatch.undo()
+        jax.clear_caches()
+    assert not bool(conv_hard)
