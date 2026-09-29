@@ -50,14 +50,32 @@ import sys
 from collections import Counter
 from types import SimpleNamespace
 
-import equinox as eqx
 import jax
-import jax.numpy as jnp
-import numpy as np
-import yaml
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
-from legoesm.training.losses import combined_loss
+
+if os.environ.get("LEGOESM_DIST") == "1":
+    # Multi-node: every process joins the job here, BEFORE the legoesm
+    # imports below.  Those pull in modules that initialise the XLA backend,
+    # and jax refuses a late initialize() outright -- which is why this call
+    # cannot live inside main() with the rest of the setup.
+    #
+    # The device list is passed explicitly: with one rank per NODE rather
+    # than one per GPU, jax's own SLURM detection claims a single device per
+    # process even though all four cards are visible, and the job silently
+    # runs on two GPUs instead of eight.
+    _vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    _local = [int(x) for x in _vis.split(",") if x.strip().isdigit()]
+    jax.distributed.initialize(
+        local_device_ids=_local if len(_local) > 1 else None)
+    print(f"DIST process {jax.process_index()} of {jax.process_count()} "
+          f"local_devices={len(jax.local_devices())}", flush=True)
+
+import equinox as eqx  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+import yaml  # noqa: E402
+from jax.sharding import Mesh, NamedSharding  # noqa: E402
+from jax.sharding import PartitionSpec as P  # noqa: E402
+from legoesm.training.losses import combined_loss  # noqa: E402
 from legoesm.training.scale_build import build_mode_components
 
 sys.path.insert(0, ".")
@@ -102,12 +120,6 @@ def main() -> None:
     ndev = int(sys.argv[3])
     steps = int(sys.argv[4]) if len(sys.argv) > 4 else 12
     gib = 1024.0 ** 3
-
-    if os.environ.get("LEGOESM_DIST") == "1":
-        # Multi-node: every process joins before any device is touched,
-        # after which jax.devices() spans the whole job.
-        jax.distributed.initialize()
-        print(f"DIST process {jax.process_index()} of {jax.process_count()}")
 
     devices = jax.devices()
     if len(devices) < ndev:
