@@ -57,7 +57,21 @@ def test_kernel_factors_scale_mass_and_number():
                                4.0 * wr.accretion_kk2000(q_c, q_r), rtol=1e-14)
 
 
-def _morrison_budget(cfg):
+def test_caps_still_bind_after_a_large_factor():
+    """The factor scales PRC BEFORE the SAM number caps: at fact=20 and a
+    long step the rain-number source is still <= N_c/dt and <= NPRC."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
+    q_c, _, _, rho = _col()
+    N_c = jnp.full(q_c.shape, 1.0e6)    # 1 cm^-3: a large drop source
+    dt = 3600.0
+    prc, nr, _ = wr.autoconversion_kk2000(q_c, N_c, rho, dt, fact=20.0)
+    cap = N_c / dt
+    assert bool(jnp.all(nr <= cap * (1 + 1e-12)))
+    assert bool(jnp.any(jnp.isclose(nr, cap, rtol=1e-12)))   # the cap binds
+    assert bool(jnp.all(nr <= prc * rho / wr._KK2000_CONS29 * (1 + 1e-12)))
+
+
+def _morrison_budget(cfg, dt=1.0):
     from legoesm.atmosphere.physics.microphysics.morrison import (
         morrison_microphysics,
     )
@@ -71,8 +85,8 @@ def _morrison_budget(cfg):
     out = morrison_microphysics(
         jnp.full(shape, 288.0), jnp.full(shape, 1.0e-2), hyd,
         jnp.full(shape, 9.0e4), jnp.full((1, shape[1] + 1), 9.0e4), rho,
-        jnp.full(shape, 200.0), 1.0, cfg._replace(publish_qc_budget=True))
-    return out.qc_budget
+        jnp.full(shape, 200.0), dt, cfg._replace(publish_qc_budget=True))
+    return out.qc_budget, q_c, dt
 
 
 def test_factor_reaches_the_threaded_scheme_config():
@@ -87,7 +101,7 @@ def test_factor_reaches_the_threaded_scheme_config():
         ExperimentConfig(microphysics="morrison", morrison_autocon_fact=0.25,
                          morrison_accre_enhan_fact=2.0), "morrison", base)
     assert (cfg.autocon_fact, cfg.accre_enhan_fact) == (0.25, 2.0)
-    b1, b2 = _morrison_budget(base), _morrison_budget(cfg)
+    (b1, _, _), (b2, _, _) = _morrison_budget(base), _morrison_budget(cfg)
     assert float(jnp.min(-b1["autoconversion"])) > 0.0
     # APPLIED terms carry the donor clamp, whose scale moves with the total
     # sink where it binds, so the ratio is the factor to ~1e-3 here (exact at
@@ -103,6 +117,43 @@ def test_factor_reaches_the_threaded_scheme_config():
                          morrison_warm_rain_scheme="seifert_beheng"),
         "morrison", base)
     assert sb.warm_rain_scheme == "seifert_beheng"
+
+
+def test_donor_clamp_bounds_large_factors():
+    """At the validated upper bounds and a long step the applied cloud-water
+    sinks never exceed the available q_c (the existing donor clamp binds)."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    cfg = MorrisonConfig(autocon_fact=20.0, accre_enhan_fact=10.0)
+    b, q_c, dt = _morrison_budget(cfg, dt=1800.0)
+    removed = -(b["autoconversion"] + b["accretion"]) * dt
+    assert bool(jnp.all(removed <= q_c * (1 + 1e-9)))
+
+
+def test_params_route_reaches_the_threaded_leaf():
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    from legoesm.driver.run_config_yaml import (
+        _ATM_SCALAR_PARAM_MAP,
+        apply_params_to_config,
+    )
+    cfg = apply_params_to_config(
+        ExperimentConfig(microphysics="morrison"),
+        {"atm.micro.MorrisonConfig.autocon_fact": 0.4,
+         "atm.micro.MorrisonConfig.accre_enhan_fact": 3.0},
+        driver="run_amip", scalar_param_map=_ATM_SCALAR_PARAM_MAP)
+    leaf = thread_morrison_scalars(cfg, "morrison", MorrisonConfig())
+    assert (leaf.autocon_fact, leaf.accre_enhan_fact) == (0.4, 3.0)
+
+
+def test_spectral_lane_threads_the_same_scalars():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _spectral_micro_config
+    mc = _spectral_micro_config(ExperimentConfig(
+        microphysics="morrison", morrison_autocon_fact=0.5))
+    assert mc.morrison.autocon_fact == 0.5
+    assert _spectral_micro_config(ExperimentConfig(microphysics="kessler")
+                                  ).scheme == "kessler"
 
 
 def test_validate_strict_refuses_inert_or_foreign_use():
@@ -160,11 +211,3 @@ def test_cli_round_trip_and_production_deck_changes_nothing():
     assert thread_morrison_scalars(
         ExperimentConfig(microphysics="morrison", **named), "morrison",
         base) is base
-
-
-def test_params_route_maps_the_leaves():
-    from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP
-    assert _ATM_SCALAR_PARAM_MAP["atm.micro.MorrisonConfig.autocon_fact"] == (
-        "morrison_autocon_fact")
-    assert _ATM_SCALAR_PARAM_MAP["atm.micro.MorrisonConfig.accre_enhan_fact"] == (
-        "morrison_accre_enhan_fact")
