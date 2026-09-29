@@ -187,6 +187,7 @@ aerosol_ccn: true
 energy_consistent_moisture_clip: true
 
 # ---- convection ---------------------------------------------------------------
+zm_land_fraction: required  # ZM reads the land mask (c0_lnd vs c0_ocn); "none" = aquaplanet only
 convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
                             # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
                             # tau 3600,

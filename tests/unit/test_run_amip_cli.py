@@ -4587,3 +4587,18 @@ def test_zm_land_fraction_flows_to_config_and_kernel():
     from legoesm.driver.physics_pipeline import _resolve_convection
     assert _resolve_convection(cfg)[1].land_fraction == "required"
     assert _resolve_convection(cfg_aqua)[1].land_fraction == "none"
+    # The legacy AMIP export keeps the policy ("none" used to come back
+    # "required", so a reloaded aquaplanet config failed setup).
+    from legoesm.driver.config import ExperimentConfig
+    for c in (cfg, cfg_aqua):
+        assert ExperimentConfig.from_amip_config(
+            c.to_amip_config()).zm_land_fraction == c.zm_land_fraction
+
+
+def test_production_deck_pins_the_zm_land_fraction_policy():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    keys = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"),
+        build_arg_parser())
+    assert keys["convection"] == "zhang_mcfarlane"
+    assert keys["zm_land_fraction"] == "required"
