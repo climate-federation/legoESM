@@ -1080,3 +1080,33 @@ def test_driver_forwards_ic_cache_dir_to_the_fesom_initializer():
     src = inspect.getsource(run_omip.run_omip_single)
     i = src.index("init_ocean_from_fesom_mesh(")
     assert 'cache_dir=getattr(args, "ic_cache_dir", None)' in src[i:i + 600]
+
+
+def test_kpp_cfl_cap_follows_the_run_dt():
+    """KPPConfig.cfl_cap_dt_s must equal the dynamics dt (default 300 s
+    matched only the MPAS default), so the driver sets it from --dt."""
+    import inspect
+    from scripts.run import run_omip
+    cfg = build_config_from_args(parse_args(["--grid", "mpas", "--dt", "600"]))
+    assert cfg.vertical_mixing.kpp.cfl_cap_dt_s == 300.0          # config default
+    assert run_omip.with_kpp_cfl_dt(cfg, 600.0).vertical_mixing.kpp.cfl_cap_dt_s == 600.0
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index('dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]')
+    assert "run_config = with_kpp_cfl_dt(run_config, dt)" in src[i:i + 200]
+    assert src.index("vertical_mixing=run_config.vertical_mixing") > i
+
+
+def test_kpp_cfl_cap_explicit_value_disagreeing_with_dt_raises():
+    """An explicitly set KPP CFL cap that disagrees with the run dt must not
+    be silently overwritten; the effective cap is recorded in run_config.json."""
+    import inspect
+    from scripts.run import run_omip
+    cfg = build_config_from_args(parse_args(["--grid", "mpas"]))
+    vm = cfg.vertical_mixing
+    user = cfg._replace(vertical_mixing=vm._replace(
+        kpp=vm.kpp._replace(cfl_cap_dt_s=900.0)))
+    with pytest.raises(ValueError, match="must use the run dt"):
+        run_omip.with_kpp_cfl_dt(user, 600.0)
+    assert run_omip.with_kpp_cfl_dt(user, 900.0).vertical_mixing.kpp.cfl_cap_dt_s == 900.0
+    src = inspect.getsource(run_omip.run_omip_single)
+    assert '"kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s)' in src
