@@ -107,6 +107,7 @@ __param_spec__ = {
             "alpha_mevp": "numerics: mEVP stress relaxation (stability-coupled to N_mevp)",
             "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
             "T_evp": "numerics: EVP damping ratio coupled to the N_evp subcycle count (E_factor = 1/(2*T_evp*N_evp))",
+            "ocean_heat_ch_nemo": "fixed oracle constant: NEMO SI3 zch PARAMETER (icesbc.F90:321); active only under ocean_heat_flux_scheme='nemo_ustar', so a trainable leaf would be inert under the default scheme",
             "sw_transmittance_const": "constant-scheme SW transmittance, default 0.0 (off — delta_eddington computes its own) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -420,3 +421,12 @@ class SeaIceConfig(NamedTuple):
     #    to Tf (frazil).  Needs q_open_top + ocean_dz_top_m from the
     #    caller (step_sea_ice kwargs); the OMIP driver passes them.
     lead_freeze_source: str = "ice_skin"
+    # Ocean-to-ice basal sensible heat flux (new-physics path only):
+    #  * "constant" (default, unchanged): ocean_heat_transfer_coeff*max(SST-Tf,0).
+    #  * "nemo_ustar": NEMO SI3 icesbc.F90:327-386, rho0*rcp*zch*u_star*(SST-Tf)
+    #    with u_star^2 = drag_ocean*|u_ice-u_oce|^2 (|tau|/rho0 when
+    #    dynamics="none"), capped so the top cell cannot cool below Tf within
+    #    one ice step.  Needs ocean_dz_top_m (step_sea_ice kwarg).
+    ocean_heat_flux_scheme: str = "constant"
+    # NEMO zch, ocean-ice heat transfer coefficient (icesbc.F90:321 PARAMETER).
+    ocean_heat_ch_nemo: float = 0.0057

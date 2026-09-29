@@ -2854,6 +2854,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # B4 — prognostic sea ice (legoESM ice, free-drift, 1 category):
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
     "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
+    "ice_ocean_heat_scheme",
     # B4 — SSS restoring, both channels: water_flux (NEMO nn_sssr=2) enters
     # via fw.restoring, tracer is the post-step edit through
     # with_surface_salinity:
@@ -2883,6 +2884,7 @@ _FESOM_FORCED_ONLY_DESTS = (
     "dm2dc", "sw_rgb_chl", "chl_file",
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
     "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
+    "ice_ocean_heat_scheme",
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
@@ -3338,6 +3340,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         if args.ice_ocean_heat_coeff is not None:
             ice_config = ice_config._replace(
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
+        ice_config = ice_config._replace(
+            ocean_heat_flux_scheme=str(args.ice_ocean_heat_scheme))
         ice_config = ice_config._replace(
             lead_freeze_source=str(args.ice_lead_freeze_source))
         # Gap 11: named oracle exchange-coefficient set. None = unchanged.
@@ -7318,6 +7322,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "exchange — ~60-80 approximates NEMO's summer "
                         "marginal-ice-zone melt rate pending the faithful "
                         "u*-dependent scheme.")
+    p.add_argument("--ice-ocean-heat-scheme", type=str, default="constant",
+                   choices=["constant", "nemo_ustar"],
+                   help="SeaIceConfig.ocean_heat_flux_scheme for "
+                        "--prognostic-sea-ice. constant (default, unchanged): "
+                        "--ice-ocean-heat-coeff x max(SST - Tf, 0). nemo_ustar: "
+                        "NEMO SI3 icesbc.F90:327-386, rho0*cp*0.0057*u_star*"
+                        "(SST - Tf) with u_star^2 = Cd_io*|u_ice - u_ocean|^2 "
+                        "(Cd_io = the ice-ocean drag, 5e-3 under --ice-exchange "
+                        "nemo_si3), capped so the top cell cannot cool below "
+                        "freezing in one step; --ice-ocean-heat-coeff is then "
+                        "unused.")
     p.add_argument("--prognostic-sea-ice", action="store_true",
                    help="Wire legoESM's REAL prognostic sea-ice model "
                         "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
@@ -8296,6 +8311,17 @@ def main() -> int:
     # ignored (dispatch footgun) — reject whenever the flag was typed
     # EXPLICITLY, even with the 'kpp' default value (codex LOW: an explicit
     # `--mpas-vmix kpp --grid tripole` is still a user error worth surfacing).
+    if (args.ice_ocean_heat_scheme != "constant"
+            and not args.prognostic_sea_ice):
+        raise SystemExit(
+            "--ice-ocean-heat-scheme configures the prognostic sea-ice model "
+            "and requires --prognostic-sea-ice (otherwise silently unused).")
+    if (args.ice_ocean_heat_scheme != "constant"
+            and args.ice_ocean_heat_coeff is not None):
+        raise SystemExit(
+            "--ice-ocean-heat-coeff sets the 'constant' scheme's coefficient "
+            "and is unused under --ice-ocean-heat-scheme "
+            f"{args.ice_ocean_heat_scheme!r}; drop one of them.")
     if (args.ice_ocean_heat_coeff is not None
             and not args.prognostic_sea_ice):
         raise SystemExit(
@@ -9852,6 +9878,8 @@ def main() -> int:
         if args.ice_ocean_heat_coeff is not None:
             ice_config = ice_config._replace(
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
+        ice_config = ice_config._replace(
+            ocean_heat_flux_scheme=str(args.ice_ocean_heat_scheme))
         ice_config = ice_config._replace(
             lead_freeze_source=str(args.ice_lead_freeze_source))
         # Gap 11: named oracle exchange-coefficient set. None = unchanged.

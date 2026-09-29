@@ -70,6 +70,98 @@ from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 # Historical helper default: convergence only unless the caller supplies Cs.
 _NO_SHEAR_RIDGING = 0.0
 
+# --- NEMO SI3 ocean-to-ice sensible heat (icesbc.F90 ice_flx_other, 5.0.1) ---
+# epsi10: SI3's "no ice" concentration threshold (ice.F90 / par_ice).
+_NEMO_EPSI10 = 1.0e-10
+# Supercooled-cell cutoff: qsb_ice_bot = 0 once the cell holds >= 20 m of ice
+# volume per unit area (icesbc.F90:381, "arbitrary" in the source).
+_NEMO_SUPERCOOL_VT_MAX_M = 20.0
+
+
+def _ocean_to_ice_heat_flux(
+    ocean_sst,
+    config: SeaIceConfig,
+    *,
+    du_ice_ocean=None,
+    dv_ice_ocean=None,
+    tau_x=None,
+    tau_y=None,
+    ice_area_total=None,
+    ice_volume_total=None,
+    ocean_dz_top_m=None,
+    dt=None,
+):
+    """Ocean-to-ice turbulent sensible heat flux per ICE area [W/m2].
+
+    Sign: POSITIVE = heat leaves the ocean into the ice base (melts ice, cools
+    the ocean); the caller charges ``F * conc`` to the ocean.
+
+    Schemes (``config.ocean_heat_flux_scheme``, static):
+      * ``"constant"``: ``ocean_heat_transfer_coeff * max(SST - Tf, 0)``.
+      * ``"nemo_ustar"``: NEMO SI3 icesbc.F90:327-386 (5.0.1)::
+
+            zfric   = Cd_io*|u_ice - u_oce|^2      (ice dynamics on, :330-341)
+                    = |tau|/rho0                   (ice dynamics off, :343-347)
+            qsb     = zswitch*rho0*rcp*zch*sqrt(zfric)*(SST - Tf)        (:371)
+            qsb     = zswitch*MIN(qsb, -MIN(zqfr,0)/Dt/MAX(at_i,epsi10)) (:377)
+            zqfr    = rho0*rcp*e3t*(Tf - SST)                            (:363)
+            qsb     = 0 if SST < Tf and vt_i >= 20 m                     (:381)
+
+        ``zswitch = 0`` where ``at_i < epsi10``.  Cd_io is ``config.drag_ocean``
+        (NEMO uses the one ``rn_Cd_io`` for rheology AND this flux).  The
+        relative velocity arrives at the ice T points (the caller's
+        ``u_ice - ocean_u``), not NEMO's average of squared face differences.
+        ``tau_x/tau_y`` [Pa] are used only when ``config.dynamics == "none"``;
+        they are the per-category AIR-ICE bulk stress, not NEMO's ocean
+        surface stress utau/vtau (not matched).  rho0 is ``constants.rho_ocean``
+        (1025, the value our ocean's heat content uses) rather than NEMO's 1026.
+        Negative under supercooling, exactly as in NEMO.
+    """
+    scheme = config.ocean_heat_flux_scheme
+    if scheme == "constant":
+        return config.ocean_heat_transfer_coeff * jnp.maximum(
+            ocean_sst - config.T_freeze_ocean, 0.0,
+        )
+    if scheme != "nemo_ustar":
+        raise ValueError(
+            f"Unknown SeaIceConfig.ocean_heat_flux_scheme={scheme!r}; expected "
+            "one of: 'constant', 'nemo_ustar'.")
+    if ocean_dz_top_m is None or dt is None or ice_area_total is None \
+            or ice_volume_total is None:
+        raise ValueError(
+            "ocean_heat_flux_scheme='nemo_ustar' needs ocean_dz_top_m, dt, "
+            "ice_area_total and ice_volume_total (the freezing cap).")
+    # rho0 * rcp: same pair as the nemo_qlead zqfr so the cap and the lead
+    # budget agree on the top cell's heat content.
+    rho_cp = constants.rho_ocean * constants.c_p_seawater
+    if config.dynamics != "none":
+        if du_ice_ocean is None or dv_ice_ocean is None:
+            raise ValueError(
+                "ocean_heat_flux_scheme='nemo_ustar' with ice dynamics needs "
+                "the ice-ocean relative velocity (du_ice_ocean, dv_ice_ocean).")
+        zfric = config.drag_ocean * (du_ice_ocean ** 2 + dv_ice_ocean ** 2)
+    else:
+        if tau_x is None or tau_y is None:
+            raise ValueError(
+                "ocean_heat_flux_scheme='nemo_ustar' without ice dynamics needs "
+                "the surface stress (tau_x, tau_y).")
+        _t2 = tau_x ** 2 + tau_y ** 2
+        _tpos = _t2 > 0.0
+        zfric = jnp.where(_tpos, jnp.sqrt(jnp.where(_tpos, _t2, 1.0)), 0.0) \
+            / constants.rho_ocean
+    # AD-safe sqrt (zfric_umin = 0 in NEMO, so no floor).
+    _fpos = zfric > 0.0
+    ustar = jnp.where(_fpos, jnp.sqrt(jnp.where(_fpos, zfric, 1.0)), 0.0)
+    dT = ocean_sst - config.T_freeze_ocean
+    qsb = rho_cp * config.ocean_heat_ch_nemo * ustar * dT
+    zqfr = rho_cp * jnp.asarray(ocean_dz_top_m) * (-dT)
+    cap = -jnp.minimum(zqfr, 0.0) / dt / jnp.maximum(ice_area_total,
+                                                     _NEMO_EPSI10)
+    zswitch = ice_area_total >= _NEMO_EPSI10
+    qsb = jnp.where(zswitch, jnp.minimum(qsb, cap), 0.0)
+    return jnp.where(
+        (dT < 0.0) & (ice_volume_total >= _NEMO_SUPERCOOL_VT_MAX_M), 0.0, qsb)
+
 
 def grid_supports_ice_dynamics(grid) -> bool:
     """True when ``grid`` has implemented sea-ice dynamics/transport ops.
@@ -396,6 +488,18 @@ def step_sea_ice(
                 "pond conservation.  Set config.itd_remap='lipscomb2001', or "
                 "use n_categories=1."
             )
+
+    if config.ocean_heat_flux_scheme not in ("constant", "nemo_ustar"):
+        raise ValueError(
+            f"Unknown SeaIceConfig.ocean_heat_flux_scheme="
+            f"{config.ocean_heat_flux_scheme!r}; expected one of: 'constant', "
+            "'nemo_ustar'.")
+    if config.ocean_heat_flux_scheme != "constant" and not uses_new_physics(config):
+        raise ValueError(
+            f"SeaIceConfig.ocean_heat_flux_scheme="
+            f"{config.ocean_heat_flux_scheme!r} is implemented on the "
+            "new-physics (v2) thermodynamics only; the legacy dynamic/slab "
+            "paths run 'constant'.")
 
     if config.dynamics == "none" and config.n_categories == 1 and not uses_new_physics(config):
         # Original slab path — fully backward compatible
@@ -1775,6 +1879,10 @@ def _thermo_v2(
     enable_lead_freeze: bool = True,
     q_open_top=None,
     ocean_dz_top_m=None,
+    du_ice_ocean=None,
+    dv_ice_ocean=None,
+    ice_area_total=None,
+    ice_volume_total=None,
 ) -> dict:
     """Extended thermodynamics: snow + brine + SW scheme + ponds aware.
 
@@ -1914,8 +2022,14 @@ def _thermo_v2(
     # 6. Basal exchange (ocean side).  After clipping ``h`` at zero
     #    we recover the *actual* basal mass change so the FW + salt
     #    budgets don't ship more ice than the column held.
-    F_ocean = config.ocean_heat_transfer_coeff * jnp.maximum(
-        ocean_sst - config.T_freeze_ocean, 0.0,
+    F_ocean = _ocean_to_ice_heat_flux(
+        ocean_sst, config,
+        du_ice_ocean=du_ice_ocean, dv_ice_ocean=dv_ice_ocean,
+        tau_x=tau_x, tau_y=tau_y,
+        ice_area_total=conc if ice_area_total is None else ice_area_total,
+        ice_volume_total=(h * conc if ice_volume_total is None
+                          else ice_volume_total),
+        ocean_dz_top_m=ocean_dz_top_m, dt=dt,
     )
     dh_dt_basal = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
     h_after_basal = jnp.maximum(h_after_melt + dt * dh_dt_basal, 0.0)
@@ -2628,6 +2742,12 @@ def _step_dynamic_v2(
     conc_old = conc
 
     # ---- 4. Thermodynamics per category ----
+    # Ice-ocean relative velocity (post-dynamics, as SI3 calls ice_flx_other
+    # after ice_dyn) and cell totals for the nemo_ustar basal heat flux.
+    du_io = u_ice - ocean_u
+    dv_io = v_ice - ocean_v
+    at_i_tot = jnp.sum(conc, axis=-1) if is_multicat else conc
+    vt_i_tot = jnp.sum(h * conc, axis=-1) if is_multicat else h * conc
     if is_multicat:
         n_cat = h.shape[-1]
         open_water_agg = jnp.clip(1.0 - jnp.sum(conc, axis=-1), 0.0, 1.0)
@@ -2659,6 +2779,8 @@ def _step_dynamic_v2(
                 enable_lead_freeze=(k == 0),
                 q_open_top=q_open_top,
                 ocean_dz_top_m=ocean_dz_top_m,
+                du_ice_ocean=du_io, dv_ice_ocean=dv_io,
+                ice_area_total=at_i_tot, ice_volume_total=vt_i_tot,
             )
             h_list.append(result["h"])
             T_list.append(result["T"])
@@ -2762,6 +2884,8 @@ def _step_dynamic_v2(
             forcing, ocean_sst, config, U_min, dt,
             q_open_top=q_open_top,
             ocean_dz_top_m=ocean_dz_top_m,
+            du_ice_ocean=du_io, dv_ice_ocean=dv_io,
+            ice_area_total=at_i_tot, ice_volume_total=vt_i_tot,
         )
         h = result["h"]
         T_ice = result["T"]

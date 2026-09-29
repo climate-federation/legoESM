@@ -228,6 +228,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
+        ("packages/ice/legoesm/ice/sea_ice.py", "_ocean_to_ice_heat_flux"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
         # The multilayer-land bulk dispatch moved into the pluggable surface
