@@ -111,7 +111,20 @@ restart-calibration, and source-boundary predicates remain separate.
   `e8e73ecac6ed8619affe880f148e407181de4c9d642f6334069f4578b95b1aff`;
 - restart-time-level, dry-inclusion, region-overlap, interval-order,
   temperature-boundary, and terminal-ULP plants: all six FIRED;
-- validation test and citation results are recorded in the final round commit.
+- default citation gate: PASS, 274 citations, zero failures, zero unmapped,
+  and zero map-audit failures; this receipt's gate: PASS, three citations,
+  zero failures, zero unmapped, and zero map-audit failures; the shifted
+  `stprk3_stg` citation plant FIRES with `SYMBOL-NOT-AT-LINE`;
+- focused round-71/72 and citation tests: `36 passed`;
+- shared-card battery: `160 passed` with nine dtype warnings;
+- tank battery: `10 passed`;
+- wide `tests/ocean/fidelity -n 12`: 2,051 collected; reached 99% with 2,026
+  passes, five registered failures, and seven skips, then reproduced round
+  71's no-summary wrapper stall. All eight round-72 tests passed in the wide
+  run. The five failing IDs were rerun serially and reproduced the standing
+  signatures: round-51 private trace registry, SI3 `MY_SRC` provenance, four
+  worktree-stamp emitters, missing `hires_lane_surface` case-board row, and
+  round-129 stale phase-3 certification.
 
 No `packages/` file changed. GYRE, DINO, and tank trajectories therefore
 cannot move; trajectory landing gates are not applicable to this diagnostic
