@@ -97,6 +97,16 @@ MPAS_PARITY_MAX_STEPS = 8
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
+def dt_for(subdivision):
+    """Fixed-Courant timestep: 300 s at s4, halved per level (dt ~ dx).
+
+    Largest finite dt over 200 steps on 4 GPUs: s7 50, s8 25, s9 12.5,
+    s10 4.69 s (75/37.5/18.75/9.375 blow up); this law sits at or below each.
+    The old max(600*4^(4-s), 30) law went non-finite at s10.
+    """
+    return 300.0 * 2.0 ** (4 - subdivision)
+
+
 def nu_del4_for(subdivision):
     """del4 coefficient for this subdivision (shared law, hyperdiff.py)."""
     return hyperdiff_coeff(subdivision, "icosahedral")
@@ -355,7 +365,7 @@ def main() -> int:
 
     dt = args.dt
     if dt is None:
-        dt = max(600.0 * 4.0 ** (4 - args.subdivision), 30.0)
+        dt = dt_for(args.subdivision)
 
     reorder_for = args.reorder_for if args.reorder_for is not None else nd
     if reorder_for < nd:
