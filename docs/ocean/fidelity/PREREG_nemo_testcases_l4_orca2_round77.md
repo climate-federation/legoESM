@@ -25,9 +25,10 @@ are already non-bit: `ua_e` differs on 8,568 / 8,568 with maximum
 `1.3951550259711822e-06 m s-1`, while `zhup2_e` differs on 8,568 / 8,568 with
 maximum `0.015548358737760282 m`.
 
-The compiled source forms `ua_e` from the three external velocity history
-levels at `dynspg_ts.f90:460-474`, forms `zsshp2_e` and then `zhup2_e` at
-`dynspg_ts.f90:476-521`, and multiplies the two operands at
+The compiled source selects the predictor coefficients at
+`dynspg_ts.f90:460-469`, forms `ua_e` from the three external velocity history
+levels at `dynspg_ts.f90:476-485`, forms `zsshp2_e` and then `zhup2_e` at
+`dynspg_ts.f90:487-522`, and multiplies the two operands at
 `dynspg_ts.f90:530-536`. Round 18 already supplies a controlled substitution
 template for this same multiplication given NEMO's recorded entry; round 77
 reuses the round-76 independent production trace, admitted advective-mean
