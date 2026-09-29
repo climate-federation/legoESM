@@ -329,7 +329,30 @@ to take.  Written down at the line rather than left implicit.
 
 ---
 
-## 9.  A finding this round is NOT acting on
+## 9.  Everything that had to stay where it was
+
+Every row below was measured on this round's own tree.  Two of them were taken
+at `a7e853e49` rather than at the final tip; `git diff a7e853e49 HEAD --
+packages/ocean/legoesm/ocean/experiments/dino.py` contains no non-comment
+line, and the other later changes are the gate, its test and this receipt, so
+no model number can have moved between them.
+
+| gate | result |
+|---|---|
+| GYRE ladder, `nemo_testcase_l2_gyre_phase3_gate.py --trajectory-only --max-step 10` | run at BOTH the pre-repair tip `16d050f62` and the repaired tree `a7e853e49`; the two reports are **equal field for field** with only the worktree stamp differing, `status DEBT`, first over bar `{T,S,u,v,ssh}` at kt 3, barotropic `{uu_b,vv_b}` at kt 2 |
+| — its digest | `7ba1dc98bf175544` on both, under the recipe "sha256 of the report JSON with the `worktree` block removed, `sort_keys=True`, compact separators, first 16 hex".  The `7ba15556de2de841` quoted by earlier receipts is a DIFFERENT canonicalization that could not be reproduced here, so the field-for-field equality above is what carries the claim, not the digest |
+| GYRE from-rest year, `--member 0 --days 360 --snap-steps 6 --tag year`, scored by `nemo_testcase_l2_gyre_year_owners.py --day-gap --days 30,240,360` | day 30 `2.3277e-06` K, day 240 `6.5862e-05` K, day 360 `2.6710e-03` K — equal to the certified `2.3276772050683987e-06` / `6.586171881479517e-05` / `0.002670992385329469` to every printed digit |
+| LOCK_EXCHANGE-zco tank, `--max-step 10 --continue-after-first` | `DEBT`, first over bar `{u}` at kt 4, 50 of 50 rows — the certified row |
+| OVERFLOW-zps tank, same | `DEBT`, first over bar `{T,u}` at kt 2, 50 of 50 rows — the certified row, stamped at the final tip `21c94fc61` |
+| the new month gate, end to end and opted in | `PASS`: `2.040288765e-03` K against a bar of `2.244317642e-03` K, reproducing the repair measurement to the last digit on a second independent run |
+
+The GYRE numbers cannot move, and the reason is structural rather than lucky:
+the only production line this round changes is one value in `DINO_RECIPES`,
+which no GYRE or tank path reads.  They were measured anyway.
+
+---
+
+## 10.  A finding this round is NOT acting on
 
 `nemo_testcase_recipe.py`'s card validator requires
 `nemo_prognostic_barotropic_state=True` for every NEMO test-case card.  That is
@@ -339,7 +362,7 @@ line, reported, not started.
 
 ---
 
-## 10.  Review
+## 11.  Review
 
 Both reviewers ran adversarially on the diff, and both came back negative on
 the first pass.  Everything they found is fixed or written down; nothing was
@@ -394,7 +417,7 @@ prognostic pair for an MLF card.
 
 ---
 
-## 11.  Choices made this round
+## 12.  Choices made this round
 
 | choice | status |
 |---|---|
