@@ -146,6 +146,10 @@ class RichardsOutput(NamedTuple):
     runoff_subsurface: jnp.ndarray  # (ncol,) subsurface runoff [kg/m2/s]
     n_iter: jnp.ndarray        # (ncol,) always equals max_iter (fixed-iteration solver)
     surface_water: jnp.ndarray  # (ncol,) updated surface ponding depth [m]
+    refill: jnp.ndarray        # (ncol,) part of the imposed draw [m] the column did
+    #   NOT supply (the psi dry floor refilled it): the caller must not report it
+    water_created: jnp.ndarray  # (ncol,) remaining signed budget residual [m]:
+    #   dStorage - (flux_top - sum(sink dz) - runoff) dt - refill
 
 
 def solve_richards(
@@ -245,8 +249,9 @@ def solve_richards(
     # the pond), _avail_rate < 0 and the cap forces q01 < 0 — i.e. water flows soil ->
     # surface -> atmosphere.  That is the intended BARE-SOIL EVAPORATION: with no pond
     # the demand is met from the soil, and the cell reduces to the old Neumann flux_top
-    # top BC (q01 == flux_top).  flux_top is already supply-limited upstream by the
-    # top-layer evaporative-resistance throttle, so this does not over-extract.
+    # top BC (q01 == flux_top).  A demand the dry column cannot supply ends at the
+    # psi dry floor, which refills it; that refill is returned as ``refill`` so the
+    # caller reports only the water the soil actually gave.
     _avail_rate = h_s0 / dt + flux_top
 
     def _surface_terms(h_s, psi0):
@@ -528,8 +533,10 @@ def solve_richards(
     # needed -- with a Picard convergence check / more iterations, not a
     # non-physical theta clip.  psi_final is left as-is (the O(slack) psi/theta
     # mismatch re-equilibrates on the next step's Picard solve, as before).
-    theta_r = hydro_config.theta_r
-    avail = jnp.maximum((theta_final - theta_r) * dz[None, :], 0.0)   # (ncol,nlayers) [m]
+    # Available down to the solver's dry floor (not theta_r): a debit below the
+    # floor would be refilled by the next step's psi clamp, i.e. created water.
+    theta_floor = theta_from_psi(_psi_dry_floor, hydro_config)
+    avail = jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0)  # (ncol,nlayers) [m]
     avail_total = jnp.sum(avail, axis=1)                             # (ncol,) [m]
     debit_frac = jnp.minimum(
         pond_deficit / jnp.maximum(avail_total, 1e-30), 1.0)         # (ncol,) in [0,1]
@@ -558,6 +565,51 @@ def solve_richards(
     runoff_surface_kgm2s = runoff_surface * constants.rho_water
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
+    # Column water budget of the imposed fluxes (pond + soil storage) [m]; > 0 =
+    # water the solve created.  Two sources, handled differently:
+    #  * refill: a draw (net upward top flux, root sink) the dry column could not
+    #    supply, refilled by the psi dry floor -- only up to the draws on layers
+    #    the floor clamp holds at the end of the solve.  The soil
+    #    did not give that water, so the caller must not report it as evaporation.
+    #  * everything else > 0: Picard non-convergence (from a floor-pinned layer,
+    #    e.g. drizzle on a dry crust, ~1e-2 kg/m2 per step measured; tiny on a
+    #    wet column).  That water went INTO the soil, so it is taken back out of
+    #    it, down to the dry floor, with psi recomputed so the next solve starts
+    #    consistent.  Whatever the column cannot give back stays in water_created
+    #    (signed diagnostic; a negative residual is left alone).
+    def _budget(theta_end):
+        return (jnp.sum((theta_end - theta_n) * dz[None, :], axis=1)
+                + (surface_water_new - h_s0)
+                - (flux_top - jnp.sum(sink * dz[None, :], axis=1)
+                   - runoff_surface - runoff_subsurface) * dt)
+
+    created = _budget(theta_final)
+    # Only draws on layers the floor clamp holds can have been refilled.
+    pinned = (psi_final <= _psi_dry_floor).astype(created.dtype)       # (ncol, nlayers)
+    draw = (jnp.maximum(-flux_top, 0.0) * pinned[:, 0]
+            + jnp.sum(jnp.maximum(sink, 0.0) * dz[None, :] * pinned, axis=1)) * dt
+    refill = jnp.clip(created, 0.0, draw)
+    excess = jnp.maximum(created - refill, 0.0)
+    # Unsaturated layers only (psi < 0): psi_from_theta has no inverse for the
+    # elastic storage above saturation, so a saturated layer is never debited.
+    unsat_avail = jnp.where(
+        psi_final < 0.0, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
+    take_frac = jnp.minimum(
+        excess / jnp.maximum(jnp.sum(unsat_avail, axis=1), 1e-30), 1.0)
+    take = unsat_avail * take_frac[:, None]                            # [m] per layer
+    theta_final = theta_final - take / dz[None, :]
+    # Masked-out layers get a mid-curve theta so the unused psi_from_theta branch
+    # stays finite (no NaN cotangent from saturated layers under reverse mode).
+    theta_safe = jnp.where(take > 0.0, theta_final,
+                           0.5 * (theta_floor + hydro_config.theta_sat))
+    psi_final = jnp.where(take > 0.0, psi_from_theta(theta_safe, hydro_config),
+                          psi_final)
+    # theta keeps the exact debit (water conserved on every curve).  PDI / Lu
+    # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
+    # the debited layer's psi carries that pre-existing inverse error; resetting
+    # theta from psi instead destroyed ~0.3 kg/m2 per step on a dry column.
+    water_created = _budget(theta_final) - refill
+
     return RichardsOutput(
         psi_new=psi_final,
         theta_new=theta_final,
@@ -565,6 +617,8 @@ def solve_richards(
         runoff_subsurface=runoff_subsurface_kgm2s,
         n_iter=n_iter_final,
         surface_water=surface_water_new,
+        refill=refill,
+        water_created=water_created,
     )
 
 
