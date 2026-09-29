@@ -123,6 +123,12 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
         "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/fldread.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/restart.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/dtatsd.f90"),
@@ -1279,6 +1285,18 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:151-152': [
         'CALL sbc        ( kstp, Nbb, Nbb )',
         'CALL l4_dump_ocean_surface_input( kstp, Nbb )', 2],
+    # --- ORCA2 card round 71: independent-month clock and terminal state ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90:235-246': [
+        'IF( sd(jf)%ln_tint ) THEN',
+        'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb) + ztinta * sd(jf)%fdta(:,:,:,iaa)',
+        12],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/restart.f90:170-184': [
+        "CALL iom_rstput( kt, nitrst, numrow, 'rdt', rn_Dt )",
+        "IF( PRESENT(Kaa) )   CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+        15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:223-271': [
+        '! Stage 3 :',
+        'IF( ln_sto_eos )   CALL sto_rst_write( kstp )', 49],
     # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
