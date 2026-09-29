@@ -122,7 +122,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   --ew-cyclic-overlap \
   --mle --mle-ce 0.06 \
   --dm2dc --sw-rgb-chl \
-  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
+  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --freshwater-closure real_freshwater --sss-restore-channel water_flux --sss-restore-normalization live_s \
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \
   --prognostic-ice-dynamics free_drift --ice-lead-freeze-source nemo_qlead \
   --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
