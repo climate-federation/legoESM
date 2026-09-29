@@ -4012,6 +4012,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_ice_snow_d_auto", None)),
         ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
          getattr(config, "morrison_hom_ice_nuc_N", None)),
+        ("morrison_autocon_fact", "autocon_fact",
+         getattr(config, "morrison_autocon_fact", None)),
+        ("morrison_accre_enhan_fact", "accre_enhan_fact",
+         getattr(config, "morrison_accre_enhan_fact", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4023,6 +4027,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _flavor = getattr(config, "morrison_flavor", None)
     if _flavor in (None, "mg"):
         _flavor = None
+    _wrs = getattr(config, "morrison_warm_rain_scheme", None)
+    if _wrs == _ExpCfg._field_defaults["morrison_warm_rain_scheme"]:
+        _wrs = None
     _sed_sub = getattr(config, "morrison_sed_cfl_substeps",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
     _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
@@ -4053,7 +4060,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _graupel = (None if _graupel
                 is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None and _graupel is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None
+            and _wrs is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4063,7 +4071,7 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict,
-        morrison_do_graupel=_graupel)
+        morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs)
 
 
 def _resolve_microphysics(config):

@@ -319,10 +319,12 @@ def morrison_microphysics(
     # Warm-rain autoconversion + accretion. KK2000 (default) is the SAM
     # M2005 oracle scheme; Seifert-Beheng retained for back-compat.
     if config.warm_rain_scheme == "kk2000":
-        dq_c_au, dN_r_au, x_c = autoconversion_kk2000(q_c_ic, N_c_eff, rho, dt)
+        dq_c_au, dN_r_au, x_c = autoconversion_kk2000(
+            q_c_ic, N_c_eff, rho, dt, fact=config.autocon_fact)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
-        dq_c_ac = accretion_kk2000(q_c_ic, q_r_ic) * cf_eff
+        dq_c_ac = accretion_kk2000(
+            q_c_ic, q_r_ic, fact=config.accre_enhan_fact) * cf_eff
     elif config.warm_rain_scheme == "seifert_beheng":
         dq_c_au, dN_r_au, x_c = autoconversion_sb(
             q_c_ic, N_c_eff, rho, config.k_au, config.x_star,

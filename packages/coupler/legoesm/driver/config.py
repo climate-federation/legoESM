@@ -1865,6 +1865,10 @@ class ExperimentConfig(NamedTuple):
     # carries no graupel; False routes frozen rain to snow and drops the
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
+    # Morrison warm rain (appended at the END: positional ABI).
+    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
+    morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
+    morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
 
     # --- ZM / CLUBB tunables (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS) ------
     # APPENDED AT THE TUPLE END (positional ABI).  None = the scheme default.
@@ -3585,6 +3589,8 @@ class ExperimentConfig(NamedTuple):
             ("morrison_fall_a_i", 230.0, 6300.0),
             ("morrison_ice_snow_d_auto", 8.0e-5, 8.0e-4),
             ("morrison_hom_ice_nuc_N", 1.0e4, 1.0e7),
+            ("morrison_autocon_fact", 0.1, 20.0),
+            ("morrison_accre_enhan_fact", 0.1, 10.0),
         ):
             _v = getattr(self, _f)
             if not math.isfinite(_v) or not (_lo <= _v <= _hi):
@@ -3618,6 +3624,25 @@ class ExperimentConfig(NamedTuple):
                 "morrison_hom_ice_nuc_N override requires "
                 "homogeneous_ice_nucleation=True — the leaf is consumed only "
                 "by the hom-nucleation branch and would be silently inert.")
+        _wrs = ("kk2000", "seifert_beheng", "seifert_beheng_sb2001")
+        if self.morrison_warm_rain_scheme not in _wrs:
+            raise ValueError(
+                f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
+                f"unknown; choose one of {_wrs}.")
+        if (self.morrison_warm_rain_scheme != "kk2000"
+                and self.microphysics != "morrison"):
+            raise ValueError(
+                f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
+                f"requires microphysics='morrison' (got {self.microphysics!r}).")
+        # The two warm-rain factors are read ONLY by the kk2000 branch.
+        _kk_only = [f for f in ("morrison_autocon_fact",
+                                "morrison_accre_enhan_fact")
+                    if f in _morrison_touched]
+        if _kk_only and self.morrison_warm_rain_scheme != "kk2000":
+            raise ValueError(
+                f"{_kk_only} require morrison_warm_rain_scheme='kk2000' "
+                f"(got {self.morrison_warm_rain_scheme!r}); they would be "
+                "silently inert.")
         if self.morrison_flavor not in ("mg", "sam"):
             raise ValueError(
                 f"morrison_flavor={self.morrison_flavor!r} unknown; choose "

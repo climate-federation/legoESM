@@ -130,6 +130,13 @@ morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # The graupel-off arm is this deck plus
                             # --no-morrison-do-graupel; this value stays
                             # until the user decides (2026-09-24).
+morrison_warm_rain_scheme: kk2000  # NAMED, equals the code default (was an
+                                   # unrecorded default).  NOTE: CAM6 MG2's
+                                   # kk2000 is 0.01*1350*qc^2.47*Nc^-1.1
+                                   # (micro_mg_utils.F90); this port is
+                                   # 1350*qc^2.47*Nc^-1.79 (SAM/E3SM form).
+morrison_autocon_fact: 1.0         # kk2000 autoconversion multiplier (1 = unscaled)
+morrison_accre_enhan_fact: 1.0     # kk2000 accretion multiplier (MG2 accre_enhan)
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
