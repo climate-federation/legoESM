@@ -256,16 +256,17 @@ def test_classical_zm_rollout_gets_the_era5_land_mask(monkeypatch):
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sig = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     calls = []
+    era5_cfg, ds = object(), object()   # the evaluator's store and dataset
 
-    def fake_era5(g):
-        calls.append(g.n_lat)
+    def fake_era5(g, config=None, *, ds=None):
+        calls.append((g.n_lat, config, ds))
         return jnp.where(jnp.asarray(g.lat2d) > 0.0, 1.0, 0.0)
 
     monkeypatch.setattr(sp, "era5_land_fraction", fake_era5)
     rollout_fn, _dt = mod._build_rollout_fn(
         "classical", AIMIPClassicalParams.from_defaults(), cfg, spec_cfg,
-        grid, sig, spec_cfg.pe_config, None, None)
-    assert calls == [grid.n_lat]
+        grid, sig, spec_cfg.pe_config, None, None, era5_cfg=era5_cfg, ds=ds)
+    assert calls == [(grid.n_lat, era5_cfg, ds)]
     shp = (grid.n_lat, grid.n_lon, spec_cfg.n_levels)
     state = isothermal_rest_state_spectral(
         grid, sig, T_init=290.0, p_s_init=1.0e5,

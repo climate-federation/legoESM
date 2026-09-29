@@ -66,9 +66,10 @@ def land_fraction_for_columns(grid, ncol, scheme_config=None):
     if getattr(scheme_config, "land_fraction", None) == "none":
         # numpy, not jnp: inside a jit trace a jnp op on a concrete array is
         # staged into the trace and bool() of it raises (measured on the MPAS
-        # step).  A traced mask is checked at run time instead: a debug
-        # callback is side-effecting, so it survives jit/DCE and its raise
-        # aborts the call.
+        # step).  A traced mask is checked at run time instead, by a debug
+        # callback (kept by jit; its raise aborts the call -- tested under
+        # jit).  JAX allows transformations to drop or repeat debug
+        # callbacks, so this is a tripwire, not a guarantee, off that path.
         if lf is not None:
             if isinstance(lf, jax.core.Tracer):
                 jax.debug.callback(_refuse_aquaplanet_land, lf)

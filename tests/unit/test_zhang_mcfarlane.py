@@ -462,14 +462,15 @@ def test_hydro_bridge_routes_zm_net_rain_to_surface_precip():
     assert "q_r" not in tt
     dq_c = tt["q_c"].data
     assert bool((dq_c >= 0.0).all()), "q_c must receive only the detrained cloud water"
-    # Booking guard only (a mis-routed rain field is an O(1) error). The exact
-    # column budget is asserted, and currently xfails, in the test below.
+    # Ratchet at the measured residual (1.19e-7 of the precipitation, x64):
+    # any growth fails here. The exact budget is asserted, and currently
+    # xfails, in the test below, which names the open defect.
     dp = sigma.layer_thickness_dp(state.p_s.data)
     sink = -jnp.sum((tt["q_v"].data + dq_c) * dp, axis=-1) / constants.g
-    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=1e-3)
+    np.testing.assert_allclose(np.asarray(precip), np.asarray(sink), rtol=2e-7, atol=1e-14)
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "OPEN: the ZM water budget misses by 1.19e-7 of the precipitation on the "
     "hydro-bridge fixture (x64). NOT the zm_conv_evap flux clip: removing it "
     "leaves the residual unchanged. It is already inside zm_convr: column "
