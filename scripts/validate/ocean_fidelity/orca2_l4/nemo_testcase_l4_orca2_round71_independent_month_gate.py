@@ -355,6 +355,8 @@ def run_month(
     restart_ledger: Path,
     ten_step_root: Path,
     ten_step_reference: Path,
+    *,
+    temperature_observer=None,
 ) -> dict[str, object]:
     """Advance the production ORCA2 card and return terminal score evidence."""
     import jax
@@ -396,6 +398,8 @@ def run_month(
         consumed += 2
         freshwater, surface = ladder._surface_forcings(card, deck_root, fields, kt)
         state = model.step(state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
+        if temperature_observer is not None and kt in (10, STEPS):
+            temperature_observer(kt, state)
         if kt <= 10:
             old_fields = ladder.assemble_surface_fields(ten_step_root, kt)
             comparisons, old_only = validate_surface_schema_calibration(
