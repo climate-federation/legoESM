@@ -143,6 +143,9 @@ class DycoreConfig(NamedTuple):
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
+    # Cube-vertex halo corner fill (grids.halo.CORNER_FILL_MODES).  "avg" =
+    # the current behaviour; applied at model build.  Inert off the cube.
+    corner_fill: str = "avg"
     # Scale on the 2nd-order Laplacian viscosity A_h (see compute_diffusion).
     # The legacy A_h=0.05*dx^2/dt over-damped resolved baroclinic eddies on a
     # ~5 h timescale (faster than their ~1-2 day growth), suppressing the
@@ -788,8 +791,8 @@ class ExperimentConfig(NamedTuple):
     cloud_cap_floor_q_c: float | None = None
     # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
     # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
-    # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
-    # calendar clock, byte-identical).
+    # its fresh albedo. None => LandAlbedoConfig default (5000 K, BATS;
+    # 0.0 selects the calendar clock).
     snow_age_activation_K: float | None = None
     # Snow-albedo age e-folding time [days].  None => the calibration's value
     # (3.674 d under land_calibrated_physics, 11.64 d otherwise).
@@ -1977,6 +1980,10 @@ class ExperimentConfig(NamedTuple):
         elif d.fv3_duo_window_pad is not None:
             errors.append(
                 "dycore.fv3_duo_window_pad given without dycore.fv3_duo_windows")
+        from legoesm.grids.halo import CORNER_FILL_MODES
+        if d.corner_fill not in CORNER_FILL_MODES:
+            errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
+                          f"got {d.corner_fill!r}")
         if d.fv3_duo_column_lane:
             if d.discretization != "fv3_duo":
                 errors.append(

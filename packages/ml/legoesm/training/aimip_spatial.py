@@ -369,17 +369,19 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         return sum(f.coeffs.size for f in self.fields.values())
 
 
-def era5_land_fraction(grid) -> jax.Array:
-    """ERA5 land-sea mask of the AIMIP store on ``grid``, shape (n_lat, n_lon).
+def era5_land_fraction(grid, era5_config=None, *, ds=None) -> jax.Array:
+    """ERA5 land-sea mask on ``grid``, shape (n_lat, n_lon).
 
-    Regridded exactly as the WB classical arm feeds it to ZM.  Not
-    ``phis > 0``: on the smoothed orography that marked 72 % of T21 columns
-    as land.
+    Read from ``era5_config``'s store (default: the WB2 store) or from an
+    already-open ``ds``, and regridded exactly as the WB classical arm feeds
+    it to ZM.  Not ``phis > 0``: on the smoothed orography that marked 72 %
+    of T21 columns as land.
     """
     from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
     from legoesm.training.scale_build import prescribed_surface_planes
 
-    sl = load_era5_slice(TrainingERA5Config(load_land_frac=True), 0)
+    cfg = (era5_config or TrainingERA5Config())._replace(load_land_frac=True)
+    sl = load_era5_slice(cfg, 0, ds=ds)
     return prescribed_surface_planes(sl, grid)["land_frac"]
 
 

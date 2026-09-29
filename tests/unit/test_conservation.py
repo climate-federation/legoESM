@@ -390,7 +390,8 @@ def _mixed_water_state():
 def test_borrow_conserves_every_species_column_integral():
     tracers, T, dp = _mixed_water_state()
     out, T_out = apply_water_positivity(
-        tracers, T, dp, conservative=True, energy_consistent=False)
+        tracers, T, dp, conservative=True, energy_consistent=False,
+        area=1.0)
     # T untouched by the borrow (frozen-MSE-neutral, Claim A)
     assert jnp.allclose(T_out, T)
     for k in tracers:
@@ -405,7 +406,8 @@ def test_hard_floor_energy_consistent_conserves_frozen_mse_incl_ice():
     tracers, T, dp = _mixed_water_state()
     h_pre = _frozen_mse_cell(tracers, T)  # per-cell, BEFORE floor
     out, T_out = apply_water_positivity(
-        tracers, T, dp, conservative=False, energy_consistent=True)
+        tracers, T, dp, conservative=False, energy_consistent=True,
+        area=1.0)
     h_post = _frozen_mse_cell(out, T_out)
     for k in out:
         assert jnp.all(out[k].data >= 0.0), k
@@ -419,7 +421,8 @@ def test_plain_floor_breaks_frozen_mse_nonvacuity():
     tracers, T, dp = _mixed_water_state()
     h_pre = _frozen_mse_cell(tracers, T)
     out, T_out = apply_water_positivity(
-        tracers, T, dp, conservative=False, energy_consistent=False)
+        tracers, T, dp, conservative=False, energy_consistent=False,
+        area=1.0)
     assert jnp.allclose(T_out, T)  # plain floor leaves T alone
     h_post = _frozen_mse_cell(out, T_out)
     # vapour floor at level 1 injects +L_v*3e-4; ice floor injects -L_f*...:

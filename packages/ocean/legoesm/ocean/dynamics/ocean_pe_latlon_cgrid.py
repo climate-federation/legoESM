@@ -4391,7 +4391,9 @@ def _bc_external_surface_forcing(
         if _sf_q_net is not None:
             from legoesm.ocean.eos import c_sw as _c_sw
             _heat_capacity = _c_sw if c_sw is None else c_sw
-            dz_0_T_q = jnp.asarray(z_coord.dz_ref[0], dtype=T.dtype) * J
+            # Live top thickness (partial top cells included): the same
+            # geometry the shortwave kernels deposit on, so the column closes.
+            dz_0_T_q = jnp.asarray(h_k[..., 0], dtype=T.dtype)
             inv_rho_csw_dz = 1.0 / (
                 jnp.asarray(rho_0, dtype=T.dtype)
                 * jnp.asarray(_heat_capacity, dtype=T.dtype)
@@ -4461,9 +4463,11 @@ def _bc_external_surface_forcing(
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
+                # Live geometry: no light in below-seabed partial cells, the
+                # seabed remainder goes to the deepest wet cell.
                 sw_tend = shortwave_penetration_tendency(
                     sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
-                    rho_0=float(rho_0),
+                    rho_0=float(rho_0), dz_live=h_k,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif _sf_sw is not None and _sf_chl is not None:
@@ -4527,6 +4531,7 @@ def _bc_external_surface_forcing(
                         z_coord.z_half_ref,
                         J,
                         rho_0=float(rho_0),
+                        dz_live=h_k,
                     )
                     dT_target = dT_target + sw_tend * mask_3d
                 # On the NEMO selector the shared physics pipeline owns the

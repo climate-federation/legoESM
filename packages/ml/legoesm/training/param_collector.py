@@ -45,7 +45,6 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.snow_bands",
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
-    "legoesm.ocean.physics.bottom_drag.config",
     "legoesm.ice.config",
     "legoesm.coupler.config",
     "legoesm.coupler.coupled_latlon_band",

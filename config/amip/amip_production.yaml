@@ -57,6 +57,8 @@ vertical_coord: cam_l32     # CAM6: hyai/hybi verbatim, p_top 2.255 hPa
 discretization: mpas
 dt: 112.5
 precision: fp64
+corner_fill: avg                     # cube-vertex halo fill; inert on MPAS,
+                                     # pinned so the run records it
 a_h_scale: 0.375
 mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # 2.3-10.2 hPa (the Sundqvist/L36 deck: 3 layers on
@@ -187,6 +189,7 @@ aerosol_ccn: true
 energy_consistent_moisture_clip: true
 
 # ---- convection ---------------------------------------------------------------
+zm_land_fraction: required  # ZM reads the land mask (c0_lnd vs c0_ocn); "none" = aquaplanet only
 convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
                             # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
                             # tau 3600,

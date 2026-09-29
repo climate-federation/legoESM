@@ -65,7 +65,7 @@ _ATMOSPHERE_KEYS: frozenset[str] = frozenset({
     "discretization",
     "time_integrator",
     "dt_seconds",
-    "hyperdiffusion_coeff",
+    "hyperdiff_scale",
     # Live LOWEST-precedence fallback for the radiation scheme, behind the
     # top-level ``radiation.scheme`` block and ``physics.radiation``.  It is
     # mapped (unlike the retired keys), so it must be allowed -- omitting it
@@ -78,6 +78,11 @@ _ATMOSPHERE_KEYS: frozenset[str] = frozenset({
 # user who wrote one had every reason to think it worked: they were documented
 # in DEFAULT_CONFIG and (for advection/equations) shipped in the templates.
 _ATMOSPHERE_RETIRED: dict[str, str] = {
+    "hyperdiffusion_coeff": (
+        "renamed to 'hyperdiff_scale': it was always a dimensionless multiplier "
+        "on the scheme's hyperdiffusion, not a coefficient.  Its old default "
+        "0.0 switched biharmonic damping off; the new default is 1.0"
+    ),
     "equations": (
         "the legacy 'equations' key never reached ExperimentConfig on this "
         "path (DEFAULT_CONFIG always supplied 'dynamics', so the axis-based "
@@ -137,6 +142,16 @@ def _normalize_dynamics(raw: str) -> str:
         )
         return canonical
     return raw
+
+
+# Keys DEFAULT_CONFIG used to declare that nothing ever read.  A config that
+# still sets one raises, so nobody believes it changed the run.
+_REMOVED_KEYS: dict[tuple[str, str], str] = {
+    ("conservation", "fix_energy"): (
+        "it was never read: no energy fixer ran whatever its value"),
+    ("output", "format"): (
+        "it was never read; the checkpoint format is output.checkpoint_format"),
+}
 
 
 def _require_known_keys(
@@ -217,26 +232,24 @@ DEFAULT_CONFIG = {
         # would have silently pinned EVERY nested config to ssp_rk3.
         "time_integrator": "auto",
         "dt_seconds": 600,          # 10 minutes
-        "hyperdiffusion_coeff": 0.0,
+        "hyperdiff_scale": 1.0,     # dimensionless multiplier on the scheme hyperdiffusion
     },
     "conservation": {
         "fix_mass": True,
-        "fix_energy": True,
     },
     "time": {
         "duration_hours": 120,     # 5 days
         "output_interval_hours": 6,
     },
     "output": {
-        "format": "zarr",
         "path": "output/",
     },
     "hardware": {
+        # No precision mode/dynamics/conservation default: a default "mode"
+        # would override a user's per-component request.  Unset resolves to
+        # fp32 (runtime.config.precision_mode_from_yaml_config).
         "precision": {
-            "mode": "fp32",  # fp32, fp64, mixed, mixed_fp64_storage
-            "dynamics": "float32",
             "ml": "bfloat16",
-            "conservation": "float64",
         },
         "devices": "auto",
         "parallelism": {
@@ -332,6 +345,7 @@ class Config:
         sub-config assembly and field defaulting belong to ``from_dict``.
         """
         from legoesm.driver.config import experiment_config_from_dict
+        from legoesm.runtime.config import precision_mode_from_yaml_config
 
         d = self._data
         atm = d.get("atmosphere", {})
@@ -353,6 +367,10 @@ class Config:
         # (``convectoin: bechtold``) or the canonical-but-wrong spelling
         # (``cloud_scheme:`` instead of ``clouds:``) would be dropped in silence
         # and the run would proceed on defaults.
+        for (blk, key), why in _REMOVED_KEYS.items():
+            if key in (d.get(blk) or {}):
+                raise ValueError(
+                    f"{blk}.{key} was removed and did nothing: {why}.  Delete it.")
         physics = _require_known_keys(physics, "physics", _PHYSICS_KEYS)
         atm = _require_known_keys(
             atm, "atmosphere", _ATMOSPHERE_KEYS, _ATMOSPHERE_RETIRED
@@ -369,6 +387,12 @@ class Config:
                 "physics.forcing must be one of ('none', 'held_suarez'), got "
                 f"{_forcing!r}"
             )
+
+        _out_h = float(time_cfg.get("output_interval_hours", 6))
+        if not _out_h > 0.0:  # also rejects NaN
+            raise ValueError(
+                f"time.output_interval_hours must be > 0, got {_out_h!r}; "
+                "it sets the diagnostic output cadence.")
 
         canonical = {
             "grid": {
@@ -390,7 +414,9 @@ class Config:
                     atm.get("discretization", "cdgrid")
                 ),
                 "dt": float(atm.get("dt_seconds", 600)),  # dt_seconds -> dt
-                "hyperdiff_scale": float(atm.get("hyperdiffusion_coeff", 1.0)),
+                "hyperdiff_scale": float(atm.get(
+                    "hyperdiff_scale",
+                    DEFAULT_CONFIG["atmosphere"]["hyperdiff_scale"])),
                 "conservation_fixer": fix_mass,
                 "fix_mass": fix_mass,
                 # Declared in DEFAULT_CONFIG and written by the experiment
@@ -402,7 +428,7 @@ class Config:
             },
             "output": {
                 "output_dir": output_cfg.get("path", ""),
-                "diag_days": max(1, int(time_cfg.get("output_interval_hours", 6) / 24)),
+                "diag_days": _out_h / 24.0,
                 "checkpoint_days": int(output_cfg.get("checkpoint_days", 0)),
                 "monthly_means": bool(output_cfg.get("monthly_means", False)),
                 "cmip_output": bool(output_cfg.get("cmip_output", False)),
@@ -410,6 +436,7 @@ class Config:
                 "checkpoint_format": output_cfg.get("checkpoint_format", "npz"),
             },
             "days": int(time_cfg.get("duration_hours", 120) / 24),
+            "precision": precision_mode_from_yaml_config(self),
             "start_day": float(time_cfg.get("start_day", 0.0)),
             "seed": int(d.get("seed", 0)),  # master RNG seed (reproducibility)
             "dataset": forcing.get("dataset", "analytical"),
