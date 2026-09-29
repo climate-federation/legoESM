@@ -40,7 +40,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from legoesm.core.nonlinear import make_implicit_newton_solver
-from legoesm.land.canopy.config import VALID_LE_MODULES, CanopyConfig
+from legoesm.land.canopy.config import RH_CAP_WIDTH_MAX, VALID_LE_MODULES, CanopyConfig
 from legoesm.land.canopy.energy_balance import (
     canopy_air_update,
     canopy_met_variables,
@@ -540,10 +540,10 @@ def solve_canopy_closure(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
-    if not config.rh_cap_smoothing_width > 0.0:
-        raise ValueError("rh_cap_smoothing_width must be > 0 (the smooth "
-                         "relative-humidity cap divides by it), got "
-                         f"{config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
+        raise ValueError("rh_cap_smoothing_width must be in "
+                         f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
+                         f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
@@ -578,10 +578,10 @@ def solve_canopy_closure_diag(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
-    if not config.rh_cap_smoothing_width > 0.0:
-        raise ValueError("rh_cap_smoothing_width must be > 0 (the smooth "
-                         "relative-humidity cap divides by it), got "
-                         f"{config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
+        raise ValueError("rh_cap_smoothing_width must be in "
+                         f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
+                         f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,

@@ -554,9 +554,10 @@ class RRTMGP:
       aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
-      mcica_cloud_fraction: jnp.ndarray | None = None,
       sw_optical_field_only: bool = False,
       lw_optical_field_only: bool = False,
+      *,
+      mcica_cloud_fraction: jnp.ndarray | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -876,6 +877,11 @@ class RRTMGP:
                   "mcica_cloud_fraction takes in-cloud paths and its own "
                   "sampling; it cannot be combined with cloud_fraction "
                   "optical-depth scaling or separate longwave paths")
+          if sw_optical_field_only or lw_optical_field_only:
+              raise ValueError(
+                  "mcica_cloud_fraction samples clouds per g-point inside the "
+                  "flux solve; the optical-field-only outputs would return "
+                  "unsampled in-cloud optics")
           from legoesm.atmosphere.physics.clouds.subcolumns import (
               generate_subcolumns)
 

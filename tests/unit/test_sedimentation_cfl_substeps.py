@@ -963,3 +963,12 @@ def test_early_exit_columns_with_different_counts_match_their_own_sequence(scale
         np.testing.assert_allclose(np.asarray(sub[sl]), np.asarray(tend), rtol=_RTOL,
                                    atol=_RTOL * float(jnp.abs(tend).max()))
         np.testing.assert_allclose(np.asarray(p_sub[sl]), np.asarray(sfc), rtol=_RTOL, atol=0)
+
+
+def test_empty_column_batch_returns_empty_outputs():
+    """The early exit takes max(nstep) over columns; an empty batch must not
+    raise (codex: jnp.max of an empty array has no identity)."""
+    q = jnp.zeros((0, 20)); rho = jnp.ones((0, 20)); Vt = jnp.ones((0, 20)); dz = jnp.ones((0, 20))
+    tend, sfc = sedimentation_tendency(q, rho, Vt, dz, dt=10.0, return_surface_flux=True,
+                                       n_substeps_max=8)
+    assert tend.shape == (0, 20) and sfc.shape == (0,)

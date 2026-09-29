@@ -158,7 +158,7 @@ VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 
 # Largest accepted smooth-RH-cap width: at 0.1, RH_c at saturation is 7% low.
-_RH_CAP_WIDTH_MAX = 0.1
+RH_CAP_WIDTH_MAX = 0.1
 
 
 class CanopyConfig(NamedTuple):
@@ -275,9 +275,9 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
-        if not 0.0 < self.rh_cap_smoothing_width <= _RH_CAP_WIDTH_MAX:
+        if not 0.0 < self.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
             raise ValueError(
-                f"rh_cap_smoothing_width must be in (0, {_RH_CAP_WIDTH_MAX}] (the smooth "
+                f"rh_cap_smoothing_width must be in (0, {RH_CAP_WIDTH_MAX}] (the smooth "
                 "relative-humidity cap divides by it), got "
                 f"{self.rh_cap_smoothing_width!r}")
         return self

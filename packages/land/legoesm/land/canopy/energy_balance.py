@@ -104,9 +104,11 @@ def apply_le_cap(LE: jax.Array, Rn: jax.Array,
 
     * ``"soft"`` — smooth softplus UPPER bound ``LE <= max(Rn,0)+slack(Rn)`` with a
       radiation-gated slack (wide by day, tight at night).  Default; stops the
-      positive-LE runaway that diverges the leaf-T Newton solve.  Negative LE
-      (dew) passes through unchanged; a zero raw flux stays exactly 0 (no lower
-      bound).
+      positive-LE runaway that diverges the leaf-T Newton solve.  A zero raw
+      flux stays exactly 0 (no lower bound); elsewhere the output is shifted
+      by at most ln(1+exp(-k*cap_hi))/k (<= 0.5 W m-2 at the 30 W m-2 night
+      slack), e.g. dew LE = -50 -> -49.5, and the upper asymptote is
+      softplus(k*cap_hi)/k, that much above cap_hi.
     * ``"hard"`` — legacy ``clip(LE, 0, max(Rn,0))`` (non-smooth; forces H>=0).
     * ``"off"`` — no cap (pre-regression behaviour; can diverge at dry sites).
     """

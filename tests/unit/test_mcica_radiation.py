@@ -87,7 +87,8 @@ def test_column_chunking_is_exact(solver):
 
 def test_refuses_optical_depth_scaling_or_separate_longwave_paths(solver):
     kw, cf, lwp, iwp = _columns()
-    for extra in ({"cloud_fraction": cf}, {"cloud_path_liq_lw": lwp}):
+    for extra in ({"cloud_fraction": cf}, {"cloud_path_liq_lw": lwp},
+                  {"sw_optical_field_only": True}, {"lw_optical_field_only": True}):
         with pytest.raises(ValueError, match="mcica_cloud_fraction"):
             solver.solve_columns(**kw, cloud_path_liq=lwp, cloud_path_ice=iwp,
                                  mcica_cloud_fraction=cf, **extra)

@@ -101,3 +101,9 @@ def test_solver_refuses_zero_width_without_validate():
     b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _B.items()})
     with pytest.raises(ValueError, match="rh_cap_smoothing_width"):
         solve_canopy_closure(jnp.asarray(_X0), b, CanopyConfig(rh_cap_smoothing_width=0.0))
+
+
+def test_solver_refuses_width_above_the_validated_range():
+    b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _B.items()})
+    with pytest.raises(ValueError, match="rh_cap_smoothing_width"):
+        solve_canopy_closure(jnp.asarray(_X0), b, CanopyConfig(rh_cap_smoothing_width=1.0))
