@@ -17,6 +17,7 @@ import pytest
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _mixing_length_floor,
+    _mxl0_anchor_floor,
     _mxl0_surface_anchor,
     nemo_tke_effective_ice_fraction,
 )
@@ -109,7 +110,7 @@ def test_nemo_card_requires_the_masked_statement():
     masked = _mxl0_surface_anchor(
         cfg, jnp.asarray([0.07, 0.07]), 1026.0, 9.80665,
         jnp.asarray([1.0, 0.0]))
-    floor = float(_mixing_length_floor(cfg))
+    floor = float(_mxl0_anchor_floor(cfg))
     assert float(np.asarray(masked)[1]) == pytest.approx(floor)
     assert float(np.asarray(masked)[0]) > floor
 
@@ -151,7 +152,66 @@ def test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor(iwm_enabled):
     unmasked = _mxl0_surface_anchor(cfg, taum, 1026.0, 9.80665,
                                     jnp.asarray([1.0, 0.0]))
     assert float(np.asarray(unmasked)[1]) == float(np.asarray(unmasked)[0])
-    assert float(np.asarray(unmasked)[0]) > float(_mixing_length_floor(cfg))
+    assert float(np.asarray(unmasked)[0]) > float(_mxl0_anchor_floor(cfg))
+
+
+# --------------------------------------------------------------------------
+# D72 — the ORCA1 OMIP card keeps MAIN's calm-column ln_mxl0 floor (0.04 m)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("iwm_enabled", [False, True])
+def test_orca1_card_keeps_mains_rn_mxl0_surface_floor(iwm_enabled):
+    """Decision 72: the ORCA1 card's CALM surface anchor stays 0.04 m.
+
+    NEMO floors the ln_mxl0 wind anchor at ``rn_mxl0``
+    (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
+    zdftke.f90:610), and ``zdf_tke_init`` has already OVERWRITTEN that
+    namelist ``rn_mxl0`` with the active mixing-length floor because
+    ``ln_mxl0`` is true (shipped zdftke.F90:859-862; GYRE ppsrc:829-832) —
+    1.0e-3 m on this ORCA1 arm, since ``ln_zdfiwm`` forces rmxl_min = 1.0e-3
+    (shipped zdftke.F90:841-843).  The user's decision is that Pierre's card
+    keeps the namelist value main used, and NEMO's overwrite stays behind the
+    NEMO-literal cards' flag.
+
+    Fails both ways: if the card takes the overwrite, and if the library
+    default stops being main's no-overwrite arm.
+    """
+    cfg = _orca1_tke_config(iwm_enabled)
+    assert cfg.nemo_mxl0_rmxl_min_overwrite is False
+    assert TKEConfig().nemo_mxl0_rmxl_min_overwrite is False
+    assert cfg.mxl0_min_m == 0.04
+    # By VALUE, on the three columns the decision is about.  The calm column
+    # is the one that moves; the windy and land columns must not.
+    anchor = np.asarray(_mxl0_surface_anchor(
+        cfg, jnp.asarray([0.10, 0.0, 0.07]), 1026.0, 9.80665,
+        jnp.asarray([1.0, 1.0, 0.0])))
+    assert float(anchor[1]) == 0.04
+    assert float(anchor[0]) == 0.7951003609964353      # wet, 0.10 Pa
+    assert float(anchor[2]) == 0.5565702526975047      # land, 0.07 Pa
+    # and the overwrite arm — what the card must NOT take — is NEMO's value.
+    overwritten = np.asarray(_mxl0_surface_anchor(
+        cfg._replace(nemo_mxl0_rmxl_min_overwrite=True),
+        jnp.asarray([0.0]), 1026.0, 9.80665, jnp.asarray([1.0])))
+    assert float(overwritten[0]) == (1.0e-3 if iwm_enabled else 1.0e-8)
+
+
+def test_nemo_literal_cards_take_the_rn_mxl0_overwrite():
+    """The other half: GYRE, the DINO NEMO cards and ORCA2 DO select it.
+
+    Their certified trajectories are pinned to the overwrite arm, so this is
+    what keeps decision 72 from moving them.
+    """
+    from legoesm.ocean.experiments.dino import DINO_RECIPES
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+
+    gyre = _nemo_tke_config()
+    assert gyre.nemo_mxl0_rmxl_min_overwrite is True
+    # GYRE runs ln_zdfiwm=.FALSE., so the overwrite value is the DERIVED
+    # rmxl_min = 1e-6/(c_k*sqrt(rn_emin)) = 1e-2 m, not rn_mxl0.
+    assert float(_mxl0_anchor_floor(gyre)) == pytest.approx(1.0e-2, rel=1e-12)
+    assert float(_mxl0_anchor_floor(gyre)) != gyre.mxl0_min_m
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        assert DINO_RECIPES[recipe]["tke_nemo_mxl0_rmxl_min_overwrite"] is True
 
 
 # --------------------------------------------------------------------------

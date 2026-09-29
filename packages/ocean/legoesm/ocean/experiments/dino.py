@@ -591,6 +591,7 @@ class DINOConfig:
     # rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m (:846).  Only the NEMO
     # DINO cards select it; a generic DINO recipe keeps its configured floor.
     tke_nemo_derived_mxl_min: bool = False
+    tke_nemo_mxl0_rmxl_min_overwrite: bool = False
     # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
     # :640-642 is the rn_mxl0 floor that follows it.
     # Only the NEMO DINO cards select the masked statement.
@@ -1245,6 +1246,9 @@ DINO_RECIPES: dict[str, dict] = {
         # DINO runs ln_zdfiwm=.FALSE. (namelist_ref:1200), so the anchor floor
         # is the DERIVED 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m, not 0.04.
         "tke_nemo_derived_mxl_min": True,
+        # ln_mxl0=.TRUE., so zdf_tke_init overwrites rn_mxl0 with rmxl_min
+        # (zdftke.F90:859-862): the anchor floor IS the mixing-length floor.
+        "tke_nemo_mxl0_rmxl_min_overwrite": True,
         "tke_nemo_mxl0_surface_tmask": True,
         "tke_n2_mode": "nemo_bn2",               # zdftke consumes eosbn2's rn2
         "tke_surface_bc": "nemo_dirichlet",      # en(1)=MAX(rn_emin0, rn_ebb·taum/rho0)
@@ -3405,6 +3409,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
             nemo_derived_mxl_min=cfg.tke_nemo_derived_mxl_min,
+            nemo_mxl0_rmxl_min_overwrite=cfg.tke_nemo_mxl0_rmxl_min_overwrite,
             nemo_mxl0_surface_tmask=cfg.tke_nemo_mxl0_surface_tmask,
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,

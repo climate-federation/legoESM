@@ -52,8 +52,9 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     # own mxl_min, which is what every non-NEMO card must keep.
     cfg = TKEConfig(
         tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
-        tke_background=1.0e-6,
-        nemo_derived_mxl_min=True, nemo_mxl0_surface_tmask=True)
+        tke_background=1.0e-6, mxl0_min_m=0.04,
+        nemo_derived_mxl_min=True, nemo_mxl0_surface_tmask=True,
+        nemo_mxl0_rmxl_min_overwrite=True)
     expected = np.float64(1.0e-6) / (
         np.float64(cfg.c_k) * np.sqrt(np.float64(cfg.tke_background)))
     floor = _mixing_length_floor(cfg)
@@ -67,7 +68,15 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     dry = _mxl0_surface_anchor(
         cfg, jnp.asarray([1.0]), _RHO0, constants.g, jnp.asarray([0.0]))
     np.testing.assert_array_equal(np.asarray(dry), np.asarray([expected]))
-    assert not hasattr(cfg, "mxl0_min_m")
+    # The overwrite arm IGNORES the card's rn_mxl0: zdf_tke_init has already
+    # replaced it with rmxl_min (shipped zdftke.F90:859-862; GYRE
+    # ppsrc:829-832).  Moving rn_mxl0 far above the derived floor must not
+    # move the calm anchor.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            cfg._replace(mxl0_min_m=7.0), jnp.asarray([0.0]), _RHO0,
+            constants.g, jnp.asarray([1.0]))),
+        np.asarray([expected]))
 
     with pytest.raises(ValueError, match="surface_tmask"):
         _mxl0_surface_anchor(
@@ -87,10 +96,19 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     plain = TKEConfig(tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
                       tke_background=1.0e-6)
     assert float(_mixing_length_floor(plain)) == 0.04
+    # ... and, on the DEFAULT (no-overwrite) arm, its CALM surface anchor is
+    # the card's own rn_mxl0, not that mixing-length floor.  The two are
+    # deliberately different numbers here so the row cannot pass by
+    # coincidence: DECISION 72 is exactly this distinction.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain._replace(mxl0_min_m=0.11), jnp.asarray([0.0]), _RHO0,
+            constants.g, None)),
+        np.asarray([0.11]))
     np.testing.assert_array_equal(
         np.asarray(_mxl0_surface_anchor(
             plain, jnp.asarray([0.0]), _RHO0, constants.g, None)),
-        np.asarray([0.04]))
+        np.asarray([TKEConfig().mxl0_min_m]))
 
 
 def test_zero_step_probe_uses_the_shared_derived_floor():
@@ -99,7 +117,7 @@ def test_zero_step_probe_uses_the_shared_derived_floor():
     source = (
         repo / "scripts/validate/ocean_fidelity/nemo_zero_step_closure.py"
     ).read_text()
-    assert "_rmxl_min = _mixing_length_floor(cfg)" in source
+    assert "_rmxl_min = _mxl0_anchor_floor(cfg)" in source
     assert "cfg.mxl0_min_m" not in source
 
 
