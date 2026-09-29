@@ -451,22 +451,23 @@ same four the previous round recorded.
 **The push gate was RED on its first run, and this round caused it.**  Three
 tests in `test_nemo_testcase_receipt_citation_gate.py` failed because the
 comment added beside the DINO recipe line pushed two mapped symbols thirty-two
-lines down: the tracer-combine selection moved from `dino.py:1706` to `:1738`
-and its config routing from `:3913` to `:3945`.  The map entry and the
+lines down: the tracer-combine selection moved from line `1706` to
+`dino.py:1738` and its config routing from line `3913` to `dino.py:3945`.  The
+map entry and the
 round-8 receipt prose that cites it were moved together, which is what the
 gate requires, and the gate then passed on the cumulative receipt with all
 nine of its own plants firing.  That is the gate doing exactly the job it was
 built for, so it is recorded rather than quietly fixed.
 
-**This receipt's own citations are NOT certified by that gate.**  It found
-twelve of them and all twelve are unmapped, because `CITATION_MAP` pins every
-citation a receipt may make and nothing was added to it here.  Each of the
-twelve was checked by hand against the compiled DINO program or the shipped
-NEMO source, and both reviewers independently re-derived the load-bearing ones
-(`cpp_DINO.fcm`, `nemogcm.f90:185`, `dynspg_ts.f90:489-491`, the `stpmlf.f90`
-rotation and the `stprk3.F90:213` swap).  Mapping them is one line each and is
-left to whoever next edits that map; until then this receipt's citations carry
-hand-checking plus two independent re-derivations, not the gate.
+**This receipt's own citations are now certified by that gate.**  It found
+twelve of them, checked by hand against the compiled DINO program or the
+shipped NEMO source when this round was written, with both reviewers
+independently re-deriving the load-bearing ones (`cpp_DINO.fcm`,
+`nemogcm.f90:185`, `dynspg_ts.f90:489-491`, the `stpmlf.f90` rotation and the
+`stprk3.F90:213` swap).  All twelve, plus every other citation this receipt
+makes, were mapped in `CITATION_MAP` in a later pass and verified against the
+real files; this receipt's citations now carry the gate, not only the
+hand-checking and the two independent re-derivations.
 
 ---
 

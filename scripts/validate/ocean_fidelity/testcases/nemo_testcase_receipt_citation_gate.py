@@ -823,6 +823,23 @@ FILES = {
     "tests/VORTEX/MY_SRC/usrdef_zgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_zgr.F90",
     "vortex_round2/namelist_cfg": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2/namelist_cfg"),
+    # --- gating the DINO month-regression and PR-1802 review-fix receipts:
+    # the DINO build's own compiled branch (bare and cfgs/-prefixed keys both
+    # cited by those receipts), the shared LBC template, and the bridge. ---
+    "cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90": NEMO / "cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90",
+    "cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90": NEMO / "cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90",
+    "nemogcm.f90": NEMO / "cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90",
+    "dynspg_ts.f90": NEMO / "cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90",
+    "lbclnk.f90": NEMO / "cfgs/DINO/BLD/ppsrc/nemo/lbclnk.f90",
+    "src/OCE/DOM/domqco.F90": _OCE / "DOM/domqco.F90",
+    "lbc_lnk_pt2pt_generic.h90": _OCE / "LBC/lbc_lnk_pt2pt_generic.h90",
+    "nemo_state_bridge.py": (
+        REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py"),
+    "zdftke.F90": _OCE / "ZDF/zdftke.F90",
+    "domhgr.F90": _OCE / "DOM/domhgr.F90",
+    "geo2ocean.F90": _OCE / "SBC/geo2ocean.F90",
+    "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg": (
+        NEMO / "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -3868,6 +3885,34 @@ CITATION_MAP = {
         6],
     'dynvor.F90:874': [
         'IF( ln_dynvor_een ) THEN   ;   ioptio = ioptio + 1   ;   nvor_scheme = np_EEN   ;   ENDIF'],
+    # --- gating the DINO month-regression and PR-1802 review-fix
+    # receipts (both previously certified only by hand): every citation
+    # verified against the real file, anchor = the exact statement text.
+    'stprk3.F90:213': ('Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs    ! Swap: Nnn unchanged, Nbb <==> Naa', 1),
+    'cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185': ('CALL stp_MLF( istp )', 1),
+    'cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:489-491': [('sshn_e(:,:) =    pssh (:,:,Kbb)', 1), ('vn_e  (:,:) =    pvv_b(:,:,Kbb)', 1), 3],
+    'cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:500-503': [('! DINO has ln_bt_fw=F -> the CENTRED branch above just ran, so this is', 1), ('IF( ll_spg_dump ) THEN', 6), 4],
+    'src/OCE/DOM/domqco.F90:165-170': [('DO_2D( nn_hls, nn_hls-1, nn_hls, nn_hls-1 )', 1), ('END_2D', 2), 6],
+    'src/OCE/DOM/domqco.F90:134-135': [("CALL lbc_lnk( 'dom_qco_zgr', r3u(:,:,Kbb), 'U', 1._wp, r3v(:,:,Kbb), 'V', 1._wp, &", 1), ("&                         r3u(:,:,Kmm), 'U', 1._wp, r3v(:,:,Kmm), 'V', 1._wp, r3f(:,:), 'F', 1._wp )", 1), 2],
+    'lbc_lnk_pt2pt_generic.h90:49': ('zland = 0._wp                                     ! land filling value: zero by default', 1),
+    'lbc_lnk_pt2pt_generic.h90:104': ('ELSE                                ;   ifill(jn,jf) = jpfillcst       ! constant value (zland)', 1),
+    'lbc_lnk_pt2pt_generic.h90:305': ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 1),
+    'DINO/BLD/ppsrc/nemo/domqco.f90:211-215,177-181': [('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), ('CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb)           )', 1), ("&                         r3u(:,:,Kmm), 'U', 1._wp, r3v(:,:,Kmm), 'V', 1._wp, r3f(:,:), 'F', 1._wp )", 1), 10],
+    'lbclnk.f90:1816-1820,1866-1871,2130-2135': [('zland = 0._wp                                     ! land filling value: zero by default', 3), ('IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 3), ('DO jn = 1, 4   ! 4 sides', 2), ('ELSE                                ;   ifill(jn,jf) = jpfillcst       ! constant value (zland)', 3), ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 5), ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 5), 17],
+    'nemo_state_bridge.py:275,917': [('nemo_prognostic_barotropic_velocity=True,', 1), ('nemo_prognostic_barotropic_velocity=True,', 2), 2],
+    'nemogcm.f90:185': ('CALL stp_MLF( istp )', 1),
+    'dynspg_ts.f90:489-491': [('sshn_e(:,:) =    pssh (:,:,Kbb)', 1), ('vn_e  (:,:) =    pvv_b(:,:,Kbb)', 1), 3],
+    'zdftke.F90:845-846': [('ELSE                          ! standard case : associated avt minimum = molecular viscosity (10^-6 m2/s)', 1), ('rmxl_min = 1.e-6_wp / ( rn_ediff * SQRT( rn_emin ) )    ! resulting minimum length to recover molecular viscosity', 1), 2],
+    'zdftke.F90:841-843': [('IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing', 1), ('rmxl_min = 1.e-03_wp             ! associated avt minimum = molecular salt diffusivity (10^-9 m2/s)', 1), 3],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg:396': ('ln_zdfiwm   = .true.       ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
+    'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
+    'domhgr.F90:222-227': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ('kff = 1', 1), 6],
+    'zdftke.F90:246,253-258': [('IF( nn_eice == 0 ) zice_fra(:) = 0._wp               ! No attenuation of TKE due to sea ice', 1), ('! ice fraction considered for attenuation of langmuir & wave breaking', 1), ('END SELECT', 1), 7],
+    'zdftke.F90:828-835': [('SELECT CASE( nn_eice )', 1), ('END SELECT', 7), 8],
+    'zdftke.F90:601-603': [('DO_1Di( 0, 0 )                  ! No sea-ice', 1), ('END_1D', 16), 3],
+    'zdftke.F90:859-862': [('IF( ln_mxl0 ) THEN', 4), ('rn_mxl0 = rmxl_min', 2), 4],
+    'geo2ocean.F90:168,259-260': [('REAL(wp) ::   zxffu, zyffu, znffu   ! x,y components and norm of the vector: between F points below and above a U point', 1), ('gsinu(ji,jj) = ( zxnpu*zyffu - zynpu*zxffu ) / znffu', 1), ('gcosu(ji,jj) = ( zxnpu*zxffu + zynpu*zyffu ) / znffu', 1), 3],
+    'domhgr.F90:222-223': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ("& iom_varid( inum, 'ff_t', ldstop = .FALSE. ) > 0    ) THEN", 1), 2],
 }
 
 
