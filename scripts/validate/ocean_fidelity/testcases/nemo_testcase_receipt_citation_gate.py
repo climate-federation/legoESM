@@ -1339,13 +1339,13 @@ CITATION_MAP = {
     # --- ORCA2 card round 77: external U-transport operand pair ---
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:460-469': [
         '!* Set extrapolation coefficients for predictor step:',
-        'ENDIF', 10],
+        ('ENDIF', 14), 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:476-485': [
         '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
-        ('END DO   ;   END DO', 2), 10],
+        ('END DO   ;   END DO', 3), 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:487-522': [
-        'IF( .NOT.lk_linssh ) THEN',
-        ('ENDIF', 2), 36],
+        ('IF( .NOT.lk_linssh ) THEN', 1),
+        ('ENDIF', 17), 36],
     # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
     'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
         '! FCT at last stage only with RK3',
