@@ -187,15 +187,15 @@ card selects flux-form advection and never reaches `dyn_zad`.
 The after-SSH statement is reached by any card that selects NEMO's own
 first-`wzv` operands AND runs NEMO's RK3 stepper.
 
-| card / recipe | selects NEMO's wzv operands | NEMO RK3 | executes the change |
+| card / recipe | selects NEMO's wzv operands | after-SSH form it STATES | executes the change |
 |---|---|---|---|
-| `VORTEX_VEC-zco` | yes, **new this round** | yes | **yes** |
-| `GYRE-zco` | yes | yes | **yes** |
-| `ORCA2-zps` | yes | yes | **yes** |
-| DINO `nemo_dino_kamm` | yes | yes | **yes** |
-| DINO `nemo_dino_kamm_mlf` | yes | no (leapfrog) | no — keeps the leapfrog form |
-| `VORTEX-zco`, `LOCK_EXCHANGE-zco`, `OVERFLOW-zps` | no | — | no |
-| DINO `legoesm_default`, `nemo_paper` | no | — | no |
+| `VORTEX_VEC-zco` | yes, **new this round** | `rk3_extrapolated` | **yes** |
+| `GYRE-zco` | yes | `rk3_extrapolated` | **yes** |
+| `ORCA2-zps` | yes | `rk3_extrapolated` | **yes** |
+| DINO `nemo_dino_kamm` | yes | states `leapfrog_continuity` | no — keeps the leapfrog form |
+| DINO `nemo_dino_kamm_mlf` | yes | states `leapfrog_continuity` | no — keeps the leapfrog form |
+| `VORTEX-zco`, `LOCK_EXCHANGE-zco`, `OVERFLOW-zps` | no | none, and the test refuses one | no |
+| DINO `legoesm_default`, `nemo_paper` | no | none | no |
 
 **This is a shared landing.** It is not scoped to VORTEX and was not made so.
 
@@ -301,12 +301,31 @@ That needs the operator's decision and is NOT taken here (section 11).
 |---|---|---|
 | the vector-EEN VORTEX card consumes NEMO's own first-`wzv` vertical velocity instead of legoESM's generic z-star one | ASKED in effect | decision 73 makes the card a transcription of NEMO's vector-invariant momentum program; this is which routine's output that program feeds to `dyn_zad`, read from `stp2d.f90:153`, not a preference |
 | the first `wzv` call's after-SSH follows the card's own time-stepping program (RK3 extrapolation, leapfrog continuity prediction) rather than one shared form | ASKED in effect, and it is the FIX | operator note BI: "a NEMO option that is right for one time-stepping program is NOT a shared default — it is selected per card, and the card's stepper is checked". Both forms are NEMO's, each cited |
-| keying that form on the card's momentum time integrator rather than adding a new config field | UNASKED, and stated | a new field would be a knob whose default keeps the bug on GYRE, DINO and ORCA2, which rule 3 forbids. The key is NEMO's own relationship between two of its sources, not a coupling of unrelated choices. Revert on request |
+| the after-SSH form is an EXPLICIT per-card field with no guessing default, not keyed off the time integrator | ASKED, after the first attempt was refused | the first version read the form from `momentum_time_integrator`, which is the hidden coupling decision 75 bans and round 163 already rejected once. It was also demonstrably wrong: DINO's NEMO recipes do not set that field, so both took the leapfrog arm by accident. A card that reaches the branch and states nothing now RAISES — there is no default that keeps the old behaviour anywhere |
+| both DINO NEMO recipes state `leapfrog_continuity` rather than one of them stating the RK3 form | UNASKED, and stated | it is the value they have always resolved to and what round 39 MEASURED on that card as the pair that closes its vertical advection, and it keeps this round inert on DINO. Which form DINO's non-MLF NEMO card SHOULD state, read from its own build's time-stepping source, is not settled here and is in OPEN |
 | the FLUX VORTEX card is left on the generic vertical velocity | UNASKED, and stated | it runs flux-form advection and never calls `dyn_zad`, so the statement is not executed there; changing it would be a second variable in the same round. Its own `kt=2` owner is still open (section 11) |
 | `zad_bottom_face_mask` is left at `min_rule` on the vector card | UNASKED, and stated | GYRE and DINO set `nemo_faithful`; this deck is flat-bottomed, so the two agree here and flipping it would be a second variable with nothing to measure. Named rather than silently carried |
 | round 4's magnitude exclusion is retracted and the bound corrected in the instrument | not a choice | a defect fix; its non-vacuity is that it un-excludes the term |
 
 ## 11. OPEN
+
+**OPEN ITEM 1 — carry the previous step's sea surface height on the RK3
+lane** so the extrapolation is exact past the first step (section 9b). This
+is a change to the state a run carries and is an OPERATOR DECISION.
+
+**OPEN ITEM 2 — walk GYRE's day-30 regression.** The year's day-30
+temperature moved from `2.327677e-06` to `2.344e-06` K, up `0.7%`, while day
+360 improved `49x`. Nothing here explains that split and it is not claimed
+to. The cheap first cut is the same per-term discriminator run at a
+developed day rather than at `kt=1`, where NEMO's extrapolation is no longer
+zero, because open item 1 predicts exactly that the error should grow with
+the size of the neglected extrapolation.
+
+**OPEN ITEM 3 — which after-SSH form DINO's non-MLF NEMO card should
+state.** Both DINO NEMO recipes now state the leapfrog's continuity
+prediction, which is what they have always resolved to and what round 39
+measured. That is a RECORD of the measured value, not a re-derivation from
+DINO's own build, and the two are not the same claim.
 
 **ORCA2 IS UNMEASURED THIS ROUND AND THAT BLOCKS ITS CLAIMS.** ORCA2-zps
 selects NEMO's first-`wzv` operands and NEMO's RK3 stepper, so it executes
