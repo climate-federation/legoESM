@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]
                        / "scripts/validate/ocean_fidelity/testcases"))
 
 from nemo_testcase_l1_vortex_kt2_walk import (  # noqa: E402
-    GateError, read_bt_frame, read_rhs, read_stage,
+    _PLANTS, GateError, plant_moved, read_bt_frame, read_rhs, read_stage,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]
@@ -127,9 +127,11 @@ def _rhsterm_bytes(tmp_path, *, magic=b"NEMO_L1_RHSTRM1 ", groups=None,
             body += _group(name, 2, _NX, _NY, 1)
         else:
             body += _group(name, rank, _NX, _NY, _NZ)
+    # version, step, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk, group count,
+    # five spare, and the 64-bit word size LAST.
     header = struct.pack(
-        "=16i", 1, 1, 1, 2, 3, 4, _NX, _NY, _NZ, 64,
-        len(names) if declared is None else declared, 0, 0, 0, 0, 0)
+        "=16i", 1, 1, 2, 3, 4, 5, _NX, _NY, _NZ,
+        len(names) if declared is None else declared, 0, 0, 0, 0, 64)
     raw = magic + header + body + trailing
     if short:                      # truncate the LAST group's payload
         raw = raw[:-16]
@@ -160,3 +162,45 @@ def test_a_malformed_per_term_record_is_refused(tmp_path, kwargs, message):
 
     with pytest.raises(Refusal, match=message):
         parse_record(_rhsterm_bytes(tmp_path, **kwargs))
+
+
+# --------------------------------------------------------------------------
+# The plant DISCRIMINATION rule.  Round 3 shipped a walk whose plant perturbed
+# arm 0's scoring only, so it passed even with both substitution hooks dead.
+# The rule that replaced it -- each plant names the arm its substitution
+# feeds, and the plant is VISIBLE only when THAT arm moves -- is a pure
+# function, so it gets a test rather than only a shell log.
+_PLANT_ARM = {
+    "score": "0_card",
+    "entry": "1_nemo_entry",
+    "external": "2_nemo_external",
+    "stage1": "3_nemo_stage1_out",
+    "stage2": "4_nemo_stage2_out",
+    "prestage_rhs": "5_nemo_prestage_rhs",
+}
+
+
+def _report(**velocities):
+    return {"arms": [{"arm": name, "kt2": {"u": value, "v": value}}
+                     for name, value in velocities.items()]}
+
+
+def test_every_plant_names_an_arm_its_substitution_feeds():
+    assert sorted(_PLANTS) == sorted(_PLANT_ARM)
+
+
+@pytest.mark.parametrize("plant", sorted(_PLANT_ARM))
+def test_a_plant_is_visible_only_when_its_own_arm_moves(plant):
+    baseline = {name: 1.0e-7 for name in _PLANT_ARM.values()}
+    baseline["6_prestage_rhs_only"] = 1.0e-7
+    clean = _report(**baseline)
+
+    moved = dict(baseline)
+    moved[_PLANT_ARM[plant]] = 1.0
+    assert plant_moved(plant, clean, _report(**moved)) is True
+
+    # An INERT hook: every other arm moves, the named one does not.  This is
+    # exactly round 3's failure mode, and it must read NOT VISIBLE.
+    elsewhere = {name: (1.0 if name != _PLANT_ARM[plant] else 1.0e-7)
+                 for name in baseline}
+    assert plant_moved(plant, clean, _report(**elsewhere)) is False

@@ -502,14 +502,14 @@ def main(argv=None) -> int:
         else:
             clean = run(root, case=args.case, plant=None,
                         allow_dirty=args.allow_dirty)
-        moved = _plant_moved(args.plant, clean, report)
+        moved = plant_moved(args.plant, clean, report)
         print(f"PLANT {args.plant} "
               f"{'VISIBLE' if moved else 'NOT VISIBLE'}")
         return 1 if moved else 0
     return 0 if report["status"] == "MEASURED" else 3
 
 
-def _plant_moved(plant: str, clean: dict, planted: dict) -> bool:
+def plant_moved(plant: str, clean: dict, planted: dict) -> bool:
     """Did the perturbation reach the arm whose substitution carries it?
 
     A plant that only moves arm 0 proves nothing about the substitution

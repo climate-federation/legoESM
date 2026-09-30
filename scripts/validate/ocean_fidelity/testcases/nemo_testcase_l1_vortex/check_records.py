@@ -140,7 +140,7 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
              "group; the file does not end on a group boundary")
     missing = [name for name in _RHSTERM_GROUPS if name not in groups]
     _require(not missing, f"{path.name}: missing group(s) {missing}")
-    declared = header[10]
+    declared = header[9]
     _require(declared == len(groups),
              f"{path.name}: the header declares {declared} groups and the "
              f"file carries {len(groups)}")

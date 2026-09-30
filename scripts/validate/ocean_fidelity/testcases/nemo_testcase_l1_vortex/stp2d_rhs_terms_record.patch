@@ -39,7 +39,7 @@
              !
           CASE( np_FLX_c2  )               !=  2n order Flux Form =!   (CEN2)                ==>> 2D RHS only
              !
-@@ -287,6 +293,46 @@
+@@ -287,6 +293,48 @@
        !
     END SUBROUTINE stp_2D
  
@@ -72,8 +72,10 @@
 +      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 rhs-term file' )
 +      clmagic = 'NEMO_L1_RHSTRM1'
 +      igrp = 4
++      ! Sixteen header integers, the 64-bit word size LAST so a reader can
++      ! find it the same way in every record family this campaign writes.
 +      WRITE(iunit) clmagic, 1, kstp, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk,   &
-+         &         STORAGE_SIZE(1._wp), igrp, 0, 0, 0, 0, 0
++         &         igrp, 0, 0, 0, 0, STORAGE_SIZE(1._wp)
 +      clname = 'uu_rhs'   ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) uu(:,:,:,Krhs)
 +      clname = 'vv_rhs'   ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) vv(:,:,:,Krhs)
 +      clname = 'ww'       ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) ww(:,:,:)

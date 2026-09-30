@@ -704,7 +704,11 @@ def test_the_vector_deck_differs_from_the_flux_deck_only_in_the_momentum_set(
 # field -- never to re-pin the digest alone.  This is the gate for that.
 _ALL_NEMO_TESTCASE_CARDS = ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps",
                             "VORTEX-zco", "VORTEX_VEC-zco")
-_DINO_NEMO_RECIPES = ("nemo_dino_kamm", "nemo_dino_kamm_mlf")
+# Every DINO recipe, not only the two NEMO-literal ones: decision 75 is
+# about a library default moving under ANY card, and the two remaining
+# recipes build their lateral mixing through the same two builders.
+_DINO_NEMO_RECIPES = ("nemo_dino_kamm", "nemo_dino_kamm_mlf",
+                      "legoesm_default", "nemo_paper")
 
 
 @contextlib.contextmanager
