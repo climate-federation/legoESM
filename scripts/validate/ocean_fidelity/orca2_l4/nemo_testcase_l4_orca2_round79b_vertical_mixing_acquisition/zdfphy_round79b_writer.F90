@@ -28,7 +28,7 @@ MODULE zdfphy_round79b_writer
    REAL(wp), SAVE :: z_r79_ediff = 0._wp, z_r79_rmxl_min = 0._wp
    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::                           &
       &   b_avt_tke, b_avm_tke, b_avt_rnf, b_avt_evd, b_avm_evd,              &
-      &   b_avt_ddm, b_avs_ddm, b_mxlm, b_mxld, b_dissl
+      &   b_avt_ddm, b_avs_ddm, b_avm_ddm, b_mxlm, b_mxld, b_dissl
 
 CONTAINS
 
@@ -47,14 +47,16 @@ CONTAINS
          ALLOCATE( b_avt_tke(jpi,jpj,jpk), b_avm_tke(jpi,jpj,jpk),            &
             &      b_avt_rnf(jpi,jpj,jpk), b_avt_evd(jpi,jpj,jpk),            &
             &      b_avm_evd(jpi,jpj,jpk), b_avt_ddm(jpi,jpj,jpk),            &
-            &      b_avs_ddm(jpi,jpj,jpk), b_mxlm(jpi,jpj,jpk),               &
-            &      b_mxld(jpi,jpj,jpk),    b_dissl(jpi,jpj,jpk) )
+            &      b_avs_ddm(jpi,jpj,jpk), b_avm_ddm(jpi,jpj,jpk),            &
+            &      b_mxlm(jpi,jpj,jpk),    b_mxld(jpi,jpj,jpk),               &
+            &      b_dissl(jpi,jpj,jpk) )
       ENDIF
       b_avt_tke(:,:,:) = 0._wp   ;   b_avm_tke(:,:,:) = 0._wp
       b_avt_rnf(:,:,:) = 0._wp   ;   b_avt_evd(:,:,:) = 0._wp
       b_avm_evd(:,:,:) = 0._wp   ;   b_avt_ddm(:,:,:) = 0._wp
-      b_avs_ddm(:,:,:) = 0._wp   ;   b_mxlm(:,:,:)    = 0._wp
-      b_mxld(:,:,:)    = 0._wp   ;   b_dissl(:,:,:)   = 0._wp
+      b_avs_ddm(:,:,:) = 0._wp   ;   b_avm_ddm(:,:,:) = 0._wp
+      b_mxlm(:,:,:)    = 0._wp   ;   b_mxld(:,:,:)    = 0._wp
+      b_dissl(:,:,:)   = 0._wp
    END SUBROUTINE r79_arm
 
    SUBROUTINE r79_tke_scalars( knn_mxl, pediff, prmxl_min )
@@ -87,9 +89,9 @@ CONTAINS
    SUBROUTINE r79_after_tke()
       INTEGER :: ji, jj, jk
       IF( .NOT. l_r79 )   RETURN
+      b_avm_tke(:,:,:) = avm(:,:,:)
       DO jk = 1, jpk ; DO jj = ntsj, ntej ; DO ji = ntsi, ntei
          b_avt_tke(ji,jj,jk) = avt(ji,jj,jk)
-         b_avm_tke(ji,jj,jk) = avm(ji,jj,jk)
       END DO ; END DO ; END DO
    END SUBROUTINE r79_after_tke
 
@@ -104,15 +106,16 @@ CONTAINS
    SUBROUTINE r79_after_evd()
       INTEGER :: ji, jj, jk
       IF( .NOT. l_r79 )   RETURN
+      b_avm_evd(:,:,:) = avm(:,:,:)
       DO jk = 1, jpk ; DO jj = ntsj, ntej ; DO ji = ntsi, ntei
          b_avt_evd(ji,jj,jk) = avt(ji,jj,jk)
-         b_avm_evd(ji,jj,jk) = avm(ji,jj,jk)
       END DO ; END DO ; END DO
    END SUBROUTINE r79_after_evd
 
    SUBROUTINE r79_after_ddm()
       INTEGER :: ji, jj, jk
       IF( .NOT. l_r79 )   RETURN
+      b_avm_ddm(:,:,:) = avm(:,:,:)
       DO jk = 1, jpk ; DO jj = ntsj, ntej ; DO ji = ntsi, ntei
          b_avt_ddm(ji,jj,jk) = avt(ji,jj,jk)
          b_avs_ddm(ji,jj,jk) = avs(ji,jj,jk)
@@ -138,7 +141,7 @@ CONTAINS
       clmagic = 'NEMO_L4_ZDFV_1'
       WRITE(iunit) clmagic
       WRITE(iunit) 1, kt, Kbb, Kmm, narea-1, nimpp, njmpp, jpi, jpj, jpk,           &
-         &         STORAGE_SIZE(1._wp), 23, n_r79_mxl,                              &
+         &         STORAGE_SIZE(1._wp), 24, n_r79_mxl,                              &
          &         MERGE(1,0,ln_zdfiwm), MERGE(1,0,ln_zdfddm)
       ALLOCATE( zwrk(jpi,jpj,jpk), zwrk2(jpi,jpj), zscal(1,1,jpk) )
 #define R79_3D(name,value) WRITE(iunit) name ; WRITE(iunit) 3,jpi,jpj,jpk,1,1,1 ; WRITE(iunit) value
@@ -151,6 +154,7 @@ CONTAINS
       R79_3D('avm_after_evd   ',b_avm_evd)
       R79_3D('avt_after_ddm   ',b_avt_ddm)
       R79_3D('avs_after_ddm   ',b_avs_ddm)
+      R79_3D('avm_after_ddm   ',b_avm_ddm)
       zwrk(:,:,:) = 0._wp
       DO jk = 1, jpk ; DO jj = ntsj, ntej ; DO ji = ntsi, ntei
          zwrk(ji,jj,jk) = avt(ji,jj,jk)

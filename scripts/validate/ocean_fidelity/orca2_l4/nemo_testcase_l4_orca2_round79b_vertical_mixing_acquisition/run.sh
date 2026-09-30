@@ -108,7 +108,7 @@ patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PATCH"
 [[ "$(grep -Fc 'CALL zdf_ddm(' "$dry/zdfphy.F90")" -eq 1 ]] || { printf 'REFUSE: double-diffusion call count changed\n' >&2; exit 66; }
 [[ "$(grep -Fc 'CALL zdf_evd(' "$dry/zdfphy.F90")" -eq 1 ]] || { printf 'REFUSE: enhanced-diffusion call count changed\n' >&2; exit 66; }
 [[ "$(grep -Fc 'CALL tke_avn(' "$dry/zdftke.F90")" -eq 1 ]] || { printf 'REFUSE: closure call count changed\n' >&2; exit 66; }
-[[ "$(grep -Ec 'R79_3D\(|R79_2D\(|R79_1D\(' "$dry/zdfphy_round79b_writer.F90")" -eq 26 ]] || {
+[[ "$(grep -Ec 'R79_3D\(|R79_2D\(|R79_1D\(' "$dry/zdfphy_round79b_writer.F90")" -eq 27 ]] || {
   printf 'REFUSE: writer field census changed\n' >&2; exit 66;
 }
 

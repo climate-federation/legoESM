@@ -29,7 +29,8 @@ HEADER_NAMES = (
 )
 EXPECTED_ORDER = (
     "avt_after_tke", "avm_after_tke", "avt_after_rnf", "avt_after_evd",
-    "avm_after_evd", "avt_after_ddm", "avs_after_ddm", "avt_after_iwm",
+    "avm_after_evd", "avt_after_ddm", "avs_after_ddm", "avm_after_ddm",
+    "avt_after_iwm",
     "avm_after_iwm", "avs_after_iwm", "avt_k", "avm_k", "en", "dissl",
     "mxlm", "mxld", "wmask", "tmask", "rnfmsk", "avtb_2d", "avtb", "avmb",
     "closure_scalars",
@@ -109,7 +110,7 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     require(order == EXPECTED_ORDER,
             f"array order in {path.name} differs from the writer's source order")
     shape3 = (head["jpi"], head["jpj"], head["jpk"])
-    for name in EXPECTED_ORDER[:18]:
+    for name in EXPECTED_ORDER[:19]:
         require(fields[name].shape == shape3,
                 f"{name} shape {fields[name].shape} != {shape3}")
     return {"header": head, "fields": fields, "sha256": sha256(path)}
@@ -120,7 +121,10 @@ def check_content(record: dict, *, plant: str | None = None) -> dict:
     f = record["fields"]
     wet = f["wmask"] > 0.0
     iwm_t = f["avt_after_iwm"] - f["avt_after_ddm"]
-    iwm_m = f["avm_after_iwm"] - f["avm_after_evd"]
+    # zdf_ddm also adds to the momentum coefficient (zdfddm.f90:172,
+    # p_avm is INTENT(inout)), so the wave arm's momentum increment is
+    # measured against the record AFTER the salt/heat split, not before it.
+    iwm_m = f["avm_after_iwm"] - f["avm_after_ddm"]
     if plant == "content":
         iwm_t = iwm_t - 1.0
     # zdfiwm.f90:314-316 adds a diffusivity clamped into [1.4e-7, 1e-2] and
@@ -148,6 +152,8 @@ def check_content(record: dict, *, plant: str | None = None) -> dict:
         "iwm_avt_max": float(iwm_t.max()),
         "iwm_avt_mean_wet": float(iwm_t[wet].mean()) if wet.any() else 0.0,
         "iwm_avm_max": float(iwm_m.max()),
+        "ddm_avm_increment_max": float(
+            (f["avm_after_ddm"] - f["avm_after_evd"]).max()),
         "rnf_avt_max": float((f["avt_after_rnf"] - f["avt_after_tke"]).max()),
         "evd_avt_max": float((f["avt_after_evd"] - f["avt_after_rnf"]).max()),
         "ddm_avs_minus_avt_max": float(

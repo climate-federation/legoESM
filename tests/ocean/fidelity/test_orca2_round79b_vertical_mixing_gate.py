@@ -62,6 +62,7 @@ def _write_record(path: Path, kt: int, rank: int) -> None:
     avm_evd = avm_k.copy()
     avt_ddm = avt_evd.copy()
     avs_ddm = avt_ddm * 0.9
+    avm_ddm = avm_evd + 2e-7
     increment = rng.uniform(1.4e-7, 1e-4, shape) * wmask
     arrays = [
         ("avt_after_tke", avt_tke, 3),
@@ -71,8 +72,9 @@ def _write_record(path: Path, kt: int, rank: int) -> None:
         ("avm_after_evd", avm_evd, 3),
         ("avt_after_ddm", avt_ddm, 3),
         ("avs_after_ddm", avs_ddm, 3),
+        ("avm_after_ddm", avm_ddm, 3),
         ("avt_after_iwm", avt_ddm + increment, 3),
-        ("avm_after_iwm", avm_evd + increment, 3),
+        ("avm_after_iwm", avm_ddm + increment, 3),
         ("avs_after_iwm", avs_ddm + increment, 3),
         ("avt_k", avt_k, 3),
         ("avm_k", avm_k, 3),

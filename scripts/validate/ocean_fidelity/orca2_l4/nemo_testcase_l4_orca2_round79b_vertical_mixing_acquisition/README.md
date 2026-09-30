@@ -11,8 +11,11 @@ order, plus the turbulence closure's internals:
 | after the closure | `:349-350`, the copy of the closure's coefficients into the working arrays | `avt_after_tke`, `avm_after_tke`, `avt_k`, `avm_k` |
 | after the river mouths | `:355`, `avt = avt + 2 * rn_avt_rnf * rnfmsk * wmask` | `avt_after_rnf`, `rnfmsk` |
 | after the convection arm | `:359`, `zdf_evd` | `avt_after_evd`, `avm_after_evd` |
-| after the salt/heat split | `:363`, `zdf_ddm` | `avt_after_ddm`, `avs_after_ddm` |
+| after the salt/heat split | `:363`, `zdf_ddm`, which also adds to the momentum coefficient (`zdfddm.f90:172`) | `avt_after_ddm`, `avs_after_ddm`, `avm_after_ddm` |
 | after the internal waves | `:372`, `zdf_iwm` (de Lavergne; `zdfiwm.f90:314-316` adds the wave diffusivity to all three) | `avt_after_iwm`, `avm_after_iwm`, `avs_after_iwm` |
+
+The momentum coefficient is captured at both the split and the wave arm because
+both add to it, so neither increment can be read off the other's boundary.
 
 The closure internals come from `zdftke.f90`'s `tke_avn`: the turbulent energy
 `en`, the two mixing lengths `zmxlm`/`zmxld` (`:697-698` under `nn_mxl = 3`),
