@@ -965,6 +965,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-soil-ice-impedance-exponent",
+                        dest="land_soil_ice_impedance_exponent", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
+                        help="Frozen-soil ice impedance exponent e (CLM5 e_ice): "
+                             "soil conductivity x 10**(-e * ice fraction). Active "
+                             "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
+                             "0 = no impedance; range 0..10.")
     parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
@@ -2520,6 +2527,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,

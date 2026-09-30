@@ -3475,6 +3475,15 @@ class ModelDriver:
         from legoesm.land.multilayer_land import FINAL_THERMAL_SUBSTEPS
         logger.info("  land soil thermal sub-steps per land step: %d",
                     FINAL_THERMAL_SUBSTEPS if _ft else 1)
+        _e_ice = float(self.config.land_soil_ice_impedance_exponent)
+        cfg = cfg._replace(
+            richards=cfg.richards._replace(ice_impedance_exponent=_e_ice))
+        logger.info("  land soil ice impedance exponent: %g (active only with "
+                    "freeze/thaw ON)", _e_ice)
+        if not _ft and _e_ice != type(self.config)._field_defaults[
+                "land_soil_ice_impedance_exponent"]:
+            logger.warning("  land soil ice impedance exponent set but soil "
+                           "freeze/thaw is off: it has no effect")
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")

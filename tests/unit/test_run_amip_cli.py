@@ -800,6 +800,31 @@ def test_land_soil_freeze_thaw_round_trip_and_decks():
         assert cfg.land_soil_freeze_thaw is want, deck
 
 
+def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
+    """CLM5 e_ice reaches ExperimentConfig, production states it explicitly
+    (user 2026-09-28), and a value outside [0, 10] is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_soil_ice_impedance_exponent == 6.0
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-soil-ice-impedance-exponent", "3.5"]), parser))
+    assert cfg1.land_soil_ice_impedance_exponent == 3.5
+    p = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_soil_ice_impedance_exponent") == 6.0
+    for bad in ("-1", "11", "nan"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+            base + ["--land-soil-ice-impedance-exponent", bad]), parser))
+        with pytest.raises(ValueError, match="land_soil_ice_impedance_exponent"):
+            cfg.validate_strict()
+    slab = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-ice-impedance-exponent", "3"]), parser))
+    with pytest.raises(ValueError, match="requires use_multilayer_land"):
+        slab.validate_strict()
+
+
 def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(

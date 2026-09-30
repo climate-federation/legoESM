@@ -1201,6 +1201,10 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Frozen-soil ice impedance exponent e (CLM5 e_ice): soil conductivity is
+    # multiplied by 10**(-e * ice fraction).  Active only with
+    # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
+    land_soil_ice_impedance_exponent: float = 6.0
     # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
     # stress also down-regulates the Ball-Berry intercept b0
     # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
@@ -2197,6 +2201,17 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
                 "multilayer soil has a freeze/thaw scheme — the knob would be "
                 "silently inert.")
+        if (self.land_soil_ice_impedance_exponent
+                != type(self)._field_defaults["land_soil_ice_impedance_exponent"]
+                and not self.use_multilayer_land):
+            errors.append(
+                "land_soil_ice_impedance_exponent requires use_multilayer_land: "
+                "only the multilayer soil has frozen-soil hydraulics — the knob "
+                "would be silently inert.")
+        if not (0.0 <= self.land_soil_ice_impedance_exponent <= 10.0):
+            errors.append(
+                "land_soil_ice_impedance_exponent must be finite in [0, 10] "
+                f"(its declared range), got {self.land_soil_ice_impedance_exponent}")
         if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
                 and not (self.use_multilayer_land
                          and self.land_surface_scheme == "two_leaf")):

@@ -29,6 +29,8 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -44,7 +46,8 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import moisture_fusion_heat_source, solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    liquid_water_content, moisture_fusion_heat_source, solve_soil_thermal)
 
 # Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
 # 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
@@ -81,6 +84,9 @@ from legoesm.land.snow_bands import (
     band_precip_snow,
     step_snow_bands,
 )
+
+# ln 10: CLM5 writes the ice impedance as a power of ten.
+_LN10 = math.log(10.0)
 
 
 def _get(lp, name: str, fallback):
@@ -1071,12 +1077,18 @@ def _step_multilayer_land_impl(
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
+    # --- Frozen-soil ice impedance (CLM5 IceImpedance), freeze/thaw lanes only ---
+    # At start-of-step T and water, held for the step.  Off -> original Richards path.
+    _log_imped = (soil_ice_log_impedance(T_soil, theta, config)
+                  if config.thermal.enable_freeze_thaw else None)
+
     # --- Richards equation (+ coupled surface ponding cell, #671) ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
         surface_water=state.surface_water,
+        log_impedance=_log_imped,
     )
     # NB (#671): the former "evaporation water budget closure" — a clip of
     # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
@@ -1560,6 +1572,27 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
             held_carbon = carbon_new
 
     return held_state, held_response, held_carbon, bad, n_held
+
+
+def soil_ice_log_impedance(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    config: MultiLayerLandConfig,
+) -> jnp.ndarray:
+    """ln of the CLM5 frozen-soil conductivity multiplier, per layer.
+
+    ``10**(-e * icefrac)`` with ``icefrac = min(1, vol_ice / theta_sat)`` and
+    ``vol_ice`` the ice (``theta - theta_liq(T)``, the thermal solve's own split)
+    at ice density, as CLM5 SoilHydrologyMod / IceImpedance.  ``e`` =
+    ``config.richards.ice_impedance_exponent``.  Zero-porosity cells get no ice.
+    """
+    liq, _ = liquid_water_content(T_soil, theta, config.thermal)
+    theta_sat = jnp.broadcast_to(config.hydraulics.theta_sat, theta.shape)
+    ice_vol = (theta - liq) * (constants.rho_water / constants.rho_ice)
+    icefrac = jnp.where(
+        theta_sat > 0.0,
+        jnp.clip(ice_vol / jnp.maximum(theta_sat, 1e-6), 0.0, 1.0), 0.0)
+    return -config.richards.ice_impedance_exponent * _LN10 * icefrac
 
 
 def init_multilayer_land_state(
