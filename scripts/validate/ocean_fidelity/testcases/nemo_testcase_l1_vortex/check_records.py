@@ -33,7 +33,18 @@ _FAMILIES = {
     # NOTE: the stage record's filename carries the stage after the step, so
     # its step digits are read from the "kt" split above, not from the tail.
     "oracle_rhs_kt": ("NEMO_L1_RHS___1", 7, "uuvv", 0),
+    # Round 4's per-term momentum record.  Sixteen header integers and then
+    # (name, rank, n1, n2, n3, payload) groups to end of file -- the
+    # self-describing shape note BD makes binding, so nothing about its size
+    # is written down here.
+    "oracle_rhsterm_kt": ("NEMO_L1_RHSTRM1", 16, "groups", 0),
 }
+# The groups every per-term record must carry, by name.  This list, the magic
+# and the format version are the ONLY hard-coded expectations.
+_RHSTERM_GROUPS = ("uu_rhs", "vv_rhs", "ww", "r3t_Kaa")
+# The boundaries stp_2D is instrumented at, in NEMO's own execution order;
+# the per-term increments are the differences between consecutive records.
+_RHSTERM_BOUNDARIES = ("hpg", "ldf", "vor", "wzv", "keg", "zad")
 
 
 class Refusal(RuntimeError):
@@ -71,6 +82,8 @@ def parse_record(path: Path, corrupt_header: bool = False) -> dict:
         _require(int(stamped) == header[1],
                  f"{path.name}: filename says step {int(stamped)}, its header "
                  f"says {header[1]}")
+    if layout == "groups":
+        return _parse_groups(path, raw, magic, header, n_header)
     payload = len(raw) - (16 + 4 * n_header)
     _require(payload % 8 == 0, f"{path.name}: payload is not a whole number of f64")
     values = payload // 8
@@ -96,6 +109,47 @@ def parse_record(path: Path, corrupt_header: bool = False) -> dict:
             "nx": nx, "ny": ny, "nz": nz, "ntr": ntr, "doubles": values}
 
 
+def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
+                  n_header: int) -> dict:
+    """Walk (name, rank, n1, n2, n3, payload) groups to end of file.
+
+    Nothing here predicts a size: each payload's length is checked against the
+    rank and extents that group itself declares, and the file must end exactly
+    on a group boundary.
+    """
+    offset = 16 + 4 * n_header
+    groups = {}
+    while offset < len(raw):
+        _require(offset + 32 <= len(raw),
+                 f"{path.name}: a group header is truncated at byte {offset}")
+        name = raw[offset:offset + 16].decode("ascii", "replace").rstrip()
+        rank, n1, n2, n3 = struct.unpack("=4i", raw[offset + 16:offset + 32])
+        offset += 32
+        _require(rank in (2, 3), f"{path.name}: group {name!r} has rank {rank}")
+        _require(min(n1, n2, n3) > 0,
+                 f"{path.name}: group {name!r} declares a nonpositive extent")
+        count = n1 * n2 * (n3 if rank == 3 else 1)
+        _require(offset + 8 * count <= len(raw),
+                 f"{path.name}: group {name!r} declares {count} doubles, but "
+                 f"only {(len(raw) - offset) // 8} remain in the file")
+        groups[name] = {"rank": rank, "shape": [n1, n2, n3][:rank],
+                        "doubles": count}
+        offset += 8 * count
+    _require(offset == len(raw),
+             f"{path.name}: {len(raw) - offset} trailing bytes after the last "
+             "group; the file does not end on a group boundary")
+    missing = [name for name in _RHSTERM_GROUPS if name not in groups]
+    _require(not missing, f"{path.name}: missing group(s) {missing}")
+    declared = header[10]
+    _require(declared == len(groups),
+             f"{path.name}: the header declares {declared} groups and the "
+             f"file carries {len(groups)}")
+    return {"file": path.name, "magic": magic, "header": header,
+            "nx": header[6], "ny": header[7], "nz": header[8], "ntr": 0,
+            "groups": groups,
+            "doubles": sum(g["doubles"] for g in groups.values())}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, type=Path,
@@ -105,6 +159,9 @@ def main(argv=None) -> int:
     parser.add_argument("--restart", required=True,
                         help="restart file name common to both runs")
     parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--rhs-terms", action="store_true",
+                        help="also require round 4's per-term momentum "
+                             "records, one per instrumented boundary")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true",
                         help="corrupt one parsed header; MUST exit non-zero")
@@ -134,6 +191,9 @@ def main(argv=None) -> int:
         wanted += [args.run_dir / f"oracle_stage_kt00000001_s{s}.bin"
                    for s in (1, 2, 3)]
         wanted.append(args.run_dir / "oracle_rhs_kt00000001.bin")
+        if args.rhs_terms:
+            wanted += [args.run_dir / f"oracle_rhsterm_kt00000001_{term}.bin"
+                       for term in _RHSTERM_BOUNDARIES]
         for path in wanted:
             _require(path.is_file(), f"the run did not write {path.name}")
         for path in sorted(args.run_dir.glob("oracle_*.bin")):
@@ -149,6 +209,25 @@ def main(argv=None) -> int:
         _require(len(shapes) == 1,
                  f"step-entry records disagree on geometry: {sorted(shapes)}")
         report["entry_geometry"] = sorted(shapes)[0]
+        if args.rhs_terms:
+            # Every boundary must be present and must agree with the others
+            # on the shape of each group it carries; a writer that dropped
+            # one boundary would leave a term silently unmeasured.
+            terms = {r["file"]: r for r in report["records"]
+                     if r["magic"] == "NEMO_L1_RHSTRM1"}
+            _require(len(terms) == len(_RHSTERM_BOUNDARIES),
+                     f"{len(terms)} per-term records, expected "
+                     f"{len(_RHSTERM_BOUNDARIES)}")
+            group_shapes = {
+                name: {tuple(r["groups"][name]["shape"]) for r in
+                       terms.values()}
+                for name in _RHSTERM_GROUPS}
+            disagree = {k: sorted(v) for k, v in group_shapes.items()
+                        if len(v) != 1}
+            _require(not disagree,
+                     f"per-term records disagree on group shapes: {disagree}")
+            report["rhsterm_group_shapes"] = {
+                k: sorted(v)[0] for k, v in group_shapes.items()}
         report["status"] = "ADMITTED"
     except Refusal as error:
         report["status"] = "REFUSED"

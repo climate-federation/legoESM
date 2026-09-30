@@ -823,6 +823,12 @@ FILES = {
         NEMO / "tests/VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90"),
     "VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "tests/VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90"),
+    # --- round 4: the record's OWN instrumented build, whose stp_2D is what
+    # the kt=2 walk attributes the vector card's second step to. ---
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90"),
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "vortex_round3/namelist_cfg": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3/"
         "namelist_cfg"),
@@ -3846,6 +3852,16 @@ CITATION_MAP = {
     'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:184-190': [('ioptio = 0                      ! parameter control and set n_dynadv', 1), ("IF( ioptio /= 1 )   CALL ctl_stop( 'choose ONE and only ONE advection scheme' )", 1), 7],
     'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:135-138': [('CASE( np_VEC_c2  )                                                         != vector form =!', 1), ('CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 1), 4],
     'VORTEX_VEC_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:861-864': [('CASE( np_VEC_c2  )', 1), ('ntot = np_CRV        ! relative + planetary vorticity', 1), 4],
+    # --- round 4: the boundary the kt=2 walk names ---
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:312-316': [
+        'CASE ( 1 )        !==  Stage 1  ==!',
+        'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 5],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
+        'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:176-179': [
+        'CASE( np_VEC_c2, np_LIN_dyn )       ! Vector Inv. Form   ==>> averaged 3D RHS only',
+        'Ve_rhs(ji,jj) = SUM( e3t_1d(1:jpkm1)*vv(ji,jj,1:jpkm1,Krhs)*vmask(ji,jj,1:jpkm1) ) * r1_hv_0(ji,jj)', 4],
     'vortex_round3/namelist_cfg:182-185': [('ln_dynadv_vec = .true.  !  decision 73: ORCA2/GYRE vector-invariant momentum', 1), ('ln_dynadv_up3 = .false. !  decision 73: exactly one advection form (dynadv.F90:190)', 1), 4],
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:239': ('r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )   ! at N+1/2 (Kmm)', 1),
     'VORTEX_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:405': ('IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration', 1),

@@ -73,6 +73,16 @@ readonly STEPS=10
 #                             plus the (bitwise zero) metric term
 #   --variant vec             the round-3 card: vector-invariant, EEN on
 #                             Coriolis plus RELATIVE vorticity
+#   --variant vecrhs          the round-4 acquisition: the SAME vector-EEN
+#                             deck, with one EXTRA read-only writer that dumps
+#                             the momentum right-hand side after each routine
+#                             that contributes to it inside stp_2D.  Round 4
+#                             proved, by substitution, that the whole of this
+#                             card's stage-1 momentum error lives in that
+#                             completed right-hand side (handing legoESM
+#                             NEMO's own copy puts stage 1 at 1.1e-16, from
+#                             1.7e-05); naming WHICH TERM needs the split,
+#                             and no existing record carries it.
 #
 # Each variant writes its OWN evidence directory beside the other and builds its
 # OWN pair of NEMO configurations.  Nothing is ever overwritten: the acquire arm
@@ -85,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --run) do_run=1 ;;
     --variant) shift; variant=${1:-} ;;
     --variant=*) variant=${1#--variant=} ;;
-    *) printf 'Usage: %s [--run] [--variant flux|vec]\n' "$0" >&2 ; exit 64 ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs]\n' "$0" >&2 ; exit 64 ;;
   esac
   shift
 done
@@ -101,25 +111,51 @@ case "$variant" in
     deck_basename=namelist_cfg_omip_l1.patch
     default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2
     ref_name=VORTEX_OMIP_L1
+    exp_name=VORTEX_OMIP_L1
     tag=round2
     ;;
   vec)
     deck_basename=namelist_cfg_vec_een.patch
     default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3
     ref_name=VORTEX_VEC_OMIP_L1
+    exp_name=VORTEX_VEC_OMIP_L1
     tag=round3_vec
     ;;
+  vecrhs)
+    # The SAME deck as the vec variant -- one hunk apart from the shipped
+    # namelist, exactly as decision 73 requires -- with a SECOND instrument.
+    # New target names, new evidence directory: nothing round 3 produced is
+    # touched, and the acquire arm below refuses any target that exists.
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round4_rhsterms
+    ref_name=VORTEX_VEC_R4_OMIP_L1
+    # The build name is new so nothing round 3 produced can be overwritten,
+    # but the RUN's experiment name comes from the SHARED deck, so the file
+    # NEMO writes still carries round 3's cn_exp.  Keep the two apart here
+    # rather than have the admission look for a file that is never written.
+    exp_name=VORTEX_VEC_OMIP_L1
+    tag=round4_vec_rhsterms
+    ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux or vec\n' "$variant" >&2
+    printf 'REFUSE: unknown variant %s; expected flux, vec or vecrhs\n' \
+      "$variant" >&2
     exit 64
     ;;
 esac
 readonly EVIDENCE=${EVIDENCE:-$default_evidence}
 readonly REF_CFG=$ref_name
 readonly RUN_CFG=${ref_name}_P3
-readonly RESTART=${ref_name}_ZCO_00000010_restart.nc
+readonly RESTART=${exp_name}_ZCO_00000010_restart.nc
 readonly TAG=$tag
 readonly INSTRUMENT=$here/stprk3_step_record.patch
+# The second, round-4 instrument.  Empty for every variant but vecrhs.
+if [[ "$variant" == "vecrhs" ]]; then
+  RHS_INSTRUMENT=$here/stp2d_rhs_terms_record.patch
+else
+  RHS_INSTRUMENT=
+fi
+readonly RHS_INSTRUMENT
+readonly SHIPPED_STP2D=$NEMO_ROOT/src/OCE/stp2d.F90
 readonly DECK=$here/$deck_basename
 readonly CHECKER=$here/check_records.py
 readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
@@ -133,6 +169,19 @@ run_cfg=$NEMO_ROOT/tests/$RUN_CFG
 for path in "$INSTRUMENT" "$DECK" "$CHECKER" "$SHIPPED_STP" "$SHIPPED_CFG"; do
   [[ -f "$path" ]] || { printf 'REFUSE: missing %s\n' "$path" >&2; exit 66; }
 done
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  [[ -f "$RHS_INSTRUMENT" ]] \
+    || { printf 'REFUSE: missing %s\n' "$RHS_INSTRUMENT" >&2; exit 66; }
+  [[ -f "$SHIPPED_STP2D" ]] \
+    || { printf 'REFUSE: missing %s\n' "$SHIPPED_STP2D" >&2; exit 66; }
+  # Same premise as the stprk3 writer: this case must not already override
+  # the file the instrument patches.
+  if [[ -e "$SRC_CASE/MY_SRC/stp2d.F90" ]]; then
+    printf 'REFUSE: %s overrides stp2d.F90; the shared-writer premise is false\n' \
+      "$TEST_CASE" >&2
+    exit 66
+  fi
+fi
 [[ -d "$SRC_CASE/MY_SRC" && -d "$SRC_CASE/EXPREF" ]] \
   || { printf 'REFUSE: %s is not the shipped test case\n' "$SRC_CASE" >&2; exit 66; }
 # The card is the PARENT grid; refuse if the shipped case stopped being the
@@ -156,6 +205,13 @@ if [[ $(grep -c '^-' "$INSTRUMENT") -ne $(grep -c '^---' "$INSTRUMENT") ]]; then
     "$INSTRUMENT" >&2
   exit 67
 fi
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  if [[ $(grep -c '^-' "$RHS_INSTRUMENT") -ne $(grep -c '^---' "$RHS_INSTRUMENT") ]]; then
+    printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+      "$RHS_INSTRUMENT" >&2
+    exit 67
+  fi
+fi
 dry=$(mktemp -d /tmp/vortex-r1-dryrun.XXXXXX)
 cp "$SHIPPED_STP" "$dry/stprk3.F90"
 cp "$SHIPPED_CFG" "$dry/namelist_cfg"
@@ -168,6 +224,25 @@ patch -s "$dry/namelist_cfg" <"$DECK" \
 grep -q 'NEMO_L1_ENTRY_1' "$dry/stprk3.F90" \
   || { printf 'REFUSE: the patched stprk3 carries no step-record writer\n' >&2
        rm -rf "$dry"; exit 67; }
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  cp "$SHIPPED_STP2D" "$dry/stp2d.F90"
+  patch -s "$dry/stp2d.F90" <"$RHS_INSTRUMENT" \
+    || { printf 'REFUSE: the per-term instrument does not apply to the shipped stp2d\n' >&2
+         rm -rf "$dry"; exit 67; }
+  grep -q 'NEMO_L1_RHSTRM1' "$dry/stp2d.F90" \
+    || { printf 'REFUSE: the patched stp2d carries no per-term writer\n' >&2
+         rm -rf "$dry"; exit 67; }
+  # One dump per contributing routine, in NEMO's own order.  A boundary that
+  # went missing would leave one term silently unmeasured, which is the whole
+  # reason this record is being acquired.
+  for term in hpg ldf vor wzv keg zad; do
+    grep -q "l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, '$term' )" \
+      "$dry/stp2d.F90" \
+      || { printf 'REFUSE: the per-term instrument has no %s boundary\n' \
+             "$term" >&2
+           rm -rf "$dry"; exit 67; }
+  done
+fi
 # Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
 # of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
 # temperature is defined by inverting this law (usrdef_istate.F90:83-88), so a
@@ -200,8 +275,8 @@ fi
 # a deck that silently carried the other card's pair would run the other card
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
-  flux) want_vec='.false.' ; want_up3='.true.'  ;;
-  vec)  want_vec='.true.'  ; want_up3='.false.' ;;
+  flux)          want_vec='.false.' ; want_up3='.true.'  ;;
+  vec | vecrhs)  want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
   printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
@@ -262,7 +337,8 @@ printf 'provenance directory (retained): %s\n' "$manifest"
 ) >"$manifest/shipped_case.sha256"
 sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   "$SRC_CASE/cpp_${TEST_CASE}.fcm" "$SHIPPED_STP" "$SHIPPED_CFG" \
-  "$INSTRUMENT" "$DECK" "$CHECKER" >"$manifest/toolchain.sha256"
+  "$INSTRUMENT" "$DECK" "$CHECKER" ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
+  ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 build_one() {          # $1 = config name, $2 = 1 to apply the instrument
@@ -280,6 +356,11 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
     [[ ! -e "$cfg/MY_SRC/stprk3.F90" ]]
     cp "$SHIPPED_STP" "$cfg/MY_SRC/stprk3.F90"
     patch "$cfg/MY_SRC/stprk3.F90" <"$INSTRUMENT"
+    if [[ -n "$RHS_INSTRUMENT" ]]; then
+      [[ ! -e "$cfg/MY_SRC/stp2d.F90" ]]
+      cp "$SHIPPED_STP2D" "$cfg/MY_SRC/stp2d.F90"
+      patch "$cfg/MY_SRC/stp2d.F90" <"$RHS_INSTRUMENT"
+    fi
   fi
   touch "$cfg/MY_SRC/"*.F90
   ./makenemo -n "$name" -m conda-scalarmath
@@ -349,11 +430,12 @@ cp "$manifest"/*.sha256 "$EVIDENCE/"
 # ADMISSION.  The checker parses every record's own header (note BD) and
 # refuses unless the two restarts are byte-identical (note AS).  Its plant
 # MUST turn it red, or it proves nothing.
+if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
-  --restart "$RESTART" --steps "$STEPS" \
+  --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
   --output "$EVIDENCE/vortex_${TAG}_admission.json"
 if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
-     --restart "$RESTART" --steps "$STEPS" --plant \
+     --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} --plant \
      >"$EVIDENCE/vortex_${TAG}_admission_plant.json" 2>&1; then
   printf 'REFUSE: the planted control did not turn the checker red\n' >&2
   exit 70
