@@ -343,6 +343,11 @@ def test_a_non_clubb_scheme_refuses_the_lever():
         make_turbulence_physics(
             TurbulenceConfig(scheme="louis", liquid_partition=True),
             model_type="mpas", dt=300.0)
+    # Diagnostic CLUBB takes no q_c: refused at build, not a traced TypeError.
+    with pytest.raises(ValueError, match="needs prognostic CLUBB"):
+        make_turbulence_physics(
+            TurbulenceConfig(scheme="clubb", liquid_partition=True),
+            model_type="mpas", dt=300.0)
     # scheme="none" never reaches that factory: the combined factory skips it,
     # so the refusal must also bind there.
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
