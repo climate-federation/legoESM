@@ -416,3 +416,40 @@ def test_tiled_water_is_folded_even_without_any_override(monkeypatch, turbulence
                 sfc_tauy_override=jnp.zeros(s2), **extra)
     assert np.isfinite(np.asarray(out.dT_dt)).all()
     assert seen[-1]["evap_kg_m2_s"] is not None and seen[-1]["lhflx_w_m2"] is not None
+
+
+def test_physics_output_carries_the_surface_water_flux():
+    """``PhysicsOutput.evap_sfc`` is the water the surface actually lost, on
+    the same basis as the reported ``lhflx``: over open ocean at one skin
+    temperature it is lhflx / L_v(SST) (the kernel's own inverse), never the
+    constant-L inverse."""
+    from legoesm.thermo import latent_heat_vaporization
+    for turbulence in ("louis", "none"):
+        pipe = _pipeline(create_cubed_sphere(4), turbulence=turbulence)
+        _, s2 = _inputs(pipe)
+        out = _step(pipe)
+        assert out.evap_sfc is not None and np.isfinite(np.asarray(out.evap_sfc)).all()
+        expected = np.asarray(out.lhflx) / float(latent_heat_vaporization(295.0))
+        np.testing.assert_allclose(np.asarray(out.evap_sfc), expected, rtol=1e-10)
+        assert np.max(np.abs(np.asarray(out.evap_sfc) / (np.asarray(out.lhflx) / constants.L_v) - 1.0)) > 1e-3
+
+    # Tiled surface: evap_sfc is the folded per-tile water (the kernel's own
+    # moisture BC), which no single-temperature inverse of lhflx reproduces.
+    from legoesm.atmosphere.physics.turbulence import integration as integ
+    seen = []
+    real = integ.fold_prescribed_surface_fluxes
+    integ.fold_prescribed_surface_fluxes = lambda cfg, **kw: (seen.append(kw), real(cfg, **kw))[1]
+    try:
+        pipe = _pipeline(create_cubed_sphere(4), turbulence="louis")
+        _, s2 = _inputs(pipe)
+        pipe.f_land = jnp.full(s2, 0.5)
+        pipe.albedo_land = jnp.full(s2, 0.2)
+        pipe.surface_tiled = True
+        out = _step(pipe, T_land=jnp.full(s2, 285.0))
+    finally:
+        integ.fold_prescribed_surface_fluxes = real
+    folded = np.asarray(pipe.adapter.unflatten_2d(seen[-1]["evap_kg_m2_s"]))
+    np.testing.assert_allclose(np.asarray(out.evap_sfc), folded, rtol=1e-12)
+    lh = np.asarray(out.lhflx)
+    for T in (295.0, 285.0, 290.0):
+        assert np.max(np.abs(np.asarray(out.evap_sfc) / (lh / float(latent_heat_vaporization(T))) - 1.0)) > 1e-5

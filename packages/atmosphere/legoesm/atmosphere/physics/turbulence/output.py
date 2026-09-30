@@ -84,3 +84,7 @@ class TurbulenceOutput(NamedTuple):
     cloud_fraction: jax.Array | None = None
     wtheta_flux: jax.Array | None = None
     dq_c_dt: jax.Array | None = None
+    # Surface water flux the kernel actually used as its moisture BC [kg/m2/s,
+    # positive up]: the prescribed tile water or lhflx / L_v(T_sfc).  The water
+    # ledgers and CMOR evspsbl read THIS, never lhflx / L_v.
+    evap_sfc: jax.Array | None = None

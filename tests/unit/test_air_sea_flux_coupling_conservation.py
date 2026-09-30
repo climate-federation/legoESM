@@ -215,7 +215,7 @@ class TestAirSeaBudgetCloses:
                 q_surface=z, shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
                 u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z, freshwater_flux=z,
                 ocean_heat_extraction=z, ocean_stress_x=z, ocean_stress_y=z,
-                surface_mass_flux=z, salt_flux=z,
+                surface_mass_flux=z, salt_flux=z, lhflx_exchange=z,
             )
         blended = blend_tiles(ocean, _zero_resp(), _zero_resp(), _zero_resp(),
                               fracs)
@@ -291,7 +291,7 @@ class TestAirSeaBudgetCloses:
                 q_surface=z, shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
                 u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z, freshwater_flux=z,
                 ocean_heat_extraction=z, ocean_stress_x=z, ocean_stress_y=z,
-                surface_mass_flux=z, salt_flux=z,
+                surface_mass_flux=z, salt_flux=z, lhflx_exchange=z,
             )
 
         tcfg = TileConfig(f_land=jnp.full(shape, f_land_val), f_lake=z)

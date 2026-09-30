@@ -283,7 +283,9 @@ def test_sea_ice_sublimation_mass_term_is_included():
     # Predicted Δ(dh/dt) from sublimation term alone:
     # Δdh_dt_sublim = -Δlhflx / (rho_ice · L_s)  (negative — more sublim
     # in dry case → more mass loss → MORE NEGATIVE dh/dt).
-    expected_d_dh_dt = -dlhflx / (config.rho_ice * constants.L_s)
+    # The charge and the mass loss both use Kirchhoff L_s at the INPUT ice T.
+    from legoesm.thermo import latent_heat_sublimation
+    expected_d_dh_dt = -dlhflx / (config.rho_ice * float(latent_heat_sublimation(265.0)))
 
     dh_dt_dry = float(jnp.mean(state_dry.h_ice.data - state.h_ice.data) / DT)
     dh_dt_moist = float(jnp.mean(state_moist.h_ice.data - state.h_ice.data) / DT)
@@ -349,6 +351,7 @@ def test_slab_ocean_Q_freeze_diagnostic_populated():
 # ==============================================================================
 
 def test_sea_ice_freshwater_flux_balances_ice_mass_change():
+    from legoesm.thermo import latent_heat_sublimation
     """Sea-ice TileResponse.freshwater_flux must equal the PER-GRID-CELL
     ice melt/freeze mass rate -rho_ice·(dh/dt - sublimation)·conc (audit
     F4 / F11).
@@ -379,7 +382,7 @@ def test_sea_ice_freshwater_flux_balances_ice_mass_change():
     # Sublimation thickness rate (signed; <0 for ice->atmosphere), over ice.
     sublim_rate = jnp.where(
         state.h_ice.data > config.h_ice_min,
-        -resp.lhflx / (config.rho_ice * constants.L_s),
+        -resp.lhflx / (config.rho_ice * latent_heat_sublimation(state.T_ice.data)),
         0.0,
     )
     # Freshwater to ocean = -(per-cell volume change going to/from the OCEAN):
@@ -555,7 +558,8 @@ def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
         config, U_min=1.0, dt=DT,
     )
 
-    expected = resp.lhflx / constants.L_s * state.concentration.data
+    from legoesm.thermo import latent_heat_sublimation
+    expected = resp.lhflx / latent_heat_sublimation(state.T_ice.data) * state.concentration.data
     assert jnp.allclose(resp.surface_mass_flux, expected, rtol=1e-12)
 
 
@@ -640,7 +644,9 @@ def test_sea_ice_latent_energy_pairs_with_moisture_and_deposition_debits():
     # Moisture-energy pairing: the blended latent ENERGY is exactly L_s times
     # the blended moisture MASS (ice-only cell), so the atmosphere never sees
     # vapor without its latent energy or vice-versa.
-    assert jnp.allclose(blended.lhflx, constants.L_s * blended.surface_mass_flux,
+    from legoesm.thermo import latent_heat_sublimation
+    assert jnp.allclose(blended.lhflx,
+                        latent_heat_sublimation(state.T_ice.data) * blended.surface_mass_flux,
                         rtol=1e-10, atol=1e-12)
 
 
@@ -783,7 +789,7 @@ def test_blending_is_area_weighted():
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
             freshwater_flux=z, ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
-            surface_mass_flux=z, salt_flux=z,
+            surface_mass_flux=z, salt_flux=z, lhflx_exchange=z,
         )
 
     fracs = TileFractions(
@@ -837,7 +843,7 @@ def test_tile_blend_lw_flux_conservation():
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
             freshwater_flux=z, ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
-            surface_mass_flux=z, salt_flux=z,
+            surface_mass_flux=z, salt_flux=z, lhflx_exchange=z,
             T_rad=None if T_rad is None else jnp.full(SHAPE, T_rad),
         )
 

@@ -6222,7 +6222,7 @@ def clubb_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
         # Expose the CLUBB ADG1-PDF liquid cloud fraction so radiation can use
