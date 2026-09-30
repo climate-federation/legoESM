@@ -1831,6 +1831,9 @@ class ExperimentConfig(NamedTuple):
     morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
     morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
     morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
+    # MorrisonConfig.warm_rain_incloud: CAM6 MG2 in-cloud warm rain on the
+    # CLUBB cloud fraction (needs turbulence='clubb', cld_macmic_num_steps>=2).
+    morrison_warm_rain_incloud: bool = False
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3565,7 +3568,7 @@ class ExperimentConfig(NamedTuple):
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
-                    "morrison_do_graupel"):
+                    "morrison_do_graupel", "morrison_warm_rain_incloud"):
             _v = getattr(self, _nm)
             if not isinstance(_v, bool):
                 errors.append(f"{_nm} must be a bool, got {_v!r}")
@@ -3574,6 +3577,16 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"{_nm}={_v} requires microphysics='morrison' "
                     f"(got {self.microphysics!r}); it would be silently inert")
+        if self.morrison_warm_rain_incloud is True and (
+                self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
+                or self.subgrid_autoconversion):
+            errors.append(
+                "morrison_warm_rain_incloud=True needs turbulence='clubb', "
+                "cld_macmic_num_steps>=2 and subgrid_autoconversion=False "
+                "(it reads CLUBB's cloud fraction from the same macmic "
+                f"sub-step); got turbulence={self.turbulence!r}, "
+                f"cld_macmic_num_steps={self.cld_macmic_num_steps}, "
+                f"subgrid_autoconversion={self.subgrid_autoconversion}")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(
