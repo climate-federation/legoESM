@@ -173,7 +173,7 @@ __param_spec__ = {
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
             "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
-            "kk2000_cam6_relvar": "CAM6 relvarmax fallback constant (clubb_intr.F90:2416-2421) for the kk2000_cam6 option; CAM6 diagnoses relvar per cell from CLUBB variance, not ported, so this is a fixed reference value, not a calibration knob",
+            "kk2000_cam6_relvar": "physics-fidelity: CAM6 relvarmax fallback constant (clubb_intr.F90:2416-2421) for the kk2000_cam6 option; CAM6 diagnoses relvar per cell from CLUBB variance, not ported, so this is a fixed reference value, not a calibration knob",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
