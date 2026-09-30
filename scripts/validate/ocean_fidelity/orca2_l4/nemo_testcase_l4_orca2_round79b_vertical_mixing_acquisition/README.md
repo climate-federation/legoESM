@@ -6,7 +6,7 @@ One file per rank per step, for the first ten steps, holding NEMO's own
 diffusivities at every boundary of the compiled `zdf_phy`, in NEMO's execution
 order, plus the turbulence closure's internals:
 
-| boundary | NEMO statement (ORCA2 build, `BLD/ppsrc/nemo/zdfphy.f90`) | arrays recorded |
+| boundary | NEMO statement (ORCA2 build, compiled `zdfphy`) | arrays recorded |
 |---|---|---|
 | after the closure | `:349-350`, the copy of the closure's coefficients into the working arrays | `avt_after_tke`, `avm_after_tke`, `avt_k`, `avm_k` |
 | after the river mouths | `:355`, `avt = avt + 2 * rn_avt_rnf * rnfmsk * wmask` | `avt_after_rnf`, `rnfmsk` |

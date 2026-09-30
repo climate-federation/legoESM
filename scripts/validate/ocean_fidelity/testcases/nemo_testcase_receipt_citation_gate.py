@@ -86,6 +86,12 @@ FILES = {
     # two-arm rmxl_min choice this deck's ln_zdfiwm selects.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (
         _ORCA2_COMPILED / "zdftke.f90"),
+    # ORCA2 round 79b cites the vertical-physics chain and the internal-wave
+    # arm that this deck runs and the card does not.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90": (
+        _ORCA2_COMPILED / "zdfiwm.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -1437,6 +1443,28 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-841': [
         'IF( ln_zdfiwm ) THEN',
         "minimum mixing length with your parameters rmxl_min = ", 7],
+    # --- ORCA2 card round 79b: NEMO's vertical-physics chain, in the order
+    # zdf_phy runs it, and the internal-wave arm the ORCA2 card does not
+    # execute.  Each boundary is pinned on its own so a widened span cannot
+    # silently swallow the neighbouring arm.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350': [
+        'avt(ji,jj,jk) = avt_k(ji,jj,jk)',
+        'avm(ji,jj,jk) = avm_k(ji,jj,jk)', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:355':
+        'avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf '
+        '* rnfmsk(ji,jj) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359':
+        'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363':
+        'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372':
+        'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:294':
+        'zav_wave(ji,jj) = MIN( MAX( 1.4e-7_wp, zav_wave(ji,jj) ), '
+        '1.e-2_wp ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:314-316': [
+        'p_avs(ji,jj,jk) = p_avs(ji,jj,jk) + zav_wave(ji,jj) * zav_ratio(ji,jj)',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 3],
     # --- ORCA2 card round 1: initial category-load SSH adjustment ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
