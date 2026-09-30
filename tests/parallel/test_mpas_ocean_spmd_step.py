@@ -128,7 +128,7 @@ def _run_serial(model, state, forcing, dt, n):
 
 
 def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
-              n_dev=N_DEV):
+              n_dev=N_DEV, halo_depth=None, relabel_depth=None):
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         gather_state_mpas_ocean_spmd,
@@ -136,9 +136,12 @@ def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
         shard_state_mpas_ocean_spmd,
     )
     fw, sf, sp = forcing
+    kw = {} if halo_depth is None else {"halo_depth": halo_depth}
     layout = build_mpas_ocean_spmd_layout(
         mesh, n_dev, n_cells_real=n_real, tracer_advection=tracer_advection,
-        nlev=state.T.data.shape[1])
+        nlev=state.T.data.shape[1], **kw)
+    if relabel_depth is not None:   # mutation: claim rings the layout lacks
+        layout = layout._replace(halo_depth=relabel_depth)
     step = make_sharded_mpas_ocean_step(model, layout)
     st = shard_state_mpas_ocean_spmd(state, layout)
     fw_s = jax.tree.map(lambda x: jax.device_put(x, layout.cell_sharding), fw)
@@ -352,3 +355,125 @@ def test_cfl_check_ignores_padded_edges():
     cfl_pad = MPASOceanModel(mesh, z, MPASOceanConfig()).check_barotropic_cfl(300.0)
     cfl_ref = MPASOceanModel(mesh0, z, MPASOceanConfig()).check_barotropic_cfl(300.0)
     assert np.isclose(cfl_pad, cfl_ref, rtol=1e-12)
+
+
+# --- global-polynomial preconditioner ("gpoly") ------------------------------
+# gpoly is the SAME fixed-M PCG on one device and on the SPMD lane (single
+# device runs it without a halo), so at a SMALL M — where the preconditioner
+# still shapes the answer — the sharded result must equal the serial one to
+# the re-association floor at every device count. A ring-validity error in
+# the redundant halo evaluation (too few rings, stale coefficients, edge
+# depth) changes the answer on partition seams and breaks this.
+_GPOLY = dict(barotropic_solver="implicit_cn", tracer_advection="superbee",
+              K_zeta_bih=1.0e13, n_barotropic_substeps=10,
+              barotropic_implicit_pcg_precond="gpoly",
+              barotropic_implicit_pcg_fixed_iters=3)
+
+
+# At 300 s on ico4 the Helmholtz is ~identity and 3 iterations converge
+# whatever the preconditioner, which made the parity test blind to it.
+_GPOLY_DT = 3600.0
+
+
+def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
+    # level 4 (2562 cells): on the ico2 fixture two rings already reach ~85%
+    # of the mesh, so a missing ring could not show.
+    mesh, n_real, model, state, forcing = _build(
+        dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps), n_dev=n_dev,
+        level=4)
+    spmd_kw.setdefault("halo_depth", halo_depth_for_config(model.config))
+    ref = _run_serial(model, state, forcing, _GPOLY_DT, 3)
+    try:
+        got, layout = _run_spmd(model, mesh, n_real, state, forcing, _GPOLY_DT, 3,
+                                "superbee", n_dev=n_dev, **spmd_kw)
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    return _compare(ref, got, n_real, mesh), layout
+
+
+@pytest.mark.parametrize("n_dev", [2, 3, 4])
+def test_gpoly_spmd_matches_serial_at_small_m(n_dev):
+    _need_devices(n_dev)
+    worst, layout = _gpoly_pair(n_dev)
+    assert layout.halo_depth == 2      # K=4 fits the historical depth
+    bad = {k: v for k, v in worst.items() if v[0] > _ATOL[k]}
+    assert not bad, (bad, worst)
+
+
+def test_gpoly_six_sweeps_needs_depth_four():
+    """The depth rule (K-2) beyond the default: K=6 builds depth 4."""
+    _need_devices(N_DEV)
+    worst, layout = _gpoly_pair(N_DEV, sweeps=6)
+    assert layout.halo_depth == 4
+    bad = {k: v for k, v in worst.items() if v[0] > _ATOL[k]}
+    assert not bad, (bad, worst)
+
+
+@pytest.mark.parametrize("sweeps", [4, 6])
+def test_gpoly_short_halo_breaks_parity(sweeps):
+    """Non-vacuity: a layout one ring shallower than the rule, relabelled to
+    pass the guard, leaves the redundant sweeps one ring short; the same
+    comparison must then fail by orders of magnitude (measured eta 1e-3 m
+    at K=4 depth 1, 2e-5 m at K=6 depth 3)."""
+    _need_devices(N_DEV)
+    need = max(2, sweeps - 2)
+    worst, _ = _gpoly_pair(N_DEV, sweeps=sweeps, halo_depth=need - 1,
+                           relabel_depth=need)
+    assert max(v[0] / _ATOL[k] for k, v in worst.items()) > 1e3, worst
+
+
+def test_gpoly_refuses_shallow_halo():
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    mesh, n_real, model, state, forcing = _build(dict(_GPOLY))
+    with pytest.raises(ValueError, match="needs a layout halo_depth of >= 2"):
+        try:
+            _run_spmd(model, mesh, n_real, state, forcing, 300.0, 1,
+                      "superbee", halo_depth=1)
+        finally:
+            set_halo_backend("local")
+            set_spmd_mesh(None)
+
+
+def test_poly_unchanged_by_deeper_halo():
+    """The production block-local preconditioner on a depth-4 layout: same
+    parity against serial as on depth 2 (the deeper halo changes nothing
+    else in the step)."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    kw = _CASES["implicit_superbee_del4"]
+    mesh, n_real, model, state, forcing = _build(dict(kw))
+    ref = _run_serial(model, state, forcing, 300.0, 3)
+    try:
+        got, layout = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3,
+                                "superbee", halo_depth=4)
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    assert layout.halo_depth == 4
+    worst = _compare(ref, got, n_real, mesh)
+    bad = {k: v for k, v in worst.items() if v[0] > _ATOL[k]}
+    assert not bad, (bad, worst)
+
+
+def test_gpoly_serial_gradient_matches_finite_difference():
+    """Reverse mode through the unrolled global-polynomial solve (single
+    device): d/ds sum(eta^2) after one step from s * eta0 vs a central
+    difference. (The SPMD step's reverse mode is NaN for the production
+    preconditioner too — a pre-existing defect outside this path.)"""
+    mesh, n_real, model, state, (fw, sf, sp) = _build(dict(_GPOLY), level=4)
+
+    def loss(s):
+        st = state._replace(eta=state.eta.replace(data=state.eta.data * s))
+        out = model._step_impl(st, _GPOLY_DT, freshwater=fw, surface_forcing=sf,
+                               sponge=sp)
+        return jnp.sum(out.eta.data ** 2)
+
+    g = float(jax.jit(jax.grad(loss))(1.0))
+    h = 1e-4
+    fd = (float(jax.jit(loss)(1.0 + h)) - float(jax.jit(loss)(1.0 - h))) / (2 * h)
+    assert np.isfinite(g) and g != 0.0
+    np.testing.assert_allclose(g, fd, rtol=1e-6)
