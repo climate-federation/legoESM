@@ -16,6 +16,7 @@ import pytest
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.land.config import MultiLayerLandConfig, RichardsConfig
 from legoesm.land.multilayer_land import init_multilayer_land_state, step_multilayer_land
 from legoesm.land.richards import psi_dry_floor, solve_richards
@@ -113,7 +114,8 @@ def _day(scheme, top, deep, n_steps=48, dt=1800.0, precip=0.0, state_dtype=None,
          sw=600.0, bottom_bc="zero_flux", **cfg_kw):
     """One jitted scan of land steps; per-step residual [kg/m2] of
     dStorage(soil + pond + canopy store) - (P - E_reported - runoff), total E
-    [kg/m2], max |lhflx - L_v * mass|."""
+    [kg/m2], max |lhflx - L_v(T_surface) * mass| (the start-of-step top-soil
+    temperature the land step charges its latent heat at)."""
     cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
                                richards=RichardsConfig(bottom_bc=bottom_bc),
                                surface_scheme=scheme, **cfg_kw)
@@ -138,7 +140,7 @@ def _day(scheme, top, deep, n_steps=48, dt=1800.0, precip=0.0, state_dtype=None,
         e = r.surface_mass_flux[0] * dt
         ro = (s2.runoff_surface[0] + s2.runoff_subsurface[0]) * dt
         return s2, (W(s2) - W(s) - (precip * dt - e - ro), e,
-                    r.lhflx[0] - r.surface_mass_flux[0] * constants.L_v)
+                    r.lhflx[0] - r.surface_mass_flux[0] * latent_heat_vaporization(s.T_soil[0, 0]))
 
     _, (res, e, gap) = jax.jit(lambda s: jax.lax.scan(body, s, None, length=n_steps))(st)
     return np.asarray(res), float(jnp.sum(e)), float(jnp.max(jnp.abs(gap)))
@@ -151,7 +153,7 @@ def _day(scheme, top, deep, n_steps=48, dt=1800.0, precip=0.0, state_dtype=None,
 def test_dry_column_reports_only_water_it_loses(scheme, cfg_kw):
     """A hot dry day on a column 5e-3 above its dry floor: every step, the water
     the land reports to the atmosphere is exactly what the column lost, and the
-    reported latent heat is L_v times it.  (Before the fix the two-leaf column
+    reported latent heat is L_v(T_surface) times it.  (Before the fix the two-leaf column
     reported ~0.04 kg/m2/day it never held.)"""
     res, et, gap = _day(scheme, top=5.0e-3, deep=5.0e-3, **cfg_kw)
     assert et > 0.0

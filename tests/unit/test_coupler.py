@@ -2063,13 +2063,16 @@ def test_ocean_evaporation_uses_flux_latent_heat_aerobulk():
     forcing = _make_forcing()
     ocean_sst = jnp.full(SHAPE, 300.0)
     zu = jnp.zeros(SHAPE)
-    for conv, L_expected in (
-        ("aerobulk", latent_heat_vaporization(ocean_sst)),
-        ("legoesm", latent_heat_vaporization(ocean_sst)),
+    for scheme, conv, L_expected in (
+        ("coare3", "aerobulk", latent_heat_vaporization(ocean_sst)),
+        ("coare3", "legoesm", latent_heat_vaporization(ocean_sst)),
+        ("constant", "legoesm", latent_heat_vaporization(ocean_sst)),
+        # The CESM port charges its oracle's constant L_v.
+        ("large_yeager_cesm", "legoesm", constants.L_v),
     ):
         resp = ocean_tile_response(
             forcing, ocean_sst, zu, zu,
-            CouplerConfig(bulk_scheme="coare3", thermo_convention=conv),
+            CouplerConfig(bulk_scheme=scheme, thermo_convention=conv),
         )
         npt.assert_allclose(resp.surface_mass_flux * L_expected, resp.lhflx,
                             rtol=1e-6)
