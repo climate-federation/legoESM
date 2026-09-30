@@ -1,6 +1,7 @@
 """Single-column offline demo: bulk vs layered snowpack, 45-60N-like early winter.
 
-30 days, dt = 1800 s, two-leaf canopy (LAI 1), soil freeze/thaw ON (production),
+30 days, dt = 1800 s, two-leaf canopy (LAI 1), soil freeze/thaw OFF in both runs
+(the layered pack refuses it until the hydrology fusion heat is charged there),
 starting from a 278 K / theta 0.25 autumn soil.  Air temperature ramps from 268
 to 258 K with a +-4 K diurnal cycle; 8-hour days with 150 W/m2 peak sun;
 downwelling LW = 0.75 sigma T_air^4; three 10 kg/m2 snowfalls (days 2, 10, 18,
@@ -57,7 +58,9 @@ def forcing_at(k):
 def run(snow_scheme, days=DAYS):
     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(),
                                snow_scheme=snow_scheme, snow_albedo_feedback=True)
-    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=True))
+    # Freeze/thaw off for BOTH schemes: the layered pack refuses it, and the
+    # bulk-vs-layered comparison must differ in the snowpack only.
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=False))
     st = init_multilayer_land_state(1, cfg, T_init=278.0, theta_init=0.25)
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([1.0]))
     step = jax.jit(lambda s, f: step_multilayer_land_with_diagnostics(
@@ -77,7 +80,7 @@ def run(snow_scheme, days=DAYS):
 def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
-    print(f"git {sha}  dt={DT:.0f}s days={DAYS}  depths={DEPTHS} m  freeze_thaw=on  two_leaf LAI=1")
+    print(f"git {sha}  dt={DT:.0f}s days={DAYS}  depths={DEPTHS} m  freeze_thaw=off  two_leaf LAI=1")
     out = {s: run(s) for s in ("bulk", "layered")}
     spd = int(86400 / DT)
     print("day | T0.3m bulk  layered | T1m bulk  layered | SWE bulk  layered | Tsfc bulk  layered")
