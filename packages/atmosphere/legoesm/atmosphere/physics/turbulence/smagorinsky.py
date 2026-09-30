@@ -302,7 +302,7 @@ def smagorinsky_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,

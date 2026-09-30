@@ -45,6 +45,7 @@ class PhysicsOutput(NamedTuple):
     conv_prog: jax.Array
     shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
     lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
+    evap_sfc: jax.Array | None = None  # surface water flux actually applied [kg/m2/s, +up]
     tke: jax.Array | None = None     # updated prognostic TKE (ncol, nlev)
     qke: jax.Array | None = None     # updated MYNN-2.5 qke=2*TKE (ncol, nlev)
     gwd_spectrum: jax.Array | None = None  # updated GWD wave-action spectrum

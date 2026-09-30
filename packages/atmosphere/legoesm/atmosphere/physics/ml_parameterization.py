@@ -138,7 +138,7 @@ def _apply_predicted_diffusivity_turbulence(
             Km=Km,
             Kh=Kh,
             shflx=zeros_2d,
-            lhflx=zeros_2d,
+            lhflx=zeros_2d, evap_sfc=zeros_2d,
             ustar=zeros_2d,
             h_pbl=zeros_2d,
         )
@@ -189,7 +189,7 @@ def _apply_predicted_diffusivity_turbulence(
         Km=Km,
         Kh=Kh,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
     )

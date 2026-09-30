@@ -1834,6 +1834,7 @@ class PhysicsPipeline:
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
         from legoesm.thermo import latent_heat_vaporization as _lv_T
         lhflx = rho_low * _lv_T(T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        evap_sfc = None   # the water flux actually applied to the column (set below)
 
         turb_owns_surface = (
             self.turbulence_fn is not None
@@ -1935,6 +1936,7 @@ class PhysicsPipeline:
             else:
                 from legoesm.thermo import latent_heat_vaporization
                 evap_rate = lhflx / latent_heat_vaporization(T_sfc)
+            evap_sfc = evap_rate
             # Heat kick carries the latent enthalpy correction (surface_layer
             # .latent_enthalpy_correction): water credited at L_v by the column
             # but charged at L(T_sfc) by the surface.
@@ -1983,6 +1985,8 @@ class PhysicsPipeline:
                 shflx = ad.unflatten_2d(turb_out.shflx)
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
+            if getattr(turb_out, 'evap_sfc', None) is not None:
+                evap_sfc = ad.unflatten_2d(turb_out.evap_sfc)
         elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(
@@ -2125,6 +2129,8 @@ class PhysicsPipeline:
                 shflx = ad.unflatten_2d(turb_out.shflx)
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
+            if getattr(turb_out, 'evap_sfc', None) is not None:
+                evap_sfc = ad.unflatten_2d(turb_out.evap_sfc)
 
         # --- Budget-ledger capture: turbulence row -------------------------
         # The BL scheme's tendencies INCLUDE its implicit surface-flux bottom
@@ -2351,6 +2357,7 @@ class PhysicsPipeline:
             conv_prog=conv_prog_out,
             shflx=shflx,
             lhflx=lhflx,
+            evap_sfc=evap_sfc,
             # Carry dtype stability: pin each updated carry to its INPUT
             # dtype so the value fed back next step (and the lax.scan
             # carry) never changes dtype.  The prognostic-spectral GWD
