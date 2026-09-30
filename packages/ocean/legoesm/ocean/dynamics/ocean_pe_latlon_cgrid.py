@@ -1743,7 +1743,9 @@ def nemo_qco_wzv_operands(
         else:
             raise ValueError(
                 "after_ssh_form must be one of ['continuity_prediction', "
-                f"'rk3_extrapolation'], got {after_ssh_form!r}")
+                "'rk3_extrapolation'] -- it names the NEMO time-stepping "
+                "scheme whose after-SSH slot this call reads; got "
+                f"{after_ssh_form!r}")
         eta_after = jax.lax.optimization_barrier(
             eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
     else:
