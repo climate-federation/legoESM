@@ -465,6 +465,18 @@ def warn_sed_substeps_unreported(cfg, lane: str = "current",
     return True
 
 
+def _evap_sfc_slot() -> int:
+    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
+    ``_sfc_diag`` tuple, derived from the SHARED slot contract like
+    ``_sed_substeps_slot`` -- never hand-counted."""
+    from legoesm.core.state import (
+        MPAS_SFC_DIAG_BASE_KEYS,
+        MPAS_SFC_DIAG_EXTRA_KEYS,
+    )
+    return (len(MPAS_SFC_DIAG_BASE_KEYS)
+            + MPAS_SFC_DIAG_EXTRA_KEYS.index("evap_sfc"))
+
+
 def _sed_substeps_slot() -> int:
     """Index of ``sed_substeps_required`` in the MPAS ``_sfc_diag`` tuple.
 
@@ -802,7 +814,9 @@ class _MPASSfcFluxAccum:
     # against an accumulated 20.5, and an apparent leak of +34.7 W/m^2 where
     # accumulated channels gave ~11.  Accumulating costs one device-side add
     # per step per slot and is what makes the budget answerable at all.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    # 13 = evap_sfc (the column's surface water flux): accumulated like hfls
+    # so CMOR evspsbl and the moisture closure get the same window MEAN.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -4600,6 +4614,7 @@ class ModelDriver:
                 sw_down_toa=kwargs.get('sw_down_toa', None),
                 shflx=kwargs.get('shflx', None),
                 lhflx=kwargs.get('lhflx', None),
+                evspsbl=kwargs.get('evspsbl', None),
             )
 
         if self._device_config is not None:
@@ -4637,7 +4652,7 @@ class ModelDriver:
                         'q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g',
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
-                        'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                        'sw_down_toa', 'shflx', 'lhflx', 'evspsbl', 'lat_deg_grid',
                         't_low_mean', 'sw_up_toa_clr', 'lw_up_toa_clr',
                     ):
                         if kwargs.get(_tname) is not None:
@@ -4685,7 +4700,7 @@ class ModelDriver:
                     # this gather rank 0 would write zeros / stale values
                     # on its five non-owned faces into the timeseries and
                     # CMOR output.  All ranks must participate (collective).
-                    for tname in ('precip_total', 'shflx', 'lhflx',
+                    for tname in ('precip_total', 'shflx', 'lhflx', 'evspsbl',
                                   'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
                                   'lw_net_sfc', 'sw_down_toa', 't_low_mean',
                                   'sw_up_toa_clr', 'lw_up_toa_clr'):
@@ -8083,17 +8098,26 @@ class ModelDriver:
         if _acc is None or not _acc.has_samples() or not _acc.is_complete():
             return
         precip = kw.get("precip")
-        hfls = kw.get("hfls")
+        evspsbl = kw.get("evspsbl")
         tracers = self.state.tracers
-        if (precip is None or hfls is None or tracers is None
-                or "q_v" not in tracers):
+        if precip is None or tracers is None or "q_v" not in tracers:
             return          # dry run, or a window whose fluxes were withheld
+        if evspsbl is None:
+            # Heat without water: the closure will NOT rebuild E as hfls / L_v
+            # (the hidden 2-3 % fallback the water channel removed).  Loud,
+            # because a silent return would read as "the budget closes".
+            import warnings
+            warnings.warn(
+                "MPAS moisture closure skipped: the window has precip and hfls "
+                "but no evspsbl (turbulence evap_sfc slot); the closure refuses "
+                "to derive water from latent heat.", stacklevel=2)
+            return
         area = getattr(self.grid, "areaCell", None)
         _p_s = self.state.p_s.data
         _p_half = self.sigma.pressure_at_half(_p_s)
         diag.moisture_tracker.update(
             tracers["q_v"].data, _p_s, self.sigma.dsigma,
-            precip, hfls,
+            precip, evap=evspsbl,
             elapsed_seconds=float(day) * 86400.0,
             area_weights=(None if area is None
                           else jnp.asarray(area).reshape(-1)),
@@ -8301,6 +8325,7 @@ class ModelDriver:
         rsdt = _sfc_slot(5)
         hfss = _sfc_slot(6)
         hfls = _sfc_slot(7)
+        evspsbl = _sfc_slot(_evap_sfc_slot())   # the column's water flux, window mean
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
@@ -8374,6 +8399,7 @@ class ModelDriver:
             rsdt=rsdt,
             hfss=hfss,
             hfls=hfls,
+            evspsbl=evspsbl,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
             wap=wap,
@@ -11467,6 +11493,7 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
+            "evspsbl": [],
             # 1.0 = the seven energy channels above are diagnostic-INTERVAL
             # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
             # cycle of the land-dominated turbulent fluxes (#1354/#1353).
@@ -12597,6 +12624,7 @@ class ModelDriver:
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
                 _sw_ns, _lw_ns = _slot(0), _slot(1)
                 _shf, _lhf = _slot(6), _slot(7)
+                _evp = _slot(_evap_sfc_slot())
                 if (_ebd is not None and _qv_e is not None
                         and not _is_mpas_cell_partitioned(self)
                         and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
@@ -12634,10 +12662,12 @@ class ModelDriver:
                                        if _shf is not None else float("nan"))
                     _ts["hfls"].append(float(_awm(_lhf, _awt))
                                        if _lhf is not None else float("nan"))
+                    _ts["evspsbl"].append(float(_awm(_evp, _awt))
+                                          if _evp is not None else float("nan"))
                 else:
                     for _ek in ("energy_toa_net", "energy_dE_dt",
                                 "energy_residual", "sw_net_sfc", "lw_net_sfc",
-                                "hfss", "hfls"):
+                                "hfss", "hfls", "evspsbl"):
                         _ts[_ek].append(float("nan"))
                 # Latest closure the CMOR feed recorded, or NaN before the
                 # first complete diagnostic window.  NaN, never 0: a zero here
@@ -13703,6 +13733,7 @@ class ModelDriver:
             energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
+            evspsbl=_arr("evspsbl") if "evspsbl" in ts else nan,
             # Flux-timing provenance for the seven channels above. WITHOUT
             # this the closure probe refuses every real series as "timing
             # unknown" -- which is the correct refusal, and exactly what
@@ -16021,11 +16052,13 @@ class ModelDriver:
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
                 _dm_carry = mean_carry
+                seg_evap = mean_carry.evap_accum   # [kg/m2], read off the carry
             else:
                 (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
                 _dm_carry = carry
+                seg_evap = carry.evap_accum        # [kg/m2], read off the carry
             # Write evolved double-moment hydrometeors back into the registry
             # dict (unpack_carry only returns q_v/q_c/q_r; q_i/q_s/q_g/N_c/N_r/N_i
             # ride the carry directly). No-op for warm-rain (carry fields None).
@@ -16229,6 +16262,7 @@ class ModelDriver:
                 seg_precip_rate = segment_accum_to_rate(seg_precip, seg_steps, DT)
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
+                seg_evap_rate = seg_evap / _seg_dur    # kg/m²/s, the CMOR evspsbl feed
                 # Segment-MEAN radiative fluxes / T_low (time integrals from
                 # the carry / segment duration) instead of the segment-end
                 # instantaneous held_* values: the held snapshots put a full
@@ -16301,6 +16335,7 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    evspsbl=seg_evap_rate,
                     t_low_mean=seg_t_low_mean,
                     q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
                     q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,

@@ -85,9 +85,13 @@ class _Driver:
         self._mpas_sfc_accum = _Accum() if accum is None else accum
 
 
-def _kw(ncol, *, precip_mm_day, hfls_w_m2):
+def _kw(ncol, *, precip_mm_day, hfls_w_m2, evspsbl=None):
+    # The closure reads the WATER (evspsbl); hfls rides along as the CMOR
+    # output does.  Tests set the water to the same E the heat implies.
     return {"precip": jnp.full((ncol,), precip_mm_day / 86400.0),
-            "hfls": jnp.full((ncol,), hfls_w_m2)}
+            "hfls": jnp.full((ncol,), hfls_w_m2),
+            "evspsbl": (jnp.full((ncol,), hfls_w_m2 / constants.L_v)
+                        if evspsbl is None else evspsbl)}
 
 
 def test_a_known_imbalance_reaches_the_tracker_with_the_right_size():
@@ -147,8 +151,35 @@ def test_withheld_fluxes_are_skipped():
     close against a None and record a spurious imbalance."""
     d = _Driver()
     diag = _Diag()
-    d._feed_mpas_moisture_budget(0.0, diag, {"precip": None, "hfls": None})
+    d._feed_mpas_moisture_budget(0.0, diag, {"precip": None, "hfls": None,
+                                            "evspsbl": None})
     assert diag.moisture_tracker.residual == []
+
+
+def test_heat_without_water_warns_and_skips():
+    """A window with precip and hfls but no evspsbl is NOT closed against
+    hfls / L_v (the hidden fallback the water channel removed): the closure
+    warns and records nothing."""
+    d = _Driver()
+    diag = _Diag()
+    kw = _kw(16, precip_mm_day=2.0, hfls_w_m2=100.0)
+    kw["evspsbl"] = None
+    with pytest.warns(UserWarning, match="refuses to derive water"):
+        d._feed_mpas_moisture_budget(0.0, diag, kw)
+    assert diag.moisture_tracker.residual == []
+
+
+def test_the_closure_reads_the_water_not_the_heat():
+    """Water 3 mm/day beside heat implying 1 mm/day: the residual is 2, the
+    number a hfls / L_v rebuild could not give."""
+    d = _Driver()
+    diag = _Diag()
+    hfls = 1.0 / 86400.0 * constants.L_v
+    e = jnp.full((16,), 3.0 / 86400.0)
+    for day in (0.0, 1.0):
+        d._feed_mpas_moisture_budget(day, diag, _kw(16, precip_mm_day=1.0,
+                                                    hfls_w_m2=hfls, evspsbl=e))
+    assert diag.moisture_tracker.residual[-1] == pytest.approx(2.0, abs=0.05)
 
 
 def test_the_cmor_feed_actually_calls_it():

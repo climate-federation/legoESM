@@ -21,9 +21,9 @@ from legoesm import constants
 from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
 
 
-def _lhflx_for_evap_mm_day(shape, evap_mm_day):
-    """lhflx [W/m²] whose implied E = evap_mm_day (E = lhflx/L_v)."""
-    return jnp.full(shape, evap_mm_day / 86400.0 * constants.L_v)
+def _evap_for_mm_day(shape, evap_mm_day):
+    """Surface water flux [kg/m²/s] for an evaporation of evap_mm_day."""
+    return jnp.full(shape, evap_mm_day / 86400.0)
 
 
 class TestMoistureBudgetTracker:
@@ -42,7 +42,7 @@ class TestMoistureBudgetTracker:
         q_v_1 = jnp.full((6, 4, 4, nlev), 0.01)   # 10 g/kg
         p_s_1 = jnp.full((6, 4, 4), 100000.0)       # 1000 hPa
         precip_1 = jnp.zeros((6, 4, 4))              # no precip
-        tracker.update(q_v_1, p_s_1, dsigma, precip_1, no_evap,
+        tracker.update(q_v_1, p_s_1, dsigma, precip_1, evap=no_evap,
                        elapsed_seconds=0.0)
 
         # Step 2: t=86400s (1 day), slightly drier
@@ -52,13 +52,13 @@ class TestMoistureBudgetTracker:
         # dW = (0.009 - 0.01) * 100000 * 1.0 / 9.81 = -101.94 kg/m²
         # over 86400s → loss rate = -1.18e-3 kg/m²/s
         precip_2 = jnp.full((6, 4, 4), 1.18e-3)     # matching precip
-        tracker.update(q_v_2, p_s_2, dsigma, precip_2, no_evap,
+        tracker.update(q_v_2, p_s_2, dsigma, precip_2, evap=no_evap,
                        elapsed_seconds=86400.0)
 
         # Step 3: t=172800s (2 days)
         q_v_3 = jnp.full((6, 4, 4, nlev), 0.009)
         precip_3 = jnp.zeros((6, 4, 4))
-        tracker.update(q_v_3, p_s_2, dsigma, precip_3, no_evap,
+        tracker.update(q_v_3, p_s_2, dsigma, precip_3, evap=no_evap,
                        elapsed_seconds=172800.0)
 
         return tracker
@@ -73,7 +73,7 @@ class TestMoistureBudgetTracker:
         precip = jnp.zeros((6, 4, 4))
 
         budget = tracker.update(q_v, p_s, dsigma, precip,
-                                jnp.zeros((6, 4, 4)), 0.0)
+                                evap=jnp.zeros((6, 4, 4)), elapsed_seconds=0.0)
 
         # Expected: W = q * p_s * sum(dsigma) / g = 0.01 * 100000 * 1.0 / g
         expected_W = 0.01 * 100000.0 / constants.g
@@ -91,11 +91,11 @@ class TestMoistureBudgetTracker:
         precip = jnp.full((2, 2), 1.0 / 86400.0)  # 1 mm/day
 
         budget = tracker.update(q_v, p_s, dsigma, precip,
-                                jnp.zeros((2, 2)), 0.0)
+                                evap=jnp.zeros((2, 2)), elapsed_seconds=0.0)
         np.testing.assert_allclose(budget.precip_rate, 1.0, rtol=1e-4)
 
     def test_evap_in_mm_per_day(self):
-        """lhflx [W/m²] converts to evap mm/day via L_v."""
+        """The water flux [kg/m²/s] is reported as evaporation in mm/day."""
         tracker = MoistureBudgetTracker()
         nlev = 3
         dsigma = jnp.full(nlev, 1.0/nlev)
@@ -104,7 +104,7 @@ class TestMoistureBudgetTracker:
         precip = jnp.zeros((2, 2))
 
         budget = tracker.update(q_v, p_s, dsigma, precip,
-                                _lhflx_for_evap_mm_day((2, 2), 2.5), 0.0)
+                                evap=_evap_for_mm_day((2, 2), 2.5), elapsed_seconds=0.0)
         np.testing.assert_allclose(budget.evap_rate, 2.5, rtol=1e-6)
 
     def test_tendency_computed(self):
@@ -150,8 +150,8 @@ class TestMoistureBudgetTracker:
         no_evap = jnp.zeros((4, 4))
 
         for i in range(5):
-            tracker.update(q_v, p_s, dsigma, precip, no_evap,
-                           float(i * 86400))
+            tracker.update(q_v, p_s, dsigma, precip, evap=no_evap,
+                           elapsed_seconds=float(i * 86400))
 
         res = np.array(tracker.residual[1:])
         np.testing.assert_allclose(res, 0.0, atol=1e-6)
@@ -164,10 +164,11 @@ class TestMoistureBudgetTracker:
         p_s = jnp.full((4, 4), 100000.0)
         q_v = jnp.full((4, 4, nlev), 0.01)          # constant → dW/dt = 0
         precip = jnp.full((4, 4), 2.0 / 86400.0)    # 2 mm/day sink
-        lhflx = _lhflx_for_evap_mm_day((4, 4), 2.0)  # 2 mm/day source
+        evap = _evap_for_mm_day((4, 4), 2.0)          # 2 mm/day source
 
         for i in range(4):
-            tracker.update(q_v, p_s, dsigma, precip, lhflx, float(i * 86400))
+            tracker.update(q_v, p_s, dsigma, precip, evap=evap,
+                           elapsed_seconds=float(i * 86400))
 
         res = np.array(tracker.residual[1:])
         np.testing.assert_allclose(res, 0.0, atol=1e-4)
@@ -183,10 +184,11 @@ class TestMoistureBudgetTracker:
         p_s = jnp.full((4, 4), 100000.0)
         q_v = jnp.full((4, 4, nlev), 0.01)          # storage FLAT
         precip = jnp.zeros((4, 4))                   # no precip
-        lhflx = _lhflx_for_evap_mm_day((4, 4), 1.4)  # E = 1.4 mm/day in
+        evap = _evap_for_mm_day((4, 4), 1.4)          # E = 1.4 mm/day in
 
         for i in range(4):
-            tracker.update(q_v, p_s, dsigma, precip, lhflx, float(i * 86400))
+            tracker.update(q_v, p_s, dsigma, precip, evap=evap,
+                           elapsed_seconds=float(i * 86400))
 
         res = np.array(tracker.residual[1:])
         np.testing.assert_allclose(res, 1.4, rtol=1e-4)

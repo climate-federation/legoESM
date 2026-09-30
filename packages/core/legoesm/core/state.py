@@ -136,10 +136,14 @@ class HydrostaticTendencies(NamedTuple):
     # Surface turbulent fluxes [W/m^2, positive UPWARD out of the surface —
     # the CMOR hfss/hfls convention, matching the surface-layer helpers'
     # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
-    # feed (evspsbl is derived downstream as lhflx / L_v). None when
-    # turbulence is off or a scheme computes no surface fluxes.
+    # feed.  None when turbulence is off or a scheme computes no surface
+    # fluxes.  ``evap_sfc`` [kg/m2/s, positive up] is the water the column
+    # actually received (the kernel's moisture BC: tiled / prescribed water,
+    # else the bulk L_v(T_sfc) inverse); CMOR evspsbl and the moisture closure
+    # read it -- never lhflx / L_v.
     shflx_sfc: Field | None = None
     lhflx_sfc: Field | None = None
+    evap_sfc: Field | None = None
     # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
     # radiation tendency for the lean MPAS/spectral loops: an interactive land
     # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
@@ -212,6 +216,10 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # species fell slower than its terminal speed) is visible in a real run
     # instead of dying only under the strict abort.
     "sed_substeps_required",
+    # slot 13: the surface water flux the column received [kg/m2/s, +up]
+    # (turbulence ``evap_sfc``); appended at the END so no existing slot
+    # index moves.  CMOR evspsbl / moisture closure read this, never hfls/L_v.
+    "evap_sfc",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

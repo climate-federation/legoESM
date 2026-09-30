@@ -641,7 +641,7 @@ class MoistureBudgetTracker:
     Usage
     -----
     tracker = MoistureBudgetTracker()
-    tracker.update(q_v, p_s, dsigma, precip, lhflx, elapsed_seconds)
+    tracker.update(q_v, p_s, dsigma, precip, evap=evap, elapsed_seconds=t)
     print(tracker.summary())
     """
 
@@ -661,7 +661,8 @@ class MoistureBudgetTracker:
         p_s: jax.Array,
         dsigma: jax.Array,
         precip: jax.Array,
-        lhflx: jax.Array,
+        *,
+        evap: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
         dp: jax.Array | None = None,
@@ -680,11 +681,12 @@ class MoistureBudgetTracker:
             column.
         precip : array, shape (...)
             Precipitation rate [kg/m²/s], positive = column sink.
-        lhflx : array, shape (...)
-            Surface latent heat flux [W/m²], positive upward — converted
-            to the evaporation vapor source E = lhflx / L_v.  Pass the
-            SAME field reported as CMOR ``hfls`` so the closure check and
-            the output diagnostics share one flux definition.
+        evap : array, shape (...)  (keyword-only)
+            Surface water flux [kg/m²/s], positive upward = the evaporation
+            vapor source E -- the water the column actually received
+            (``PhysicsOutput.evap_sfc``), the SAME field reported as CMOR
+            ``evspsbl``.  Never a latent heat divided by a constant: the
+            keyword-only signature makes a W/m² caller fail loudly.
         elapsed_seconds : float
             Time since simulation start [s].
         dp : array, shape (..., nlev), optional
@@ -707,11 +709,11 @@ class MoistureBudgetTracker:
         _h = np.asarray(jnp.stack([
             area_weighted_mean(W, area_weights),
             area_weighted_mean(precip, area_weights),
-            area_weighted_mean(lhflx, area_weights),
+            area_weighted_mean(evap, area_weights),
         ]))
         mean_W = float(_h[0])
         mean_P = float(_h[1]) * 86400.0                  # kg/m²/s → mm/day
-        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day  # latent-ok: DEFERRED (PR 3) -- water ledger fed only lhflx; needs the mass-flux feed, residual ~2-3 % of E until then
+        mean_E = float(_h[2]) * 86400.0                  # kg/m²/s → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:
