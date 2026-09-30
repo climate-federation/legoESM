@@ -140,9 +140,17 @@ def _clubb_liquid_partition_on(turbulence_config) -> bool:
     substitutes a fresh ``CLUBBConfig()``, and an authoritative
     ``turbulence_override`` can carry the lever without the flag ever being set.
     """
-    if getattr(turbulence_config, "scheme", None) != "clubb":
-        return False
-    return bool(getattr(turbulence_config, "liquid_partition", False))
+    on = bool(getattr(turbulence_config, "liquid_partition", False))
+    scheme = getattr(turbulence_config, "scheme", None)
+    if on and scheme != "clubb":
+        # Refuse, not False: make_physics skips the turbulence factory (and its
+        # own guard) for scheme="none", so False here would build a model that
+        # silently runs without the exchange that was selected (codex).
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition is CLUBB's cloud-liquid "
+            f"exchange; scheme={scheme!r} has no closure liquid to exchange. "
+            "Use scheme='clubb' or leave it off.")
+    return on
 
 
 def make_physics(

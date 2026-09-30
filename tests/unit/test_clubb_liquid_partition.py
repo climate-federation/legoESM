@@ -343,6 +343,13 @@ def test_a_non_clubb_scheme_refuses_the_lever():
         make_turbulence_physics(
             TurbulenceConfig(scheme="louis", liquid_partition=True),
             model_type="mpas", dt=300.0)
+    # scheme="none" never reaches that factory: the combined factory skips it,
+    # so the refusal must also bind there.
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    with pytest.raises(ValueError, match="no closure liquid"):
+        make_physics(PhysicsConfig(
+            turbulence=TurbulenceConfig(scheme="none", liquid_partition=True)),
+            model_type="mpas", cld_macmic_num_steps=3)
 
 
 def test_partition_uses_the_grid_mean_liquid_not_the_in_cloud_one():
