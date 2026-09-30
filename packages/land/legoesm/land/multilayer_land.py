@@ -47,6 +47,7 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import (
+    compute_heat_capacity,
     liquid_water_content,
     moisture_fusion_heat_source,
     solve_snow_soil_thermal,
@@ -1218,18 +1219,25 @@ def _step_multilayer_land_impl(
         # percolation.  Soil temperature is solved BEFORE the soil hydrology here
         # (CLM5 order) because the pack's drainage feeds the Richards top flux;
         # the bulk branch keeps its post-hydrology solve below.
+        # The unmet-evaporation energy is only final after hydrology (the Richards
+        # refill), so the solve takes a PRE-hydrology estimate: the latent demand
+        # minus what the start-of-step supply cap lets the soil give.  Sign: W/m^2,
+        # positive = energy INTO the column (same convention as G_surface).  The
+        # post-hydrology remainder is charged to the top soil layer below.
+        evap_excess_energy_pre = lhflx - (sublim_actual * constants.L_s
+                                          + soil_evap * constants.L_v)
         C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
         T_pack_solved, T_soil_new = solve_snow_soil_thermal(
             pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
             config.hydraulics, config.thermal,
-            G_surface + evap_excess_energy, dt,
+            G_surface + evap_excess_energy_pre, dt,
             surface_conductance=surface_out.surface_conductance,
             T_snow_top_ref=T_pack_top_ref)
         snow_T_top_excess = jnp.maximum(
             T_pack_solved[:, 0] - constants.T_freeze, 0.0)
         # Ground heat flux the column actually received [W/m^2]: the Robin term
         # evaluated at the solved temperatures (zero for the two-leaf canopy).
-        snow_ground_heat_applied = G_surface + evap_excess_energy
+        snow_ground_heat_applied = G_surface + evap_excess_energy_pre
         if surface_out.surface_conductance is not None:
             snow_ground_heat_applied = snow_ground_heat_applied - (
                 surface_out.surface_conductance
@@ -1295,6 +1303,22 @@ def _step_multilayer_land_impl(
     # temperature is not re-solved this step.
     lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
     evap_excess_energy = lhflx - lhflx_actual
+
+    if layered:
+        # Post-hydrology remainder of the unmet-evaporation energy: the latent
+        # demand the soil did not supply after all (Richards refill, rootless
+        # sink), already charged at the surface as L_v.  Sign: W/m^2, positive =
+        # energy INTO the column (downward), the same convention as G_surface and
+        # evap_excess_energy; it is >= 0 whenever hydrology only reduces the draw.
+        # Charged as a sensible increment of the top soil layer at the heat
+        # capacity the combined solve used (start-of-step theta; freeze/thaw is
+        # refused on this branch), so pack + soil energy closes against the
+        # realised latent flux (in - out - dStorage = 0).
+        evap_excess_energy_post = evap_excess_energy - evap_excess_energy_pre
+        C_top = compute_heat_capacity(
+            theta, config.hydraulics, config.thermal)[:, 0] * dz[0]   # J/m2/K
+        T_soil_new = T_soil_new.at[:, 0].add(evap_excess_energy_post * dt / C_top)
+        snow_ground_heat_applied = snow_ground_heat_applied + evap_excess_energy_post
 
     # --- Soil thermal diffusion (final, with converged G) ---
     # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
