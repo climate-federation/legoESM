@@ -211,3 +211,76 @@ def test_cli_round_trip_and_production_deck_changes_nothing():
     assert thread_morrison_scalars(
         ExperimentConfig(microphysics="morrison", **named), "morrison",
         base) is base
+
+
+# --- warm_rain_scheme="kk2000_cam6": CAM6 MG2 kk2000_liq_autoconversion ------
+
+def _cam6_fortran_prc(qc, nc_per_kg, rho, relvar):
+    """micro_mg_utils.F90:689-736 transcribed with math.gamma (independent of
+    the JAX kernel): prc_coef = gamma(relvar+2.47)/gamma(relvar)/relvar**2.47;
+    prc = prc_coef*0.01*1350*qc**2.47*(nc*1e-6*rho)**(-1.1) if qc >= 1e-8."""
+    import math
+    if qc < 1.0e-8:
+        return 0.0
+    coef = math.gamma(relvar + 2.47) / math.gamma(relvar) / relvar ** 2.47
+    return coef * 0.01 * 1350.0 * qc ** 2.47 * (nc_per_kg * 1.0e-6 * rho) ** (-1.1)
+
+
+@pytest.mark.parametrize("qc,nc_cm3,rho,relvar", [
+    (2.0e-4, 50.0, 1.1, 10.0),
+    (8.0e-4, 200.0, 0.9, 2.0),
+    (5.0e-5, 20.0, 1.2, 0.5),
+])
+def test_cam6_rate_reproduces_the_fortran_formula(qc, nc_cm3, rho, relvar):
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
+    n_per_m3 = nc_cm3 * 1.0e6
+    prc, nr, _ = wr.autoconversion_kk2000_cam6(
+        jnp.asarray([qc]), jnp.asarray([n_per_m3]), jnp.asarray([rho]), relvar)
+    want = _cam6_fortran_prc(qc, n_per_m3 / rho, rho, relvar)
+    np.testing.assert_allclose(float(prc[0]), want, rtol=1e-12)
+    # nprc = prc/droplet_mass_25um per kg (rhow=1000) -> per volume x rho
+    m25 = 4.0 / 3.0 * np.pi * 1000.0 * (25.0e-6) ** 3
+    np.testing.assert_allclose(float(nr[0]), want * rho / m25, rtol=1e-12)
+
+
+def test_cam6_guards_and_factor():
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as wr
+    rho, n = jnp.asarray([1.0, 1.0]), jnp.asarray([1e8, 1e8])
+    prc, nr, _ = wr.autoconversion_kk2000_cam6(
+        jnp.asarray([5.0e-9, 1.0e-2]), n, rho, 10.0)
+    assert float(prc[0]) == 0.0 and float(nr[0]) == 0.0          # icsmall gate
+    capped = _cam6_fortran_prc(5.0e-3, 1e8, 1.0, 10.0)            # 5e-3 cap
+    np.testing.assert_allclose(float(prc[1]), capped, rtol=1e-12)
+    p1, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1], 10.0)
+    p2, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1],
+                                            10.0, fact=0.2)
+    np.testing.assert_allclose(p2, 0.2 * p1, rtol=1e-14)
+
+
+def test_cam6_option_reaches_the_kernel_through_the_threading():
+    """The flat selector threads onto the leaf MPAS/FV use, and the Morrison
+    kernel then produces the CAM6 rate (differs from the SAM kk2000 one)."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    exp = ExperimentConfig(microphysics="morrison",
+                           morrison_warm_rain_scheme="kk2000_cam6",
+                           morrison_autocon_fact=0.5)
+    exp.validate_strict()
+    leaf = thread_morrison_scalars(exp, "morrison", MorrisonConfig())
+    assert leaf.warm_rain_scheme == "kk2000_cam6" and leaf.autocon_fact == 0.5
+    b_sam, _, _ = _morrison_budget(MorrisonConfig())
+    b_cam, _, _ = _morrison_budget(leaf)
+    ratio = np.asarray(b_cam["autoconversion"] / b_sam["autoconversion"])
+    assert np.all(np.isfinite(ratio)) and not np.allclose(ratio, 1.0, rtol=1e-3)
+
+
+def test_kk2000_path_unchanged_by_the_cam6_option():
+    """Adding the option leaves the default kk2000 budget bit-identical to the
+    same leaf with the (unread) CAM6 relvar changed."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    a, _, _ = _morrison_budget(MorrisonConfig())
+    b, _, _ = _morrison_budget(MorrisonConfig(kk2000_cam6_relvar=0.3))
+    for k in ("autoconversion", "accretion"):
+        np.testing.assert_array_equal(np.asarray(a[k]).view(np.uint64),
+                                      np.asarray(b[k]).view(np.uint64))

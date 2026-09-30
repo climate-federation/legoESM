@@ -173,6 +173,7 @@ __param_spec__ = {
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
             "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
+            "kk2000_cam6_relvar": "CAM6 relvarmax fallback constant (clubb_intr.F90:2416-2421) for the kk2000_cam6 option; CAM6 diagnoses relvar per cell from CLUBB variance, not ported, so this is a fixed reference value, not a calibration knob",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
@@ -981,6 +982,11 @@ class MorrisonConfig(NamedTuple):
     # MG2's paired cloud-number sink npra is absent here).  1.0 = unscaled.
     autocon_fact: float = 1.0
     accre_enhan_fact: float = 1.0
+    # Relative variance of in-cloud liquid for warm_rain_scheme="kk2000_cam6"
+    # (CAM6 ``relvar``).  10.0 = CAM6's ``relvarmax`` when deep convection is
+    # not CLUBB (clubb_intr.F90:2416-2421), the value it falls back to where
+    # CLUBB's qc variance is unavailable; CAM6 clips to [0.001, relvarmax].
+    kk2000_cam6_relvar: float = 10.0
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
