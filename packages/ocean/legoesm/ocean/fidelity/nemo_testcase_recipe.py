@@ -149,6 +149,18 @@ def _model_config(
             # is the advective form, not the flux-form UP3 vertical flux the
             # other card runs.
             vertical_momentum_scheme="nemo_advective",
+            # stp2d.f90:153 CALL wzv(..., np_velocity): the vertical velocity
+            # dyn_zad consumes is NEMO's own wzv result -- the bottom-up
+            # integral of the live-thickness horizontal divergence plus
+            # NEMO's scale-factor term (sshwzv.f90:295-298) -- NOT legoESM's
+            # generic z-star diagnosis, which redistributes the column's own
+            # surface tendency through the column and forces the vertical
+            # velocity to zero at the surface.  Measured on this card's own
+            # kt=1 boundary (round-5 receipt): the generic form is the WHOLE
+            # of the vector card's first-stage momentum error.  GYRE, DINO
+            # and ORCA2 already select this arm; VORTEX inherited the
+            # generic default from the flux card, which never calls dyn_zad.
+            zad_qco_evaluation="nemo_literal",
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",

@@ -1612,6 +1612,7 @@ def nemo_qco_wzv_operands(
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
+    after_ssh_form="continuity_prediction",
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1715,8 +1716,34 @@ def nemo_qco_wzv_operands(
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
     if eta_after_override is None:
-        eta_after = jax.lax.optimization_barrier(
-            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        if after_ssh_form == "rk3_extrapolation":
+            # NEMO's RK3 program does NOT predict the "after" SSH from
+            # continuity before the first wzv call.  It reuses the LINEAR
+            # EXTRAPOLATION the previous step left in the after slot,
+            # ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
+            # (stprk3.F90:222-225, commented there "linear extrapolation of
+            # ssh to compute ww at the beginning of the next time-step"),
+            # which ``stp_2D`` turns into
+            # ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0`` (stp2d.F90:147-151)
+            # immediately before ``CALL wzv`` (stp2d.F90:153).  In this array
+            # convention that guess is ``2*eta_now - eta_before``; at the
+            # first step the extrapolation has never run, ``eta_before`` is
+            # ``eta_now``, and the scale-factor term is exactly zero -- which
+            # is what NEMO's own recorded ``ww`` shows on the VORTEX
+            # vector-invariant card.
+            eta_after = jax.lax.optimization_barrier(
+                2.0 * eta_now - eta_before)
+        elif after_ssh_form == "continuity_prediction":
+            # NEMO's modified-leapfrog program fills the after slot from the
+            # barotropic continuity in ``ssh_nxt`` BEFORE ``wzv_MLF`` reads
+            # ``r3t(:,:,Kaa)`` (sshwzv.F90:205-209), so there the prediction
+            # IS the statement.  DINO's round 39 measured this pair.
+            eta_after = jax.lax.optimization_barrier(
+                eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        else:
+            raise ValueError(
+                "after_ssh_form must be one of ['continuity_prediction', "
+                f"'rk3_extrapolation'], got {after_ssh_form!r}")
         eta_after = jax.lax.optimization_barrier(
             eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
     else:
@@ -5000,6 +5027,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             qco_tmask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
             eta_after_override=nemo_stage_zad_eta_after_override,
+            # Which NEMO time-stepping program the card runs decides what is
+            # sitting in the after-SSH slot when the FIRST wzv call reads it:
+            # the RK3 program's own linear extrapolation (stprk3.F90:225 ->
+            # stp2d.F90:149 -> stp2d.F90:153) or the leapfrog's ssh_nxt
+            # continuity prediction.  This is NEMO's own relationship between
+            # the two sources, not an inference across unrelated choices, and
+            # it is read from the field the card already states.
+            after_ssh_form=(
+                "rk3_extrapolation"
+                if getattr(config, "momentum_time_integrator", "euler")
+                == "rk3_ws" else "continuity_prediction"),
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;
