@@ -161,6 +161,12 @@ def _model_config(
             # and ORCA2 already select this arm; VORTEX inherited the
             # generic default from the flux card, which never calls dyn_zad.
             zad_qco_evaluation="nemo_literal",
+            # stprk3.f90:225 -> stp2d.f90:149 -> stp2d.f90:153: NEMO's RK3
+            # program leaves the PREVIOUS step's linear extrapolation in the
+            # after slot, and that is what the first wzv call's scale-factor
+            # term is built from.  STATED here, never inferred from the time
+            # integrator or any other field (decision 75).
+            nemo_first_wzv_after_ssh="rk3_extrapolated",
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",
@@ -444,6 +450,12 @@ def _model_config(
             vertical_momentum_scheme="nemo_advective",
             zad_bottom_face_mask="nemo_faithful",
             zad_qco_evaluation="nemo_literal",
+            # stprk3.f90:225 -> stp2d.f90:149 -> stp2d.f90:153: NEMO's RK3
+            # program leaves the PREVIOUS step's linear extrapolation in the
+            # after slot, and that is what the first wzv call's scale-factor
+            # term is built from.  STATED here, never inferred from the time
+            # integrator or any other field (decision 75).
+            nemo_first_wzv_after_ssh="rk3_extrapolated",
             wzv_call2_evaluation="nemo_literal",
             # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
             # landed choice -- explicit here, not inferred from EOS or any

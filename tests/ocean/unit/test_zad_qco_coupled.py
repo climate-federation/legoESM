@@ -60,7 +60,7 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     ww, hu, hv = _nemo_qco_zad_operands(
         jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
         jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
-        jnp.asarray(tm), dt)
+        jnp.asarray(tm), dt, after_ssh_form="leapfrog_continuity")
 
     at = np.asarray(coord.nemo_e1e2t)
     au = np.asarray(coord.nemo_e1e2u)
@@ -307,9 +307,9 @@ def test_wzv_after_ssh_form_is_the_time_stepping_program():
     args, dt, eta_now, eta_before = _wzv_operand_fixture()
 
     ww_rk3, _, _ = nemo_qco_wzv_operands(
-        *args, dt, after_ssh_form="rk3_extrapolation")
+        *args, dt, after_ssh_form="rk3_extrapolated")
     ww_mlf, _, _ = nemo_qco_wzv_operands(
-        *args, dt, after_ssh_form="continuity_prediction")
+        *args, dt, after_ssh_form="leapfrog_continuity")
     assert not np.array_equal(np.asarray(ww_rk3), np.asarray(ww_mlf)), (
         "the two time-stepping programs must give different vertical "
         "velocities, or this test cannot fail")
@@ -320,7 +320,7 @@ def test_wzv_after_ssh_form_is_the_time_stepping_program():
     np.testing.assert_array_equal(np.asarray(ww_rk3),
                                   np.asarray(ww_explicit))
 
-    with pytest.raises(ValueError, match="after_ssh_form must be one of"):
+    with pytest.raises(ValueError, match="nemo_first_wzv_after_ssh"):
         nemo_qco_wzv_operands(*args, dt, after_ssh_form="whatever")
 
 
@@ -340,3 +340,24 @@ def test_vortex_vector_card_selects_nemos_own_first_wzv():
     assert vec.momentum_time_integrator == "rk3_ws"
     flux = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
     assert flux.zad_qco_evaluation == "generic"
+
+
+def test_an_unstated_after_ssh_form_raises_rather_than_guessing():
+    """Unset is a hard error, not a default.  A card that resolves NEMO's own
+    first wzv call states which program's after-SSH slot it reads; inferring
+    it from a sibling selector is the hidden coupling decision 75 bans."""
+    args, dt, _, _ = _wzv_operand_fixture()
+    with pytest.raises(ValueError, match="nemo_first_wzv_after_ssh"):
+        nemo_qco_wzv_operands(*args, dt, after_ssh_form="")
+
+
+def test_the_vortex_and_gyre_cards_state_the_form_and_dino_states_the_other():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    for case in ("VORTEX_VEC-zco", "GYRE-zco"):
+        cfg = build_nemo_testcase_card(case).recipe.model_config
+        assert cfg.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert (dino_config_for_recipe("nemo_dino_kamm_mlf")
+            .nemo_first_wzv_after_ssh == "leapfrog_continuity")

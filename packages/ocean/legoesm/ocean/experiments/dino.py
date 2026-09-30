@@ -993,6 +993,10 @@ class DINOConfig:
     # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
     # Literal default keeps every non-DINO-fidelity recipe byte-identical.
     zad_qco_evaluation: str = "generic"
+    # Which NEMO program's after-SSH slot the first wzv call reads; stated
+    # per card, never inferred (decision 75).  Empty on a card that resolves
+    # the nemo_literal ZAD branch is a hard error at step time.
+    nemo_first_wzv_after_ssh: str = ""
     # Coupled post-barotropic WZV call-2 hdiv x Kaa-r3t evaluation.
     wzv_call2_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
@@ -1442,6 +1446,15 @@ DINO_RECIPES: dict[str, dict] = {
         # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
         # thickness alone worsens it, so expose only the coupled selector.
         "zad_qco_evaluation": "nemo_literal",
+        # Which program's after-SSH the FIRST wzv call reads.  Both
+        # nemo_dino_kamm cards state the leapfrog's ssh_nxt continuity
+        # prediction, which is what round 39 MEASURED on this card as the
+        # pair that closes ZAD, and what these cards have always resolved to.
+        # STATED, not inferred (decision 75).  See the VORTEX round-5 receipt
+        # for the open item: the non-MLF card's own NEMO build has not been
+        # re-read for which of the two it runs, so this records the measured
+        # value rather than a re-derivation.
+        "nemo_first_wzv_after_ssh": "leapfrog_continuity",
         "wzv_call2_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
@@ -3942,6 +3955,7 @@ def dino_lat_lon_model_config(
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
         zad_qco_evaluation=cfg.zad_qco_evaluation,
+        nemo_first_wzv_after_ssh=cfg.nemo_first_wzv_after_ssh,
         wzv_call2_evaluation=cfg.wzv_call2_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,

@@ -568,10 +568,21 @@ _CERTIFIED_CARD_DIGESTS_ROUND2 = {          # 5bbac73f6, superseded by round 4
 # below); the four removals are fields that no longer exist, which no card
 # can state, so they are recorded here and the pin moves.  LOCK_EXCHANGE and
 # OVERFLOW carry no physics block at all and their pins are unchanged.
-_CERTIFIED_CARD_DIGESTS = {                 # 85607c118588 + round 4
-    "GYRE-zco": "337651dbd9f1b49c",
-    "LOCK_EXCHANGE-zco": "159ca3d07db0a3f5",
-    "OVERFLOW-zps": "73174751388503aa",
+# ROUND 5 moves all three again, for one reason and only one: the model
+# configuration gained a field, ``nemo_first_wzv_after_ssh``, which names
+# which NEMO time-stepping program's after-SSH slot the first wzv call reads.
+# The digest hashes the NamedTuple's printed form and that prints every
+# field, so adding one moves every card's digest whether or not the card
+# selects anything with it.  The tanks state "" (they never reach the
+# branch) and nothing they execute changed -- their ladders are byte-equal
+# in this round's evidence.  GYRE states "rk3_extrapolated", which is the
+# value it already resolved to before the field existed, so the digest moved
+# and its numbers did not: the certified kt=1..10 rows are re-measured in the
+# round-5 receipt.
+_CERTIFIED_CARD_DIGESTS = {                 # 85607c118588 + rounds 4 and 5
+    "GYRE-zco": "da52bd90a40f71fd",
+    "LOCK_EXCHANGE-zco": "d794c4c5cb3dd880",
+    "OVERFLOW-zps": "2bb9d9be75fd924d",
 }
 
 
@@ -810,3 +821,52 @@ def test_no_dino_nemo_card_inherits_the_explicit_cfl_cap(recipe_name):
     assert flipped.biharmonic == clean.biharmonic
     assert clean.harmonic.enforce_cfl is False
     assert clean.biharmonic.enforce_cfl is True
+
+
+# --- VORTEX round 5: the first wzv call's after-SSH is STATED, not inferred ---
+# Decision 75 bans a scientific choice that lives in a default, and round 163
+# rejected keying one selector off an unrelated one.  The form the first wzv
+# call reads is therefore a field of its own, and a card that reaches the
+# branch without stating it raises.
+
+_AFTER_SSH_FORMS = {"rk3_extrapolated", "leapfrog_continuity"}
+
+
+@pytest.mark.parametrize("case", _ALL_NEMO_TESTCASE_CARDS)
+def test_every_card_that_reaches_the_first_wzv_branch_states_its_after_ssh(case):
+    config = build_nemo_testcase_card(case).recipe.model_config
+    stated = config.nemo_first_wzv_after_ssh
+    if config.zad_qco_evaluation == "nemo_literal":
+        assert stated in _AFTER_SSH_FORMS, (
+            f"{case} resolves NEMO's own first wzv call and must STATE which "
+            "program's after-SSH slot it reads")
+    else:
+        assert stated == "", (
+            f"{case} never reaches that branch, so it must not carry a value "
+            "that looks like a selection")
+
+
+@pytest.mark.parametrize("recipe_name", _DINO_NEMO_RECIPES)
+def test_every_dino_nemo_recipe_states_its_after_ssh(recipe_name):
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    cfg = dino_config_for_recipe(recipe_name)
+    if cfg.zad_qco_evaluation == "nemo_literal":
+        assert cfg.nemo_first_wzv_after_ssh in _AFTER_SSH_FORMS
+
+
+def test_the_after_ssh_form_does_not_follow_the_time_integrator():
+    """The non-vacuity plant for the whole idea: the two cards that state the
+    two DIFFERENT forms must not be separable by the integrator field, or the
+    old inference would still reproduce every card and nothing was fixed."""
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+
+    vortex = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
+    dino = dino_config_for_recipe("nemo_dino_kamm")
+    assert vortex.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert dino.nemo_first_wzv_after_ssh == "leapfrog_continuity"
+    # The inference this replaced read momentum_time_integrator, and on the
+    # DINO card that field is not even set to the value the inference keyed
+    # on -- which is exactly how a hidden coupling gets a card wrong without
+    # anyone seeing it.
+    assert getattr(dino, "momentum_time_integrator", None) != "rk3_ws"
