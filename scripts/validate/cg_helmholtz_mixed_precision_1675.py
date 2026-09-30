@@ -35,6 +35,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.atmosphere.dynamics.gcm import semi_implicit_cdgrid as sic
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -94,7 +95,7 @@ def main(argv=None) -> int:
     # kappa ~ 1 + coeff * |lambda_max| and |lambda_max| ~ 8 / dx^2 for this
     # 5-point FV Laplacian, so coeff = (kappa - 1) * dx^2 / 8 puts the solve at
     # the requested condition number rather than at a hand-picked coefficient.
-    dx_min = 6.371e6 * (np.pi / 2) / n / np.sqrt(3)
+    dx_min = constants.R_earth * (np.pi / 2) / n / np.sqrt(3)
     coeff = (a.kappa - 1.0) * dx_min ** 2 / 8.0
 
     cd_ref = _build(PrecisionPolicy.fp64(), n)

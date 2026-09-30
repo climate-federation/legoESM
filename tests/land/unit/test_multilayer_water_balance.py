@@ -113,9 +113,9 @@ def test_evaporation_conserves_with_and_without_pond():
     exceeds the top layer's available water would drive it to theta_r, where the van-
     Genuchten asymptote floors theta and the (fixed Neumann) evap flux leaks O(0.03)
     kg/m2 (a PRE-EXISTING solver property the old flux_infiltrated BC shared, not the
-    coupled cell).  Production never hits it: bare-soil evap is supply-limited by the
-    top-layer resistance (S_top**exp -> 0 as theta -> theta_r).  So this uses a demand
-    the column can supply."""
+    coupled cell).  The solver returns that refill as ``water_created`` and the land
+    step reports only the water the soil gave (test_land_evap_supply_limit.py).  So
+    this isolated-solver gate uses a demand the column can supply."""
     loam = SoilHydraulicsConfig()
     evap = -5.0e-7  # net upward surface water flux [m/s], within column supply
     assert abs(_richards_residual(loam, evap, 0.0)) < 1.0e-3                 # dry surface

@@ -114,6 +114,12 @@ def test_hyperdiffusion_scales_with_subdivision(monkeypatch):
     assert seen["nu_del4"] == seen["nu_del4_ps"] == mod.nu_del4_for(7)
 
 
+def test_timestep_halves_per_level():
+    mod = _load_bench()
+    assert mod.dt_for(4) == 300.0
+    assert [mod.dt_for(s) for s in (7, 8, 9, 10)] == [37.5, 18.75, 9.375, 4.6875]
+
+
 def test_state_is_finite_flags_nan_and_inf():
     """A blown-up state must be stamped invalid, not timed as data."""
     import jax.numpy as jnp

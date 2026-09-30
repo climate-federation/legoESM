@@ -189,7 +189,7 @@ divergence is divided by it at
 live thickness multiplies the divergence back at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:153`.  legoESM forms the
 ratio at `ocean_pe_latlon_cgrid.py:1681`, forms the thickness at
-`ocean_pe_latlon_cgrid.py:1682` and hands it to the divergence block at
+`ocean_pe_latlon_cgrid.py:1684` and hands it to the divergence block at
 `ocean_pe_latlon_cgrid.py:1706`, so replacing that one operand replaces both
 compiled occurrences and nothing else.
 
@@ -285,7 +285,7 @@ the barotropic step that produces the after height.  It should not, for this
 residual.  The stage height's only consumers inside the velocity-indicator
 producer are the two ratios it feeds — the face ratio at
 `ocean_pe_latlon_cgrid.py:1681` through the face geometry, and the T-point
-ratio at the same line into `ocean_pe_latlon_cgrid.py:1682` — and both are now
+ratio at the same line into `ocean_pe_latlon_cgrid.py:1684` — and both are now
 measured inert, at `1.5e-05` and `1.4e-09` of the residual respectively.  A
 `6.28e-10` m height error is a real difference in the model's own stage state
 and it will matter wherever the height is consumed directly, but it cannot be

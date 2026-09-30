@@ -1673,9 +1673,9 @@ requires-dist = [
     { name = "hatchling", marker = "extra == 'dev'" },
     { name = "imageio", marker = "extra == 'ml'", specifier = ">=2.30" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
-    { name = "jax", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
     { name = "jax-mps", marker = "extra == 'mps'" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "legoesm", extras = ["ml", "mesh", "viz", "data", "dev", "docs", "wizard"], marker = "extra == 'all'" },
     { name = "legoesm-atmosphere", editable = "packages/atmosphere" },
     { name = "legoesm-core", editable = "packages/core" },
@@ -1722,6 +1722,7 @@ dependencies = [
     { name = "jaxlib" },
     { name = "legoesm-core" },
     { name = "numpy" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -1732,11 +1733,12 @@ ml = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
-    { name = "jax", specifier = ">=0.4.35" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "legoesm-core", editable = "packages/core" },
     { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/ml" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 provides-extras = ["ml"]
 
@@ -1770,8 +1772,8 @@ mpi = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
-    { name = "jax", specifier = ">=0.4.35" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "mpi4jax", marker = "extra == 'mpi'", specifier = ">=0.8,<0.10" },
     { name = "mpi4py", marker = "extra == 'mpi'", specifier = ">=4.1,<5" },
     { name = "netcdf4", specifier = ">=1.6" },
@@ -1825,8 +1827,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
-    { name = "jax", specifier = ">=0.4.35" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "legoesm-core", editable = "packages/core" },
     { name = "numpy", specifier = ">=1.26" },
 ]
@@ -1848,8 +1850,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
-    { name = "jax", specifier = ">=0.4.35" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "legoesm-core", editable = "packages/core" },
     { name = "netcdf4", specifier = ">=1.6" },
     { name = "numpy", specifier = ">=1.26" },
@@ -1900,8 +1902,8 @@ tools = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
-    { name = "jax", specifier = ">=0.4.35" },
-    { name = "jaxlib", specifier = ">=0.4.35" },
+    { name = "jax", specifier = ">=0.5.3" },
+    { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "legoesm-core", editable = "packages/core" },
     { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/ml" },
     { name = "legoesm-tools", marker = "extra == 'tools'", editable = "packages/tools" },

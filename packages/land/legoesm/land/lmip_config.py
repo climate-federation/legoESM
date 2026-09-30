@@ -11,6 +11,8 @@ An experiment is fully described by a YAML file with this schema::
       surface_scheme: two_leaf_canopy | simple_seb
       bulk_scheme: most | constant
       enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
+      soil_ice_impedance_exponent: float  # CLM5 e_ice in [0, 10], active with freeze/thaw
+                                       #   (absent = RichardsConfig default 6)
       albedo: {field: value}           # LandAlbedoConfig field values (absent = default)
       glacier_albedo_vis: float        # ice-sheet base albedo pair (both or neither;
       glacier_albedo_nir: float        #   absent = uncalibrated module default)
@@ -184,6 +186,13 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.enable_freeze_thaw must be a bool "
             f"(got {physics['enable_freeze_thaw']!r})")
+    # Frozen-soil ice impedance exponent (CLM5 e_ice); absent = library default.
+    _e = physics.get("soil_ice_impedance_exponent")
+    if _e is not None and (isinstance(_e, bool) or not isinstance(_e, (int, float))
+                           or not 0.0 <= float(_e) <= 10.0):
+        raise ValueError(
+            "physics.soil_ice_impedance_exponent must be a number in [0, 10] "
+            f"(got {_e!r})")
     # Snow thermal scheme: "single" (single-node bulk SWE) is the only scheme on
     # this lane; the key exists so configs are explicit and a future scheme name
     # fails here rather than silently running different physics.

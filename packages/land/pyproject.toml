@@ -24,8 +24,8 @@ classifiers = [
 # or training"), which is what lets `pip install legoesm-land` run standalone.
 dependencies = [
     "legoesm-core~=0.1.0",
-    "jax>=0.4.35",
-    "jaxlib>=0.4.35",
+    "jax>=0.5.3",
+    "jaxlib>=0.5.3",
     "numpy>=1.26",
     "equinox>=0.11",
     # NetCDF surface-data + EC-site driver IO (global_surface_data, boundary_data).

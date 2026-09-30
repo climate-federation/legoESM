@@ -149,6 +149,8 @@ land_stomatal_beta: false
 # transpiration is plant-limited even without a resolved canopy. That is the
 # most this lane can do today; wiring the canopy onto it is separate work.
 land_surface_scheme: simple_seb
+mpas_land_params_refresh: false  # the per-step canopy rebuild is two-leaf
+                                 # only; simple_seb keeps its setup params
 
 # NOT SET, and worth knowing why. The per-PFT land parameters -- albedo,
 # emissivity, root depth, roughness, bulk transfer coefficient, wilting point,
