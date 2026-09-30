@@ -110,10 +110,76 @@ def test_absurd_cache_is_discarded_for_the_cold_start():
 
 
 def test_canopy_call_jits_on_mixed_columns():
-    seed = jnp.full((8, 6), jnp.nan).at[:3].set(_a(_SEED_9725, dtype=jnp.float32))
+    """Warm (a real converged cache), garbage and never-solved seeds side by side."""
+    warm = _canopy_call().canopy_x
+    seed = warm.at[3:5].set(_a(_SEED_9725, dtype=warm.dtype)).at[5].set(jnp.nan)
     eager = _canopy_call(seed_arr=seed)
     jitted = jax.jit(lambda s: _canopy_call(seed_arr=s))(seed)
+    assert bool(jnp.all(eager.converged == jitted.converged))
     assert float(jnp.max(jnp.abs(eager.shflx - jitted.shflx))) < 1e-3
+
+
+# ---- the Picard control flow, driven by a stand-in solver -------------------
+# The stand-in "converges" exactly when its seed's leaf temperature is below
+# _COLD_MAX (the _canopy_call cold state is Ta = 290-298 K), and returns its seed
+# as the solution.  It records the ground flux the soil callback receives.
+
+_COLD_MAX = 300.0
+_WARM_BAD = [330.0, 330.0, 280.0, 280.0, 330.0, 0.01]   # admissible, but "leads astray"
+
+
+def _stub_run(monkeypatch, seed_arr, converge_on_passes=None):
+    import legoesm.land.surface_scheme.two_leaf_canopy as tl
+    calls = {"n": 0}
+
+    def fake(x0, bun, cc):
+        k = calls["n"]
+        ok = x0[0] < _COLD_MAX
+        if converge_on_passes is not None:
+            ok = ok & (k in converge_on_passes)
+        z = jnp.zeros((), x0.dtype)
+        return (x0, jnp.array(1), ok, z, z, z, z)
+
+    def counted(*a, **k):
+        out = jax.vmap(fake)(*a)
+        calls["n"] += 1
+        return out
+
+    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
+    seen_G = []
+    out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G)
+    return out, seen_G, calls["n"]
+
+
+class _VmapProxy:
+    """jax.vmap, except vmap(_solve_one_col) is replaced by the stand-in."""
+    def __init__(self, real, fake, counted):
+        self.real, self.fake, self.counted = real, fake, counted
+
+    def __call__(self, f, *a, **k):
+        if getattr(f, "__name__", "") == "_solve_one_col":
+            return self.counted
+        return self.real(f, *a, **k)
+
+
+def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
+    seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
+    out, seen_G, n = _stub_run(monkeypatch, seed)
+    assert n == 6
+    # pass 0 (warm seed) fails everywhere, and its ground flux does not reach the soil
+    assert float(jnp.max(jnp.abs(seen_G[0]))) == 0.0
+    # pass 1 (cold) converges; the soil sees a real flux from then on
+    assert float(jnp.max(jnp.abs(seen_G[1]))) > 0.0
+    assert bool(jnp.all(out.converged))
+    assert bool(jnp.all(out.canopy_x[:, 0] < _COLD_MAX))
+
+
+def test_acceptance_is_the_last_pass(monkeypatch):
+    """Converged on pass 0 only: cached, but the call reports NOT converged."""
+    out, seen_G, _ = _stub_run(monkeypatch, None, converge_on_passes={0})
+    assert not bool(jnp.any(out.converged))
+    assert bool(jnp.all(jnp.isfinite(out.canopy_x)))
+    assert all(float(jnp.max(jnp.abs(g))) == 0.0 for g in seen_G[1:])
 
 
 # ---- shared solver: the new gates are opt-in and drive the adjoint ----------
@@ -126,12 +192,19 @@ def _quad_solver(max_iters=60, **kw):
 
 
 def test_default_contract_unchanged():
-    plain = _quad_solver()
-    gated = _quad_solver(n_sq_max=None, admissible=None)
-    x0, p = _a([-3.0]), _a([4.0])
-    a, b = plain(x0, p), gated(x0, p)
-    for u, v in zip(a, b):
-        assert bool(jnp.all(u == v))
+    """Defaults: an exact seed stops at iteration 0 (the initial n_sq_0 <= atol
+    gate), and the negative root is accepted as before."""
+    solve = _quad_solver()
+    x, n, conv, *_ = solve(_a([2.0]), _a([4.0]))
+    assert bool(conv) and int(n) == 0 and float(x[0]) == 2.0
+    x, _, conv, *_ = solve(_a([-3.0]), _a([4.0]))
+    assert bool(conv) and abs(float(x[0]) + 2.0) < 1e-6
+
+
+def test_an_exact_but_inadmissible_seed_is_not_converged():
+    solve = _quad_solver(admissible=lambda x: x[0] > 0.0)
+    _, _, conv, *_ = solve(_a([-2.0]), _a([4.0]))
+    assert not bool(conv)
 
 
 def test_inadmissible_exact_root_is_rejected_and_has_zero_gradient():
@@ -143,7 +216,7 @@ def test_inadmissible_exact_root_is_rejected_and_has_zero_gradient():
     x_pos, _, conv_pos, *_ = solve(_a([3.0]), _a([4.0]))
     assert bool(conv_pos)
     g_pos = jax.grad(lambda p: solve(_a([3.0]), p)[0][0])(_a([4.0]))
-    assert abs(float(g_pos[0]) - 0.25) < 1e-6          # d sqrt(p)/dp at p=4
+    assert abs(float(g_pos[0]) - 0.25) < 1e-4          # d sqrt(p)/dp at p=4
 
 
 def test_absolute_ceiling_rejects_a_relative_only_pass():

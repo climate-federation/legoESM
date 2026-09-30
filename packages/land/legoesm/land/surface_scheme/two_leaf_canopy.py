@@ -487,7 +487,9 @@ def compute_two_leaf_canopy_fluxes(
     # handed back to the caller.
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
-    # solve astray gets a cold retry inside the same call (no extra solves).
+    # solve astray gets a cold retry inside the same call.  The passes run over
+    # every column anyway (vmap), so this costs nothing; for a column that never
+    # converges, its frozen soil boundary makes later passes repeat passes 0/1.
     # A pass that did not converge must not move the soil boundary either: its
     # ground flux is not physics.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
@@ -499,11 +501,14 @@ def compute_two_leaf_canopy_fluxes(
         (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
          hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
+        # A rejected iterate may be non-finite: evaluate the fluxes of a failed
+        # column at the (finite) cold state instead, so no NaN enters a
+        # reverse-mode tangent.  Those fluxes are not physics either way -- the
+        # column reports converged=False and the caller holds it.
+        x_final = jnp.where(converged[:, None], x_final, cold_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
-        # Zero (not NaN) on a failed column, so neither branch of the select
-        # below carries a non-finite value into a reverse-mode tangent.
         Ts_thermal = soil_thermal_fn(jnp.where(converged, G_k, 0.0), dt)
         Ts_bc_k = jnp.where(converged,
                             (1.0 - omega) * Ts_bc_k + omega * Ts_thermal,
