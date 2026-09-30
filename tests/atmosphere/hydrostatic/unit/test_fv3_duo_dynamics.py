@@ -755,13 +755,15 @@ class TestModelDriverLane:
         bundle = driver.model.dcmip16_initial_state(do_pert=True)
         q0 = bundle["q"][0]
         bundle = {**bundle, "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+        from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
         g = driver.model.grid
         for _ in range(n_steps):
             bundle = driver.model.step(bundle, dt)
-            st, q = apply_kessler_step_sixface_jax(
+            st, pr, q = apply_kessler_step_sixface_jax(
                 bundle["state"], bundle["press"], bundle["q"], dt=dt,
-                n=g.n, ng=g.ng, km=driver.model.config.km)
-            bundle = {**bundle, "state": st, "q": q}
+                n=g.n, ng=g.ng, km=driver.model.config.km,
+                ptop=driver.model._ptop, akap=FV3_KAPPA)
+            bundle = {**bundle, "state": st, "press": pr, "q": q}
         pt_drv = np.asarray(driver.state["state"]["pt"])
         assert np.isfinite(pt_drv).all()
         # the driver's bridge is jitted, this composition is eager: XLA
@@ -770,6 +772,8 @@ class TestModelDriverLane:
             x, y = np.asarray(x), np.asarray(y)
             return np.abs(x - y).max() <= 1e-13 * max(np.abs(x).max(), 1e-300)
         assert _close(pt_drv, bundle["state"]["pt"])
+        assert _close(driver.state["state"]["delp"], bundle["state"]["delp"])
+        assert _close(driver.state["press"]["pe"], bundle["press"]["pe"])
         for i in range(3):
             assert _close(driver.state["q"][i], bundle["q"][i]), i
         # the humidity slot is the DCMIP16 field, not a passenger copy
@@ -785,11 +789,21 @@ class TestModelDriverLane:
                               microphysics="kessler")
         driver = ModelDriver(cfg, output_dir=tmp_path)
         driver.setup()
-        b = driver._fv3_duo_fresh_ic()
-        b = {**b, "q": list(b["q"]) + [b["q"][0] * 0.5]}
+        # rain on a SATURATED column so some reaches the surface and the
+        # renormalisation is NOT the identity (mass gate non-vacuous); on
+        # the dry IC the core evaporates any seed within the step
+        from tests.grids.test_fv3_duo_window_spmd import _saturate_and_seed_rain
+        b = _saturate_and_seed_rain(driver._fv3_duo_fresh_ic(),
+                                    driver.model.grid)
         out = driver._fv3_duo_apply_kessler(b, float(cfg.dycore.dt))
         assert len(out["q"]) == 4
-        assert np.array_equal(np.asarray(out["q"][3]), np.asarray(b["q"][3]))
+        # the passenger's MASS is conserved through the renormalisation
+        g = driver.model.grid
+        cs = slice(g.ng, g.ng + g.n)
+        m0 = (np.asarray(b["state"]["delp"]) * np.asarray(b["q"][3]))[:, cs, cs]
+        m1 = (np.asarray(out["state"]["delp"]) * np.asarray(out["q"][3]))[:, cs, cs]
+        assert np.allclose(m1, m0, rtol=1e-12, atol=0)
+        assert np.abs(np.asarray(out["q"][3]) - np.asarray(b["q"][3]))[:, cs, cs].max() > 0.0
         out2 = driver._fv3_duo_apply_kessler(out, float(cfg.dycore.dt))
         assert len(out2["q"]) == 4
 
@@ -1182,7 +1196,7 @@ def test_wall_default_surface_is_frozen():
 # 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
 # loop never evaluates (the cloud_scheme allow-list entry's own argument);
 # non-default values stay refused, so the allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "71129e0044383074ff9fb65d9eddef903a21419dbba9a7941fbd90adcf0796a0"
+_WALL_SURFACE_SHA256 = "95569efd839eee0287c4980fdff33981403573022936c7ccc6e4067d808ed709"
 
 
 def test_wall_leaf_types_are_scalar():

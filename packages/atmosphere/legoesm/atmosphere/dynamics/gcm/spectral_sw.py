@@ -45,6 +45,18 @@ from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
 
 
+# --- default del-4 hyperdiffusion: 2.338e15 m^4/s at T21, scaled (21/T)^4 ---
+# Same scaling the spectral Held-Suarez drivers and the atmosphere test matrix
+# already use for their explicit coefficients.
+_HYPERDIFF_REF_COEFF = 2.338e15   # m^4/s at T21
+_HYPERDIFF_REF_TRUNC = 21
+
+
+def default_hyperdiff_coeff(grid: GaussianGrid) -> float:
+    """Truncation-scaled default: 2.338e15 * (21 / n_max)**4 [m^4/s]."""
+    return _HYPERDIFF_REF_COEFF * (_HYPERDIFF_REF_TRUNC / grid.n_max) ** 4
+
+
 # =============================================================================
 # State and config
 # =============================================================================
@@ -68,7 +80,9 @@ class SpectralSWConfig(NamedTuple):
     carried by the initial geopotential field.
     """
     g: float = constants.g
-    hyperdiff_coeff: float = 2.338e15 # Spectral diffusion coefficient
+    # None = default_hyperdiff_coeff(grid): 2.338e15 * (21/n_max)**4.
+    # A float is used as given.
+    hyperdiff_coeff: float | None = None
     hyperdiff_order: int = 2          # Diffusion order (2 = nabla^4)
     spectral_filter_order: int = 0    # Exponential filter order (0 = off)
                                       # Recommended: 8 for runs with topography
@@ -213,6 +227,8 @@ def spectral_sw_tendencies(
     #   - It would violate mass distribution conservation
     #   - It causes spurious energy drift
     #   - Standard practice (Hack & Jakob 1992) diffuses only vor and div
+    if config.hyperdiff_coeff is None:
+        config = config._replace(hyperdiff_coeff=default_hyperdiff_coeff(grid))
     if config.hyperdiff_coeff > 0:
         # Batch the two pointwise hyperdiffusions (vor, div) into one
         # call by stacking along a trailing axis.  ``spectral_hyperdiffusion_3d``
@@ -306,6 +322,9 @@ class SpectralShallowWaterModel:
         self._use_cpu_for_spectral = placement.use_cpu_for_spectral
         self._cpu_device = placement.cpu_device
         self._default_device = placement.default_device
+        if self.config.hyperdiff_coeff is None:
+            self.config = self.config._replace(
+                hyperdiff_coeff=default_hyperdiff_coeff(self.grid))
 
         # Precompute exponential spectral filter if enabled.
         # The filter damps high-wavenumber spectral coefficients to

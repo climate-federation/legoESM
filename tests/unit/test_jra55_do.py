@@ -884,3 +884,132 @@ def test_cache_polar_gap_is_treated_not_diluted(tmp_path):
     ))
     np.testing.assert_allclose(untreated[1:-1, :], 290.0, atol=1e-9)
     np.testing.assert_allclose(untreated[[0, -1], :], 290.0 * 0.749995, rtol=1e-4)
+
+
+def test_ocean_loader_reads_builder_cache(tmp_path):
+    """The ocean OMIP-2 loader must read what build_jra55_cache writes
+    instead of silently falling back to synthetic forcing."""
+    import xarray as xr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+
+    src_path = tmp_path / "synthetic_jra55.zarr"
+    _make_synthetic_jra55_zarr(src_path, n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path), years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    for root in (cfg.cache_dir, cache_path):   # directory or the store itself
+        f = load_jra55_do(1958, cache_dir=root, allow_synthetic=False)
+        ds = xr.open_zarr(cache_path)
+        n = 365 * RECORDS_PER_DAY
+        assert f.u10.shape == (n, 4, 8)
+        np.testing.assert_array_equal(f.T_air, ds.tas.values[:n])
+        np.testing.assert_array_equal(
+            f.precip, ds.prra.values[:n] + ds.prsn.values[:n])
+        np.testing.assert_array_equal(f.slp, ds.psl.values[:n])
+        assert np.all((f.lon >= 0.0) & (f.lon < 360.0))
+        assert f.time_s[1] - f.time_s[0] == 3 * 3600.0
+    with pytest.raises(FileNotFoundError):
+        load_jra55_do(1959, cache_dir=cfg.cache_dir, allow_synthetic=False)
+
+
+def test_ocean_loader_rejects_record_window_outside_cache(tmp_path):
+    """A store whose ref_year puts the requested year outside its record axis
+    must raise, not wrap the negative slice onto the end of the cache."""
+    import zarr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+
+    src_path = tmp_path / "synthetic_jra55.zarr"
+    _make_synthetic_jra55_zarr(src_path, n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path), years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    g = zarr.open_group(str(cache_path), mode="r+")
+    g.attrs["ref_year"] = 1959
+    zarr.consolidate_metadata(str(cache_path))
+    with pytest.raises(ValueError, match="malformed"):
+        load_jra55_do(1958, cache_dir=cache_path)
+
+
+@pytest.fixture(scope="module")
+def two_year_builder_cache(tmp_path_factory):
+    """A 1958-1959 cache written by the real builder (shared, read-only)."""
+    tmp = tmp_path_factory.mktemp("jra2y")
+    src = tmp / "src.zarr"
+    _make_synthetic_jra55_zarr(src, year_start=1958, year_end=1959,
+                               n_lat=8, n_lon=16, cadence_hours=6)
+    cfg = JRA55DoConfig(
+        source_path=str(src), years=(1958, 1959),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp / "cache",
+    )
+    return build_jra55_cache(cfg, overwrite=True, progress=False)
+
+
+def test_ocean_loader_cycles_years_through_the_cache_window(two_year_builder_cache):
+    """OMIP-2 long runs request years past the cache's end (2000 + y up to
+    2059 against a 1958-2018 cache): with cycle_years they wrap into the
+    cache's own window instead of crashing."""
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    store = two_year_builder_cache
+    y58 = load_jra55_do(1958, cache_dir=store)
+    y59 = load_jra55_do(1959, cache_dir=store)
+    assert not np.array_equal(y58.T_air, y59.T_air)
+    for req, ref in ((1960, y58), (1961, y59), (2019, y59), (1957, y59)):
+        got = load_jra55_do(req, cache_dir=store, cycle_years=True)
+        np.testing.assert_array_equal(got.T_air, ref.T_air)
+    with pytest.raises(FileNotFoundError, match="outside the cached window 1958-1959"):
+        load_jra55_do(1960, cache_dir=store)
+
+
+def test_ocean_loader_refuses_celsius_and_transposed_fields(two_year_builder_cache, tmp_path):
+    """The cache is a trust boundary: a Celsius air temperature or a field
+    stored (time, lon, lat) would otherwise be read as Kelvin (time, lat, lon)
+    without error (codex review of #1810)."""
+    import shutil
+    import xarray as xr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    good = two_year_builder_cache
+    load_jra55_do(1958, cache_dir=good)                       # the control passes
+    for name, edit, match in (
+        ("celsius", lambda ds: ds.assign(tas=ds["tas"] - 273.15), "Celsius"),
+        ("transposed", lambda ds: ds.assign(uas=ds["uas"].transpose("time", "lon", "lat")),
+         "expected \\('time', 'lat', 'lon'\\)"),
+    ):
+        bad = tmp_path / f"{name}.zarr"
+        ds = xr.open_zarr(good).load()
+        edit(ds).to_zarr(bad, mode="w")
+        with pytest.raises(ValueError, match=match):
+            load_jra55_do(1958, cache_dir=bad)
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda g: g.attrs.update(records_per_day=4), "records_per_day"),
+    (lambda g: g.attrs.update(n_records=10), "n_records"),
+    (lambda g: g.attrs.update(calendar="standard"), "calendar"),
+    (lambda g: g["tas"].__setitem__((5, 0, 0), np.nan), "non-finite"),
+    (lambda g: g.attrs.pop("year_start"), "missing attrs"),
+])
+def test_ocean_loader_rejects_malformed_builder_cache(
+        two_year_builder_cache, tmp_path, mutate, match):
+    """Layout and finiteness are checked at the cache boundary: a store at a
+    different cadence, with the wrong record count, another calendar, or
+    NaNs must raise instead of feeding shifted or non-finite forcing."""
+    import shutil
+    import zarr
+    from legoesm.ocean.forcing.jra55_do import load_jra55_do
+    store = tmp_path / "c.zarr"
+    shutil.copytree(two_year_builder_cache, store)
+    g = zarr.open_group(str(store), mode="r+")
+    mutate(g)
+    zarr.consolidate_metadata(str(store))
+    with pytest.raises(ValueError, match=match):
+        load_jra55_do(1958, cache_dir=store)

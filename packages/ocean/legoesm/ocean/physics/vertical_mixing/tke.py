@@ -174,50 +174,94 @@ _NEMO_MOLECULAR_VISCOSITY = 1.0e-6
 def _mixing_length_floor(cfg: "TKEConfig"):
     """Return the active scheme's mixing-length floor.
 
-    NEMO derives ``rmxl_min = 1.e-6_wp / (rn_ediff*SQRT(rn_emin))``
-    in binary64 (shipped ``zdftke.F90:845-847``; GYRE preprocessed
-    ``zdftke.f90:815-817``). legoESM's corresponding card fields are ``c_k``
-    (``rn_ediff``) and ``tke_background`` (``rn_emin``). Keep the source
-    association exactly; in particular, do not replace division by a
-    reciprocal. Veros choices retain their independently configured floor.
+    ``zdf_tke_init`` chooses ``rmxl_min`` in two arms
+    (shipped ``zdftke.F90:841-848``):
+
+    * ``ln_zdfiwm = .TRUE.`` FORCES ``rn_emin = 1.e-10_wp`` and
+      ``rmxl_min = 1.e-03_wp`` (``:842-843``) and never evaluates the
+      derivation below.  A card on that arm therefore carries ``1.0e-3`` in
+      ``cfg.mxl_min`` and leaves ``nemo_derived_mxl_min`` False (ORCA1,
+      ORCA2).
+    * ``ln_zdfiwm = .FALSE.`` derives
+      ``rmxl_min = 1.e-6_wp / (rn_ediff*SQRT(rn_emin))`` (``:846``; GYRE
+      preprocessed ``zdftke.f90:815-817``) in binary64.  legoESM's
+      corresponding card fields are ``c_k`` (``rn_ediff``) and
+      ``tke_background`` (``rn_emin``).  Keep the source association exactly;
+      in particular, do not replace division by a reciprocal.
+
+    ``nemo_derived_mxl_min`` selects the second arm.  It is False by default,
+    so every card that does not ask for the derivation — Veros choices, FESOM,
+    and every ln_zdfiwm card — keeps its own configured ``mxl_min``.
     """
-    if cfg.tke_mxl_choice not in (3, 4):
+    if not cfg.nemo_derived_mxl_min:
         return cfg.mxl_min
     if not jax.config.x64_enabled:
-        raise ValueError("NEMO-derived rmxl_min requires JAX binary64 enabled")
+        raise ValueError(
+            "TKEConfig.nemo_derived_mxl_min=True (NEMO-derived rmxl_min) "
+            "requires JAX binary64 enabled")
     rn_ediff = jnp.asarray(cfg.c_k, dtype=jnp.float64)
     rn_emin = jnp.asarray(cfg.tke_background, dtype=jnp.float64)
     return (jnp.asarray(_NEMO_MOLECULAR_VISCOSITY, dtype=jnp.float64)
             / (rn_ediff * jnp.sqrt(rn_emin)))
 
 
-def _mxl0_surface_anchor(
-    cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask,
-):
-    """ln_mxl0 surface anchor (shipped zdftke.F90:575,598-603,640-642).
+def _mxl0_anchor_floor(cfg: "TKEConfig"):
+    """Return the lower bound of the ``ln_mxl0`` surface anchor.
 
-    zdf_tke_init first overwrites rn_mxl0 with the derived rmxl_min when
-    ln_mxl0 is true (shipped zdftke.F90:859-862; GYRE ppsrc:829-832), then
-    tke_avn evaluates
+    ``tke_avn`` evaluates ``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``
+    (GYRE ppsrc ``zdftke.f90:610``), so on a CALM column the anchor IS this
+    value.  ``zdf_tke_init`` OVERWRITES the namelist ``rn_mxl0`` with the
+    active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
+    (shipped ``zdftke.F90:859-862``; GYRE ppsrc ``zdftke.f90:828-831``).
+
+    ``nemo_mxl0_rmxl_min_overwrite`` selects that overwrite.  It is False by
+    default, which is main's behaviour: the floor is the card's own
+    ``mxl0_min_m`` (NEMO's namelist ``rn_mxl0``).  DECISION 72 (user,
+    2026-09-28) keeps the ORCA1 OMIP card on the default arm and leaves
+    NEMO's overwrite to the NEMO-literal cards.
+    """
+    if cfg.nemo_mxl0_rmxl_min_overwrite:
+        return _mixing_length_floor(cfg)
+    return cfg.mxl0_min_m
+
+
+def _mxl0_surface_anchor(
+    cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
+):
+    """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
+
+    zdf_tke_init overwrites rn_mxl0 with the derived rmxl_min when ln_mxl0
+    is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) -- that
+    overwrite is what nemo_mxl0_rmxl_min_overwrite selects
+    (:func:`_mxl0_anchor_floor`); the default arm keeps the card's own
+    rn_mxl0 (mxl0_min_m), which is main's behaviour.  tke_avn then evaluates
     l_sfc=max(rn_mxl0,vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
     NEMO nn_mxl scheme (3 = nn_mxl=3, 4 = nn_mxl=2); ORCA1 sets ln_mxl0=.true.
     independently of nn_mxl, so BOTH need the anchor."""
     if cfg.tke_mxl_choice not in (3, 4):
         return None
-    if surface_tmask is None:
-        raise ValueError(
-            "NEMO tke_mxl_choice 3/4 requires surface_tmask for the "
-            "compiled `taum*tmask(:,:,1)` ln_mxl0 statement.")
     taum = jnp.asarray(taum)
-    surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
-    if surface_tmask.shape != taum.shape:
-        raise ValueError(
-            "surface_tmask must match taum; got "
-            f"{surface_tmask.shape} vs {taum.shape}.")
+    if not cfg.nemo_mxl0_surface_tmask:
+        # Default (main's behaviour): unmasked stress.  Callers with no
+        # surface T-mask (FESOM) stay supported; NEMO-literal cards opt into
+        # the compiled masked statement with nemo_mxl0_surface_tmask=True.
+        masked_taum = jnp.maximum(taum, 0.0)
+    else:
+        if surface_tmask is None:
+            raise ValueError(
+                "TKEConfig.nemo_mxl0_surface_tmask=True requires "
+                "surface_tmask for the compiled `taum*tmask(:,:,1)` ln_mxl0 "
+                "statement (zdftke.F90:602).")
+        surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
+        if surface_tmask.shape != taum.shape:
+            raise ValueError(
+                "surface_tmask must match taum; got "
+                f"{surface_tmask.shape} vs {taum.shape}.")
+        masked_taum = jnp.maximum(taum, 0.0) * surface_tmask
     return jnp.maximum(
-        jnp.asarray(_mixing_length_floor(cfg), dtype=taum.dtype),
+        jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype),
         _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
-        * jnp.maximum(taum, 0.0) * surface_tmask)
+        * masked_taum)
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
@@ -810,14 +854,14 @@ def compute_mixing_lengths(
         raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
         l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-        # (shipped zdftke.F90:575,598-603,640-642), computed by the CALLER
+        # (shipped zdftke.F90:575,602,640-642), computed by the CALLER
         # (which owns taum/rho_0/g and the surface tmask)
         # and passed via l_surface_anchor. The no-anchor fallback used to claim
         # NEMO's ln_mxl0=F branch, but that branch uses raw rn_mxl0
         # (GYRE ppsrc zdftke.f90:614-615), not rmxl_min; fail closed because
         # legoESM exposes only the ln_mxl0=T NEMO path.
         # With ln_mxl0, NEMO overwrites the namelist rn_mxl0 with rmxl_min at
-        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:829-832).
+        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:828-831).
         if l_surface_anchor is not None:
             l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
         else:

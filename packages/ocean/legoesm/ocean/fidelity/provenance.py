@@ -93,6 +93,16 @@ __all__ = ["git_sha", "worktree_stamp", "allow_dirty_stamps",
            "dirty_stamps_allowed", "scoped_allow_dirty"]
 
 
+def _git_output(tree, *args: str) -> str:
+    """``git -C <tree> <args>`` stdout.  Raises on a missing git or a failure.
+
+    One owner for the subprocess call; both stamps below wrap it with their
+    own error text.
+    """
+    return subprocess.check_output(
+        ["git", "-C", str(tree), *args], text=True, stderr=subprocess.DEVNULL)
+
+
 def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:
     """Full HEAD SHA of the tree this module was imported from.
 
@@ -103,18 +113,15 @@ def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str
     """
     tree = Path(repo) if repo is not None else Path(__file__).resolve().parent
 
-    def _git(*args: str) -> str:
-        try:
-            return subprocess.check_output(
-                ["git", "-C", str(tree), *args], text=True, stderr=subprocess.DEVNULL
-            )
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise RuntimeError(f"cannot stamp git SHA from {tree}: {error}") from error
-
-    sha = _git("rev-parse", "HEAD").strip()
-    # No strip() on the porcelain output: " M path" keeps its leading space.
-    dirty = [line for line in _git("status", "--porcelain", "--untracked-files=no").splitlines()
-             if line.strip()]
+    try:
+        sha = _git_output(tree, "rev-parse", "HEAD").strip()
+        # No strip() on porcelain output: " M path" keeps its leading space.
+        status = _git_output(
+            tree, "status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"cannot stamp git SHA from {tree}: {error}") from error
+    dirty = [line for line in status.splitlines() if line.strip()]
     if not dirty:
         return sha
     if allow_dirty:
@@ -152,9 +159,7 @@ def worktree_stamp(*, repo: str | Path | None = None,
     tree = Path(repo) if repo is not None else Path(__file__).resolve().parent
 
     def _git(*args: str) -> str:
-        return subprocess.check_output(
-            ["git", "-C", str(tree), *args], text=True,
-            stderr=subprocess.DEVNULL)
+        return _git_output(tree, *args)
 
     try:
         top = _git("rev-parse", "--show-toplevel").strip()

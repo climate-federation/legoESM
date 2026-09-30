@@ -44,7 +44,7 @@ fraction of the residual that row already carries.
 | (A) the two cards select different momentum-advection switches | **HELD** | ORCA2 `ln_dynadv_vec = .true.`; OVERFLOW `ln_dynadv_up3 = .true.`. Constructed cards: ORCA2-zps and GYRE-zco `vector_invariant`; OVERFLOW-zps and LOCK-zco `flux_form` + `nemo_up3`. ORCA2 ladder under the candidate: 40 checkpoints, 0 moved rows. |
 | (B) the candidate is wrong on the tank's partial-step / closed-wall cells | **not the blocker; stays open on the OVERFLOW card** | 0 of the 20 violating rows is `AT-BAR`; all 20 are `DEBT`. Largest worsening / reference-residual ratio 0.3101, median 0.0054, all below 1. |
 | (C) the tank's certified record came from a different NEMO build | **REFUTED, on binary provenance** | The two runs use BYTE-IDENTICAL namelists. Their executables differ: the certified reference run's own binary hashes `08d83236dd7f5b92bb4f194e414e2ef5`, equal to the uninstrumented `OVERFLOW_OMIP_L1` build, whose `MY_SRC` carries NO `dynadv_up3` override at all, so the certified record ran the SHIPPED UP3; the walk record's binary hashes `59da10f439b2316b72778440d8e11ff2`, the instrumented build, whose `dynadv_up3.F90` differs from the shipped file by additions only (one `USE` and eleven writer `CALL`s) at the same `-O3`. Round 57's source-order replay of the recorded operands reproduced the recorded flux bit-exactly, which is not what a re-associated statement looks like. |
-| (D) the candidate changes something upstream that the tank runs | **REFUTED** | The edited routine has exactly one production call site, `ocean_pe_latlon_cgrid.py:5247`, inside the guard at `ocean_pe_latlon_cgrid.py:5229`; the sibling branch is the vector-invariant ENE/EEN operator. The other references are unit tests and probes. |
+| (D) the candidate changes something upstream that the tank runs | **REFUTED** | The edited routine has exactly one production call site, `ocean_pe_latlon_cgrid.py:5320`, inside the guard at `ocean_pe_latlon_cgrid.py:5302`; the sibling branch is the vector-invariant ENE/EEN operator. The other references are unit tests and probes. |
 
 ## Compiled statements and the card that runs them
 
@@ -56,8 +56,8 @@ flux at `:194-195`. The deck that reaches those lines selects
 reference run's own namelist makes the same two selections at
 `overflow_kt1_10/namelist_cfg:86` and `:92`. The deck that does not reach them
 selects `ORCA2_OMIP_L4/EXP00/namelist_cfg:346` and `:352`. legoESM pins the
-same split on the card: the condition at `nemo_testcase_recipe.py:1596`
-refuses, at `:1599`, to build ORCA2-zps or GYRE-zco with anything but the
+same split on the card: the condition at `nemo_testcase_recipe.py:2205`
+refuses, at `:2208`, to build ORCA2-zps or GYRE-zco with anything but the
 vector-invariant selection.
 
 ## Measured results
@@ -161,7 +161,7 @@ never fires.
 - Citation gate on this receipt (10 citations, PASS) and on the default
   receipt (274 citations, PASS), its nine built-in plants firing on both.
 - Shifted-line plants on two of this round's own citations,
-  `ocean_pe_latlon_cgrid.py:5229` and `ORCA2_OMIP_L4/EXP00/namelist_cfg:346`:
+  `ocean_pe_latlon_cgrid.py:5302` and `ORCA2_OMIP_L4/EXP00/namelist_cfg:346`:
   both make the gate FAIL with `SYMBOL-NOT-AT-LINE`. Recorded because a first
   attempt passed `--plant 3`, which names no citation and was therefore a
   no-op that proved nothing; that vacuous run is not evidence.

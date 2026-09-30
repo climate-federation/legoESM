@@ -767,6 +767,43 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         c_eps=rn_ediss,
         tke_background=rn_emin,         # rn_emin (1e-10 under ln_zdfiwm, else 1e-6)
         mxl_min=rmxl_min,               # rmxl_min (1e-3 under ln_zdfiwm, else model default)
+        # Both arms above already carry NEMO's OWN rmxl_min, so the card must
+        # NOT re-derive it: zdf_tke_init evaluates 1e-6/(rn_ediff*SQRT(rn_emin))
+        # only on the ln_zdfiwm=.FALSE. arm (zdftke.F90:846), and ORCA1 runs
+        # ln_zdfiwm=.TRUE., where :841-843 FORCES rmxl_min=1e-3.
+        nemo_derived_mxl_min=False,
+        # DECISION 72 (user, 2026-09-28): this ORCA1 card keeps MAIN's
+        # calm-column ln_mxl0 surface floor, the namelist rn_mxl0 = 0.04 m,
+        # stated here by value rather than left to a default.  NEMO itself
+        # OVERWRITES rn_mxl0 with the active mixing-length floor whenever
+        # ln_mxl0 is true -- 1.0e-3 m on this ORCA1 arm, because ln_zdfiwm
+        # forces rmxl_min = 1.0e-3 (shipped zdftke.F90:859-862 and :841-843;
+        # GYRE ppsrc:828-831 and :810-812) -- and that transcription stays
+        # available, but only to the NEMO-literal cards, which select it with
+        # nemo_mxl0_rmxl_min_overwrite=True.  The two arms differ ONLY where
+        # the wind anchor does not already exceed the floor, i.e. on calm and
+        # land columns; every windy column is identical.  Same principle as
+        # decisions 66 and 68: this card is not ours to switch, and the PR body
+        # states NEMO's own value so Pierre can decide.  False is also the
+        # library default, so both lines are a record of the choice, not a
+        # behaviour change.  Pinned by tests/ocean/unit/
+        # test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_mains_rn_mxl0_surface_floor.
+        mxl0_min_m=0.04,
+        nemo_mxl0_rmxl_min_overwrite=False,
+        # DECISION 66 (user, 2026-09-28): this ORCA1 card keeps its PREVIOUS,
+        # UNMASKED ln_mxl0 surface anchor.  NEMO's compiled statement does
+        # multiply the stress by tmask(:,:,1) (zdftke.F90:602), and that
+        # transcription stays available -- but only to the NEMO-literal cards,
+        # which select it with nemo_mxl0_surface_tmask=True.  tmask(:,:,1) is 1
+        # on every WET column, so the two arms differ on LAND columns only, and
+        # the user's instruction is to leave this card alone: "only switch it in
+        # the stuff that impacts our work, no need to touch his."  False is also
+        # the library default, so this line is a record of the choice, not a
+        # behaviour change.  Pinned by
+        # tests/ocean/unit/test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor.
+        nemo_mxl0_surface_tmask=False,
         tke_surface_min=1.0e-4,         # rn_emin0
         # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs

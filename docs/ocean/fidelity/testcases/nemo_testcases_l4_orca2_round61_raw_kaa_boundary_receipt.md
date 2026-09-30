@@ -51,7 +51,7 @@ Only afterwards does it build and apply the barotropic correction at
 `OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:436-448`.
 
 The private field and conflict guard are
-`ocean_model_latlon_cgrid.py:1277` and
+`ocean_model_latlon_cgrid.py:1304` and
 `ocean_model_latlon_cgrid.py:2763-2787`.  The production capture is immediately
 before the existing deferred correction at
 `ocean_model_latlon_cgrid.py:9336-9343`; the captured U/V replace returned

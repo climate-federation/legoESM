@@ -52,6 +52,7 @@ __param_spec__ = {
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -115,7 +116,6 @@ __param_spec__ = {
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
-            "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
             "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
@@ -265,6 +265,44 @@ class TKEConfig(NamedTuple):
     # Requires positivity="floor" (the Veros positivity branch returns before
     # the `MAX(en,rn_emin)` this mask rides on).
     tke_dry_wmask: bool = False
+    # ----- NEMO rmxl_min provenance (zdftke.F90:841-848) -----------------
+    # NEMO picks the mixing-length floor in TWO arms:
+    #   ln_zdfiwm=.TRUE.  -> rn_emin FORCED to 1e-10 and rmxl_min FORCED to
+    #                        1e-3 (zdftke.F90:842-843); the derivation below
+    #                        is never evaluated.
+    #   ln_zdfiwm=.FALSE. -> rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin))
+    #                        (zdftke.F90:846), i.e. derived from c_k and
+    #                        tke_background, and the namelist floor is unused.
+    # ``False`` (DEFAULT, main's behaviour): the floor IS ``mxl_min``, whatever
+    #   the card set.  That is also the correct value for an ln_zdfiwm=.TRUE.
+    #   card, which simply sets ``mxl_min=1.0e-3`` (ORCA1, ORCA2).
+    # ``True``: take the ln_zdfiwm=.FALSE. derivation.  Only a NEMO-literal
+    #   card that runs ln_zdfiwm=.FALSE. selects it (GYRE, DINO).  The
+    #   derivation is evaluated in binary64 and RAISES without x64, so the
+    #   requirement lands only on the cards that ask for it.
+    nemo_derived_mxl_min: bool = False
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:602 evaluates
+    # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
+    # the anchor is built from ``taum`` alone and a caller that has no
+    # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked
+    # statement, and a missing ``surface_tmask`` is a hard error.  Only the
+    # NEMO-literal cards select it.
+    nemo_mxl0_surface_tmask: bool = False
+    # ----- NEMO rn_mxl0: the ln_mxl0 surface-anchor FLOOR ------------------
+    # ``tke_avn`` floors the wind anchor at ``rn_mxl0``
+    # (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
+    # zdftke.f90:610), so on a CALM column the anchor IS this value.
+    # ``zdf_tke_init`` then OVERWRITES the namelist ``rn_mxl0`` with the
+    # active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
+    # (shipped zdftke.F90:859-862; GYRE ppsrc zdftke.f90:828-831).
+    # ``False`` (DEFAULT, main's behaviour): NO overwrite -- the floor is the
+    #   card's own ``mxl0_min_m``, i.e. the namelist ``rn_mxl0``.  DECISION 72
+    #   (user, 2026-09-28) keeps the ORCA1 OMIP card on this arm.
+    # ``True``: take NEMO's overwrite, i.e. the mixing-length floor.  Only the
+    #   NEMO-literal cards select it (GYRE and everything built on it, the
+    #   ORCA2-zps testcase card, and the NEMO DINO cards).
+    nemo_mxl0_rmxl_min_overwrite: bool = False
+    mxl0_min_m: float = 0.04             # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -814,7 +852,6 @@ class KPPConfig(NamedTuple):
     K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
-    c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
     # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
     # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so

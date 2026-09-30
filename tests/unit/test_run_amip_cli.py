@@ -774,6 +774,40 @@ def test_snow_albedo_ageing_flags_flow_to_config():
     cfg.validate_strict()
 
 
+def test_land_soil_freeze_thaw_round_trip_and_decks():
+    """The flag reaches ExperimentConfig both ways, and each deck states its
+    value explicitly: production ON (user 2026-09-26), the preserved old deck
+    OFF so it still reproduces the arms it exists for."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_soil_freeze_thaw is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-soil-freeze-thaw"]), parser))
+    assert cfg1.land_soil_freeze_thaw is True
+    cfg2 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-soil-freeze-thaw"]), parser))
+    assert cfg2.land_soil_freeze_thaw is False
+    for deck, want in (("amip_production.yaml", True),
+                       ("amip_sundqvist_l36.yaml", False)):
+        p = build_arg_parser()
+        rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), p)
+        assert rows.get("land_soil_freeze_thaw") is want, deck
+        p.set_defaults(**rows)
+        cfg = build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS), p))
+        assert cfg.land_soil_freeze_thaw is want, deck
+
+
+def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-freeze-thaw"]), parser))
+    with pytest.raises(ValueError, match="land_soil_freeze_thaw"):
+        cfg.validate_strict()
+
+
 @pytest.mark.parametrize("bad", ["0.1", "500"])
 def test_land_snow_tau_days_out_of_range_is_refused(bad):
     """0.5 d is melting spring snow and 400 d spans the cold plateau; outside
@@ -2172,6 +2206,53 @@ def test_config_yaml_round_trips_authoritative_values():
     assert materialize_sub_config(
         turbulence_config_for(cfg)).clubb.liquid_partition is True
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is True
+    # User decision 2026-09-25 (run 4): NO in-cloud inhomogeneity thinning,
+    # matching CAM6 whose RRTMG applies no such factor.  "constant" with
+    # factor 1.0 is the no-thinning path.  Pinned on the RESOLVED cloud
+    # config and on its EFFECT: the liquid path handed to radiation equals
+    # the raw grid-mean path, which two_region (the old row) would thin.
+    assert cfg.cloud_optics_inhomogeneity == "constant"
+    assert cfg.cloud_inhomogeneity_factor == 1.0
+    _assert_optics_thinning(cfg, thinned=False)
+
+
+def _assert_optics_thinning(cfg, *, thinned: bool):
+    """Build the lane's cloud config from ``cfg`` and measure the thinning.
+
+    A saturated, cloudy, warm column: with no inhomogeneity factor the liquid
+    water path handed to radiation is EXACTLY ``q_c * dp / g``; two_region at
+    fsd 1.0 thins it.  Asserting the effect, not the field, is what makes the
+    production pin non-vacuous against a renamed or ignored selector.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties,
+    )
+    # The MPAS lane's own builder (model_driver._run_mpas), so the pin reads
+    # the config the run would radiate with, not the YAML.
+    from legoesm.driver.model_driver import _standalone_cloud_config
+    cloud_cfg = _standalone_cloud_config(
+        cfg, cfg.cloud_scheme, allow_convective_cloud=True)
+    assert cloud_cfg.cloud_partial_coverage_optics == "none"
+    T = jnp.full((1, 4), 285.0)
+    p_full = jnp.array([[70000.0, 80000.0, 90000.0, 95000.0]])
+    dp = jnp.full((1, 4), 5000.0)
+    q_v = jnp.full((1, 4), 8.0e-3)
+    q_c = jnp.full((1, 4), 4.0e-4)
+    p_half = jnp.array([[65000.0, 75000.0, 85000.0, 92500.0, 97500.0]])
+    props = compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
+        q_ice=jnp.zeros_like(q_c),
+        cloud_fraction_override=jnp.full((1, 4), 0.5),
+        # cam6_clubb's tropopause switch needs these; harmless to the others.
+        lat=jnp.zeros((1,)), p_half=p_half)
+    raw = q_c * dp / constants.g
+    ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
+    if thinned:
+        assert ratio < 0.95, f"expected two_region thinning, got ratio {ratio}"
+    else:
+        assert ratio == 1.0, f"expected NO thinning, got ratio {ratio}"
 
 
 def test_sundqvist_l36_deck_still_round_trips():
@@ -2218,6 +2299,11 @@ def test_sundqvist_l36_deck_still_round_trips():
     assert materialize_sub_config(
         turbulence_config_for(cfg)).clubb.liquid_partition is False
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
+    # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
+    # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
+    assert cfg.cloud_optics_inhomogeneity == "two_region"
+    assert cfg.cloud_fsd == 1.0
+    _assert_optics_thinning(cfg, thinned=True)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -4087,6 +4173,24 @@ def test_fv3_duo_windows_flags_round_trip_and_validate():
     cfg.validate_strict()
 
 
+def test_fv3_duo_column_lane_flag_round_trips_and_validates():
+    """--fv3-duo-column-lane reaches DycoreConfig (default False) and
+    validate_strict refuses it with the window layout."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_column_lane is False
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    assert cfg.dycore.fv3_duo_column_lane is True
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
+                        "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="rung 7"):
+        cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
+    with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):
+        cfg.validate_strict()
+
+
 def test_fv3_duo_windows_without_pad_is_refused():
     """The pad is a measured per-deck halo width, never defaulted."""
     cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])
@@ -4465,3 +4569,59 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_corner_fill_flag_round_trip_and_production_pin(capsys):
+    parser = build_arg_parser()
+    default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert default.dycore.corner_fill == "avg"
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--corner-fill", "fv3_bgrid_xdir"]), parser))
+    assert cfg.dycore.corner_fill == "fv3_bgrid_xdir"
+    cfg.validate_strict()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical", "--corner-fill", "fv3_bgrid"])
+    assert "invalid choice" in capsys.readouterr().err
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = Path(__file__).resolve().parents[2] / "config/amip/amip_production.yaml"
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    assert keys["corner_fill"] == "avg"                          # deck -> loader
+    parser.set_defaults(**keys)
+    cfg = build_config_from_args(parser.parse_args([]))           # loader -> config
+    assert cfg.dycore.corner_fill == "avg"
+
+
+def test_zm_land_fraction_flows_to_config_and_kernel():
+    """--zm-land-fraction threads CLI -> ExperimentConfig -> ZhangMcFarlaneConfig;
+    the default requires a land fraction; validate_strict refuses anything else."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]), parser))
+    assert cfg.zm_land_fraction == "required"
+    cfg_aqua = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane",
+         "--zm-land-fraction", "none"]), parser))
+    assert cfg_aqua.zm_land_fraction == "none"
+    with pytest.raises(ValueError, match="zm_land_fraction"):
+        cfg._replace(zm_land_fraction="bogus").validate_strict()
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    assert _resolve_convection(cfg)[1].land_fraction == "required"
+    assert _resolve_convection(cfg_aqua)[1].land_fraction == "none"
+    # The legacy AMIP export keeps the policy ("none" used to come back
+    # "required", so a reloaded aquaplanet config failed setup).
+    from legoesm.driver.config import ExperimentConfig
+    for c in (cfg, cfg_aqua):
+        assert ExperimentConfig.from_amip_config(
+            c.to_amip_config()).zm_land_fraction == c.zm_land_fraction
+
+
+def test_production_deck_pins_the_zm_land_fraction_policy():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    keys = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"),
+        build_arg_parser())
+    assert keys["convection"] == "zhang_mcfarlane"
+    assert keys["zm_land_fraction"] == "required"

@@ -46,9 +46,15 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
         _mixing_length_floor, _mxl0_surface_anchor,
     )
 
+    # A NEMO card on the ln_zdfiwm=.FALSE. arm: it SELECTS the derivation
+    # (zdftke.F90:845-846) and the compiled masked anchor statement
+    # (zdftke.F90:602).  Without those two selections the card keeps its
+    # own mxl_min, which is what every non-NEMO card must keep.
     cfg = TKEConfig(
         tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
-        tke_background=1.0e-6)
+        tke_background=1.0e-6, mxl0_min_m=0.04,
+        nemo_derived_mxl_min=True, nemo_mxl0_surface_tmask=True,
+        nemo_mxl0_rmxl_min_overwrite=True)
     expected = np.float64(1.0e-6) / (
         np.float64(cfg.c_k) * np.sqrt(np.float64(cfg.tke_background)))
     floor = _mixing_length_floor(cfg)
@@ -62,7 +68,15 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     dry = _mxl0_surface_anchor(
         cfg, jnp.asarray([1.0]), _RHO0, constants.g, jnp.asarray([0.0]))
     np.testing.assert_array_equal(np.asarray(dry), np.asarray([expected]))
-    assert not hasattr(cfg, "mxl0_min_m")
+    # The overwrite arm IGNORES the card's rn_mxl0: zdf_tke_init has already
+    # replaced it with rmxl_min (shipped zdftke.F90:859-862; GYRE
+    # ppsrc:829-832).  Moving rn_mxl0 far above the derived floor must not
+    # move the calm anchor.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            cfg._replace(mxl0_min_m=7.0), jnp.asarray([0.0]), _RHO0,
+            constants.g, jnp.asarray([1.0]))),
+        np.asarray([expected]))
 
     with pytest.raises(ValueError, match="surface_tmask"):
         _mxl0_surface_anchor(
@@ -71,8 +85,30 @@ def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     # The card fields remain differentiable; deriving the floor must not
     # convert a traced rn_ediff to a host scalar.
     grad = jax.grad(lambda ediff: _mixing_length_floor(
-        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6)))
+        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6,
+                  nemo_derived_mxl_min=True)))
     assert np.isfinite(float(grad(jnp.asarray(0.1, dtype=jnp.float64))))
+
+    # The other half of the same rule: a card that does NOT select the
+    # derivation keeps its configured floor and accepts a missing mask.
+    # NEMO's ln_zdfiwm=.TRUE. arm is exactly this case (zdftke.F90:841-843
+    # forces rmxl_min=1e-3), and so is every non-NEMO card.
+    plain = TKEConfig(tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
+                      tke_background=1.0e-6)
+    assert float(_mixing_length_floor(plain)) == 0.04
+    # ... and, on the DEFAULT (no-overwrite) arm, its CALM surface anchor is
+    # the card's own rn_mxl0, not that mixing-length floor.  The two are
+    # deliberately different numbers here so the row cannot pass by
+    # coincidence: DECISION 72 is exactly this distinction.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain._replace(mxl0_min_m=0.11), jnp.asarray([0.0]), _RHO0,
+            constants.g, None)),
+        np.asarray([0.11]))
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain, jnp.asarray([0.0]), _RHO0, constants.g, None)),
+        np.asarray([TKEConfig().mxl0_min_m]))
 
 
 def test_zero_step_probe_uses_the_shared_derived_floor():
@@ -81,16 +117,25 @@ def test_zero_step_probe_uses_the_shared_derived_floor():
     source = (
         repo / "scripts/validate/ocean_fidelity/nemo_zero_step_closure.py"
     ).read_text()
-    assert "_rmxl_min = _mixing_length_floor(cfg)" in source
+    assert "_rmxl_min = _mxl0_anchor_floor(cfg)" in source
     assert "cfg.mxl0_min_m" not in source
 
 
 def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
-    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i."""
+    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i.
+
+    Full ice is included because mode 1 is source-literally ``TANH(10*fr_i)``
+    and therefore never reaches complete attenuation, while mode 3's
+    ``MIN(4*fr_i, 1)`` reaches it at a quarter cover (zdftke.f90:260,262).
+    That difference is 4.1e-9 and vanishes inside NEMO's background clamp on
+    the mixing coefficients, so it is pinned HERE, on the shared
+    transcription, rather than through a diffusivity profile where the clamp
+    would hide it (round 170).
+    """
     old = get_policy()
     try:
         set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9], dtype=jnp.float64)
+        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9, 1.0], dtype=jnp.float64)
         got = np.asarray(jax.jit(
             lambda value: nemo_tke_effective_ice_fraction(value, 1))(fr_i))
         import math
@@ -99,6 +144,14 @@ def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
         np.testing.assert_array_equal(got.view(np.uint64), target.view(np.uint64))
         assert not np.array_equal(got[1:].view(np.uint64),
                                   np.asarray(fr_i)[1:].view(np.uint64))
+        # Mode 1 at FULL ice stays strictly below the complete attenuation
+        # mode 3 already reaches at a quarter cover.
+        full_mode1 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(1.0, dtype=jnp.float64), 1))
+        quarter_mode3 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(0.25, dtype=jnp.float64), 3))
+        assert quarter_mode3 == 1.0
+        assert full_mode1 < quarter_mode3
         tangent = jax.grad(lambda value: jnp.sum(
             nemo_tke_effective_ice_fraction(value, 1)))(fr_i)
         assert bool(jnp.all(jnp.isfinite(tangent)))

@@ -244,24 +244,29 @@ class TestSpectralPECMT:
         assert float(jnp.max(jnp.abs(tendencies.vor_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(tendencies.div_hat.data))) == 0.0
 
-    def test_zm_refused_without_surface_precip_sink(
+    def test_zm_runs_with_vapour_and_cloud_tracers_and_refuses_without_cloud(
         self, grid, sigma_coord, rest_state,
     ):
-        """CAM6 Zhang-McFarlane emits a SIGNED net rain-flux divergence that
-        only column-integrates to surface rain; this bridge has no surface
-        precip sink, so it must refuse loudly rather than book the field per
-        layer into a tracer (codex round 1, #3)."""
+        """CAM6 Zhang-McFarlane emits a SIGNED net rain-flux divergence whose
+        column integral is the surface rain.  The bridge books only dq_v and
+        dq_c and lets the rain leave the column (the hydrostatic bridge's
+        surface route), so it needs BOTH tracers; without q_c the detrained
+        condensate would vanish unrecorded, and that is refused loudly."""
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="zhang_mcfarlane"),
+            ConvectionConfig(scheme="zhang_mcfarlane",  # grid has no land: aquaplanet
+                             zhang_mcfarlane=ZhangMcFarlaneConfig(land_fraction="none")),
             model_type="spectral_pe", dt=300.0,
         )
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
-        state = _state_with_tracers(rest_state, {
-            "q_v": Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg"),
-            "q_c": Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg"),
-        })
-        with pytest.raises(ValueError, match="NET rain-flux"):
-            physics_fn(state, grid, sigma_coord)
+        q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
+        q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        tendencies, _ = physics_fn(
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+        assert set(tendencies.tracers) == {"q_v", "q_c"}
+        for k in ("q_v", "q_c"):
+            assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
+        with pytest.raises(ValueError, match="must carry both tracers"):
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
 
     def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,
@@ -614,8 +619,10 @@ class TestSpectralPECMT:
 @pytest.fixture(
     scope="module",
     params=[
-        # zhang_mcfarlane is absent by design: CAM6 ZM's rain is a signed net
-        # flux divergence this bridge refuses (test_zm_refused_without_surface_precip_sink).
+        # zhang_mcfarlane is absent by design: this fixture's state is q_v-only
+        # and ZM needs a q_c tracer for its detrained condensate (its signed
+        # net rain flux takes the surface route); it is pinned through the
+        # bridge in tests/unit/test_spectral_zm_rain_surface_route.py.
         ("kain_fritsch", "kain_fritsch", KainFritschConfig),
         ("emanuel", "emanuel", EmanuelConfig),
         ("tiedtke", "tiedtke", TiedtkeConfig),

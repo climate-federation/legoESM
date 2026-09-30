@@ -803,7 +803,8 @@ def _make_mpas_turbulence(
             zero_ps = jnp.zeros_like(state.p_s.data)
             tendencies = HydrostaticTendencies(
                 du_dt=state.u.replace(data=zero_edges),
-                dv_dt=None,
+                dv_dt=(None if state.v is None
+                       else state.v.replace(data=jnp.zeros_like(state.v.data))),
                 dT_dt=state.T.replace(data=zero_cells),
                 dp_s_dt=state.p_s.replace(data=zero_ps),
                 dphis_dt=state.phis.replace(data=zero_ps),
@@ -816,8 +817,20 @@ def _make_mpas_turbulence(
         nlev = sigma_coord.n_levels
         nCells = T.shape[0]
 
-        # Edge → cell wind reconstruction (Perot 2000).
-        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+        # Edge -> cell wind reconstruction (Perot 2000); a column model
+        # that carries cell winds (state.v present: the FV3 duo view)
+        # hands them over directly and gets cell tendencies back.
+        _cell_winds = state.v is not None
+        if _cell_winds:
+            # geographic east/north cell winds, (nCells, nlev) like T: a
+            # staggered lane must never land here by carrying a v leaf
+            if state.v.data.shape != T.shape or u_edge.shape != T.shape:
+                raise ValueError(
+                    "column-model winds must be cell fields shaped like T "
+                    f"{T.shape}; got u {u_edge.shape}, v {state.v.data.shape}")
+            u_cell, v_cell = u_edge, state.v.data
+        else:
+            u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
 
         # Pressures
         p_full = sigma_coord.pressure_at_full(p_s)  # (nCells, nlev)
@@ -1061,7 +1074,11 @@ def _make_mpas_turbulence(
         # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
         du_cell = turb_out.du_dt  # (nCells, nlev)
         dv_cell = turb_out.dv_dt
-        du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
+        if _cell_winds:
+            du_edge_normal, _dv_leaf = du_cell, dv_cell
+        else:
+            du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
+            _dv_leaf = None
 
         dT_cell = turb_out.dT_dt
 
@@ -1099,7 +1116,8 @@ def _make_mpas_turbulence(
         _lhf = getattr(turb_out, "lhflx", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
-            dv_dt=None,
+            dv_dt=(None if _dv_leaf is None
+                   else state.v.replace(data=_dv_leaf, name="dv_dt_turb")),
             dT_dt=state.T.replace(data=dT_cell, name="dT_dt_turb"),
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),

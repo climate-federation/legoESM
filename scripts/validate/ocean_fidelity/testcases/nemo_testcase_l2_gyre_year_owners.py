@@ -49,6 +49,16 @@ MODES
                      drives independent day-180-to-240 production-JIT arms
                      with NEMO's recorded heat or complete effective tracer
                      diffusivity at the implicit-solve boundary.
+  --score-solve-input-pair
+                     admits the Round-173 NEMO-side e3t/content pair and
+                     ranks its day-240 wet-cell temperature leverage.
+  --developed-content-walk
+                     walks the two compiled temperature-content families at
+                     step 1081 through production JIT and eager execution.
+  --developed-tracer-ldf-walk
+                     walks every recorded compiled-order tracer-LDF operand
+                     and write at step 1081 through that production step;
+                     --developed-slope-root extends it through `ldf_slp`.
   --forcing-gate     legoESM's CURRENT surface forcing against the LITERAL
                      usrdef_sbc transcription, BIT-EXACT, evaluated on NEMO's
                      OWN state at every day boundary the record holds.  This is
@@ -95,6 +105,19 @@ record-backed plants are persisted in their round evidence)
   developed-vertical-avt-ulp
                            moves one consumed NEMO avt interface by one ULP;
                            the matrix and day-240 temperature must both move
+  solve-input-e3t-scale    scales the e3t arm's day-240 wet temperature
+                           difference and requires its registered RMS to move
+  solve-input-content-scale
+                           does the same for the content arm
+  developed-content-krhs-ulp
+                           moves one recorded T(Krhs) operand by one ULP and
+                           requires the accumulated-content row to change
+  developed-content-rhs-ulp
+                           moves the recorded complete content by one ULP and
+                           requires the final registered row to change
+  developed-content-process-effect
+                           perturbs one wet production surface-rate cell and
+                           requires every downstream content boundary to move
 
 ``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
 day-by-day walk and the per-step walk report numbers, they do not carry a bar.
@@ -183,6 +206,9 @@ PROCESS_ROWS = (
     "geometry", "advection", "surface_boundary", "shortwave",
     "lateral_diffusion", "vertical_diffusion",
 )
+ACCUMULATED_CONTENT_PROCESS_ROWS = (
+    "advection", "surface_boundary", "shortwave", "lateral_diffusion",
+)
 LEGO_PROCESS_FIELDS = (
     "Tbb", "q_Kbb", "q_Kmm", "q_Kaa", "B0", "Badv", "Bsbc", "Bqsr",
     "Bldf", "Bpre", "Taa",
@@ -197,6 +223,16 @@ DEFAULT_REFERENCE_PROCESS_TRACE = Path(
     "lego_process_trace_v3")
 DEFAULT_IMMUTABLE_GYRE_YEAR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre")
+DEFAULT_SOLVE_INPUT_PAIR_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round173/"
+    "oracle_solve_input_pair_wet_retry")
+DEFAULT_SOLVE_INPUT_BASELINE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round172/"
+    "oracle_solve_input_pair/baseline")
+DEFAULT_SOLVE_INPUT_SOURCE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round125/"
+    "oracle_vertical_decomposition")
+SOLVE_INPUT_REMAINDER_K = 1.241262968697578e-03
 # Round 125 reuses the existing self-describing ``tra_zdf`` record.  The
 # source writer remains armed for steps 1--2; one additive source line widens
 # it to the 360-step day-180-to-240 interval.  These are byte-layout constants,
@@ -462,10 +498,16 @@ def _check_process_stamp(root: Path, expected_commit: str) -> None:
                         "process_records.stamp")
 
 
-def _resolved_process_card(path: Path) -> dict[str, bool]:
+def _resolved_process_card(
+        path: Path, *, expected_itend: int = PROCESS_END_STEP,
+        ) -> dict[str, bool]:
     text = Path(path).read_text(encoding="utf-8", errors="replace")
+    require(expected_itend >= 1,
+            "resolved process-card endpoint must be positive")
     patterns = {
-        "itend_1440": r"number of the last time step\s+nn_itend\s*=\s*1440\b",
+        f"itend_{expected_itend}": (
+            rf"number of the last time step\s+nn_itend\s*=\s*"
+            rf"{expected_itend}\b"),
         "dt_14400": r"ocean time step\s+rn_Dt\s*=\s*14400(?:\.0+)?\b",
         "tiling_off": r"Tiling \(T\) or not \(F\)\s+ln_tile\s*=\s*F\b",
         "qsr_on": r"Light penetration in temperature Eq\.\s+ln_traqsr\s*=\s*T\b",
@@ -569,17 +611,25 @@ def _process_sbc_effect_control(record: dict, mask: np.ndarray) -> dict:
 
 
 def validate_process_record(root: Path, expected_commit: str,
-                            *, plant: str | None = None) -> dict:
-    """Admit all 360 passive NEMO frames, or exercise one named plant."""
+                            *, plant: str | None = None,
+                            start_step: int = PROCESS_START_STEP,
+                            end_step: int = PROCESS_END_STEP,
+                            restart_hashes: dict[str, str] | None = None,
+                            ) -> dict:
+    """Admit a contiguous passive NEMO process stream or fire a plant."""
     root = Path(root)
+    require(1 <= start_step <= end_step,
+            "process-record step interval must be positive and ordered")
+    restart_hashes = (PROCESS_RESTART_HASHES if restart_hashes is None
+                      else restart_hashes)
     expected_names = [
         f"oracle_process_budget_kt{step:08d}.bin"
-        for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1)
+        for step in range(start_step, end_step + 1)
     ]
     records = [root / name for name in expected_names]
     observed = sorted(root.glob("oracle_process_budget_kt*.bin"))
     require([path.name for path in observed] == expected_names,
-            "process-record set is not exactly steps 1081..1440")
+            f"process-record set is not exactly steps {start_step}..{end_step}")
     producer = (root / "producer_commit.txt").read_text(
         encoding="utf-8").strip()
     require(producer == expected_commit,
@@ -643,15 +693,15 @@ def validate_process_record(root: Path, expected_commit: str,
     previous_taa = None
     headers = []
     digests = {}
-    for expected_step, path in enumerate(records, PROCESS_START_STEP):
-        record = first if expected_step == PROCESS_START_STEP \
+    for expected_step, path in enumerate(records, start_step):
+        record = first if expected_step == start_step \
             else read_process_record(path)
         require(record["kstp"] == expected_step,
                 f"{path.name}: step sequence mismatch")
         require(record["sha256"] == manifest[path.name],
                 f"{path.name}: sha256 manifest mismatch")
         digests[path.name] = record["sha256"]
-        if expected_step in (PROCESS_START_STEP, PROCESS_END_STEP):
+        if expected_step in (start_step, end_step):
             headers.append(list(record["header"]))
         if previous_taa is not None:
             chained_cells_unequal += _different_cells(
@@ -672,9 +722,10 @@ def validate_process_record(root: Path, expected_commit: str,
         require(activity[name] > 0,
                 f"active process row {name} never moves a wet cell")
 
-    resolved = _resolved_process_card(root / "ocean.output")
+    resolved = _resolved_process_card(
+        root / "ocean.output", expected_itend=end_step)
     restart_rows = {}
-    for name, expected in PROCESS_RESTART_HASHES.items():
+    for name, expected in restart_hashes.items():
         observed_digest = _sha256(root / name)
         require(observed_digest == expected,
                 f"passive restart {name} is {observed_digest}, expected "
@@ -695,6 +746,7 @@ def validate_process_record(root: Path, expected_commit: str,
         "worktree": worktree_stamp(), "binary_sha256": binary_digest,
         "layout": {
             "magic": PROCESS_MAGIC, "record_count": len(records),
+            "start_step": start_step, "end_step": end_step,
             "bytes_per_record": PROCESS_RECORD_BYTES,
             "total_record_bytes": sum(path.stat().st_size for path in records),
             "first_and_last_headers": headers,
@@ -1241,12 +1293,25 @@ def _write_trace_manifest(root: Path, paths: list[Path], commit: str) -> dict:
     return rows
 
 
+def _day_aligned_process_interval(start_step: int, end_step: int,
+                                  label: str) -> tuple[int, int, int]:
+    require(1 <= start_step <= end_step,
+            f"{label} step interval must be positive and ordered")
+    start_day, start_remainder = divmod(start_step - 1, 6)
+    end_day, end_remainder = divmod(end_step, 6)
+    require(start_remainder == 0 and end_remainder == 0,
+            f"{label} interval must start and end on daily boundaries")
+    return start_day, end_day, end_step - start_step + 1
+
+
 def produce_lego_process_trace(root: Path, expected_commit: str,
                                *, mesh_path: Path = DEFAULT_MESH,
                                include_vertical: bool = False,
+                               start_step: int = PROCESS_START_STEP,
+                               end_step: int = PROCESS_END_STEP,
                                reference_process_trace: Path =
                                DEFAULT_REFERENCE_PROCESS_TRACE) -> dict:
-    """Run seed zero independently from rest and write steps 1081--1440."""
+    """Run seed zero independently from rest and trace one day-aligned span."""
     _policy()
     from numpy.lib.format import open_memmap
 
@@ -1262,6 +1327,12 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
     require(stamp["commit"] == expected_commit,
             f"trace commit {stamp['commit']} != --expect-commit "
             f"{expected_commit}")
+    start_day, end_day, trace_steps = _day_aligned_process_interval(
+        start_step, end_step, "process-trace")
+    if include_vertical:
+        require((start_step, end_step) ==
+                (PROCESS_START_STEP, PROCESS_END_STEP),
+                "vertical extension remains frozen to steps 1081..1440")
     root = Path(root)
     require(not root.exists(),
             f"trace root already exists; refusing overwrite: {root}")
@@ -1307,18 +1378,22 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         trace_fields.extend(LEGO_VERTICAL_FIELDS)
     for name in trace_fields:
         if name.startswith("q_"):
-            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape2
+            shape = (trace_steps,) + shape2
         elif name in ("heat_K", "isoneutral_K", "effective_K", "e3w_now"):
-            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape3[:-1] + (
+            shape = (trace_steps,) + shape3[:-1] + (
                 shape3[-1] - 1,)
         else:
-            shape = (LEGO_PROCESS_TRACE_STEPS,) + shape3
+            shape = (trace_steps,) + shape3
         path = root / f"{name}.npy"
         paths.append(path)
         maps[name] = open_memmap(path, mode="w+", dtype="<f8", shape=shape)
 
     snapshot_root = root / "lego_seed0"
     snapshot_root.mkdir()
+    start_snapshot = snapshot_root / f"day{start_day:03d}.npz"
+    end_snapshot = snapshot_root / f"day{end_day:03d}.npz"
+    if start_step == 1:
+        np.savez(start_snapshot, **year._snapshot(state, gate))
     started = time.time()
     total_unequal_bytes = 0
     max_step_unequal_bytes = 0
@@ -1328,16 +1403,15 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         _load_lego_trace_arrays(Path(reference_process_trace))
         if include_vertical else None)
     reference_moved = {name: 0 for name in LEGO_PROCESS_FIELDS}
-    for completed in range(PROCESS_END_STEP):
+    for completed in range(end_step):
         kt = completed + 1
         freshwater, surface = gate._surface_forcings(card, state, kt)
-        if kt < PROCESS_START_STEP:
+        if kt < start_step:
             state = ordinary_model.step(
                 state, dt=card.dt_s, freshwater=freshwater,
                 surface_forcing=surface)
-            if kt == PROCESS_START_STEP - 1:
-                np.savez(snapshot_root / "day180.npz",
-                         **year._snapshot(state, gate))
+            if kt == start_step - 1:
+                np.savez(start_snapshot, **year._snapshot(state, gate))
             if kt == 1260:
                 np.savez(snapshot_root / "day210.npz",
                          **year._snapshot(state, gate))
@@ -1365,7 +1439,7 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         require(unequal_bytes == 0,
                 f"step {kt}: diagnostic carried state differs from ordinary "
                 f"production by {unequal_bytes} bytes")
-        if kt == PROCESS_START_STEP:
+        if kt == start_step:
             planted = plant_model.step(
                 state, dt=card.dt_s, freshwater=freshwater,
                 surface_forcing=surface)
@@ -1378,7 +1452,7 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         frame = _trace_frame(trace)
         if include_vertical:
             frame.update(_vertical_trace_frame(vertical_trace))
-        index = kt - PROCESS_START_STEP
+        index = kt - start_step
         for name in trace_fields:
             require(frame[name].shape == maps[name].shape[1:],
                     f"step {kt} {name}: shape {frame[name].shape}, expected "
@@ -1401,7 +1475,7 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
             print(f"  lego process trace step {kt:4d}  "
                   f"{time.time() - started:7.1f} s", flush=True)
 
-    np.savez(snapshot_root / "day240.npz", **year._snapshot(state, gate))
+    np.savez(end_snapshot, **year._snapshot(state, gate))
     for array in maps.values():
         array.flush()
     del maps
@@ -1419,8 +1493,9 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
                    if include_vertical else "gyre-legoesm-process-trace-v1"),
         "case": CASE,
         "producer_commit": expected_commit,
-        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
-        "record_count": LEGO_PROCESS_TRACE_STEPS,
+        "steps": [start_step, end_step],
+        "record_count": trace_steps,
+        "snapshot_files": [start_snapshot.name, end_snapshot.name],
         "dt_s": DT_S, "seed": 0, "platform": "cpu",
         "precision": "fp64/libm", "production_entry": "model.step/_step_jitted",
         "shape_3d": list(shape3), "shape_2d": list(shape2),
@@ -1438,8 +1513,7 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
         })
     metadata_path = root / "manifest.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    paths.extend([snapshot_root / "day180.npz",
-                  snapshot_root / "day240.npz", metadata_path])
+    paths.extend([start_snapshot, end_snapshot, metadata_path])
     if include_vertical:
         paths.append(snapshot_root / "day210.npz")
     file_hashes = _write_trace_manifest(root, paths, expected_commit)
@@ -1447,7 +1521,7 @@ def produce_lego_process_trace(root: Path, expected_commit: str,
     report["root"] = str(root)
     report["trace_files_sha256"] = file_hashes
     kind = "process+vertical" if include_vertical else "process"
-    print(f"STATUS PASS: legoESM {kind} trace {LEGO_PROCESS_TRACE_STEPS} "
+    print(f"STATUS PASS: legoESM {kind} trace {trace_steps} "
           f"frames; carried state unequal bytes {total_unequal_bytes}")
     return report
 
@@ -1510,15 +1584,21 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
     manifest = _trace_file_manifest(root)
     has_vertical = (
         metadata["format"] == "gyre-legoesm-process-vertical-trace-v2")
+    trace_start, trace_end = (int(value) for value in metadata["steps"])
+    trace_steps = int(metadata["record_count"])
+    require(trace_steps == trace_end - trace_start + 1,
+            "legoESM trace count disagrees with its step interval")
+    snapshot_files = set(metadata.get(
+        "snapshot_files", ("day180.npz", "day240.npz")))
     expected_files = {f"{name}.npy" for name in LEGO_PROCESS_FIELDS} | {
-        "day180.npz", "day240.npz", "manifest.json"}
+        *snapshot_files, "manifest.json"}
     if has_vertical:
         expected_files |= {f"{name}.npy" for name in LEGO_VERTICAL_FIELDS}
         expected_files.add("day210.npz")
     require(set(manifest) == expected_files,
             "legoESM trace manifest file set differs from the frozen layout")
-    file_paths = {name: (root / name if name not in (
-                             "day180.npz", "day210.npz", "day240.npz")
+    file_paths = {name: (root / name if name not in snapshot_files | {
+                             "day210.npz"}
                          else root / "lego_seed0" / name)
                   for name in expected_files}
     for name, path in file_paths.items():
@@ -1530,9 +1610,9 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
     shape3 = tuple(metadata["shape_3d"])
     shape2 = tuple(metadata["shape_2d"])
     for name, array in arrays.items():
-        expected_shape = ((LEGO_PROCESS_TRACE_STEPS,) + shape2
+        expected_shape = ((trace_steps,) + shape2
                           if name.startswith("q_") else
-                          (LEGO_PROCESS_TRACE_STEPS,) + shape3)
+                          (trace_steps,) + shape3)
         require(array.shape == expected_shape and array.dtype == np.float64,
                 f"{name}: shape/dtype {array.shape}/{array.dtype}, expected "
                 f"{expected_shape}/float64")
@@ -1573,7 +1653,7 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
     chained = 0
     surface_subsurface_visits = 0
     previous_taa = None
-    for index in range(LEGO_PROCESS_TRACE_STEPS):
+    for index in range(trace_steps):
         frame = {name: np.asarray(array[index])
                  for name, array in arrays.items()}
         for name, value in frame.items():
@@ -1592,7 +1672,7 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
             float(np.max(np.abs(rows["rounding_closure"][mask]))))
     require(chained == 0,
             f"legoESM trace fails Taa-to-next-Tbb chain in {chained} cells")
-    expected_surface_visits = int(mask[..., 0].sum()) * LEGO_PROCESS_TRACE_STEPS
+    expected_surface_visits = int(mask[..., 0].sum()) * trace_steps
     require(surface_subsurface_visits == 0,
             "legoESM surface-boundary bucket moved "
             f"{surface_subsurface_visits} subsurface wet cells; a non-surface "
@@ -1611,7 +1691,8 @@ def validate_lego_process_trace(root: Path, expected_commit: str,
         "format": "gyre-legoesm-process-trace-validation-v1",
         "status": "PASS", "case": CASE, "root": str(root),
         "producer_commit": expected_commit, "worktree": worktree_stamp(),
-        "layout": {"record_count": LEGO_PROCESS_TRACE_STEPS,
+        "layout": {"record_count": trace_steps,
+                   "steps": [trace_start, trace_end],
                    "shape_3d": list(shape3), "shape_2d": list(shape2),
                    "fields": list(LEGO_PROCESS_FIELDS)},
         "controls": {
@@ -1774,37 +1855,67 @@ def _projection(component: np.ndarray, endpoint: np.ndarray,
     return fraction * endpoint_rms, fraction
 
 
+def _explicit_process_rounding(target: np.ndarray,
+                               physical_rows: dict[str, np.ndarray],
+                               ) -> tuple[np.ndarray, np.ndarray]:
+    """Close the paired interval directly, without differencing closures."""
+    subtotal = np.zeros_like(target)
+    for values in physical_rows.values():
+        subtotal = subtotal + values
+    rounding = target - subtotal
+    return rounding, subtotal + rounding
+
+
 def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
-                         expected_commit: str, *,
+                         expected_commit: str, *, expected_day240_rms: float,
+                         process_start_step: int = PROCESS_START_STEP,
+                         process_end_step: int = PROCESS_END_STEP,
+                         nemo_expected_commit: str =
+                         "af3f7215060fc17c71adc6794817c710df8ee471",
+                         process_restart_hashes: dict[str, str] | None = None,
+                         expected_projected_interval_carry: float | None = None,
                          immutable_lego_root: Path = DEFAULT_IMMUTABLE_GYRE_YEAR,
                          nemo_root: Path = YEAR_ROOT,
                          mesh_path: Path = DEFAULT_MESH) -> dict:
-    """Close and rank the independent day-180-to-240 process budget."""
+    """Close one process span and rank it against the day-240 endpoint."""
     _policy()
     year = _year()
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
+    start_day, end_day, trace_steps = _day_aligned_process_interval(
+        process_start_step, process_end_step, "process-budget")
+    require(trace_steps % 60 == 0,
+            "process-budget interval must contain whole ten-day blocks")
+    block_count = trace_steps // 60
     nemo_validation = validate_process_record(
-        nemo_process_root, "af3f7215060fc17c71adc6794817c710df8ee471")
+        nemo_process_root, nemo_expected_commit,
+        start_step=process_start_step, end_step=process_end_step,
+        restart_hashes=process_restart_hashes)
     lego_validation = validate_lego_process_trace(
         lego_trace_root, expected_commit, mesh_path=mesh_path)
+    require(lego_validation["layout"]["steps"] ==
+            [process_start_step, process_end_step],
+            "legoESM trace interval differs from requested process budget")
     card = build_nemo_testcase_card(CASE)
     mesh, wet3, wet2, _dz, _dy, _area, bands = year._geometry(card, mesh_path)
     nlev = wet3.shape[-1]
     lat = np.asarray(mesh["gphit"], dtype=np.float64)
 
-    generated180 = _load_npz(Path(lego_trace_root) / "lego_seed0/day180.npz")
-    generated240 = _load_npz(Path(lego_trace_root) / "lego_seed0/day240.npz")
-    immutable180 = _load_npz(
-        Path(immutable_lego_root) / "lego_seed0_year/day180.npz")
-    immutable240 = _load_npz(
-        Path(immutable_lego_root) / "lego_seed0_year/day240.npz")
+    generated_start = _load_npz(
+        Path(lego_trace_root) / f"lego_seed0/day{start_day:03d}.npz")
+    generated_end = _load_npz(
+        Path(lego_trace_root) / f"lego_seed0/day{end_day:03d}.npz")
+    immutable_root = Path(immutable_lego_root) / "lego_seed0_year"
+    immutable_end = _load_npz(immutable_root / f"day{end_day:03d}.npz")
+    immutable_pairs = [(end_day, generated_end, immutable_end)]
+    immutable_start_path = immutable_root / f"day{start_day:03d}.npz"
+    if start_day != end_day and immutable_start_path.is_file():
+        immutable_pairs.append((
+            start_day, generated_start, _load_npz(immutable_start_path)))
     immutable_mismatches = {}
-    for day, generated, immutable in (
-            (180, generated180, immutable180),
-            (240, generated240, immutable240)):
+    for day, generated, immutable in immutable_pairs:
         immutable_mismatches[str(day)] = {}
         for name in FIELDS:
             a = np.asarray(generated[name], dtype=np.float64)
@@ -1817,36 +1928,46 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
                     f"day {day} {name}: generated trace differs from immutable "
                     f"year member in {unequal} cells")
 
-    nemo180 = year._load_nemo(nemo_root, 0, 180, nlev)
+    immutable240 = _load_npz(
+        Path(immutable_lego_root) / "lego_seed0_year/day240.npz")
     nemo240 = year._load_nemo(nemo_root, 0, 240, nlev)
-    lego_start = np.asarray(generated180["T"], dtype=np.float64)
-    lego_end = np.asarray(generated240["T"], dtype=np.float64)
-    nemo_start = np.asarray(nemo180["T"], dtype=np.float64)
-    nemo_end = np.asarray(nemo240["T"], dtype=np.float64)
-    endpoint = lego_end - nemo_end
+    endpoint = np.asarray(immutable240["T"], dtype=np.float64) - np.asarray(
+        nemo240["T"], dtype=np.float64)
     endpoint_rms = _rms(endpoint, wet3)
-    require(endpoint_rms == 1.6446741930292448e-2,
-            f"day-240 headline {endpoint_rms:.17e} differs from frozen "
-            "1.6446741930292448e-2 K")
+    require(np.isfinite(expected_day240_rms) and expected_day240_rms >= 0.0,
+            "--expect-day240-rms must be finite and non-negative")
+    require(endpoint_rms == expected_day240_rms,
+            f"day-240 headline {endpoint_rms:.17e} differs from explicit "
+            f"expected value {expected_day240_rms:.17e} K")
     immutable030 = _load_npz(
         Path(immutable_lego_root) / "lego_seed0_year/day030.npz")
     nemo030 = year._load_nemo(nemo_root, 0, 30, nlev)
     day30_rms = _rms(np.asarray(immutable030["T"]) - nemo030["T"], wet3)
 
     lego_arrays = _load_lego_trace_arrays(Path(lego_trace_root))
+    lego_start = np.asarray(lego_arrays["Tbb"][0], dtype=np.float64)
+    lego_end = np.asarray(lego_arrays["Taa"][-1], dtype=np.float64)
+    first_nemo = read_process_record(
+        Path(nemo_process_root)
+        / f"oracle_process_budget_kt{process_start_step:08d}.bin")
+    last_nemo = read_process_record(
+        Path(nemo_process_root)
+        / f"oracle_process_budget_kt{process_end_step:08d}.bin")
+    nemo_start = np.asarray(first_nemo["Tbb"][..., :nlev], dtype=np.float64)
+    nemo_end = np.asarray(last_nemo["Taa"][..., :nlev], dtype=np.float64)
     components_lego = {name: np.zeros_like(lego_start) for name in PROCESS_ROWS}
     components_nemo = {name: np.zeros_like(nemo_start) for name in PROCESS_ROWS}
     block_lego = [{name: np.zeros_like(lego_start) for name in PROCESS_ROWS}
-                  for _ in range(6)]
+                  for _ in range(block_count)]
     block_nemo = [{name: np.zeros_like(nemo_start) for name in PROCESS_ROWS}
-                  for _ in range(6)]
+                  for _ in range(block_count)]
     block_start_lego = []
     block_end_lego = []
     block_start_nemo = []
     block_end_nemo = []
     current_block = -1
-    for index, step in enumerate(range(PROCESS_START_STEP,
-                                       PROCESS_END_STEP + 1)):
+    for index, step in enumerate(range(process_start_step,
+                                       process_end_step + 1)):
         block = index // 60
         if block != current_block:
             current_block = block
@@ -1871,24 +1992,10 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
             block_end_nemo.append(
                 np.asarray(nemo_frame["Taa"][..., :nlev]).copy())
 
-    require(_different_cells(np.asarray(lego_arrays["Tbb"][0]),
-                             lego_start, wet3) == 0,
-            "legoESM first trace Tbb differs from day-180 snapshot")
-    require(_different_cells(np.asarray(lego_arrays["Taa"][-1]),
-                             lego_end, wet3) == 0,
-            "legoESM final trace Taa differs from day-240 snapshot")
-    first_nemo = read_process_record(
-        Path(nemo_process_root)
-        / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
-    last_nemo = read_process_record(
-        Path(nemo_process_root)
-        / f"oracle_process_budget_kt{PROCESS_END_STEP:08d}.bin")
-    require(_different_cells(first_nemo["Tbb"][..., :nlev], nemo_start,
-                             wet3) == 0,
-            "NEMO first trace Tbb differs from day-180 restart")
-    require(_different_cells(last_nemo["Taa"][..., :nlev], nemo_end,
-                             wet3) == 0,
-            "NEMO final trace Taa differs from day-240 restart")
+    require(_different_cells(lego_start, generated_start["T"], wet3) == 0,
+            f"legoESM first trace Tbb differs from day-{start_day} snapshot")
+    require(_different_cells(lego_end, generated_end["T"], wet3) == 0,
+            f"legoESM final trace Taa differs from day-{end_day} snapshot")
 
     def sum_rows(rows):
         total = np.zeros_like(lego_start)
@@ -1898,25 +2005,33 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
 
     closure_lego = (lego_end - lego_start) - sum_rows(components_lego)
     closure_nemo = (nemo_end - nemo_start) - sum_rows(components_nemo)
+    interval_endpoint = lego_end - nemo_end
     component = {"incoming": lego_start - nemo_start}
     for name in PROCESS_ROWS:
         component[name] = components_lego[name] - components_nemo[name]
-    component["rounding_closure"] = closure_lego - closure_nemo
-    reconstruction = np.zeros_like(endpoint)
-    for values in component.values():
-        reconstruction = reconstruction + values
-    reconstruction_residual = endpoint - reconstruction
+    component["rounding_closure"], reconstruction = (
+        _explicit_process_rounding(interval_endpoint, component))
+    reconstruction_residual = interval_endpoint - reconstruction
     max_reconstruction = float(np.max(np.abs(reconstruction_residual[wet3])))
+    require(max_reconstruction <= 4.0e-15,
+            "process budget reconstruction residual "
+            f"{max_reconstruction:.17e} K exceeds 4e-15 K")
 
     block_components = []
-    for block in range(6):
+    for block in range(block_count):
         item = {name: block_lego[block][name] - block_nemo[block][name]
                 for name in PROCESS_ROWS}
         local_lego_closure = ((block_end_lego[block] - block_start_lego[block])
                               - sum_rows(block_lego[block]))
         local_nemo_closure = ((block_end_nemo[block] - block_start_nemo[block])
                               - sum_rows(block_nemo[block]))
-        item["rounding_closure"] = local_lego_closure - local_nemo_closure
+        block_target = ((block_end_lego[block] - block_end_nemo[block])
+                        - (block_start_lego[block] - block_start_nemo[block]))
+        item["rounding_closure"], block_reconstruction = (
+            _explicit_process_rounding(block_target, item))
+        require(float(np.max(np.abs(
+            (block_target - block_reconstruction)[wet3]))) <= 4.0e-15,
+                f"ten-day block {block} fails explicit rounding closure")
         block_components.append(item)
 
     regions = _regions(lat, wet2)
@@ -1949,18 +2064,37 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
     for name, values in component.items():
         carry, fraction = _projection(values, endpoint, wet3, endpoint_rms)
         if name == "incoming":
-            birth = {"interval_days": "before day 180", "signed_carry_K": carry}
+            birth = {"interval_days": f"before day {start_day}",
+                     "signed_carry_K": carry}
         else:
             block_rows = []
             for block, block_values in enumerate(block_components):
                 block_value = block_values[name]
                 block_carry, _ = _projection(
                     block_value, endpoint, wet3, endpoint_rms)
-                block_rows.append((abs(block_carry), block, block_carry))
-            _, block, block_carry = max(block_rows)
-            birth = {"interval_days": [180 + 10 * block,
-                                        180 + 10 * (block + 1)],
-                     "signed_carry_K": block_carry}
+                moved = int(np.count_nonzero(block_value[wet3]))
+                block_rows.append((abs(block_carry), block, block_carry,
+                                   moved))
+            _, block, block_carry, moved = max(block_rows)
+            first_nonzero = next(
+                (item for item in block_rows if item[3] > 0), None)
+            require(first_nonzero is not None,
+                    f"process row {name} never moves in any ten-day block")
+            birth = {
+                "strongest_interval_days": [start_day + 10 * block,
+                                              start_day + 10 * (block + 1)],
+                "strongest_signed_carry_K": block_carry,
+                "strongest_nonzero_cells": moved,
+                "first_bitwise_nonzero_interval_days": [
+                    start_day + 10 * first_nonzero[1],
+                    start_day + 10 * (first_nonzero[1] + 1)],
+                "first_bitwise_nonzero_signed_carry_K": first_nonzero[2],
+                "ten_day_blocks": [
+                    {"interval_days": [start_day + 10 * row[1],
+                                       start_day + 10 * (row[1] + 1)],
+                     "signed_carry_K": row[2], "nonzero_cells": row[3]}
+                    for row in block_rows],
+            }
         depth_location = strongest_partition(values, bands)
         longitude_location = strongest_partition(values, horizontal_masks)
         latitude_location = strongest_partition(values, latitude_masks)
@@ -1981,26 +2115,45 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
     ranking.sort(key=lambda row: row["abs_signed_carry_K"], reverse=True)
     signed_sum = float(sum(row["signed_carry_K"] for row in ranking))
     sum_abs = float(sum(row["abs_signed_carry_K"] for row in ranking))
+    projected_interval_carry, _ = _projection(
+        interval_endpoint, endpoint, wet3, endpoint_rms)
+    required_interval_carry = (
+        endpoint_rms if expected_projected_interval_carry is None
+        else expected_projected_interval_carry)
+    require(projected_interval_carry == required_interval_carry,
+            "projected interval carry "
+            f"{projected_interval_carry:.17e} K differs from explicit "
+            f"expected value {required_interval_carry:.17e} K")
+    largest_physical = next(
+        row for row in ranking
+        if row["owner"] not in ("incoming", "rounding_closure"))
     report = {
-        "format": "gyre-day240-process-budget-v1", "case": CASE,
-        "status": "PASS", "interval_days": [180, 240],
+        "format": "gyre-day240-process-budget-v2", "case": CASE,
+        "status": "PASS", "interval_days": [start_day, end_day],
         "nemo_process_root": str(nemo_process_root),
         "lego_trace_root": str(lego_trace_root),
         "immutable_lego_root": str(immutable_lego_root),
         "nemo_root": str(nemo_root),
         "headline": {"day240_T3D_rms_K": endpoint_rms,
+                     "expected_day240_T3D_rms_K": expected_day240_rms,
                      "day30_T3D_rms_K": day30_rms},
         "endpoint_controls": {
             "immutable_cells_unequal": immutable_mismatches,
             "max_abs_reconstruction_residual_K": max_reconstruction,
             "lego_interval_closure_rms_K": _rms(closure_lego, wet3),
             "nemo_interval_closure_rms_K": _rms(closure_nemo, wet3),
+            "differenced_model_closures_rms_K": _rms(
+                closure_lego - closure_nemo, wet3),
             "signed_carry_sum_K": signed_sum,
-            "signed_carry_minus_endpoint_rms_K": signed_sum - endpoint_rms,
+            "projected_interval_carry_K": projected_interval_carry,
+            "expected_projected_interval_carry_K": required_interval_carry,
+            "signed_carry_minus_projected_interval_K": (
+                signed_sum - projected_interval_carry),
             "sum_abs_signed_carry_K": sum_abs,
             "cancellation_ratio": sum_abs / endpoint_rms,
         },
         "ranking": ranking, "largest_owner": ranking[0]["owner"],
+        "largest_physical_owner": largest_physical["owner"],
         "nemo_validation": nemo_validation,
         "lego_validation": lego_validation,
         "worktree": worktree_stamp(),
@@ -2012,7 +2165,9 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
         print(f"  {rank:4d} {row['owner']:>22s} "
               f"{row['signed_carry_K']:16.8e} "
               f"{row['component_rms_K']:16.8e} "
-              f"{str(row['birth']['interval_days']):>14s}")
+              f"{str(row['birth'].get('strongest_interval_days',
+                                      row['birth'].get(
+                                          'interval_days'))):>14s}")
     print(f"  day-240 T rms {endpoint_rms:.17e} K; signed carry sum "
           f"{signed_sum:.17e} K; max reconstruction residual "
           f"{max_reconstruction:.3e} K")
@@ -4090,9 +4245,21 @@ def main(argv=None) -> int:
                         help="decompose the gap at this day")
     parser.add_argument("--process-record", type=Path, default=None,
                         help="validate a Round-123 process-record root")
+    parser.add_argument("--process-start-step", type=int,
+                        default=PROCESS_START_STEP)
+    parser.add_argument("--process-end-step", type=int,
+                        default=PROCESS_END_STEP)
+    parser.add_argument("--process-restart-sha", action="append", default=[],
+                        metavar="NAME=SHA256",
+                        help="override passive restart checks for a different "
+                             "contiguous process-record interval")
     parser.add_argument("--produce-process-trace", action="store_true",
                         help="run the independent legoESM Round-124 process "
                              "trace into --root")
+    parser.add_argument("--process-trace-start-step", type=int,
+                        default=PROCESS_START_STEP)
+    parser.add_argument("--process-trace-end-step", type=int,
+                        default=PROCESS_END_STEP)
     parser.add_argument("--produce-vertical-trace", action="store_true",
                         help="extend the existing production process trace "
                              "with consumed tracer-ZDF operands")
@@ -4101,6 +4268,16 @@ def main(argv=None) -> int:
     parser.add_argument("--process-budget", type=Path, default=None,
                         help="score this NEMO process root against "
                              "--lego-process-record")
+    parser.add_argument("--expect-day240-rms", type=float, default=None,
+                        help="exact required day-240 T3D RMS for "
+                             "--process-budget")
+    parser.add_argument("--expect-projected-interval-carry", type=float,
+                        default=None,
+                        help="exact required projection of the interval-end "
+                             "gap onto the day-240 endpoint")
+    parser.add_argument("--process-record-commit", default=
+                        "af3f7215060fc17c71adc6794817c710df8ee471",
+                        help="producer commit stamped into --process-budget")
     parser.add_argument("--vertical-record", type=Path, default=None,
                         help="validate a Round-125 tra_zdf internal-record "
                              "root")
@@ -4159,6 +4336,36 @@ def main(argv=None) -> int:
         "--developed-vertical-sensitivity", action="store_true",
         help="rank the day-240 sensitivity to NEMO's recorded vertical "
              "tracer coefficient and live e3w(Kmm) divisor")
+    parser.add_argument(
+        "--produce-solve-input-record", action="store_true",
+        help="write the passive developed e3t/content input pair used by "
+             "the Round-172 NEMO-side sensitivity")
+    parser.add_argument(
+        "--score-solve-input-pair", action="store_true",
+        help="admit and score the Round-173 NEMO-side e3t/content pair")
+    parser.add_argument(
+        "--developed-content-walk", action="store_true",
+        help="walk the step-1081 temperature-content producer through the "
+             "complete production step under JIT and eager execution")
+    parser.add_argument(
+        "--developed-content-process-walk", action="store_true",
+        help="decompose the step-1081 accumulated temperature content over "
+             "the directly observed process boundaries under JIT and eager")
+    parser.add_argument(
+        "--developed-tracer-ldf-walk", action="store_true",
+        help="walk the admitted Round-177 tracer-LDF operands and writes in "
+             "the complete production step under JIT and eager")
+    parser.add_argument("--developed-tracer-ldf-root", type=Path,
+                        default=Path(
+                            "/data/abyssal/dbalwada/nemo-testcases-l2/"
+                            "phase3/round177/oracle_tracer_ldf_walk"))
+    parser.add_argument("--developed-slope-root", type=Path, default=None)
+    parser.add_argument("--solve-input-pair-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_PAIR_ROOT)
+    parser.add_argument("--solve-input-baseline-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_BASELINE_ROOT)
+    parser.add_argument("--solve-input-source-root", type=Path,
+                        default=DEFAULT_SOLVE_INPUT_SOURCE_ROOT)
     parser.add_argument("--developed-stage2-adv-split", action="store_true",
                         help="split NEMO's vector-invariant dyn_adv into its "
                              "kinetic-energy gradient and vertical advection "
@@ -4226,6 +4433,20 @@ def main(argv=None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--plant", default=None)
     args = parser.parse_args(argv)
+
+    def parsed_process_restart_hashes():
+        if not args.process_restart_sha:
+            return None
+        result = {}
+        for row in args.process_restart_sha:
+            require("=" in row, "--process-restart-sha needs NAME=SHA256")
+            name, digest = row.split("=", 1)
+            require(name and re.fullmatch(r"[0-9a-f]{64}", digest),
+                    "--process-restart-sha has an invalid name or digest")
+            require(name not in result,
+                    f"duplicate passive restart row {name}")
+            result[name] = digest
+        return result
 
     report = None
     if args.self_check:
@@ -4353,6 +4574,128 @@ def main(argv=None) -> int:
                 f"plant {args.plant!r} did not fire")
         print("DEVELOPED TKE FIRST NON-BIT: "
               f"{report['first_non_bit_statement']}")
+        print("STATUS PASS")
+        return 0
+    if args.produce_solve_input_record:
+        require(args.expect_commit is not None,
+                "--produce-solve-input-record needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--produce-solve-input-record needs --daily-record-audit")
+        report = produce_developed_solve_input_record(
+            args.daily_record_root, args.daily_record_audit,
+            args.expect_commit, args.root)
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        print("STATUS PASS: developed solve-input record "
+              f"{report['record_count']} frames")
+        return 0
+    if args.score_solve_input_pair:
+        try:
+            report = score_nemo_solve_input_pair(
+                args.solve_input_pair_root,
+                args.solve_input_baseline_root,
+                args.solve_input_source_root,
+                args.mesh, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["ranking"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_content_process_walk:
+        require(args.expect_commit is not None,
+                "--developed-content-process-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-content-process-walk needs "
+                "--daily-record-audit")
+        try:
+            report = developed_accumulated_content_process_walk(
+                args.developed_process_root, args.developed_vertical_root,
+                args.daily_record_root, args.daily_record_audit,
+                args.expect_commit, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+            return 2
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_tracer_ldf_walk:
+        require(args.expect_commit is not None,
+                "--developed-tracer-ldf-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-tracer-ldf-walk needs --daily-record-audit")
+        try:
+            report = developed_tracer_ldf_statement_walk(
+                args.developed_tracer_ldf_root, args.daily_record_root,
+                args.daily_record_audit, args.expect_commit,
+                slope_root=args.developed_slope_root, plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+            return 2
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
+        print("STATUS PASS")
+        return 0
+    if args.developed_content_walk:
+        require(args.expect_commit is not None,
+                "--developed-content-walk needs --expect-commit")
+        require(args.daily_record_audit is not None,
+                "--developed-content-walk needs --daily-record-audit")
+        try:
+            report = developed_content_producer_walk(
+                args.developed_vertical_root, args.daily_record_root,
+                args.daily_record_audit, args.expect_commit,
+                plant=args.plant)
+        except GateError as error:
+            if args.plant in (None, "none"):
+                raise
+            if str(error).startswith("PLANT-BLIND"):
+                print(f"STATUS PLANT-BLIND: {args.plant}: {error}")
+                return 2
+            print(f"STATUS PLANT-FIRED: {args.plant}: {error}")
+            return 1
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+            print(f"  wrote {args.json}")
+        if report["status"] == "PLANT-FIRED":
+            print(f"STATUS PLANT-FIRED: {args.plant}: "
+                  f"{report['control']}")
+            return 1
+        require(args.plant in (None, "none"),
+                f"plant {args.plant!r} did not fire")
+        print(json.dumps(report["modes"], indent=2))
         print("STATUS PASS")
         return 0
     if args.developed_vertical_sensitivity:
@@ -4682,6 +5025,8 @@ def main(argv=None) -> int:
         report = produce_lego_process_trace(
             args.root, args.expect_commit, mesh_path=args.mesh,
             include_vertical=args.produce_vertical_trace,
+            start_step=args.process_trace_start_step,
+            end_step=args.process_trace_end_step,
             reference_process_trace=args.reference_process_trace)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
@@ -4780,9 +5125,19 @@ def main(argv=None) -> int:
                 "--process-budget needs --lego-process-record")
         require(args.expect_commit is not None,
                 "--process-budget needs --expect-commit")
+        require(args.expect_day240_rms is not None,
+                "--process-budget needs --expect-day240-rms")
         report = score_process_budget(
             args.process_budget, args.lego_process_record,
-            args.expect_commit, immutable_lego_root=args.immutable_lego_root,
+            args.expect_commit,
+            expected_day240_rms=args.expect_day240_rms,
+            process_start_step=args.process_start_step,
+            process_end_step=args.process_end_step,
+            nemo_expected_commit=args.process_record_commit,
+            process_restart_hashes=parsed_process_restart_hashes(),
+            expected_projected_interval_carry=(
+                args.expect_projected_interval_carry),
+            immutable_lego_root=args.immutable_lego_root,
             nemo_root=args.nemo_root, mesh_path=args.mesh)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
@@ -4807,8 +5162,11 @@ def main(argv=None) -> int:
     if args.process_record is not None:
         require(args.expect_commit is not None,
                 "--process-record needs --expect-commit")
+        restart_hashes = parsed_process_restart_hashes()
         report = validate_process_record(
-            args.process_record, args.expect_commit, plant=args.plant)
+            args.process_record, args.expect_commit, plant=args.plant,
+            start_step=args.process_start_step,
+            end_step=args.process_end_step, restart_hashes=restart_hashes)
         if args.json:
             Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
             print(f"  wrote {args.json}")
@@ -12119,6 +12477,1394 @@ def developed_state_process_walk(
     return report
 
 
+# ---------------- Round-174 paired NEMO solve-input ranking ----------------
+def _score_solve_input_temperatures(
+        temperatures: dict[str, np.ndarray], wet: np.ndarray,
+        *, plant: str | None = None) -> dict:
+    """Score both directed NEMO arms against their admitted baseline."""
+    required = {"baseline", "source", "e3t_wet", "content_wet"}
+    require(set(temperatures) == required,
+            "solve-input temperature registry is incomplete")
+    shape = temperatures["baseline"].shape
+    require(wet.shape == shape,
+            f"solve-input mask shape {wet.shape} != temperature {shape}")
+    require(int(np.count_nonzero(wet)) == 18000,
+            "solve-input wet-cell census moved from 18000")
+    for name, values in temperatures.items():
+        require(values.shape == shape,
+                f"solve-input {name} shape {values.shape} != {shape}")
+        require(bool(np.all(np.isfinite(values[wet]))),
+                f"solve-input {name} has non-finite wet temperature")
+
+    baseline = np.asarray(temperatures["baseline"], dtype=np.float64)
+    source = np.asarray(temperatures["source"], dtype=np.float64)
+    source_unequal = int(np.count_nonzero(baseline[wet] != source[wet]))
+    require(source_unequal == 0,
+            f"solve-input baseline moved {source_unequal} source cells")
+
+    rows = {}
+    for name in ("e3t_wet", "content_wet"):
+        values = np.asarray(temperatures[name], dtype=np.float64)
+        delta = values - baseline
+        unequal = int(np.count_nonzero(delta[wet] != 0.0))
+        rms = _rms(delta, wet)
+        require(unequal > 0 and rms > 0.0,
+                f"solve-input {name} is non-discriminating")
+        rows[name] = {
+            "wet_cells": 18000,
+            "cells_unequal": unequal,
+            "max_abs_K": float(np.max(np.abs(delta[wet]))),
+            "day240_T3D_rms_K": rms,
+            "fraction_of_complete_K_e3w_remainder": (
+                rms / SOLVE_INPUT_REMAINDER_K),
+        }
+
+    plant_to_arm = {
+        "solve-input-e3t-scale": "e3t_wet",
+        "solve-input-content-scale": "content_wet",
+    }
+    if plant not in (None, "none"):
+        require(plant in plant_to_arm,
+                f"PLANT-BLIND: unknown solve-input plant {plant!r}")
+        name = plant_to_arm[plant]
+        values = np.asarray(temperatures[name], dtype=np.float64)
+        delta = values - baseline
+        planted = values.copy()
+        planted[wet] = baseline[wet] + delta[wet] * np.float64(
+            1.0 + 2.0**-20)
+        moved = int(np.count_nonzero(planted[wet] != values[wet]))
+        outside = int(np.count_nonzero(planted[~wet] != values[~wet]))
+        planted_rms = _rms(planted - baseline, wet)
+        expected = rows[name]["cells_unequal"]
+        if (moved != expected or outside != 0
+                or planted_rms == rows[name]["day240_T3D_rms_K"]):
+            raise GateError(
+                "PLANT-BLIND: solve-input scale moved "
+                f"{moved}/{expected} unequal wet cells, {outside} dry cells; "
+                f"rms={planted_rms:.17e}")
+        raise GateError(
+            f"solve-input {name} scale was caught: wet_cells={moved}, "
+            f"dry_cells={outside}, rms={planted_rms:.17e}")
+
+    ranking = sorted(
+        ({"arm": name, **row} for name, row in rows.items()),
+        key=lambda row: row["day240_T3D_rms_K"], reverse=True)
+    return {
+        "baseline": {
+            "cells_unequal": source_unequal,
+            "day240_T3D_rms_K": _rms(baseline - source, wet),
+        },
+        "rows": rows,
+        "ranking": ranking,
+        "larger_family": ranking[0]["arm"],
+        "prediction_e3t_larger_than_content": (
+            "CONFIRMED" if rows["e3t_wet"]["day240_T3D_rms_K"]
+            > rows["content_wet"]["day240_T3D_rms_K"] else "REFUTED"),
+        "half_remainder_threshold_K": 0.5 * SOLVE_INPUT_REMAINDER_K,
+        "prediction_neither_reaches_half": (
+            "CONFIRMED" if all(
+                row["day240_T3D_rms_K"]
+                < 0.5 * SOLVE_INPUT_REMAINDER_K
+                for row in rows.values()) else "REFUTED"),
+    }
+
+
+def score_nemo_solve_input_pair(
+        pair_root: Path, baseline_root: Path, source_root: Path,
+        mesh_path: Path, *, plant: str | None = None) -> dict:
+    """Admit and score the Round-173 wet-only NEMO input pair."""
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "solve-input scoring requires a clean committed tree")
+    pair_root = Path(pair_root)
+    baseline_root = Path(baseline_root)
+    source_root = Path(source_root)
+    restart_1080 = "GYRE_OMIP_L2_P3_00001080_restart.nc"
+    restart_1440 = "GYRE_OMIP_L2_P3_00001440_restart.nc"
+    arms = ("e3t_wet", "content_wet")
+
+    required = [
+        pair_root / "round173_outputs.sha256",
+        pair_root / "binary.sha256",
+        pair_root / "corrected_input.sha256",
+        baseline_root / restart_1080,
+        baseline_root / restart_1440,
+        source_root / restart_1080,
+        source_root / restart_1440,
+    ]
+    for arm in arms:
+        required.extend((
+            pair_root / arm / restart_1080,
+            pair_root / arm / restart_1440,
+            pair_root / arm / "nemo",
+            pair_root / arm / "round172_solve_inputs.raw",
+            pair_root / arm / "run.user.stdout.log",
+        ))
+    for path in required:
+        require(path.is_file(), f"solve-input record lacks {path}")
+
+    output_rows = {}
+    for line in (pair_root / "round173_outputs.sha256").read_text().splitlines():
+        digest, name = line.split()
+        output_rows[name] = digest
+    expected_outputs = {
+        f"{arm}/{restart}" for arm in arms
+        for restart in (restart_1080, restart_1440)
+    }
+    require(set(output_rows) == expected_outputs,
+            "solve-input output manifest registry moved")
+    for name, digest in output_rows.items():
+        require(_sha256(pair_root / name) == digest,
+                f"solve-input output hash moved for {name}")
+
+    binary_digest = (pair_root / "binary.sha256").read_text().split()[0]
+    raw_digest = (pair_root / "corrected_input.sha256").read_text().split()[0]
+    for arm in arms:
+        require(_sha256(pair_root / arm / "nemo") == binary_digest,
+                f"solve-input {arm} binary moved")
+        require(_sha256(pair_root / arm / "round172_solve_inputs.raw")
+                == raw_digest, f"solve-input {arm} input moved")
+        require((pair_root / arm / "run.user.stdout.log").read_text()
+                .splitlines() == ["STOP 0"],
+                f"solve-input {arm} lacks an exact STOP 0 record")
+
+    source_hashes = {
+        restart: _sha256(source_root / restart)
+        for restart in (restart_1080, restart_1440)
+    }
+    require(_sha256(baseline_root / restart_1080)
+            == source_hashes[restart_1080],
+            "solve-input baseline step 1080 moved from Round 125")
+    require(_sha256(baseline_root / restart_1440)
+            == source_hashes[restart_1440],
+            "solve-input baseline step 1440 moved from Round 125")
+    for arm in arms:
+        require(_sha256(pair_root / arm / restart_1080)
+                == source_hashes[restart_1080],
+                f"solve-input {arm} step 1080 moved before intervention")
+        require(_sha256(pair_root / arm / restart_1440)
+                != source_hashes[restart_1440],
+                f"solve-input {arm} step 1440 is non-discriminating")
+
+    year = _year()
+    wet = np.asarray(year.nemo_operands(mesh_path)["tmask"][..., :30]) > 0.5
+    temperatures = {
+        "source": year._load_nemo(
+            source_root, 0, 240, 30, directory=source_root)["T"],
+        "baseline": year._load_nemo(
+            baseline_root, 0, 240, 30, directory=baseline_root)["T"],
+    }
+    for arm in arms:
+        temperatures[arm] = year._load_nemo(
+            pair_root, 0, 240, 30, directory=pair_root / arm)["T"]
+    scored = _score_solve_input_temperatures(
+        temperatures, wet, plant=plant)
+    return {
+        "format": "gyre-round174-nemo-solve-input-pair-v1",
+        "status": "PASS",
+        "worktree": stamp,
+        "precision": "binary64",
+        "metric": "unweighted T3D RMS over NEMO tmask",
+        "interval": {"entry_step": 1080, "final_step": 1440,
+                     "entry_day": 180, "final_day": 240},
+        "admission": {
+            "pair_root": str(pair_root),
+            "baseline_root": str(baseline_root),
+            "source_root": str(source_root),
+            "binary_sha256": binary_digest,
+            "corrected_input_sha256": raw_digest,
+            "source_restart_sha256": source_hashes,
+            "wet_cells": int(np.count_nonzero(wet)),
+            "arms": list(arms),
+        },
+        "complete_K_e3w_remainder_K": SOLVE_INPUT_REMAINDER_K,
+        **scored,
+        "interpretation": (
+            "forced-input magnitude sensitivity only; not source-exact "
+            "landing proof"),
+    }
+
+
+# ---------------- Round-175 developed content producer walk ---------------
+def _content_walk_rows(observed: dict[str, np.ndarray], record: dict,
+                       wet: np.ndarray) -> dict:
+    """Score one complete-step execution against NEMO's written operands."""
+    nlev = wet.shape[-1]
+    dt = np.float64(record["arrays"]["rDt"])
+    nemo = {
+        "T_Kbb": _vertical_field(record, "T_Kbb_in", nlev),
+        "e3t_Kbb": _vertical_field(record, "e3t_Kbb", nlev),
+        "T_Krhs": _vertical_field(record, "T_Krhs_in", nlev),
+        "e3t_Kmm": _vertical_field(record, "e3t_Kmm", nlev),
+        "content": _vertical_field(record, "rhs_T", nlev),
+    }
+    nemo["before_content"] = nemo["e3t_Kbb"] * nemo["T_Kbb"]
+    nemo["accumulated_Krhs_content"] = (
+        (dt * nemo["e3t_Kmm"]) * nemo["T_Krhs"])
+    literal = (nemo["before_content"]
+               + nemo["accumulated_Krhs_content"])
+    calibration = _score_developed_row(literal, nemo["content"], wet)
+    require(calibration["bit_exact"],
+            "literal compiled-order content does not reproduce rhs_T")
+
+    registry = (
+        "T_Kbb", "e3t_Kbb", "before_content", "T_Krhs", "e3t_Kmm",
+        "accumulated_Krhs_content", "content",
+    )
+    require(set(observed) >= set(registry),
+            "developed content observer registry is incomplete")
+    rows = {
+        name: _score_developed_row(observed[name], nemo[name], wet)
+        for name in registry
+    }
+    first_non_bit = next(
+        (name for name in registry if not rows[name]["bit_exact"]), "NONE")
+    substitutions = {
+        "model_T_Krhs_only": _score_developed_row(
+            (dt * nemo["e3t_Kmm"]) * observed["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+        "model_e3t_Kmm_only": _score_developed_row(
+            (dt * observed["e3t_Kmm"]) * nemo["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+        "both_model_operands_nemo_association": _score_developed_row(
+            (dt * observed["e3t_Kmm"]) * observed["T_Krhs"],
+            nemo["accumulated_Krhs_content"], wet),
+    }
+    ranked = sorted(
+        ({"operand": name, **row} for name, row in substitutions.items()
+         if name != "both_model_operands_nemo_association"),
+        key=lambda row: row["rms"], reverse=True)
+    return {
+        "rows": rows,
+        "registered_order": list(registry),
+        "first_non_bit": first_non_bit,
+        "literal_nemo_rhs_calibration": calibration,
+        "model_content_rebuild": _score_developed_row(
+            observed["rebuilt_content"], observed["content"], wet),
+        "reciprocal_operand_substitution": substitutions,
+        "operand_ranking_by_rms": ranked,
+    }
+
+
+def developed_content_producer_walk(
+        vertical_root: Path, daily_root: Path, daily_audit: Path,
+        expected_commit: str, *, plant: str | None = None) -> dict:
+    """Walk NEMO's two temperature-content families at developed step 1081."""
+    require(plant in (None, "none", "developed-content-krhs-ulp",
+                      "developed-content-rhs-ulp"),
+            f"unknown developed-content plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed content walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed content walk commit differs from --expect-commit")
+    vertical_root = Path(vertical_root)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=DEFAULT_PROCESS_RECORD_ROOT)
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    nlev = wet.shape[-1]
+    record = _read_vertical_record(
+        vertical_root
+        / f"oracle_trazdf_matrix_kt{PROCESS_START_STEP:08d}.bin",
+        PROCESS_START_STEP)
+    calibration = _vertical_calibration(record)
+    require(all(value == 0 for value in calibration.values()),
+            "Round-125 compiled calibration moved at step 1081")
+
+    if plant in ("developed-content-krhs-ulp",
+                 "developed-content-rhs-ulp"):
+        dt = np.float64(record["arrays"]["rDt"])
+        tkrhs = _vertical_field(record, "T_Krhs_in", nlev)
+        e3t = _vertical_field(record, "e3t_Kmm", nlev)
+        before = (_vertical_field(record, "e3t_Kbb", nlev)
+                  * _vertical_field(record, "T_Kbb_in", nlev))
+        baseline_accum = (dt * e3t) * tkrhs
+        baseline_rhs = before + baseline_accum
+        if plant == "developed-content-rhs-ulp":
+            candidates = np.argwhere(wet & np.isfinite(baseline_rhs))
+            require(candidates.size > 0,
+                    "PLANT-BLIND: no finite wet complete content")
+            index = tuple(int(value) for value in candidates[0])
+            planted_rhs = np.array(baseline_rhs, copy=True)
+            planted_rhs[index] = np.nextafter(
+                planted_rhs[index], np.inf)
+            rhs_moved = _different_cells(
+                planted_rhs, baseline_rhs, wet)
+            if rhs_moved != 1:
+                raise GateError(
+                    "PLANT-BLIND: complete-content ULP moved "
+                    f"{rhs_moved} cells")
+            return {
+                "status": "PLANT-FIRED", "plant": plant,
+                "control": {"index_jik": list(index),
+                            "complete_rhs_cells_moved": rhs_moved},
+            }
+        all_next = np.nextafter(tkrhs, np.inf)
+        all_next_accum = (dt * e3t) * all_next
+        candidates = np.argwhere(
+            wet & np.isfinite(tkrhs)
+            & (all_next_accum.view(np.uint64)
+               != baseline_accum.view(np.uint64)))
+        require(candidates.size > 0,
+                "PLANT-BLIND: no one-ULP wet T(Krhs) change reaches the "
+                "accumulated-content row")
+        index = tuple(int(value) for value in candidates[0])
+        planted = np.array(tkrhs, copy=True)
+        planted[index] = np.nextafter(planted[index], np.inf)
+        require(planted[index] != tkrhs[index],
+                "PLANT-BLIND: T(Krhs) ULP rounded away")
+        planted_accum = (dt * e3t) * planted
+        accum_moved = _different_cells(planted_accum, baseline_accum, wet)
+        rhs_moved = _different_cells(
+            before + planted_accum, baseline_rhs, wet)
+        if accum_moved != 1:
+            raise GateError(
+                "PLANT-BLIND: T(Krhs) ULP moved "
+                f"accum={accum_moved}, rhs={rhs_moved} cells")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index_jik": list(index),
+                        "accumulated_content_cells_moved": accum_moved,
+                        "complete_rhs_cells_moved": rhs_moved},
+        }
+
+    freshwater, surface = gate._surface_forcings(
+        card, state, PROCESS_START_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    hooks = _NEMOWSRK3TestHooks(
+        tracer_process_trace=(), vertical_solve_trace=True)
+    e3t_0 = _vertical_field(record, "e3t_0", nlev)
+
+    def run_mode(*, eager: bool) -> tuple[object, dict[str, np.ndarray]]:
+        def execute(model, *, traced: bool):
+            if eager:
+                with jax.disable_jit():
+                    result = model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=traced)
+                    return jax.device_get(result)
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                result = model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha)
+            return jax.device_get(result)
+
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config)
+        trace = execute(trace_model, traced=True)
+        ordinary = execute(ordinary_model, traced=False)
+        trace_state = trace.state_after
+        moved = _state_bit_mismatches(trace_state, ordinary)
+        require(moved == 0,
+                f"existing content trace moved {moved} returned-state bytes")
+        frame = _trace_frame(trace)
+        vertical = _vertical_trace_frame(trace)
+        tbb = frame["Tbb"]
+        e3t_kbb = e3t_0 * frame["q_Kbb"][..., None]
+        e3t_kmm = e3t_0 * frame["q_Kmm"][..., None]
+        before = e3t_kbb * tbb
+        content = vertical["content_T"]
+        accumulated = content - before
+        recovered_krhs = accumulated / (
+            np.float64(record["arrays"]["rDt"]) * e3t_kmm)
+        return trace, {
+            "T_Kbb": tbb,
+            "e3t_Kbb": e3t_kbb,
+            "before_content": before,
+            "T_Krhs": recovered_krhs,
+            "e3t_Kmm": e3t_kmm,
+            "accumulated_Krhs_content": accumulated,
+            "content": content,
+            "rebuilt_content": before + accumulated,
+        }
+
+    modes = {}
+    for name, eager in (("production_step_jit", False),
+                        ("production_eager", True)):
+        _trace, observed = run_mode(eager=eager)
+        modes[name] = _content_walk_rows(observed, record, wet)
+        modes[name]["observer_state_unequal_bytes"] = 0
+        modes[name]["observer"] = (
+            "existing tracer_process_trace and vertical_solve_trace; "
+            "no callback or new returned field")
+
+    authoritative = modes["production_step_jit"]
+    predictions = {
+        "literal_nemo_rhs_bit_exact": authoritative[
+            "literal_nemo_rhs_calibration"]["bit_exact"],
+        "before_family_bit_exact": all(
+            authoritative["rows"][name]["bit_exact"]
+            for name in ("T_Kbb", "e3t_Kbb", "before_content")),
+        "accumulated_family_at_least_1000_cells": authoritative["rows"][
+            "accumulated_Krhs_content"]["cells_unequal"] >= 1000,
+        "complete_content_max_at_least_1e_6_Km": authoritative["rows"][
+            "content"]["max_abs"] >= 1.0e-6,
+        "jit_and_eager_same_first_non_bit": (
+            authoritative["first_non_bit"]
+            == modes["production_eager"]["first_non_bit"]),
+    }
+    return {
+        "format": "gyre-round175-developed-content-walk-v1",
+        "status": "PASS",
+        "case": CASE,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "worktree": stamp,
+        "precision": "fp64",
+        "step": PROCESS_START_STEP,
+        "wet_cells": int(np.count_nonzero(wet)),
+        "admission": {
+            "vertical": vertical_admission["status"],
+            "daily_audit": str(daily_audit),
+            "entry_restart": str(bundle["restart_path"]),
+            "source_checks": bundle["source_checks"],
+            "compiled_calibration_cells_unequal": calibration,
+        },
+        "modes": modes,
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit": authoritative["first_non_bit"],
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "compiled_source": {
+            "content_rhs": "trazdf.f90:549-567",
+        },
+    }
+
+
+# -------- Round-176 developed accumulated-content process walk -----------
+ROUND175_ACCUMULATED_CONTENT_RMS_KM = 7.046353169355859e-04
+
+
+def _accumulated_content_process_rows(
+        actual_cumulative: dict[str, np.ndarray],
+        expected_cumulative: dict[str, np.ndarray],
+        actual_complete: np.ndarray, expected_complete: np.ndarray,
+        wet: np.ndarray) -> dict:
+    """Score cumulative and isolated explicit-content process boundaries."""
+    required = set(ACCUMULATED_CONTENT_PROCESS_ROWS)
+    require(set(actual_cumulative) == required,
+            "model accumulated-content boundary registry is incomplete")
+    require(set(expected_cumulative) == required,
+            "NEMO accumulated-content boundary registry is incomplete")
+    cumulative = {
+        name: _score_developed_row(
+            actual_cumulative[name], expected_cumulative[name], wet)
+        for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+    }
+    cumulative["complete_accumulated_content"] = _score_developed_row(
+        actual_complete, expected_complete, wet)
+
+    actual_components = {}
+    expected_components = {}
+    previous_actual = np.zeros_like(actual_complete)
+    previous_expected = np.zeros_like(expected_complete)
+    for name in ACCUMULATED_CONTENT_PROCESS_ROWS:
+        actual_components[name] = actual_cumulative[name] - previous_actual
+        expected_components[name] = (
+            expected_cumulative[name] - previous_expected)
+        previous_actual = actual_cumulative[name]
+        previous_expected = expected_cumulative[name]
+
+    total_error = actual_complete - expected_complete
+    component_errors = {
+        name: actual_components[name] - expected_components[name]
+        for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+    }
+    component_sum = np.zeros_like(total_error)
+    for name in ACCUMULATED_CONTENT_PROCESS_ROWS:
+        component_sum = component_sum + component_errors[name]
+    component_errors["rounding_closure"] = total_error - component_sum
+    reconstructed = component_sum + component_errors["rounding_closure"]
+    reconstruction = _score_developed_row(reconstructed, total_error, wet)
+
+    total_selected = total_error[wet]
+    denominator = float(np.sum(total_selected * total_selected))
+    require(denominator > 0.0,
+            "complete accumulated-content error is zero; projection undefined")
+    total_rms = float(np.sqrt(np.mean(total_selected * total_selected)))
+    components = {}
+    for name in (*ACCUMULATED_CONTENT_PROCESS_ROWS, "rounding_closure"):
+        row = (_score_developed_row(
+            actual_components[name], expected_components[name], wet)
+            if name != "rounding_closure" else
+            _score_developed_row(
+                component_errors[name], np.zeros_like(total_error), wet))
+        error = component_errors[name][wet]
+        row["signed_projection_Km"] = float(
+            np.sum(error * total_selected) / denominator * total_rms)
+        row["projection_fraction"] = float(
+            np.sum(error * total_selected) / denominator)
+        components[name] = row
+
+    ranked = sorted(
+        ({"name": name, **components[name]}
+         for name in ACCUMULATED_CONTENT_PROCESS_ROWS),
+        key=lambda row: row["rms"], reverse=True)
+    first_non_bit = next(
+        (name for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+         if not cumulative[name]["bit_exact"]), "NONE")
+    return {
+        "registered_cumulative_order": [
+            *ACCUMULATED_CONTENT_PROCESS_ROWS,
+            "complete_accumulated_content"],
+        "cumulative_rows": cumulative,
+        "isolated_components": components,
+        "component_ranking_by_rms": ranked,
+        "first_non_bit_cumulative_boundary": first_non_bit,
+        "complete_error_rms_Km": total_rms,
+        "signed_projection_sum_Km": float(sum(
+            row["signed_projection_Km"] for row in components.values())),
+        "reconstruction": reconstruction,
+    }
+
+
+def developed_accumulated_content_process_walk(
+        process_root: Path, vertical_root: Path, daily_root: Path,
+        daily_audit: Path, expected_commit: str, *,
+        plant: str | None = None) -> dict:
+    """Decompose developed T(Krhs) over directly observed process writes."""
+    require(plant in (None, "none", "developed-content-process-effect"),
+            f"unknown developed content-process plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed content-process walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed content-process walk commit differs from --expect-commit")
+    process_root = Path(process_root)
+    vertical_root = Path(vertical_root)
+    process_admission = validate_process_record(
+        process_root, PROCESS_RECORD_COMMIT)
+    vertical_admission = validate_vertical_record(
+        vertical_root, DEVELOPED_VERTICAL_RECORD_COMMIT,
+        process_root=process_root)
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    nlev = wet.shape[-1]
+    process_record = read_process_record(
+        process_root
+        / f"oracle_process_budget_kt{DEVELOPED_PROCESS_STEP:08d}.bin")
+    vertical_record = _read_vertical_record(
+        vertical_root
+        / f"oracle_trazdf_matrix_kt{DEVELOPED_PROCESS_STEP:08d}.bin",
+        DEVELOPED_PROCESS_STEP)
+    calibration = _vertical_calibration(vertical_record)
+    require(all(value == 0 for value in calibration.values()),
+            "Round-125 compiled calibration moved at step 1081")
+
+    dt = np.float64(vertical_record["arrays"]["rDt"])
+    e3t_kmm = _vertical_field(vertical_record, "e3t_Kmm", nlev)
+    expected_complete = (
+        (dt * e3t_kmm)
+        * _vertical_field(vertical_record, "T_Krhs_in", nlev))
+    record_fields = {
+        "advection": "rhs_after_advection",
+        "surface_boundary": "rhs_after_surface_boundary",
+        "shortwave": "rhs_after_shortwave",
+        "lateral_diffusion": "rhs_after_lateral_diffusion",
+    }
+    expected_cumulative = {
+        name: (dt * e3t_kmm) * np.asarray(
+            process_record[field][..., :nlev], dtype=np.float64)
+        for name, field in record_fields.items()
+    }
+    process_to_vertical = _score_developed_row(
+        expected_cumulative["lateral_diffusion"], expected_complete, wet)
+    require(process_to_vertical["bit_exact"],
+            "Round-123 final process RHS differs from Round-125 T(Krhs)")
+
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    e3t_0 = _vertical_field(vertical_record, "e3t_0", nlev)
+
+    def execute_mode(*, eager: bool, hook=()):
+        hooks = _NEMOWSRK3TestHooks(
+            tracer_process_trace=hook, vertical_solve_trace=True)
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+        def execute(model):
+            if hook:
+                # The public production entry compiles the diagnostic and
+                # ordinary paths independently, then replaces the diagnostic
+                # trace's state_after with the ordinary result.  A direct
+                # _step_jitted call would expose the deliberately planted
+                # diagnostic state and make the passivity control fire before
+                # the registered downstream rows can be tested.
+                return jax.device_get(model.step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
+            if eager:
+                with jax.disable_jit():
+                    return jax.device_get(model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=(
+                            model is trace_model)))
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                return jax.device_get(model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
+
+        trace = execute(trace_model)
+        ordinary = execute(ordinary_model)
+        moved = _state_bit_mismatches(trace.state_after, ordinary)
+        require(moved == 0,
+                f"content-process observer moved {moved} state bytes")
+        frame = _trace_frame(trace)
+        vertical = _vertical_trace_frame(trace)
+        before = (e3t_0 * frame["q_Kbb"][..., None]) * frame["Tbb"]
+        e3t_after = vertical["e3t_after"]
+        boundary_fields = {
+            "advection": "Badv", "surface_boundary": "Bsbc",
+            "shortwave": "Bqsr", "lateral_diffusion": "Bldf",
+        }
+        cumulative = {
+            name: e3t_after * frame[field] - before
+            for name, field in boundary_fields.items()
+        }
+        complete = vertical["content_T"] - before
+        return trace, cumulative, complete, moved
+
+    if plant == "developed-content-process-effect":
+        _baseline_trace, baseline, baseline_complete, _ = execute_mode(
+            eager=False)
+        index = tuple(int(value) for value in np.argwhere(wet)[0])
+        delta = float(np.ldexp(1.0, -40))
+        _planted_trace, planted, planted_complete, _ = execute_mode(
+            eager=False, hook=(*index, delta))
+        moved = {
+            name: _different_cells(planted[name], baseline[name], wet)
+            for name in ACCUMULATED_CONTENT_PROCESS_ROWS
+        }
+        moved["complete_accumulated_content"] = _different_cells(
+            planted_complete, baseline_complete, wet)
+        require(moved["advection"] == 0,
+                "content-process plant moved the upstream advection row")
+        require(all(moved[name] > 0 for name in (
+            "surface_boundary", "shortwave", "lateral_diffusion",
+            "complete_accumulated_content")),
+            "content-process plant failed to reach every downstream row")
+        return {
+            "status": "PLANT-FIRED", "plant": plant,
+            "control": {"index_jik": list(index),
+                        "rate_delta_K_s": delta,
+                        "cells_moved": moved},
+        }
+
+    modes = {}
+    for mode_name, eager in (("production_step_jit", False),
+                             ("production_eager", True)):
+        _trace, actual_cumulative, actual_complete, moved = execute_mode(
+            eager=eager)
+        mode = _accumulated_content_process_rows(
+            actual_cumulative, expected_cumulative,
+            actual_complete, expected_complete, wet)
+        mode["observer_state_unequal_bytes"] = moved
+        modes[mode_name] = mode
+
+    authoritative = modes["production_step_jit"]
+    predictions = {
+        "record_calibrations_bit_exact": (
+            process_to_vertical["bit_exact"]
+            and all(value == 0 for value in calibration.values())),
+        "observers_bit_exact": all(
+            mode["observer_state_unequal_bytes"] == 0
+            for mode in modes.values()),
+        "advection_first_non_bit_at_least_1000_cells": (
+            authoritative["first_non_bit_cumulative_boundary"]
+            == "advection"
+            and authoritative["cumulative_rows"]["advection"]
+            ["cells_unequal"] >= 1000),
+        "lateral_diffusion_largest_and_at_least_1e_4_Km": (
+            authoritative["component_ranking_by_rms"][0]["name"]
+            == "lateral_diffusion"
+            and authoritative["isolated_components"]["lateral_diffusion"]
+            ["rms"] >= 1.0e-4),
+        "reproduces_round175_accumulated_rms": abs(
+            authoritative["complete_error_rms_Km"]
+            - ROUND175_ACCUMULATED_CONTENT_RMS_KM) <= 1.0e-15,
+        "jit_and_eager_same_first_non_bit": (
+            authoritative["first_non_bit_cumulative_boundary"]
+            == modes["production_eager"]
+            ["first_non_bit_cumulative_boundary"]),
+    }
+    return {
+        "format": "gyre-round176-developed-content-process-walk-v1",
+        "status": "PASS", "case": CASE,
+        "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "worktree": stamp, "precision": "fp64",
+        "step": DEVELOPED_PROCESS_STEP,
+        "wet_cells": int(np.count_nonzero(wet)),
+        "admission": {
+            "process": process_admission["status"],
+            "vertical": vertical_admission["status"],
+            "daily_audit": str(daily_audit),
+            "entry_restart": str(bundle["restart_path"]),
+            "source_checks": bundle["source_checks"],
+            "compiled_calibration_cells_unequal": calibration,
+            "process_to_vertical_final_rhs": process_to_vertical,
+        },
+        "modes": modes,
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit_boundary": authoritative[
+            "first_non_bit_cumulative_boundary"],
+        "largest_component": authoritative[
+            "component_ranking_by_rms"][0]["name"],
+        "internal_statement_owner": (
+            "INHERITED_CONTEXT:stage3_FCT_transport"
+            if authoritative["first_non_bit_cumulative_boundary"]
+            == "advection" else "UNMEASURED"),
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "compiled_source": {
+            "process_order": "stprk3_stg.f90:861-869,930-970",
+            "content_consumer": "trazdf.f90:549-567",
+        },
+    }
+
+
+# ---------------- Round-178 developed tracer-LDF statement walk -----------
+ROUND177_LDF_MAGIC = b"NEMO_L2_R177LDF "
+ROUND177_LDF_HEADER = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)
+ROUND177_LDF_RECORD = "oracle_tracer_ldf_walk_kt00001081.bin"
+ROUND177_LDF_3D = (
+    "T_Kbb", "Krhs_before", "Krhs_after", "Krhs_increment",
+    "e3t_3d", "e3u_3d", "e3v_3d", "tmask", "umask", "vmask", "wmask",
+    "ahtu", "ahtv", "uslp", "vslp", "wslpi", "wslpj", "ah_wslp2",
+    "akz", "dit", "djt", "dkt", "A11", "A22", "A13", "A23",
+    "hmsku", "hmskv", "fu", "fv", "vmsku", "vmskv", "ahu_w",
+    "ahv_w", "A31", "A32", "fw_lower", "fw_upper")
+ROUND177_LDF_2D = (
+    "r3t_Kmm", "r3u_Kmm", "r3v_Kmm", "e2_e1u", "e1_e2v", "e2u",
+    "e1v", "e1t", "e2t", "e1e2t", "r1_e1e2t")
+ROUND179_SLOPE_MAGIC = b"NEMO_L2_R179SLP "
+ROUND179_SLOPE_HEADER = (1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)
+ROUND179_SLOPE_RECORD = "oracle_slope_walk_kt00001081.bin"
+ROUND179_SLOPE_3D = (
+    "prd", "pn2", "tmask", "umask", "vmask", "wmask", "e3u_live",
+    "e3v_live", "zgru", "zgrv", "zdzr", "zau", "zav", "zbu_raw",
+    "zbv_raw", "zbu_limited", "zbv_limited", "zfi", "zfj", "zmli",
+    "zmlj", "zdepu", "zdepv", "zwz", "zww", "zuslp_pre",
+    "zvslp_pre", "zuslp_post", "zvslp_post", "uslp", "vslp")
+ROUND179_SLOPE_2D = (
+    "r3t_Kmm", "r3u_Kmm", "r3v_Kmm", "zhmlpt", "r1_hmlu",
+    "r1_hmlv", "r1_hmlw", "hmlp", "ssmask", "r1_e1u", "r1_e2v",
+    "nmln", "miku", "mikv", "mikt", "iku", "ikv")
+ROUND179_SLOPE_1D = ("gdept_1d", "gdepw_1d", "e3w_1d")
+
+
+def _read_round177_ldf_record(root: Path) -> dict:
+    """Read the already-admitted compiled Round-177 stream fail-closed."""
+    root = Path(root)
+    path = root / ROUND177_LDF_RECORD
+    stamp_path = path.with_suffix(path.suffix + ".stamp")
+    require(path.is_file() and stamp_path.is_file(),
+            f"Round-177 record or stamp is missing under {root}")
+    blob = path.read_bytes()
+    require(len(blob) == 8_903_548,
+            f"Round-177 record has {len(blob)} bytes, expected 8903548")
+    require(blob[:16] == ROUND177_LDF_MAGIC,
+            f"Round-177 magic moved: {blob[:16]!r}")
+    header = struct.unpack_from("=13i", blob, 16)
+    require(header == ROUND177_LDF_HEADER,
+            f"Round-177 header is {header}, expected {ROUND177_LDF_HEADER}")
+    digest = hashlib.sha256(blob).hexdigest()
+    stamped = stamp_path.read_text().strip().split()
+    require(stamped == [digest,
+                        "7634d2720f73d0c41a8007f1faaab5cea9883cdc",
+                        ROUND177_LDF_RECORD],
+            f"Round-177 record stamp disagrees: {stamped}")
+    offset = 16 + 13 * 4
+    arrays = {}
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    for name in ROUND177_LDF_3D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count3,
+                            offset=offset).reshape((36, 26, 31), order="F")
+        arrays[name] = np.ascontiguousarray(raw.transpose(1, 0, 2))
+        offset += count3 * 8
+    for name in ROUND177_LDF_2D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count2,
+                            offset=offset).reshape((36, 26), order="F")
+        arrays[name] = np.ascontiguousarray(raw.T)
+        offset += count2 * 8
+    arrays["e3w_1d"] = np.frombuffer(
+        blob, dtype="=f8", count=31, offset=offset).copy()
+    offset += 31 * 8
+    require(offset == len(blob),
+            f"Round-177 parser stopped at {offset} of {len(blob)} bytes")
+    require(all(np.all(np.isfinite(value)) for value in arrays.values()),
+            "Round-177 record contains a non-finite value")
+    return {"path": str(path), "sha256": digest, "header": list(header),
+            "producer_commit": stamped[1], "arrays": arrays}
+
+
+def _read_round179_slope_record(root: Path) -> dict:
+    """Read the admitted developed native-slope causal stream fail-closed."""
+    root = Path(root)
+    path = root / ROUND179_SLOPE_RECORD
+    stamp_path = path.with_suffix(path.suffix + ".stamp")
+    require(path.is_file() and stamp_path.is_file(),
+            f"Round-179 record or stamp is missing under {root}")
+    blob = path.read_bytes()
+    require(len(blob) == 7_324_076,
+            f"Round-179 record has {len(blob)} bytes, expected 7324076")
+    require(blob[:16] == ROUND179_SLOPE_MAGIC,
+            f"Round-179 magic moved: {blob[:16]!r}")
+    header = struct.unpack_from("=13i", blob, 16)
+    require(header == ROUND179_SLOPE_HEADER,
+            f"Round-179 header is {header}, expected {ROUND179_SLOPE_HEADER}")
+    digest = hashlib.sha256(blob).hexdigest()
+    stamped = stamp_path.read_text().strip().split()
+    require(stamped == [digest,
+                        "1ead968a9eb5e6c4c52f1d0c04b46bc264bc0cbc",
+                        ROUND179_SLOPE_RECORD],
+            f"Round-179 record stamp disagrees: {stamped}")
+    offset = 16 + 13 * 4
+    arrays = {}
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    for name in ROUND179_SLOPE_3D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count3,
+                            offset=offset).reshape((36, 26, 31), order="F")
+        arrays[name] = np.ascontiguousarray(raw.transpose(1, 0, 2))
+        offset += count3 * 8
+    for name in ROUND179_SLOPE_2D:
+        raw = np.frombuffer(blob, dtype="=f8", count=count2,
+                            offset=offset).reshape((36, 26), order="F")
+        arrays[name] = np.ascontiguousarray(raw.T)
+        offset += count2 * 8
+    for name in ROUND179_SLOPE_1D:
+        arrays[name] = np.frombuffer(
+            blob, dtype="=f8", count=31, offset=offset).copy()
+        offset += 31 * 8
+    require(offset == len(blob),
+            f"Round-179 parser stopped at {offset} of {len(blob)} bytes")
+    require(all(np.all(np.isfinite(value)) for value in arrays.values()),
+            "Round-179 record contains a non-finite value")
+    return {"path": str(path), "sha256": digest, "header": list(header),
+            "producer_commit": stamped[1], "arrays": arrays}
+
+
+def developed_tracer_ldf_statement_walk(
+        ldf_root: Path, daily_root: Path, daily_audit: Path,
+        expected_commit: str, *, slope_root: Path | None = None,
+        plant: str | None = None) -> dict:
+    """Walk the developed tracer-LDF statement in the complete step graph."""
+    require(plant in (None, "none", "developed-ldf-e3u-ulp",
+                      "developed-slope-first-ulp"),
+            f"unknown developed tracer-LDF plant {plant!r}")
+    _policy()
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "developed tracer-LDF walk requires a clean committed tree")
+    require(stamp["commit"] == expected_commit,
+            "developed tracer-LDF walk commit differs from --expect-commit")
+    oracle = _read_round177_ldf_record(Path(ldf_root))
+    raw = oracle["arrays"]
+    slope_oracle = (_read_round179_slope_record(Path(slope_root))
+                    if slope_root is not None else None)
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card, gate = bundle["card"], bundle["gate"]
+    state, payload = bundle["state"], bundle["payload"]
+    freshwater, surface = gate._surface_forcings(
+        card, state, DEVELOPED_PROCESS_STEP)
+    ssha = jnp.asarray(payload["ssha"])
+    nlev = int(np.asarray(state.T.data).shape[-1])
+
+    def field3(name):
+        return np.ascontiguousarray(raw[name][2:-2, 2:-2, :nlev])
+
+    reference = {name: field3(name) for name in ROUND177_LDF_3D}
+    wet = reference["tmask"] != 0.0
+    umask = reference["umask"] != 0.0
+    vmask = reference["vmask"] != 0.0
+    wmask = reference["wmask"] != 0.0
+    require(wet.shape == np.asarray(state.T.data).shape,
+            f"Round-177 crop is {wet.shape}, state is {state.T.data.shape}")
+    require(int(np.count_nonzero(wet)) == 18000,
+            f"Round-177 cropped wet count moved: {np.count_nonzero(wet)}")
+
+    def execute_mode(*, eager: bool, override=None,
+                     slope_n2_mode: str = "recompute"):
+        diagnostic_hook = (
+            "slope" if slope_oracle is not None and override is None
+            else (True if override is None else override))
+        hooks = _NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True,
+            tracer_ldf_diagnostics=diagnostic_hook)
+        require(slope_n2_mode in ("recompute", "carried_step_entry"),
+                f"unknown slope N2 mode {slope_n2_mode!r}")
+        model_config = card.recipe.model_config._replace(
+            gm_redi=card.recipe.model_config.gm_redi._replace(
+                slope_n2_evaluation=slope_n2_mode))
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            model_config, _nemo_ws_test_hooks=hooks)
+        ordinary_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, model_config)
+
+        def execute(model, *, tracing):
+            if eager:
+                with jax.disable_jit():
+                    return jax.device_get(model._step_impl(
+                        state, card.dt_s, freshwater=freshwater,
+                        surface_forcing=surface,
+                        _nemo_stage1_zad_eta_after_override=ssha,
+                        _return_tracer_process_trace=tracing))
+            model.prime_step_caches(state)
+            with jax.disable_jit(False):
+                return jax.device_get(model._step_jitted(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface,
+                    _nemo_stage1_zad_eta_after_override=ssha))
+
+        trace = execute(trace_model, tracing=True)
+        ordinary = execute(ordinary_model, tracing=False)
+        moved = _state_bit_mismatches(trace.state_after, ordinary)
+        if override is None:
+            require(moved == 0,
+                    f"tracer-LDF observer moved {moved} production-state bytes")
+        raw_diagnostics = trace.ldf_diagnostics
+        diagnostics = {
+            key: np.asarray(value, dtype=np.float64)
+            for key, value in raw_diagnostics.items()
+            if not isinstance(value, dict)
+        }
+        if slope_oracle is not None:
+            require(isinstance(raw_diagnostics.get("slope"), dict),
+                    "production slope diagnostics are missing")
+            diagnostics["slope"] = {
+                key: np.asarray(value, dtype=np.float64)
+                for key, value in raw_diagnostics["slope"].items()}
+        return diagnostics, moved
+
+    # Compiled execution order, including the source rows which are dead in
+    # this GYRE branch but consumed by the later implicit solve.
+    row_spec = (
+        ("T_Kbb", "q", wet), ("tmask", "tmask", np.ones_like(wet)),
+        ("umask", "umask", np.ones_like(wet)),
+        ("vmask", "vmask", np.ones_like(wet)),
+        ("wmask", "wmask", np.ones_like(wet)),
+        ("ahtu", "ahtu", umask), ("ahtv", "ahtv", vmask),
+        ("uslp", "uslp", umask), ("vslp", "vslp", vmask),
+        ("wslpi", "wslpi", wet), ("wslpj", "wslpj", wet),
+        ("dit", "dit", umask), ("djt", "djt", vmask),
+        ("dkt", "dkt", wmask),
+        ("e3t_live", "e3t", wet), ("e3u_live", "e3u_flux", umask),
+        ("e3v_live", "e3v_flux", vmask),
+        ("A11", "A11", umask), ("A22", "A22", vmask),
+        ("hmsku", "hmsku", umask), ("hmskv", "hmskv", vmask),
+        ("A13", "A13", umask), ("A23", "A23", vmask),
+        ("fu", "zfu", wet), ("fv", "zfv", wet),
+        ("vmsku", "vmsku", wmask), ("vmskv", "vmskv", wmask),
+        ("ahu_w", "ahu_w", wmask), ("ahv_w", "ahv_w", wmask),
+        ("A31", "A31", wmask), ("A32", "A32", wmask),
+        ("fw_lower", "zfw_top", wet),
+        ("fw_upper", "zfw_kp1", wet),
+        ("Krhs_increment", "tendency", wet),
+    )
+    reference_alias = {
+        "e3t_live": reference["e3t_3d"] * (
+            1.0 + raw["r3t_Kmm"][2:-2, 2:-2, None]
+            * reference["tmask"]),
+        "e3u_live": reference["e3u_3d"] * (
+            1.0 + raw["r3u_Kmm"][2:-2, 2:-2, None]
+            * reference["umask"]),
+        "e3v_live": reference["e3v_3d"] * (
+            1.0 + raw["r3v_Kmm"][2:-2, 2:-2, None]
+            * reference["vmask"]),
+    }
+    slope_reference = None
+    slope_row_spec = ()
+    if slope_oracle is not None:
+        slope_raw = slope_oracle["arrays"]
+        slope_reference = {
+            **{name: np.ascontiguousarray(
+                slope_raw[name][2:-2, 2:-2, :nlev])
+               for name in ROUND179_SLOPE_3D},
+            **{name: np.ascontiguousarray(slope_raw[name][2:-2, 2:-2])
+               for name in ROUND179_SLOPE_2D},
+            **{name: np.ascontiguousarray(slope_raw[name][:nlev])
+               for name in ROUND179_SLOPE_1D},
+        }
+        wet2 = np.any(slope_reference["tmask"] != 0.0, axis=-1)
+        level = np.ones(nlev, dtype=bool)
+        slope_row_spec = (
+            ("nmln", wet2, "inherited", "ldfslp.f90:187-194"),
+            ("gdept_1d", level, "inherited", "ldfslp.f90:196-199"),
+            ("r3t_Kmm", wet2, "inherited", "ldfslp.f90:196-199"),
+            ("ssmask", wet2, "inherited", "ldfslp.f90:196-199"),
+            ("zhmlpt", wet2, "owned", "ldfslp.f90:196-199"),
+            ("r1_hmlu", wet2, "owned", "ldfslp.f90:209-220"),
+            ("r1_hmlv", wet2, "owned", "ldfslp.f90:209-220"),
+            ("r3u_Kmm", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("r3v_Kmm", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("miku", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("mikv", wet2, "inherited", "ldfslp.f90:209-220"),
+            ("hmlp", wet2, "inherited", "ldfslp.f90:223-229"),
+            ("gdepw_1d", level, "inherited", "ldfslp.f90:223-229"),
+            ("mikt", wet2, "inherited", "ldfslp.f90:223-229"),
+            ("r1_hmlw", wet2, "owned", "ldfslp.f90:223-229"),
+            ("prd", wet, "inherited", "ldfslp.f90:231-260"),
+            ("tmask", wet, "inherited", "ldfslp.f90:231-260"),
+            ("umask", umask, "inherited", "ldfslp.f90:231-260"),
+            ("vmask", vmask, "inherited", "ldfslp.f90:231-260"),
+            ("zgru", umask, "owned", "ldfslp.f90:231-251"),
+            ("zgrv", vmask, "owned", "ldfslp.f90:231-251"),
+            ("pn2", wmask, "inherited", "ldfslp.f90:252-261"),
+            ("zdzr", wet, "owned", "ldfslp.f90:252-261"),
+            ("r1_e1u", wet2, "inherited", "ldfslp.f90:270-276"),
+            ("r1_e2v", wet2, "inherited", "ldfslp.f90:270-276"),
+            ("zau", umask, "owned", "ldfslp.f90:270-276"),
+            ("zav", vmask, "owned", "ldfslp.f90:270-276"),
+            ("zbu_raw", umask, "owned", "ldfslp.f90:270-287"),
+            ("zbv_raw", vmask, "owned", "ldfslp.f90:270-287"),
+            ("e3u_live", umask, "inherited", "ldfslp.f90:278-291"),
+            ("e3v_live", vmask, "inherited", "ldfslp.f90:278-291"),
+            ("e3w_1d", level, "inherited", "ldfslp.f90:278-291"),
+            ("zbu_limited", umask, "owned", "ldfslp.f90:288-295"),
+            ("zbv_limited", vmask, "owned", "ldfslp.f90:288-295"),
+            ("iku", wet2, "owned", "ldfslp.f90:297-303"),
+            ("ikv", wet2, "owned", "ldfslp.f90:297-303"),
+            ("zfi", umask, "owned", "ldfslp.f90:304-309"),
+            ("zfj", vmask, "owned", "ldfslp.f90:304-309"),
+            ("zmli", umask, "owned", "ldfslp.f90:304-309"),
+            ("zmlj", vmask, "owned", "ldfslp.f90:304-309"),
+            ("zdepu", umask, "owned", "ldfslp.f90:311-327"),
+            ("zdepv", vmask, "owned", "ldfslp.f90:311-327"),
+            ("zuslp_pre", umask, "owned", "ldfslp.f90:325-340"),
+            ("zvslp_pre", vmask, "owned", "ldfslp.f90:325-340"),
+            ("zwz", umask, "owned", "ldfslp.f90:328-334"),
+            ("zww", vmask, "owned", "ldfslp.f90:328-334"),
+            ("zuslp_post", umask, "owned", "ldfslp.f90:335-341"),
+            ("zvslp_post", vmask, "owned", "ldfslp.f90:335-341"),
+            ("uslp", umask, "owned", "ldfslp.f90:345-361"),
+            ("vslp", vmask, "owned", "ldfslp.f90:345-361"),
+        )
+
+    def score(diagnostics):
+        rows = {}
+        for oracle_name, actual_name, mask in row_spec:
+            expected = (reference_alias[oracle_name]
+                        if oracle_name in reference_alias
+                        else reference[oracle_name])
+            rows[oracle_name] = _score_developed_row(
+                diagnostics[actual_name], expected, mask)
+        first = next((name for name, row in rows.items()
+                      if not row["bit_exact"]), None)
+        return rows, first
+
+    def score_slope(diagnostics):
+        if slope_reference is None:
+            return {}, None, None
+        actual = diagnostics["slope"]
+        rows = {}
+        for name, mask, ownership, statement in slope_row_spec:
+            row = _score_developed_row(
+                actual[name], slope_reference[name], mask)
+            row.update({"ownership": ownership, "statement": statement})
+            rows[name] = row
+        first = next((name for name, row in rows.items()
+                      if not row["bit_exact"]), None)
+        first_owned = next((name for name, row in rows.items()
+                            if (row["ownership"] == "owned"
+                                and not row["bit_exact"])), None)
+        return rows, first, first_owned
+
+    baseline_jit, moved_jit = execute_mode(eager=False)
+    baseline_eager, moved_eager = execute_mode(eager=True)
+    if plant == "developed-ldf-e3u-ulp":
+        planted_e3u = np.array(baseline_jit["e3u_flux"], copy=True)
+        index = tuple(int(value) for value in np.argwhere(umask)[0])
+        planted_e3u[index] = np.nextafter(planted_e3u[index], np.inf)
+        planted, _ = execute_mode(
+            eager=False,
+            override=(jnp.asarray(planted_e3u),
+                      jnp.asarray(baseline_jit["e3v_flux"])))
+        upstream = ("q", "dit", "djt", "dkt")
+        downstream = ("A11", "zfu", "tendency")
+        control = {
+            "moved_index_jik": list(index),
+            "upstream_cells_moved": {
+                name: _different_cells(planted[name], baseline_jit[name],
+                                       np.ones_like(wet))
+                for name in upstream},
+            "downstream_cells_moved": {
+                name: _different_cells(planted[name], baseline_jit[name],
+                                       np.ones_like(wet))
+                for name in downstream},
+        }
+        require(all(value == 0 for value in
+                    control["upstream_cells_moved"].values()),
+                f"face-thickness plant moved an upstream row: {control}")
+        require(all(value > 0 for value in
+                    control["downstream_cells_moved"].values()),
+                f"face-thickness plant did not reach every consumer: {control}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+
+    jit_rows, jit_first = score(baseline_jit)
+    eager_rows, eager_first = score(baseline_eager)
+    slope_jit_rows, slope_jit_first, slope_jit_first_owned = score_slope(
+        baseline_jit)
+    slope_eager_rows, slope_eager_first, slope_eager_first_owned = score_slope(
+        baseline_eager)
+    carried_jit = carried_eager = None
+    carried_jit_rows = carried_eager_rows = {}
+    carried_jit_first = carried_eager_first = None
+    carried_jit_first_owned = carried_eager_first_owned = None
+    carried_moved_jit = carried_moved_eager = None
+    source_recurrence = None
+    if slope_oracle is not None:
+        # Rebuild the literal zdf_mxl loop from the admitted record before
+        # interpreting either model arm.  NEMO initializes nmln at nlb10,
+        # advances it only while the cumulative integral is strictly below
+        # zN2_c, and caps the level by mbkt (zdfmxl.f90:109-123).
+        gdepw = slope_reference["gdepw_1d"]
+        e3w_1d = slope_reference["e3w_1d"]
+        zrefdep = 10.0 - 0.1 * float(np.min(e3w_1d))
+        nlb10_index = int(np.flatnonzero(gdepw > zrefdep)[0])
+        nmln_literal = np.full(wet2.shape, nlb10_index + 1,
+                               dtype=np.int32)
+        hml_acc = np.zeros(wet2.shape, dtype=np.float64)
+        mbkt = np.count_nonzero(slope_reference["tmask"], axis=-1)
+        threshold = (float(card.recipe.model_config.constants.g)
+                     * float(card.recipe.model_config.gm_redi.mld_rho_c)
+                     / float(card.recipe.model_config.constants.rho_0))
+        cumulative = np.zeros_like(slope_reference["pn2"])
+        for level in range(nlb10_index, nlev):
+            hml_acc = hml_acc + np.maximum(
+                slope_reference["pn2"][..., level], 0.0) * (
+                    e3w_1d[level]
+                    * (1.0 + slope_reference["r3t_Kmm"]))
+            cumulative[..., level] = hml_acc
+            nmln_literal = np.where(
+                hml_acc < threshold,
+                np.minimum(level + 1, mbkt) + 1,
+                nmln_literal)
+        hml_literal = np.take(gdepw, nmln_literal - 1) * (
+            1.0 + slope_reference["r3t_Kmm"]) * slope_reference["ssmask"]
+        literal_nmln = _score_developed_row(
+            nmln_literal.astype(np.float64), slope_reference["nmln"], wet2)
+        literal_hmlp = _score_developed_row(
+            hml_literal, slope_reference["hmlp"], wet2)
+        require(literal_nmln["bit_exact"] and literal_hmlp["bit_exact"],
+                "literal zdf_mxl reconstruction does not calibrate to NEMO")
+        source_recurrence = {
+            "nlb10_fortran": nlb10_index + 1,
+            "zrefdep_m": zrefdep,
+            "threshold_s-2_m": threshold,
+            "nmln": literal_nmln,
+            "hmlp": literal_hmlp,
+        }
+        carried_jit, carried_moved_jit = execute_mode(
+            eager=False, slope_n2_mode="carried_step_entry")
+        carried_eager, carried_moved_eager = execute_mode(
+            eager=True, slope_n2_mode="carried_step_entry")
+        (carried_jit_rows, carried_jit_first,
+         carried_jit_first_owned) = score_slope(carried_jit)
+        (carried_eager_rows, carried_eager_first,
+         carried_eager_first_owned) = score_slope(carried_eager)
+    if plant == "developed-slope-first-ulp":
+        require(slope_oracle is not None,
+                "developed slope plant needs --developed-slope-root")
+        # `nmln` is integer-valued.  Its smallest representable causal
+        # perturbation is one vertical index, not one floating-point ULP.
+        first = np.asarray(carried_jit["slope"]["nmln"], dtype=np.int32) - 1
+        candidates = np.argwhere(wet2 & (first < nlev - 2))
+        require(candidates.size > 0,
+                "developed slope plant has no movable wet mixed-layer index")
+        index = tuple(int(value) for value in candidates[0])
+        planted_first = np.array(first, copy=True)
+        planted_first[index] += 1
+        planted, state_moved = execute_mode(
+            eager=False, override={"nmln": jnp.asarray(planted_first)},
+            slope_n2_mode="carried_step_entry")
+        upstream = ("prd", "pn2", "gdept_1d")
+        downstream = ("nmln", "zhmlpt", "r1_hmlu", "uslp")
+        control = {
+            "moved_index_ji": list(index),
+            "integer_boundary_reason": (
+                "nmln is an integer branch index; one level is its smallest "
+                "representable causal perturbation"),
+            "production_state_unequal_bytes": state_moved,
+            "upstream_cells_moved": {
+                name: _different_cells(
+                    planted["slope"][name], carried_jit["slope"][name],
+                    np.ones_like(planted["slope"][name], dtype=bool))
+                for name in upstream},
+            "downstream_cells_moved": {
+                name: _different_cells(
+                    planted["slope"][name], carried_jit["slope"][name],
+                    np.ones_like(planted["slope"][name], dtype=bool))
+                for name in downstream},
+        }
+        require(all(value == 0 for value in
+                    control["upstream_cells_moved"].values()),
+                f"mixed-layer-index plant moved an upstream row: {control}")
+        require(all(value > 0 for value in
+                    control["downstream_cells_moved"].values()),
+                f"mixed-layer-index plant missed a consumer: {control}")
+        return {"status": "PLANT-FIRED", "plant": plant,
+                "control": control}
+    statements = {
+        "uslp": "ldfslp.f90:262-268",
+        "vslp": "ldfslp.f90:269-275",
+        "wslpi": "ldfslp.f90:323-327",
+        "wslpj": "ldfslp.f90:329-333",
+        "e3u_live": "traldf_iso.f90:275",
+        "e3v_live": "traldf_iso.f90:276",
+    }
+    predictions = {
+        "observer_passive": moved_jit == 0 and moved_eager == 0,
+        "entry_temperature_bit_exact": jit_rows["T_Kbb"]["bit_exact"],
+        "first_non_bit_is_live_face_thickness": jit_first in (
+            "e3u_live", "e3v_live"),
+        "jit_and_eager_same_first_non_bit": jit_first == eager_first,
+    }
+    slope_predictions = ({
+        "first_non_bit_is_nmln": slope_jit_first == "nmln",
+        "prd_is_non_bit": not slope_jit_rows["prd"]["bit_exact"],
+        "pn2_is_non_bit": not slope_jit_rows["pn2"]["bit_exact"],
+        "jit_and_eager_same_first_non_bit": (
+            slope_jit_first == slope_eager_first),
+        "first_owned_row_is_downstream": (
+            slope_jit_first_owned is not None
+            and list(slope_jit_rows).index(slope_jit_first_owned)
+            > list(slope_jit_rows).index(slope_jit_first)),
+    } if slope_oracle is not None else {})
+    return {
+        "format": ("gyre-round180-developed-slope-walk-v1"
+                   if slope_oracle is not None
+                   else "gyre-round178-developed-tracer-ldf-walk-v1"),
+        "status": "PASS", "case": CASE, "worktree": stamp,
+        "execution": "LatLonCGridOceanModel._step_jitted production closure",
+        "step": DEVELOPED_PROCESS_STEP,
+        "record": {key: value for key, value in oracle.items()
+                   if key != "arrays"},
+        "slope_record": ({key: value for key, value in slope_oracle.items()
+                          if key != "arrays"}
+                         if slope_oracle is not None else None),
+        "admission": {"daily_audit": str(daily_audit),
+                      "entry_restart": str(bundle["restart_path"]),
+                      "source_checks": bundle["source_checks"],
+                      "wet_cells": int(np.count_nonzero(wet))},
+        "modes": {
+            "production_step_jit": {
+                "first_non_bit_row": jit_first,
+                "first_non_bit_statement": statements.get(jit_first),
+                "observer_state_unequal_bytes": moved_jit,
+                "rows": jit_rows, "slope_first_non_bit": slope_jit_first,
+                "slope_first_owned_non_bit": slope_jit_first_owned,
+                "slope_rows": slope_jit_rows},
+            "production_eager": {
+                "first_non_bit_row": eager_first,
+                "first_non_bit_statement": statements.get(eager_first),
+                "observer_state_unequal_bytes": moved_eager,
+                "rows": eager_rows, "slope_first_non_bit": slope_eager_first,
+                "slope_first_owned_non_bit": slope_eager_first_owned,
+                "slope_rows": slope_eager_rows},
+            "carried_mld_production_step_jit": {
+                "observer_state_unequal_bytes": carried_moved_jit,
+                "slope_first_non_bit": carried_jit_first,
+                "slope_first_owned_non_bit": carried_jit_first_owned,
+                "slope_rows": carried_jit_rows},
+            "carried_mld_production_eager": {
+                "observer_state_unequal_bytes": carried_moved_eager,
+                "slope_first_non_bit": carried_eager_first,
+                "slope_first_owned_non_bit": carried_eager_first_owned,
+                "slope_rows": carried_eager_rows}},
+        "authoritative_mode": "production_step_jit",
+        "first_non_bit_row": (slope_jit_first if slope_oracle is not None
+                              else jit_first),
+        "first_non_bit_statement": (
+            slope_jit_rows[slope_jit_first]["statement"]
+            if slope_jit_first is not None else statements.get(jit_first)),
+        "first_owned_non_bit_row": slope_jit_first_owned,
+        "predictions": predictions,
+        "all_frozen_predictions_confirmed": all(predictions.values()),
+        "round180_predictions": slope_predictions,
+        "all_round180_predictions_confirmed": (
+            all(slope_predictions.values()) if slope_predictions else None),
+        "round181_source_recurrence": source_recurrence,
+        "round181_predictions": ({
+            "baseline_nmln_14_columns": (
+                slope_jit_rows["nmln"]["cells_unequal"] == 14
+                and slope_eager_rows["nmln"]["cells_unequal"] == 14),
+            "literal_source_recurrence_bit_exact": (
+                source_recurrence["nmln"]["bit_exact"]
+                and source_recurrence["hmlp"]["bit_exact"]),
+            "carried_n2_makes_nmln_bit_exact": (
+                carried_jit_rows["nmln"]["bit_exact"]
+                and carried_eager_rows["nmln"]["bit_exact"]),
+            "carried_n2_makes_hmlp_bit_exact": (
+                carried_jit_rows["hmlp"]["bit_exact"]
+                and carried_eager_rows["hmlp"]["bit_exact"]),
+        } if slope_oracle is not None else {}),
+        "compiled_source": {
+            "call": "stprk3_stg.f90:928-934",
+            "slope_call": "stprk3.f90:178",
+            "u_slope_write": "ldfslp.f90:262-268",
+            "a33": "traldf_iso.f90:167",
+            "gradients": "traldf_iso.f90:215-250",
+            "horizontal": "traldf_iso.f90:272-299",
+            "vertical": "traldf_iso.f90:311-344",
+            "rhs": "traldf_iso.f90:346-367",
+            "writer": "traldf_iso.f90:403-419"},
+    }
+
+
 # ---------------- Round-167 developed vertical-coefficient sensitivity ----
 ROUND167_HISTORICAL_ARTIFACTS = {
     "round134_daily_tke_reset": {
@@ -12159,11 +13905,133 @@ def _rank_vertical_sensitivity(final_rows: dict[str, dict]) -> list[dict]:
                   reverse=True)
 
 
+def produce_developed_solve_input_record(
+        daily_root: Path, daily_audit: Path, expected_commit: str,
+        root: Path) -> dict:
+    """Write passive e3t/content inputs for the NEMO-side paired run."""
+    _policy()
+    import jax.numpy as jnp
+    from numpy.lib.format import open_memmap
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["clean"],
+            "solve-input record requires a clean tree: "
+            f"{stamp['dirty_paths']}")
+    require(stamp["commit"] == expected_commit,
+            "solve-input record commit differs from --expect-commit")
+    root = Path(root)
+    require(not root.exists(),
+            f"solve-input record root exists; refusing overwrite: {root}")
+    root.mkdir(parents=True)
+
+    bundle = _developed_entry_bundle(
+        Path(daily_root), Path(daily_audit), expected_commit)
+    card = bundle["card"]
+    gate = bundle["gate"]
+    wet = bundle["wet"]
+    state = bundle["state"]
+    payload = bundle["payload"]
+    shape = (LEGO_PROCESS_TRACE_STEPS,) + wet.shape
+    paths = [root / "e3t_Kaa.npy", root / "content_T.npy"]
+    e3t_out = open_memmap(paths[0], mode="w+", dtype="<f8", shape=shape)
+    content_out = open_memmap(paths[1], mode="w+", dtype="<f8", shape=shape)
+
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    carried_bytes = 0
+    scale = np.float64(1.0 + 2.0 ** -20)
+    scale_control = None
+    started = time.time()
+    for step in range(PROCESS_START_STEP, PROCESS_END_STEP + 1):
+        freshwater, surface = gate._surface_forcings(card, state, step)
+        ssha = (jnp.asarray(payload["ssha"])
+                if step == PROCESS_START_STEP else None)
+        trace = trace_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        ordinary = ordinary_model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface,
+            _nemo_stage1_zad_eta_after_override=ssha)
+        mismatch = _state_bit_mismatches(trace.state_after, ordinary)
+        carried_bytes += mismatch
+        require(mismatch == 0,
+                f"step {step}: solve-input observer moved {mismatch} bytes")
+        vertical = _vertical_trace_frame(trace)
+        e3t = np.asarray(vertical["e3t_after"], dtype=np.float64)
+        content = np.asarray(vertical["content_T"], dtype=np.float64)
+        require(e3t.shape == wet.shape == content.shape,
+                f"step {step}: solve-input shape differs from wet mask")
+        require(np.all(np.isfinite(e3t[wet]))
+                and np.all(np.isfinite(content[wet])),
+                f"step {step}: solve-input record has non-finite wet cells")
+        index = step - PROCESS_START_STEP
+        e3t_out[index] = e3t
+        content_out[index] = content
+        if step == PROCESS_START_STEP:
+            moved = {}
+            for name, values in (("e3t_Kaa", e3t),
+                                 ("content_T", content)):
+                selected = wet & np.isfinite(values) & (values > 0.0)
+                planted = np.array(values, copy=True)
+                planted[selected] *= scale
+                moved[name] = int(np.count_nonzero(
+                    planted[selected].view(np.uint64)
+                    != values[selected].view(np.uint64)))
+                require(moved[name] == int(np.count_nonzero(selected)),
+                        f"PLANT-BLIND: {name} scale missed a selected cell")
+            scale_control = {
+                "scale": float(scale),
+                "selected_cells_moved": moved,
+            }
+        state = ordinary
+        if step % 60 == 0:
+            print(f"  solve-input record step {step}/1440 "
+                  f"{time.time() - started:.1f}s", flush=True)
+
+    e3t_out.flush()
+    content_out.flush()
+    del e3t_out, content_out
+    require(scale_control is not None, "solve-input scale plant never ran")
+    metadata = {
+        "format": "gyre-round172-developed-solve-input-record-v1",
+        "producer_commit": expected_commit,
+        "case": CASE,
+        "steps": [PROCESS_START_STEP, PROCESS_END_STEP],
+        "record_count": LEGO_PROCESS_TRACE_STEPS,
+        "shape": list(shape),
+        "dtype": "float64",
+        "platform": "cpu",
+        "precision": "fp64/libm",
+        "production_entry": "LatLonCGridOceanModel.step -> self._step_jitted",
+        "carried_state_unequal_bytes": carried_bytes,
+        "scale_control": scale_control,
+        "daily_audit": str(daily_audit),
+        "entry_restart": str(bundle["restart_path"]),
+        "entry_restart_sha256": payload["sha256"],
+        "worktree": stamp,
+    }
+    metadata_path = root / "manifest.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    paths.append(metadata_path)
+    metadata["files_sha256"] = _write_trace_manifest(
+        root, paths, expected_commit)
+    return metadata
+
+
 def developed_vertical_day240_sensitivity(
         process_root: Path, vertical_root: Path, daily_root: Path,
         daily_audit: Path, expected_commit: str, evidence_root: Path, *,
         plant: str | None = None) -> dict:
-    """Rank recorded coefficient and e3w at the developed solve boundary.
+    """Rank recorded solve inputs at the developed vertical boundary.
 
     Every arm starts from NEMO's admitted step-1080 state and runs the real
     production-jitted step through step 1440.  The only directed input is the
@@ -12172,12 +14040,15 @@ def developed_vertical_day240_sensitivity(
     require(plant in (None, "none", "developed-vertical-avt-ulp",
                       "developed-vertical-complete-ulp",
                       "developed-vertical-e3w-ulp",
-                      "developed-vertical-e3w-scale"),
+                      "developed-vertical-e3w-scale",
+                      "developed-vertical-e3t-scale",
+                      "developed-vertical-content-scale"),
             f"unknown developed vertical-sensitivity plant {plant!r}")
     _policy()
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+        LatLonCGridOceanModel, _NEMOVerticalSolveTestInput,
+        _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp()
@@ -12215,8 +14086,8 @@ def developed_vertical_day240_sensitivity(
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
-    def recorded_vertical(
-            step: int) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+    def recorded_vertical(step: int) -> tuple[
+            dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         path = vertical_root / (
             f"oracle_trazdf_matrix_kt{step:08d}.bin")
         record = _read_vertical_record(path, step)
@@ -12226,10 +14097,14 @@ def developed_vertical_day240_sensitivity(
         heat = _vertical_field(record, "avt")[:, :, 1:nlev]
         effective = _vertical_field(record, "zwt_mix")[:, :, 1:nlev]
         e3w = _vertical_field(record, "e3w_Kmm")[:, :, 1:nlev]
+        e3t = _vertical_field(record, "e3t_Kaa", nlev)
+        content = _vertical_field(record, "rhs_T", nlev)
         require(heat.shape == effective.shape == e3w.shape
                 == interface_wet.shape,
                 f"step {step}: recorded vertical coefficient shape differs")
-        return record, heat, effective, e3w
+        require(e3t.shape == content.shape == wet.shape,
+                f"step {step}: recorded vertical cell input shape differs")
+        return record, heat, effective, e3w, e3t, content
 
     def forcing(state, step: int):
         freshwater, surface = gate._surface_forcings(card, state, step)
@@ -12267,14 +14142,17 @@ def developed_vertical_day240_sensitivity(
                 target = None
             else:
                 probe = traced_step(state, step)
-                record, nemo_heat, nemo_effective, nemo_e3w = (
-                    recorded_vertical(step))
+                (record, nemo_heat, nemo_effective, nemo_e3w, nemo_e3t,
+                 nemo_content) = recorded_vertical(step)
                 vertical = _vertical_trace_frame(probe)
                 viscosity = np.asarray(
                     probe.vertical_solve.viscosity_K, dtype=np.float64)
                 target_postadd = None
                 target_e3w = None
+                target_e3t = None
+                target_content = None
                 identity_reference = None
+                fixed_override = None
                 if name == "identity_postadd":
                     target = vertical["heat_K"]
                     target_postadd = vertical["effective_K"]
@@ -12303,6 +14181,10 @@ def developed_vertical_day240_sensitivity(
                 elif name in ("complete_K", "complete_K_ulp"):
                     target = vertical["heat_K"]
                     target_postadd = np.array(nemo_effective, copy=True)
+                    # Route the unchanged live divisor through the existing
+                    # fourth seam slot so every complete-K arm shares one
+                    # production-JIT signature.
+                    target_e3w = np.array(vertical["e3w_now"], copy=True)
                     if plant_first_coefficient and step == PROCESS_START_STEP:
                         candidates = np.argwhere(
                             interface_wet & np.isfinite(target_postadd)
@@ -12323,42 +14205,128 @@ def developed_vertical_day240_sensitivity(
                             "new_uint64": int(np.asarray(
                                 target_postadd[index]).view(np.uint64)),
                         }
+                elif name.startswith("fixed_"):
+                    target = np.array(vertical["heat_K"], copy=True)
+                    target_viscosity = np.array(viscosity, copy=True)
+                    target_postadd = np.array(
+                        vertical["effective_K"], copy=True)
+                    target_e3w = np.array(vertical["e3w_now"], copy=True)
+                    target_e3t = np.array(vertical["e3t_after"], copy=True)
+                    target_content = np.array(
+                        vertical["content_T"], copy=True)
+                    replace = np.zeros(6, dtype=np.bool_)
+                    if name != "fixed_disabled":
+                        replace[:] = True
+                    if name.startswith("fixed_complete_K_e3w"):
+                        target_postadd = np.array(nemo_effective, copy=True)
+                        target_e3w = np.array(nemo_e3w, copy=True)
+                    if "_e3t" in name:
+                        target_e3t = np.array(nemo_e3t, copy=True)
+                    if "_content" in name:
+                        target_content = np.array(nemo_content, copy=True)
+                    if plant_first_coefficient and step == PROCESS_START_STEP:
+                        is_e3t = "_e3t" in name
+                        planted_name = "e3t_Kaa" if is_e3t else "rhs_T"
+                        planted_target = target_e3t if is_e3t else target_content
+                        candidates = np.argwhere(
+                            wet & np.isfinite(planted_target)
+                            & (planted_target > 0.0))
+                        require(candidates.size > 0,
+                                f"PLANT-BLIND: no positive recorded "
+                                f"{planted_name}")
+                        scale = np.float64(1.0 + 2.0 ** -20)
+                        index = tuple(candidates.T)
+                        old = np.array(planted_target[index], copy=True)
+                        planted_target[index] *= scale
+                        moved = int(np.count_nonzero(
+                            planted_target[index].view(np.uint64)
+                            != old.view(np.uint64)))
+                        require(moved == candidates.shape[0],
+                                f"PLANT-BLIND: {planted_name} scale did not "
+                                "move every active cell")
+                        first_step["plant"] = {
+                            "field": planted_name,
+                            "active_cells_scaled": moved,
+                            "scale": float(scale),
+                        }
+                    fixed_override = _NEMOVerticalSolveTestInput(
+                        heat_K=jnp.asarray(target),
+                        viscosity_K=jnp.asarray(target_viscosity),
+                        formed_K=jnp.asarray(target_postadd),
+                        tracer_e3w=jnp.asarray(target_e3w),
+                        tracer_e3t=jnp.asarray(target_e3t),
+                        temperature_content=jnp.asarray(target_content),
+                        replace=jnp.asarray(replace),
+                    )
+                    identity_reference = probe.state_after
                 elif name in ("complete_K_e3w_identity",
                                "complete_K_e3w",
                                "complete_K_e3w_ulp",
-                               "complete_K_e3w_scale"):
+                               "complete_K_e3w_scale",
+                               "complete_K_e3w_e3t_identity",
+                               "complete_K_e3w_e3t",
+                               "complete_K_e3w_e3t_scale",
+                               "complete_K_e3w_content_identity",
+                               "complete_K_e3w_content",
+                               "complete_K_e3w_content_scale"):
                     target = vertical["heat_K"]
                     target_postadd = np.array(nemo_effective, copy=True)
                     target_e3w = (np.array(vertical["e3w_now"], copy=True)
                                   if name == "complete_K_e3w_identity" else
                                   np.array(nemo_e3w, copy=True))
-                    if name == "complete_K_e3w_identity":
+                    if "_e3t" in name or "_content" in name:
+                        target_e3t = (
+                            np.array(vertical["e3t_after"], copy=True)
+                            if (name.endswith("_identity")
+                                or "_content" in name) else
+                            np.array(nemo_e3t, copy=True))
+                    if "_content" in name:
+                        target_content = (
+                            np.array(vertical["content_T"], copy=True)
+                            if name.endswith("_identity") else
+                            np.array(nemo_content, copy=True))
+                    if name.endswith("_identity"):
                         base_override = (
                             jnp.asarray(target), jnp.asarray(viscosity),
                             jnp.asarray(target_postadd))
+                        if name != "complete_K_e3w_identity":
+                            base_override += (jnp.asarray(nemo_e3w),)
                         identity_reference = (
                             traced_step(state, step, base_override)
                             if step == PROCESS_START_STEP else
                             production_step(state, step, base_override))
                     if plant_first_coefficient and step == PROCESS_START_STEP:
+                        planted_name = "e3w_Kmm"
+                        planted_mask = interface_wet
+                        planted_target = target_e3w
+                        if name == "complete_K_e3w_e3t_scale":
+                            planted_name = "e3t_Kaa"
+                            planted_mask = wet
+                            planted_target = target_e3t
+                        elif name == "complete_K_e3w_content_scale":
+                            planted_name = "rhs_T"
+                            planted_mask = wet
+                            planted_target = target_content
                         candidates = np.argwhere(
-                            interface_wet & np.isfinite(target_e3w)
-                            & (target_e3w > 0.0))
+                            planted_mask & np.isfinite(planted_target)
+                            & (planted_target > 0.0))
                         require(candidates.size > 0,
-                                "PLANT-BLIND: no positive recorded e3w_Kmm")
-                        if name == "complete_K_e3w_scale":
+                                f"PLANT-BLIND: no positive recorded "
+                                f"{planted_name}")
+                        if name.endswith("_scale"):
                             scale = np.float64(1.0 + 2.0 ** -20)
                             index = tuple(candidates.T)
-                            old = np.array(target_e3w[index], copy=True)
-                            target_e3w[index] *= scale
+                            old = np.array(planted_target[index], copy=True)
+                            planted_target[index] *= scale
                             moved = int(np.count_nonzero(
-                                target_e3w[index].view(np.uint64)
+                                planted_target[index].view(np.uint64)
                                 != old.view(np.uint64)))
                             require(moved == candidates.shape[0],
-                                    "PLANT-BLIND: e3w scale did not move "
-                                    "every active interface")
+                                    f"PLANT-BLIND: {planted_name} scale did "
+                                    "not move every active cell")
                             first_step["plant"] = {
-                                "active_interfaces_scaled": moved,
+                                "field": planted_name,
+                                "active_cells_scaled": moved,
                                 "scale": float(scale),
                             }
                         else:
@@ -12379,11 +14347,18 @@ def developed_vertical_day240_sensitivity(
                             }
                 else:  # pragma: no cover - private caller registry
                     raise AssertionError(name)
-                override = (jnp.asarray(target), jnp.asarray(viscosity))
-                if target_postadd is not None:
-                    override += (jnp.asarray(target_postadd),)
-                if target_e3w is not None:
-                    override += (jnp.asarray(target_e3w),)
+                if fixed_override is not None:
+                    override = fixed_override
+                else:
+                    override = (jnp.asarray(target), jnp.asarray(viscosity))
+                    if target_postadd is not None:
+                        override += (jnp.asarray(target_postadd),)
+                    if target_e3w is not None:
+                        override += (jnp.asarray(target_e3w),)
+                    if target_e3t is not None:
+                        override += (jnp.asarray(target_e3t),)
+                    if target_content is not None:
+                        override += (jnp.asarray(target_content),)
                 selected = (traced_step(state, step, override)
                             if step == PROCESS_START_STEP
                             else production_step(state, step, override))
@@ -12396,16 +14371,28 @@ def developed_vertical_day240_sensitivity(
                     require(mismatch == 0,
                             f"identity seam moved step {step} state by "
                             f"{mismatch} bytes")
-                if name == "complete_K_e3w_identity":
-                    reference_state = (identity_reference.state_after
-                                       if step == PROCESS_START_STEP else
-                                       identity_reference)
+                if name in ("fixed_disabled", "fixed_identity"):
+                    reference_state = identity_reference
                     mismatch = _state_bit_mismatches(
                         reference_state, selected_state)
                     identity_mismatched_bytes += mismatch
-                    require(mismatch == 0,
-                            f"e3w identity seam moved step {step} state by "
-                            f"{mismatch} bytes")
+                    if mismatch:
+                        reference_fields = gate.lego_fields(reference_state)
+                        selected_fields = gate.lego_fields(selected_state)
+                        masks = gate.expected_masks(card)
+                        first_step["identity_failure"] = {
+                            "arm": name,
+                            "step": step,
+                            "state_bytes_moved": mismatch,
+                            "field_cells_moved": {
+                                field: _different_cells(
+                                    reference_fields[field],
+                                    selected_fields[field], masks[field])
+                                for field in FIELDS
+                            },
+                            "verdict": "REFUTED",
+                        }
+                        return None, identity_mismatched_bytes
                 if step == PROCESS_START_STEP:
                     selected_vertical = _vertical_trace_frame(selected)
                     probe_process = _trace_frame(probe)
@@ -12425,31 +14412,56 @@ def developed_vertical_day240_sensitivity(
                             selected_vertical["heat_K"], nemo_heat,
                             interface_wet) == 0,
                             "heat-K seam did not consume NEMO avt")
-                    if name in ("complete_K", "complete_K_e3w_identity",
-                                "complete_K_e3w"):
+                    if (name == "complete_K"
+                            or name.startswith("complete_K_e3w")
+                            or name.startswith("fixed_complete_K_e3w")):
                         effective_row = _score_developed_row(
                             selected_vertical["effective_K"], nemo_effective,
                             interface_wet)
-                    if name == "complete_K_e3w":
+                    if (name.startswith("complete_K_e3w")
+                            or name.startswith("fixed_complete_K_e3w")):
                         e3w_row = _score_developed_row(
                             selected_vertical["e3w_now"], nemo_e3w,
                             interface_wet)
+                    if name in ("complete_K_e3w_e3t",
+                                "fixed_complete_K_e3w_e3t"):
+                        e3t_row = _score_developed_row(
+                            selected_vertical["e3t_after"], nemo_e3t, wet)
+                    if name in ("complete_K_e3w_content",
+                                "fixed_complete_K_e3w_content"):
+                        content_row = _score_developed_row(
+                            selected_vertical["content_T"], nemo_content,
+                            wet)
                     first_step[name] = {
                         "upstream_cells_moved": upstream,
                         "vertical": selected_vertical,
                         "target_heat_K": target,
                         "target_complete_K": target_postadd,
                         "target_e3w": target_e3w,
+                        "target_e3t": target_e3t,
+                        "target_content": target_content,
                     }
-                    if name in ("complete_K", "complete_K_e3w_identity",
-                                "complete_K_e3w"):
+                    if (name == "complete_K"
+                            or name.startswith("complete_K_e3w")
+                            or name.startswith("fixed_complete_K_e3w")):
                         require(effective_row["bit_exact"],
                                 "direct complete-K seam did not consume "
                                 "NEMO zwt_mix bit for bit")
-                    if name == "complete_K_e3w":
+                    if (name.startswith("complete_K_e3w")
+                            or name.startswith("fixed_complete_K_e3w")):
                         require(e3w_row["bit_exact"],
                                 "direct e3w seam did not consume NEMO "
                                 "e3w_Kmm bit for bit")
+                    if name in ("complete_K_e3w_e3t",
+                                "fixed_complete_K_e3w_e3t"):
+                        require(e3t_row["bit_exact"],
+                                "direct e3t seam did not consume NEMO "
+                                "e3t_Kaa bit for bit")
+                    if name in ("complete_K_e3w_content",
+                                "fixed_complete_K_e3w_content"):
+                        require(content_row["bit_exact"],
+                                "direct content seam did not consume NEMO "
+                                "rhs_T bit for bit")
             if step == PROCESS_START_STEP and name == "free":
                 first_step[name] = {
                     "vertical": _vertical_trace_frame(selected),
@@ -12470,14 +14482,57 @@ def developed_vertical_day240_sensitivity(
             ["complete_K_e3w"] if plant in (
                 "developed-vertical-e3w-ulp",
                 "developed-vertical-e3w-scale") else
-            ["free", "complete_K", "complete_K_e3w_identity",
-             "complete_K_e3w"])
+            ["fixed_complete_K_e3w_e3t"]
+            if plant == "developed-vertical-e3t-scale" else
+            ["fixed_complete_K_e3w_content"]
+            if plant == "developed-vertical-content-scale" else
+            ["fixed_disabled", "fixed_identity", "free",
+             "fixed_complete_K_e3w",
+             "fixed_complete_K_e3w_e3t",
+             "fixed_complete_K_e3w_content"])
     for arm in arms:
         arm_state, arm_identity = run_arm(arm)
         identity_bytes += arm_identity
         if arm_state is None:
             break
         final_states[arm] = arm_state
+
+    if "identity_failure" in first_step:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        return {
+            "format": "gyre-round172-fixed-solve-input-refutation-v1",
+            "status": "REFUTED",
+            "case": CASE,
+            "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
+            "worktree": stamp,
+            "interval": {"entry_step": DEVELOPED_ENTRY_STEP,
+                         "failed_step": PROCESS_START_STEP,
+                         "entry_day": 180},
+            "admission": {
+                "process": process_admission["status"],
+                "vertical": vertical_admission["status"],
+                "daily_audit": str(daily_audit),
+                "entry_restart": str(bundle["restart_path"]),
+                "entry_restart_sha256": payload["sha256"],
+            },
+            "controls": {
+                "identity_failure": first_step["identity_failure"],
+                "first_step_compiled_calibration_cells_unequal":
+                    _vertical_calibration(recorded_vertical(
+                        PROCESS_START_STEP)[0]),
+            },
+            "sensitivity": None,
+            "conclusion": (
+                "the fixed-shape identity solve input changes the "
+                "production-jitted step, so both directed "
+                "sensitivities are withheld and no magnitude owner is "
+                "named"),
+            "compiled_source": {
+                "e3t_matrix_weight": "trazdf.f90:468-474",
+                "content_rhs": "trazdf.f90:549-567",
+                "implicit_solve": "trazdf.f90:577-582",
+            },
+        }
 
     if plant == "developed-vertical-avt-ulp":
         planted_state, _ = run_arm(
@@ -12556,9 +14611,36 @@ def developed_vertical_day240_sensitivity(
                 f"matrix={matrix_moved}, day240_T={final_t_moved}")
         raise GateError(
             "scaled recorded e3w_Kmm was caught: "
-            f"interfaces={first_step['plant']['active_interfaces_scaled']}, "
+            f"interfaces={first_step['plant']['active_cells_scaled']}, "
             f"scale={first_step['plant']['scale']:.17g}, "
             f"matrix_cells={matrix_moved}, day240_T_cells={final_t_moved}")
+
+    if plant in ("developed-vertical-e3t-scale",
+                 "developed-vertical-content-scale"):
+        is_e3t = plant == "developed-vertical-e3t-scale"
+        baseline_name = ("fixed_complete_K_e3w_e3t" if is_e3t else
+                         "fixed_complete_K_e3w_content")
+        planted_name = baseline_name + "_scale"
+        planted_state, _ = run_arm(
+            planted_name, plant_first_coefficient=True)
+        baseline_vertical = first_step[baseline_name]["vertical"]
+        planted_vertical = first_step[planted_name]["vertical"]
+        field = "e3t_after" if is_e3t else "content_T"
+        consumed_moved = _different_cells(
+            baseline_vertical[field], planted_vertical[field], wet)
+        final_t_moved = _different_cells(
+            gate.lego_fields(final_states[baseline_name])["T"],
+            gate.lego_fields(planted_state)["T"], wet)
+        if consumed_moved == 0 or final_t_moved == 0:
+            raise GateError(
+                f"PLANT-BLIND: scaled recorded {field} moved "
+                f"consumed={consumed_moved}, day240_T={final_t_moved}")
+        raise GateError(
+            f"scaled recorded {field} was caught: "
+            f"cells={first_step['plant']['active_cells_scaled']}, "
+            f"scale={first_step['plant']['scale']:.17g}, "
+            f"consumed_cells={consumed_moved}, "
+            f"day240_T_cells={final_t_moved}")
 
     year = _year()
     final_restart = year._daily_restart_path(daily_root, PROCESS_END_STEP)
@@ -12585,8 +14667,8 @@ def developed_vertical_day240_sensitivity(
     first_record = read_process_record(
         process_root
         / f"oracle_process_budget_kt{PROCESS_START_STEP:08d}.bin")
-    first_vertical_record, nemo_heat, nemo_effective, nemo_e3w = (
-        recorded_vertical(PROCESS_START_STEP))
+    (first_vertical_record, nemo_heat, nemo_effective, nemo_e3w, nemo_e3t,
+     nemo_content) = recorded_vertical(PROCESS_START_STEP)
     nemo_process_rows = process_temperature_rows(first_record)
     lego_process_rows = lego_process_temperature_rows(
         first_step["free"]["process"])
@@ -12601,15 +14683,24 @@ def developed_vertical_day240_sensitivity(
             first_step["free"]["vertical"]["effective_K"],
             nemo_effective, interface_wet),
     }
-    first_rows["complete_arm_effective_K"] = _score_developed_row(
-        first_step["complete_K"]["vertical"]["effective_K"],
-        nemo_effective, interface_wet)
     first_rows["complete_e3w_arm_effective_K"] = _score_developed_row(
-        first_step["complete_K_e3w"]["vertical"]["effective_K"],
+        first_step["fixed_complete_K_e3w"]["vertical"]["effective_K"],
         nemo_effective, interface_wet)
     first_rows["complete_e3w_arm_e3w_Kmm"] = _score_developed_row(
-        first_step["complete_K_e3w"]["vertical"]["e3w_now"],
+        first_step["fixed_complete_K_e3w"]["vertical"]["e3w_now"],
         nemo_e3w, interface_wet)
+    first_rows["complete_e3w_arm_e3t_Kaa"] = _score_developed_row(
+        first_step["fixed_complete_K_e3w"]["vertical"]["e3t_after"],
+        nemo_e3t, wet)
+    first_rows["complete_e3w_arm_content_T"] = _score_developed_row(
+        first_step["fixed_complete_K_e3w"]["vertical"]["content_T"],
+        nemo_content, wet)
+    first_rows["direct_e3t_arm_e3t_Kaa"] = _score_developed_row(
+        first_step["fixed_complete_K_e3w_e3t"]["vertical"]["e3t_after"],
+        nemo_e3t, wet)
+    first_rows["direct_content_arm_content_T"] = _score_developed_row(
+        first_step["fixed_complete_K_e3w_content"]["vertical"]["content_T"],
+        nemo_content, wet)
     require(identity_bytes == 0,
             "identity coefficient arm moved the production trajectory")
 
@@ -12631,26 +14722,40 @@ def developed_vertical_day240_sensitivity(
     historical["round126_vertical_subowners"].update(round126["headline"])
 
     free_rms = final_rows["free"]["T"]["rms"]
-    complete_rms = final_rows["complete_K"]["T"]["rms"]
-    e3w_rms = final_rows["complete_K_e3w"]["T"]["rms"]
-    e3w_removed = complete_rms - e3w_rms
-    carries_remainder = e3w_removed >= 0.5 * complete_rms
+    e3w_rms = final_rows["fixed_complete_K_e3w"]["T"]["rms"]
+    e3t_rms = final_rows["fixed_complete_K_e3w_e3t"]["T"]["rms"]
+    content_rms = final_rows["fixed_complete_K_e3w_content"]["T"]["rms"]
+    e3t_removed = e3w_rms - e3t_rms
+    content_removed = e3w_rms - content_rms
+    half_remainder = 0.5 * e3w_rms
+    ranking = sorted((
+        {"arm": "e3t_Kaa", "day240_T3D_rms_K": e3t_rms,
+         "removed_K": e3t_removed,
+         "removed_fraction": e3t_removed / e3w_rms},
+        {"arm": "content_T", "day240_T3D_rms_K": content_rms,
+         "removed_K": content_removed,
+         "removed_fraction": content_removed / e3w_rms},
+    ), key=lambda row: row["removed_K"], reverse=True)
     sensitivity = {
-        "complete_K_day240_T3D_rms_K": complete_rms,
         "complete_K_e3w_day240_T3D_rms_K": e3w_rms,
-        "e3w_day240_T3D_rms_removed_K": e3w_removed,
-        "e3w_removed_fraction_of_complete_K_remainder": (
-            e3w_removed / complete_rms if complete_rms else 0.0),
-        "e3w_carries_at_least_half_of_remainder": carries_remainder,
+        "half_remainder_threshold_K": half_remainder,
+        "ranking": ranking,
+        "e3t_carries_at_least_half": e3t_removed >= half_remainder,
+        "content_carries_at_least_half": content_removed >= half_remainder,
+        "prediction_e3t_larger_than_content": (
+            "CONFIRMED" if e3t_removed > content_removed else "REFUTED"),
     }
-    conclusion = (
-        "live e3w(Kmm) carries at least half of the complete-K remainder"
-        if carries_remainder else
-        "live e3w(Kmm) is exonerated by magnitude; rank e3t(Kaa) and the "
-        "content RHS next")
+    if max(e3t_removed, content_removed) < 2.0e-10:
+        conclusion = (
+            "e3t(Kaa) and tracer content are both below the run-to-run "
+            "floor; continue after the formed solve inputs")
+    else:
+        conclusion = (
+            f"{ranking[0]['arm']} is the larger remaining developed "
+            "tracer-solve input by day-240 sensitivity")
     evidence_root.mkdir(parents=True, exist_ok=True)
     return {
-        "format": "gyre-round169-developed-e3w-sensitivity-v1",
+        "format": "gyre-round172-fixed-solve-input-sensitivity-v1",
         "status": "PASS",
         "case": CASE,
         "execution": "LatLonCGridOceanModel.step -> self._step_jitted",
@@ -12677,12 +14782,16 @@ def developed_vertical_day240_sensitivity(
             "historical": historical,
         },
         "interventions": {
-            "heat_K": "replace only pre-isoneutral heat diffusivity with "
-                      "NEMO avt at every developed step",
-            "complete_K": "replace only the already-formed temperature "
-                          "coefficient with NEMO zwt_mix",
-            "complete_K_e3w": "complete-K arm plus replacement of only the "
-                               "tracer e3w(Kmm) divisor with NEMO e3w_Kmm",
+            "fixed_disabled": "fixed contract present; all six dynamic "
+                              "selectors false",
+            "fixed_identity": "fixed contract present; all six dynamic "
+                              "selectors true with model values",
+            "fixed_complete_K_e3w": "identity arm with formed K and tracer "
+                                     "e3w(Kmm) replaced by NEMO values",
+            "fixed_complete_K_e3w_e3t": "preceding arm plus replacement of "
+                                          "only tracer matrix e3t(Kaa)",
+            "fixed_complete_K_e3w_content": "common arm plus replacement "
+                                             "of only temperature content",
             "viscosity": "model value in every arm",
             "all_other_inputs": "free-running arm state and forcing",
         },
@@ -12690,8 +14799,9 @@ def developed_vertical_day240_sensitivity(
         "registered_row_count": sum(
             len(rows) for rows in final_rows.values()),
         "all_moved_rows_registered": set(final_rows) == {
-            "free", "complete_K", "complete_K_e3w_identity",
-            "complete_K_e3w"},
+            "fixed_disabled", "fixed_identity", "free",
+            "fixed_complete_K_e3w", "fixed_complete_K_e3w_e3t",
+            "fixed_complete_K_e3w_content"},
         "free_day240_T3D_rms_K": free_rms,
         "sensitivity": sensitivity,
         "conclusion": conclusion,
@@ -12699,6 +14809,7 @@ def developed_vertical_day240_sensitivity(
             "closure_to_avt": "zdftke.f90:681-712",
             "effective_coefficient": "trazdf.f90:418-444",
             "implicit_matrix": "trazdf.f90:445-480",
+            "content_rhs": "trazdf.f90:549-567",
             "implicit_solve": "trazdf.f90:527-582",
         },
     }

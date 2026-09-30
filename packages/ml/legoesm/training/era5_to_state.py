@@ -2055,6 +2055,122 @@ def era5_to_mpas_carry(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def era5_phis_fn(era5: ERA5Slice):
+    """``phis_fn(lon, lat)`` for ``create_fv3_duo_grid``: the raw ERA5
+    surface geopotential at arbitrary points (KD-tree inverse distance,
+    the MPAS path's regrid), radians in, ``m^2/s^2`` out, shape of the
+    inputs.  The duo grid builder evaluates it on the padded A-grid and
+    the del-2 terrain filter then smooths it ON the duo grid."""
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar)
+    lat_src, lon_src = np.asarray(era5.lat), np.asarray(era5.lon)
+    if not np.any(np.asarray(era5.phis)):
+        # load_era5_ic zero-fills a store without surface geopotential
+        # (warning only); on this lane that would pair mountain p_s with
+        # flat terrain and skip the hydrostatic move -- refuse
+        raise ValueError(
+            "era5_phis_fn: the ERA5 slice carries an all-zero surface "
+            "geopotential (store without 'geopotential_at_surface'); the "
+            "duo lane needs the real terrain")
+    phis_src = jnp.asarray(era5.phis)
+
+    def fn(lon, lat):
+        lon, lat = np.asarray(lon), np.asarray(lat)
+        w = compute_latlon_to_voronoi_weights(
+            lat_src, lon_src, lat.reshape(-1), lon.reshape(-1))
+        # a WRITABLE array: the grid builder's halo exchange fills it in place
+        return np.array(regrid_scalar(phis_src, w), dtype=np.float64).reshape(lon.shape)
+    return fn
+
+
+def era5_to_fv3_duo_bundle(era5: ERA5Slice, col_model, *, n_tracers: int = 3):
+    """ERA5 slice -> the FV3 duo's native six-face bundle through the
+    column model (route A, M4).
+
+    Cell centres (``col_model.mesh``, the duo A-grid compute window) take
+    T, q, p_s, u, v by the MPAS path's KD-tree regrid; the vertical is
+    ``interp_pressure_to_hybrid`` on the model's own ak/bk (the column
+    model's ``sigma_coord``).  Orography is the GRID's phis (the smoothed
+    field the dycore consumes, ``ctx["hs6"]``), and p_s is moved to it
+    hydrostatically from the raw ERA5 phis at each cell,
+    ``p_s *= exp((phis_raw - phis_grid)/(R_d T_sfc))`` (the MPAS path's
+    correction).  A p_s below the hybrid table's positive-thickness floor
+    is REFUSED, not clamped (clamping would move phis off the grid's).
+
+    ``q`` stays SPECIFIC humidity (FV3 sphum, the dycore's ``zvir`` basis);
+    the MPAS carry converts to mixing ratio -- the column lane keeps one
+    convention end to end (decision recorded in the M4 plan).  Tracer
+    slots: ``[q_v, zeros...]`` up to ``n_tracers``.
+
+    Winds: geographic A-grid (u, v) on the columns lifted ONCE to the
+    D grid by the certified physics-increment lift
+    (``apply_column_increments_sixface_jax`` on a zero-wind state with
+    ``dt = 1``): linear in the increment, one-ring A-grid exchange as the
+    Held-Suarez twin.  Halos of pt/delp/q are zero (the step exchanges at
+    entry, as the DCMIP16 IC leaves them).
+    """
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.core.fv3_native_physics_coupling import (
+        apply_column_increments_sixface_jax)
+    from legoesm.core.fv3_native_state_3d import field_shape
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar)
+    dyn = col_model.dyn
+    n, ng, km = col_model.n, col_model.ng, col_model.km
+    mesh, sigma = col_model.mesh, col_model.sigma_coord
+    ci = slice(ng, ng + n)
+    w = compute_latlon_to_voronoi_weights(
+        np.asarray(era5.lat), np.asarray(era5.lon),
+        np.asarray(mesh.latCell), np.asarray(mesh.lonCell))
+    rg = lambda a: regrid_scalar(jnp.asarray(a), w)  # noqa: E731
+    T_c, q_c, u_c, v_c = rg(era5.T), rg(era5.q), rg(era5.u), rg(era5.v)
+    p_s = rg(era5.p_s)
+    phis_raw = rg(era5.phis)
+    phis_grid = jnp.asarray(col_model._phis)
+    T_sfc = T_c[..., -1]                      # 1000 hPa (plev ascending)
+    p_s = p_s * jnp.exp((phis_raw - phis_grid) / (constants.R_d * T_sfc))
+    floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+    n_low = int(jnp.sum(p_s < floor))
+    if n_low:
+        raise ValueError(
+            f"era5_to_fv3_duo_bundle: {n_low} columns have p_s below the "
+            f"hybrid table's positive-thickness floor {floor:.0f} Pa (min "
+            f"{float(p_s.min()):.0f} Pa); the smoothed terrain is too high "
+            f"for this table -- smooth more or change the table, do not "
+            f"clamp")
+    plev = jnp.asarray(era5.plev_Pa)
+    A, B, p_ref = jnp.asarray(sigma.A_full), jnp.asarray(sigma.B_full), float(sigma.p_ref)
+    vi = lambda f: interp_pressure_to_hybrid(f, plev, p_s, A, B, p_ref)  # noqa: E731
+    T_m, u_m, v_m = vi(T_c), vi(u_c), vi(v_c)
+    q_m = jnp.clip(vi(q_c), 0.0, 0.99)       # specific humidity, FV3 sphum
+    faces = lambda a: jnp.reshape(a, (6, n, n) + a.shape[1:])  # noqa: E731
+    m = n + 2 * ng
+    zeros3 = jnp.zeros((6, m, m, km), dtype=jnp.float64)
+    pt = zeros3.at[:, ci, ci].set(faces(T_m))
+    ak, bk = jnp.asarray(dyn.ak), jnp.asarray(dyn.bk)
+    delp_c = (jnp.diff(ak)[None, None, None, :]
+              + jnp.diff(bk)[None, None, None, :] * faces(p_s)[..., None])
+    delp = zeros3.at[:, ci, ci].set(delp_c)
+    q = [zeros3.at[:, ci, ci].set(faces(q_m))]
+    for _ in range(1, n_tracers):
+        q.append(jnp.zeros_like(q[0]))
+    u0 = jnp.zeros((6,) + tuple(field_shape("u", n, ng, km)), dtype=jnp.float64)
+    v0 = jnp.zeros((6,) + tuple(field_shape("v", n, ng, km)), dtype=jnp.float64)
+    # ``w`` rides the hydrostatic state too (the C-grid phase reads it
+    # unconditionally; zero on this arm, as the DCMIP16 IC carries it)
+    state = {"u": u0, "v": v0, "pt": pt, "delp": delp, "w": zeros3}
+    press = p_var_hydrostatic(delp, ptop=dyn.ptop, akap=FV3_KAPPA, n=n, ng=ng, km=km)
+    view = (u0, v0, zeros3, zeros3)          # zero winds: the lift is the increment
+    st, _, _ = apply_column_increments_sixface_jax(
+        state, press, q, view, col_model._tab, col_model._wv6,
+        faces(u_m), faces(v_m), jnp.zeros((6, n, n, km)), {},
+        dt=1.0, n=n, ng=ng, km=km, ptop=dyn.ptop, akap=FV3_KAPPA)
+    omga = jnp.zeros((6,) + tuple(field_shape("delp", n, ng, km)), dtype=jnp.float64)
+    return {"state": {**state, "u": st["u"], "v": st["v"]}, "press": press,
+            "q": q, "omga": omga, "nh": None}
+
+
 def regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
     """Regrid ERA5 lat-lon fields to the model's Gaussian grid.
 

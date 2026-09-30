@@ -17,6 +17,7 @@ and JAX-free (unit-tested on the login node); all heavy imports live inside
 from __future__ import annotations
 
 import argparse
+import os as _os
 from typing import NamedTuple
 
 VALID_MODES = ("physics", "neural_gcm", "sfno")
@@ -522,6 +523,11 @@ def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
     compile itself, with a bumped walltime) via ``smoke_radiation: rrtmgp``.
     """
     yml["n_lat"], yml["n_lon"], yml["nlev"] = 32, 64, 8
+    # The spectral core takes its grid from ``spectral.n_max`` and only falls
+    # back to n_lat; drop it so the smoke runs the same small grid (T21).
+    if "spectral" in yml:
+        yml["spectral"] = {k: v for k, v in yml["spectral"].items()
+                           if k != "n_max"}
     yml["radiation"] = str(yml.get("smoke_radiation", "gray"))
     return cfg._replace(n_epochs=1)
 
@@ -817,6 +823,16 @@ def _main(argv=None):
     # multi_step_hours lead, default 6 h).  A fixed 24 h single_day_rollout here
     # would score a 24 h forecast against a 6 h target.
     roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
+    # MEMORY PROBE ONLY: override the scan trip count so the compiled gradient
+    # can be measured at several rollout lengths with EVERY other thing --
+    # shapes, physics, dt, loss -- held identical. The only difference between
+    # arms is how many times the remat'd step is scanned, which is exactly the
+    # variable that separates "the unrolled rollout holds the memory" from
+    # "one step's physics does". Never set in a training run; the forecast it
+    # produces would no longer match the target's lead.
+    if _os.environ.get("LEGOESM_WB_ROLL_STEPS"):
+        roll_steps = int(_os.environ["LEGOESM_WB_ROLL_STEPS"])
+        print(f"MEMPROBE roll_steps OVERRIDDEN to {roll_steps}", flush=True)
 
     def _loss(trainable, sample):
         ic, target, forcing = sample
@@ -1008,6 +1024,12 @@ def _main(argv=None):
             n_probe_used = None          # nothing was probed; it was restored
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
         else:
+            if _os.environ.get("LEGOESM_WB_MEM_PROBE") == "1":
+                import sys as _sys
+                _sys.path.insert(0, "scripts/tmp")
+                import _probe_wb_mem_total as _pm
+                _pm.run(_probe_vg, eqx.partition(params, eqx.is_inexact_array)[0],
+                        local[0], label=_os.environ.get("LEGOESM_WB_MEM_ARM", "?"))
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
                 params, _probe_vg, local, n_probe=None, num_processes=nproc)
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
@@ -1016,8 +1038,6 @@ def _main(argv=None):
             # epoch write would otherwise re-measure on every chained resume
             # (job 27194893 died exactly there). Fingerprint-gated on read.
             if rank == 0:
-                import os as _os
-
                 _os.makedirs(cfg.out_dir, exist_ok=True)
                 _pf_payload = {
                     "schema": _MANIFEST_SCHEMA,

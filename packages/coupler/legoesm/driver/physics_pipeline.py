@@ -47,7 +47,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
-from legoesm.core.grid_adapters import make_adapter
+from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
 
@@ -344,6 +344,8 @@ class PhysicsPipeline:
         # False (default) every ledger code path is a byte-identical no-op
         # (feature-gating exception: Python ``if``, never jnp.where).
         self.budget_ledger = False  # set by build_physics_pipeline
+        # Cell areas weighting the ledger's global means (None = one column).
+        self._ledger_area = None
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -1514,8 +1516,7 @@ class PhysicsPipeline:
                         dt=dt, config=_conv_cfg,
                         land_frac=(
                             ad.flatten_2d(self.f_land)
-                            if self.f_land is not None
-                            else jnp.zeros((ad.ncol,), dtype=T_col.dtype)),
+                            if self.f_land is not None else None),
                         cld_frac=(None if cloud_fraction is None
                                   else cloud_fraction.reshape(T_col.shape)),
                         pref_edge=self.sigma_half * constants.p_ref,
@@ -1735,7 +1736,7 @@ class PhysicsPipeline:
             _bl_micro = ledger_entry(
                 dq_v_dt_micro + dq_c_dt + dq_r_dt
                 + dq_i_dt + dq_s_dt + dq_g_dt,
-                dT_dt_micro, p_s, _bl_dsigma)
+                dT_dt_micro, p_s, _bl_dsigma, area=self._ledger_area)
             # Convection's column store contribution: vapour tendency plus —
             # for detraining (mass-flux) schemes only — the anvil condensate
             # routed into q_c below.  The in-updraft rain (dq_r_conv_dt) and
@@ -1745,7 +1746,8 @@ class PhysicsPipeline:
             _bl_conv_q = dq_v_dt_conv + (
                 dq_c_dt_conv if _ctr.detrains_to_cloud
                 else jnp.zeros_like(dq_v_dt_conv))
-            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma)
+            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
+                                    area=self._ledger_area)
 
         # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
         # schemes, ``detrains_to_cloud``) adds convective condensate to the
@@ -2101,9 +2103,10 @@ class PhysicsPipeline:
                 _bl_turb = ledger_entry(
                     ad.unflatten_3d(turb_out.dq_v_dt),
                     ad.unflatten_3d(turb_out.dT_dt),
-                    p_s, _bl_dsigma)
+                    p_s, _bl_dsigma, area=self._ledger_area)
             else:
-                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma)
+                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma,
+                                        area=self._ledger_area)
 
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
@@ -2265,6 +2268,7 @@ class PhysicsPipeline:
             snow_new, _, _ = update_snow(
                 snow, jnp.zeros_like(snow), T_land, precip_snow_diag, dt,
                 Q_net=None,
+                snow_age_activation_K=0.0,  # age output discarded below
             )
         else:
             snow_new = snow
@@ -2281,10 +2285,11 @@ class PhysicsPipeline:
                 N_LEDGER, ROW_CONVECTION, ROW_MICROPHYSICS, ROW_OTHER,
                 ROW_RADIATION, ROW_TURBULENCE, ledger_entry,
             )
-            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma)
+            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma,
+                                   area=self._ledger_area)
             _bl_total = ledger_entry(
                 dq_v_dt + dq_c_dt + dq_r_dt + dq_i_dt + dq_s_dt + dq_g_dt,
-                dT_dt, p_s, _bl_dsigma)
+                dT_dt, p_s, _bl_dsigma, area=self._ledger_area)
             _bl_other = _bl_total - (_bl_turb + _bl_conv + _bl_micro + _bl_rad)
             _bl_out = jnp.zeros((N_LEDGER, 2), dtype=_bl_total.dtype)
             _bl_out = _bl_out.at[ROW_TURBULENCE].set(_bl_turb)
@@ -3722,8 +3727,7 @@ def _resolve_convection(config):
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
-            # coefficients + the quasi-equilibrium heating-ceiling ratio
-            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            # coefficients.  Defaults match BechtoldConfig.
             # The ExperimentConfig field (2026-09-15); the earlier
             # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
             # existed and silently capped every run at 0.02.
@@ -3808,6 +3812,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "zhang_mcfarlane":
+            conv_config = conv_config._replace(
+                land_fraction=config.zm_land_fraction)
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
@@ -4003,8 +4010,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
                           _ExpCfg._field_defaults["morrison_sed_cfl_substeps_strict"])
     _sed_max = getattr(config, "morrison_sed_cfl_substeps_max",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
+    _graupel = getattr(config, "morrison_do_graupel",
+                       _ExpCfg._field_defaults["morrison_do_graupel"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
-                    ("morrison_sed_cfl_substeps_strict", _sed_strict)):
+                    ("morrison_sed_cfl_substeps_strict", _sed_strict),
+                    ("morrison_do_graupel", _graupel)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4021,8 +4031,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _sed_max = (None if _sed_max
                 == _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"]
                 else _sed_max)
+    _graupel = (None if _graupel
+                is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4031,7 +4043,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         micro_config, scheme, morrison_scalars=_touched,
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
-        morrison_sed_cfl_substeps_strict=_sed_strict)
+        morrison_sed_cfl_substeps_strict=_sed_strict,
+        morrison_do_graupel=_graupel)
 
 
 def _resolve_microphysics(config):
@@ -4990,6 +5003,8 @@ def build_physics_pipeline(grid, sigma, config):
     # Per-process budget ledger (same OutputConfig flow as clear_sky_diag).
     pipeline.budget_ledger = bool(
         getattr(getattr(config, 'output', None), 'budget_ledger', False))
+    if pipeline.budget_ledger and not isinstance(grid, SingleColumnGrid):
+        pipeline._ledger_area = grid.grid_area
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

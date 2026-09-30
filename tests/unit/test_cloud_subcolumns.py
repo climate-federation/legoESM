@@ -318,3 +318,46 @@ def test_validate_strict_bounds_the_subcolumn_count():
     for bad in (0, 65):
         with pytest.raises((ValueError, SystemExit), match="n_subcolumns"):
             ExperimentConfig(cloud_n_subcolumns=bad).validate_strict()
+
+
+# ------------------------------------------------------------ McICA shift
+
+def test_shift_keeps_the_per_layer_marginal():
+    cf = _cf()
+    shift = jnp.linspace(0.0, 0.97, cf.shape[0])
+    m = np.asarray(generate_subcolumns(cf, 32, shift=shift))
+    err = np.abs(m.mean(axis=0) - np.asarray(cf))
+    assert err.mean() < 0.02, f"mean marginal error {err.mean():.4f}"
+
+
+def test_zero_shift_is_the_unshifted_table():
+    cf = _cf()
+    a = generate_subcolumns(cf, 16)
+    b = generate_subcolumns(cf, 16, shift=jnp.zeros(cf.shape[0]))
+    assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_shift_changes_which_subcolumn_is_cloudy():
+    """Identical columns with different shifts get different subcolumn masks,
+    so a g-point is not paired with the same cloud sample in every column."""
+    cf = jnp.broadcast_to(_cf()[5], (2, NLEV))
+    m = np.asarray(generate_subcolumns(cf, 16, shift=jnp.asarray([0.0, 0.37])))
+    assert not np.array_equal(m[:, 0], m[:, 1])
+
+
+def test_in_cloud_paths_match_the_subcolumn_paths():
+    from legoesm.atmosphere.physics.clouds.subcolumns import in_cloud_paths
+    cf = _cf()
+    lwp = cf * 0.05
+    iwp = cf * 0.01
+    mask = jnp.ones((1,) + cf.shape, dtype=bool)
+    l1, i1 = subcolumn_paths(mask, cf, lwp, iwp)
+    l2, i2 = in_cloud_paths(cf, lwp, iwp)
+    assert np.array_equal(np.asarray(l1), np.asarray(l2))
+    assert np.array_equal(np.asarray(i1), np.asarray(i2))
+
+
+def test_validate_strict_accepts_mcica():
+    from legoesm.driver.config import ExperimentConfig
+
+    ExperimentConfig(cloud_vertical_overlap_optics="mcica").validate_strict()

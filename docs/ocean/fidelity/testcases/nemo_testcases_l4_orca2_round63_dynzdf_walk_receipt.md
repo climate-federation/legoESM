@@ -53,14 +53,14 @@ the U/V solves at
 live statements in the acquired test build.
 
 The private hook and constructor guard are at
-`ocean_model_latlon_cgrid.py:1278-1283` and
-`ocean_model_latlon_cgrid.py:2795-2799`.  The production solve binds the hook
-at `ocean_model_latlon_cgrid.py:10956-10960`, captures explicit,
+`ocean_model_latlon_cgrid.py:1305-1310` and
+`ocean_model_latlon_cgrid.py:2832-2836`.  The production solve binds the hook
+at `ocean_model_latlon_cgrid.py:11117-11121`, captures explicit,
 barotropic-subtracted, and drag-complete operands at
-`ocean_model_latlon_cgrid.py:11421-11424`,
-`ocean_model_latlon_cgrid.py:11611-11614`, and
-`ocean_model_latlon_cgrid.py:11730-11736`, then uses an ordered write-only
-callback on the completed solve at `ocean_model_latlon_cgrid.py:11898-11905`.
+`ocean_model_latlon_cgrid.py:11610-11613`,
+`ocean_model_latlon_cgrid.py:11800-11803`, and
+`ocean_model_latlon_cgrid.py:11919-11925`, then uses an ordered write-only
+callback on the completed solve at `ocean_model_latlon_cgrid.py:12107-12114`.
 No public card constructs this hook.
 
 The gate requires clean commit identity, CPU, fp64/libm, production JIT, the

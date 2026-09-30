@@ -4465,7 +4465,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
+    if cfg.fix_mass or getattr(cfg, "conservative_tracer_clamp", False):
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -4637,27 +4637,28 @@ def make_voronoi_sharded_step(
                     _pt, phys_state_out = _pr[0], _pr[1]
                 else:
                     _pt = _pr
+                _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+                _tr_phys = state_new.tracers
+                if (state_new.tracers is not None
+                        and _pt.tracer_tendencies is not None):
+                    # water tendencies carry their mass (mirrors the
+                    # serial _step_jit; shared helper)
+                    from legoesm.core.conservation import (
+                        apply_physics_water_mass,
+                    )
+                    _tr_phys, _ps_phys = apply_physics_water_mass(
+                        state_new.tracers, _pt.tracer_tendencies,
+                        _ps_phys, sigma, dt)
                 state_new = MPASHydrostaticState(
                     u=state_new.u.replace(
                         data=state_new.u.data + dt * _pt.du_dt.data),
                     T=state_new.T.replace(
                         data=state_new.T.data + dt * _pt.dT_dt.data),
-                    p_s=state_new.p_s.replace(
-                        data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                    p_s=state_new.p_s.replace(data=_ps_phys),
                     phis=state_new.phis,
                     v=state_new.v,
-                    tracers=state_new.tracers,
+                    tracers=_tr_phys,
                 )
-                if (state_new.tracers is not None
-                        and _pt.tracer_tendencies is not None):
-                    state_new = state_new._replace(tracers={
-                        k: (state_new.tracers[k].replace(
-                                data=state_new.tracers[k].data
-                                + dt * _pt.tracer_tendencies[k].data)
-                            if k in _pt.tracer_tendencies
-                            else state_new.tracers[k])
-                        for k in state_new.tracers
-                    })
 
             # --- 3. Floors (mirrors _step_jit): temperature and tracer
             #        non-negativity (advection is not positive-definite;
@@ -4677,9 +4678,12 @@ def make_voronoi_sharded_step(
                 # sequentially-dependent ones.
                 acc = jnp.float64
                 area_acc = area_arg.astype(acc)
+                # DRY mass (p_s - g*column water), the serial fixer's
+                # convention (user decision 2026-09-28)
+                from legoesm.core.conservation import dry_surface_pressure
                 ps_pair = jnp.stack([
-                    state.p_s.data.astype(acc),
-                    state_new.p_s.data.astype(acc),
+                    dry_surface_pressure(state.p_s.data, state.tracers, sigma).astype(acc),
+                    dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma).astype(acc),
                 ], axis=0) * area_acc[None]
                 masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
                 correction = (masses[0] - masses[1]) / _total_area
@@ -4694,9 +4698,12 @@ def make_voronoi_sharded_step(
                 # the promoted add (iter-11); parity in that corner mode
                 # differs only by the rounding of the correction add.
                 _ps = state_new.p_s.data
+                from legoesm.core.conservation import shift_ps_keep_tracer_mass
+                _ps_new, _tr_new = shift_ps_keep_tracer_mass(
+                    _ps, state_new.tracers, sigma, correction)
                 state_new = state_new._replace(
-                    p_s=state_new.p_s.replace(
-                        data=(_ps + correction).astype(_ps.dtype)))
+                    p_s=state_new.p_s.replace(data=_ps_new.astype(_ps.dtype)),
+                    tracers=_tr_new)
 
             # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
             # dp must be the FINAL layer mass, so this runs post-fix (the serial
@@ -4717,7 +4724,8 @@ def make_voronoi_sharded_step(
                     conservative=getattr(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

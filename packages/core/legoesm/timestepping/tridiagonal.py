@@ -69,6 +69,17 @@ def thomas_solve(
     Thomas sweep, then forms the band/RHS cotangents from ``λ`` and ``x`` — no
     ``1/denom**2`` term ever appears, and the forward values are bit-identical.
 
+    ``operation_order``:
+      * ``"normalised"`` (default) divides by ``b + _TINY`` / ``denom +
+        _TINY``, i.e. every pivot carries the clamp described above.
+      * ``"nemo_unnormalised"`` transcribes NEMO's own forward elimination and
+        has NO pivot clamp: it divides by the running diagonal exactly as the
+        Fortran does, because adding a clamp would change the arithmetic this
+        arm exists to reproduce. That is safe here because its only caller,
+        the sea-ice vertical heat solve (``ice/bitz_lipscomb.py``), builds a
+        diagonally dominant matrix, whose pivots stay bounded away from zero.
+        A new caller must establish the same property before selecting it.
+
     Limitations (by design, not bugs):
       * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
         clamps a (near-singular) pivot to ``_TINY`` it is a surrogate, not the

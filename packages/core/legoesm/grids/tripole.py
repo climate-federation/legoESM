@@ -460,6 +460,7 @@ def create_tripole_grid(
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
     strip_north_rows: int = 0,
+    use_mesh_coriolis: bool = False,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -485,6 +486,20 @@ def create_tripole_grid(
         with implicit barotropics. Default 1 000 m matches the
         runner-side floor used in the 20-yr ORCA1 production run.
         Pass 0.0 to disable.
+    use_mesh_coriolis : bool, default False
+        Source of the T-point Coriolis parameter ``f_T``.  ``False``
+        (DEFAULT, the historical behaviour): the analytic
+        ``2*omega*sin(lat_T)``.  ``True``: the mesh file's own ``ff_t`` when
+        it supplies one, which is what NEMO reads
+        (``domhgr.F90:222-227`` takes ``ff_t``/``ff_f`` from ``cn_domcfg``
+        whenever both variables exist).  ORCA's curvilinear grid generation
+        and its stored constants make the two differ in the last bits, so
+        this is an opt-in for NEMO-literal cards, not a default.  The
+        F-point field ``ff_f`` is carried separately either way and is read
+        only by the literal NEMO EEN/ENE vorticity arms.  NEMO's rule is a
+        PAIR -- it takes the mesh Coriolis only when BOTH ``ff_f`` and
+        ``ff_t`` are in the file -- so a mesh holding only one of them
+        supplies neither, here as there.
     strip_north_rows : int, default 0
         Drop this many rows from the NORTH end of every mesh field before
         building the geometry.  NEMO ``jperio=4`` (T-point pivot) meshes such
@@ -589,10 +604,21 @@ def create_tripole_grid(
         # Estimate from T-point areas
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
 
-    # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
-    # domain file supplies them.  Preserve ff_t for its literal T-point
-    # consumers and carry ff_f separately for NEMO's EEN/ENE vorticity arms.
-    f_T = raw.get("ff_t", 2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    # Coriolis.  NEMO domhgr.F90:222-227 reads ff_t/ff_f directly when the
+    # domain file supplies BOTH.  That is an opt-in here
+    # (``use_mesh_coriolis``): the analytic 2*omega*sin(lat_T) stays the
+    # default so every existing tripole run keeps its f_T to the last bit.
+    # ff_f is carried separately either way, and is read only by the literal
+    # NEMO EEN/ENE vorticity arms.
+    # NEMO's own rule is a PAIR: it takes the mesh Coriolis only when BOTH
+    # ff_f and ff_t exist in cn_domcfg (domhgr.F90:222-227, kff=1), and
+    # otherwise computes both itself.  Follow that, so a file with only one of
+    # them can never produce a mesh-F / analytic-T mixture.
+    _mesh_coriolis = "ff_t" in raw and "ff_f" in raw
+    if use_mesh_coriolis and _mesh_coriolis:
+        f_T = raw["ff_t"].astype(dtype)
+    else:
+        f_T = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
 
     # f at u-points
     f_u_inner = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
@@ -608,7 +634,7 @@ def create_tripole_grid(
     f_v = jnp.concatenate(
         [f_T_for_v[0:1], f_v_inner, f_T_for_v[-1:]], axis=0
     )
-    ff_f = raw["ff_f"].astype(dtype) if "ff_f" in raw else None
+    ff_f = raw["ff_f"].astype(dtype) if _mesh_coriolis else None
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
@@ -851,6 +877,38 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         [jnp.maximum(jnp.cos(lat_new_1d), 1e-10).astype(dtype),
          jnp.asarray(grid.cos_lat_v, dtype)])
 
+    # lat_v is cos_lat_v's COMPANION (n_lat+1,) v-face profile — the face
+    # LATITUDES themselves — filled whenever the builder knows them
+    # (``create_latlon_geometry`` does, so every synthetic tripole carries it;
+    # the file-backed ``create_tripole_grid`` leaves it None).  It rides the
+    # SAME v-face axis as cos_lat_v, and the band slicer already slices and
+    # widens the two as ONE family (the v-face names in ``halo_latlon``), so a
+    # pad that grows cos_lat_v but not lat_v hands the NORTH band one row
+    # fewer than the interior bands and the per-field band stack dies with
+    # "All input arrays must have the same shape" — the identical eORCA025
+    # crash cos_lat_v's own miss caused (job 9471878).
+    #
+    # VALUE: ``compute_v_face_coords`` puts ``lat_v[j]`` at the SOUTH face of
+    # T row ``j`` (``lat[0] - dlat/2`` at the south end, the two-row mean
+    # inside), so the new entries are the new land rows' latitudes shifted a
+    # HALF CELL SOUTH — not the row centres (codex review).  The seam needs
+    # nothing: the surviving ``lat_v[0] = lat_T[0] - dlat/2`` is already
+    # exactly the interior face ``(lat_new[-1] + lat_T[0])/2`` the padded grid
+    # wants there, because the new rows are one ``dlat`` apart.  The result
+    # stays strictly increasing northward.
+    # ponytail: the cos_lat_v block above keeps evaluating its new entries at
+    # the row CENTRES.  That is a pre-existing half-cell difference on LAND
+    # rows, and cos_lat_v is set on the file-backed eORCA cards, so moving it
+    # would change those runs' padded metrics; it is left alone deliberately.
+    # ``None`` passes through unchanged, keeping face-array-free grids
+    # byte-identical.
+    lat_v_pad = grid.lat_v
+    if lat_v_pad is not None:
+        lat_v_new = lat_new_1d - 0.5 * jnp.mean(dlat_row)
+        lat_v_pad = jnp.concatenate(
+            [lat_v_new.astype(jnp.asarray(lat_v_pad).dtype),
+             jnp.asarray(lat_v_pad)])
+
     # seam_wall_rows is an OPTIONAL (n_lat,) per-row profile (None on the
     # eORCA builds today, set by the DINO bridge).  If present it must grow
     # too, or the same band-slice raggedness bites; the new rows are LAND,
@@ -899,6 +957,7 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
         cos_lat=cos_lat_pad,
         sin_lat=sin_lat_pad,
         cos_lat_v=cos_lat_v_pad,
+        lat_v=lat_v_pad,
         lat=lat_1d_pad,
         seam_wall_rows=seam_pad,
         native_lat_T_deg=native_lat_pad,

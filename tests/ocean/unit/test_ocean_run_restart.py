@@ -725,55 +725,49 @@ def test_tuple_carry_elements_are_not_mistaken_for_orphans(tmp_path):
     _assert_slot_equal("bt_hist", got.bt_hist, state.bt_hist)
 
 
-def test_format3_deviation_bt_hist_migrates_to_absolute(tmp_path):
-    """A real v3 carry is converted once; its deltas are never reinterpreted."""
-    _, _, state = _base_state()
-    shape = state.eta.data.shape
-    final_u = jnp.arange(np.prod(shape), dtype=state.eta.data.dtype).reshape(shape)
-    final_v = final_u + 100.0
-    final_eta = final_u + 200.0
-    uu_b = state.eta.replace(data=final_u, name="uu_b", units="m/s",
-                             staggering="u")
-    vv_b = state.eta.replace(data=final_v, name="vv_b", units="m/s",
-                             staggering="v")
-    eta = state.eta.replace(data=final_eta)
-    deltas = tuple(jnp.full(shape, float(i + 1), dtype=final_u.dtype)
-                   for i in range(6))
-    state = state._replace(uu_b=uu_b, vv_b=vv_b, eta=eta, bt_hist=deltas)
-    path = tmp_path / "v3.npz"
-    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
-    with np.load(path, allow_pickle=False) as f:
-        payload = {k: f[k] for k in f.files}
-    payload["_format"] = np.asarray(3)
-    np.savez(path, **payload)
+def test_format3_bt_hist_archive_is_refused_in_plain_words(tmp_path):
+    """A version-3 barotropic history cannot be converted, and says so.
 
-    got, _, meta = load_run_restart(path, _base_state()[2],
-                                    grid_type="latlon")
-    assert meta["format"] == 3
-    finals = (final_u, final_u, final_v, final_v, final_eta, final_eta)
-    for actual, final, delta in zip(got.bt_hist, finals, deltas):
-        np.testing.assert_array_equal(np.asarray(actual),
-                                      np.asarray(final - delta))
-    # Planted old-semantics control: at least one migrated absolute array must
-    # differ from the stored deviation, or this test would accept a no-op.
-    assert not np.array_equal(np.asarray(got.bt_hist[0]), np.asarray(deltas[0]))
-
-
-def test_format3_bt_hist_without_paired_means_fails_loudly(tmp_path):
-    """Migration cannot guess the two absolute velocity anchors."""
+    Version 3 stored ``final - history`` for each AB3/AM4 slot. The matching
+    finals are ``uu_b``/``vv_b``, which are version-4 slots: no real version-3
+    archive holds them, so the old migration could only ever reach its own
+    failure path. The loader now refuses such an archive in words a reader can
+    act on, instead of silently reinterpreting deviations as absolute
+    histories.
+    """
     _, _, state = _base_state()
     shape = state.eta.data.shape
     state = state._replace(
-        bt_hist=tuple(jnp.ones(shape, dtype=state.eta.data.dtype)
-                      for _ in range(6)))
-    path = tmp_path / "incomplete-v3.npz"
+        bt_hist=tuple(jnp.full(shape, float(i + 1), dtype=state.eta.data.dtype)
+                      for i in range(6)))
+    path = tmp_path / "v3-with-history.npz"
     save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
     with np.load(path, allow_pickle=False) as f:
         payload = {k: f[k] for k in f.files}
     payload["_format"] = np.asarray(3)
     np.savez(path, **payload)
-    with pytest.raises(ValueError, match="cannot migrate deviation-form bt_hist"):
+    with pytest.raises(ValueError, match="must be REGENERATED"):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
+def test_format3_without_bt_hist_still_loads(tmp_path):
+    """Refusing the history must not refuse format 3 itself.
+
+    Every run that did not use the NEMO AB3/AM4 barotropic filter wrote no
+    ``bt_hist`` at all, and those archives stay readable.
+    """
+    _, _, state = _base_state()
+    assert state.bt_hist is None
+    path = tmp_path / "v3-plain.npz"
+    save_run_restart(path, state, step=7, time_days=1.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_format"] = np.asarray(3)
+    np.savez(path, **payload)
+    got, _, meta = load_run_restart(path, _base_state()[2], grid_type="latlon")
+    assert meta["format"] == 3 and meta["step"] == 7
+    np.testing.assert_array_equal(np.asarray(got.eta.data),
+                                  np.asarray(state.eta.data))
 
 
 def test_underscore_named_payload_cannot_hide_a_carry(tmp_path):

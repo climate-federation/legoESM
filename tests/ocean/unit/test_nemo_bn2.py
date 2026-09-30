@@ -471,6 +471,7 @@ def test_nemo_reciprocal_r3t_is_selectable_jittable_and_differentiable():
 def test_native_e3w_coordinate_validation_wrappers_and_ad():
     """Raw mesh fields survive both wrappers; JIT and T/S/eta gradients work."""
     import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.eos import nemo_bn2_live_geometry
     from legoesm.ocean.vertical import (
         create_full_step_coordinate, create_partial_cell_coordinate,
@@ -500,14 +501,26 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
         np.nextafter(np.nextafter(np.nextafter(ew[3], np.inf), np.inf), np.inf),
         np.inf,
     )
-    z_roundoff = create_z_star_from_thicknesses(
-        dz,
-        nemo_gdept_0_m=gd,
-        nemo_e3w_0_m=ew_roundoff,
-    )
-    assert np.allclose(
-        np.asarray(z_roundoff.nemo_e3w_0), ew_roundoff, rtol=0.0, atol=1.0e-5
-    )
+    # create_z_star_from_thicknesses casts raw mesh fields to
+    # get_policy().control (default: fp32), which would silently collapse a
+    # four-fp64-ULP difference back to a bit-identical float32 value and make
+    # the bit-exact check below pass vacuously regardless of what the
+    # wrapper does. Force fp64 for this specific check so it actually
+    # exercises the fp64-ULP claim; restore afterward so it cannot leak into
+    # later tests (the same policy-leak class as #1802 finding 3).
+    _saved_policy = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        z_roundoff = create_z_star_from_thicknesses(
+            dz,
+            nemo_gdept_0_m=gd,
+            nemo_e3w_0_m=ew_roundoff,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(z_roundoff.nemo_e3w_0), ew_roundoff
+        )
+    finally:
+        set_policy(_saved_policy)
 
     z = create_z_star_from_thicknesses(
         dz, t_depth_ref_m=gd, nemo_gdept_0_m=gd,

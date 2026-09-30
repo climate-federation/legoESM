@@ -41,10 +41,16 @@ def make_implicit_newton_solver(
         def fun(x):
             return scaled_residual(x, parameters)
 
-        jac = jax.jacfwd(fun)
+        def fun_twice(x):
+            f = fun(x)
+            return f, f
+
+        # The forward sweep's primal IS the residual: one pass gives both.
+        jac_and_fun = jax.jacfwd(fun_twice, has_aux=True)
 
         def residual_jacobian(x):
-            return fun(x), jac(x) * x_scale
+            jacobian, residual = jac_and_fun(x)
+            return residual, jacobian * x_scale
 
         def step(jacobian_z, residual, damping):
             n = residual.shape[0]
@@ -69,7 +75,7 @@ def make_implicit_newton_solver(
             x, residual, jacobian_z, n_sq, damping, iteration, _ = state
             delta_z, n_sq_predicted = step(jacobian_z, residual, damping)
             x_trial = x + x_scale * delta_z
-            residual_trial = fun(x_trial)
+            residual_trial, jacobian_trial = residual_jacobian(x_trial)
             n_sq_trial = jnp.sum(residual_trial * residual_trial)
             denominator = jnp.maximum(
                 n_sq - n_sq_predicted,
@@ -81,9 +87,7 @@ def make_implicit_newton_solver(
             x_new = jnp.where(accept, x_trial, x)
             residual_new = jnp.where(accept, residual_trial, residual)
             n_sq_new = jnp.where(accept, n_sq_trial, n_sq)
-            jacobian_new = jnp.where(
-                accept, jac(x_trial) * x_scale, jacobian_z
-            )
+            jacobian_new = jnp.where(accept, jacobian_trial, jacobian_z)
 
             # Nielsen gain-ratio adaptation.  The negated comparison is
             # intentional: a NaN gain ratio must increase damping.

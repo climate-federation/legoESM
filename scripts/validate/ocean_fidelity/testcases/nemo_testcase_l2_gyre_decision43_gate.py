@@ -227,6 +227,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
         "tke_shear_step_entry_eta", "stage1_r3t_ratio",
+        "mld_carried_step_entry_n2",
     },
             f"unknown Decision-43 source route {route!r}")
 
@@ -247,6 +248,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             "adaptive_implicit_vertadv": bool(
                 config.adaptive_implicit_vertadv),
             "gm_redi_configured": config.gm_redi is not None,
+            "gm_redi_mld_criterion": getattr(
+                config.gm_redi, "mld_criterion", None),
+            "gm_redi_slope_n2_evaluation": getattr(
+                config.gm_redi, "slope_n2_evaluation", None),
             "momentum_advection": getattr(
                 config, "momentum_advection", "flux_form"),
             "wzv_call2_evaluation": getattr(
@@ -311,6 +316,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             executes = (
                 config.tracer_time_integrator == "rk3_ws"
                 and not values["linear_free_surface"])
+        elif route == "mld_carried_step_entry_n2":
+            executes = (
+                config.gm_redi is not None
+                and getattr(config.gm_redi, "mld_criterion", None)
+                == "n2_integral"
+                and getattr(
+                    config.gm_redi, "slope_n2_evaluation", "recompute")
+                == "carried_step_entry")
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -675,9 +688,11 @@ def evaluate(
         "dino_statement_not_executed": not dino_shared,
         "all_executing_cards_measured": not unmeasured_executing_cards,
     }
-    # Decision 43 requires a DINO before/after measurement only when the exact
-    # source condition executes.  This route does not: both shipped DINO cards
-    # use the Euler tracer lane.  Keep both booleans so the waiver is explicit.
+    # Decision 43 requires a separate measurement for every non-primary card
+    # that executes the exact source condition.  ``all_executing_cards_measured``
+    # is the fail-closed discharge for a shared DINO statement; the historical
+    # ``dino_statement_not_executed`` field remains an explicit census fact,
+    # not an unconditional admission requirement.
     admissible = bool(
         criteria["day30_T_rms_decreases"]
         and criteria["month_and_year_day30_agree"]
@@ -687,7 +702,6 @@ def evaluate(
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
         and criteria["all_moved_rows_registered"]
-        and criteria["dino_statement_not_executed"]
         and criteria["all_executing_cards_measured"])
 
     return {
@@ -744,7 +758,8 @@ def main(argv: list[str] | None = None) -> int:
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
             "momentum_ldf_live_geometry", "stage_momentum_wzv",
-            "tke_shear_step_entry_eta", "stage1_r3t_ratio"),
+            "tke_shear_step_entry_eta", "stage1_r3t_ratio",
+            "mld_carried_step_entry_n2"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],

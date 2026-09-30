@@ -1032,6 +1032,24 @@ def _ssp_rk3_tracer_pair_step(
     return a_new, b_new
 
 
+class _NEMOVerticalSolveTestInput(NamedTuple):
+    """Fixed-shape private input for production-compiled solve probes.
+
+    ``replace`` is a dynamic six-element boolean array.  Disabled, identity,
+    directed, and planted probes therefore share one JIT input structure and
+    one traced graph; only leaf values differ.  No model configuration can
+    construct or select this diagnostic input.
+    """
+
+    heat_K: object
+    viscosity_K: object
+    formed_K: object
+    tracer_e3w: object
+    tracer_e3t: object
+    temperature_content: object
+    replace: object
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -1060,6 +1078,15 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # materialization passive against the ordinary production step.
     slow_forcing_rhs_observer: object = None
     slow_forcing_rhs_observer_face: str = ""
+    # WRITE-only round-5 (VORTEX) observer for the PER-TERM decomposition of
+    # that same completed right-hand side.  It is handed the
+    # ``MomentumTendencyDiagnostics`` the very same ``tendencies`` call
+    # already builds -- with the stage face thicknesses, the lateral-diffusion
+    # thickness operands and the continuity clock this step supplies -- so the
+    # rows are a decomposition of the array the observer above reports and not
+    # a second opinion obtained from a different call.  None is the production
+    # value and no model configuration can select it.
+    slow_forcing_rhs_term_observer: object = None
     # Private round-142 directed discriminator: replace only the owned native
     # faces of the completed 3-D momentum RHS before its depth reduction.
     # None leaves the production program unchanged; this is not configurable.
@@ -1287,6 +1314,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
+    # Round 5 (VORTEX) WRITE-only companion to the override above: report
+    # the vertical velocity and face thicknesses dyn_zad is handed, so the
+    # operand can be scored against the oracle's own recorded ``ww``
+    # instead of only being replaced by it.  None is the production value.
+    stage1_zad_operand_observer: object = None
     # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
     # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
     # operand, so one operand at a time can be replaced by NEMO's recorded
@@ -1445,7 +1477,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     bn2_intermediate: str = ""  # Private one-output compiled-bn2 walk.
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
     bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
-    tracer_process_trace: object = None  # Round-124 write-only trace / plant.
+    tracer_process_trace: object = None; tracer_ldf_diagnostics: object = None
+    # Round 189 one-variable production-JIT discriminator.  Replace only the
+    # live stage-3 stretch handed to qsr_2BD; the stage geometry, QCO weights,
+    # preceding accumulator and returned trajectory retain their own values.
+    # This requires the WRITE-only process trace and is not configurable.
+    stage3_qsr_stretch_override: object = None
     # Return the stage-3 FCT active-cell map alongside the unchanged process
     # boundaries. Kept separate so Round 136 can prove this larger return
     # graph does not move the already-admitted Round-124 observer's rows.
@@ -2819,14 +2856,18 @@ class LatLonCGridOceanModel:
                     "stage-3 FCT pair hook requires "
                     "tracer_time_integrator='rk3_ws'")
         _process_trace = self._nemo_ws_test_hooks.tracer_process_trace
+        if (self._nemo_ws_test_hooks.stage3_qsr_stretch_override is not None
+                and _process_trace is None):
+            raise ValueError(
+                "stage3_qsr_stretch_override requires tracer_process_trace")
         if (self._nemo_ws_test_hooks.vertical_solve_trace
                 and _process_trace is None):
             raise ValueError(
                 "vertical_solve_trace requires tracer_process_trace")
-        if (self._nemo_ws_test_hooks.tracer_process_branch_activity
+        if ((self._nemo_ws_test_hooks.tracer_process_branch_activity or self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None)
                 and _process_trace is None):
             raise ValueError(
-                "tracer_process_branch_activity requires "
+                "tracer diagnostic hook requires "
                 "tracer_process_trace")
         if _process_trace is not None:
             if not isinstance(_process_trace, tuple) or len(
@@ -3560,6 +3601,26 @@ class LatLonCGridOceanModel:
                 f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
                 f"got {config.eos!r}",
             )
+        # NEMO S-EOS (``ln_seos``) coefficients are a per-run &nameos block, not
+        # a library constant.  ``eos_nemo_seos=None`` keeps NemoSEOSConfig()'s
+        # DINO values (every pre-existing caller).  When a card supplies its own
+        # set, refuse the two combinations that would SILENTLY read the DINO
+        # defaults instead: a different EOS selection, and the GM/Redi + EKE
+        # closures, whose density calls take eos/eos_linear only.
+        if getattr(config, "eos_nemo_seos", None) is not None:
+            if config.eos != "nemo_seos":
+                raise ValueError(
+                    "eos_nemo_seos carries NEMO &nameos coefficients and is "
+                    'only read when eos="nemo_seos"; got eos='
+                    f"{config.eos!r}. Drop the coefficients or select the EOS.")
+            if config.gm_redi is not None:
+                raise ValueError(
+                    "eos_nemo_seos with gm_redi is refused: the GM/Redi and "
+                    "EKE density closures build their EOS from eos/eos_linear "
+                    "alone, so they would silently run NemoSEOSConfig()'s DINO "
+                    "coefficients while the dynamics ran this card's. Thread "
+                    "eos_nemo_seos through those closures before combining "
+                    "them.")
 
         # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
         # the source-augmentation flags are validated at construction). The EKE
@@ -4395,6 +4456,62 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+            # NEMO ln_dynvor_een under ln_dynadv_vec=.false. (dynvor.F90:874
+            # routes np_EEN; dyn_vor_init:891-893 gives the flux-form arm
+            # ntot = np_CME).  vor_een's np_CME branch (dynvor.F90:780-783) is
+            # ff_f plus a metric term whose two coefficients are
+            #   di_e2v_2e1e2f = (e2v(i+1,j) - e2v(i,j)) * 0.5 * r1_e1e2f
+            #   dj_e1u_2e1e2f = (e1u(i,j+1) - e1u(i,j)) * 0.5 * r1_e1e2f
+            # (dynvor.F90:905-908).  On a Cartesian mesh whose scale factors
+            # are one repeated constant those differences are bitwise zero and
+            # the branch IS np_COR.  On any other mesh they are not, and the
+            # transcription would be silently incomplete -- so this scheme is
+            # admitted only on a constant-scale-factor grid, and only with the
+            # flux-form momentum it was read off.
+            _cor_s = getattr(config, "coriolis_scheme", "matsuno_split")
+            if _cor_s != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" carries the planetary '
+                    "Coriolis inside NEMO's vor_een triad, so the Matsuno "
+                    'rotation must be off: requires coriolis_scheme='
+                    f'"explicit_ab2", got {_cor_s!r}.')
+            _ma = getattr(config, "momentum_advection", "vector_invariant")
+            if _ma != "flux_form":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" transcribes NEMO\'s '
+                    "FLUX-FORM vorticity arm only (dyn_vor_init:891-893). "
+                    "Vector-invariant momentum routes NEMO to np_CRV, where "
+                    "the triad also carries the RELATIVE vorticity — use "
+                    '"een_total" for that. Got momentum_advection='
+                    f"{_ma!r}.")
+            if config.een_e3f_scheme != "nemo_avg4":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs NEMO\'s own '
+                    'e3f_vor thickness: requires een_e3f_scheme="nemo_avg4", '
+                    f"got {config.een_e3f_scheme!r}.")
+            _emw = getattr(config, "een_metric_weighting", "off")
+            if _emw != "nemo":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs vor_een\'s own '
+                    "e1v/e2u transport weighting (dynvor.F90:791-792,804-806):"
+                    f' requires een_metric_weighting="nemo", got {_emw!r}.')
+            _bt_cor = getattr(config.barotropic, "barotropic_coriolis", "avg")
+            _bt_spl = getattr(config, "barotropic_coriolis_split", "frozen")
+            if _bt_cor != "een_metric" or _bt_spl != "live":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" requires the MATCHING '
+                    "barotropic arm: NEMO's dyn_cor_2D_init runs the same "
+                    "triad on ff_f/e3f_vor under np_EEN "
+                    "(dynspg_ts.F90:1326-1345), and the depth-mean of the "
+                    "baroclinic Coriolis must be subtracted with that same "
+                    'stencil. Requires barotropic_coriolis="een_metric" and '
+                    'barotropic_coriolis_split="live"; got '
+                    f"{_bt_cor!r} / {_bt_spl!r}.")
+            # The constant-scale-factor requirement is a property of the MESH,
+            # which this config-only validator cannot see; it is enforced by
+            # ``assert_een_planetary_metric_term_vanishes`` at the point the
+            # card is built (nemo_testcase_recipe.py), where the grid is.
         if getattr(config, "vorticity_scheme", "al81") in (
                 "ene_total", "een_total"):
             _vs = getattr(config, "vorticity_scheme", "al81")
@@ -5062,6 +5179,7 @@ class LatLonCGridOceanModel:
                    nemo_operator_association=False,
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
+                   nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None):
         """Compute baroclinic tendencies.
 
@@ -5122,6 +5240,7 @@ class LatLonCGridOceanModel:
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
             nemo_stage_zad_operands=nemo_stage_zad_operands,
+            nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
             diagnose_momentum=return_nemo_operator_components,
@@ -5312,7 +5431,13 @@ class LatLonCGridOceanModel:
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
         _tke_n2_bundle = _tke_n2_bundle_override
-        if _tke_n2_bundle is None and _apply_implicit_vmix:
+        _carried_slope_n2 = (
+            _cfg_b.gm_redi is not None
+            and getattr(
+                _cfg_b.gm_redi, "slope_n2_evaluation", "recompute")
+            == "carried_step_entry")
+        if (_tke_n2_bundle is None
+                and (_apply_implicit_vmix or _carried_slope_n2)):
             _tke_n2_bundle = self._tke_step_entry_n2_bundle(
                 state, z_coord=_zc, config=_cfg_b)
         # Prescribed-flow lever (config.prescribed_flow, validated at
@@ -5476,6 +5601,15 @@ class LatLonCGridOceanModel:
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
                     _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1])
+        # The per-term observer needs the diagnostics this same call can
+        # already return; asking for them adds the decomposition and changes
+        # no tendency (the diagnostics are built from the terms as they are
+        # accumulated).  The live-stage operand bundle stays gated on its own
+        # flag so a per-term measurement cannot switch a production arm on.
+        _rhs_term_observer = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
+        _want_rhs_components = (
+            _return_live_stage_operands or callable(_rhs_term_observer))
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5490,11 +5624,21 @@ class LatLonCGridOceanModel:
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               nemo_stage_zad_operand_observer=(
+                                   self._nemo_ws_test_hooks.stage1_zad_operand_observer),
                                nemo_stage_zad_eta_after_override=(
                                    _nemo_stage1_zad_eta_after_override),
-                               return_nemo_operator_components=_return_live_stage_operands)
-        if _return_live_stage_operands:
-            tend, _, _nemo_ws_stage1_operator_operands = _tend_result
+                               return_nemo_operator_components=_want_rhs_components)
+        if _want_rhs_components:
+            tend, _mom_term_diagnostics, _live_operands = _tend_result
+            _nemo_ws_stage1_operator_operands = (
+                _live_operands if _return_live_stage_operands else None)
+            if callable(_rhs_term_observer):
+                jax.debug.callback(
+                    _rhs_term_observer,
+                    {name: getattr(_mom_term_diagnostics, name).data
+                     for name in type(_mom_term_diagnostics)._fields},
+                    ordered=False)
         else:
             tend = _tend_result
             _nemo_ws_stage1_operator_operands = None
@@ -5884,8 +6028,9 @@ class LatLonCGridOceanModel:
         _nemo_ws_process_qco = None
         _nemo_ws_process_surface_rate = None
         _nemo_ws_process_qsr_rate = None
+        _nemo_ws_qsr_association = None
         _nemo_ws_process_boundaries = None
-        _nemo_ws_process_Taa = None
+        _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
         _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
@@ -7075,6 +7220,10 @@ class LatLonCGridOceanModel:
                     _h_ref_ws[..., 0], 1.0e-10)
                 _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
                     _h_ref_ws[..., 0], 1.0e-10)
+                _qsr_stretch_override = (
+                    self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
+                if _qsr_stretch_override is not None:
+                    _r3t_m = _qsr_stretch_override
                 _qsr_b = shortwave_penetration_tendency(
                     surface_forcing.sw_down,
                     _zc.dz_ref, _zc.z_half_ref, _r3t_b,
@@ -7172,6 +7321,16 @@ class LatLonCGridOceanModel:
                 _nemo_ws_process_qco = (
                     _qt_b, _qt_12, _qt_aa,
                     h_k_old, _h_live_one_half, _h_live_new)
+                _nemo_ws_qsr_association = _NEMOWSQsrAssociationTrace(
+                    tendency_kbb=tend.dT_dt.data,
+                    qsr_kbb=_qsr_b,
+                    qsr_kmm=_qsr_m,
+                    thickness_kbb=h_k_old,
+                    thickness_kmm=_h_live_one_half,
+                    process_qsr_kbb=_process_qsr_kbb,
+                    process_surface_rate=_nemo_ws_process_surface_rate,
+                    process_qsr_rate=_nemo_ws_process_qsr_rate,
+                )
 
             def _momentum_stage_w(geom):
                 # NEMO's momentum consumers read the field its OWN continuity
@@ -8443,11 +8602,11 @@ class LatLonCGridOceanModel:
                 # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
                 # so the bolus is not even requested there.
                 native_bolus_slope_eta=_eta_gm_in,
-                # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
-                # carry the step-entry Nnn SSH rather than recomputing from
-                # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
+                # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
                 redi_flux_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,
+                return_redi_diagnostics=(_return_tracer_process_trace and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=(_return_tracer_process_trace and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None),
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
             )
@@ -8462,7 +8621,7 @@ class LatLonCGridOceanModel:
                         )
                     )
             else:
-                dT_gm, dS_gm = _gm_out
+                dT_gm, dS_gm, *_ldf_diag = _gm_out; _nemo_ws_ldf_diagnostics = _ldf_diag[0] if _ldf_diag else None
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
                 # dropped from the explicit F_z above (implicit_K33=True); recompute
@@ -9518,7 +9677,8 @@ class LatLonCGridOceanModel:
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
-                    or _nemo_ws_process_Taa is None):
+                    or _nemo_ws_process_Taa is None
+                    or _nemo_ws_qsr_association is None):
                 raise ValueError("WS-RK3 tracer process trace is incomplete")
             if (_return_vertical_solve_trace
                     and _nemo_ws_vertical_solve_trace is None):
@@ -9532,8 +9692,9 @@ class LatLonCGridOceanModel:
                 q_Kaa=_qaa,
                 boundaries=_nemo_ws_process_boundaries,
                 Taa=_nemo_ws_process_Taa,
+                qsr_association=_nemo_ws_qsr_association,
                 vertical_solve=_nemo_ws_vertical_solve_trace,
-                fct_activity=_nemo_ws_fct_activity,
+                fct_activity=_nemo_ws_fct_activity, ldf_diagnostics=_nemo_ws_ldf_diagnostics,
             )
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
@@ -11100,6 +11261,7 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
             _vmix_eos_fn = _make_eos_fn(
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated
@@ -11210,19 +11372,42 @@ class LatLonCGridOceanModel:
                 )
 
         # Private causal seam: two arrays replace the post-closure heat and
-        # viscosity profiles; a third optionally replaces formed tracer K;
-        # a fourth optionally replaces only the tracer e3w(Kmm) divisor.
+        # viscosity profiles; later arrays optionally replace formed tracer
+        # K, the tracer e3w(Kmm) divisor, the tracer e3t(Kaa) matrix weight,
+        # and the already-formed temperature content, in that order.
         _formed_effective_K_override = None
         _tracer_e3w_test_override = None
-        if effective_K_test_override is not None:
-            if len(effective_K_test_override) not in (2, 3, 4):
+        _tracer_e3t_test_override = None
+        _tracer_content_t_test_override = None
+        _fixed_solve_test_input = None
+        _fixed_solve_replace = None
+        if isinstance(effective_K_test_override,
+                      _NEMOVerticalSolveTestInput):
+            _fixed_solve_test_input = effective_K_test_override
+            _fixed_solve_replace = jnp.asarray(
+                effective_K_test_override.replace, dtype=bool)
+            if _fixed_solve_replace.shape != (6,):
                 raise ValueError(
-                    "vertical K test override requires 2, 3, or 4 arrays")
+                    "fixed vertical-solve test input requires six selectors")
+            K_v_cell = jnp.where(
+                _fixed_solve_replace[0],
+                effective_K_test_override.heat_K, K_v_cell)
+            A_v_cell = jnp.where(
+                _fixed_solve_replace[1],
+                effective_K_test_override.viscosity_K, A_v_cell)
+        elif effective_K_test_override is not None:
+            if len(effective_K_test_override) not in (2, 3, 4, 5, 6):
+                raise ValueError(
+                    "vertical K test override requires 2 through 6 arrays")
             K_v_cell, A_v_cell = effective_K_test_override[:2]
             if len(effective_K_test_override) >= 3:
                 _formed_effective_K_override = effective_K_test_override[2]
-            if len(effective_K_test_override) == 4:
+            if len(effective_K_test_override) >= 4:
                 _tracer_e3w_test_override = effective_K_test_override[3]
+            if len(effective_K_test_override) >= 5:
+                _tracer_e3t_test_override = effective_K_test_override[4]
+            if len(effective_K_test_override) == 6:
+                _tracer_content_t_test_override = effective_K_test_override[5]
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -11388,7 +11573,11 @@ class LatLonCGridOceanModel:
                 K_v_cell = K_v_cell * _wet_if_vmix
                 if dK_ddm_salt is not None:
                     dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
-            if _formed_effective_K_override is not None:
+            if _fixed_solve_test_input is not None:
+                K_v_cell = jnp.where(
+                    _fixed_solve_replace[2],
+                    _fixed_solve_test_input.formed_K, K_v_cell)
+            elif _formed_effective_K_override is not None:
                 K_v_cell = _formed_effective_K_override
             # IMPLICIT surface tracer forcing: add masked dt·S_surf to the
             # solve input, matching Veros's dt_tracer·forc/dz[surface] RHS.
@@ -11768,8 +11957,20 @@ class LatLonCGridOceanModel:
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
-        _tracer_e3w = (dz_half_cell if _tracer_e3w_test_override is None
-                       else _tracer_e3w_test_override)
+        if _fixed_solve_test_input is not None:
+            _tracer_e3w = jnp.where(
+                _fixed_solve_replace[3],
+                _fixed_solve_test_input.tracer_e3w, dz_half_cell)
+            _tracer_e3t = jnp.where(
+                _fixed_solve_replace[4],
+                _fixed_solve_test_input.tracer_e3t, dz_cell)
+        else:
+            _tracer_e3w = (dz_half_cell
+                           if _tracer_e3w_test_override is None
+                           else _tracer_e3w_test_override)
+            _tracer_e3t = (dz_cell
+                           if _tracer_e3t_test_override is None
+                           else _tracer_e3t_test_override)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -11795,11 +11996,19 @@ class LatLonCGridOceanModel:
                         _content_s = S_solve_in * dz_cell
                     else:
                         _content_t, _content_s = nemo_tracer_content_rhs
+                    if _fixed_solve_test_input is not None:
+                        _content_t = jnp.where(
+                            _fixed_solve_replace[5],
+                            _fixed_solve_test_input.temperature_content,
+                            _content_t)
+                    elif _tracer_content_t_test_override is not None:
+                        _content_t = _tracer_content_t_test_override
                     _tracer_wet = _literal_t_wet
                     _tracer_result = (
                         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
                             T_solve_in, S_solve_in, _content_t, _content_s,
-                            K_v_cell, dz_cell, _tracer_e3w, dt, _tracer_wet,
+                            K_v_cell, _tracer_e3t, _tracer_e3w, dt,
+                            _tracer_wet,
                             evaluation="nemo_literal",
                             implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
                     if return_tracer_solve_trace:
@@ -11814,7 +12023,7 @@ class LatLonCGridOceanModel:
                             heat_K=_trace_heat_K,
                             isoneutral_K=_trace_isoneutral_K,
                             effective_K=K_v_cell,
-                            e3t_after=dz_cell,
+                            e3t_after=_tracer_e3t,
                             e3w_now=_tracer_e3w,
                             wet=_tracer_wet,
                             content_T=_content_t,
@@ -14940,6 +15149,19 @@ class _NEMOWSTracerSolveTrace(NamedTuple):
     viscosity_K: object
 
 
+class _NEMOWSQsrAssociationTrace(NamedTuple):
+    """Consumed production-JIT QSR source-association arrays for Round 190."""
+
+    tendency_kbb: object
+    qsr_kbb: object
+    qsr_kmm: object
+    thickness_kbb: object
+    thickness_kmm: object
+    process_qsr_kbb: object
+    process_surface_rate: object
+    process_qsr_rate: object
+
+
 class _NEMOWSTracerProcessTrace(NamedTuple):
     """Private production-JIT stage-3 temperature boundaries for Round 124."""
 
@@ -14950,5 +15172,7 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
     q_Kaa: object  # noqa: N815 - NEMO time-level spelling is the record API.
     boundaries: object
     Taa: object
+    qsr_association: object
     vertical_solve: object
     fct_activity: object
+    ldf_diagnostics: object

@@ -603,8 +603,8 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         nemo_source_round(H_v_ref + 1.0) - v_mask)
     r1_v0 = nemo_source_round(v_mask / r1_v0_denom)
     r3_v_half_sum = nemo_source_round(0.5 * ssh_v_sum)
-    r3_v = nemo_source_round(
-        nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v)
+    r3_v = _zero_polar_lat_ends(nemo_source_round(
+        nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v))
     r1_v_entry = nemo_source_round(
         r1_v0 / nemo_source_round(1.0 + r3_v))
     if return_entry_inverse:
@@ -2401,17 +2401,39 @@ def nemo_flux_form_update_active(config) -> bool:
     )
 
 
-def _carried_nemo_depth_mean(state, dtype):
+def nemo_carried_barotropic_state_active(config) -> bool:
+    """Does this CONFIG select NEMO's carried external mode at the window seed?
+
+    ``BarotropicConfig.nemo_prognostic_barotropic_state`` is the single owner
+    of that choice.  Reading it off ``state.uu_b`` instead — a state-allocation
+    detail — would let the presence of an array pick the scheme, which is the
+    silent-fallback shape this predicate exists to remove (compare
+    :func:`nemo_flux_form_update_active`).
+    """
+    return bool(getattr(getattr(config, "barotropic", config),
+                        "nemo_prognostic_barotropic_state", False))
+
+
+def _carried_nemo_depth_mean(state, dtype, config):
     """Return the paired NEMO Kbb external-mode state, or ``None``.
 
     NEMO declares this independently of 3-D velocity at ``oce.F90:39,99``;
-    ``dynspg_ts.F90:484-500`` reads it directly at the window seed.  A partial
-    pair is structurally invalid and must not silently fall back to a reduction.
+    ``dynspg_ts.F90:484-500`` reads it directly at the window seed.  The CONFIG
+    decides whether this card runs that identity; a card that does and has no
+    pair, or only half a pair, is structurally invalid and must not silently
+    fall back to a reduction.
     """
+    if not nemo_carried_barotropic_state_active(config):
+        return None
     if (state.uu_b is None) != (state.vv_b is None):
         raise ValueError("NEMO prognostic depth mean requires both uu_b and vv_b")
     if state.uu_b is None:
-        return None
+        raise ValueError(
+            "barotropic.nemo_prognostic_barotropic_state=True selects NEMO's "
+            "carried external mode at the window seed, but this state carries "
+            "no uu_b/vv_b pair. Build the state with "
+            "nemo_prognostic_barotropic_velocity=True, or clear the config "
+            "flag.")
     return state.uu_b.data.astype(dtype), state.vv_b.data.astype(dtype)
 
 
@@ -2598,7 +2620,7 @@ def barotropic_substeps_latlon_cgrid(
     # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
-    _carried_baro = _carried_nemo_depth_mean(state, _dt)
+    _carried_baro = _carried_nemo_depth_mean(state, _dt, config)
     if _carried_baro is None:
         U_bar, V_bar = _depth_average_to_faces(
             u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
@@ -2626,6 +2648,31 @@ def barotropic_substeps_latlon_cgrid(
         _h_k_corr = compute_layer_thickness(
             _h_eta_corr, H_bathy, z_coord,
             min_water_column_m=config.min_water_column_m).astype(_dt)
+        # DECISION 67 (user, 2026-09-28) IS HELD, AND ITS PREMISE IS
+        # REFUTED.  The decision was to give this replacement depth-mean the
+        # card's own face-thickness convention, on the reading that NEMO forms
+        # its barotropic velocity by dividing the accumulated transport by the
+        # e1e2-weighted ssh-averaged face depth
+        # (``dynspg_ts.f90:835-842``).  That statement is inside
+        # ``IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av )``, and
+        # BOTH cards this campaign runs set ``ln_dynadv_vec = .TRUE.``
+        # (GYRE ``EXP00/ocean.output:780``, DINO ``RUN_TRAJ/ocean.output:1012``),
+        # so that branch never executes here.  What NEMO actually runs on these
+        # cards sums the substep VELOCITIES and divides by the weight sum --
+        # ``puu_b(:,:,Kaa) = puu_b(:,:,Kaa) + za1 * ua_e(:,:)``
+        # (``dynspg_ts.f90:768``) then ``/ r1_wgt1s``
+        # (``dynspg_ts.f90:802``) -- with NO face depth in it at all.
+        # Threading the ssh-average convention through here would therefore
+        # transcribe a convention NEMO does not use on any card under test, so
+        # the generic reduction stays until the user rules on the real
+        # statement.  Measured, for whoever picks this up: the threading is
+        # INERT on every ``rk3_ws`` card (GYRE and both tanks are byte-identical
+        # with and without it, and a 1e-6 relative perturbation of this
+        # reference moves no row of the certified ladder, because
+        # ``rk3_stage_barotropic_correction`` replaces the velocity downstream),
+        # and on DINO -- the one card that consumes it -- it moves the 90-day
+        # twin's ACC by 7e-6 Sv.  See the PR #1802 final re-certification
+        # receipt.
         U_bar_corr, V_bar_corr = _depth_average_to_faces(
             u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,
         )
@@ -3179,7 +3226,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
     _area_seed = grid.area.astype(_dt)
-    _carried_baro = _carried_nemo_depth_mean(state, _dt)
+    _carried_baro = _carried_nemo_depth_mean(state, _dt, config)
     if _carried_baro is None:
         U_bar, V_bar = _depth_average_to_faces(
             u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,

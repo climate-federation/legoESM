@@ -69,6 +69,7 @@ from legoesm.atmosphere.physics import (                          # noqa: E402
     ConvectionConfig, GravityWaveDragConfig, MicrophysicsConfig, PhysicsConfig,
     RadiationConfig, TurbulenceConfig, make_physics,
 )
+from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig  # noqa: E402
 from legoesm.core.field import Field                              # noqa: E402
 from legoesm.core.state import HydrostaticState                   # noqa: E402
 from legoesm.grids.vertical import create_sigma_coordinate        # noqa: E402
@@ -129,9 +130,10 @@ def build_state(nlev: int, ncol: int):
 
 
 def _physics(scheme: str, dt: float, sub_overrides: dict | None = None):
-    conv_kwargs: dict = {"scheme": scheme}
+    # The SCM column has no land fraction: ZM runs as an explicit aquaplanet.
+    conv_kwargs: dict = {"scheme": scheme, "zhang_mcfarlane": ZhangMcFarlaneConfig(land_fraction="none")}
     if sub_overrides:
-        base = getattr(ConvectionConfig(scheme=scheme), scheme)
+        base = getattr(ConvectionConfig(**conv_kwargs), scheme)
         conv_kwargs[scheme] = base._replace(**sub_overrides)
     return make_physics(
         PhysicsConfig(

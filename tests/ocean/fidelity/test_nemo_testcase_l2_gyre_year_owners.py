@@ -39,6 +39,9 @@ VERTICAL_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
 VERTICAL_EARLY_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round123/"
     "oracle_process_budget/oracle_trazdf_matrix_kt00000001.bin")
+ROUND179_CARD = (ROOT / "scripts" / "validate" / "ocean_fidelity"
+                 / "testcases"
+                 / "nemo_testcase_l2_gyre_round179_slope_walk")
 
 
 @pytest.fixture(scope="module")
@@ -170,6 +173,39 @@ def test_round123_process_record_layout_and_reader(tmp_path, harness):
 
     with pytest.raises(harness.GateError, match="1415292 bytes"):
         harness.read_process_record(record_path, truncate=True)
+
+
+def test_process_card_endpoint_follows_explicit_interval(tmp_path, harness):
+    output = tmp_path / "ocean.output"
+    output.write_text("""
+       number of the last time step    nn_itend = 1080
+       ocean time step                 rn_Dt = 14400.0
+       Tiling (T) or not (F)           ln_tile = F
+       Light penetration in temperature Eq. ln_traqsr = T
+       open boundaries not used (ln_bdy = F)
+       geothermal heating at ocean bottom ln_trabbc = F
+       bottom boundary layer flag ln_trabbl = F
+       Apply relaxation or not ln_tradmp = F
+       convection mass flux (mfc) ln_zdfmfc = F
+       OSMOSIS-OBL closure (OSM) ln_zdfosm = F
+       non-penetrative convection (npc) ln_zdfnpc = F
+    """)
+    rows = harness._resolved_process_card(output, expected_itend=1080)
+    assert rows["itend_1080"]
+    with pytest.raises(harness.GateError,
+                       match="resolved process card differs: itend_1440"):
+        harness._resolved_process_card(output, expected_itend=1440)
+
+
+def test_process_interval_is_day_aligned_and_fail_closed(harness):
+    assert harness._day_aligned_process_interval(1, 1080, "test") == (
+        0, 180, 1080)
+    assert harness._day_aligned_process_interval(1081, 1440, "test") == (
+        180, 240, 360)
+    with pytest.raises(harness.GateError, match="daily boundaries"):
+        harness._day_aligned_process_interval(2, 1080, "test")
+    with pytest.raises(harness.GateError, match="positive and ordered"):
+        harness._day_aligned_process_interval(1081, 1080, "test")
 
 
 def test_round136_record_availability_refuses_endpoint_relabeling(harness):
@@ -469,6 +505,22 @@ def test_round124_lego_process_budget_closes_and_ulp_control_moves(harness):
         rows["surface_boundary"], inert["surface_boundary"], mask) == 0
 
 
+def test_process_rounding_closes_the_paired_interval_directly(harness):
+    target = np.asarray([1.0, -1.0], dtype=np.float64)
+    rows = {
+        "incoming": np.asarray([1.0e16, -1.0e16], dtype=np.float64),
+        "shortwave": np.asarray([-1.0e16, 1.0e16], dtype=np.float64),
+        "surface_boundary": np.asarray([0.25, -0.25], dtype=np.float64),
+    }
+    rounding, reconstructed = harness._explicit_process_rounding(target, rows)
+    assert np.array_equal(reconstructed, target)
+    assert np.any(rounding != 0.0)
+    without_rounding = np.zeros_like(target)
+    for values in rows.values():
+        without_rounding += values
+    assert not np.array_equal(without_rounding, target)
+
+
 def test_round124_effect_control_reaches_downstream_not_carried_state(harness):
     from types import SimpleNamespace
 
@@ -726,6 +778,27 @@ def test_round123_acquisition_card_is_additive_and_fail_closed(harness):
     assert "ROUND123_PROCESS_RECORD_READY" in run_sh
 
 
+def test_round177_record_header_tracks_the_compiled_writer():
+    """The admission pins Kbb/Kmm/Krhs in the writer's literal order."""
+    root = Path(
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_round177_tracer_ldf")
+    patch = (root / "traldf_iso_round177.patch").read_text()
+    run_sh = (root / "run.sh").read_text()
+    assert "1, kt, Kbb, Kmm, Krhs" in patch
+    assert (
+        "expected_header = (1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)"
+        in run_sh)
+    process_patch = Path(
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_round123_process_budget/"
+        "stprk3_stg_round123.patch").read_text()
+    assert "kstg, Kbb, Kmm, Krhs, Kaa" in process_patch
+    assert (
+        "process_header != (1, 1081, 3, 1, 2, 3, 3, 36, 26, 31, 64)"
+        in run_sh)
+
+
 def _toy():
     lat = np.array([[18.0, 30.0, 42.0]])
     wet = np.ones_like(lat, dtype=bool)
@@ -979,3 +1052,253 @@ def test_round167_vertical_sensitivity_ranking_is_complete_and_signed(harness):
     broken.pop("complete_K")
     with pytest.raises(harness.GateError, match="no complete_K arm"):
         harness._rank_vertical_sensitivity(broken)
+
+
+def test_round174_solve_input_pair_ranks_both_arms_and_plants_fire(harness):
+    """The paired scorer registers both arms and catches either scale plant."""
+    shape = (20, 30, 30)
+    wet = np.ones(shape, dtype=bool)
+    baseline = np.full(shape, 10.0, dtype=np.float64)
+    e3t = baseline + np.float64(1.0e-4)
+    content = baseline.copy()
+    content[:10] += np.float64(1.0e-5)
+    fields = {
+        "baseline": baseline,
+        "source": baseline.copy(),
+        "e3t_wet": e3t,
+        "content_wet": content,
+    }
+
+    scored = harness._score_solve_input_temperatures(fields, wet)
+    assert scored["baseline"]["cells_unequal"] == 0
+    assert scored["baseline"]["day240_T3D_rms_K"] == 0.0
+    assert [row["arm"] for row in scored["ranking"]] == [
+        "e3t_wet", "content_wet"]
+    assert scored["prediction_e3t_larger_than_content"] == "CONFIRMED"
+
+    for plant in ("solve-input-e3t-scale",
+                  "solve-input-content-scale"):
+        with pytest.raises(harness.GateError, match="scale was caught"):
+            harness._score_solve_input_temperatures(
+                fields, wet, plant=plant)
+
+    incomplete = dict(fields)
+    incomplete.pop("content_wet")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._score_solve_input_temperatures(incomplete, wet)
+
+    moved_source = dict(fields)
+    moved_source["source"] = baseline.copy()
+    moved_source["source"][0, 0, 0] = np.nextafter(10.0, np.inf)
+    with pytest.raises(harness.GateError, match="baseline moved 1 source"):
+        harness._score_solve_input_temperatures(moved_source, wet)
+
+
+def test_round174_solve_input_pair_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The record scorer must refuse before reading data from a dirty tree."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.score_nemo_solve_input_pair(
+            tmp_path / "pair", tmp_path / "baseline",
+            tmp_path / "source", tmp_path / "mesh")
+
+
+def test_round175_content_rows_find_the_first_moved_family(
+        harness, monkeypatch):
+    """The content registry distinguishes before state from accumulated RHS."""
+    shape = (2, 3, 2)
+    wet = np.ones(shape, dtype=bool)
+    nemo = {
+        "T_Kbb_in": np.full(shape, 3.0),
+        "e3t_Kbb": np.full(shape, 4.0),
+        "T_Krhs_in": np.full(shape, 5.0),
+        "e3t_Kmm": np.full(shape, 6.0),
+    }
+    before = nemo["e3t_Kbb"] * nemo["T_Kbb_in"]
+    accumulated = (np.float64(2.0) * nemo["e3t_Kmm"]) * nemo["T_Krhs_in"]
+    nemo["rhs_T"] = before + accumulated
+    monkeypatch.setattr(
+        harness, "_vertical_field",
+        lambda _record, name, _nlev=None: np.array(nemo[name], copy=True))
+    observed = {
+        "T_Kbb": nemo["T_Kbb_in"].copy(),
+        "e3t_Kbb": nemo["e3t_Kbb"].copy(),
+        "before_content": before.copy(),
+        "T_Krhs": nemo["T_Krhs_in"].copy(),
+        "e3t_Kmm": nemo["e3t_Kmm"].copy(),
+        "accumulated_Krhs_content": accumulated.copy(),
+        "content": nemo["rhs_T"].copy(),
+        "rebuilt_content": nemo["rhs_T"].copy(),
+        "advection_increment": np.ones(shape),
+        "source_increment": accumulated - 1.0,
+    }
+    observed["accumulated_Krhs_content"][0, 0, 0] = np.nextafter(
+        observed["accumulated_Krhs_content"][0, 0, 0], np.inf)
+    observed["content"][0, 0, 0] = (
+        observed["before_content"][0, 0, 0]
+        + observed["accumulated_Krhs_content"][0, 0, 0])
+    observed["rebuilt_content"] = (
+        observed["before_content"]
+        + observed["accumulated_Krhs_content"])
+    scored = harness._content_walk_rows(
+        observed, {"arrays": {"rDt": 2.0}}, wet)
+    assert scored["first_non_bit"] == "accumulated_Krhs_content"
+    assert scored["rows"]["before_content"]["bit_exact"] is True
+    assert scored["rows"]["accumulated_Krhs_content"][
+        "cells_unequal"] == 1
+
+
+def test_round175_content_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The developed walk refuses before opening either oracle record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_content_producer_walk(
+            tmp_path / "vertical", tmp_path / "daily",
+            tmp_path / "audit", "0" * 40)
+
+
+def test_round176_content_process_registry_and_projection(harness):
+    """Every compiled process row contributes to the complete error."""
+    shape = (2, 2, 2)
+    wet = np.ones(shape, dtype=bool)
+    expected = {
+        "advection": np.full(shape, 1.0),
+        "surface_boundary": np.full(shape, 3.0),
+        "shortwave": np.full(shape, 6.0),
+        "lateral_diffusion": np.full(shape, 10.0),
+    }
+    actual = {name: values.copy() for name, values in expected.items()}
+    # One error in each isolated component; cumulative writes retain all
+    # earlier changes, exactly as the compiled Krhs accumulator does.
+    actual["advection"][0, 0, 0] += 0.25
+    actual["surface_boundary"][0, 0, 0] += 0.50
+    actual["shortwave"][0, 0, 0] += 1.00
+    actual["lateral_diffusion"][0, 0, 0] += 2.00
+    scored = harness._accumulated_content_process_rows(
+        actual, expected, actual["lateral_diffusion"],
+        expected["lateral_diffusion"], wet)
+    assert scored["first_non_bit_cumulative_boundary"] == "advection"
+    assert scored["registered_cumulative_order"] == [
+        "advection", "surface_boundary", "shortwave",
+        "lateral_diffusion", "complete_accumulated_content"]
+    assert set(scored["isolated_components"]) == {
+        "advection", "surface_boundary", "shortwave",
+        "lateral_diffusion", "rounding_closure"}
+    assert scored["reconstruction"]["bit_exact"] is True
+    assert np.isclose(
+        scored["signed_projection_sum_Km"],
+        scored["complete_error_rms_Km"])
+
+    incomplete = dict(actual)
+    incomplete.pop("shortwave")
+    with pytest.raises(harness.GateError, match="registry is incomplete"):
+        harness._accumulated_content_process_rows(
+            incomplete, expected, actual["lateral_diffusion"],
+            expected["lateral_diffusion"], wet)
+
+
+def test_round176_content_process_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The process walk refuses before opening either oracle record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_accumulated_content_process_walk(
+            tmp_path / "process", tmp_path / "vertical",
+            tmp_path / "daily", tmp_path / "audit", "0" * 40)
+
+
+def test_round178_ldf_walk_pins_record_and_production_diagnostics(harness):
+    """The developed walk consumes the admitted layout through the step."""
+    assert harness.ROUND177_LDF_HEADER == (
+        1, 1081, 1, 2, 3, 36, 26, 31, 30, 1, 64, 38, 11)
+    assert len(harness.ROUND177_LDF_3D) == 38
+    assert len(harness.ROUND177_LDF_2D) == 11
+    model = Path(
+        "packages/ocean/legoesm/ocean/dynamics/"
+        "ocean_model_latlon_cgrid.py").read_text()
+    operator = Path(
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/"
+        "gm_redi_latlon_cgrid.py").read_text()
+    assert "tracer_ldf_diagnostics" in model
+    assert "return_redi_diagnostics=" in model
+    assert '"e3u_flux": e3u_flux' in operator
+    assert '"tendency": tend' in operator
+
+
+def test_round178_ldf_walk_refuses_dirty_worktree(
+        harness, tmp_path, monkeypatch):
+    """The statement walk refuses before it opens the acquired record."""
+    from legoesm.ocean.fidelity import provenance
+
+    monkeypatch.setattr(
+        provenance, "worktree_stamp",
+        lambda: {"clean": False, "commit": "synthetic-dirty"})
+    with pytest.raises(harness.GateError,
+                       match="requires a clean committed tree"):
+        harness.developed_tracer_ldf_statement_walk(
+            tmp_path / "ldf", tmp_path / "daily",
+            tmp_path / "audit", "0" * 40)
+
+
+def test_round179_slope_record_layout_is_derived_and_additive():
+    """The acquisition schema and additive source card stay synchronized."""
+    count3 = 36 * 26 * 31
+    count2 = 36 * 26
+    expected = 16 + 13 * 4 + 31 * count3 * 8 + 17 * count2 * 8 + 3 * 31 * 8
+    assert expected == 7_324_076
+    run = (ROUND179_CARD / "run.sh").read_text()
+    patch = (ROUND179_CARD / "ldfslp_round179.patch").read_text()
+    assert "readonly EXPECTED_SIZE=7324076" in run
+    assert "expected_header = (1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)" in run
+    assert "IN_RUN_SHAPIRO_CALIBRATION_PASS" in run
+    assert "/usr/bin/time" not in run
+    removed = [line for line in patch.splitlines()
+               if line.startswith("-") and not line.startswith("---")]
+    assert removed == []
+
+
+def test_round179_source_layout_plant_fires():
+    """Removing one registered recurrence row is a named nonzero refusal."""
+    result = subprocess.run(
+        [str(ROUND179_CARD / "run.sh"), "--plant-layout"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    output = result.stdout + result.stderr
+    assert result.returncode == 69, output
+    assert "STATUS PLANT-FIRED: source-layout" in output
+    assert "REFUSE: intentional source-layout plant exit" in output
+
+
+def test_round180_slope_walk_registry_and_production_hook(harness):
+    """The admitted causal schema is complete and routed through production."""
+    assert harness.ROUND179_SLOPE_HEADER == (
+        1, 1081, 1, 1, 36, 26, 31, 30, 31, 17, 3, 0, 179)
+    assert len(harness.ROUND179_SLOPE_3D) == 31
+    assert len(harness.ROUND179_SLOPE_2D) == 17
+    assert len(harness.ROUND179_SLOPE_1D) == 3
+    model = Path(
+        "packages/ocean/legoesm/ocean/dynamics/"
+        "ocean_model_latlon_cgrid.py").read_text()
+    operator = Path(
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/"
+        "gm_redi_latlon_cgrid.py").read_text()
+    assert "return_redi_slope_diagnostics=" in model
+    assert "native_slope_nmln_override=" in model
+    assert "def _nemo_native_slope_diagnostics" in operator
+    assert '"zuslp_post": post_u' in operator

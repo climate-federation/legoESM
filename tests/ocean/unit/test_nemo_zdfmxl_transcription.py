@@ -715,6 +715,42 @@ def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
         np.testing.assert_array_equal(np.asarray(selected), np.asarray(implicit))
 
 
+def test_carried_mld_n2_skips_dead_recompute_with_dry_mesh_e3w(monkeypatch):
+    """The carried rn2b arm consumes its operand before any local eosbn2."""
+    import legoesm.ocean.eos as eos
+    from legoesm import constants
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_mld_from_n2_integral,
+    )
+
+    nlat, nlon, nlev = 3, 4, 6
+    z = _z_coord(
+        np.geomspace(10.0, 100.0, nlev), nlat, nlon,
+        np.full((nlat, nlon), nlev - 1))
+    active = np.asarray(z.is_active) > 0.5
+    iface_wet = active[..., :-1] & active[..., 1:]
+    carried_e3w = np.where(iface_wet, 1.0, 0.0)
+    carried_n2 = np.zeros_like(carried_e3w)
+
+    def dead_recompute(*_args, **_kwargs):
+        raise AssertionError("carried rn2b arm evaluated a dead local eosbn2")
+
+    monkeypatch.setattr(eos, "compute_buoyancy_frequency_nemo_bn2",
+                        dead_recompute)
+    hml, m_base = _nemo_mld_from_n2_integral(
+        jnp.full((nlat, nlon, nlev), 10.0),
+        jnp.full((nlat, nlon, nlev), 35.0),
+        jnp.ones((nlat, nlon)), z, make_eos_fn("nemo_seos", None),
+        GMRediConfig().mld_rho_c, constants.g, constants.rho_ocean_nemo,
+        active_3d=z.is_active,
+        jacobian=jnp.ones((nlat, nlon)), n2_override=carried_n2,
+        e3w_override=carried_e3w)
+    assert np.all(np.isfinite(np.asarray(hml)))
+    assert np.all(np.asarray(m_base) >= 0)
+
+
 def test_wslp_ml_anchor_never_reads_past_the_columns_own_bottom():
     """The w-slope ML-ramp anchor index (``kanc``, ldfslp.F90 ``nmln+1``) must
     never exceed the COLUMN'S OWN deepest wet level, not just the array's
