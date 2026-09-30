@@ -132,6 +132,26 @@ def get_adapter(mode: str):
     return getattr(module, class_name)
 
 
+# Template ids (relative to config/templates, no .yaml) that were renamed or
+# removed; resolving one raises with a pointer instead of "not found".
+RETIRED_TEMPLATES: dict[str, str] = {
+    "coupled/amip": (
+        "template 'coupled/amip' was renamed to "
+        "'3d_idealized/hydrostatic_gray_1yr': it never ran AMIP (analytical "
+        "forcing, gray radiation).  For AMIP use "
+        "config/amip/amip_production.yaml"
+    ),
+}
+
+
+def retired_template_message(template: str) -> str | None:
+    """Migration message if *template* (an id or a path) is retired."""
+    rel = str(template).replace("\\", "/")
+    rel = rel[:-5] if rel.endswith(".yaml") else rel
+    rel = rel.rsplit("templates/", 1)[-1]
+    return RETIRED_TEMPLATES.get(rel)
+
+
 def load_adapter(path: str):
     """Read *path*'s mode, then load it through the matching adapter.
 
@@ -139,8 +159,13 @@ def load_adapter(path: str):
     section heuristics); the adapter then re-reads and merges onto its own
     defaults.  Returns a ``(mode, adapter_instance)`` tuple.
     """
+    import os
+
     import yaml
 
+    retired = retired_template_message(path)
+    if retired is not None and not os.path.isfile(path):
+        raise ValueError(retired)
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
     mode = detect_mode(raw)

@@ -242,7 +242,8 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         ),
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
         thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
-        richards=RichardsConfig(),
+        # Land tables were calibrated with the drainage limiter at 0.5 (#862).
+        richards=RichardsConfig(fc_drain_saturation=0.5),
         carbon=CarbonConfig(
             scheme=args.carbon_scheme,
             woody=args.carbon_woody,

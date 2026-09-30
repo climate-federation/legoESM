@@ -90,10 +90,6 @@ UNREACHABLE_PARAMS = frozenset({
     'ocean.backscatter.efficiency',
     # ocean.backscatter: tau_relax_days (1)
     'ocean.backscatter.tau_relax_days',
-    # ocean.bottom_drag: linear (1)
-    'ocean.bottom_drag.linear.r',
-    # ocean.bottom_drag: quadratic (1)
-    'ocean.bottom_drag.quadratic.C_d',
     # ocean.conv: enhanced_diffusion (2)
     'ocean.conv.enhanced_diffusion.K_bg',
     'ocean.conv.enhanced_diffusion.K_conv',

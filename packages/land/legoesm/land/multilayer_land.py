@@ -1019,15 +1019,6 @@ def _step_multilayer_land_impl(
         extractable_water / dt + infil_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
-    # --- Combine the two phase streams ---
-    # Total vapour mass leaving the surface = pack sublimation + soil / plant
-    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
-    # unmet by a reservoir cap or the bare-soil resistance returns to the ground
-    # heat flux as ``evap_excess_energy`` so the surface energy budget still
-    # closes (in - out - dStorage = 0).
-    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
-    evap_excess_energy = lhflx - lhflx_actual
-
     # --- Root water uptake partition ---
     # ``soil_flux`` is the L_v soil / plant-water stream ONLY: the snowpack
     # already swallowed the sublimation / frost stream (``sublim_actual``)
@@ -1062,6 +1053,7 @@ def _step_multilayer_land_impl(
     # the total soil+canopy water budget closes against precip - ET - runoff and
     # the reported LE is unchanged.
     W_canopy_new = state.W_canopy
+    _wet_evap = jnp.zeros_like(evap_transp)
     if _do_intercept:
         _wet_evap_demand = jnp.maximum(
             surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
@@ -1103,6 +1095,31 @@ def _step_multilayer_land_impl(
     # band-aid for the old infiltration/evap mismatch; theta_from_psi is now
     # bounded below at theta_r by construction, the coupled surface cell carries
     # the ponded excess, and the mixed-form solve closes the water budget.
+
+    # --- Realised soil / plant-water evaporation (what the soil actually gave) ---
+    # A draw the dry column cannot supply (bare-soil top flux or root sink) ends
+    # at the Richards psi dry floor, which REFILLS it: the soil loses less than
+    # the demand (measured: 0.51 of a 0.8 mm/d desert demand was refilled).  The
+    # evaporation handed to the atmosphere is therefore the demand minus that
+    # refill (``richards_out.refill``, bounded by the solver's draw, so a negative
+    # or non-draw residual is never turned into evaporation or dew; the solver
+    # takes non-draw created water back out of the soil).  Draws are NOT pre-capped by
+    # start-of-step layer water: that would also cut legitimate capillary supply
+    # from moister layers below (-3.7% of a moist-subsoil day's ET, measured).
+    # Transpiration is rebuilt from the sink the solve received, so a column with
+    # zero root weight reports none.  Units: kg m-2 s-1, positive = upward.
+    evap_transp = rho_w * jnp.sum(sink * dz[None, :], axis=-1)
+    soil_evap = evap_bare + evap_transp + _wet_evap - richards_out.refill * rho_w / dt
+
+    # --- Combine the two phase streams ---
+    # Total vapour mass leaving the surface = pack sublimation + soil / plant
+    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
+    # unmet by a reservoir cap, the bare-soil resistance or the soil supply limit
+    # returns to the ground heat flux as ``evap_excess_energy`` (below) so the
+    # surface energy budget still closes (in - out - dStorage = 0); the skin
+    # temperature is not re-solved this step.
+    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
+    evap_excess_energy = lhflx - lhflx_actual
 
     # --- Soil thermal diffusion (final, with converged G) ---
     # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
