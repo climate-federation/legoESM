@@ -58,7 +58,8 @@ def step_lake(
     # ``L · evap_rate``, so phase-correct L is the only switch needed.
     # Earlier the lake always used L_v, biasing lhflx by ~13% over
     # frozen lakes (coupler-conservation audit F17).
-    L_eff = jnp.where(is_frozen, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_epi, is_frozen)
 
     # Frozen lakes are bright: absorb THIS step's shortwave through the
     # ice/snow albedo, keyed on the same start-of-step frozen state as the

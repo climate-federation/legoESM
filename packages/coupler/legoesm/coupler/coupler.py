@@ -15,7 +15,6 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.precision import get_policy
-from legoesm.thermo import latent_heat_vaporization_sst
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
     apply_gustiness,
@@ -406,12 +405,14 @@ def ocean_tile_response(
     _ssh_dtype = ocean_sst.dtype
     # Ocean tile freshwater: P − E, where evap is back-derived from lhflx
     # with the SAME latent heat the flux used (ocean is liquid, never
-    # sublimes): SST-dependent L_vap on the aerobulk MOST branch, L_v
-    # otherwise.  Positive = freshwater INTO ocean.
-    if _is_most and _thermo_conv == "aerobulk":
-        _L_evap = latent_heat_vaporization_sst(ocean_sst)
+    # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
+    # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
+    # which charges its oracle's constant.  Positive = freshwater INTO ocean.
+    if config.bulk_scheme == "large_yeager_cesm":
+        _L_evap = constants.L_v   # latent-ok: CESM shr_flux_atmOcn oracle constant (compute_sam_oceflx_fluxes charges it)
     else:
-        _L_evap = constants.L_v
+        from legoesm.thermo import latent_heat_vaporization
+        _L_evap = latent_heat_vaporization(ocean_sst)
     evap_rate = lhflx / _L_evap   # kg/m²/s, positive = up (ocean → atm)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(

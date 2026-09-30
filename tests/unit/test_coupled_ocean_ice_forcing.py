@@ -26,8 +26,6 @@ import unittest
 
 import jax.numpy as jnp
 
-from legoesm import constants
-
 
 def _fake_tile(shape, *, lhflx=50.0, tau_x=0.0, tau_y=0.0):
     """Minimal ocean-tile response with the fields ``_assemble`` reads."""
@@ -37,7 +35,9 @@ def _fake_tile(shape, *, lhflx=50.0, tau_x=0.0, tau_y=0.0):
         lw_up=jnp.full(shape, 400.0),
         shflx=jnp.full(shape, 10.0),
         lhflx=jnp.full(shape, lhflx),   # >0 => evaporation
-        surface_mass_flux=jnp.full(shape, lhflx) / constants.L_v,
+        # The driver reads the tile's WATER flux directly (never lhflx / L);
+        # any nonzero mock value exercises the open-water scaling below.
+        surface_mass_flux=jnp.full(shape, lhflx * 4.0e-7),
         tau_x=jnp.full(shape, tau_x),
         tau_y=jnp.full(shape, tau_y),
     )

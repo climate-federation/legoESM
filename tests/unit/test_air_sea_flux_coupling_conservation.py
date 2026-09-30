@@ -118,8 +118,14 @@ class TestAtmConsumesCouplerFlux:
             pipe.sigma_half[-1] - pipe.sigma_half[-2])
         dT_bottom = out.dT_dt[..., -1]
         dq_bottom = out.dq_v_dt[..., -1]
-        expect_dT = constants.g * sh_ovr / (constants.c_pd * dp_low)
-        expect_dq = constants.g * (lh_ovr / constants.L_v) / dp_low
+        # No water channel: the kick inverts the SAME L_v(T_sfc) the bulk law
+        # charges, and the heat kick books (lhflx - L_v * evap), the enthalpy
+        # the atmosphere's constant-L convention would otherwise over-credit.
+        from legoesm.thermo import latent_heat_vaporization
+        evap_fb = lh_ovr / latent_heat_vaporization(inp["sst"])
+        expect_dq = constants.g * evap_fb / dp_low
+        expect_dT = constants.g * (sh_ovr + lh_ovr - constants.L_v * evap_fb) / (
+            constants.c_pd * dp_low)
         # gray radiation also heats the column, so compare the DIFFERENCE
         # between override-on and a zero-flux override (isolates the BL kick).
         out0 = _call(sfc_shflx_override=jnp.zeros(shape_2d),
@@ -128,6 +134,18 @@ class TestAtmConsumesCouplerFlux:
                             rtol=1e-10, atol=1e-12)
         assert jnp.allclose(dq_bottom - out0.dq_v_dt[..., -1], expect_dq,
                             rtol=1e-10, atol=1e-12)
+        # With the coupler's water channel the moisture kick is that water,
+        # exactly, and the heat kick carries the physical-vs-reference gap.
+        evap_ovr = jnp.full(shape_2d, 3.0e-5)
+        out_w = _call(sfc_shflx_override=sh_ovr, sfc_lhflx_override=lh_ovr,
+                      sfc_evap_override=evap_ovr)
+        assert jnp.allclose(out_w.dq_v_dt[..., -1] - out0.dq_v_dt[..., -1],
+                            constants.g * evap_ovr / dp_low, rtol=1e-10, atol=1e-12)
+        assert jnp.allclose(
+            out_w.dT_dt[..., -1] - out0.dT_dt[..., -1],
+            constants.g * (sh_ovr + lh_ovr - constants.L_v * evap_ovr) / (constants.c_pd * dp_low),
+            rtol=1e-10, atol=1e-12)
+        assert jnp.allclose(out_w.lhflx, lh_ovr)   # reported latent heat stays physical
 
     def test_override_none_byte_identical(self):
         """Override absent => the atmosphere computes its own bulk fluxes,
@@ -329,13 +347,19 @@ class TestAirSeaBudgetCloses:
         col_dE = jnp.sum(
             constants.c_pd * (dp / constants.g)
             * (out.dT_dt - out0.dT_dt), axis=-1)
-        assert jnp.allclose(col_dE, sh_ovr, rtol=1e-9, atol=1e-9)
+        # Heat-only override: the water is lhflx / L_v(T_sfc) (the inverse of
+        # the bulk law's own L) and the heat kick books the gap between that
+        # water credited at the column's reference L_v and the physical lhflx.
+        from legoesm.thermo import latent_heat_vaporization
+        evap = lh_ovr / latent_heat_vaporization(inp["sst"])
+        assert jnp.allclose(col_dE, sh_ovr + lh_ovr - constants.L_v * evap, rtol=1e-9, atol=1e-9)
 
         # Column-integrated water-mass change == evap == lhflx / L_v.
         col_dW = jnp.sum(
             (dp / constants.g) * (out.dq_v_dt - out0.dq_v_dt), axis=-1)
-        assert jnp.allclose(col_dW, lh_ovr / constants.L_v,
-                            rtol=1e-9, atol=1e-12)
+        assert jnp.allclose(col_dW, evap, rtol=1e-9, atol=1e-12)
+        # Physical closure: c_p dT + L_v dq over the column == shflx + lhflx exactly.
+        assert jnp.allclose(col_dE + constants.L_v * col_dW, sh_ovr + lh_ovr, rtol=1e-9, atol=1e-9)
 
 
 class TestTurbulenceLowerBC:
@@ -400,70 +424,47 @@ class TestCoupledDriverWiring:
         assert atm.get_sfc_flux_override is not None
 
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
-        assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a blended response exists, its LH is the tile MASS flux times
-        # the atmosphere's L_v, and its SH carries the (L_vap - L_v)*E
-        # remainder so energy closes (see the tests below).
-        from legoesm import constants
+        assert atm.get_sfc_flux_override(0.0) == (None, None, None)
+        # Once a blended response exists, its SH/LH flow through.
         sh = jnp.full((6, 4, 4), 22.0)
-        mf = jnp.full((6, 4, 4), 77.0 / constants.L_v)
-        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=mf * 2.44e6,
-                                                 surface_mass_flux=mf)
-        got_sh, got_lh = atm.get_sfc_flux_override(0.0)
-        np.testing.assert_allclose(got_sh, sh + mf * (2.44e6 - constants.L_v),
-                                   rtol=1e-12)
-        np.testing.assert_allclose(got_lh, 77.0, rtol=1e-12)
-
-    def test_hook_hands_the_tile_mass_flux_scaled_by_the_atmosphere_L_v(self):
-        """Water conservation across the coupler: the atmosphere derives its
-        moisture source as lhflx / L_v, so the hook must hand it
-        surface_mass_flux * L_v, not the tile's lhflx (which used L_vap(SST)
-        under the aerobulk convention, ~2 % smaller)."""
-        from types import SimpleNamespace
-        from legoesm import constants
-        from legoesm.driver.coupled_config import CoupledConfig
-        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
-        atm = SimpleNamespace(get_sfc_flux_override=None)
-        evap = jnp.array([1.0e-5, 2.0e-5])
-        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
-                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
-                               surface_mass_flux=evap)
-        drv = SimpleNamespace(
-            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=resp)
-        CoupledESMDriver._override_sfc_fluxes(drv)
-        shflx, lhflx = atm.get_sfc_flux_override(0.0)
-        # sensible carries the (L_vap - L_v)*E remainder (energy closure)
-        np.testing.assert_allclose(
-            shflx, resp.shflx + evap * (2.44e6 - constants.L_v), rtol=1e-12)
-        np.testing.assert_allclose(lhflx / constants.L_v, evap, rtol=1e-12)
-        assert not np.allclose(lhflx, resp.lhflx)
-        drv._last_sfc_response = SimpleNamespace(shflx=resp.shflx, lhflx=resp.lhflx,
-                                                 surface_mass_flux=None)
+        lh = jnp.full((6, 4, 4), 77.0)
+        ev = jnp.full((6, 4, 4), 3.1e-5)
+        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh, surface_mass_flux=ev)
+        got_sh, got_lh, got_ev = atm.get_sfc_flux_override(0.0)
+        assert jnp.array_equal(got_sh, sh)
+        assert jnp.array_equal(got_lh, lh)          # physical latent heat, untouched
+        assert jnp.array_equal(got_ev, ev)          # the tiles' water flux, untouched
+        # A response without the water flux is refused, never re-derived from lhflx.
+        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
         with pytest.raises(ValueError, match="surface_mass_flux"):
             atm.get_sfc_flux_override(0.0)
 
     def test_hook_closes_water_and_energy_together(self):
-        """The atmosphere's turbulent energy input (sensible + latent it is
-        handed) must equal the ocean tile's turbulent heat loss
-        (shflx + lhflx), while its moisture source stays the tile mass flux."""
+        """The atmosphere's moisture source is the tile mass flux, and its heat
+        intake (sensible + latent_enthalpy_correction + the L_v*E its moist
+        enthalpy credits the water with) equals the tiles' shflx + lhflx, with
+        the tile charging a latent heat != L_v (main #1822 closure, expressed
+        through the atmosphere's own correction)."""
         from types import SimpleNamespace
-        from legoesm import constants
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            latent_enthalpy_correction)
         from legoesm.driver.coupled_config import CoupledConfig
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         atm = SimpleNamespace(get_sfc_flux_override=None)
         evap = jnp.array([1.0e-5, 2.0e-5])
         resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
-                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               lhflx=evap * 2.44e6,           # L(SST) < L_v
                                surface_mass_flux=evap)
         drv = SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
             _atm=atm, _last_sfc_response=resp)
         CoupledESMDriver._override_sfc_fluxes(drv)
-        sh_atm, lh_atm = atm.get_sfc_flux_override(0.0)
-        np.testing.assert_allclose(lh_atm / constants.L_v, evap, rtol=1e-12)
-        np.testing.assert_allclose(sh_atm + lh_atm, resp.shflx + resp.lhflx,
-                                   rtol=1e-12)
+        sh, lh, ev = atm.get_sfc_flux_override(0.0)
+        np.testing.assert_allclose(ev, evap, rtol=1e-12)
+        heat_in = sh + latent_enthalpy_correction(lh, ev) + constants.L_v * ev
+        np.testing.assert_allclose(heat_in, resp.shflx + resp.lhflx, rtol=1e-12)
+        # Non-vacuous: without the correction the column misses (L - L_v)*E.
+        assert not np.allclose(sh + constants.L_v * ev, resp.shflx + resp.lhflx)
 
     def test_assemble_ocean_forcing_sw_down_is_net(self):
         """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,
@@ -477,7 +478,7 @@ class TestCoupledDriverWiring:
         tile = types.SimpleNamespace(
             albedo=jnp.full(shape, 0.06), lw_up=jnp.full(shape, 400.0),
             shflx=jnp.full(shape, 12.0), lhflx=jnp.full(shape, 60.0),
-            surface_mass_flux=jnp.full(shape, 60.0) / constants.L_v,
+            surface_mass_flux=jnp.full(shape, 2.0e-5),   # clearly NOT lhflx / L_v (2.4e-5)
             tau_x=z, tau_y=z,
         )
         sst = jnp.full(shape, 290.0)

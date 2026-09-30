@@ -80,6 +80,8 @@ from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -266,9 +268,9 @@ def smagorinsky_turbulence(
     sflx_v = tau_y
     # Heat: shflx = rho * c_pd * Ch * |V| * (T_sfc - T) [W/m^2]
     # For T diffusion: surface_flux = shflx / c_pd [kg/(m^2*s) * K]
-    sflx_T = shflx / constants.c_pd
-    # Moisture: lhflx = rho * L_v * Ch * |V| * (q_sfc - q_v) [W/m^2]
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # Apply implicit vertical diffusion.  Heat is mixed in θ-space so a
     # dry adiabat stays neutral; momentum and moisture are conserved on

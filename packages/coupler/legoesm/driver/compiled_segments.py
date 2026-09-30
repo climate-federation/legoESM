@@ -730,6 +730,12 @@ class SegmentForcing(NamedTuple):
     # pytree carries no spurious empty leaf.
     sfc_shflx_override: jax.Array | None = None
     sfc_lhflx_override: jax.Array | None = None
+    # Prescribed surface WATER flux [kg/m2/s, positive up]: the coupler's
+    # tile-blended mass flux.  With it the atmosphere's moisture source is
+    # the water the tiles actually lost, and sfc_lhflx_override stays the
+    # PHYSICAL latent heat (each tile's own L(T, phase)) for the heat
+    # consumers.  None (ERA5-prescribed heat only) -> lhflx / L_v(T_sfc).
+    sfc_evap_override: jax.Array | None = None
     # Prescribed ERA5 / coupler surface MOMENTUM fluxes — the surface stress
     # [Pa, stress ON THE ATMOSPHERE, opposite in sign to the wind — the
     # convention of surface_layer.compute_surface_fluxes] for this segment.
@@ -818,6 +824,7 @@ def pack_forcing(
     sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
+    sfc_evap_override=None,
     sfc_taux_override=None,
     sfc_tauy_override=None,
     sfc_lw_up=None,
@@ -918,6 +925,10 @@ def pack_forcing(
             None if sfc_lhflx_override is None
             else jnp.asarray(sfc_lhflx_override)
         ),
+        sfc_evap_override=(
+            None if sfc_evap_override is None
+            else jnp.asarray(sfc_evap_override)
+        ),
         sfc_taux_override=(
             None if sfc_taux_override is None
             else jnp.asarray(sfc_taux_override)
@@ -953,7 +964,7 @@ def pack_forcing(
 GRID_SHAPED_FORCING_FIELDS = (
     "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
     "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
-    "sfc_shflx_override", "sfc_lhflx_override",
+    "sfc_shflx_override", "sfc_lhflx_override", "sfc_evap_override",
     "sfc_taux_override", "sfc_tauy_override",
     "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac",
 )
@@ -1281,6 +1292,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
         sfc_shflx_override=statics.forcing.sfc_shflx_override,
         sfc_lhflx_override=statics.forcing.sfc_lhflx_override,
+        sfc_evap_override=statics.forcing.sfc_evap_override,
         sfc_taux_override=statics.forcing.sfc_taux_override,
         sfc_tauy_override=statics.forcing.sfc_tauy_override,
         sfc_lw_up=statics.forcing.sfc_lw_up,
@@ -2177,6 +2189,7 @@ def build_segment_fn(
                     sfc_emissivity_override=forcing.sfc_emissivity_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
+                    sfc_evap_override=forcing.sfc_evap_override,
                     sfc_taux_override=forcing.sfc_taux_override,
                     sfc_tauy_override=forcing.sfc_tauy_override,
                     sfc_lw_up=forcing.sfc_lw_up,

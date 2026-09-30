@@ -1878,7 +1878,7 @@ class DiagnosticCollector:
             # matching the bulk-flux scheme's own L_v-only partition of
             # lhflx.  Wiring the phase-aware flux needs the ice fraction in
             # this feed — tracked as a follow-up, unchanged by #1353.
-            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
+            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v   # latent-ok: DEFERRED (PR 3) -- evspsbl needs the mass-flux feed (constant L, ~2-3 % low over warm ocean)
             for _name, _src in (
                 ('tas', tas_field),
                 ('ts', ts_field),

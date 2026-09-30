@@ -35,12 +35,12 @@ c_pv = 1846.0                   # Specific heat of water vapor [J/(kg*K)]
 c_pw = 4218.0                   # Specific heat of liquid water [J/(kg*K)]
 c_pi = 2106.0                   # Specific heat of ice [J/(kg*K)]
 L_v = 2.501e6                   # Latent heat of vaporization at 0C [J/kg]
-# SST slope of L_v in the NEMO/AeroBulk air-sea convention (sbc_phy
-# L_vap: L = (2.501 - 0.00237 (T - T_freeze)) 1e6) — equals L_v at 0 degC
-# by construction.  Used by thermo.latent_heat_vaporization_sst (#762).
-L_v_sst_slope = 2.370e3         # [J/(kg*K)] dL_v/dT, NEMO sbc_phy / Fairall
-L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
+# Temperature dependence of L_v/L_s/L_f is Kirchhoff's relation from the
+# specific heats above: see legoesm.thermo.latent_heat_vaporization.
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
+# Sublimation is DERIVED so the three latent heats close identically
+# (L_s - L_v - L_f == 0); the former independent 2.834e6 disagreed by 700 J/kg.
+L_s = L_v + L_f                 # Latent heat of sublimation at 0C [J/kg] (2.8347e6)
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
 rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE default)

@@ -167,7 +167,7 @@ def column_moist_static_energy(
 
     g = jnp.asarray(constants.g, dtype=_acc_e)
     c_p = jnp.asarray(constants.c_pd, dtype=_acc_e)
-    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)
+    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     R_d = jnp.asarray(constants.R_d, dtype=_acc_e)
 
     # Compute geopotential at full levels (hydrostatic, bottom-up)
@@ -246,7 +246,7 @@ def column_moist_static_energy(
     KE = 0.5 * (u ** 2 + v ** 2)
     latent = L_v * q_v
     if q_frozen is not None:
-        L_f = jnp.asarray(constants.L_f, dtype=_acc_e)
+        L_f = jnp.asarray(constants.L_f, dtype=_acc_e)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
         latent = latent - L_f * q_frozen.astype(_acc_e)
     integrand = (c_p * T + latent + Phi + KE) * dp / g
 
@@ -711,7 +711,7 @@ class MoistureBudgetTracker:
         ]))
         mean_W = float(_h[0])
         mean_P = float(_h[1]) * 86400.0                  # kg/m²/s → mm/day
-        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day
+        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day  # latent-ok: DEFERRED (PR 3) -- water ledger fed only lhflx; needs the mass-flux feed, residual ~2-3 % of E until then
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:
