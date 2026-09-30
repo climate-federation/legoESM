@@ -643,16 +643,21 @@ def test_new_config_fields_sit_at_the_tuple_end():
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
     assert MorrisonConfig._fields[-2:] == ("publish_qc_budget", "liquid_from_closure")
     # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
-    for cls in (ExperimentConfig, AMIPExperimentConfig):
-        assert cls._fields[-5:-1] == (
+    # ExperimentConfig then end-appended the two land canopy smoothing widths
+    # (2026-09-30), so its block sits two further from the tail.
+    for cls, tail in ((ExperimentConfig, 2), (AMIPExperimentConfig, 0)):
+        f = cls._fields[:len(cls._fields) - tail]
+        assert f[-5:-1] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
             "morrison_sed_cfl_substeps_max", "morrison_sed_cfl_substeps_strict")
-        assert cls._fields[-1] == "morrison_do_graupel"
+        assert f[-1] == "morrison_do_graupel"
+    assert ExperimentConfig._fields[-2:] == (
+        "land_canopy_rh_cap_smoothing_width", "land_canopy_zeta_cap_smoothing_width")
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
     assert MorrisonConfig._fields[-6] == "homogeneous_ice_supersaturation"
-    assert ExperimentConfig._fields[-6] == "bechtold_rhebc_land_deep"
+    assert ExperimentConfig._fields[-8] == "bechtold_rhebc_land_deep"
     assert AMIPExperimentConfig._fields[-6] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
     # tail) re-binds every stored positional value, so pin the whole tuple
@@ -674,7 +679,9 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # so nothing re-binds.
             # 288 -> 291 / 125 -> 126 at the 2026-09-26 merge: main added the
             # CLUBB liquid-partition fields; morrison_do_graupel end-appended.
-            (ExperimentConfig, 291, "c023f86f71966a44"),
+            # 291 -> 293: land canopy smoothing widths END-appended; the first
+            # 291 fields still hash to c023f86f71966a44.
+            (ExperimentConfig, 293, "b380eb4b2adef6b3"),
             (AMIPExperimentConfig, 126, "4a3eca6eda2a76ed")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \

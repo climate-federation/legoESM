@@ -3367,6 +3367,27 @@ class ModelDriver:
         _ft = bool(self.config.land_soil_freeze_thaw)
         cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
         logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        # Canopy solver smoothing widths, same placement: the calibration above
+        # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
+        # value set any earlier would be discarded.
+        _w_over = {k: float(v) for k, v in (
+            ("rh_cap_smoothing_width",
+             getattr(self.config, "land_canopy_rh_cap_smoothing_width", None)),
+            ("zeta_cap_smoothing_width",
+             getattr(self.config, "land_canopy_zeta_cap_smoothing_width", None)),
+        ) if v is not None}
+        if _w_over:
+            from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
+            if not isinstance(cfg.surface_scheme, _CanopyCfg):
+                raise ValueError(
+                    f"land canopy smoothing widths {sorted(_w_over)} set but the "
+                    f"surface scheme is {type(cfg.surface_scheme).__name__}")
+            cfg = cfg._replace(
+                surface_scheme=cfg.surface_scheme._replace(**_w_over).validate())
+        if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
+            logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g",
+                        cfg.surface_scheme.rh_cap_smoothing_width,
+                        cfg.surface_scheme.zeta_cap_smoothing_width)
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")
