@@ -231,7 +231,7 @@ size. Preflight is green on all three variants.
 | LOCK_EXCHANGE-zco kt=1..3 | `AT-BAR`, no row over the bar |
 | OVERFLOW-zps kt=1..3 | `DEBT`, first over bar `{T,u}` at kt 2 — unchanged from the value the merge receipt published |
 | GYRE certified ladder, trajectory only, kt=1..10 | the first attempt was REFUSED by its own argument parser (this gate takes no `--allow-dirty`), re-queued without it; STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/gyre_ladder.log` |
-| DINO month gate (note BI; this round changes `packages/`), private work dir | STILL RUNNING at hand-off, log `phase3/vortex/round4/dino_month.log` |
+| DINO month gate (note BI; this round changes `packages/`), private work dir | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`, exit 0. Identical to round 3's value, i.e. `1.9e-10 K` from the certified one, which is the harness's own run-to-run floor: this round is INERT on DINO, which is what an additive round should give |
 | kt=2 walk, vector card | section 6 |
 | kt=2 walk, flux card | arms 0-4 identical to round 3's published rows |
 | walk plants, six of them | all VISIBLE, all exit non-zero |
@@ -239,7 +239,7 @@ size. Preflight is green on all three variants.
 | acquisition preflight, all three variants | `PREFLIGHT_OK` on flux, vec and vecrhs; unknown variant exit 64 |
 | clean re-run of every walk and plant at the committed tree | STILL RUNNING at hand-off, same log |
 
-**Three rows are honestly incomplete and the round is HELD on them.** The
+**Two rows are still incomplete and the round is HELD on them.** The
 GYRE year rows (day 30 / 240 / 360) were NOT run at all: the resolved
 configuration of every card is byte-identical before and after (section 4,
 zero changed keys on nine cards) and part B changes no model code, so a
