@@ -533,6 +533,13 @@ def _si3_step_with_trace(state: SI3ColumnState,
         z0=one * config.z0_ice,
         q_surface=z,
         shflx=z,
+        # SI3 oracle lane: the oracle's OWN sublimation constant
+        # (ConstantsConfig.latent_sublimation, NEMO value on the NEMO set),
+        # the same one its bulk law used to turn latent into this evaporation
+        # (_si3_bulk: evaporation_ice = latent / latent_sublimation), so heat
+        # and water stay paired on the oracle's law.  Scheme-internal oracle
+        # constant kept by user decision 2026-09-28 (5a); the Kirchhoff
+        # L_s(T_ice) applies to the native lanes only.
         lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
         tau_x=z,
         tau_y=z,
