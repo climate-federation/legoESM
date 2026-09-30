@@ -33,11 +33,16 @@ _FAMILIES = {
     # NOTE: the stage record's filename carries the stage after the step, so
     # its step digits are read from the "kt" split above, not from the tail.
     "oracle_rhs_kt": ("NEMO_L1_RHS___1", 7, "uuvv", 0),
-    # Round 4's per-term momentum record.  Sixteen header integers and then
-    # (name, rank, n1, n2, n3, payload) groups to end of file -- the
-    # self-describing shape note BD makes binding, so nothing about its size
-    # is written down here.
-    "oracle_rhsterm_kt": ("NEMO_L1_RHSTRM1", 16, "groups", 0),
+    # Round 4's per-term momentum record.  FIFTEEN header integers -- version,
+    # step, the four time-level indices, the three extents, the group count,
+    # four spare and the word size LAST -- and then (name, rank, n1, n2, n3,
+    # payload) groups to end of file.  The count is the writer's, read off
+    # the committed instrument rather than assumed: the first draft of this
+    # line said sixteen because a comment in the writer said so, and the
+    # acquisition's admission caught it by reading a group NAME where it
+    # expected the word size.  Nothing about the record's SIZE is written
+    # down here; every payload is checked against its own declared extents.
+    "oracle_rhsterm_kt": ("NEMO_L1_RHSTRM1", 15, "groups", 0),
 }
 # The groups every per-term record must carry, by name.  This list, the magic
 # and the format version are the ONLY hard-coded expectations.

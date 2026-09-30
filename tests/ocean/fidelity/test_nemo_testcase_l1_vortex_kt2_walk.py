@@ -128,10 +128,11 @@ def _rhsterm_bytes(tmp_path, *, magic=b"NEMO_L1_RHSTRM1 ", groups=None,
         else:
             body += _group(name, rank, _NX, _NY, _NZ)
     # version, step, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk, group count,
-    # five spare, and the 64-bit word size LAST.
+    # four spare, and the 64-bit word size LAST -- fifteen, the count the
+    # committed writer emits.
     header = struct.pack(
-        "=16i", 1, 1, 2, 3, 4, 5, _NX, _NY, _NZ,
-        len(names) if declared is None else declared, 0, 0, 0, 0, 64)
+        "=15i", 1, 1, 2, 3, 4, 5, _NX, _NY, _NZ,
+        len(names) if declared is None else declared, 0, 0, 0, 64)
     raw = magic + header + body + trailing
     if short:                      # truncate the LAST group's payload
         raw = raw[:-16]

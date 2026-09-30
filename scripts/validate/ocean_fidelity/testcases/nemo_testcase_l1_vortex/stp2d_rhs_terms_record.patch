@@ -72,7 +72,7 @@
 +      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 rhs-term file' )
 +      clmagic = 'NEMO_L1_RHSTRM1'
 +      igrp = 4
-+      ! Sixteen header integers, the 64-bit word size LAST so a reader can
++      ! Fifteen header integers, the 64-bit word size LAST so a reader can
 +      ! find it the same way in every record family this campaign writes.
 +      WRITE(iunit) clmagic, 1, kstp, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk,   &
 +         &         igrp, 0, 0, 0, 0, STORAGE_SIZE(1._wp)
