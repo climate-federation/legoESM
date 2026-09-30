@@ -146,6 +146,12 @@ def test_diagnosis_needs_a_reference_and_uses_amplitude_not_nan_kind():
     assert diagnose_blowup(leaf_grad_report(kernel)) == "unclassified"
     assert diagnose_blowup(leaf_grad_report(kernel), 0.0) == "unclassified"
 
+    # EVERY leaf non-finite: no surviving amplitude to compare, so abstain.
+    # The old rule fell through to "kernel" here because max() over an empty
+    # set defaulted to 0.0 -- a total overflow labelled as a kernel NaN.
+    total = {"a": jnp.array([jnp.inf]), "b": jnp.array([jnp.inf])}
+    assert diagnose_blowup(leaf_grad_report(total), 1.0) == "unclassified"
+
 
 def test_leaf_report_separates_nan_from_inf_and_names_the_leaf():
     from legoesm.training.grad_horizon import leaf_grad_report
