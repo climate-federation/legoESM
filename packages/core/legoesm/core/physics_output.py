@@ -45,7 +45,6 @@ class PhysicsOutput(NamedTuple):
     conv_prog: jax.Array
     shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
     lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
-    evap_sfc: jax.Array | None = None  # surface water flux actually applied [kg/m2/s, +up]
     tke: jax.Array | None = None     # updated prognostic TKE (ncol, nlev)
     qke: jax.Array | None = None     # updated MYNN-2.5 qke=2*TKE (ncol, nlev)
     gwd_spectrum: jax.Array | None = None  # updated GWD wave-action spectrum
@@ -73,3 +72,8 @@ class PhysicsOutput(NamedTuple):
     # byte-identical.  Carried so the finite-volume lanes can report the
     # clamp the way the MPAS loop does.  Appended LAST (positional ABI).
     sed_substeps_required: jax.Array | None = None
+    # Surface water flux actually applied to the column [kg/m2/s, positive up]:
+    # the kernel's moisture BC (tiled / prescribed water when folded, else the
+    # bulk L_v(T_sfc) inverse).  None when no surface scheme ran.  Appended
+    # LAST (positional ABI).
+    evap_sfc: jax.Array | None = None

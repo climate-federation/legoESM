@@ -432,3 +432,24 @@ def test_physics_output_carries_the_surface_water_flux():
         expected = np.asarray(out.lhflx) / float(latent_heat_vaporization(295.0))
         np.testing.assert_allclose(np.asarray(out.evap_sfc), expected, rtol=1e-10)
         assert np.max(np.abs(np.asarray(out.evap_sfc) / (np.asarray(out.lhflx) / constants.L_v) - 1.0)) > 1e-3
+
+    # Tiled surface: evap_sfc is the folded per-tile water (the kernel's own
+    # moisture BC), which no single-temperature inverse of lhflx reproduces.
+    from legoesm.atmosphere.physics.turbulence import integration as integ
+    seen = []
+    real = integ.fold_prescribed_surface_fluxes
+    integ.fold_prescribed_surface_fluxes = lambda cfg, **kw: (seen.append(kw), real(cfg, **kw))[1]
+    try:
+        pipe = _pipeline(create_cubed_sphere(4), turbulence="louis")
+        _, s2 = _inputs(pipe)
+        pipe.f_land = jnp.full(s2, 0.5)
+        pipe.albedo_land = jnp.full(s2, 0.2)
+        pipe.surface_tiled = True
+        out = _step(pipe, T_land=jnp.full(s2, 285.0))
+    finally:
+        integ.fold_prescribed_surface_fluxes = real
+    folded = np.asarray(pipe.adapter.unflatten_2d(seen[-1]["evap_kg_m2_s"]))
+    np.testing.assert_allclose(np.asarray(out.evap_sfc), folded, rtol=1e-12)
+    lh = np.asarray(out.lhflx)
+    for T in (295.0, 285.0, 290.0):
+        assert np.max(np.abs(np.asarray(out.evap_sfc) / (lh / float(latent_heat_vaporization(T))) - 1.0)) > 1e-5
