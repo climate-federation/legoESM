@@ -190,3 +190,18 @@ def test_most_refuses_zero_iterations():
             ur=3.0 * one, Ta=300.0 * one, Tv_atm=300.5 * one, Tc=301.0 * one,
             q_atm=0.010 * one, q_c=0.011 * one, zldis=10.0 * one, z0m=0.5 * one,
             n_iters=0, zeta_cap_width=CanopyConfig().zeta_cap_smoothing_width)
+
+
+def test_most_n_iters_reaches_the_canopy_solve():
+    """The canopy residual must run the configured number of MOST iterations:
+    on the captured stable column a 1-iteration loop gives a different root."""
+    from legoesm.land.canopy.solver import CanopyForcingBundle, solve_canopy_closure
+    import pytest
+    b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _ZCAP_COL.items()})
+    x10, _, ok10 = solve_canopy_closure(jnp.asarray(_ZCAP_X0), b, CanopyConfig())
+    x1, _, ok1 = solve_canopy_closure(jnp.asarray(_ZCAP_X0), b, CanopyConfig(most_n_iters=1))
+    assert bool(ok10) and bool(ok1)
+    assert float(jnp.max(jnp.abs(x10 - x1))) > 1e-6
+    with pytest.raises(ValueError, match="most_n_iters"):
+        CanopyConfig(most_n_iters=0).validate()
+    assert CanopyConfig().most_n_iters == 10

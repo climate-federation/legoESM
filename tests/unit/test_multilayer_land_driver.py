@@ -1105,11 +1105,12 @@ def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
         multilayer_soil_depth=cal["soil_grid"].total_depth,
         land_canopy_rh_cap_smoothing_width=0.02,
         land_canopy_zeta_cap_smoothing_width=0.03,
+        land_canopy_most_n_iters=7,
     )
     d = CanopyConfig()
-    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width) != (0.02, 0.03)
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
     base.validate_strict()
     drv = ModelDriver(base, output_dir=tmp_path / "w")
     drv.setup()
     ss = drv.physics.land_ml_cfg.surface_scheme
-    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width) == (0.02, 0.03)
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)

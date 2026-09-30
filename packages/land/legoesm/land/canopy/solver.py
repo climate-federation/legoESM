@@ -192,6 +192,7 @@ def _canopy_residual(
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
     zeta_cap_width: float,
+    most_n_iters: int,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
 
@@ -214,7 +215,7 @@ def _canopy_residual(
     # ---- MOST stability ----
     ustar, rah_above, raw_above, uav, _ = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
-        zeta_cap_width=zeta_cap_width)
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
 
     # ---- Boundary and below-canopy resistances ----
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
@@ -377,6 +378,7 @@ def canopy_forward(
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
     zeta_cap_width: float,
+    most_n_iters: int,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
 
@@ -394,7 +396,7 @@ def canopy_forward(
 
     ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
-        zeta_cap_width=zeta_cap_width)
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -560,6 +562,7 @@ def solve_canopy_closure(
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         rh_cap_width=config.rh_cap_smoothing_width,
         zeta_cap_width=config.zeta_cap_smoothing_width,
+        most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -603,6 +606,7 @@ def solve_canopy_closure_diag(
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         rh_cap_width=config.rh_cap_smoothing_width,
         zeta_cap_width=config.zeta_cap_smoothing_width,
+        most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -620,6 +624,7 @@ def _make_implicit_newton_solver(
     use_ta_for_photosynthesis: bool,
     rh_cap_width: float,
     zeta_cap_width: float,
+    most_n_iters: int,
     max_iters: int,
     tol: float,
 ):
@@ -635,6 +640,7 @@ def _make_implicit_newton_solver(
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
             rh_cap_width=rh_cap_width,
             zeta_cap_width=zeta_cap_width,
+            most_n_iters=most_n_iters,
         )
 
     return make_implicit_newton_solver(

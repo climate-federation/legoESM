@@ -271,6 +271,9 @@ land_surface_scheme: two_leaf
 # (user 2026-09-30): canopy-air RH <= 1 cap and stable zeta <= 0.5 cap.
 land_canopy_rh_cap_smoothing_width: 0.01
 land_canopy_zeta_cap_smoothing_width: 0.05
+# Above-canopy Monin-Obukhov fixed-point iterations: 5 -> 10 (user 2026-09-30;
+# 5 left unstable columns up to 11% off in aerodynamic resistance).
+land_canopy_most_n_iters: 10
 mpas_land_beta_soil: true
 land_soil_init: aridity
 

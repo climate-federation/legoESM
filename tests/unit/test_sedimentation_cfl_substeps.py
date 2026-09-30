@@ -645,19 +645,20 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
     # ExperimentConfig then end-appended the two land canopy smoothing widths
     # (2026-09-30), so its block sits two further from the tail.
-    for cls, tail in ((ExperimentConfig, 2), (AMIPExperimentConfig, 0)):
+    for cls, tail in ((ExperimentConfig, 3), (AMIPExperimentConfig, 0)):
         f = cls._fields[:len(cls._fields) - tail]
         assert f[-5:-1] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
             "morrison_sed_cfl_substeps_max", "morrison_sed_cfl_substeps_strict")
         assert f[-1] == "morrison_do_graupel"
-    assert ExperimentConfig._fields[-2:] == (
-        "land_canopy_rh_cap_smoothing_width", "land_canopy_zeta_cap_smoothing_width")
+    assert ExperimentConfig._fields[-3:] == (
+        "land_canopy_rh_cap_smoothing_width", "land_canopy_zeta_cap_smoothing_width",
+        "land_canopy_most_n_iters")
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
     assert MorrisonConfig._fields[-6] == "homogeneous_ice_supersaturation"
-    assert ExperimentConfig._fields[-8] == "bechtold_rhebc_land_deep"
+    assert ExperimentConfig._fields[-9] == "bechtold_rhebc_land_deep"
     assert AMIPExperimentConfig._fields[-6] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
     # tail) re-binds every stored positional value, so pin the whole tuple
@@ -681,7 +682,9 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # CLUBB liquid-partition fields; morrison_do_graupel end-appended.
             # 291 -> 293: land canopy smoothing widths END-appended; the first
             # 291 fields still hash to c023f86f71966a44.
-            (ExperimentConfig, 293, "b380eb4b2adef6b3"),
+            # 293 -> 294: land_canopy_most_n_iters END-appended (prefix still
+            # b380eb4b2adef6b3).
+            (ExperimentConfig, 294, "826ab14331fb1c62"),
             (AMIPExperimentConfig, 126, "4a3eca6eda2a76ed")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \

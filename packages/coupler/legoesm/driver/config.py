@@ -1823,6 +1823,9 @@ class ExperimentConfig(NamedTuple):
     # Range: CanopyConfig.validate (one range, owned by the land package).
     land_canopy_rh_cap_smoothing_width: float | None = None
     land_canopy_zeta_cap_smoothing_width: float | None = None
+    # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
+    # Monin-Obukhov solve (same placement and None semantics as the widths).
+    land_canopy_most_n_iters: int | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3516,11 +3519,12 @@ class ExperimentConfig(NamedTuple):
                 f"microphysics='morrison' (got {self.microphysics!r})")
         _rhw = self.land_canopy_rh_cap_smoothing_width
         _zw = self.land_canopy_zeta_cap_smoothing_width
-        if _rhw is not None or _zw is not None:
+        _mi = self.land_canopy_most_n_iters
+        if _rhw is not None or _zw is not None or _mi is not None:
             if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
                 errors.append(
-                    "land_canopy_*_smoothing_width set but land_surface_scheme="
-                    f"{self.land_surface_scheme!r}, use_multilayer_land="
+                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
                     f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
                     "multilayer land reads them, so the value would be inert")
             else:
@@ -3530,10 +3534,11 @@ class ExperimentConfig(NamedTuple):
                     _cc._replace(**({} if _rhw is None else
                                     {"rh_cap_smoothing_width": float(_rhw)}),
                                  **({} if _zw is None else
-                                    {"zeta_cap_smoothing_width": float(_zw)})
+                                    {"zeta_cap_smoothing_width": float(_zw)}),
+                                 **({} if _mi is None else {"most_n_iters": _mi})
                                  ).validate()
                 except ValueError as exc:
-                    errors.append(f"land_canopy_*_smoothing_width: {exc}")
+                    errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel"):
             _v = getattr(self, _nm)

@@ -264,6 +264,14 @@ class CanopyConfig(NamedTuple):
     # the cap reads 0.5 - w*ln2.  Must be > 0.  Static under jit (excluded
     # from __param_spec__ tuning).  Appended at the end of the tuple.
     zeta_cap_smoothing_width: float = 0.05
+    # Fixed-point iterations of the above-canopy Monin-Obukhov solve (CLM5
+    # FrictionVelocity form, Zeng 1998 bulk-Ri start).  The loop always
+    # converges (no oscillation measured), but 5 iterations left unstable
+    # columns short: on 5760 captured production columns aerodynamic
+    # resistance was off by up to 11% (p99 2.3%), sensible heat by up to
+    # 13.5 W/m2; at 10 the worst error is 0.25%.  Default 5 -> 10 (user
+    # 2026-09-30).  Appended at the end of the tuple.
+    most_n_iters: int = 10
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -294,6 +302,9 @@ class CanopyConfig(NamedTuple):
                 f"zeta_cap_smoothing_width must be in (0, {ZETA_CAP_WIDTH_MAX}] "
                 "(the smooth stability cap divides by it), got "
                 f"{self.zeta_cap_smoothing_width!r}")
+        if not (isinstance(self.most_n_iters, int) and self.most_n_iters >= 1):
+            raise ValueError("most_n_iters must be a positive int, got "
+                             f"{self.most_n_iters!r}")
         return self
 
 
