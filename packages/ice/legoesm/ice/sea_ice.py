@@ -1095,7 +1095,7 @@ def _step_slab(
         z0=jnp.full(h.shape, config.z0_ice, dtype=_h_dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
-        # Realized latent (== L_s * surface_mass_flux / conc): the atmosphere
+        # Realized latent (== L_s(T_ice) * surface_mass_flux / conc): the atmosphere
         # latent energy matches the skin solve and the moisture mass (#28).
         lhflx=diag["lhflx_realized"],
         tau_x=tau_x,
@@ -1863,7 +1863,7 @@ def _thermo_single(
         # Realized ice->atmosphere sublimation mass [kg/m2(ice)/s] (#28).
         "sublim_mass_per_ice_area": sublim_mass_per_ice_area,
         # Latent flux PER-ICE-AREA consistent with the realized sublimation mass
-        # (== L_s * sublim_mass_per_ice_area where the cap fires, else the bulk
+        # (== L_s(T_ice) * sublim_mass_per_ice_area where the cap fires, else the bulk
         # lhflx); fed to the coupler so the atmosphere latent energy matches the
         # skin solve and the moisture mass (#28).
         "lhflx_realized": lhflx_realized,
@@ -2410,7 +2410,7 @@ def _thermo_v2(
     # consume_sublimation_from_snow_then_ice; deposition via min(..., 0) since
     # the helper grows snow and returns zero sub-depths under lhflx<0) is known
     # in ONE pass.  Build the latent CONSISTENT with it so the atmosphere latent
-    # energy == L_s*realized mass and the skin is cooled by that same latent.
+    # energy == L_s(T_ice)*realized mass and the skin is cooled by that same latent.
     # Use snow+ice TOTAL (snow sublimation is not bounded by ice h).  GUARD: only
     # rebase when the loss demand was not fully met, so thick / fully-supplied
     # cells return the bulk ``lhflx`` bitwise (no-op for validated baselines).
@@ -2867,7 +2867,7 @@ def _thermo_v2(
         "alpha": alpha,
         "lw_up": lw_up,
         "shflx": shflx,
-        # Realized latent (== L_s * sublim_mass_to_atmos / conc): the atmosphere
+        # Realized latent (== L_s(T_ice) * sublim_mass_to_atmos / conc): the atmosphere
         # latent energy matches the realized sublimation mass + the skin solve
         # (#28).  Equals the bulk lhflx where the loss demand was fully met.
         "lhflx": lhflx_realized,
@@ -2881,7 +2881,7 @@ def _thermo_v2(
         # sublimated this step, capped at available snow/ice; deposition added
         # via min(lhflx/L_s*dt, 0) since the helper grows snow and returns zero
         # sub-depths under lhflx<0), weighted by the input ice fraction.  Reusing
-        # the same numerator guarantees L_s*sublim_mass_to_atmos == lhflx_realized
+        # the same numerator guarantees L_s(T_ice)*sublim_mass_to_atmos == lhflx_realized
         # * conc exactly, so the atmosphere water + energy pair (#28).
         "sublim_mass_to_atmos": realized_sublim_kg / dt * conc,
         # Its latent-energy twin at THIS category's L_s(T_ice): summed over
@@ -3155,7 +3155,7 @@ def _step_dynamic_v2(
         sum_conc_post = jnp.sum(conc, axis=-1, keepdims=False)
         # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis only: it
         # matches the single-cat ``conc_basis`` contract so resp.lhflx *
-        # max(pre,post) == L_s * sublim_mass_total identically across paths
+        # max(pre,post) == sum_k L_s(T_k) m_k (latent_total) identically across paths
         # (sublim_mass_total is on the INPUT-conc basis).  The SH/STRESS
         # numerators are kept per-grid-cell and divided by ``conc_agg`` at the
         # response build (findings #9 + #4), NOT by this latent basis.
@@ -3165,7 +3165,7 @@ def _step_dynamic_v2(
         # the input conc inside ``_thermo_v2``, so a zero latent basis (no ice
         # at EITHER end) implies ``sublim_mass_total == 0``; the 0.0 fallback
         # below is forward-identical and keeps the documented invariant
-        # ``resp.lhflx * max(pre, post) == L_s * sublim_mass_total`` exact
+        # ``resp.lhflx * max(pre, post) == sum_k L_s(T_k) m_k`` exact
         # (0 == 0).  MULTICAT counterpart of the single-cat site at L2635 --
         # both must be fixed together or the cross-path parity comment above
         # becomes false on the ice-free adjoint.
@@ -3207,7 +3207,7 @@ def _step_dynamic_v2(
         # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
         # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
         # clamp cells under-report the latent and break
-        # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
+        # resp.lhflx*sum_conc == latent_total (sum_k L_s(T_k) m_k) (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
         lhflx_resp = jnp.where(
             _has_conc_basis_mc,
@@ -3252,12 +3252,12 @@ def _step_dynamic_v2(
         # multicat path -- max(PRE-DYNAMICS conc_pre, post-thermo conc) -- so
         # single-cat and multicat expose an IDENTICAL latent<->mass invariant to
         # TileResponse consumers regardless of transport: resp.lhflx *
-        # max(conc_pre, conc_post) == L_s * surface_mass_flux.  (Using the
+        # max(conc_pre, conc_post) == L_s(T_ice) * surface_mass_flux.  (Using the
         # post-transport thermo-input conc here would diverge from the multicat
         # ``sum_conc_safe`` basis under transport='advect'.)  #28, codex.
         # float32 AD safety: UNCONDITIONAL floored divide -> NaN adjoint over
         # ice-free cells.  The documented invariant is ``resp.lhflx *
-        # max(conc_pre, conc_post) == L_s * surface_mass_flux``; with that basis
+        # max(conc_pre, conc_post) == L_s(T_ice) * surface_mass_flux``; with that basis
         # zero there is no ice at EITHER end, so ``sublim_mass_total == 0`` and
         # both sides of the invariant are 0 -- fallback 0.0 is forward-identical
         # and keeps the invariant exact.  Single-cat counterpart of the multicat

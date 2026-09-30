@@ -1990,7 +1990,9 @@ class PhysicsPipeline:
             elif getattr(turb_out, 'lhflx', None) is not None:
                 # A kernel that replaced lhflx without publishing its water: the
                 # bulk kick's value would now pair with the wrong heat -- report
-                # absence, never a stale pair.
+                # absence, never a stale pair.  (The mirror case, water without
+                # lhflx, keeps the bulk heat: no in-tree kernel does it and each
+                # leg stays individually truthful.)
                 evap_sfc = None
         elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
@@ -2139,7 +2141,9 @@ class PhysicsPipeline:
             elif getattr(turb_out, 'lhflx', None) is not None:
                 # A kernel that replaced lhflx without publishing its water: the
                 # bulk kick's value would now pair with the wrong heat -- report
-                # absence, never a stale pair.
+                # absence, never a stale pair.  (The mirror case, water without
+                # lhflx, keeps the bulk heat: no in-tree kernel does it and each
+                # leg stays individually truthful.)
                 evap_sfc = None
 
         # --- Budget-ledger capture: turbulence row -------------------------
