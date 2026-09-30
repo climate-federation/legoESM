@@ -92,6 +92,8 @@ FILES = {
         _ORCA2_COMPILED / "zdfphy.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90": (
         _ORCA2_COMPILED / "zdfiwm.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
+        _ORCA2_COMPILED / "zdfddm.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -1465,6 +1467,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:314-316': [
         'p_avs(ji,jj,jk) = p_avs(ji,jj,jk) + zav_wave(ji,jj) * zav_ratio(ji,jj)',
         'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 3],
+    # The salt/heat split also adds to the momentum coefficient, which is why
+    # the wave arm's momentum increment is measured after it and not before.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172':
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + MAX( zavft + zavdt, zavfs + zavds )',
     # --- ORCA2 card round 1: initial category-load SSH adjustment ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',

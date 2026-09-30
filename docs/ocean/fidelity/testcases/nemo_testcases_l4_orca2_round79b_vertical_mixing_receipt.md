@@ -23,7 +23,7 @@ Evidence, all read out of the pinned record and the compiled source:
   choice round 78 named: with the wave arm on, NEMO forces the turbulent-energy
   minimum to 1e-10 and the mixing-length floor to 1.0e-3 m.
 * NEMO applies it last in the vertical-physics chain.  In the compiled
-  compiled vertical-physics module, the closure's coefficients are copied into
+  vertical-physics module, the closure's coefficients are copied into
   the working arrays (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350`),
   the river mouths add to them (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:355`),
   the convection arm runs (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359`),
@@ -122,7 +122,13 @@ Preflight proofs run in this round, in the sandbox:
 * the launcher's five `ocean.output` predicates all match the pinned record;
 * the gate's non-vacuity test passes, 7 tests: the synthetic clean record is
   admitted, each of the five plants makes the gate refuse, and a record set
-  missing a step is refused.
+  missing a step is refused;
+* the launcher's own `--preflight-only` mode runs all of the above end to end
+  and prints `ORCA2_ROUND79B_ZDF_VMIX_PREFLIGHT_READY`;
+* the receipt citation gate passes on this receipt (7 citations, none
+  unmapped, no failures, blind map audit clean, 9 of 9 self-test plants fire)
+  and still passes on the campaign's default receipt (274 citations, none
+  unmapped).
 
 ### Command for the operator
 
@@ -143,7 +149,33 @@ landing comes.
 
 Codex is refused this round: the quota guard reports 84.0% used (reset
 2026-10-01 21:50), which the round's order treats as refused.  One Claude
-code-reviewer subagent is the review; its verdict is recorded below.
+code-reviewer subagent is the review.
+
+**Verdict: SHIP WITH CHANGES**, one finding, closed in-round.
+
+The reviewer rebuilt the card, re-read every cited compiled line, checked every
+copy loop in the instrumentation against the real array declarations, traced
+each of the five plants to the check it trips, and re-ran the launcher's log
+predicates.  All held.  Its one finding: the record measured the wave arm's
+momentum increment across a boundary the salt/heat split also moves, because
+NEMO hands that routine the momentum coefficient as an inout argument and it
+adds to it (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172`).  The
+difference the gate reported as the wave arm's was the two arms summed.  The
+admission decision was never at risk -- both contributions are non-negative, so
+the gate's negativity check could not be fooled -- but the number a later round
+would have cited was wrong.
+
+Closed by capturing the momentum coefficient at the split as well, measuring
+the wave increment against that boundary, and reporting the split's own
+increment separately.  The same edit closes a second defect found while fixing
+it: the momentum coefficient is declared over the whole local array while the
+tracer coefficients are declared over the inner band only, and its buffers were
+being filled over the inner band alone, so every halo row of every momentum
+difference was the coefficient itself rather than an increment.  The record now
+carries twenty-four arrays rather than twenty-three.
+
+The reviewer did not rebuild NEMO; the syntax proofs and the dry-patch call
+counts above are this round's own, re-run after the fix.
 
 ## OPEN
 
