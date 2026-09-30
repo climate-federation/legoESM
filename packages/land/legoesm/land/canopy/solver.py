@@ -128,7 +128,11 @@ _ROOT_NSQ_MAX = 1.0e-2     # [-] absolute ceiling on the scaled squared residual
 
 def canopy_state_admissible(x: jax.Array) -> jax.Array:
     """True where ``x[..., :6]`` = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] is a
-    finite state inside the physical box a canopy root may occupy."""
+    finite state inside the physical box a canopy root may occupy.
+
+    Containment, not a full physical check: Ci is only required finite (no
+    garbage state seen so far had an out-of-range Ci; the leaf temperatures and
+    q_c are what went wrong)."""
     T = x[..., jnp.array([0, 1, 4])]
     return (jnp.all(jnp.isfinite(x), axis=-1)
             & jnp.all((T >= _ROOT_T_MIN_K) & (T <= _ROOT_T_MAX_K), axis=-1)

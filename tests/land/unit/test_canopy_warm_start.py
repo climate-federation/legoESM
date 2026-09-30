@@ -198,7 +198,7 @@ def test_degenerate_regimes_stay_inside_the_feasible_set(name, kw):
 # entry point instead.
 # ---------------------------------------------------------------------------
 
-def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
+def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None):
     """One two-leaf canopy call over a small realistic column batch."""
     import numpy as np
     from legoesm.core.coupling_fields import AtmToSurface
@@ -228,7 +228,8 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
         land_config=MultiLayerLandConfig(), canopy_params=None,
         w_frac_rz=w_frac, wind_speed=jnp.abs(forcing.u_lowest),
         wind_dir_x=jnp.ones_like(w_frac), wind_dir_y=jnp.zeros_like(w_frac),
-        soil_thermal_fn=lambda G, dt_: T_soil, dt=1800.0,
+        soil_thermal_fn=(lambda G, dt_: T_soil) if soil_record is None
+        else (lambda G, dt_: (soil_record.append(G), T_soil)[1]), dt=1800.0,
         canopy_seed=seed_arr)
 
 
