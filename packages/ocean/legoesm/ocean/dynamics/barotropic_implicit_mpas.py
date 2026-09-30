@@ -667,8 +667,9 @@ def barotropic_implicit_mpas(
             # fresh on the layout's depth+2 rings the K-1 sweeps leave z
             # valid on owned + ring 1 when depth >= K-2; p = z + beta p
             # stays valid there and A p is exact on owned cells, which is
-            # all the owned-weighted dots and x/r updates read. One exchange per iteration (of r, inside M_inv) replaces
-            # the exchange of p inside A_op. Coefficients and the warm start
+            # all the owned-weighted dots and x/r updates read. One
+            # exchange per iteration (of r, inside M_inv) replaces the
+            # exchange of p inside A_op. Coefficients and the warm start
             # are refreshed once so the halo rings carry OWNER values (the
             # outer ring's local diagonal and edges see missing neighbours).
             if _dist:
