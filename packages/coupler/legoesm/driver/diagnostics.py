@@ -240,7 +240,9 @@ def _refuse_heat_without_water(where: str, lhflx, evspsbl) -> None:
         raise ValueError(
             f"DiagnosticCollector.{where}: lhflx was fed without evspsbl; "
             "the moisture closure and CMOR evspsbl need the water the column "
-            "actually received (PhysicsOutput.evap_sfc), never lhflx / L_v.")
+            "actually received -- feed evspsbl from the lane's water channel "
+            "(the segment carry's evap accumulator, the MPAS evap_sfc slot, "
+            "or the turbulence output's evap_sfc), never lhflx / L_v.")
 
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
