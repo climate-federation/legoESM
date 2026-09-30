@@ -230,7 +230,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     baseline_trace = jax.device_get(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_barotropic_substeps=True)).step(
+            expose_barotropic_substeps=True),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     own_rate_u = -np.asarray(
@@ -253,7 +255,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
-            barotropic_drag_rate_override=drag_override)).step(
+            barotropic_drag_rate_override=drag_override),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     history_override = _history_override(entry_trace.substeps, oracle)
@@ -264,7 +268,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     print("STEP inherited cold-history trace")
     history_trace = jax.device_get(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
-        _nemo_ws_test_hooks=history_trace_hooks).step(
+        _nemo_ws_test_hooks=history_trace_hooks,
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
             state_entry, card.dt_s, freshwater=freshwater,
             surface_forcing=surface))
     history_candidate = round15._candidate_ordered(
@@ -287,7 +293,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_hooks(
             _NEMOWSRK3TestHooks, expose_trace=False,
-            drag=drag_override, history=history_override)).step(
+            drag=drag_override, history=history_override),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
 
@@ -303,14 +311,18 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_hooks(
             _NEMOWSRK3TestHooks, expose_trace=True, drag=drag_override,
-            history=history_override, slow=own_slow)).step(
+            history=history_override, slow=own_slow),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     noop_stage = jax.device_get(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_hooks(
             _NEMOWSRK3TestHooks, expose_trace=False, drag=drag_override,
-            history=history_override, slow=own_slow)).step(
+            history=history_override, slow=own_slow),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     noop_controls = {
@@ -332,7 +344,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_hooks(
             _NEMOWSRK3TestHooks, expose_trace=True, drag=drag_override,
-            history=history_override, slow=recorded_slow)).step(
+            history=history_override, slow=recorded_slow),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     substituted_candidate = round15._candidate_ordered(
@@ -366,7 +380,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_hooks(
             _NEMOWSRK3TestHooks, expose_trace=False, drag=drag_override,
-            history=history_override, slow=recorded_slow)).step(
+            history=history_override, slow=recorded_slow),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     baseline_stage_field = np.asarray(history_stage.stage_outputs[2][4])[
@@ -411,7 +427,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             card.recipe.grid, card.recipe.z_coord, cfg,
             _nemo_ws_test_hooks=_hooks(
                 _NEMOWSRK3TestHooks, expose_trace=True, drag=drag_override,
-                history=history_override, slow=(planted_u, planted_v))).step(
+                history=history_override, slow=(planted_u, planted_v)),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                     state_entry, card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
         planted_candidate = round15._candidate_ordered(

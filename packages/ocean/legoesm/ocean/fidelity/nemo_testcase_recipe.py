@@ -1453,35 +1453,32 @@ _ORCA2_IWM_AVMB = 1.4e-6   # NEMO rnu [m2/s]
 _ORCA2_IWM_AVTB = 1.0e-10  # [m2/s]
 
 
-def _orca2_iwm_forcing(path, surface_tmask: np.ndarray):
-    """The six wave-power / decay-scale maps, exactly as zdf_iwm_init reads them.
+def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
+    """The six wave-power / decay-scale maps, as zdf_iwm_init reads them.
 
-    The four power maps are multiplied by the surface tracer mask (NEMO's
-    ``smask0``) and the critical-slope decay scale is stored as its RECIPROCAL,
-    which is what the scheme consumes.  The ORCA2 product is already on this
-    card's own grid, so no regridding is involved.
+    Delegates to the shared loader, which masks the four power maps with the
+    surface tracer mask (NEMO's ``smask0``), leaves the decay scales unmasked,
+    guards a non-positive critical-slope scale before inverting it, and stores
+    that inverse, which is what the scheme consumes.  The ORCA2 product is on
+    this card's own grid, so the loader's coordinate check takes its
+    pass-through branch and nothing is regridded; the assertion below is what
+    makes that a checked fact rather than an assumption.
     """
-    from legoesm.ocean.iwm_forcing import read_iwm_file
-    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
-        IWMForcing,
-    )
+    from legoesm.ocean.forcing.curvilinear_regrid import coords_match
+    from legoesm.ocean.iwm_forcing import load_iwm_forcing, read_iwm_file
 
-    data = read_iwm_file(str(path))
-    mask = np.asarray(surface_tmask, dtype=np.float64)
-    for name in ("power_bot", "power_cri", "power_nsq", "power_sho",
-                 "scale_bot", "scale_cri"):
-        if data[name].shape != mask.shape:
-            raise ValueError(
-                f"ORCA2 internal-wave forcing {name} has shape "
-                f"{data[name].shape}, expected the card's {mask.shape}; this "
-                "card reads the product on its own grid and never regrids it")
-    return IWMForcing(
-        ebot=jnp.asarray(data["power_bot"] * mask, dtype=jnp.float64),
-        ecri=jnp.asarray(data["power_cri"] * mask, dtype=jnp.float64),
-        ensq=jnp.asarray(data["power_nsq"] * mask, dtype=jnp.float64),
-        esho=jnp.asarray(data["power_sho"] * mask, dtype=jnp.float64),
-        hbot=jnp.asarray(data["scale_bot"], dtype=jnp.float64),
-        hcri_inv=jnp.asarray(1.0 / data["scale_cri"], dtype=jnp.float64),
+    raw = read_iwm_file(str(path))
+    if not coords_match(raw["nav_lat"], raw["nav_lon"],
+                        np.asarray(lat_t, dtype=np.float64),
+                        np.asarray(lon_t, dtype=np.float64),
+                        tol_deg=1.0e-3):
+        raise ValueError(
+            "the ORCA2 internal-wave product is not on this card's grid; "
+            "this card reads it directly and never regrids it")
+    return load_iwm_forcing(
+        str(path), lat_t, lon_t,
+        land_mask=np.asarray(surface_tmask, dtype=np.float64),
+        coord_match_tol_deg=1.0e-3,
     )
 
 
@@ -1532,7 +1529,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             name: np.asarray(ds.variables[name][:], dtype=np.float64)
             for name in (
                 "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
-                "ff_f", "gphit",
+                "ff_f", "gphit", "glamt",
             )
         }
 
@@ -1767,7 +1764,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         z_coord=z_coord,
         land_mask=jnp.asarray(tmask[..., 0], dtype=jnp.float64),
         initial_state=state,
-        iwm_forcing=_orca2_iwm_forcing(iwm_path, tmask[..., 0]),
+        iwm_forcing=_orca2_iwm_forcing(
+            iwm_path, tmask[..., 0], metric["gphit"], metric["glamt"]),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",

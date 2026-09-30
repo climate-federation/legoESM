@@ -241,7 +241,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     baseline_trace = jax.device_get(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_barotropic_substeps=True)).step(
+            expose_barotropic_substeps=True),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     own_rate_u = -np.asarray(
@@ -262,7 +264,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
-            barotropic_drag_rate_override=drag_override)).step(
+            barotropic_drag_rate_override=drag_override),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     history_override = round16._history_override(entry_trace.substeps, oracle)
@@ -271,7 +275,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=round16._hooks(
             _NEMOWSRK3TestHooks, expose_trace=True, drag=drag_override,
-            history=history_override)).step(
+            history=history_override),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     own_slow_u = np.asarray(history_trace.substeps["slow_u"][0])
@@ -283,7 +289,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=round16._hooks(
             _NEMOWSRK3TestHooks, expose_trace=True, drag=drag_override,
-            history=history_override, slow=recorded_slow)).step(
+            history=history_override, slow=recorded_slow),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     candidate = round15._candidate_ordered(card, substituted_trace.substeps)

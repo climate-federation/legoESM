@@ -243,7 +243,8 @@ def capture_ldf_replay(deck_root: Path, record_root: Path,
         west(reciprocal(raw.e2u)),
         south(reciprocal(raw.e1v)),
     )
-    model = LatLonCGridOceanModel(grid, zc, cfg)
+    model = LatLonCGridOceanModel(
+        grid, zc, cfg, iwm_forcing=card.recipe.iwm_forcing)
     result = model.tendencies(
         state, dt=card.dt_s, momentum_only=True,
         ldf_state=(state.T.data, state.S.data, state.u.data, state.v.data),

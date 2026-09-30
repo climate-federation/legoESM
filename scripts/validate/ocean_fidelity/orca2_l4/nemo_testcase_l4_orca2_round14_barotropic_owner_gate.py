@@ -336,7 +336,8 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_live_stage_operands=True,
                 slow_forcing_incoming_override=incoming_override),
-        )
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
         return model.step(state, dt=card.dt_s, freshwater=freshwater,
                           surface_forcing=surface)
 
@@ -371,6 +372,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True),
+        iwm_forcing=card.recipe.iwm_forcing,
     )
     print("STEP slow-forcing operand trace")
     operand_trace = model_ops.step(

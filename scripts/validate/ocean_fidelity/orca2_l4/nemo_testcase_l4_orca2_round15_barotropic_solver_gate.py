@@ -250,7 +250,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     baseline_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_live_stage_operands=True))
+            expose_live_stage_operands=True),
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     baseline = jax.device_get(baseline_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     oracle_ssh3 = ladder.read_state_frame(
@@ -272,7 +274,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     trace_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_barotropic_substeps=True))
+            expose_barotropic_substeps=True),
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     trace = jax.device_get(trace_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     substeps = trace.substeps
@@ -307,7 +311,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
-            barotropic_drag_rate_override=(own_rate_u, own_rate_v)))
+            barotropic_drag_rate_override=(own_rate_u, own_rate_v)),
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     noop = jax.device_get(noop_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     noop_identical = bool(np.array_equal(
@@ -322,7 +328,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
             barotropic_drag_rate_override=(
-                injected_rate_u, injected_rate_v)))
+                injected_rate_u, injected_rate_v)),
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     substituted_trace = jax.device_get(substituted_trace_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     substituted_substeps = substituted_trace.substeps
@@ -346,7 +354,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True,
             barotropic_drag_rate_override=(
-                injected_rate_u, injected_rate_v)))
+                injected_rate_u, injected_rate_v)),
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     substituted = jax.device_get(substituted_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     substituted_ssh = round14._ssh_row(
@@ -384,7 +394,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
     print("STEP recorded entry-velocity substitution trace")
     entry_trace = jax.device_get(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
-        _nemo_ws_test_hooks=entry_hooks).step(
+        _nemo_ws_test_hooks=entry_hooks,
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
             state_entry, card.dt_s, freshwater=freshwater,
             surface_forcing=surface))
     entry_candidate = _candidate_ordered(card, entry_trace.substeps)
@@ -395,7 +407,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True,
             barotropic_drag_rate_override=(
-                injected_rate_u, injected_rate_v))).step(
+                injected_rate_u, injected_rate_v)),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                     state_entry, card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
     entry_stage_field = np.asarray(entry_stage.stage_outputs[2][4])[
@@ -443,7 +457,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             expose_barotropic_substeps=True,
             barotropic_drag_rate_override=(
                 injected_rate_u, injected_rate_v),
-            barotropic_raw_history_override=raw_history)).step(
+            barotropic_raw_history_override=raw_history),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     history_candidate = _candidate_ordered(card, history_trace.substeps)
@@ -455,7 +471,9 @@ def run(deck_root: Path, root: Path, json_out: Path | None,
             expose_live_stage_operands=True,
             barotropic_drag_rate_override=(
                 injected_rate_u, injected_rate_v),
-            barotropic_raw_history_override=raw_history)).step(
+            barotropic_raw_history_override=raw_history),
+        iwm_forcing=card.recipe.iwm_forcing,
+    ).step(
                 state_entry, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
     history_stage_field = np.asarray(history_stage.stage_outputs[2][4])[

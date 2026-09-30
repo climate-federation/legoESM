@@ -387,7 +387,9 @@ def production_ldf_tendency(deck_root: Path, root: Path, kt: int):
     freshwater, surface = ladder._surface_forcings(
         card, deck_root, surface_fields, kt)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, config)
+        card.recipe.grid, card.recipe.z_coord, config,
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     _, diag = model.tendencies_with_diagnostics(
         state, surface_forcing=surface, dt=card.dt_s)
     # legoESM u[j, i+1] == NEMO u[jj=j, ji=i]; legoESM v[j+1, i] == NEMO v.
