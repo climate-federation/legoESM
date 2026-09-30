@@ -362,6 +362,7 @@ def mpas_hydrostatic_tendencies(
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
     return_thermo_terms: bool = False,
+    fence_pv_flux: bool = False,
 ) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
@@ -543,6 +544,11 @@ def mpas_hydrostatic_tendencies(
         pv_flux_3d = pv_flux_energy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
         )
+        # Value-neutral fusion split, set only by the sharded (multi-GPU)
+        # step: there it cuts the A100 step 7-15% (s9 16/32 GPUs, s7 2 GPUs);
+        # on one device it costs 1-3.5%, so the serial path leaves it off.
+        if fence_pv_flux:
+            pv_flux_3d = jax.lax.optimization_barrier(pv_flux_3d)
     elif config.pv_scheme == "enstrophy":
         pv_flux_3d = pv_flux_enstrophy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
@@ -1260,7 +1266,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.mesh.areaCell)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

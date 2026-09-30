@@ -320,3 +320,10 @@ def test_restart_snow_layers_round_trip_and_mismatch_refused(tmp_path):
     np.savez(tmp_path / "part.npz", **d)
     with pytest.raises(ValueError, match="snow-layer"):
         _load_restart(tmp_path / "part.npz", lay)
+
+
+def test_lmip_runs_the_drainage_limiter_at_the_calibrated_value():
+    """The land tables were calibrated with the field-capacity drainage limiter
+    at 0.5; LMIP must not inherit the RichardsConfig library default (0.0)."""
+    land = build_config_from_args(_parse_args(["--lat", "45.0"])).land
+    assert land.richards.fc_drain_saturation == 0.5

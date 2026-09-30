@@ -605,3 +605,45 @@ class TestCubedSphereLevelFallbackBootstrap:
                 n_devices=4,
                 allow_level_fallback=False,
             )
+
+
+@pytest.mark.parametrize("precision,expected", [
+    ({}, "fp32"),
+    ({"dynamics": "float64"}, "fp64"),
+    ({"dynamics": "float32", "conservation": "float64"}, "mixed"),
+    ({"dynamics": "float32"}, "fp32"),
+    ({"conservation": "float64"}, "mixed"),
+    ({"mode": "fp32", "dynamics": "float64"}, "fp32"),
+])
+def test_yaml_precision_honours_per_component_keys(precision, expected):
+    """DEFAULT_CONFIG supplies no precision mode, so a per-component request is
+    not overridden by a default mode; an explicit mode still wins."""
+    from legoesm.config import Config
+    from legoesm.runtime.config import precision_mode_from_yaml_config
+    cfg = Config.from_dict({"hardware": {"precision": precision}})
+    assert precision_mode_from_yaml_config(cfg) == expected
+
+
+def test_yaml_precision_reaches_the_driver_bootstrap(monkeypatch):
+    """The resolved YAML precision must be the precision ModelDriver boots
+    with, not only what the resolver returns (codex review of #1811)."""
+    import legoesm.runtime
+    from legoesm.config import Config
+    from legoesm.driver.model_driver import ModelDriver
+    ec = Config.from_dict(
+        {"hardware": {"precision": {"dynamics": "float64"}}}).to_experiment_config()
+    assert ec.precision == "fp64"
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_bootstrap(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(legoesm.runtime, "bootstrap", _fake_bootstrap)
+    driver = ModelDriver(ec)
+    with pytest.raises(_Stop):
+        driver._bootstrap_runtime()
+    assert seen["precision"] == "fp64"

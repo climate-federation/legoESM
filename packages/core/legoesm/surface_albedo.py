@@ -85,8 +85,9 @@ class LandAlbedoConfig(NamedTuple):
     # 0.80-0.85 on the Antarctic plateau and 0.6-0.75 on Arctic tundra. One
     # parameter cannot be right for melting spring snow and for the polar
     # plateau: the missing dependence is temperature, not the value.
-    # 0.0 = OFF (calendar-time clock, byte-identical); BATS uses 5000 K.
-    snow_age_activation_K: float = 0.0
+    # Default = BATS 5000 K.  0.0 selects the calendar-time clock (the defect
+    # above) and must be set explicitly by any lane that wants it.
+    snow_age_activation_K: float = 5000.0
     # Dry-soil brightening (Oleson et al. 2013, CLM): exposed soil brightens as the
     # top layer dries, so a DESERT (low soil moisture) is far brighter than moist bare
     # soil / tundra — a contrast a single per-PFT albedo cannot represent.  The

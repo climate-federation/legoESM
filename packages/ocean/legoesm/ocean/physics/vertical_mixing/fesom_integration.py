@@ -39,12 +39,49 @@ import numpy as np
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+    EOS_SAFE_SALINITY_PSU,
     bn2_ladder_kwargs,
 )
 from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_tke_effective_ice_fraction,
     tke_vertical_mixing,
 )
+
+__physics_contract__ = {
+    "summary": (
+        "FESOM node-column bridge for the legoESM (NEMO-card) prognostic TKE "
+        "closure: calls the grid-agnostic tke_vertical_mixing on node columns "
+        "and returns (Kv on nodes, Av on elements, TKE) in fesom_jax layout "
+        "for its implicit vertical solver."
+    ),
+    "inputs": {
+        "state.T": "degC", "state.S": "psu", "state.uv_node": "m/s",
+        "surface_forcing.tau_x": "N/m^2", "surface_forcing.tau_y": "N/m^2",
+        "dt_tke": "s",
+    },
+    "outputs": {
+        "Kv_nod": "m^2/s", "Av_elem": "m^2/s", "tke": "m^2/s^2",
+    },
+    "sign_convention": (
+        "Kv, Av >= 0; Kv[:, k] is the interface ABOVE layer k, so Kv[:, 0] = 0 "
+        "(no flux through the surface) and slots below the last wet layer are "
+        "0 (no flux through the seafloor); z positive up. A coefficient "
+        "producer: the fesom implicit solver applies the fluxes."
+    ),
+    # Produces coefficients only; the flux-form solver that applies them owns
+    # the budget, so this module conserves/violates nothing by itself.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Gaspar et al. (1990) / Madec et al. NEMO zdftke on FESOM2 node "
+        "columns (Danilov et al. 2017, GMD 10)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_fesom_tke_bridge.py — Kv/Av/TKE layout pinned "
+        "(Kv[:,0]==0, zeros below the pad slot), wind forcing raises surface "
+        "TKE, unsupported TKE options raise."
+    ),
+}
 
 
 def fesom_zgeom(mesh) -> SimpleNamespace:
@@ -139,7 +176,7 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         u_node = jnp.where(layer_mask, uv[..., 0], 0.0)
         v_node = jnp.where(layer_mask, uv[..., 1], 0.0)
         T = jnp.where(layer_mask, state.T.data, 0.0)
-        S = jnp.where(layer_mask, state.S.data, 35.0)
+        S = jnp.where(layer_mask, state.S.data, EOS_SAFE_SALINITY_PSU)
         rho = compute_ocean_rho(
             SimpleNamespace(T=SimpleNamespace(data=T), S=SimpleNamespace(data=S)),
             zgeom, J, eos_fn=eos_fn, eos_depth="geometric",
