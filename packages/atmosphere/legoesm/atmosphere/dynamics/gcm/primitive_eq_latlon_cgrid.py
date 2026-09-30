@@ -1392,7 +1392,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=grid.area)
             state = state._replace(tracers=_tr_out, T=_T_out)
 
         # #1675: the mass fixer's accumulate-dtype correction promotes ``p_s``

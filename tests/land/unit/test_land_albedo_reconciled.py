@@ -120,3 +120,16 @@ def test_ground_absorption_nonnegative_under_bright_snow():
     total = np.asarray(out.ASW_Sun + out.ASW_Sh + out.ASW_Soil)
     want = (1 - 0.8) * 250.0 + (1 - 0.7) * 250.0 + (1 - rt._RHO_UV) * 10.0
     np.testing.assert_allclose(total, want, rtol=1e-9)
+
+
+def test_snow_age_activation_default_is_bats_and_production_pins_it():
+    """Default is the BATS 5000 K temperature-dependent clock (the calendar
+    clock left every snow cell at 0.5207); production still sets it explicitly."""
+    from pathlib import Path
+
+    import yaml
+
+    from legoesm.surface_albedo import LandAlbedoConfig
+    assert LandAlbedoConfig().snow_age_activation_K == 5000.0
+    deck = Path(__file__).resolve().parents[3] / "config/amip/amip_production.yaml"
+    assert yaml.safe_load(deck.read_text())["snow_age_activation_K"] == 5000.0

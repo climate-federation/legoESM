@@ -1074,6 +1074,15 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # materialization passive against the ordinary production step.
     slow_forcing_rhs_observer: object = None
     slow_forcing_rhs_observer_face: str = ""
+    # WRITE-only round-5 (VORTEX) observer for the PER-TERM decomposition of
+    # that same completed right-hand side.  It is handed the
+    # ``MomentumTendencyDiagnostics`` the very same ``tendencies`` call
+    # already builds -- with the stage face thicknesses, the lateral-diffusion
+    # thickness operands and the continuity clock this step supplies -- so the
+    # rows are a decomposition of the array the observer above reports and not
+    # a second opinion obtained from a different call.  None is the production
+    # value and no model configuration can select it.
+    slow_forcing_rhs_term_observer: object = None
     # Private round-142 directed discriminator: replace only the owned native
     # faces of the completed 3-D momentum RHS before its depth reduction.
     # None leaves the production program unchanged; this is not configurable.
@@ -1290,6 +1299,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
+    # Round 5 (VORTEX) WRITE-only companion to the override above: report
+    # the vertical velocity and face thicknesses dyn_zad is handed, so the
+    # operand can be scored against the oracle's own recorded ``ww``
+    # instead of only being replaced by it.  None is the production value.
+    stage1_zad_operand_observer: object = None
     # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
     # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
     # operand, so one operand at a time can be replaced by NEMO's recorded
@@ -3531,6 +3545,26 @@ class LatLonCGridOceanModel:
                 f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
                 f"got {config.eos!r}",
             )
+        # NEMO S-EOS (``ln_seos``) coefficients are a per-run &nameos block, not
+        # a library constant.  ``eos_nemo_seos=None`` keeps NemoSEOSConfig()'s
+        # DINO values (every pre-existing caller).  When a card supplies its own
+        # set, refuse the two combinations that would SILENTLY read the DINO
+        # defaults instead: a different EOS selection, and the GM/Redi + EKE
+        # closures, whose density calls take eos/eos_linear only.
+        if getattr(config, "eos_nemo_seos", None) is not None:
+            if config.eos != "nemo_seos":
+                raise ValueError(
+                    "eos_nemo_seos carries NEMO &nameos coefficients and is "
+                    'only read when eos="nemo_seos"; got eos='
+                    f"{config.eos!r}. Drop the coefficients or select the EOS.")
+            if config.gm_redi is not None:
+                raise ValueError(
+                    "eos_nemo_seos with gm_redi is refused: the GM/Redi and "
+                    "EKE density closures build their EOS from eos/eos_linear "
+                    "alone, so they would silently run NemoSEOSConfig()'s DINO "
+                    "coefficients while the dynamics ran this card's. Thread "
+                    "eos_nemo_seos through those closures before combining "
+                    "them.")
 
         # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
         # the source-augmentation flags are validated at construction). The EKE
@@ -4347,6 +4381,62 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+            # NEMO ln_dynvor_een under ln_dynadv_vec=.false. (dynvor.F90:874
+            # routes np_EEN; dyn_vor_init:891-893 gives the flux-form arm
+            # ntot = np_CME).  vor_een's np_CME branch (dynvor.F90:780-783) is
+            # ff_f plus a metric term whose two coefficients are
+            #   di_e2v_2e1e2f = (e2v(i+1,j) - e2v(i,j)) * 0.5 * r1_e1e2f
+            #   dj_e1u_2e1e2f = (e1u(i,j+1) - e1u(i,j)) * 0.5 * r1_e1e2f
+            # (dynvor.F90:905-908).  On a Cartesian mesh whose scale factors
+            # are one repeated constant those differences are bitwise zero and
+            # the branch IS np_COR.  On any other mesh they are not, and the
+            # transcription would be silently incomplete -- so this scheme is
+            # admitted only on a constant-scale-factor grid, and only with the
+            # flux-form momentum it was read off.
+            _cor_s = getattr(config, "coriolis_scheme", "matsuno_split")
+            if _cor_s != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" carries the planetary '
+                    "Coriolis inside NEMO's vor_een triad, so the Matsuno "
+                    'rotation must be off: requires coriolis_scheme='
+                    f'"explicit_ab2", got {_cor_s!r}.')
+            _ma = getattr(config, "momentum_advection", "vector_invariant")
+            if _ma != "flux_form":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" transcribes NEMO\'s '
+                    "FLUX-FORM vorticity arm only (dyn_vor_init:891-893). "
+                    "Vector-invariant momentum routes NEMO to np_CRV, where "
+                    "the triad also carries the RELATIVE vorticity — use "
+                    '"een_total" for that. Got momentum_advection='
+                    f"{_ma!r}.")
+            if config.een_e3f_scheme != "nemo_avg4":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs NEMO\'s own '
+                    'e3f_vor thickness: requires een_e3f_scheme="nemo_avg4", '
+                    f"got {config.een_e3f_scheme!r}.")
+            _emw = getattr(config, "een_metric_weighting", "off")
+            if _emw != "nemo":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs vor_een\'s own '
+                    "e1v/e2u transport weighting (dynvor.F90:791-792,804-806):"
+                    f' requires een_metric_weighting="nemo", got {_emw!r}.')
+            _bt_cor = getattr(config.barotropic, "barotropic_coriolis", "avg")
+            _bt_spl = getattr(config, "barotropic_coriolis_split", "frozen")
+            if _bt_cor != "een_metric" or _bt_spl != "live":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" requires the MATCHING '
+                    "barotropic arm: NEMO's dyn_cor_2D_init runs the same "
+                    "triad on ff_f/e3f_vor under np_EEN "
+                    "(dynspg_ts.F90:1326-1345), and the depth-mean of the "
+                    "baroclinic Coriolis must be subtracted with that same "
+                    'stencil. Requires barotropic_coriolis="een_metric" and '
+                    'barotropic_coriolis_split="live"; got '
+                    f"{_bt_cor!r} / {_bt_spl!r}.")
+            # The constant-scale-factor requirement is a property of the MESH,
+            # which this config-only validator cannot see; it is enforced by
+            # ``assert_een_planetary_metric_term_vanishes`` at the point the
+            # card is built (nemo_testcase_recipe.py), where the grid is.
         if getattr(config, "vorticity_scheme", "al81") in (
                 "ene_total", "een_total"):
             _vs = getattr(config, "vorticity_scheme", "al81")
@@ -5014,6 +5104,7 @@ class LatLonCGridOceanModel:
                    nemo_operator_association=False,
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
+                   nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None):
         """Compute baroclinic tendencies.
 
@@ -5073,6 +5164,7 @@ class LatLonCGridOceanModel:
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
             nemo_stage_zad_operands=nemo_stage_zad_operands,
+            nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
             diagnose_momentum=return_nemo_operator_components,
@@ -5427,6 +5519,15 @@ class LatLonCGridOceanModel:
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
                     _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1])
+        # The per-term observer needs the diagnostics this same call can
+        # already return; asking for them adds the decomposition and changes
+        # no tendency (the diagnostics are built from the terms as they are
+        # accumulated).  The live-stage operand bundle stays gated on its own
+        # flag so a per-term measurement cannot switch a production arm on.
+        _rhs_term_observer = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
+        _want_rhs_components = (
+            _return_live_stage_operands or callable(_rhs_term_observer))
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5441,11 +5542,21 @@ class LatLonCGridOceanModel:
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               nemo_stage_zad_operand_observer=(
+                                   self._nemo_ws_test_hooks.stage1_zad_operand_observer),
                                nemo_stage_zad_eta_after_override=(
                                    _nemo_stage1_zad_eta_after_override),
-                               return_nemo_operator_components=_return_live_stage_operands)
-        if _return_live_stage_operands:
-            tend, _, _nemo_ws_stage1_operator_operands = _tend_result
+                               return_nemo_operator_components=_want_rhs_components)
+        if _want_rhs_components:
+            tend, _mom_term_diagnostics, _live_operands = _tend_result
+            _nemo_ws_stage1_operator_operands = (
+                _live_operands if _return_live_stage_operands else None)
+            if callable(_rhs_term_observer):
+                jax.debug.callback(
+                    _rhs_term_observer,
+                    {name: getattr(_mom_term_diagnostics, name).data
+                     for name in type(_mom_term_diagnostics)._fields},
+                    ordered=False)
         else:
             tend = _tend_result
             _nemo_ws_stage1_operator_operands = None
@@ -10871,6 +10982,7 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
             _vmix_eos_fn = _make_eos_fn(
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated

@@ -62,10 +62,18 @@ from kamm_twin_90d import seasonal_t0_seconds  # noqa: E402
 T0_SEC = seasonal_t0_seconds(INIT_RESTART_PATH) if INIT_RESTART else 0.0
 print(f"seasonal clock: t0 = {T0_SEC:.0f} s "
       f"({'restart adatrj' if INIT_RESTART else 'from-rest arm -> 0'})")
-br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
     lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)   # bridge-frame lon fix
+# A card that selects NEMO's LITERAL latitude-dependent etau profile needs the
+# native T-point degree latitudes carried on the geometry, or the model refuses
+# at the first step ("grid.native_lat_T_deg is None").  Same predicate as the
+# 90-day twin uses (kamm_twin_90d.py:1317) rather than a second rule; cards
+# that do not select the literal profile keep the historical geometry pytree
+# exactly, so their runs are byte-unchanged.
+br = bridge_nemo_to_legoesm_topo(
+    g, s, periodic_i=True, full_step=True,
+    carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
 if os.environ.get("DINO_VMIX"):
     # Swap-the-subsystem discriminator: "constant" uses cfg.A_v_bg/K_v_bg
     # directly, which for the kamm card are 1.2e-4 / 1.2e-5 -- byte-identical

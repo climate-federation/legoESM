@@ -101,8 +101,9 @@ def estimate_curvilinear_cell_area(lat_deg, lon_deg):
     lat = np.asarray(lat_deg, dtype=np.float64)
     lon = np.asarray(lon_deg, dtype=np.float64)
     from legoesm import constants
-    dlon = np.abs(np.gradient(lon, axis=-1))
-    dlon = np.minimum(dlon, 360.0 - dlon)          # seam guard
+    # Unwrap BEFORE differencing: a central difference halves a mid-row
+    # 360-deg jump to ~180 deg, which a post-gradient min(d, 360-d) misses.
+    dlon = np.abs(np.gradient(np.unwrap(lon, period=360.0, axis=-1), axis=-1))
     dlat = np.abs(np.gradient(lat, axis=-2))
     return (constants.R_earth ** 2 * np.cos(np.deg2rad(lat))
             * np.deg2rad(dlon) * np.deg2rad(dlat))

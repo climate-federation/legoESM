@@ -93,6 +93,31 @@ def test_freeze_thaw_override_on():
     assert cfg.physics["enable_freeze_thaw"] is True
 
 
+def test_soil_ice_impedance_exponent_range():
+    ok = _minimal()
+    ok["physics"]["soil_ice_impedance_exponent"] = 6.0
+    assert validate_config(ok).physics["soil_ice_impedance_exponent"] == 6.0
+    for bad_v in (-1.0, 11.0, "6", True):
+        bad = _minimal()
+        bad["physics"]["soil_ice_impedance_exponent"] = bad_v
+        with pytest.raises(ValueError, match="soil_ice_impedance_exponent"):
+            validate_config(bad)
+
+
+def test_freeze_thaw_decks_state_the_ice_impedance_exponent():
+    """User 2026-09-28: every LMIP deck running freeze/thaw states e explicitly."""
+    import pathlib
+    import yaml
+    root = pathlib.Path(__file__).resolve().parents[2] / "config" / "lmip"
+    n = 0
+    for p in sorted(root.glob("*.yaml")):
+        phys = (yaml.safe_load(p.read_text()) or {}).get("physics") or {}
+        if phys.get("enable_freeze_thaw") is True:
+            n += 1
+            assert phys.get("soil_ice_impedance_exponent") == 6.0, p.name
+    assert n >= 3
+
+
 def test_land_cover_dataset_defaults_to_clm5():
     cfg = validate_config(_minimal())
     assert cfg.surfdata["land_cover_dataset"] == "clm5"     # default applied
