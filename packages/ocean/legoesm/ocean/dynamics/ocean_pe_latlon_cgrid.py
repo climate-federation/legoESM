@@ -1731,6 +1731,9 @@ def nemo_qco_wzv_operands(
             # ``eta_now``, and the scale-factor term is exactly zero -- which
             # is what NEMO's own recorded ``ww`` shows on the VORTEX
             # vector-invariant card.
+            # NEMO's extrapolation is arithmetic on two heights and carries
+            # NO freshwater term: stprk3.F90:225 is the whole statement.  The
+            # leapfrog branch below folds emp in because ``ssh_nxt`` does.
             eta_after = jax.lax.optimization_barrier(
                 2.0 * eta_now - eta_before)
         elif after_ssh_form == "continuity_prediction":
@@ -1740,14 +1743,15 @@ def nemo_qco_wzv_operands(
             # IS the statement.  DINO's round 39 measured this pair.
             eta_after = jax.lax.optimization_barrier(
                 eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+            eta_after = jax.lax.optimization_barrier(
+                eta_after + jax.lax.optimization_barrier(dt * fw))
         else:
             raise ValueError(
                 "after_ssh_form must be one of ['continuity_prediction', "
                 "'rk3_extrapolation'] -- it names the NEMO time-stepping "
                 "scheme whose after-SSH slot this call reads; got "
                 f"{after_ssh_form!r}")
-        eta_after = jax.lax.optimization_barrier(
-            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+        eta_after = eta_after * tmask[..., 0]
     else:
         eta_after = jax.lax.optimization_barrier(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]

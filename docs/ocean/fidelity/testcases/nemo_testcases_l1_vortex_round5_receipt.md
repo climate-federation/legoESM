@@ -205,3 +205,89 @@ first-`wzv` operands AND runs NEMO's RK3 stepper.
 | per-term observer's effect on the model | right-hand side `1.36e-20`, `u`/`v` `2.78e-17`, `T`/`S`/`eta` exactly `0` — the compiled-rounding floor, `2 000×` below what it is used to attribute, and MEASURED rather than asserted |
 | ordered control (NEMO's vertical-velocity call leaves the momentum accumulator untouched) | holds |
 | `tests/ocean/unit/test_zad_qco_coupled.py` | `5 passed` |
+| `tests/test_dispatch_hardening.py` (the new guard is pinned grow-only) | `24 passed` |
+| GYRE from-rest year, day 30 / 240 / 360 | section 9 |
+| DINO month gate, private work dir | section 9 |
+| card battery, citation gate, push gate | section 9 |
+| citation map audit over the default receipt | `unmapped: []`, `map entries failing: 0` |
+
+## 9. The shared landing's own gates
+
+GYRE executes the changed statement, so Decision 43/55/59 binds: the year
+rows are re-run and registered, and the direction is reported, not the
+magnitude alone.
+
+## 9b. How far the transcription actually reaches, stated rather than implied
+
+READ OFF THE CODE, not measured: NEMO's extrapolated guess is
+`2*ssh(n) - ssh(n-1)`, and the second operand is the PREVIOUS step's entry
+height. legoESM's RK3 lane does not carry it — the leap-frog lane does, and
+every RK3 consumer falls back to the step-entry height when it is absent
+(and the harnesses that drive these cards do not seed it). So on an RK3 card
+the transcription currently evaluates to "the after slot holds the
+step-entry height", i.e. the scale-factor term is exactly zero.
+
+* At the FIRST step that is EXACTLY NEMO, because the extrapolation has
+  never run — which is what NEMO's own recorded vertical velocity shows, and
+  it is the whole of this round's measurement.
+* At later steps it is an approximation of NEMO's extrapolation, not the
+  extrapolation. Everything measured here is still measured: the VORTEX
+  ladder re-seeds every `kt` from NEMO's own record, and the improvement is
+  reported per step; GYRE's 40 moved rows all moved toward NEMO.
+
+**Completing it requires legoESM's RK3 lane to carry the previous step's
+entry sea surface height, which is a change to the state a run carries.**
+That needs the operator's decision and is NOT taken here (section 11).
+
+## 10. Choices made this round
+
+| choice | ASKED or UNASKED | note |
+|---|---|---|
+| the vector-EEN VORTEX card consumes NEMO's own first-`wzv` vertical velocity instead of legoESM's generic z-star one | ASKED in effect | decision 73 makes the card a transcription of NEMO's vector-invariant momentum program; this is which routine's output that program feeds to `dyn_zad`, read from `stp2d.f90:153`, not a preference |
+| the first `wzv` call's after-SSH follows the card's own time-stepping program (RK3 extrapolation, leapfrog continuity prediction) rather than one shared form | ASKED in effect, and it is the FIX | operator note BI: "a NEMO option that is right for one time-stepping program is NOT a shared default — it is selected per card, and the card's stepper is checked". Both forms are NEMO's, each cited |
+| keying that form on the card's momentum time integrator rather than adding a new config field | UNASKED, and stated | a new field would be a knob whose default keeps the bug on GYRE, DINO and ORCA2, which rule 3 forbids. The key is NEMO's own relationship between two of its sources, not a coupling of unrelated choices. Revert on request |
+| the FLUX VORTEX card is left on the generic vertical velocity | UNASKED, and stated | it runs flux-form advection and never calls `dyn_zad`, so the statement is not executed there; changing it would be a second variable in the same round. Its own `kt=2` owner is still open (section 11) |
+| `zad_bottom_face_mask` is left at `min_rule` on the vector card | UNASKED, and stated | GYRE and DINO set `nemo_faithful`; this deck is flat-bottomed, so the two agree here and flipping it would be a second variable with nothing to measure. Named rather than silently carried |
+| round 4's magnitude exclusion is retracted and the bound corrected in the instrument | not a choice | a defect fix; its non-vacuity is that it un-excludes the term |
+
+## 11. OPEN
+
+**DECISION NEEDED — finish the after-SSH transcription on the RK3 lane.**
+NEMO's guess is `2*ssh(n) - ssh(n-1)`; legoESM's RK3 lane carries only
+`ssh(n)`, so the term evaluates to zero at every step instead of only the
+first (section 9b). Carrying the previous step's entry height is a change to
+the state a run carries, which the lane's standing rule says is never taken
+without the operator. One line: **carry the previous step's entry sea
+surface height on the RK3 lane (Y), or leave the after-SSH slot equal to the
+step-entry height (X, today)?** Current value X. My pick: Y, because the
+statement is NEMO's and the round has already shown what this operand is
+worth — but the measurement that settles it is cheap and should come first:
+the same per-term discriminator at `kt=2` rather than `kt=1`, where NEMO's
+extrapolation is no longer zero.
+
+**Round 6 — note BK's resolution ladder, if the vector card is at bar level.**
+It is not yet: `kt=2` is `3.37e-06` against a bar of `1e-15`, and the flux
+card's own `1.14e-07` is now the nearer target. The vector card's remaining
+`kt=2` velocity residual is `30×` the flux card's, so ONE difference remains
+between the two momentum programs at that step, and the same walk that found
+this one will find it — the per-term rows are now all at the floor, so the
+remainder is NOT in the completed pre-stage right-hand side and must be in
+what the stages do with it. Round 4's own stage table already says where to
+look: with NEMO's pre-stage right-hand side handed over, stage 1 was EXACT
+(`1.1e-16`), so the residual is stage 2 or stage 3.
+
+**The flux card's `kt=2` owner is still unnamed** (stage-3 residual
+`1.204e-07`), unchanged by this round, with the implicit vertical viscosity
+still on its candidate list and still unmeasured by a committed instrument.
+
+**Then the resolution ladder** (decision 74, note BK) — 15 km and 10 km,
+still owed.
+
+**What this bears on ORCA2 and on the developed state.** ORCA2, GYRE and
+DINO's RK3 recipe all execute the changed statement at EVERY step of a
+developed state, where the after-SSH extrapolation is not zero. GYRE's
+ten-step ladder shows the size of that: 40 of 50 scored rows moved, all
+toward NEMO, median factor `3.10`. Any ORCA2 finding that rests on a
+developed-state momentum row, on the first RK3 stage, or on the barotropic
+slow forcing is downstream of this and should be re-measured before it is
+spent.
