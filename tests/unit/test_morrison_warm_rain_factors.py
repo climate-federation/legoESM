@@ -255,7 +255,12 @@ def test_cam6_guards_and_factor():
     p2, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1],
                                             10.0, fact=0.2)
     np.testing.assert_allclose(p2, 0.2 * p1, rtol=1e-14)
-    # relvar clipped to CAM6's [0.001, 10]
+    # relvar clipped to CAM6's [0.001, 10] at BOTH ends (relvar is CAM6's
+    # inverse relative variance: small = strong enhancement)
+    p_lo, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1], 1e-6)
+    p_lo_ref, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1], 1e-3)
+    np.testing.assert_allclose(p_lo, p_lo_ref, rtol=1e-12)
+    assert float(p_lo[0]) > float(p1[0])
     p_hi, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1], 50.0)
     np.testing.assert_allclose(p_hi, p1, rtol=1e-14)
     # cloud-number sink from the CAPPED water: prc*rho/x_c == prc*ncic/qcic
@@ -282,6 +287,34 @@ def test_cam6_option_reaches_the_kernel_through_the_threading():
     b_cam, _, _ = _morrison_budget(leaf)
     ratio = np.asarray(b_cam["autoconversion"] / b_sam["autoconversion"])
     assert np.all(np.isfinite(ratio)) and not np.allclose(ratio, 1.0, rtol=1e-3)
+
+
+def test_cam6_accretion_uses_the_capped_water():
+    """In the kk2000_cam6 branch accretion sees the 5e-3 in-cloud cap: the
+    applied accretion at q_c = 1e-2 equals that at q_c = 5e-3 (dt = 1 s, the
+    donor clamp does not bind); the SAM kk2000 branch has no such cap."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        morrison_microphysics,
+    )
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+
+    def acc(cfg, qc):
+        shape = (1, 2)
+        z = jnp.zeros(shape)
+        f = dict(q_c=jnp.full(shape, qc), q_r=jnp.full(shape, 1e-4),
+                 N_r=jnp.full(shape, 1e5))
+        hyd = HydrometeorState(**{k: f.get(k, z) for k in HydrometeorState._fields})
+        out = morrison_microphysics(
+            jnp.full(shape, 288.0), jnp.full(shape, 1.0e-2), hyd,
+            jnp.full(shape, 9.0e4), jnp.full((1, 3), 9.0e4), jnp.full(shape, 1.0),
+            jnp.full(shape, 200.0), 1.0, cfg._replace(publish_qc_budget=True))
+        return np.asarray(out.qc_budget["accretion"])
+
+    cam = MorrisonConfig(warm_rain_scheme="kk2000_cam6")
+    np.testing.assert_allclose(acc(cam, 1.0e-2), acc(cam, 5.0e-3), rtol=1e-10)
+    sam = MorrisonConfig()
+    assert not np.allclose(acc(sam, 1.0e-2), acc(sam, 5.0e-3), rtol=1e-3)
 
 
 def test_kk2000_path_unchanged_by_the_cam6_option():

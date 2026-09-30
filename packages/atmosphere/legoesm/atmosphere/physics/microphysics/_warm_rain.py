@@ -901,7 +901,11 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0):
 
     ``N_c[#/cm³]`` = ``N_c_eff``[#/m³]·1e-6, identical to CAM6's
     ``ncic[#/kg]·1e-6·rho``.  ``var_coef(r, a) = Γ(r+a)/(Γ(r)·r^a)`` is the
-    sub-grid cloud-water variance enhancement.  Ported guards: ``q_c >= 1e-8``
+    sub-grid cloud-water variance enhancement, verbatim from
+    micro_mg_utils.F90:574-583 + :333-339.  CAM6's ``relvar`` is the
+    INVERSE relative variance (gamma shape ν = mean²/variance,
+    clubb_intr.F90:2425 ``rcm**2/qclvar``), so large relvar = uniform cloud
+    (factor → 1) and small relvar = strong enhancement.  Ported guards: ``q_c >= 1e-8``
     gate (``icsmall``) and the 5e-3 kg/kg in-cloud cap.  Rain-number source =
     ``PRC·rho / m(25 µm)`` (CAM6 ``nprc``, per-volume here); the cloud-number
     sink is the caller's ``-PRC·rho/x_c`` = CAM6 ``nprc1`` (``x_c`` from the
