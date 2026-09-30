@@ -255,6 +255,15 @@ def test_cam6_guards_and_factor():
     p2, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1],
                                             10.0, fact=0.2)
     np.testing.assert_allclose(p2, 0.2 * p1, rtol=1e-14)
+    # relvar clipped to CAM6's [0.001, 10]
+    p_hi, _, _ = wr.autoconversion_kk2000_cam6(jnp.asarray([3e-4]), n[:1], rho[:1], 50.0)
+    np.testing.assert_allclose(p_hi, p1, rtol=1e-14)
+    # cloud-number sink from the CAPPED water: prc*rho/x_c == prc*ncic/qcic
+    prc, _, x_c = wr.autoconversion_kk2000_cam6(jnp.asarray([1.0e-2]), n[:1],
+                                               rho[:1], 10.0)
+    ncic_per_kg = 1e8 / 1.0
+    np.testing.assert_allclose(float(prc[0] * rho[0] / x_c[0]),
+                               float(prc[0]) * ncic_per_kg / 5.0e-3, rtol=1e-12)
 
 
 def test_cam6_option_reaches_the_kernel_through_the_threading():
