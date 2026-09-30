@@ -33,9 +33,7 @@ from legoesm.runtime.precision import apply_precision
 # The ocean kernels mixed-mode must keep in fp64 (see precision._OCEAN_OVERRIDES).
 _OCEAN_SENSITIVE = (
     "barotropic_solver",
-    "pressure_gradient",
     "equation_of_state",
-    "coriolis",
 )
 
 

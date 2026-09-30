@@ -622,41 +622,29 @@ def with_precision(module: str):
 # ---------------------------------------------------------------------------
 
 # These are applied via set_recommended_overrides() — they encode domain
-# knowledge about which ESM kernels are precision-sensitive.
+# knowledge about which ESM kernels are precision-sensitive.  Every non-empty
+# entry must name a module some kernel actually passes to this API (gated by
+# tests/unit/test_precision.py); an unconsumed name promises fp64 it never
+# delivers.
 
 _OCEAN_OVERRIDES = {
     # Barotropic solver: iterative, very sensitive to rounding in SSH
     "barotropic_solver": {"compute": jnp.float64, "control": jnp.float64},
-    # Pressure gradient: hydrostatic cancellation is catastrophic in fp32
-    "pressure_gradient": {"compute": jnp.float64},
     # EOS: density differences O(0.01 kg/m³) require > 7 sig figs
     "equation_of_state": {"compute": jnp.float64},
-    # Coriolis: f*u difference sensitive at high latitudes
-    "coriolis": {"compute": jnp.float64},
     # Tracer advection: safe in fp32 with flux limiters
     "tracer_advection": {},
     # Tracer diffusion: safe in fp32
     "tracer_diffusion": {},
     # Vertical mixing: safe in fp32
     "vertical_mixing": {},
-    # Time stepping: accumulation in fp64 for long runs
-    "ocean_timestepping": {"accumulate": jnp.float64},
     # Global budgets: always fp64
     "ocean_diagnostics": {"accumulate": jnp.float64, "control": jnp.float64},
 }
 
 _ATMOSPHERE_OVERRIDES = {
-    # Spectral transforms: require fp64 (complex128 FFTs)
-    "spectral_transform": {
-        "storage": jnp.float64, "compute": jnp.float64,
-        "accumulate": jnp.float64, "control": jnp.float64,
-    },
     # Pressure gradient: hydrostatic balance subtraction
     "atm_pressure_gradient": {"compute": jnp.float64},
-    # Semi-implicit solver: matrix inversion needs fp64
-    "semi_implicit": {"compute": jnp.float64, "control": jnp.float64},
-    # Gravity wave propagation: vertical eigenvalue problem
-    "gravity_wave": {"control": jnp.float64},
     # Radiation: safe in fp32 (optical depths are O(1))
     "radiation": {},
     # Convection: safe in fp32
@@ -674,8 +662,6 @@ _LAND_OVERRIDES = {
     "soil_moisture": {},
     # Soil thermal: diffusion — safe in fp32
     "soil_thermal": {},
-    # Carbon pools: century timescale, small fluxes → fp64 accumulation
-    "carbon_pools": {"accumulate": jnp.float64},
     # Runoff: safe in fp32
     "runoff": {},
     # ET: safe in fp32
@@ -683,14 +669,8 @@ _LAND_OVERRIDES = {
 }
 
 _ICE_OVERRIDES = {
-    # EVP stress solver: subcycled, sensitive to convergence
-    "evp_solver": {"compute": jnp.float64, "control": jnp.float64},
-    # Ice thickness: conservation-critical, small increments
-    "ice_thickness": {"accumulate": jnp.float64},
     # Energy balance: safe in fp32
     "ice_energy": {},
-    # Mass balance: fp64 accumulation for century runs
-    "ice_mass_balance": {"accumulate": jnp.float64},
 }
 
 

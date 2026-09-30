@@ -4210,6 +4210,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -4396,6 +4397,7 @@ def make_voronoi_sharded_step(
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
@@ -4465,7 +4467,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
+    if cfg.fix_mass or getattr(cfg, "conservative_tracer_clamp", False):
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -4724,7 +4726,8 @@ def make_voronoi_sharded_step(
                     conservative=getattr(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

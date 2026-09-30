@@ -422,6 +422,7 @@ class TestCoupledDriverWiring:
             _atm=atm, _last_sfc_response=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
+
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None, None)
         # Once a blended response exists, its SH/LH flow through.
@@ -437,6 +438,33 @@ class TestCoupledDriverWiring:
         drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
         with pytest.raises(ValueError, match="surface_mass_flux"):
             atm.get_sfc_flux_override(0.0)
+
+    def test_hook_closes_water_and_energy_together(self):
+        """The atmosphere's moisture source is the tile mass flux, and its heat
+        intake (sensible + latent_enthalpy_correction + the L_v*E its moist
+        enthalpy credits the water with) equals the tiles' shflx + lhflx, with
+        the tile charging a latent heat != L_v (main #1822 closure, expressed
+        through the atmosphere's own correction)."""
+        from types import SimpleNamespace
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            latent_enthalpy_correction)
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        sh, lh, ev = atm.get_sfc_flux_override(0.0)
+        np.testing.assert_allclose(ev, evap, rtol=1e-12)
+        heat_in = sh + latent_enthalpy_correction(lh, ev) + constants.L_v * ev
+        np.testing.assert_allclose(heat_in, resp.shflx + resp.lhflx, rtol=1e-12)
+        # Non-vacuous: without the correction the column misses (L - L_v)*E.
+        assert not np.allclose(sh + constants.L_v * ev, resp.shflx + resp.lhflx)
 
     def test_assemble_ocean_forcing_sw_down_is_net(self):
         """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,

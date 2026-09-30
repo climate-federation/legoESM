@@ -36,7 +36,9 @@ if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed()
 
 from legoesm.driver.config import (
+    CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
+    ZM_SCALAR_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
@@ -48,6 +50,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -346,6 +349,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "below 1 are honoured and are how a blow-up gets "
                              "localised in time: the reported failure day is the "
                              "first SAMPLE, not the first bad step.")
+    parser.add_argument("--corner-fill", dest="corner_fill",
+                        choices=CORNER_FILL_MODES,
+                        default=_DYCORE_DEFAULTS.corner_fill,
+                        help="Cubed-sphere cube-vertex halo corner fill "
+                             "(inert on other grids). avg = 2-point average.")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
@@ -889,6 +897,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
                              "above it. Default: the scheme's own 0 = no limit.")
+    for _f, _leaf in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}.items():
+        _cls = ("ZhangMcFarlaneConfig" if _f.startswith("zm_")
+                else "CLUBBParams")
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"{_cls}.{_leaf} (legal range: the scheme's "
+                                 "__param_spec__). Default: the scheme's own "
+                                 "value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -941,13 +957,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
-                             "None = 0.0 = off (calendar clock, byte-identical).")
+                             "None = the LandAlbedoConfig default (5000 K); 0 = "
+                             "calendar clock.")
     parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-soil-ice-impedance-exponent",
+                        dest="land_soil_ice_impedance_exponent", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
+                        help="Frozen-soil ice impedance exponent e (CLM5 e_ice): "
+                             "soil conductivity x 10**(-e * ice fraction). Active "
+                             "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
+                             "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
+                        help="Two-leaf canopy: soil-moisture stress also "
+                             "down-regulates the Ball-Berry intercept b0. "
+                             "Default on (library value); the FLUXNET EC-site "
+                             "setup uses --no-land-canopy-stress-b0. Requires "
+                             "--use-multilayer-land --land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-interception",
+                        dest="land_canopy_interception",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_interception,
+                        help="Two-leaf canopy rain interception (canopy water "
+                             "store, throughfall, wet-leaf evaporation). "
+                             "Default off. Requires --use-multilayer-land "
+                             "--land-surface-scheme two_leaf.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1672,6 +1712,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-params-refresh",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="mpas_land_params_refresh",
+                        help="MPAS lane, multilayer two-leaf land: rebuild "
+                             "LAI, canopy height and soil albedo from the "
+                             "surfdata climatology every land step, as the "
+                             "offline calibration does (default on). "
+                             "--no-mpas-land-params-refresh keeps the start "
+                             "day's parameters for the whole run. Acts only "
+                             "with --use-multilayer-land.")
     parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
                         dest="mpas_qv_smooth_del2_m2s",
                         help="MPAS lane only: horizontal q_v del2 (unweighted "
@@ -1799,6 +1849,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(the model reached 288%% at 228 K). Treats the "
                              "cause of the supersaturation pile-up rather "
                              "than draining it after the fact.")
+    parser.add_argument("--morrison-warm-rain-scheme",
+                        choices=["kk2000", "kk2000_cam6", "seifert_beheng",
+                                 "seifert_beheng_sb2001"],
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_scheme"],
+                        dest="morrison_warm_rain_scheme",
+                        help="Morrison warm-rain autoconversion/accretion "
+                             "law (kk2000 = Khairoutdinov-Kogan 2000).")
+    parser.add_argument("--morrison-autocon-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_autocon_fact"],
+                        dest="morrison_autocon_fact",
+                        help="Multiplier on the kk2000 autoconversion rate "
+                             "(CAM6 MG2-style; 1.0 = unscaled, <1 keeps "
+                             "more cloud liquid). kk2000 only.")
+    parser.add_argument("--morrison-accre-enhan-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_accre_enhan_fact"],
+                        dest="morrison_accre_enhan_fact",
+                        help="Multiplier on kk2000 accretion of cloud by "
+                             "rain (MG2 accre_enhan; 1.0 = unscaled). "
+                             "kk2000 only.")
+    parser.add_argument("--morrison-warm-rain-incloud",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_incloud"],
+                        dest="morrison_warm_rain_incloud",
+                        help="CAM6 MG2 in-cloud warm rain: autoconversion "
+                             "and accretion on cloud water divided by CLUBB's "
+                             "(liquid) cloud fraction, tendencies scaled "
+                             "back by it (CAM6 MG2; CAM6 uses max(liquid, "
+                             "ice) fraction). "
+                             "Needs --turbulence clubb and "
+                             "cld_macmic_num_steps>=2.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -2259,6 +2343,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_window_pad=args.fv3_duo_window_pad,
         fv3_duo_column_lane=args.fv3_duo_column_lane,
         hyperdiff_scale=args.hyperdiff_scale,
+        corner_fill=args.corner_fill,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,
@@ -2390,6 +2475,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
+        **{_f: getattr(args, _f)
+           for _f in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
                                        if args.clubb_q_flux_scale_sigma_band
@@ -2440,6 +2527,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_canopy_stress_b0=args.land_canopy_stress_b0,
+        land_canopy_interception=args.land_canopy_interception,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2495,6 +2585,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
@@ -2506,10 +2597,14 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
+        morrison_warm_rain_scheme=args.morrison_warm_rain_scheme,
+        morrison_autocon_fact=args.morrison_autocon_fact,
+        morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
+        morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

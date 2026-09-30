@@ -142,9 +142,10 @@ cd ./runs/w2 && bash run.sh
 python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --output-dir ./runs/w2hi \
     -o grid.resolution=96 -o time.duration_hours=240
 
-# operational (needs data)
-python scripts/experiment/fetch_data.py fetch coupled/amip
-python scripts/experiment/init_experiment.py coupled/amip --name amip1 --output-dir ./runs/amip1
+# data-gated template (the one template with a data list; the run itself is
+# idealized — for AMIP use config/amip/amip_production.yaml via run_amip.py)
+python scripts/experiment/fetch_data.py fetch 3d_idealized/hydrostatic_gray_1yr
+python scripts/experiment/init_experiment.py 3d_idealized/hydrostatic_gray_1yr --name hs1 --output-dir ./runs/hs1
 
 # reproduce any past run from its manifest
 legoesm reproduce ./runs/w2/<output>/run_manifest.json --check

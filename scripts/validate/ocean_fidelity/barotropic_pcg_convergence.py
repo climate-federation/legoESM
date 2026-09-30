@@ -75,7 +75,8 @@ def main() -> int:
                    help="jacobi | poly:K  (K damped-Jacobi sweeps of the "
                         "device-LOCAL operator, no communication; the "
                         "preconditioner stays SPD, the CG operator is the "
-                        "full A)")
+                        "full A) | gpoly:K  (same sweeps of the GLOBAL "
+                        "operator, i.e. no device-boundary edge dropped)")
     p.add_argument("--save-systems", type=str, default="",
                    help="write the captured systems to this .npz")
     p.add_argument("--load-systems", type=str, default="",
@@ -187,10 +188,13 @@ def main() -> int:
         if args.precond == "jacobi":
             def M_inv(r):
                 return r * inv_diag
-        elif args.precond.startswith("poly:"):
+        elif args.precond.startswith(("poly:", "gpoly:")):
             K = int(args.precond.split(":")[1])
-            em_loc = sysm["edge_mask"] * jnp.asarray(same_owner_edge,
-                                                     dtype=rhs.dtype)
+            # gpoly: the same polynomial on the GLOBAL operator (no edge
+            # dropped) — what a deep-halo solve evaluates redundantly.
+            keep = (np.ones_like(same_owner_edge)
+                    if args.precond.startswith("gpoly:") else same_owner_edge)
+            em_loc = sysm["edge_mask"] * jnp.asarray(keep, dtype=rhs.dtype)
             A_loc = bim._make_helmholtz(sysm["H_e"], sysm["coeff"], mesh,
                                         mask, em_loc)
             inv_diag_loc = bim._helmholtz_inv_diag_mpas(

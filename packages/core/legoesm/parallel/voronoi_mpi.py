@@ -480,6 +480,9 @@ class MPASOceanHaloRefresh(NamedTuple):
     owned_mask_cells: jnp.ndarray | None = None
     owned_mask_edges: jnp.ndarray | None = None
     global_sum: Callable | None = None
+    # Cell rings each refresh fills (SPMD lane); ``None`` = not declared.
+    # The global-polynomial PCG preconditioner needs >= sweeps - 2.
+    halo_depth: int | None = None
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -1262,6 +1265,7 @@ def make_voronoi_mpi_step(
                     config, "conservative_tracer_clamp", False),
                 energy_consistent=getattr(
                     config, "energy_consistent_moisture_clip", False),
+                area=_owned_area,
                 sum_fn=_mpi_owned_sum)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))

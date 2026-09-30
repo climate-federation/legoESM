@@ -55,7 +55,9 @@ class TestWOASSSLoader:
         assert sss_zonal[idx_arctic] < sss_zonal[idx_subtrop]
 
     def test_load_falls_back_to_synthetic(self, tmp_path):
-        sss, lat, lon = load_woa_sss(cache_dir=tmp_path)
+        with pytest.raises(FileNotFoundError):       # fail-loud by default
+            load_woa_sss(cache_dir=tmp_path)
+        sss, lat, lon = load_woa_sss(cache_dir=tmp_path, allow_synthetic=True)
         assert sss.shape[0] == WOA_LAT_NATIVE
         assert sss.shape[1] == WOA_LON_NATIVE
 
@@ -400,3 +402,15 @@ class TestInterpWOASSSToGrid:
         )
         # At lat = 10 we expect SSS ≈ 10 (within 1° interp width).
         assert jnp.allclose(out, jnp.array([10.0, -25.0, 60.0]), atol=1.0)
+
+    def test_interp_honours_woa_longitude_origin(self):
+        """Field equal to its own longitude: sampling at a WOA centre returns
+        that centre on both 0.5..359.5 and -179.5..179.5 axes."""
+        lat_woa = jnp.linspace(-89.5, 89.5, 180)
+        lat_t = jnp.array([0.5, 0.5, 0.5])
+        lon_t = jnp.array([100.5, 250.5, -109.5])
+        for lon_woa in (jnp.arange(0.5, 360.0, 1.0),
+                        jnp.arange(-179.5, 180.0, 1.0)):
+            sss = jnp.broadcast_to(jnp.mod(lon_woa, 360.0)[None, :], (180, 360))
+            out = interp_woa_sss_to_grid(sss, lat_woa, lon_woa, lat_t, lon_t)
+            assert jnp.allclose(out, jnp.array([100.5, 250.5, 250.5]), atol=1e-9)

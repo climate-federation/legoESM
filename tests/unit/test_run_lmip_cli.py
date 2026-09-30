@@ -285,3 +285,10 @@ def test_carbon_ic_config_yaml_round_trips_to_args():
     assert args.carbon_ic.endswith("global_carbon_ic.npz")
     # A seeded config must still build a usable land config.
     assert build_config_from_args(args).land is not None
+
+
+def test_lmip_runs_the_drainage_limiter_at_the_calibrated_value():
+    """The land tables were calibrated with the field-capacity drainage limiter
+    at 0.5; LMIP must not inherit the RichardsConfig library default (0.0)."""
+    land = build_config_from_args(_parse_args(["--lat", "45.0"])).land
+    assert land.richards.fc_drain_saturation == 0.5

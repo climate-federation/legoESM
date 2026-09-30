@@ -490,7 +490,8 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
                       sponge_factor, spectral_filter, checkpoint_path=None,
                       ensemble_ic_noise=0.0, ensemble_noise_scale=1.0,
                       sf_override=None, mc_dropout_members=0,
-                      probabilistic=False, member_paths=()):
+                      probabilistic=False, member_paths=(), era5_cfg=None,
+                      ds=None):
     """Return ``(rollout_fn, dt_for_orchestrator)`` for the variant.
 
     The orchestrator calls ``rollout_fn(state, physics_fn, grid_, sigma_,
@@ -519,13 +520,24 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
     )
 
     if variant == "classical":
+        # The ERA5 land-sea mask run_aimip trains on, read from the same
+        # store/dataset as the verification cases: ZM requires it on the
+        # grid, and the spatial surface fields are gated by it.
+        from legoesm.training.aimip_spatial import (
+            era5_land_fraction, grid_with_zm_land_fraction,
+        )
+        conv = str(cfg.get("aimip_convection", "tiedtke"))
+        spatial = parse_bool_flag(cfg.get("aimip_spatial_surface", False))
+        land = (era5_land_fraction(grid, era5_cfg, ds=ds)
+                if spatial or conv == "zhang_mcfarlane" else None)
+        grid = grid_with_zm_land_fraction(grid, conv, land)
         rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=rad_update_interval,
-            convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+            convection_scheme=conv,
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(
                 cfg.get("aimip_surface_bulk_scheme", "constant")),
@@ -535,7 +547,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
             allow_unfilled_families=parse_bool_flag(
     cfg.get("aimip_allow_unfilled_families", False)),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
-            land_mask=None,
+            land_mask=land if spatial else None,
             split_rad=split_rad,
         )
         if isinstance(built, tuple):
@@ -879,6 +891,8 @@ def main(argv=None, ds=None):
             "(ic_noise=%.4g x noise_scale=%.4g)", len(trained),
             cfg_args.ensemble_ic_noise, cfg_args.ensemble_noise_scale)
 
+    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
+        zarr_store=yml["era5_zarr"])
     rollout_fn, dt_orch = _build_rollout_fn(
         cfg_args.variant, trained, yml, spec_cfg, grid, sigma, pe_config,
         sponge_factor, spectral_filter, checkpoint_path=cfg_args.checkpoint,
@@ -888,14 +902,13 @@ def main(argv=None, ds=None):
         mc_dropout_members=cfg_args.mc_dropout_members,
         probabilistic=cfg_args.probabilistic,
         member_paths=cfg_args.members,
+        era5_cfg=era5_cfg, ds=ds,
     )
     # The orchestrator computes n_steps = lead*3600/dt_orch; leads must land on
     # that grid (classical/column_nn: dt=dycore dt; sfno_full: dt=dt_sfno).
     _assert_leads_on_dt_grid(cfg_args.leads_hours, dt_orch)
 
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
-        zarr_store=yml["era5_zarr"])
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg_args.leads_hours, eval_year=eval_year,

@@ -622,7 +622,7 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
     lsm = ((lat[:, None] > 0) & (lon[None, :] < np.pi)).astype(np.float32)
     calls = []
 
-    def fake_slice(config, time_idx):
+    def fake_slice(config, time_idx, **kw):
         calls.append(config.load_land_frac)
         return types.SimpleNamespace(lat=lat, lon=lon, land_frac=lsm, sfc_shf=None)
 
@@ -656,6 +656,33 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(out))
     with pytest.raises(ValueError, match="land_frac is required"):
         fn(state, grid, sig)
+
+
+def test_era5_land_fraction_reads_the_callers_store_and_dataset(monkeypatch):
+    """The mask comes from the store (and open dataset) the caller names, not
+    silently from the default WB2 store."""
+    import types
+
+    import numpy as np
+
+    import legoesm.training.era5_to_state as e2s
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_spatial import era5_land_fraction
+
+    seen = []
+    lat = np.linspace(-np.pi / 2, np.pi / 2, 19)
+    lon = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+
+    def fake_slice(config, time_idx, *, ds=None, **kw):
+        seen.append((config.zarr_store, config.load_land_frac, ds))
+        return types.SimpleNamespace(lat=lat, lon=lon, sfc_shf=None,
+                                     land_frac=np.zeros((19, 72), np.float32))
+
+    monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
+    ds = object()
+    cfg = e2s.TrainingERA5Config()._replace(zarr_store="local.zarr")
+    era5_land_fraction(create_gaussian_grid(8, dealiasing="quadratic"), cfg, ds=ds)
+    assert seen == [("local.zarr", True, ds)]
 
 
 @pytest.mark.slow

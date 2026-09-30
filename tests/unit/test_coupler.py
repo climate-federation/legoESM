@@ -680,26 +680,27 @@ def test_lake_mixing_direction():
 
 
 def test_lake_surface_mass_flux_uses_phase_aware_L():
-    """Lake TileResponse.surface_mass_flux = lhflx / L_eff, where
-    L_eff = L_s for frozen lakes (T_epi <= T_freeze) and L_v
-    otherwise (audit F3 + iter-11).
+    """Lake TileResponse.surface_mass_flux = lhflx / L_eff, where L_eff is
+    the Kirchhoff latent heat at the start-of-step epilimnion temperature:
+    L_s(T_epi) for frozen lakes (T_epi <= T_freeze), L_v(T_epi) otherwise
+    (audit F3 + iter-11; surface_latent_heat).  The constant L_v / L_s are
+    1.1 % / 3e-4 off at these temperatures, far outside rtol.
     """
-    from legoesm import constants
+    from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
     config = LakeConfig()
 
-    # Warm liquid lake: L_eff = L_v
+    # Warm liquid lake: L_eff = L_v(285 K) = 2.4729e6 J/kg
     state_warm = _make_lake_state(T_epi=285.0, T_hypo=280.0)
     forcing_warm = _make_forcing(T_lowest=290.0)
     _, resp_warm = step_lake(state_warm, forcing_warm, config, U_min=1.0, dt=DT)
-    from legoesm.thermo import surface_latent_heat
-    expected_warm = resp_warm.lhflx / surface_latent_heat(285.0, 0.0)   # L_v(T_epi)
+    expected_warm = resp_warm.lhflx / latent_heat_vaporization(285.0)
     assert jnp.allclose(resp_warm.surface_mass_flux, expected_warm, rtol=1e-6)
 
-    # Frozen lake: L_eff = L_s
+    # Frozen lake: L_eff = L_s(270 K) = 2.8355e6 J/kg
     state_cold = _make_lake_state(T_epi=270.0, T_hypo=270.0)
     forcing_cold = _make_forcing(T_lowest=240.0, sw=0.0, lw=200.0)
     _, resp_cold = step_lake(state_cold, forcing_cold, config, U_min=1.0, dt=DT)
-    expected_cold = resp_cold.lhflx / surface_latent_heat(270.0, 1.0)   # L_s(T_epi)
+    expected_cold = resp_cold.lhflx / latent_heat_sublimation(270.0)
     assert jnp.allclose(resp_cold.surface_mass_flux, expected_cold, rtol=1e-6)
 
 
@@ -2056,3 +2057,33 @@ def test_coupled_multicategory_itd_ice_state_and_aggregation():
     s1 = init_surface_state(sh, ice_config=SeaIceConfig(dynamics="free_drift"))
     assert isinstance(s1.ice, DynamicSeaIceState)
     assert _total_ice_sic(s1.ice).shape == sh
+
+
+def test_ocean_evaporation_uses_flux_latent_heat_aerobulk():
+    """Evap mass flux must be lhflx divided by the latent heat the flux used.
+
+    The MOST law charges the Kirchhoff L_v(SST) under BOTH thermo conventions
+    (the convention now selects only the heat capacity), so the ocean
+    freshwater/atmosphere moisture flux must use that same L (not constant L_v).
+    """
+    from legoesm.thermo import latent_heat_vaporization
+
+    forcing = _make_forcing()
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+    for scheme, conv, L_expected in (
+        ("coare3", "aerobulk", latent_heat_vaporization(ocean_sst)),
+        ("coare3", "legoesm", latent_heat_vaporization(ocean_sst)),
+        ("constant", "legoesm", latent_heat_vaporization(ocean_sst)),
+        # The CESM port charges its oracle's constant L_v.
+        ("large_yeager_cesm", "legoesm", constants.L_v),
+    ):
+        resp = ocean_tile_response(
+            forcing, ocean_sst, zu, zu,
+            CouplerConfig(bulk_scheme=scheme, thermo_convention=conv),
+        )
+        npt.assert_allclose(resp.surface_mass_flux * L_expected, resp.lhflx,
+                            rtol=1e-6)
+        npt.assert_allclose(resp.freshwater_flux,
+                            forcing.precip_total - resp.surface_mass_flux,
+                            rtol=1e-6)

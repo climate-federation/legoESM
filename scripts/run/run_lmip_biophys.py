@@ -150,6 +150,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        soil_ice_impedance_exponent=cfg.physics.get("soil_ice_impedance_exponent"),
         albedo=cfg.physics.get("albedo") or {},
         glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
         glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
@@ -508,6 +509,10 @@ def run(args) -> int:
         if getattr(args, "carbon_prognostic", False):
             base_cfg = base_cfg._replace(
                 carbon=base_cfg.carbon._replace(scheme="differland"))
+        _e_ice = getattr(args, "soil_ice_impedance_exponent", None)
+        if _e_ice is not None:
+            base_cfg = base_cfg._replace(richards=base_cfg.richards._replace(
+                ice_impedance_exponent=float(_e_ice)))
         # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
@@ -1071,6 +1076,8 @@ def run(args) -> int:
                 # Sourced from the CONSTRUCTED config (not args) so provenance
                 # reflects the physics actually run.
                 "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "soil_ice_impedance_exponent": float(
+                    config.richards.ice_impedance_exponent),
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),

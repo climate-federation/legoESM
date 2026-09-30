@@ -138,6 +138,11 @@ def test_identity_path_has_one_external_mode_writer_for_carried_pair():
         ("dynamics/ocean_model_latlon_cgrid.py", "_step_impl"),
         ("fidelity/nemo_io.py", "read_nemo_restart"),
         ("fidelity/nemo_recipe.py", "build_nemo_eady_recipe"),
+        # The VORTEX card is the first testcase card whose oracle starts with
+        # a non-zero velocity, so it transcribes NEMO's own istate.F90:149-154
+        # depth average into the card's construction-time state.  Card
+        # construction, like the bridges above, is not a live model writer.
+        ("fidelity/nemo_testcase_recipe.py", "build_vortex_zco_card"),
         ("fidelity/nemo_state_bridge.py", "bridge_nemo_to_legoesm"),
         ("fidelity/nemo_state_bridge.py", "bridge_nemo_to_legoesm_topo"),
     ])

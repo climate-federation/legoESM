@@ -274,6 +274,26 @@ def build_config_from_args(args) -> OMIPRunConfig:
     )
 
 
+def with_kpp_cfl_dt(run_config: OMIPRunConfig, dt: float) -> OMIPRunConfig:
+    """Tie the KPP explicit-diffusion CFL cap to the run's timestep.
+
+    ``KPPConfig.cfl_cap_dt_s`` must equal the ocean dynamics dt (its default
+    300 s matched only the MPAS default dt), so the driver passes the value it
+    knows instead of leaving a default that disagrees with ``--dt``.  A value
+    already moved off the default (set explicitly upstream) that disagrees
+    with ``dt`` raises instead of being silently overwritten.
+    """
+    vm = run_config.vertical_mixing
+    current = float(vm.kpp.cfl_cap_dt_s)
+    default = float(KPPConfig._field_defaults["cfl_cap_dt_s"])
+    if current != default and current != float(dt):
+        raise ValueError(
+            f"KPPConfig.cfl_cap_dt_s was set to {current} s but the run "
+            f"timestep is {float(dt)} s; the KPP CFL cap must use the run dt")
+    return run_config._replace(vertical_mixing=vm._replace(
+        kpp=vm.kpp._replace(cfl_cap_dt_s=float(dt))))
+
+
 def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
     """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
     and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
@@ -5745,6 +5765,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     else:
         resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
+    run_config = with_kpp_cfl_dt(run_config, dt)
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)
     diag_every = args.diag_every or max(1, int(86400.0 / dt))  # ~daily
@@ -5754,6 +5775,8 @@ def run_omip_single(grid_type: str, args) -> dict:
           f"dt={dt:.0f}s | {days:.0f} days ({n_steps} steps)")
     print(f"  Physics: {args.physics} | SW: {args.sw_down} W/m² | "
           f"Water type: {args.water_type}")
+    print(f"  KPP CFL cap timestep (from dt): "
+          f"{run_config.vertical_mixing.kpp.cfl_cap_dt_s:.0f} s")
     print(f"{'='*70}")
 
     t_setup = time.time()
@@ -6678,6 +6701,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
         "dt_seconds": float(dt),
+        "kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s),
         "days": float(args.days),
         "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),
@@ -6894,6 +6918,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             from legoesm.parallel.voronoi_spmd_ocean import (
                 build_mpas_ocean_spmd_layout,
                 gather_state_mpas_ocean_spmd,
+                halo_depth_for_config,
                 make_sharded_mpas_ocean_step,
                 n_real_cells,
                 shard_cell_stack_spmd,
@@ -6902,7 +6927,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             _layout = build_mpas_ocean_spmd_layout(
                 grid, _nd, n_cells_real=n_real_cells(grid),
                 tracer_advection=str(model.config.tracer_advection),
-                nlev=int(args.nlev))
+                nlev=int(args.nlev),
+                halo_depth=halo_depth_for_config(model.config))
             spmd_step = make_sharded_mpas_ocean_step(model, _layout)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather
