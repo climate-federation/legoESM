@@ -3677,14 +3677,17 @@ class ExperimentConfig(NamedTuple):
                     f"(got {self.microphysics!r}); it would be silently inert")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
-                or self.subgrid_autoconversion):
+                or self.subgrid_autoconversion
+                or self.cloud_scheme != "cam6_clubb"):
             errors.append(
                 "morrison_warm_rain_incloud=True needs turbulence='clubb', "
+                "cloud_scheme='cam6_clubb' (CAM6 ast = max(alst, aist)), "
                 "cld_macmic_num_steps>=2 and subgrid_autoconversion=False "
                 "(it reads CLUBB's cloud fraction from the same macmic "
                 f"sub-step); got turbulence={self.turbulence!r}, "
                 f"cld_macmic_num_steps={self.cld_macmic_num_steps}, "
-                f"subgrid_autoconversion={self.subgrid_autoconversion}")
+                f"subgrid_autoconversion={self.subgrid_autoconversion}, "
+                f"cloud_scheme={self.cloud_scheme!r}")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(
