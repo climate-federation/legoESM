@@ -277,8 +277,8 @@ for DINO.**
 
 ### 7b. The citation gate on a committed tree
 
-Re-run after this receipt was committed: `16 passed`, `map entries failing
-audit: 0`, every plant firing.
+Re-run after this receipt was committed: `17 passed` (the new duplicate-key
+test is the seventeenth), `map entries failing audit: 0`, every plant firing.
 
 ## 8. Review
 
