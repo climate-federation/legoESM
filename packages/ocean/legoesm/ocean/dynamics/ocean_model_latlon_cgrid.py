@@ -1074,6 +1074,15 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # materialization passive against the ordinary production step.
     slow_forcing_rhs_observer: object = None
     slow_forcing_rhs_observer_face: str = ""
+    # WRITE-only round-5 (VORTEX) observer for the PER-TERM decomposition of
+    # that same completed right-hand side.  It is handed the
+    # ``MomentumTendencyDiagnostics`` the very same ``tendencies`` call
+    # already builds -- with the stage face thicknesses, the lateral-diffusion
+    # thickness operands and the continuity clock this step supplies -- so the
+    # rows are a decomposition of the array the observer above reports and not
+    # a second opinion obtained from a different call.  None is the production
+    # value and no model configuration can select it.
+    slow_forcing_rhs_term_observer: object = None
     # Private round-142 directed discriminator: replace only the owned native
     # faces of the completed 3-D momentum RHS before its depth reduction.
     # None leaves the production program unchanged; this is not configurable.
@@ -1290,6 +1299,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
+    # Round 5 (VORTEX) WRITE-only companion to the override above: report
+    # the vertical velocity and face thicknesses dyn_zad is handed, so the
+    # operand can be scored against the oracle's own recorded ``ww``
+    # instead of only being replaced by it.  None is the production value.
+    stage1_zad_operand_observer: object = None
     # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
     # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
     # operand, so one operand at a time can be replaced by NEMO's recorded
@@ -5090,6 +5104,7 @@ class LatLonCGridOceanModel:
                    nemo_operator_association=False,
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
+                   nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None):
         """Compute baroclinic tendencies.
 
@@ -5149,6 +5164,7 @@ class LatLonCGridOceanModel:
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
             nemo_stage_zad_operands=nemo_stage_zad_operands,
+            nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
             diagnose_momentum=return_nemo_operator_components,
@@ -5503,6 +5519,15 @@ class LatLonCGridOceanModel:
                     _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
                     _ws_ldf_face_thickness_kbb[0],
                     _ws_ldf_face_thickness_kbb[1])
+        # The per-term observer needs the diagnostics this same call can
+        # already return; asking for them adds the decomposition and changes
+        # no tendency (the diagnostics are built from the terms as they are
+        # accumulated).  The live-stage operand bundle stays gated on its own
+        # flag so a per-term measurement cannot switch a production arm on.
+        _rhs_term_observer = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
+        _want_rhs_components = (
+            _return_live_stage_operands or callable(_rhs_term_observer))
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5517,11 +5542,21 @@ class LatLonCGridOceanModel:
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               nemo_stage_zad_operand_observer=(
+                                   self._nemo_ws_test_hooks.stage1_zad_operand_observer),
                                nemo_stage_zad_eta_after_override=(
                                    _nemo_stage1_zad_eta_after_override),
-                               return_nemo_operator_components=_return_live_stage_operands)
-        if _return_live_stage_operands:
-            tend, _, _nemo_ws_stage1_operator_operands = _tend_result
+                               return_nemo_operator_components=_want_rhs_components)
+        if _want_rhs_components:
+            tend, _mom_term_diagnostics, _live_operands = _tend_result
+            _nemo_ws_stage1_operator_operands = (
+                _live_operands if _return_live_stage_operands else None)
+            if callable(_rhs_term_observer):
+                jax.debug.callback(
+                    _rhs_term_observer,
+                    {name: getattr(_mom_term_diagnostics, name).data
+                     for name in type(_mom_term_diagnostics)._fields},
+                    ordered=False)
         else:
             tend = _tend_result
             _nemo_ws_stage1_operator_operands = None

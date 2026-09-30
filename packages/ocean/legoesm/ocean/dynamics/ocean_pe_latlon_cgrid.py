@@ -4881,6 +4881,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_operator_association: bool = False,
     return_nemo_operator_components: bool = False,
     nemo_stage_zad_operands=None,
+    nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
@@ -5007,6 +5008,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         zad_w = jax.lax.optimization_barrier(zad_w)
         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
         zad_h_v = jax.lax.optimization_barrier(zad_h_v)
+    if callable(nemo_stage_zad_operand_observer):
+        # WRITE-only: report the operands dyn_zad is about to consume, BEFORE
+        # any substitution, so the vertical velocity legoESM built can be
+        # scored against the oracle's own recorded ``ww`` at this boundary.
+        jax.debug.callback(nemo_stage_zad_operand_observer,
+                           {"w": zad_w, "h_u": zad_h_u, "h_v": zad_h_v},
+                           ordered=False)
     if nemo_stage_zad_operands is not None:
         # None preserves a live operand; Round 121 substitutes W alone.
         _ow, _ohu, _ohv = nemo_stage_zad_operands
