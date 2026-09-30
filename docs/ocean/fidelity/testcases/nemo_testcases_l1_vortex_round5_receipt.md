@@ -252,6 +252,11 @@ That needs the operator's decision and is NOT taken here (section 11).
 
 ## 11. OPEN
 
+**ORCA2 IS UNMEASURED THIS ROUND AND THAT BLOCKS ITS CLAIMS.** ORCA2-zps
+selects NEMO's first-`wzv` operands and NEMO's RK3 stepper, so it executes
+the changed statement at every step, and its ladder was NOT re-run here.
+Run it before any ORCA2 fidelity number from before this round is spent.
+
 **DECISION NEEDED — finish the after-SSH transcription on the RK3 lane.**
 NEMO's guess is `2*ssh(n) - ssh(n-1)`; legoESM's RK3 lane carries only
 `ssh(n)`, so the term evaluates to zero at every step instead of only the
@@ -291,3 +296,35 @@ toward NEMO, median factor `3.10`. Any ORCA2 finding that rests on a
 developed-state momentum row, on the first RK3 stage, or on the barotropic
 slow forcing is downstream of this and should be re-measured before it is
 spent.
+
+## 12. Review
+
+The codex quota guard reads `80.0% used`. At the 80% line the brief puts the
+review on a Claude reviewer, so ONE fresh Claude code-reviewer was the
+review, told to refute, told to verify every cited NEMO line verbatim, and
+told specifically to attack the plants and the row map — because that is
+what rounds 3 and 4 got wrong.
+
+**Verdict: SHIP, with follow-ups.** Findings and dispositions:
+
+| # | finding | disposition |
+|---|---|---|
+| 1 HIGH | keying the after-SSH form on the time integrator is a SHARED landing: GYRE and ORCA2 both execute it, and ORCA2 was not re-measured | **ACCEPTED, and it is a gate, not a note.** GYRE's certified ladder was re-measured here (40 of 50 rows moved, all toward NEMO, 0 worsened) and its year is in section 9. **ORCA2 is UNMEASURED this round and no ORCA2 fidelity claim may be spent until its ladder is re-run** — carried into section 11 |
+| 2 HIGH | the freshwater term was added after BOTH after-SSH branches, but NEMO's RK3 extrapolation carries none — only the leapfrog's `ssh_nxt` does | **CONFIRMED AND FIXED** (`88785a0b6`). Measured inert rather than argued: the operand is reachable only through one keyword and no caller in the repository ever passes it a value, so no number moves today; the deviation would have fired the moment that wiring landed, on a card with real evaporation minus precipitation |
+| 3 MEDIUM | the extrapolation collapses to a no-op past the first step because the RK3 lane carries no previous-step height, so the `kt=2..10` improvement is carried by the OTHER half of the fix | **AGREED, and it was already section 9b.** Restated in the reviewer's sharper words: **the ladder tables past `kt=1` do not validate the extrapolation term itself.** The decision that would complete it is in section 11 |
+| 4 LOW | the reviewed range did not register the new guard in the grow-only dispatch ratchet | already fixed in `442671ec0`, which landed while the review was running |
+
+What the reviewer checked and did NOT fault, which is the part the
+attribution rests on: the two-sided bound is the right correction and its
+numbers are internally consistent; the row map matches the code's own
+bundling and the closure check reads the array captured BEFORE any plant
+mutates it; all five plants perturb values that actually flow into the owner
+decision rather than a printed label, and the plant size is correctly placed
+between the total and the term peaks; asking the tendency call for its
+decomposition is structurally additive and cannot feed back into the
+tendency; both new tests are non-vacuous; and **every cited NEMO source line
+is verbatim-correct** — which this campaign has not always managed.
+
+**Single reviewer, stated plainly.** The campaign's default is two. This
+round had one, per the brief's instruction at the quota line. That is a
+weaker review than the default and is recorded as such.
