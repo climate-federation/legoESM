@@ -327,7 +327,7 @@ def morrison_microphysics(
                 "warm_rain_incloud and subgrid_autoconversion are two cloud-"
                 "fraction sources for the same in-cloud closure; enable one.")
         q_c_ic, q_r_ic, N_c_ic, cf_eff = mg2_incloud_warm_rain_inputs(
-            q_c, q_r, q_i, N_c_eff, cloud_fraction,
+            q_c, q_r, N_c_eff, cloud_fraction,
             rescale_nc=getattr(config, "predict_Nc", False))
     elif getattr(config, "subgrid_autoconversion", False):
         RH = q_v / jnp.maximum(q_sat, 1.0e-10)

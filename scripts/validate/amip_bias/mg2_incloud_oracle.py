@@ -69,7 +69,7 @@ def main(argv=None):
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
     from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-    from test_morrison_warm_rain_incloud import mg2_oracle
+    from test_morrison_warm_rain_incloud import mg2_oracle, mg2_size_bounded_ncic
     sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     print(f"git {sha}; checkpoint {a.checkpoint}; ncol {a.ncol}")
@@ -130,6 +130,23 @@ def main(argv=None):
               "grid-mean/in-cloud (oracle, 0.01<cf<0.99, qc>=1e-6) autoconv median "
               f"{np.median(g[m] / prc[m]):.3f}, accretion "
               f"{np.median(g_a[m & (pra > 0)] / pra[m & (pra > 0)]):.3f}")
+    # REPORTED, not gated: MG2's size_dist_param_liq resets ncic to keep the
+    # mean droplet diameter in [2, 50] um before autoconversion; neither our
+    # kernel nor this port applies it (it acts at cf = 1 too).  How often and
+    # how much, on these cells, MG2 law, relvar 10:
+    lc = np.maximum(cf, 1e-4)
+    cells = (qc >= 1e-6)
+    for nc in NC_CM3:
+        for name, qcic in (("in-cloud", np.minimum(qc / lc, 5e-3)),
+                           ("grid-mean", np.minimum(qc, 5e-3))):
+            q, r = qcic[cells], rho[cells]
+            n0 = nc * 1e6 / r
+            n1 = np.array([mg2_size_bounded_ncic(a, b, c) for a, b, c in zip(q, n0, r)])
+            f = (n1 / n0) ** -1.1                   # prc ratio, bounded / unbounded
+            bind = n1 != n0
+            print(f"size bound, {name:9s} Nc {nc:5.0f}/cm3: binds in {bind.mean():.1%} of "
+                  f"{bind.size} cells (qc>=1e-6); prc x{np.median(f[bind]) if bind.any() else 1:.3f} "
+                  f"median where it binds, min x{f.min():.3f}")
     # cf = 1 bitwise vs the switch-off path, on columns inside the documented
     # domain (q_c in {0} U [1e-18, 5e-3], q_r in {0} U [1e-18, 0.01))
     out_dom = (((qc < 1e-18) & (qc != 0)) | (qc > 5e-3)

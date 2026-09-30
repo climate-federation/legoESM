@@ -992,7 +992,10 @@ class MorrisonConfig(NamedTuple):
     # with lcldm = max(CLUBB cloud fraction, 1e-4) (micro_mg2_0.F90:878,
     # :1224-1322).  Needs the closure's cloud fraction at the call
     # (``cloud_fraction=``); raises without it.  False = rates on the
-    # grid-mean state (the pre-existing behaviour).
+    # grid-mean state (the pre-existing behaviour).  Departure: CAM6 uses
+    # ast = max(liquid, ice) cloud fraction; here CLUBB's LIQUID fraction
+    # only, so where ice cloud is wider the in-cloud water, and the rate
+    # (~lcldm^-1.47 at fixed grid water), is larger than CAM6's.
     warm_rain_incloud: bool = False
 
 

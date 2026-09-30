@@ -30,6 +30,27 @@ def _var_coef(relvar, a):
     return math.gamma(r + a) / math.gamma(r) / r ** a
 
 
+def mg2_size_bounded_ncic(qcic, ncic, rho):
+    """size_dist_param_liq (micro_mg_utils.F90:432-472, size_dist_param_basic
+    :478-513): MG2 resets ncic [#/kg] so the mean diameter of the gamma PSD
+    stays in [2, 50] um (and mean mass >= 1e-20 kg) before autoconversion.
+    NOT ported (a kernel-level step that applies at cf = 1 too); used only to
+    report how often it binds."""
+    if not qcic > QSMALL:
+        return ncic
+    pgam = 1.0 - 0.7 * math.exp(-0.008 * 1.0e-6 * ncic * rho)
+    pgam = max(1.0 / pgam ** 2 - 1.0, 2.0)
+    shape = math.pi / 6.0 * 1000.0 * (pgam + 1) * (pgam + 2) * (pgam + 3)
+    lo, hi = (pgam + 1.0) / 50.0e-6, (pgam + 1.0) / 2.0e-6
+    ncic = min(ncic, qcic / 1.0e-20)
+    lam = (shape * ncic / qcic) ** (1.0 / 3.0)
+    if lam < lo:
+        ncic = lo ** 3 * qcic / shape
+    elif lam > hi:
+        ncic = hi ** 3 * qcic / shape
+    return ncic
+
+
 def mg2_oracle(qc, qr, qi, nc_vol, cf, rho, *, law, relvar=10.0,
                accre_enhan=1.0, predict_nc=False):
     """Grid-mean prc, pra [kg/kg/s] and nprc1 [#/m3/s], MG2 line by line.
@@ -75,15 +96,17 @@ def mg2_oracle(qc, qr, qi, nc_vol, cf, rho, *, law, relvar=10.0,
 
 def _columns():
     """Two columns, level 0 = top.  Covers: lcldm floor (cf 1e-6), in-cloud
-    cap (qc/cf > 5e-3), qric cap, sub-qsmall and sub-icsmall water, cloud-free
-    gaps that inherit the precip fraction from above, and a gap with ice that
+    cap (qc/cf > 5e-3), qric cap, sub-qsmall water, qcic in (0, icsmall)
+    (col 1 lev 3: the MG2 law is gated, the SAM law is not), qric in
+    (0, qsmall) under cloud (col 1 lev 8: accretion gated), cloud-free gaps
+    that inherit the precip fraction from above, and a gap with ice that
     breaks the inheritance."""
     cf = np.array([
         [0.3, 1e-6, 0.05, 0.6, 0.0, 0.0, 0.25, 0.0, 1.0, 0.0],
-        [0.8, 0.8, 0.02, 0.0, 0.0, 0.5, 0.9, 0.0, 0.0, 0.4]])
+        [0.8, 0.8, 0.02, 1.0, 0.0, 0.5, 0.9, 0.0, 1.0, 0.4]])
     qc = np.array([
         [2e-4, 3e-7, 1e-3, 4e-4, 0.0, 1e-19, 3e-4, 0.0, 6e-4, 5e-9],
-        [6e-4, 3e-4, 2e-5, 0.0, 0.0, 2e-4, 1e-3, 0.0, 0.0, 1e-4]])
+        [6e-4, 3e-4, 2e-5, 5e-10, 0.0, 2e-4, 1e-3, 0.0, 4e-4, 1e-4]])
     qi = np.zeros_like(qc)
     qi[0, 7] = 1e-6                                   # breaks inheritance
     qr = np.array([
@@ -134,6 +157,8 @@ def test_rates_match_the_mg2_transcription(scheme, law, relvar):
     prc, pra, _ = mg2_oracle(qc, qr, qi, np.full(qc.shape, nc), cf, rho,
                              law=law, relvar=relvar, accre_enhan=1.3)
     assert prc.max() > 0 and pra.max() > 0
+    assert pra[1, 8] == 0.0                              # qric < qsmall gate
+    assert (prc[1, 3] == 0.0) == (law == "mg2")          # icsmall gate
     np.testing.assert_allclose(-np.asarray(b["autoconversion"]), prc,
                                rtol=1e-12, atol=1e-300)
     np.testing.assert_allclose(-np.asarray(b["accretion"]), pra,
@@ -144,6 +169,30 @@ def test_rates_match_the_mg2_transcription(scheme, law, relvar):
                                  accre_enhan=1.3)
     assert np.abs(g_prc - prc).max() > 1e-3 * prc.max()
     assert np.abs(g_pra - pra).max() > 1e-3 * pra.max()
+
+
+def test_precip_fraction_inheritance_cannot_move_a_warm_rain_rate():
+    """MG2 'in_cloud' only rewrites precip_frac where qc < qsmall (and
+    qi < qsmall), where qcic = 0; so the port uses precip_frac = lcldm.
+    The oracle keeps the inheritance; switching it off moves no rate."""
+    cf, qc, qr, qi, rho = _columns()
+    nc = np.full(qc.shape, 7.0e7)
+    full = mg2_oracle(qc, qr, qi, nc, cf, rho, law="mg2")
+    # every level "cloudy" for the inheritance test = no inheritance at all
+    none = mg2_oracle(qc, qr, np.ones_like(qi), nc, cf, rho, law="mg2")
+    for a, b in zip(full, none):
+        np.testing.assert_array_equal(a, b)
+    gaps = (qc < QSMALL) & (qi < QSMALL) & (qr > QSMALL)
+    assert gaps[:, 1:].any()
+
+
+def test_size_bound_transcription_binds_both_ways():
+    """The reporting-only size_dist_param_liq transcription: large in-cloud
+    water at low number raises ncic (50 um cap), tiny water at high number
+    lowers it (2 um floor), a mid state is untouched."""
+    assert mg2_size_bounded_ncic(5e-3, 3e7, 1.0) > 3e7
+    assert mg2_size_bounded_ncic(1e-9, 3e9, 1.0) < 3e9
+    assert mg2_size_bounded_ncic(3e-4, 1e8, 1.0) == 1e8
 
 
 def test_mg2_accretion_varcoef_is_the_one_dropped_factor():
@@ -167,8 +216,9 @@ def test_prognostic_droplet_number_is_rescaled_in_cloud():
     np.testing.assert_allclose(-np.asarray(out.qc_budget["autoconversion"]),
                                prc, rtol=1e-12, atol=1e-300)
     # Pre-existing floor: the sink is safe_divide(., x_c, eps=1e-15), zero
-    # below a 1e-15 kg mean droplet (~0.6 um); at the lcldm floor the
-    # in-cloud number is 1e4x the grid mean and hits it.  MG2 has no floor.
+    # below a 1e-15 kg mean droplet (~0.6 um).  lcldm cancels in
+    # x_c = qcic rho / ncic unless the 5e-3 cap binds, so the dead cells are
+    # the ones with tiny q_c rho / N_c.  MG2 has no floor.
     x_c = np.where(qc >= QSMALL, np.minimum(qc / np.maximum(cf, MINCLD), 5e-3)
                    * rho / (nc / np.maximum(cf, MINCLD)), 0.0)
     live = x_c > 1e-15
