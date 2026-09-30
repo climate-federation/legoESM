@@ -170,7 +170,7 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
 
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
                          barotropic_solver: str = "explicit_substep",
-                         pcg_variant: str = "standard",
+                         pcg_variant: str | None = None,
                          n_barotropic_substeps: int = 10,
                          conservation_fixer: bool = True,
                          eta_floor_clamp_iters: int = 3):
@@ -192,7 +192,7 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
 
 
 def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_substep",
-                         pcg_variant: str = "standard",
+                         pcg_variant: str | None = None,
                          n_barotropic_substeps: int = 10,
                          conservation_fixer: bool = True,
                          eta_floor_clamp_iters: int = 3):
@@ -220,7 +220,10 @@ def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_subste
         # what actually binds as the communicator reaches 256-512 ranks.
         # Not the default: it is a different (equivalent-in-exact-arithmetic)
         # recurrence, so it is opt-in and parity-gated, per the audit.
-        barotropic_implicit_pcg_variant=pcg_variant,
+        # None keeps MPASOceanConfig's own default, so a bench row measures
+        # the production recurrence unless a variant is asked for.
+        **({} if pcg_variant is None
+           else {"barotropic_implicit_pcg_variant": pcg_variant}),
         # Production-like conservation fixers: without them the explicit
         # subcycle's raw volume drift (~1e-4 over a smoke window) would
         # trip the gate — and their global reductions are exactly the
@@ -361,7 +364,7 @@ def main() -> int:
                    default="auto")
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce"],
-                   default="standard",
+                   default=None,
                    help="reduction strategy inside the distributed fixed-M "
                         "PCG (implicit_cn only). 'standard' costs 1+2M "
                         "batched allreduces per solve, 'single_reduce' "
@@ -547,7 +550,7 @@ def main() -> int:
     # single-rank takes the stock-CG branch instead).  Refuse the two
     # combinations where the flag would be silently inert rather than emit a
     # row whose solver label is not what ran (codex review).
-    if args.pcg_variant != "standard":
+    if args.pcg_variant not in (None, "standard"):
         if args.barotropic_solver != "implicit_cn":
             raise SystemExit(
                 f"--pcg-variant {args.pcg_variant} only affects the implicit "
@@ -921,10 +924,10 @@ def main() -> int:
         # pre-existing row, so historic receipts stay comparable.
         solver_variant=(
             f"mpas_ocean_{args.barotropic_solver}"
-            + (f"_{args.pcg_variant}"
+            + (f"_{config.barotropic_implicit_pcg_variant}"
                if (args.barotropic_solver == "implicit_cn"
                    and n_ranks > 1
-                   and args.pcg_variant != "standard")
+                   and config.barotropic_implicit_pcg_variant != "standard")
                else "")),
         cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
         scaling_kind=args.mode,

@@ -384,7 +384,8 @@ def attach_static_rho_ref_z(
     c2 = mesh.cellsOnEdge[1]
 
     def _fill(field_cell):
-        return fill_land_cells_mpas(field_cell, mask, c1, c2)
+        return fill_land_cells_mpas(field_cell, mask, c1, c2,
+                                    mesh.edgesOnCell, mesh.nEdgesOnCell)
 
     eos_fn = make_eos_fn(
         config.eos, getattr(config, "eos_linear", None),
