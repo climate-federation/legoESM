@@ -525,7 +525,7 @@ def test_driver_column_lane_refusals(tmp_path):
                        (dict(mpas_qv_smooth_del4_m4s=1e14),
                         "MPAS-lane knob|smoothing"),
                        (dict(held_suarez_forcing=True), "hswf"),
-                       (dict(topography="gaussian"), "column mesh"),
+                       (dict(topography="gaussian"), "topography"),
                        (dict(microphysics="morrison"), "nwat=6"),
                        (dict(convection="zhang_mcfarlane"), "nwat=6")):
         drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
@@ -551,3 +551,191 @@ def test_column_model_refuses_wind_edits_and_writes_back_T(dry):
         "q": [jnp.asarray(ic["q"][0]).at[:, CI, CI].multiply(0.5)]
         + list(ic["q"][1:])}, DT)
     _assert_bundle_equal(out.native, ref)
+
+
+# ---------------------------------------------------------------------
+# M5: checkpoint / restart on the column lane
+# ---------------------------------------------------------------------
+
+def _same_bytes(x, y):
+    """Bitwise: same shape, same dtype, finite, identical bytes (no
+    equal_nan, no signed-zero leniency -- codex 2026-09-30)."""
+    x, y = np.asarray(x), np.asarray(y)
+    return (x.shape == y.shape and x.dtype == y.dtype
+            and np.isfinite(x).all() and np.isfinite(y).all()
+            and x.tobytes() == y.tobytes())
+
+
+def _walk_bundle(b):
+    """Every array of a duo bundle, enumerated from the STRUCTURE (not
+    the writer's own flattener, which would make the claim circular)."""
+    out = {}
+    for k, v in b["state"].items():
+        out[f"state.{k}"] = np.asarray(v)
+    for k, v in b["press"].items():
+        out[f"press.{k}"] = np.asarray(v)
+    for i, v in enumerate(b["q"]):
+        out[f"q.{i}"] = np.asarray(v)
+    out["omga"] = np.asarray(b["omga"])
+    return out
+
+
+@pytest.mark.parametrize("phys", [
+    dict(),
+    dict(microphysics="kessler"),
+    dict(microphysics="kessler", turbulence="mynn25"),
+])
+def test_driver_column_lane_restart_is_bitwise(tmp_path, phys):
+    """PRE-REGISTERED acceptance (M5): run A = 2 days straight with a
+    checkpoint each day; run B = a fresh driver loading A's day-1
+    checkpoint and advancing the remaining day (the MPAS lane's
+    days-this-job convention).  The final native bundles must be
+    BITWISE identical on EVERY array: the checkpoint carries the full
+    duo bundle (not the column view), the same jitted programs run, and
+    the fp64 npz round-trip is exact.  With Kessler the MPAS physics
+    package runs every step; with TKE turbulence the package carries
+    PROGNOSTIC memory (PhysicsState.tke), so the physics carry restore
+    is exercised: every PhysicsState field is compared bitwise too, and
+    the carry is first shown to EVOLVE between the checkpoint and the
+    end of run A (GLM 2026-09-30: a bundle-only gate is blind to a
+    silently re-seeded carry when the physics is stateless).  A
+    tolerance here would hide state loss."""
+    from legoesm.driver.model_driver import ModelDriver
+    dt = 1920.0
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir(), dir_b.mkdir()
+    mk = dict(dt=dt, **phys)
+    cfg_a = _driver_cfg(dir_a, days=2, **mk)
+    cfg_a = cfg_a._replace(output=cfg_a.output._replace(checkpoint_days=1))
+    drv_a = ModelDriver(cfg_a, output_dir=dir_a)
+    drv_a.setup()
+    assert drv_a.run() == "COMPLETED"
+    dt = drv_a.config.dycore.dt          # post-CFL-clamp effective dt
+    mid = dir_a / "checkpoint_day_0001.npz"
+    assert mid.is_file(), sorted(p.name for p in dir_a.iterdir())
+    with np.load(mid) as d:
+        assert str(d["_schema"]) == "fv3duo_ckpt_v1"
+        assert int(d["step"]) == int(d["_step"]) == int(86400.0 / dt)
+        # the view rides along for the plotters; the bundle for the restart
+        for k in ("u", "T", "p_s", "phis", "state_delp", "state_u",
+                  "press_ps", "q_0", "q_2", "omga", "fv3duo_hs6",
+                  "fv3duo_tracer_names") + (
+                      ("physstate_prng_key",) if phys else ()):
+            assert k in d.files, k
+        assert [str(n) for n in d["fv3duo_tracer_names"]] == \
+            list(drv_a.model.tracer_names)
+        ps_mid = {k[len("physstate_"):]: np.asarray(d[k]) for k in d.files
+                  if k.startswith("physstate_")
+                  and k != "physstate_meta_conv_scheme"}
+
+    cfg_b = _driver_cfg(dir_b, days=1, **mk)
+    drv_b = ModelDriver(cfg_b, output_dir=dir_b)
+    drv_b.setup()
+    step, day = drv_b.load_checkpoint(mid)
+    assert step == int(86400.0 / dt) and day == pytest.approx(1.0)
+    assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+
+    got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
+    assert set(got) == set(ref)
+    diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
+    assert not diffs, f"column-lane restart is NOT bitwise: {diffs}"
+    # and the chain actually moved past the checkpoint (finite both sides)
+    with np.load(mid) as d:
+        pt_mid = np.asarray(d["state_pt"])
+        assert np.isfinite(pt_mid).all() and np.isfinite(ref["state.pt"]).all()
+        assert pt_mid.tobytes() != ref["state.pt"].tobytes()
+    # the physics carry: bitwise A == B on every persisted field (the
+    # carry exists only when a physics package runs) ...
+    ps_a, ps_b = drv_a._mpas_phys_state, drv_b._mpas_phys_state
+    if not phys:
+        assert ps_a is None and ps_b is None and not ps_mid
+    else:
+        assert ps_a is not None and ps_b is not None and ps_mid
+        ps_diffs = [k for k in ps_mid
+                    if not _same_bytes(getattr(ps_a, k), getattr(ps_b, k))]
+        assert not ps_diffs, \
+            f"physics carry restart is NOT bitwise: {ps_diffs}"
+    # ... and the CONTROL: with prognostic turbulence the carry must have
+    # moved between the checkpoint and the end of run A, or the
+    # comparison above has no power
+    if phys.get("turbulence") == "mynn25":
+        qke_a = np.asarray(ps_a.qke)
+        assert np.isfinite(qke_a).all()
+        assert ps_mid["qke"].tobytes() != qke_a.tobytes(), \
+            "PhysicsState.qke did not evolve; the carry gate is vacuous"
+        # MUTATION (codex 2026-09-30): the same restart with the carry
+        # STRIPPED from the file (the documented opt-in to a fresh seed)
+        # must NOT reproduce run A -- otherwise the carry comparison
+        # above could pass on a silently re-seeded restart.
+        dir_c = tmp_path / "c"
+        dir_c.mkdir()
+        with np.load(mid) as d:
+            kept = {k: d[k] for k in d.files if not k.startswith("physstate_")}
+        stripped = dir_c / mid.name
+        np.savez(stripped, **kept)
+        drv_c = ModelDriver(_driver_cfg(dir_c, days=1, **mk), output_dir=dir_c)
+        drv_c.setup()
+        step_c, day_c = drv_c.load_checkpoint(stripped)
+        assert drv_c.run(start_step=step_c, start_day=day_c) == "COMPLETED"
+        assert not _same_bytes(drv_c._mpas_phys_state.qke, qke_a), \
+            "a carry-stripped restart reproduced run A: the carry gate has no power"
+        assert not _same_bytes(drv_c.state.native["state"]["pt"],
+                               ref["state.pt"])
+
+
+def test_driver_column_lane_refuses_a_plain_mpas_checkpoint(tmp_path):
+    """A checkpoint without the duo bundle (an MPAS-lane file, or a
+    column-lane file with the bundle stripped) cannot restart the column
+    lane: the view cannot rebuild the D-grid state.  Refused by name."""
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=0.25)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    bad = tmp_path / "checkpoint_day_0000.npz"
+    np.savez(bad, u=np.zeros(1), T=np.zeros(1), p_s=np.zeros(1),
+             phis=np.zeros(1), step=np.asarray(3), day=np.asarray(0.1))
+    with pytest.raises(ValueError, match="carries no fv3_duo bundle"):
+        drv.load_checkpoint(bad)
+
+
+def test_driver_column_lane_restart_rebuilds_terrain_from_the_file(tmp_path):
+    """The terrain lives in the GRID, not the bundle: a run on a non-flat
+    terrain checkpoints its padded ``hs6`` stack, and a fresh driver --
+    whose factory grid is FLAT -- rebuilds the grid from the file at
+    load (no ERA5 re-derivation) and continues bitwise.  Synthetic bump
+    through the same factory path the ERA5 IC uses (phis_fn + the del-2
+    filter), so no data file is needed."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.factory import create_fv3_duo_grid
+
+    def bump(lon, lat):
+        return 500.0 * constants.g * np.exp(
+            -((np.asarray(lat) - 0.6) ** 2 + (np.asarray(lon) - 1.0) ** 2)
+            / 0.15)
+
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir(), dir_b.mkdir()
+    cfg_a = _driver_cfg(dir_a, days=1, microphysics="kessler")
+    cfg_a = cfg_a._replace(output=cfg_a.output._replace(checkpoint_days=0.5))
+    drv_a = ModelDriver(cfg_a, output_dir=dir_a)
+    drv_a.setup()
+    drv_a._fv3_duo_column_rewrap(create_fv3_duo_grid(
+        N, NG, phis_fn=bump, phis_filter_iter=2))
+    hs6_a = drv_a._fv3_duo_column_hs6(drv_a.model)
+    assert float(np.abs(hs6_a).max()) > 1.0e3        # not flat (>100 m)
+    assert drv_a.run() == "COMPLETED"
+    mid = dir_a / "checkpoint_day_0000.npz"        # day 0.5 rounds to 0
+    assert mid.is_file()
+    with np.load(mid) as d:
+        assert _same_bytes(d["fv3duo_hs6"], hs6_a)
+
+    drv_b = ModelDriver(_driver_cfg(dir_b, days=0.5, microphysics="kessler"),
+                        output_dir=dir_b)
+    drv_b.setup()
+    assert float(np.abs(drv_b._fv3_duo_column_hs6(drv_b.model)).max()) == 0.0
+    step, day = drv_b.load_checkpoint(mid)
+    assert _same_bytes(drv_b._fv3_duo_column_hs6(drv_b.model), hs6_a)
+    assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+    got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
+    diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
+    assert not diffs, f"terrain restart is NOT bitwise: {diffs}"

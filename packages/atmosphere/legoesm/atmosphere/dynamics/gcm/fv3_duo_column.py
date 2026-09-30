@@ -169,6 +169,17 @@ class FV3DuoColumnModel:
             tracers=tracers, native=bundle)
         return state, view
 
+    @property
+    def zvir(self) -> float:
+        """The dycore's thermodynamic mode (the checkpoint stamps it)."""
+        return self.dyn.zvir
+
+    def to_bundle(self, state):
+        """The native bundle *state* stands for, with the driver's
+        post-step column edits written back (the checkpoint writer's
+        entry: what the next step would consume)."""
+        return self._native_of(state)
+
     def from_bundle(self, bundle):
         fn = self._post_fns.get("view")
         if fn is None:

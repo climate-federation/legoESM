@@ -6009,7 +6009,10 @@ class ModelDriver:
         # job is (mis)configured with a non-zero ``--start-day``.  The
         # restart-chain launcher's ``TARGET_DAYS`` / latest-checkpoint glob
         # are therefore in absolute simulated days.
-        if self.config.grid.grid_type == "mpas":
+        # (the fv3_duo COLUMN lane -- grid_type cubed_sphere, MPAS-shaped
+        # column state -- checkpoints through this branch too, M5)
+        if (self.config.grid.grid_type == "mpas"
+                or self._fv3_duo_column_model() is not None):
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
             _ps_carry = getattr(self, "_mpas_phys_state", None)
@@ -6287,6 +6290,30 @@ class ModelDriver:
                 for _k, _v in self._carry_aux.items():
                     if _k.startswith("cmor_flux"):
                         _save[_k] = np.asarray(_v)
+            # fv3_duo COLUMN lane (M5): the u/T/p_s/phis above are the
+            # column VIEW (order-4 cell winds) and cannot rebuild the duo
+            # bundle (D-grid winds, pressure stack, halos), so the FULL
+            # native bundle rides along under the closed lane's own
+            # fv3duo_ckpt_v1 keys (state_*/press_*/q_*/omga + stamps),
+            # written back from the driver's post-step column edits --
+            # exactly what the next step would consume.  The MPAS
+            # payload (physstate_*, land_ml_*, trc_*, accumulators)
+            # keeps flowing through the shared machinery above.
+            _col = self._fv3_duo_column_model()
+            if _col is not None:
+                _bundle = _col.to_bundle(s)
+                _save.update(self._fv3_duo_flatten_bundle(_bundle))
+                _save.update(self._fv3_duo_checkpoint_stamps(
+                    _col.config, step, day, len(_bundle["q"])))
+                # the terrain lives in the GRID, not the bundle: persist
+                # the padded stack the run stepped on (halos included) so
+                # a resume rebuilds the grid from the file, never from
+                # the ERA5 source; and the ORDERED tracer names, because
+                # q_<i> is a slot index and _nq alone cannot see a
+                # reordered deck (GLM 2026-09-30)
+                _save["fv3duo_hs6"] = self._fv3_duo_column_hs6(_col)
+                _save["fv3duo_tracer_names"] = np.asarray(
+                    list(_col.tracer_names))
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             self._save_cmor_accumulator_sidecar(day)
@@ -6792,7 +6819,8 @@ class ModelDriver:
         refused loudly instead of dying on an unrelated shape error
         deeper in a decode (codex 2026-08-18 MAJOR, kept as a gate).
         """
-        if self.config.dycore.discretization == "fv3_duo":
+        _col_lane = self._fv3_duo_column_model() is not None
+        if self.config.dycore.discretization == "fv3_duo" and not _col_lane:
             return self._load_fv3_duo_checkpoint(Path(path))
         path = Path(path)
 
@@ -6801,7 +6829,7 @@ class ModelDriver:
         # (u edge-normal, T/p_s/phis on cells; v=None, tracers=None) from
         # the four-array npz and return (step, day) so the chained job
         # continues from the saved absolute day.
-        if self.config.grid.grid_type == "mpas":
+        if self.config.grid.grid_type == "mpas" or _col_lane:
             # Fail loud on a missing/dir path rather than silently falling
             # through to the cube/lat-lon ``load_restart`` (which would
             # raise a confusing non-MPAS error).
@@ -6813,6 +6841,35 @@ class ModelDriver:
             from legoesm.core.state import HydrostaticState
             from legoesm.core.field import Field
             d = np.load(path)
+            _col = self._fv3_duo_column_model()
+            if _col is not None:
+                # fv3_duo COLUMN lane (M5): the file must carry the duo
+                # bundle (schema-stamped); a plain MPAS checkpoint cannot
+                # rebuild the D-grid state from the column view.  The
+                # terrain lives in the grid, not the bundle: the grid is
+                # rebuilt FROM THE FILE's padded stack when it differs
+                # from the constructed model's (an ERA5-terrain run
+                # resumed on the factory's flat grid), so a restart is
+                # self-contained -- no ERA5 re-derivation (GLM 2026-09-30).
+                for _need in ("_schema", "fv3duo_hs6", "fv3duo_tracer_names"):
+                    if _need not in d.files:
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} carries no fv3_duo "
+                            f"bundle ({_need} absent): a checkpoint written "
+                            f"by the MPAS lane cannot restart the fv3_duo "
+                            f"column lane (the column view cannot rebuild "
+                            f"the D-grid state).")
+                _hs6_ck = np.asarray(d["fv3duo_hs6"], dtype=np.float64)
+                if not np.array_equal(_hs6_ck, self._fv3_duo_column_hs6(_col)):
+                    from legoesm.grids.factory import create_fv3_duo_grid
+                    _col = self._fv3_duo_column_rewrap(create_fv3_duo_grid(
+                        _col.grid.n, _col.grid.ng, phis6=_hs6_ck))
+                    if not np.array_equal(_hs6_ck,
+                                          self._fv3_duo_column_hs6(_col)):
+                        raise RuntimeError(
+                            "fv3_duo column restart: the rebuilt grid does "
+                            "not carry the checkpoint's terrain bitwise")
+                self.sigma = _col.sigma_coord
             # Vertical LEVEL-POSITION guard.  The shape guards below only see
             # nlev, and nlev no longer identifies the σ grid: a uniform L30 and
             # a tropopause-refined L30 (grid.tropopause_refine) are the same
@@ -6855,7 +6912,37 @@ class ModelDriver:
             # guard compares against the GLOBAL mesh size under MPI, the local
             # state otherwise.
             _mpi = self._voronoi_layout is not None
-            if _mpi:
+            if _col is not None:
+                if _mpi:
+                    raise NotImplementedError(
+                        "fv3_duo column lane restart under a Voronoi "
+                        "partition: the column lane is single-process")
+                (_st, _pr, _q, _om, _nh, _ck_step, _ck_day
+                 ) = self._decode_fv3_duo_checkpoint_arrays(path)
+                if (int(_ck_step) != int(d["step"])
+                        or float(_ck_day) != float(d["day"])):
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name}: the duo stamps "
+                        f"(step {int(_ck_step)}, day {float(_ck_day)}) "
+                        f"disagree with the MPAS ones ({int(d['step'])}, "
+                        f"{float(d['day'])}); the file is not one "
+                        f"consistent write.")
+                _tn_ck = [str(n) for n in d["fv3duo_tracer_names"]]
+                if _tn_ck != list(_col.tracer_names):
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} tracer slots "
+                        f"{_tn_ck} != the column model's "
+                        f"{list(_col.tracer_names)} (q_<i> is a slot "
+                        f"index; a reordered deck would swap species "
+                        f"silently)")
+                if "tracer_names" in d:
+                    _validate_number_convention(
+                        d, [str(n) for n in d["tracer_names"]])
+                self.state = _col.from_bundle(
+                    {"state": _st, "press": _pr, "q": _q, "omga": _om,
+                     "nh": _nh})
+                self._fv3_duo_column_restored = True
+            elif _mpi:
                 from legoesm.parallel.voronoi_partition import scatter_to_local
                 part = self._voronoi_layout.partition
                 _guard = (("u", part.nEdges_global, self.state.u.data.shape[1:]),
@@ -6896,18 +6983,21 @@ class ModelDriver:
                         )
                 _u, _T, _ps, _phis = (jnp.asarray(d["u"]), jnp.asarray(d["T"]),
                                       jnp.asarray(d["p_s"]), jnp.asarray(d["phis"]))
-            self.state = HydrostaticState(
-                u=Field(data=_u, name="u",
-                        dims=("nEdges", "nlev"), units="m/s"),
-                T=Field(data=_T, name="T",
-                        dims=("nCells", "nlev"), units="K"),
-                p_s=Field(data=_ps, name="p_s",
-                          dims=("nCells",), units="Pa"),
-                phis=Field(data=_phis, name="phis",
-                           dims=("nCells",), units="m2/s2"),
-            )
+            if _col is None:
+                self.state = HydrostaticState(
+                    u=Field(data=_u, name="u",
+                            dims=("nEdges", "nlev"), units="m/s"),
+                    T=Field(data=_T, name="T",
+                            dims=("nCells", "nlev"), units="K"),
+                    p_s=Field(data=_ps, name="p_s",
+                              dims=("nCells",), units="Pa"),
+                    phis=Field(data=_phis, name="phis",
+                               dims=("nCells",), units="m2/s2"),
+                )
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
-            if "tracer_names" in d:
+            # (column lane: the tracers are the bundle's own q slots, already
+            # in the view built above)
+            if "tracer_names" in d and _col is None:
                 _names = [str(n) for n in d["tracer_names"]]
                 _validate_number_convention(d, _names)
                 self.state = self.state._replace(tracers={
@@ -8537,56 +8627,36 @@ class ModelDriver:
         operator.  Fresh IC = the closed lane's own builder
         (``_fv3_duo_fresh_ic``: DCMIP16 baroclinic wave, Kessler slots)
         seen through the column view, so rung 1 of the ladder is the
-        SAME bundle on both lanes.  Restart (M5) and the ERA5 IC (M4)
-        are refused here by name.
+        SAME bundle on both lanes.
+
+        Restart (M5): ``load_checkpoint`` on an MPAS checkpoint that
+        carries the duo bundle (``fv3duo_ckpt_v1`` keys next to the MPAS
+        payload) has already rebuilt the column state through
+        ``from_bundle`` and staged the physics/land/accumulator carry
+        exactly as on the MPAS lane, so this entry skips the IC and
+        hands the loaded state to ``_run_mpas`` (days-this-job
+        convention, as for MPAS).
         """
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
-            FV3DuoColumnModel,
-        )
-        if not isinstance(self.model, FV3DuoColumnModel):
+        if self._fv3_duo_column_model() is None:
             raise ValueError(
                 "fv3_duo_column_lane: the constructed dycore is "
                 f"{type(self.model).__name__}, not FV3DuoColumnModel")
-        if getattr(self, "_fv3_duo_restart_bundle", None) is not None:
-            raise NotImplementedError(
-                "fv3_duo column lane: restart is M5 (the MPAS writer does "
-                "not carry the duo bundle yet)")
-        if self.config.output.checkpoint_days > 0:
-            raise NotImplementedError(
-                "fv3_duo column lane: checkpoints are M5; run with "
-                "checkpoint_days=0")
         if getattr(self, "_ensemble_size", 1) not in (None, 1):
             raise NotImplementedError(
                 "fv3_duo column lane threads no ensemble axis")
         cfg = self.config
-        if cfg.ic == "era5":
-            # ERA5 IC (M4): the duo grid is REBUILT with the ERA5 terrain
-            # (phis_fn on the padded A-grid, FV3's del-2 filter ON the duo
-            # grid, cfg.topo_smoothing passes -- the same field the MPAS
-            # path reads for its Laplacian passes) and the bundle built on
-            # the column mesh; the factory's flat model is discarded.
-            from legoesm.grids.factory import create_fv3_duo_grid
-            from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
-                FV3DuoColumnModel,
-            )
-            from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-                FV3DuoDynamicsModel,
-            )
-            from legoesm.training.era5_to_state import (
-                era5_phis_fn, era5_to_fv3_duo_bundle, load_era5_ic,
-            )
-            if not cfg.ic_path:
-                raise ValueError("ic='era5' needs ic_path")
-            era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
-            old = self.model.dyn
-            grid = create_fv3_duo_grid(
-                old.grid.n, old.grid.ng, phis_fn=era5_phis_fn(era5),
-                phis_filter_iter=int(cfg.topo_smoothing))
-            self.model = FV3DuoColumnModel(
-                FV3DuoDynamicsModel(grid, old.config),
-                tracer_names=self.model.tracer_names)
+        if getattr(self, "_fv3_duo_column_restored", False):
+            if start_step == 0 and self._loaded_checkpoint_step_day is None:
+                raise ValueError(
+                    "fv3_duo column lane: a checkpoint was loaded but "
+                    "run() was called from step 0; pass the (step, day) "
+                    "load_checkpoint returned.")
             self.grid = self.model.mesh
             self.sigma = self.model.sigma_coord
+            bundle = self.state.native
+        elif cfg.ic == "era5":
+            from legoesm.training.era5_to_state import era5_to_fv3_duo_bundle
+            era5 = self._fv3_duo_column_era5_terrain()
             bundle = era5_to_fv3_duo_bundle(
                 era5, self.model, n_tracers=len(self.model.tracer_names))
             logger.info(
@@ -8607,7 +8677,8 @@ class ModelDriver:
             q0 = bundle["q"][0]
             bundle = {**bundle,
                       "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
-        self.state = self.model.from_bundle(bundle)
+        if not getattr(self, "_fv3_duo_column_restored", False):
+            self.state = self.model.from_bundle(bundle)
         dyn = self.model.dyn
         self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
         self._phis_data = self.state.phis.data
@@ -9281,6 +9352,94 @@ class ModelDriver:
                 f"checkpoint schema persists fp64 bit-exact only.")
         return arrays
 
+    def _fv3_duo_checkpoint_stamps(self, mcfg, step: int, day: float,
+                                   nq: int) -> dict:
+        """The fv3duo_ckpt_v1 metadata the loader validates against the
+        constructed model: ONE source for the closed lane's own file and
+        for the column lane's MPAS checkpoint (M5)."""
+        from legoesm.io.git_provenance import git_provenance
+        return dict(
+            _schema=self._FV3_DUO_CKPT_SCHEMA,
+            _step=np.int64(step),
+            _day=np.float64(day),
+            _dt=np.float64(self.config.dycore.dt),
+            _hydrostatic=np.bool_(mcfg.hydrostatic),
+            # the thermodynamic mode is CONTRACT too (codex
+            # 2026-09-24): a dry checkpoint resumed moist would gain
+            # humidity feedback silently, and the tracer count alone
+            # cannot tell the two apart
+            _zvir=np.float64(self.model.zvir),
+            _km=np.int64(mcfg.km),
+            _resolution=np.int64(self.model.grid.n),
+            # nq is CONTRACT, not decoration: the loader checks the
+            # tracer leaves against it, because a contiguity check
+            # alone accepts the empty set and resumes with tracers
+            # silently dropped (codex BLOCKER 2026-08-19).
+            _nq=np.int64(nq),
+            _git_sha=git_provenance(Path(__file__)).commit,
+        )
+
+    def _fv3_duo_column_model(self):
+        """The FV3DuoColumnModel when the driver runs the column lane,
+        else None (one isinstance, imported lazily)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+            FV3DuoColumnModel,
+        )
+        m = getattr(self, "model", None)
+        return m if isinstance(m, FV3DuoColumnModel) else None
+
+    @staticmethod
+    def _fv3_duo_column_hs6(col) -> np.ndarray:
+        """The padded terrain stack ``(6, m_a, m_a)`` the column model's
+        grid steps on (fp64, halos included); zeros on a flat grid, whose
+        context carries no ``hs6`` (the step's own default)."""
+        hs6 = col.grid.ctx_np.get("hs6")
+        m_a = col.n + 2 * col.ng
+        if hs6 is None:
+            return np.zeros((6, m_a, m_a), dtype=np.float64)
+        return np.stack([np.asarray(h, dtype=np.float64) for h in hs6])
+
+    def _fv3_duo_column_rewrap(self, grid):
+        """Re-wrap the column model on *grid* (same deck, same tracer
+        names); the factory's model is discarded.  The state the driver
+        holds is tied by identity to the model that built it, so this
+        runs BEFORE any from_bundle."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+            FV3DuoColumnModel,
+        )
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        old = self.model.dyn
+        self.model = FV3DuoColumnModel(
+            FV3DuoDynamicsModel(grid, old.config),
+            tracer_names=self.model.tracer_names)
+        self.grid = self.model.mesh
+        self.sigma = self.model.sigma_coord
+        return self.model
+
+    def _fv3_duo_column_era5_terrain(self):
+        """ERA5 IC (M4) on the column lane, fresh start only: the duo grid
+        is REBUILT with the ERA5 terrain (phis_fn on the padded A-grid,
+        FV3's del-2 filter ON the duo grid, cfg.topo_smoothing passes --
+        the same field the MPAS path reads for its Laplacian passes) and
+        the column model re-wrapped on it.  A restart never comes here:
+        the checkpoint carries the terrain (``fv3duo_hs6``).  Returns the
+        loaded ERA5 dataset for the IC builder."""
+        from legoesm.grids.factory import create_fv3_duo_grid
+        from legoesm.training.era5_to_state import (
+            era5_phis_fn, load_era5_ic,
+        )
+        cfg = self.config
+        if not cfg.ic_path:
+            raise ValueError("ic='era5' needs ic_path")
+        era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
+        old = self.model.dyn
+        self._fv3_duo_column_rewrap(create_fv3_duo_grid(
+            old.grid.n, old.grid.ng, phis_fn=era5_phis_fn(era5),
+            phis_filter_iter=int(cfg.topo_smoothing)))
+        return era5
+
     def _fv3_duo_checkpoint_write(self, arrays: dict, mcfg, step: int,
                                   day: float, nq: int, path: Path) -> None:
         """The ROOT-ONLY write body shared by both arms of
@@ -9289,7 +9448,6 @@ class ModelDriver:
         out so the multi-process arm can wrap the WHOLE thing (not
         just ``np.savez``) in one try/except before the rendezvous
         (codex MAJOR, mp-driver-io design review 2026-08-27)."""
-        from legoesm.io.git_provenance import git_provenance
         # UNIQUE tmp name (GLM 2026-08-19): a fixed "<name>.tmp" lets two
         # concurrent writers in one directory interleave their bytes, and
         # os.replace then atomically publishes garbage -- an atomic rename
@@ -9298,24 +9456,7 @@ class ModelDriver:
         with open(tmp, "wb") as fh:
             np.savez(
                 fh,
-                _schema=self._FV3_DUO_CKPT_SCHEMA,
-                _step=np.int64(step),
-                _day=np.float64(day),
-                _dt=np.float64(self.config.dycore.dt),
-                _hydrostatic=np.bool_(mcfg.hydrostatic),
-                # the thermodynamic mode is CONTRACT too (codex
-                # 2026-09-24): a dry checkpoint resumed moist would gain
-                # humidity feedback silently, and the tracer count alone
-                # cannot tell the two apart
-                _zvir=np.float64(self.model.zvir),
-                _km=np.int64(mcfg.km),
-                _resolution=np.int64(self.model.grid.n),
-                # nq is CONTRACT, not decoration: the loader checks the
-                # tracer leaves against it, because a contiguity check
-                # alone accepts the empty set and resumes with tracers
-                # silently dropped (codex BLOCKER 2026-08-19).
-                _nq=np.int64(nq),
-                _git_sha=git_provenance(Path(__file__)).commit,
+                **self._fv3_duo_checkpoint_stamps(mcfg, step, day, nq),
                 **arrays)
             # fsync BEFORE the rename, and the directory after it: page
             # cache survives SIGKILL but not node loss, and os.replace is
