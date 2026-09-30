@@ -1247,6 +1247,8 @@ class ExperimentConfig(NamedTuple):
     # run starts from a settled deep-soil temperature/moisture instead of the
     # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
     # restart's ncol / n_layers must match the run's grid (validated on load).
+    # An ERA5 soil-temperature variant is built by
+    # ``scripts/data/regrid_land_ic.py --era5-soil-t``.
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
