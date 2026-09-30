@@ -179,7 +179,7 @@ the merged file rather than by shifting by hand:
   `nemo_testcase_l2_gyre_round54_tke_operands.py:225-239`, no line moved but
   extent 12 to 15, because the GYRE lane widened that gate file and the ORCA2
   lane's copy of the extent had not followed.
-  `nemo_testcase_recipe.py:175,405,1567` to `:346,591,2189`, three anchors
+  `nemo_testcase_recipe.py:175,405,1567` to `:359,604,2202`, three anchors
   with three different deltas because two insertions sit between them; extent
   unchanged.
 

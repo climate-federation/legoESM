@@ -56,8 +56,8 @@ flux at `:194-195`. The deck that reaches those lines selects
 reference run's own namelist makes the same two selections at
 `overflow_kt1_10/namelist_cfg:86` and `:92`. The deck that does not reach them
 selects `ORCA2_OMIP_L4/EXP00/namelist_cfg:346` and `:352`. legoESM pins the
-same split on the card: the condition at `nemo_testcase_recipe.py:2205`
-refuses, at `:2208`, to build ORCA2-zps or GYRE-zco with anything but the
+same split on the card: the condition at `nemo_testcase_recipe.py:2218`
+refuses, at `:2221`, to build ORCA2-zps or GYRE-zco with anything but the
 vector-invariant selection.
 
 ## Measured results

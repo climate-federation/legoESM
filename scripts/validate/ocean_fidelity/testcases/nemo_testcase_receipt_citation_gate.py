@@ -1103,12 +1103,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:2205':
+    'nemo_testcase_recipe.py:2218':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5302': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5320': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:2208':
+    'nemo_testcase_recipe.py:2221':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -2999,7 +2999,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:8801-8809': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:563-650': [
+    'nemo_testcase_recipe.py:576-663': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 88],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -3252,7 +3252,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:413-415': [
+    'nemo_testcase_recipe.py:426-428': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:10391-10408': [
@@ -3498,9 +3498,6 @@ CITATION_MAP = {
     # --- round 49: compiled GYRE LDF/ENE statements and call order ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:165-167': [
         '&namdyn_vor', 'ln_dynvor_ene = .true.', 3],
-    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-175': [
-        'hydrostatic pressure gradient (HPG))',
-        "CALL r46_rhs( 'after_zad', uu, vv, Krhs )", 35],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:431-480': [
         'CALL    eos    (        ts, Kmm, rhd, rhop )',
         "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 50],
@@ -3666,9 +3663,6 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90:123-126': [
         ('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs)', 1),
         '&                                            * ( zWdzV(ji,jj) + zzWdzV )', 4],
-    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
-        'Compute ssh and (uu_b,vv_b)  at N+1',
-        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:695-711': [
         'Round-29 L2 WRITE-only stage-3 pre-LDF momentum frame.',
         'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )', 17],
@@ -3838,9 +3832,6 @@ CITATION_MAP = {
         'maximum isoppycnal slope             rn_slpmax', 1),
     # --- ROUND 39: the slopes are built ONCE PER STEP on the BEFORE state ---
     'stprk3.F90:173': ('CALL eos ( ts, Nbb, rhd )                   ! before in situ density', 1),
-    'stprk3.F90:195': ('CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 1),
-    'stprk3.F90:200': ('CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )', 1),
-    'stprk3.F90:207': ('CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 1),
     'GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/stprk3.f90:178': (
         'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   ! before slope for standard operator', 1),
     'LDF/ldfslp.F90:80': ('SUBROUTINE ldf_slp( kt, prd, pn2, Kbb, Kmm )', 1),
@@ -4153,7 +4144,6 @@ CITATION_MAP = {
     'dynhpg.F90:359,383': ['puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap',
          'puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap',
          2],
-    'dynadv.F90:144': 'vector form : keg + zad + vor is used',
     'domzgr_substitute.h90:139': [('define  gdept(i,j,k,t)', 1), ('define  gdept(i,j,k,t)', 1), 1],
     'domzgr_substitute.h90:145': [('gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))', 1),
          ('gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))', 1),
@@ -4180,9 +4170,6 @@ CITATION_MAP = {
                       ('SELECT CASE( n_dynadv )', 2), 1],
     'stp2d.F90:178': 'CASE( np_VEC_c2, np_LIN_dyn )',
     'stp2d.F90:183': 'CASE ( np_FLX_c2, np_FLX_up3 )',
-    'domqco.F90:166-169': [
-        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)', 1),
-        ('r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
     'namelist_cfg:91': 'ln_dynvor_ens = .true.',
     'lock_kt1_10/ocean.output:715': [('enstrophy conserving scheme', 1),
                                      ('enstrophy conserving scheme', 1), 1],
@@ -4344,7 +4331,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:631': [
+    'nemo_testcase_recipe.py:644': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -4390,7 +4377,7 @@ CITATION_MAP = {
     # (92) is above both edits and remains unmoved.  Round 7 of the ORCA2 lane
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; the anchor text is unchanged, so this is a rigid re-anchor.
-    'nemo_testcase_recipe.py:346,591,2189': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:359,604,2202': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

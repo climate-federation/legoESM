@@ -291,6 +291,30 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     assert clean.lateral_mixing.harmonic.enforce_cfl is False
     assert clean.lateral_mixing.biharmonic.enforce_cfl is True
 
+    # ... and the after-SSH form is STATED on the ORCA2 card, not inherited
+    # from the shared GYRE identity it specialises.  The shared builder is
+    # made to hand back a sentinel; a card that merely inherited would carry
+    # the sentinel through, and deleting the card's own line makes this red.
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe_module
+
+    original = recipe_module._model_config
+
+    def _sentinel_base(*args, **kwargs):
+        built = original(*args, **kwargs)
+        # Poison ONLY the shared GYRE identity the ORCA2 branch builds on,
+        # not the ORCA2 identity's own return value.
+        if kwargs.get("whole_step_identity") == "gyre_vector_ene_c2":
+            return built._replace(
+                nemo_first_wzv_after_ssh="leapfrog_continuity")
+        return built
+
+    recipe_module._model_config = _sentinel_base
+    try:
+        stated = build_orca2_zps_card(deck).recipe.model_config
+    finally:
+        recipe_module._model_config = original
+    assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+
 
 # --------------------------------------------------------------------------
 # S5 — one meaning per nn_eice value, on every integration
