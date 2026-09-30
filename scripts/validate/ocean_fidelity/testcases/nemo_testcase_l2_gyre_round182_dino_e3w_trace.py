@@ -6,8 +6,9 @@ harness.  It labels each Python call site while JAX traces the production step
 and prints that call's runtime raw-mesh divisor minimum and invalid-cell count.
 The wrapped kernel, configuration, state bridge, and step are unchanged.
 
-Run with the normal ``kamm_twin_90d.py`` positional/optional arguments after
-``--``.  ``--plant-call N`` sets the first divisor cell of traced call N to
+Run with the wrapped harness's own positional/optional arguments after
+``--``; ``--script`` selects the harness (default: the developed-state 90-day
+twin; the from-rest year screen is the other caller of the same step).  ``--plant-call N`` sets the first divisor cell of traced call N to
 zero and must make the existing fail-closed raw-mesh guard fire.
 """
 from __future__ import annotations
@@ -39,6 +40,13 @@ def main() -> None:
         help="after the repaired ssh-average entry inverse, restore one "
              "non-finite closed V-face boundary value; the production run "
              "must fail and print STATUS PLANT-FIRED")
+    parser.add_argument(
+        "--script",
+        default="scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
+        help="the committed DINO harness to wrap; the default is the "
+             "developed-state 90-day twin, and the from-rest year screen "
+             "(dino_year_screen_fullframe.py) is the other one that runs the "
+             "same production step")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
@@ -231,12 +239,9 @@ def main() -> None:
         return result
 
     LatLonCGridOceanModel.step = traced_step
-    sys.argv = ["kamm_twin_90d.py", *args]
+    sys.argv = [ns.script.rsplit("/", 1)[-1], *args]
     try:
-        runpy.run_path(
-            "scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py",
-            run_name="__main__",
-        )
+        runpy.run_path(ns.script, run_name="__main__")
     except Exception as exc:
         if ns.plant_closed_v_boundary:
             print("STATUS PLANT-FIRED")
