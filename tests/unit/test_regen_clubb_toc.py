@@ -84,3 +84,37 @@ def test_the_checker_refuses_to_validate_nothing(mod, tmp_path):
     f.write_text('"""No TOC rows here at all."""\n# 1. First\n')
     out = mod.check_toc(f)
     assert out and "validating nothing" in out[0], out
+
+
+def _full_toc(mod, pointer=True, drop_header=None):
+    """A synthetic file with all EXPECTED_TOC_ROWS rows, correctly numbered."""
+    n = mod.EXPECTED_TOC_ROWS
+    head = ['"""M.']
+    if pointer:
+        head.append("Table of contents (flag reference table at line 0)")
+    head += [f"  {k}. [line  0] S{k}" for k in range(1, n + 1)] + ['"""']
+    body = [f"# {k}. S{k}" for k in range(1, n + 1) if k != drop_header]
+    return head + body + ["# CAM-default CLUBB model-flag values (reference table)"]
+
+
+def test_a_missing_pointer_is_not_exact(mod):
+    """All rows right but the flag-table pointer gone must not read as exact."""
+    lines, _ = mod.retarget(_full_toc(mod, pointer=False))
+    out = mod.check_lines(lines)
+    assert out and "pointers" in out[0], out
+    # Control: the same file WITH its pointer is exact once renumbered.
+    fixed, _ = mod.retarget(_full_toc(mod))
+    assert mod.check_lines(fixed) == []
+
+
+def test_an_unrepairable_toc_is_not_rewritten(mod, tmp_path):
+    """A row whose header is gone cannot be renumbered; refuse, do not write."""
+    f = tmp_path / "fake.py"
+    text = "\n".join(_full_toc(mod, drop_header=3))
+    f.write_text(text)
+    assert mod.main(["--path", str(f)]) == 1
+    assert f.read_text() == text
+    # Control: pure renumbering drift IS repaired and written.
+    f.write_text("\n".join(_full_toc(mod)))
+    assert mod.main(["--path", str(f)]) == 0
+    assert mod.check_toc(f) == []

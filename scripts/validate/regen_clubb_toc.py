@@ -83,18 +83,13 @@ def retarget(lines: list[str]) -> tuple[list[str], list[str]]:
     return out, drift
 
 
-def check_toc(path=None) -> list[str]:
-    """Drift in the committed file, as a list of human-readable strings.
+def check_lines(lines: list[str]) -> list[str]:
+    """Drift in a TOC given as lines; the one implementation both doors use.
 
-    The importable form, so PYTEST is the invoker. A ``--check`` flag that
-    nothing runs is not a tripwire -- this repo has no CI, so the only thing
-    that reliably executes is the test suite. One implementation, two doors.
-
-    REFUSES a file whose TOC it cannot see: matching zero rows and reporting
-    "in sync" would be a checker that validates nothing while looking green.
+    REFUSES a TOC it cannot see: matching zero rows (or no flag-table pointer)
+    and reporting "in sync" would be a checker that validates nothing while
+    looking green.
     """
-    path = pathlib.Path(path or _DEFAULT)
-    lines = path.read_text().split("\n")
     rows = [int(m.group(1)) for l in lines[:_TOC_SCAN_LINES]
             if (m := re.match(r"  (\d+)\.\s+\[line\s+(\d+)\]", l))]
     if sorted(rows) != list(range(1, EXPECTED_TOC_ROWS + 1)):
@@ -102,7 +97,22 @@ def check_toc(path=None) -> list[str]:
                 f"1..{EXPECTED_TOC_ROWS} — the TOC format changed or a row is "
                 f"duplicated/missing, so this checker is validating nothing; fix "
                 f"the pattern or EXPECTED_TOC_ROWS before trusting a green"]
+    n_ptr = sum(bool(re.search(r"flag reference table at line \d+", l))
+                for l in lines[:_TOC_SCAN_LINES])
+    if n_ptr != 1:
+        return [f"found {n_ptr} flag-reference-table pointers in the TOC, "
+                f"expected exactly 1"]
     return retarget(lines)[1]
+
+
+def check_toc(path=None) -> list[str]:
+    """Drift in the committed file, as a list of human-readable strings.
+
+    The importable form, so PYTEST is the invoker. A ``--check`` flag that
+    nothing runs is not a tripwire -- this repo has no CI, so the only thing
+    that reliably executes is the test suite. One implementation, two doors.
+    """
+    return check_lines(pathlib.Path(path or _DEFAULT).read_text().split("\n"))
 
 
 def main(argv=None) -> int:
@@ -116,8 +126,9 @@ def main(argv=None) -> int:
     path = pathlib.Path(args.path)
     # One implementation, two doors: the CLI goes through the same row-count
     # guard as pytest, so ``--check`` cannot pass on a TOC it failed to parse.
-    drift = check_toc(path)
-    out = retarget(path.read_text().split("\n"))[0]
+    lines = path.read_text().split("\n")
+    drift = check_lines(lines)
+    out = retarget(lines)[0]
 
     if not drift:
         print(f"{path.name}: TOC is exact")
@@ -127,6 +138,15 @@ def main(argv=None) -> int:
     if args.check:
         print(f"{path.name}: {len(drift)} stale TOC reference(s) -- run this "
               f"script without --check to fix")
+        return 1
+    # Only renumbering is repairable. A missing header, banner, row or pointer
+    # survives the rewrite, so verify the result and refuse to write instead
+    # of reporting a repair that did not happen (codex).
+    left = check_lines(out)
+    if left:
+        for d in left:
+            print(f"  UNREPAIRABLE: {d}")
+        print(f"{path.name}: not rewritten -- fix the TOC structure by hand")
         return 1
     path.write_text("\n".join(out))
     print(f"{path.name}: rewrote {len(drift)} stale reference(s)")

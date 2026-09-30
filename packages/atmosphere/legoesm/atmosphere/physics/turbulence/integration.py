@@ -521,6 +521,15 @@ def make_turbulence_physics(
     Callable
         Physics function with the correct signature for the model.
     """
+    # The lever lives on TurbulenceConfig, so any scheme can carry it; only
+    # CLUBB's closure implements the exchange. Refuse rather than build a
+    # model that silently runs without the liquid exchange that was selected.
+    if (getattr(turbulence_config, "liquid_partition", False)
+            and turbulence_config.scheme != "clubb"):
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition is CLUBB's cloud-liquid "
+            f"exchange; scheme={turbulence_config.scheme!r} has no closure "
+            "liquid to exchange. Use scheme='clubb' or leave it off.")
     if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
         raise ValueError(
             "f_land/land_beta are the MPAS land surface boundary knobs; the "

@@ -331,6 +331,20 @@ def test_non_mpas_lanes_refuse_the_lever():
     make_turbulence_physics(tc, model_type="mpas")
 
 
+def test_a_non_clubb_scheme_refuses_the_lever():
+    """The selector sits on TurbulenceConfig, so any scheme can carry it; only
+    CLUBB implements it. The MPAS lane (the one that accepts it for CLUBB) must
+    refuse it for another scheme rather than silently drop the exchange."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        make_turbulence_physics,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    with pytest.raises(ValueError, match="no closure liquid"):
+        make_turbulence_physics(
+            TurbulenceConfig(scheme="louis", liquid_partition=True),
+            model_type="mpas", dt=300.0)
+
+
 def test_partition_uses_the_grid_mean_liquid_not_the_in_cloud_one():
     """The tracer written back must be GRID-MEAN water, not in-cloud water.
 
