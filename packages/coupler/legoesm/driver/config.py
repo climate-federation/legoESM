@@ -940,7 +940,8 @@ class ExperimentConfig(NamedTuple):
     # reviving above an inversion (the default False lets a plume killed by
     # negative buoyancy resume nonzero M_u aloft — physically questionable,
     # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only (guarded in physics_pipeline).
+    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
+    # other convection scheme.
     convective_buoyancy_death_memory: bool = False
 
     # Convection / Turbulence / GWD
@@ -1143,18 +1144,14 @@ class ExperimentConfig(NamedTuple):
     # land tile is active (``land_mask_path`` set).
     #   C_land           : effective heat capacity [J/m^2/K]
     #   emissivity_land  : LW emissivity
-    #   beta_land        : soil-moisture evaporation factor in [0, 1]
-    #                      (1 = wet surface; calibration default in
-    #                      Phase 1 — left tunable)
     C_land: float = 2.0e5
     emissivity_land: float = constants.emissivity_land
-    beta_land: float = 1.0
 
     # Multilayer land surface (Phase L1).  When True, replaces the slab
     # _step_slab_land call with step_multilayer_land from legoesm.land,
     # which carries a prognostic (T_soil, theta_soil, psi_soil, snow)
     # state per column.  Requires land_mask_path to also be set.  The
-    # slab knobs (C_land, emissivity_land, beta_land) become unused and
+    # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
     # Land-tile call interval [s]; 0.0 (default) advances the land every
@@ -1172,6 +1169,16 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
+    # stress also down-regulates the Ball-Berry intercept b0
+    # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
+    # the FLUXNET-validated EC-site setup uses False. Whether the default should
+    # move is an open user decision, so decks set it explicitly.
+    land_canopy_stress_b0: bool = True
+    # Two-leaf canopy rain interception (MultiLayerLandConfig.interception =
+    # InterceptionConfig()): a prognostic canopy water store, throughfall and
+    # wet-leaf evaporation. Default off; decks set it explicitly.
+    land_canopy_interception: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1196,12 +1203,6 @@ class ExperimentConfig(NamedTuple):
     # the full CLM PFT parameterisation validated.  Ignored unless land_surface_scheme
     # == 'clm_ml' (+ use_multilayer_land).
     clm_ml_use_surfdata_pft: bool = False
-    # Strategy B: hydrate MultiLayerLandState from an ERA5 land NetCDF
-    # at IC time instead of the strategy-A uniform 0.5*theta_sat fill.
-    # Build with probes/preprocess_era5_land_ic.sh; expects variables
-    # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
-    # use_multilayer_land is False.
-    era5_land_ic_path: str = ""
     # Spun-up land INITIAL CONDITION (#746 item 1): a MultiLayerLandState
     # restart (.npz) written by ``scripts/run/run_land_spinup.py`` after an
     # offline multi-year land spin-up.  When set (and use_multilayer_land is
@@ -1210,7 +1211,6 @@ class ExperimentConfig(NamedTuple):
     # run starts from a settled deep-soil temperature/moisture instead of the
     # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
     # restart's ncol / n_layers must match the run's grid (validated on load).
-    # Takes precedence over era5_land_ic_path when both are set.
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
@@ -1241,19 +1241,6 @@ class ExperimentConfig(NamedTuple):
     transient_land_cover: bool = False
     land_cover_surfdata: str = ""
 
-    # Diagnostic T-based ice partition.  At every radiation call the
-    #   cloud_r_eff_ice : ice effective radius [m]
-    cloud_r_eff_ice: float = 30.0e-6
-
-    # Land/ocean cloud droplet effective radius (Phase 3 of cloud-micro plan).
-    # Land has ~3x higher CDNC than ocean, giving ~30% smaller r_eff and
-    # brighter clouds.  Compute the per-column r_eff as a linear blend
-    # weighted by f_land (the land-fraction field) inside
-    # compute_radiation_core.  Replaces cloud_r_eff_liq in the AMIP active
-    # tunable set; the single-value field is kept for backward-compat with
-    # no-land runs (f_land = 0 → blend equals cloud_r_eff_liq_ocean).
-    cloud_r_eff_liq_ocean: float = 10.0e-6
-    cloud_r_eff_liq_land: float = 7.0e-6
     # Activate the slab-land SEB tile without loading a separate LSM file.
     # Useful when --topography already provides a good f_land (ETOPO) and
     # no separate mask file is available.  Ignored when land_mask_path is set
@@ -1270,7 +1257,6 @@ class ExperimentConfig(NamedTuple):
     T_init: float = 300.0
     rh_init: float = 0.7
     dynamic_albedo: bool = False
-    carbon_cycle: str = "none"
 
     # Initial conditions
     #   "default"  — isothermal held_suarez_init at T_init (e.g. 300 K)
@@ -1317,38 +1303,24 @@ class ExperimentConfig(NamedTuple):
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
     sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
-    sundqvist_evap_coeff: float = 5e-4     # Sundqvist sub-cloud rain evaporation coeff
-    cloud_r_eff_liq: float = 10.0e-6       # cloud droplet effective radius [m]
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
     # defaults; the calibration threads them to the schemes as a
     # `physics_cfg_overrides` dict-of-dicts (keys: micro/conv/turb/gwd).
-    sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
-    sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
     louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
     # Marine-Sc cloud-top entrainment (Louis BL): vents trapped BL-top moisture
     # into the dry free troposphere to thin excess stratocumulus liquid cloud
     # (the AMIP albedo bias) without a surface-evaporation trade.  SINGLE knob:
     # 0.0 = off (default => byte-identical), > 0 = on.  Deploy warm-start/ramp.
     louis_cloudtop_entrainment_efficiency: float = 0.0  # LouisConfig.cloudtop_entrainment_efficiency [0,1]; 0=off
-    louis_Ck: float = 0.4                       # LouisConfig.Ck
     louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
     louis_b_louis: float = 5.0                  # LouisConfig.b_louis
     louis_c_louis: float = 16.6                 # LouisConfig.c_louis
     louis_d_louis: float = 5.0                  # LouisConfig.d_louis
-    louis_z0: float = 1.0e-4                    # SurfaceLayerConfig.z0 [m]
-    louis_Ch_neutral: float = 1.5e-3            # SurfaceLayerConfig.Ch_neutral
-    louis_Cd_neutral: float = 1.5e-3            # SurfaceLayerConfig.Cd_neutral
     # Exact 2*pi/100 km — MUST equal McFarlaneConfig.k_wave's own
     # expression: gwd_config_for overlays this onto the leaf, so a
     # truncated literal would silently perturb the default kernel.
     mcfarlane_k_wave: float = 2.0 * math.pi / 100e3  # McFarlaneConfig.k_wave [1/m]
-    # INERT: no McFarlaneConfig field of this name exists — the scheme derives
-    # N from the column state (mcfarlane.py).  Kept only for the positional ABI
-    # + serialized-config compatibility; gwd_config_for deliberately does not
-    # wire it, and it was dropped from the ml/tuning.py catalog so it can no
-    # longer be advertised as a live knob (codex round 1, finding 5).
-    mcfarlane_N_ref: float = 0.01               # INERT (no leaf field)
     mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
     mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
     # Morrison ice-microphysics tunables (active when microphysics='morrison'
@@ -1375,9 +1347,6 @@ class ExperimentConfig(NamedTuple):
                                                 # homogeneous_ice_nucleation
                                                 # branch; validate_strict
                                                 # refuses the inert combo)
-    # SBM convective precip efficiency: fraction of column-net drying that
-    # precipitates directly as rain (rest is detrained as condensate).
-    sbm_precip_efficiency: float = 0.5          # SBMConfig.precip_efficiency
     # (morrison_phase_aware_sat_adj / cloud_rh_ice_crit / cloud_rh_ice_sat
     # DELETED 2026-07-26: their comments documented physics that was NEVER
     # implemented — no MorrisonConfig.phase_aware_sat_adj, no
@@ -1551,7 +1520,6 @@ class ExperimentConfig(NamedTuple):
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
-    debug_precision: bool = False     # log warnings when array dtypes mismatch policy
 
     # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
     # descends from this via ``legoesm.runtime.rng.split_keys``, so the run is
@@ -2157,11 +2125,24 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+            errors.append(
+                "convective_buoyancy_death_memory=True requires "
+                f"convection='tiedtke' (got {self.convection!r}): only the "
+                "Tiedtke scheme reads it — the knob would be silently inert.")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
                 "multilayer soil has a freeze/thaw scheme — the knob would be "
                 "silently inert.")
+        if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
+                and not (self.use_multilayer_land
+                         and self.land_surface_scheme == "two_leaf")):
+            errors.append(
+                "land_canopy_interception=True / land_canopy_stress_b0=False "
+                "require use_multilayer_land with land_surface_scheme="
+                "'two_leaf': only the two-leaf canopy reads them — the knob "
+                "would be silently inert.")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -3836,13 +3817,6 @@ class ExperimentConfig(NamedTuple):
                 f"checkpoint_format must be one of {_valid_checkpoint_format}, "
                 f"got {self.output.checkpoint_format!r}"
             )
-        # Reject unsupported coupled/ESM modes with actionable errors.
-        if self.carbon_cycle != "none":
-            errors.append(
-                f"carbon_cycle={self.carbon_cycle!r} is not implemented. "
-                f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
-                f"Set carbon_cycle='none' or use a coupled driver."
-            )
         _valid_ic = ("default", "standard", "era5")
         if self.ic not in _valid_ic:
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
@@ -4132,19 +4106,13 @@ class ExperimentConfig(NamedTuple):
             land_interface_flux=getattr(
                 amip_cfg, 'land_interface_flux', 'legacy_dual'),
             emissivity_land=getattr(amip_cfg, 'emissivity_land', constants.emissivity_land),
-            beta_land=getattr(amip_cfg, 'beta_land', 1.0),
             use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
             multilayer_n_layers=getattr(amip_cfg, 'multilayer_n_layers', 10),
             multilayer_soil_depth=getattr(amip_cfg, 'multilayer_soil_depth', 3.0),
-            era5_land_ic_path=getattr(amip_cfg, 'era5_land_ic_path', ''),
-            cloud_r_eff_ice=getattr(amip_cfg, 'cloud_r_eff_ice', 30.0e-6),
-            cloud_r_eff_liq_ocean=getattr(amip_cfg, 'cloud_r_eff_liq_ocean', 10.0e-6),
-            cloud_r_eff_liq_land=getattr(amip_cfg, 'cloud_r_eff_liq_land', 7.0e-6),
             surfdata_path=getattr(amip_cfg, 'surfdata_path', ''),
             T_init=amip_cfg.T_init,
             rh_init=amip_cfg.rh_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
-            carbon_cycle=amip_cfg.carbon_cycle,
             experiment=amip_cfg.experiment,
             start_year=amip_cfg.start_year,
             C_H=amip_cfg.C_H,
@@ -4162,20 +4130,12 @@ class ExperimentConfig(NamedTuple):
             sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
             sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
             sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
-            sundqvist_evap_coeff=getattr(amip_cfg, 'sundqvist_evap_coeff', 5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
-            cloud_r_eff_liq=getattr(amip_cfg, 'cloud_r_eff_liq', 10.0e-6),
-            sundqvist_sigmoid_sharpness=getattr(amip_cfg, 'sundqvist_sigmoid_sharpness', 20.0),
-            sbm_T_min_convect=getattr(amip_cfg, 'sbm_T_min_convect', 200.0),
             louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
-            louis_Ck=getattr(amip_cfg, 'louis_Ck', 0.4),
             louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
             louis_b_louis=getattr(amip_cfg, 'louis_b_louis', 5.0),
             louis_c_louis=getattr(amip_cfg, 'louis_c_louis', 16.6),
             louis_d_louis=getattr(amip_cfg, 'louis_d_louis', 5.0),
-            louis_z0=getattr(amip_cfg, 'louis_z0', 1.0e-4),
-            louis_Ch_neutral=getattr(amip_cfg, 'louis_Ch_neutral', 1.5e-3),
-            louis_Cd_neutral=getattr(amip_cfg, 'louis_Cd_neutral', 1.5e-3),
             # Default from the live field default (NOT a re-typed literal): the
             # truncated 6.283185307e-5 that used to sit here is ~3e-11 off the
             # exact 2*pi/100 km, which gwd_config_for now overlays onto the
@@ -4184,7 +4144,6 @@ class ExperimentConfig(NamedTuple):
             mcfarlane_k_wave=getattr(
                 amip_cfg, 'mcfarlane_k_wave',
                 ExperimentConfig._field_defaults['mcfarlane_k_wave']),
-            mcfarlane_N_ref=getattr(amip_cfg, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=amip_cfg.sbm_tau_c,
@@ -4350,7 +4309,6 @@ class ExperimentConfig(NamedTuple):
             T_init=self.T_init,
             rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,
-            carbon_cycle=self.carbon_cycle,
             experiment=self.experiment,
             start_year=self.start_year,
             C_H=self.C_H,
@@ -4368,24 +4326,15 @@ class ExperimentConfig(NamedTuple):
             sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
             sw_exponent=getattr(self, 'sw_exponent', 2.0),
             sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
-            sundqvist_evap_coeff=getattr(self, 'sundqvist_evap_coeff', 5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
-            cloud_r_eff_liq=getattr(self, 'cloud_r_eff_liq', 10.0e-6),
-            sundqvist_sigmoid_sharpness=getattr(self, 'sundqvist_sigmoid_sharpness', 20.0),
-            sbm_T_min_convect=getattr(self, 'sbm_T_min_convect', 200.0),
             louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
-            louis_Ck=getattr(self, 'louis_Ck', 0.4),
             louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),
             louis_b_louis=getattr(self, 'louis_b_louis', 5.0),
             louis_c_louis=getattr(self, 'louis_c_louis', 16.6),
             louis_d_louis=getattr(self, 'louis_d_louis', 5.0),
-            louis_z0=getattr(self, 'louis_z0', 1.0e-4),
-            louis_Ch_neutral=getattr(self, 'louis_Ch_neutral', 1.5e-3),
-            louis_Cd_neutral=getattr(self, 'louis_Cd_neutral', 1.5e-3),
             mcfarlane_k_wave=getattr(
                 self, 'mcfarlane_k_wave',
                 ExperimentConfig._field_defaults['mcfarlane_k_wave']),
-            mcfarlane_N_ref=getattr(self, 'mcfarlane_N_ref', 0.01),
             mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
             mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=self.sbm_tau_c,

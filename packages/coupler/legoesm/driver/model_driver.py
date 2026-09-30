@@ -3450,6 +3450,18 @@ class ModelDriver:
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")
+        # Two-leaf canopy b0 stress and rain interception, same placement: the
+        # calibration bake rebuilds ``surface_scheme`` at its library default.
+        if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
+            _sb0 = bool(self.config.land_canopy_stress_b0)
+            cfg = cfg._replace(
+                surface_scheme=cfg.surface_scheme._replace(stress_b0=_sb0))
+            logger.info("  land canopy b0 soil-moisture stress: %s",
+                        "ON" if _sb0 else "off")
+        if self.config.land_canopy_interception:
+            from legoesm.land.canopy.interception import InterceptionConfig
+            cfg = cfg._replace(interception=InterceptionConfig())
+            logger.info("  land canopy rain interception: ON")
 
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
@@ -16135,8 +16147,13 @@ class ModelDriver:
                 )
 
                 # CFL computed host-side from final segment state (not in hot loop)
-                from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
-                _dx_min = estimate_min_dx_cubed_sphere(cfg.grid.resolution) if hasattr(self.grid, 'n') else 1e6
+                # Same spacing the setup dt clamp judged (grid type, resolution,
+                # polar filter): pole cell on lat-lon without the filter.
+                from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx
+                _dx_min = estimate_min_dx(
+                    cfg.grid.resolution, cfg.grid.grid_type,
+                    getattr(self.grid, 'radius', constants.R_earth),
+                    use_polar_filter=getattr(cfg.dycore, "use_polar_filter", False))
 
                 # Under MPI, CFL on owned faces only, then global max
                 # CFL is a CELL-CENTRE number (the dx estimate is the centre

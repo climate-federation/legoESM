@@ -3816,6 +3816,13 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction)
 
+        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
+        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
+        if scheme == "tiedtke":
+            conv_config = conv_config._replace(
+                buoyancy_death_memory=bool(getattr(
+                    config, "convective_buoyancy_death_memory", False)))
+
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
         # replaces the constant ``precip_efficiency`` with the PHYSICAL
@@ -4373,9 +4380,6 @@ def turbulence_config_for(config):
         # changed nothing while reporting success.  Thread any NON-DEFAULT
         # value into the active louis sub-config; an all-defaults config
         # takes no _replace, preserving the byte-identity contract above.
-        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
-        # LouisConfig field and are NOT threaded here — still inert, see the
-        # upstream note in the calibration repo.)
         # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
         # scheme's nested config here, for the same reason the marine-Sc flag
         # above is threaded here -- this function is the single source every
@@ -4602,9 +4606,7 @@ def gwd_config_for(config):
     gc = GravityWaveDragConfig(scheme=scheme)
     if scheme == "none":
         return gc
-    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
-    # NOT wired: no McFarlaneConfig field of that name exists (dangling
-    # ExperimentConfig scalar, tracked separately).
+    # McFarlane (orographic) tunables.
     mc = gc.mcfarlane._replace(
         k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
         directional_spread=float(getattr(

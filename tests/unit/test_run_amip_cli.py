@@ -808,6 +808,44 @@ def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
         cfg.validate_strict()
 
 
+def test_land_canopy_flags_round_trip_and_production_pin():
+    """--land-canopy-stress-b0 / --land-canopy-interception reach
+    ExperimentConfig both ways, and the production deck pins the current
+    values (b0 stressed, interception off)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--land-surface-scheme", "two_leaf"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_stress_b0 is True
+    assert cfg0.land_canopy_interception is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-canopy-stress-b0", "--land-canopy-interception"]),
+        parser))
+    assert cfg1.land_canopy_stress_b0 is False
+    assert cfg1.land_canopy_interception is True
+    try:   # flat analytical topography fails validation for its own reason
+        cfg1.validate_strict()
+    except ValueError as e:
+        assert "land_canopy" not in str(e)
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_canopy_stress_b0") is True
+    assert rows.get("land_canopy_interception") is False
+
+
+@pytest.mark.parametrize("flag", ["--land-canopy-interception",
+                                  "--no-land-canopy-stress-b0"])
+def test_land_canopy_flags_without_two_leaf_are_refused(flag):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-surface-scheme", "simple_seb", flag]), parser))
+    with pytest.raises(ValueError, match="two_leaf"):
+        cfg.validate_strict()
+
+
 @pytest.mark.parametrize("bad", ["0.1", "500"])
 def test_land_snow_tau_days_out_of_range_is_refused(bad):
     """0.5 d is melting spring snow and 400 d spans the cold plateau; outside
@@ -4569,6 +4607,45 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
+    """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
+    the kernel is built from, not stop at ExperimentConfig."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+
+    parser = build_arg_parser()
+    base = ["--grid", "gaussian", "--resolution", "21",
+            "--convection", "tiedtke"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--convective-buoyancy-death-memory"]),
+        parser))
+    assert cfg_on.convective_buoyancy_death_memory is True
+    assert _resolve_convection(cfg_off)[1].buoyancy_death_memory is False
+    assert _resolve_convection(cfg_on)[1].buoyancy_death_memory is True
+
+
+@pytest.mark.parametrize("scheme", ["bechtold", "kain_fritsch", "sbm"])
+def test_buoyancy_death_memory_refused_off_tiedtke_in_python_config(scheme):
+    """A config built in Python (no CLI) must refuse the flag with any scheme
+    that does not read it, exactly as the CLI does."""
+    from legoesm.driver.config import ExperimentConfig
+    cfg = ExperimentConfig(convection=scheme,
+                           convective_buoyancy_death_memory=True)
+    with pytest.raises(ValueError, match="convective_buoyancy_death_memory"):
+        cfg.validate_strict()
+    # control: the same scheme with the flag at its default is not refused for it
+    try:
+        cfg._replace(convective_buoyancy_death_memory=False).validate_strict()
+    except ValueError as e:
+        assert "convective_buoyancy_death_memory" not in str(e)
+    # and Tiedtke with the flag on is not refused for it
+    try:
+        cfg._replace(convection="tiedtke").validate_strict()
+    except ValueError as e:
+        assert "convective_buoyancy_death_memory" not in str(e)
 
 
 def test_corner_fill_flag_round_trip_and_production_pin(capsys):

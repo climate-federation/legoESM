@@ -270,6 +270,10 @@ land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
 land_surface_scheme: two_leaf
+# Pinned at the current values (b0 stressed, no interception) so the deck
+# records them; changing either is a labelled land baseline, not a default flip.
+land_canopy_stress_b0: true
+land_canopy_interception: false
 mpas_land_beta_soil: true
 land_soil_init: aridity
 

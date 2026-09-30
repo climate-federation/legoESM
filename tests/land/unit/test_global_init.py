@@ -914,3 +914,19 @@ def test_archetype_step_diagnostics_use_the_canopy_gpp():
         npt.assert_allclose(np.asarray(getattr(_cb, f)),
                             np.asarray(getattr(carbon_expected, f)),
                             rtol=1e-10, err_msg=f)
+
+
+def test_archetype_spinup_runs_the_drainage_limiter_at_the_calibrated_value():
+    """The carbon spin-up must run the land at the calibrated drainage
+    limiter (0.5), not the RichardsConfig library default (0.0)."""
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
+    from legoesm.land.carbon.global_init import iter_archetype_batches
+    pft = CLM5_PFT_NAMES.index("broadleaf_deciduous_temperate")
+    table = ArchetypeTable(
+        pft_id=np.array([pft]), mat_k=np.array([285.0]),
+        map_yr=np.array([900.0]), t_seasonal_amp_k=np.array([12.0]),
+        aridity=np.array([1.1]), sw_mean_w=np.array([200.0]),
+        soil_class=np.array(["loam"], dtype=object))
+    batches = iter_archetype_batches(table, n_layers=6, soil_depth=2.0, dt=7200.0)
+    assert len(batches) == 1
+    assert batches[0].config.richards.fc_drain_saturation == 0.5
