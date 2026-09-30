@@ -188,7 +188,7 @@ def self_checks(verbose=True):
     # gate passes with e2t substituted or with the array rolled by a row.  The
     # spacing is therefore pinned against an INDEPENDENT ground truth, the
     # mesh's own T-point latitudes.
-    _R = 6371229.0                                   # NEMO ra  # coeff-ok: oracle constant
+    _R = constants.R_earth                           # == NEMO ra
     gt = np.deg2rad(np.diff(np.asarray(A.gphit, float)[:, 25])) * _R
     rel = float(np.max(np.abs(_e2v[:-1, 25] - gt) / gt))
     ok.append(("S1c e2v is the T-to-T distance (vs R*dphi from gphit)",
@@ -441,7 +441,7 @@ def b1():
     e2t = np.asarray(A.mm["e2t"][0]).squeeze()
     ahmt = 0.5 * _RN_UV * np.maximum(e1t, e2t)
     beta = (2.0 * constants.Omega
-            * np.cos(np.deg2rad(np.asarray(A.gphit, float))) / 6371229.0)
+            * np.cos(np.deg2rad(np.asarray(A.gphit, float))) / constants.R_earth)
     Lm = (ahmt / beta) ** (1.0 / 3.0)
     lm_wall = float(np.mean(Lm[WALL_ROWS, 25]))
     print(f"    the oracle's own coefficient at the wall rows is "

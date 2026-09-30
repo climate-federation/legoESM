@@ -20,18 +20,21 @@ References
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
-@jax.custom_vjp
+@partial(jax.custom_vjp, nondiff_argnums=(4,))
 def thomas_solve(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
+    operation_order: str = "normalised",
 ) -> jax.Array:
     """Solve a tridiagonal system via the Thomas algorithm.
 
@@ -66,19 +69,42 @@ def thomas_solve(
     Thomas sweep, then forms the band/RHS cotangents from ``λ`` and ``x`` — no
     ``1/denom**2`` term ever appears, and the forward values are bit-identical.
 
+    ``operation_order``:
+      * ``"normalised"`` (default) divides by ``b + _TINY`` / ``denom +
+        _TINY``, i.e. every pivot carries the clamp described above.
+      * ``"nemo_unnormalised"`` transcribes NEMO's own forward elimination and
+        has NO pivot clamp: it divides by the running diagonal exactly as the
+        Fortran does, because adding a clamp would change the arithmetic this
+        arm exists to reproduce. That is safe here because its only caller,
+        the sea-ice vertical heat solve (``ice/bitz_lipscomb.py``), builds a
+        diagonally dominant matrix, whose pivots stay bounded away from zero.
+        A new caller must establish the same property before selecting it.
+
     Limitations (by design, not bugs):
       * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
         clamps a (near-singular) pivot to ``_TINY`` it is a surrogate, not the
         exact derivative of the clamped map — that is the whole point (the exact
         derivative is the NaN we are avoiding), and on a well-conditioned system
         it equals the raw element-wise autodiff to machine precision.
-      * Reverse-only: ``jax.jvp``/``jacfwd`` through ``thomas_solve`` now raise
-        (a ``custom_vjp`` defines no JVP).  No production/test path forward-diffs
-        this solver; the LAPACK ``thomas_solve_batched`` keeps both modes.
-      * Higher-order reverse mode recurses through this same rule (the bwd's
-        ``λ`` solve uses the wrapper), so grad-of-grad stays clamp-protected too.
+      * Reverse-only: ``jax.jvp``/``jacfwd`` through ``thomas_solve`` raise
+        (a ``custom_vjp`` defines no JVP).  Pinned by
+        ``test_thomas_solve_custom_vjp.py``.
+      * FORWARD-OVER-REVERSE (``jax.jvp`` of ``jax.grad``) DOES work, because
+        this rule's ``λ`` solve calls the undecorated impl rather than
+        re-entering the wrapper (#1736).  An earlier version of this docstring
+        claimed "no production/test path forward-diffs this solver"; that was
+        false -- ``da/curvature.py``'s ``hvp``, ``gauss_newton_hvp`` and
+        ``dense_hessian`` are all forward-over-reverse, and all three raised
+        here.  It also claimed the LAPACK ``thomas_solve_batched`` "keeps both
+        modes"; its CPU default is ``vmap(thomas_solve)``, so that is only true
+        under ``LEGOESM_TRIDIAG=lapack|pcr``.
+      * The price of the line above: higher-order reverse mode no longer
+        recurses through this rule, so a SECOND derivative taken where a pivot
+        is clamped differentiates the raw ``1/denom**2`` and can overflow in
+        float32.  float64 is unaffected, and the measured pivot margin on the
+        production soil column is ~7e33 above the clamp.  Pinned by test.
     """
-    return _thomas_solve_impl(a, b, c, d)
+    return _thomas_solve_impl(a, b, c, d, operation_order)
 
 
 def _thomas_solve_impl(
@@ -86,6 +112,7 @@ def _thomas_solve_impl(
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
+    operation_order: str = "normalised",
 ) -> jax.Array:
     """Raw Thomas forward sweep (the primal computation; see ``thomas_solve``)."""
     n = b.shape[-1]
@@ -104,6 +131,46 @@ def _thomas_solve_impl(
     b = jnp.asarray(b, work_dtype)
     c = jnp.asarray(c, work_dtype)
     d = jnp.asarray(d, work_dtype)
+
+    if operation_order == "nemo_unnormalised":
+        diagonal = b
+        rhs = d
+
+        def unnormalised_forward(k, carry):
+            diagonal_k, rhs_k = carry
+            previous = diagonal_k[..., k - 1]
+            diagonal_k = diagonal_k.at[..., k].set(
+                diagonal_k[..., k]
+                - (a[..., k] * c[..., k - 1]) / previous
+            )
+            rhs_k = rhs_k.at[..., k].set(
+                rhs_k[..., k]
+                - (a[..., k] * rhs_k[..., k - 1]) / previous
+            )
+            return diagonal_k, rhs_k
+
+        diagonal, rhs = jax.lax.fori_loop(
+            1, n, unnormalised_forward, (diagonal, rhs)
+        )
+        solution = jnp.zeros_like(rhs)
+        solution = solution.at[..., -1].set(
+            rhs[..., -1] / diagonal[..., -1]
+        )
+
+        def unnormalised_backward(reverse_k, current):
+            k = n - 2 - reverse_k
+            return current.at[..., k].set(
+                (rhs[..., k] - c[..., k] * current[..., k + 1])
+                / diagonal[..., k]
+            )
+
+        solution = jax.lax.fori_loop(
+            0, n - 1, unnormalised_backward, solution
+        )
+        return jax.lax.convert_element_type(solution, out_dtype)
+
+    if operation_order != "normalised":
+        raise ValueError(f"unknown Thomas operation order {operation_order!r}")
 
     # Initialize: for k=0, c_star = c[0]/b[0], d_star = d[0]/b[0]
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
@@ -161,12 +228,12 @@ def _thomas_solve_impl(
     return jax.lax.convert_element_type(x, out_dtype)
 
 
-def _thomas_solve_fwd(a, b, c, d):
-    x = _thomas_solve_impl(a, b, c, d)
+def _thomas_solve_fwd(a, b, c, d, operation_order):
+    x = _thomas_solve_impl(a, b, c, d, operation_order)
     return x, (a, b, c, x)
 
 
-def _thomas_solve_bwd(res, x_bar):
+def _thomas_solve_bwd(operation_order, res, x_bar):
     """Adjoint of ``A x = d`` (A tridiagonal): d̄ = A⁻ᵀ x̄ =: λ, and the band
     cotangents from ``x = A⁻¹ d`` ⇒ Ā = -λ xᵀ restricted to the three bands:
     ā[k] = -λ[k] x[k-1], b̄[k] = -λ[k] x[k], c̄[k] = -λ[k] x[k+1]."""
@@ -176,12 +243,29 @@ def _thomas_solve_bwd(res, x_bar):
     xw = jnp.asarray(x, work); xbar = jnp.asarray(x_bar, work)
 
     # Transposed system Aᵀ λ = x̄.  Aᵀ has sub-diag aT[k]=c[k-1], super-diag
-    # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep
-    # (custom_vjp wrapper -> stable higher-order too).
+    # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep,
+    # calling the UNDECORATED impl rather than re-entering the wrapper (#1736).
+    #
+    # WHY NOT THE WRAPPER: re-entering it makes this rule's own body contain a
+    # custom_vjp call, and forward-differentiating a custom_vjp is undefined in
+    # JAX.  That made ``jax.jvp(jax.grad(f))`` -- i.e. every forward-over-reverse
+    # second-order operator in da/curvature.py -- raise on any objective
+    # containing this solve.  Measured: the refusal is raised HERE, at this
+    # line, not at the primal call; routing this one solve to the impl makes
+    # the land-column HVP finite and match a central finite difference to
+    # rel 3.6e-09 against the test's 5e-3 bar, with the first-order gradient
+    # bit-unchanged.
+    #
+    # WHAT IT COSTS: higher-order reverse mode no longer recurses through this
+    # rule, so a SECOND derivative taken where a pivot is clamped differentiates
+    # the raw recursion's 1/denom**2 and can overflow in float32 (float64 is
+    # fine).  That trade is pinned by a test rather than left to prose; see
+    # tests/unit/test_thomas_solve_custom_vjp.py.  The first-order adjoint
+    # below is unaffected -- it never forms 1/denom**2.
     zc = jnp.zeros_like(cw[..., :1])
     aT = jnp.concatenate([zc, cw[..., :-1]], axis=-1)
     cT = jnp.concatenate([aw[..., 1:], jnp.zeros_like(aw[..., :1])], axis=-1)
-    lam = thomas_solve(aT, bw, cT, xbar)
+    lam = _thomas_solve_impl(aT, bw, cT, xbar, operation_order)
 
     x_km1 = jnp.concatenate([jnp.zeros_like(xw[..., :1]), xw[..., :-1]], axis=-1)
     x_kp1 = jnp.concatenate([xw[..., 1:], jnp.zeros_like(xw[..., :1])], axis=-1)

@@ -1,0 +1,71 @@
+--- traldf_iso.F90
++++ traldf_iso.F90
+@@ -120,0 +121,13 @@
++      LOGICAL :: lr177_write
++      INTEGER :: r177_unit, r177_ios
++      CHARACTER(LEN=16) :: r177_magic
++      CHARACTER(LEN=64) :: r177_filename
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_rhs_before
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_dit, r177_djt, r177_dkt
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_A11, r177_A22, r177_A13, r177_A23
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_hmsku, r177_hmskv, r177_fu, r177_fv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_vmsku, r177_vmskv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_ahu_w, r177_ahv_w
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_A31, r177_A32
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r177_fw_lower, r177_fw_upper
++      !
+@@ -135,0 +149,24 @@
++      lr177_write = lwp .AND. kt == 1081
++      IF( lr177_write ) THEN
++         ALLOCATE( r177_rhs_before(jpi,jpj,jpk) )
++         ALLOCATE( r177_dit(jpi,jpj,jpk), r177_djt(jpi,jpj,jpk), r177_dkt(jpi,jpj,jpk) )
++         ALLOCATE( r177_A11(jpi,jpj,jpk), r177_A22(jpi,jpj,jpk), r177_A13(jpi,jpj,jpk), r177_A23(jpi,jpj,jpk) )
++         ALLOCATE( r177_hmsku(jpi,jpj,jpk), r177_hmskv(jpi,jpj,jpk), r177_fu(jpi,jpj,jpk), r177_fv(jpi,jpj,jpk) )
++         ALLOCATE( r177_vmsku(jpi,jpj,jpk), r177_vmskv(jpi,jpj,jpk), r177_ahu_w(jpi,jpj,jpk), r177_ahv_w(jpi,jpj,jpk) )
++         ALLOCATE( r177_A31(jpi,jpj,jpk), r177_A32(jpi,jpj,jpk), r177_fw_lower(jpi,jpj,jpk), r177_fw_upper(jpi,jpj,jpk) )
++         r177_rhs_before(:,:,:) = pt(:,:,:,jp_tem,Krhs)
++         r177_dit(:,:,:) = 0._wp ; r177_djt(:,:,:) = 0._wp ; r177_dkt(:,:,:) = 0._wp
++         r177_A11(:,:,:) = 0._wp ; r177_A22(:,:,:) = 0._wp
++         r177_A13(:,:,:) = 0._wp ; r177_A23(:,:,:) = 0._wp
++         r177_hmsku(:,:,:) = 0._wp ; r177_hmskv(:,:,:) = 0._wp
++         r177_fu(:,:,:) = 0._wp ; r177_fv(:,:,:) = 0._wp
++         r177_vmsku(:,:,:) = 0._wp ; r177_vmskv(:,:,:) = 0._wp
++         r177_ahu_w(:,:,:) = 0._wp ; r177_ahv_w(:,:,:) = 0._wp
++         r177_A31(:,:,:) = 0._wp ; r177_A32(:,:,:) = 0._wp
++         r177_fw_lower(:,:,:) = 0._wp ; r177_fw_upper(:,:,:) = 0._wp
++      ENDIF
++      !
++      ! Round-177 captures the selected Laplacian include below.  The
++      ! companion include patch is guarded by defined(iso_lap).
++      !
++
+@@ -161,0 +200,29 @@
++      IF( lr177_write ) THEN
++         WRITE(r177_filename,'("oracle_tracer_ldf_walk_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=r177_unit, FILE=TRIM(r177_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r177_ios )
++         IF( r177_ios /= 0 ) CALL ctl_stop( 'traldf_iso_lap: cannot open Round-177 dump' )
++         r177_magic = 'NEMO_L2_R177LDF'
++         WRITE(r177_unit) r177_magic, 1, kt, Kbb, Kmm, Krhs, jpi, jpj, jpk, jpkm1, jp_tem, STORAGE_SIZE(1._wp), 38, 11
++         WRITE(r177_unit) pt(:,:,:,jp_tem,Kbb), r177_rhs_before, pt(:,:,:,jp_tem,Krhs), &
++            &             pt(:,:,:,jp_tem,Krhs) - r177_rhs_before, &
++            &             e3t_3d, e3u_3d, e3v_3d, tmask, umask, vmask, wmask, &
++            &             ahtu, ahtv, uslp, vslp, wslpi, wslpj, ah_wslp2, akz
++         WRITE(r177_unit) r177_dit, r177_djt, r177_dkt, r177_A11, r177_A22, r177_A13, r177_A23, &
++            &             r177_hmsku, r177_hmskv, r177_fu, r177_fv, r177_vmsku, r177_vmskv, &
++            &             r177_ahu_w, r177_ahv_w, r177_A31, r177_A32, r177_fw_lower, r177_fw_upper
++         WRITE(r177_unit) r3t(:,:,Kmm), r3u(:,:,Kmm), r3v(:,:,Kmm), &
++            &             e2_e1u, e1_e2v, e2u, e1v, e1t, e2t, e1e2t, r1_e1e2t
++         WRITE(r177_unit) e3w_1d
++         CLOSE(r177_unit, IOSTAT=r177_ios)
++         IF( r177_ios /= 0 ) CALL ctl_stop( 'traldf_iso_lap: cannot close Round-177 dump' )
++         DEALLOCATE( r177_rhs_before, r177_dit, r177_djt, r177_dkt )
++         DEALLOCATE( r177_A11, r177_A22, r177_A13, r177_A23 )
++         DEALLOCATE( r177_hmsku, r177_hmskv, r177_fu, r177_fv )
++         DEALLOCATE( r177_vmsku, r177_vmskv, r177_ahu_w, r177_ahv_w )
++         DEALLOCATE( r177_A31, r177_A32, r177_fw_lower, r177_fw_upper )
++         WRITE(numout,*) 'ROUND177_TRACER_LDF_DUMP ', kt, Kbb, Kmm, Krhs, TRIM(r177_filename)
++      ENDIF
++      !
++
++

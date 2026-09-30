@@ -1,0 +1,77 @@
+{
+ "format": "nemo-testcase-l2-gyre-round37-v1",
+ "date": "2026-09-06",
+ "starting_tip": "e49063768799",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "acquisition": {
+  "run_by": "the operator, not the agent",
+  "card": "GYRE_OMIP_L2_P3_SM_R37TRAZDF, copied from GYRE_OMIP_L2_P3_SM_R35TRAZDF",
+  "run_dir": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round37_oracle_trazdf_matrix",
+  "record": "oracle_trazdf_matrix_kt00000001.bin, 6965416 bytes, 115072 = 2 x 57536 longer than round 35's",
+  "twin": "PASS, 44 of 44 arrays bit-identical to round 35's salvaged read, 0 failures; round 35 needed the salvage and round 37 does not",
+  "admission": "PASS, owned-field differences empty; the --plant-consumed control turns it red"
+ },
+ "measured": {
+  "trazdf_given_nemo_inputs": {
+   "calibration": "0/21120 on all 13 rows",
+   "assembly.zwi": "704 signed zeros -> 0/21120",
+   "assembly.zwd": "3120/21120 at 299.71001721561242 -> unchanged, REGISTERED",
+   "assembly.zws": "704 signed zeros -> 0/21120",
+   "sweep.T": "133/21120 at 7.1054273576010019e-15 -> 0/21120",
+   "sweep.S": "111/21120 at 7.1054273576010019e-15 -> 0/21120",
+   "rhs_content.T/S": "0/21120",
+   "clamp.T/S": "0/21824"
+  },
+  "momentum_sweep_given_nemo_inputs": {
+   "GYRE-zco.zdf_solve_lego.u": "582/21120 at 2.0816681711721685e-17 -> 0/21120",
+   "GYRE-zco.zdf_solve_lego.v": "623/21120 at 1.3877787807814457e-17 -> 0/21120",
+   "LOCK_EXCHANGE-zco.zdf_solve_lego.u/v": "0/7800 -> 0/7800",
+   "OVERFLOW-zps.zdf_solve_lego.u/v": "0/60600 -> 0/60600",
+   "plant": "unplanted 0/0, planted 1748 (u) / 1758 (v)"
+  },
+  "barotropic_correction": {
+   "GYRE-zco.u": "exact True 0.0 (17400) -> exact True 0.0",
+   "GYRE-zco.v": "exact True 0.0 (17100) -> exact True 0.0",
+   "LOCK_EXCHANGE-zco.u": "exact True 0.0 (2540) -> exact True 0.0",
+   "OVERFLOW-zps.u": "exact False 3.851859888774472e-34 (16900) -> exact True 0.0, DISCHARGED"
+  },
+  "upstream_owner": {
+   "stage3_output_residual_T": "3.1956659540810506e-11 K before AND after both solve fixes",
+   "model_own_content_rhs_vs_NEMO": "6.821210263296962e-13 K.m on T, 3.637978807091713e-12 psu.m on S, 18000 cells",
+   "substituting_NEMOs_own_rhs_moves_the_output_by": "5.786374251651969e-16 K, 4.25e-4 of the residual",
+   "verdict": "neither the solve nor its right-hand side owns the residual; the owner is inside the matrix legoESM builds or downstream of the solve"
+  },
+  "dry_cell_thickness": {
+   "GYRE-zco": "3120 of 21120 h_partial cells exactly 0.0",
+   "LOCK_EXCHANGE-zco": "5240 of 7800 exactly 0.0",
+   "OVERFLOW-zps": "43600 of 60600 exactly 0.0",
+   "consequence": "removing the dry-diagonal substitution divides by zero; OVERFLOW step 1 gave 2800 NaN of 60600 and restoring it gives 0"
+  },
+  "tracer_combine_is_inert": {
+   "GYRE-zco": "0 of 198956 bits differ between the two values",
+   "LOCK_EXCHANGE-zco": "0 of 47262",
+   "OVERFLOW-zps": "0 of 328152",
+   "measured_by": "the independent diff review"
+  },
+  "kt_1_to_10_first_over_bar": {
+   "before_commit": "e49063768799",
+   "GYRE-zco": "kt=2 T S u v -> kt=2 T S u v",
+   "LOCK_EXCHANGE-zco": "kt=4 u -> kt=4 u",
+   "OVERFLOW-zps": "kt=2 T u -> kt=2 T u"
+  }
+ },
+ "refuted": {
+  "PR3": "the right-hand-side FORM does not own the stage-3 residual; the naive concentration form gives 1.5458154965841686e-05 K (484000x too large, so the model does not evaluate it) and substituting NEMO's own RHS moves the output by 5.79e-16 K",
+  "round_35_36_claim": "the NEMO cards' literal trazdf matrix is NOT fed T_solve_in*dz_cell; the WS-RK3 ladder supplies its own content RHS independently of tracer_combine, and tracer_combine is inert on all three cards"
+ },
+ "confirmed": {
+  "PR1": "the sweep residual is single-vs-double rounding of the multiply in the second and third recurrences",
+  "PR2": "the fix takes both sweep rows to 0/21120",
+  "PR5": "the ascending-k column sum discharges OVERFLOW and leaves GYRE and LOCK bit-identical"
+ },
+ "reviews": {
+  "codex": "unavailable on this account",
+  "claim_review": "independent fresh Claude agent; broke the dry-diagonal precondition with a two-sided control, broke the helper's identity claim on subnormals, weakened the FMA framing, and bounded the RHS contribution at 6.82e-14 K",
+  "diff_review": "independent fresh Claude agent; defeated the sweep discharge through AT-BAR-SIGNED-ZERO, found the new momentum arm had no non-vacuity control, measured tracer_combine inert on all three cards, and independently reproduced the dry-diagonal defect"
+ }
+}

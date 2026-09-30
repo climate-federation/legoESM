@@ -87,7 +87,7 @@ def small_setup():
 @pytest.fixture(scope="module")
 def rest_state(small_setup):
     """Rest state: u = v = w = theta' = rho' = 0."""
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState,
     )
     grid, height, _ = small_setup
@@ -109,7 +109,7 @@ def rest_state(small_setup):
 # ----------------------------------------------------------------------
 
 def test_slow_tendencies_shapes_at_rest(small_setup, rest_state):
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_slow_tendencies,
     )
     grid, height, terrain = small_setup
@@ -125,7 +125,7 @@ def test_slow_tendencies_shapes_at_rest(small_setup, rest_state):
 
 def test_slow_tendencies_finite_at_rest(small_setup, rest_state):
     """Slow tendencies must be finite at the rest state."""
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_slow_tendencies,
     )
     grid, height, terrain = small_setup
@@ -139,7 +139,7 @@ def test_slow_tendencies_finite_at_rest(small_setup, rest_state):
 
 def test_pole_wall_bc_on_dv(small_setup, rest_state):
     """v tendency must vanish at the polar lat-faces."""
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_slow_tendencies,
     )
     grid, height, terrain = small_setup
@@ -159,7 +159,7 @@ def test_rest_state_remains_at_rest_under_one_step(small_setup, rest_state):
     discrete dycore should preserve that equilibrium to floating-
     point tolerance.
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_step,
     )
     grid, height, terrain = small_setup
@@ -183,7 +183,7 @@ def test_uv_shapes_preserved_through_step(small_setup, rest_state):
     or v.  If a future refactor accidentally interpolates them to
     cell centres, this test fails immediately.
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_step,
     )
     grid, height, terrain = small_setup
@@ -223,7 +223,7 @@ def test_pgf_zero_at_rest(small_setup, rest_state):
     guard for finding #6 in the v1 review: any future change that
     leaks the reference Exner into ``pi_p`` would show up here.
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         cgrid_latlon_nh_slow_tendencies,
     )
     grid, height, terrain = small_setup
@@ -266,7 +266,7 @@ def test_warm_bubble_drives_upward_motion(small_setup):
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         compute_exner_perturbation,
     )
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState, cgrid_latlon_nh_step,
     )
     grid, height, terrain = small_setup
@@ -372,7 +372,7 @@ def test_step_applies_slow_theta_advection(small_setup):
     shows up in the stepped state (plus an O(few %) acoustic-response
     difference, hence the 0.25 safety factor on the expected scale).
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState,
         cgrid_latlon_nh_slow_tendencies,
         cgrid_latlon_nh_step,
@@ -429,7 +429,7 @@ def test_step_applies_w_sponge(small_setup):
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonCompressibleEulerConfig,
         CGridLatLonNonHydrostaticState,
         cgrid_latlon_nh_step,
@@ -485,7 +485,7 @@ def test_dry_mass_conserved_under_divergent_wind(small_setup):
     via a column far from the seeded rho' patch, which only the
     compression term can reach on this timescale).
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState,
         cgrid_latlon_nh_step,
     )
@@ -551,7 +551,7 @@ def test_dry_mass_conserved_over_terrain(small_setup):
     dynamics (PGF metric term, surface kinematic w BC) is still
     flat-terrain physics -- documented at the flux call site.
     """
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState,
         cgrid_latlon_nh_step,
     )
@@ -600,7 +600,7 @@ def test_sponge_profile_shape_forwarded(small_setup):
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+    from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
         CGridLatLonCompressibleEulerConfig,
         CGridLatLonNonHydrostaticState,
         cgrid_latlon_nh_slow_tendencies,

@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 
 def git_sha(*, allow_dirty: bool = False) -> str:
@@ -35,7 +40,17 @@ DEFAULT_ORACLE_ROOTS = {
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"),
     "OVERFLOW-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"),
+    "VORTEX-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2"),
+    # The same experiment with the ORCA2/GYRE momentum scheme set
+    # (decision 73); its own NEMO run, beside the flux card's.
+    "VORTEX_VEC-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3"),
 }
+
+# NEMO writes its records with a halo of this width on every side; the gate
+# strips it to reach the local interior.  It is the same for all three cases.
+_HALO = 2
 
 
 class GateError(RuntimeError):
@@ -47,33 +62,54 @@ def require(ok: bool, message: str) -> None:
         raise GateError(message)
 
 
-def read_entry(path: Path, case: str) -> dict:
+def read_entry(path: Path, case: str, *, expect_interior=None) -> dict:
+    """Parse the record's OWN header; never predict its shape (note BD).
+
+    This used to carry a hard-coded ``(nx, ny, nz)`` tuple per case, and a
+    third case would have meant a third tuple.  Five acquisitions in a row have
+    now been refused by a checker that predicted a size by hand, so the shape
+    is read from the header and only the parts that are genuinely fixed -- the
+    magic string, the format version, the tracer count and the word size -- are
+    asserted.  ``expect_interior``, when given, is the INTERIOR shape the
+    caller's card carries, which is a claim about the card rather than about
+    the record and is checked separately and loudly.
+    """
     with path.open("rb") as fh:
         magic = fh.read(16).decode("ascii").rstrip()
         version, step, nbb, nx, ny, nz, ntr, bits = struct.unpack(
             "=8i", fh.read(32))
         data = np.fromfile(fh, dtype=np.float64)
-    expected = (206, 7, 101) if case == "OVERFLOW-zps" else (134, 7, 21)
     require(magic == "NEMO_L1_ENTRY_1", f"{path}: bad magic")
-    require(
-        (version, nx, ny, nz, ntr, bits) == (1, *expected, 2, 64),
-        f"{path}: bad header")
+    require((version, ntr, bits) == (1, 2, 64),
+            f"{path}: unsupported record format "
+            f"(version={version}, ntr={ntr}, bits={bits})")
+    require(min(nx, ny, nz) > 0, f"{path}: nonpositive extent in header")
+    require(nx > 2 * _HALO and ny > 2 * _HALO,
+            f"{path}: {nx}x{ny} is not wider than two halos on each side")
     count = nx * ny * nz
-    require(data.size == 4 * count + nx * ny, f"{path}: bad payload length")
+    require(data.size == 4 * count + nx * ny,
+            f"{path}: payload is {data.size} doubles, but its own header "
+            f"({nx}x{ny}x{nz}, {ntr} tracers) asks for {4 * count + nx * ny}")
+    if expect_interior is not None:
+        interior = (ny - 2 * _HALO, nx - 2 * _HALO)
+        require(tuple(expect_interior) == interior,
+                f"{path}: record interior {interior} does not match the "
+                f"card's {tuple(expect_interior)}")
 
     def xyz(values):
         return values.reshape((nx, ny, nz), order="F")[
-            2:-2, 2:-2].transpose(1, 0, 2)
+            _HALO:-_HALO, _HALO:-_HALO].transpose(1, 0, 2)
 
     return {
         "step": step,
         "Nbb": nbb,
+        "nz": nz,
         "T": xyz(data[:count]),
         "S": xyz(data[count:2 * count]),
         "u": xyz(data[2 * count:3 * count]),
         "v": xyz(data[3 * count:4 * count]),
         "ssh": data[4 * count:].reshape((nx, ny), order="F")[
-            2:-2, 2:-2].T,
+            _HALO:-_HALO, _HALO:-_HALO].T,
     }
 
 
@@ -118,6 +154,8 @@ def score(
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(use)[0])] += 1.0
     require(np.all(np.isfinite(candidate[use])), f"{name}: candidate nonfinite")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+    record_residual_field(name, oracle, candidate, use)
     exact = bool(np.array_equal(oracle[use], candidate[use]))
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
     error = float(np.max(np.abs(candidate[use] - oracle[use]))) / scale
@@ -234,9 +272,10 @@ def run(
     )
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
     model = LatLonCGridOceanModel(
@@ -258,8 +297,18 @@ def run(
     for kt in range(1, max_step + 1):
         path = oracle_root / f"oracle_step_entry_kt{kt:08d}.bin"
         require(path.is_file(), f"missing {path}")
-        oracle = read_entry(path, case)
+        oracle = read_entry(
+            path, case,
+            expect_interior=np.asarray(
+                card.recipe.initial_state.T.data).shape[:2])
         require(oracle["step"] == kt, f"{path}: step mismatch")
+        # NEMO's record carries jpk levels where the card executes jpkm1 of
+        # them; the last is the permanently dry dummy bottom.  Assert the
+        # relation rather than trimming blindly, so a record with the WRONG
+        # number of levels is a refusal and not a silent slice.
+        require(oracle["nz"] == nlev + card.dummy_bottom_records,
+                f"{path}: {oracle['nz']} levels, card executes {nlev} plus "
+                f"{card.dummy_bottom_records} dummy bottom record(s)")
         candidate = lego_fields(state)
         rows = []
         for field in ("T", "S", "u", "v", "ssh"):
@@ -351,8 +400,19 @@ def run(
                 "stprk3_stg.F90:468,588"),
         }
         if owner_controls:
+            # Every read_entry call gets the card's own shape and the level
+            # relation, not only the one in the walk: a reviewer found that
+            # this owner-controls path could admit a record with the right
+            # interior but the WRONG number of levels, which the old
+            # hard-coded tuple would have refused.
             oracle2 = read_entry(
-                oracle_root / "oracle_step_entry_kt00000002.bin", case)
+                oracle_root / "oracle_step_entry_kt00000002.bin", case,
+                expect_interior=np.asarray(
+                    card.recipe.initial_state.T.data).shape[:2])
+            require(oracle2["nz"] == nlev + card.dummy_bottom_records,
+                    "owner-controls kt=2 record has "
+                    f"{oracle2['nz']} levels, card executes {nlev} plus "
+                    f"{card.dummy_bottom_records} dummy bottom record(s)")
             oracle_T = oracle2["T"][..., :nlev]
             active_T = masks["T"]
             faithful_T = np.asarray(faithful_kt2.T.data)
@@ -444,6 +504,7 @@ def run(
                 "one_variable_controls": controls,
             }
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "legoesm_git_sha": legoesm_git_sha,
         "case": case,
@@ -486,6 +547,7 @@ def run(
     }
 
 
+@scoped_allow_dirty
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=tuple(DEFAULT_ORACLE_ROOTS), required=True)
@@ -529,38 +591,43 @@ def main() -> int:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
-        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+        add_ulp_compare_arguments, capture_residual_fields,
+        comparison_exit_code, persist_ulp_comparison, run_ulp_comparison,
+        write_residual_artifact,
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
-    report = run(
-        args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
-        args.max_step, plant=args.plant,
-        continue_after_first=args.continue_after_first,
-        diagnostic_disable_bbl=args.diagnostic_disable_bbl,
-        owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
-        arm_literal_stage_wzv=args.arm_literal_stage_wzv,
-        arm_legacy_seed_faces=args.arm_legacy_seed_faces,
-        arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
-        arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
-        arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+    with capture_residual_fields() as residuals:
+        report = run(
+            args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
+            args.max_step, plant=args.plant,
+            continue_after_first=args.continue_after_first,
+            diagnostic_disable_bbl=args.diagnostic_disable_bbl,
+            owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
+            arm_literal_stage_wzv=args.arm_literal_stage_wzv,
+            arm_legacy_seed_faces=args.arm_legacy_seed_faces,
+            arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
+            arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
+            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        raise GateError("--compare-to requires --output for the residual sidecar")
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
     print(text, end="")
     if args.compare_to:
-        # The exit status now reports the ULP COMPARISON, not this gate's own
-        # AT-BAR/DEBT verdict: a re-association is being checked against a
-        # committed reference, and the DEBT status itself is one of the fields
-        # the comparison requires to be unchanged.
+        # The exit status now reports the oracle-relative cellwise comparison,
+        # not this run's own AT-BAR/DEBT verdict.
         comparison = run_ulp_comparison(args, report)
         print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
         code = comparison_exit_code(comparison)
         if code == 2:
-            print("PLANTED CONTROL DID NOT LAND: a planted "
-                  f"{comparison['planted_ulp_move']}-ulp move left the "
-                  "comparison green, so the comparison is inspecting nothing",
+            print("PLANTED CONTROL DID NOT PRODUCE ITS REQUIRED VERDICT: "
+                  f"{comparison['plant']}",
                   file=sys.stderr)
         return code
     return 0 if report["status"] == "AT-BAR" else 1

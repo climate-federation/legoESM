@@ -911,6 +911,37 @@ ROUTINE_REGISTRY: tuple[RoutineRow, ...] = (
                        "masked inside the advective transport dyn_adv_up3 consumes, "
                        "zFu = e2u*e3u(Kmm)*( uu(Kmm) + zub*umask(ji,jj,jk) )")),
     )),
+    RoutineRow("S-49", "zdf_drg/dyn_drg/dyn_zdf bottom-drag composition",
+               "SHARED", "ln_non_lin + ln_drgimp + ln_dynspg_ts", (
+        Impl(_OPL, "nemo_bottom_drag_rate_faces",
+             Reference("nemo", "nonlinear_implicit_split_explicit_drag",
+                       "zdfdrg.F90:138-190; dynspg_ts.F90:699-705,1584-1643; "
+                       "dynzdf.F90:148-160,293-305 (selected as the inseparable "
+                       "zdf_drag_in_matrix+zdf_baroclinic_only+"
+                       "barotropic_drag_substep identity)",
+                       selected_by=("DINO", "GYRE"))),
+    )),
+    RoutineRow("S-50", "hpg_sco literal operands and recurrence", "SHARED",
+               "ln_hpg_sco", (
+        Impl(_EOS, "nemo_roquet_density_anomaly_ratio",
+             Reference("nemo", "hpg_sco_density_operand",
+                       "eosbn2.F90:265-288: source-associated prd = zn*r1_rho0-1",
+                       selected_by=("DINO", "GYRE"))),
+        Impl(_LCOPS, "nemo_hpg_sco_literal_cgrid",
+             Reference("nemo", "hpg_sco_recurrence",
+                       "dynhpg.F90:340-390: bottom-up e3w(Kmm) trapezoid and "
+                       "native U/V face-gradient recurrence",
+                       selected_by=("DINO", "GYRE"))),
+    )),
+    RoutineRow("S-51", "sbc U/V coastal surface-stress factors", "SHARED",
+               "none", (
+        Impl(_OPL, "surface_stress_faces",
+             Reference("nemo", "sbcmod_coastal_stress_factors",
+                       "sbcmod.F90:539-546: face average followed by "
+                       "(2-umask)*MAX(adjacent tmask); private legacy hook "
+                       "is a gate-only ablation",
+                       selected_by=("DINO", "GYRE", "ORCA1"))),
+    )),
     RoutineRow("M-01", "stp_MLF whole-step composition", "ARTIFICIAL_BRANCH", "absence of key_RK3 (nemo_mlf selected by no card)", (
         Impl(_OMLC, "_leapfrog_step",
              Reference("nemo", "stp_MLF", "stpmlf.F90:108-473 (two _step_impl passes)")),

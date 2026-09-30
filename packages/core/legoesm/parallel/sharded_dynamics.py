@@ -77,6 +77,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import hashlib
+
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -1251,7 +1253,8 @@ SPMD_HALO_DEPTH = 3
 def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
                        already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
                        ppermute_cells_per_device_threshold=2_000,
-                       round_profile_for_device=None):
+                       round_profile_for_device=None,
+                       cell_width=None, edge_width=None):
     """How much halo communication one ownership choice costs, computed offline.
 
     Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
@@ -1392,10 +1395,46 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
     ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
     cells_per = n_cells // n_dev
     edges_per = n_edges // n_dev
+    # PRODUCTION WEIGHTS. make_voronoi_sharded_step passes
+    # cell_width=nlev+2, edge_width=nlev; the colouring is SIZE-AWARE and
+    # will admit an extra round when it buys more than ten per cent of
+    # padded weight, so the weights change WHICH schedule is chosen, not
+    # just its reported cost. Left unset this function colours at 1:1 and
+    # its round count is then NOT the one production builds (codex).
+    production_weighted = cell_width is not None and edge_width is not None
     sched = _build_ppermute_schedule(
         partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+        **({"cell_width": int(cell_width), "edge_width": int(edge_width)}
+           if production_weighted else {}),
     )
+    # Partition fingerprint: max_degree alone does not pin the split --
+    # neighbours and payloads can change at equal degree -- so a gate that
+    # wants "the same split the reference measured" compares this (codex).
+    #
+    # It hashes the NEIGHBOUR SET, not cell_owner. Hashing ownership was
+    # measured vacuous: the partition methods reorder the MESH and then cut
+    # it into contiguous blocks, so sfc, metis and geometric all produce
+    # the same owner array while colouring to 13, 15 and 16 rounds. The
+    # directed pair set is what actually differs, and unlike the round
+    # assignment it does not move when the colouring policy changes.
+    _pairs = sorted({(int(s), int(d))
+                     for perm in sched["ppermute_perms"] for s, d in perm})
+    partition_fingerprint = hashlib.sha256(
+        repr((_pairs, int(max_lc), int(max_le), int(cells_per),
+              int(edges_per))).encode()
+    ).hexdigest()[:16]
     return {
+        "production_weighted": production_weighted,
+        "cell_width": cell_width,
+        "edge_width": edge_width,
+        "weights_note": (
+            None if production_weighted else
+            "coloured at 1:1: production passes cell_width=nlev+2, "
+            "edge_width=nlev, and the size-aware colouring can pick a "
+            "DIFFERENT schedule under those weights, so n_rounds here is "
+            "not production's round count"),
+        "partition_fingerprint": partition_fingerprint,
+        "n_neighbour_pairs": len(_pairs),
         "method": method,
         "resolved_method": resolved,
         "n_dev": n_dev,
@@ -3725,7 +3764,7 @@ def make_voronoi_sharded_step(
             )
         return model.step
 
-    from legoesm.core.precision import cast_pytree
+    from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState
     from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
@@ -4171,6 +4210,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -4357,6 +4397,7 @@ def make_voronoi_sharded_step(
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
@@ -4426,7 +4467,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
+    if cfg.fix_mass or getattr(cfg, "conservative_tracer_clamp", False):
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -4598,27 +4639,28 @@ def make_voronoi_sharded_step(
                     _pt, phys_state_out = _pr[0], _pr[1]
                 else:
                     _pt = _pr
+                _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+                _tr_phys = state_new.tracers
+                if (state_new.tracers is not None
+                        and _pt.tracer_tendencies is not None):
+                    # water tendencies carry their mass (mirrors the
+                    # serial _step_jit; shared helper)
+                    from legoesm.core.conservation import (
+                        apply_physics_water_mass,
+                    )
+                    _tr_phys, _ps_phys = apply_physics_water_mass(
+                        state_new.tracers, _pt.tracer_tendencies,
+                        _ps_phys, sigma, dt)
                 state_new = MPASHydrostaticState(
                     u=state_new.u.replace(
                         data=state_new.u.data + dt * _pt.du_dt.data),
                     T=state_new.T.replace(
                         data=state_new.T.data + dt * _pt.dT_dt.data),
-                    p_s=state_new.p_s.replace(
-                        data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                    p_s=state_new.p_s.replace(data=_ps_phys),
                     phis=state_new.phis,
                     v=state_new.v,
-                    tracers=state_new.tracers,
+                    tracers=_tr_phys,
                 )
-                if (state_new.tracers is not None
-                        and _pt.tracer_tendencies is not None):
-                    state_new = state_new._replace(tracers={
-                        k: (state_new.tracers[k].replace(
-                                data=state_new.tracers[k].data
-                                + dt * _pt.tracer_tendencies[k].data)
-                            if k in _pt.tracer_tendencies
-                            else state_new.tracers[k])
-                        for k in state_new.tracers
-                    })
 
             # --- 3. Floors (mirrors _step_jit): temperature and tracer
             #        non-negativity (advection is not positive-definite;
@@ -4638,9 +4680,12 @@ def make_voronoi_sharded_step(
                 # sequentially-dependent ones.
                 acc = jnp.float64
                 area_acc = area_arg.astype(acc)
+                # DRY mass (p_s - g*column water), the serial fixer's
+                # convention (user decision 2026-09-28)
+                from legoesm.core.conservation import dry_surface_pressure
                 ps_pair = jnp.stack([
-                    state.p_s.data.astype(acc),
-                    state_new.p_s.data.astype(acc),
+                    dry_surface_pressure(state.p_s.data, state.tracers, sigma).astype(acc),
+                    dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma).astype(acc),
                 ], axis=0) * area_acc[None]
                 masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
                 correction = (masses[0] - masses[1]) / _total_area
@@ -4655,9 +4700,12 @@ def make_voronoi_sharded_step(
                 # the promoted add (iter-11); parity in that corner mode
                 # differs only by the rounding of the correction add.
                 _ps = state_new.p_s.data
+                from legoesm.core.conservation import shift_ps_keep_tracer_mass
+                _ps_new, _tr_new = shift_ps_keep_tracer_mass(
+                    _ps, state_new.tracers, sigma, correction)
                 state_new = state_new._replace(
-                    p_s=state_new.p_s.replace(
-                        data=(_ps + correction).astype(_ps.dtype)))
+                    p_s=state_new.p_s.replace(data=_ps_new.astype(_ps.dtype)),
+                    tracers=_tr_new)
 
             # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
             # dp must be the FINAL layer mass, so this runs post-fix (the serial
@@ -4678,11 +4726,19 @@ def make_voronoi_sharded_step(
                     conservative=getattr(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-            return cast_pytree(state_new, None, "storage"), phys_state_out
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+            return (finalize_to_storage(
+                        cast_pytree(state_new, None, "storage")),
+                    phys_state_out)
 
         return _step
 
@@ -4832,3 +4888,14 @@ def check_sharding(state, config: DeviceConfig, verbose: bool = False) -> dict:
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Public names for the Voronoi partition / ppermute machinery shared with the
+# MPAS OCEAN SPMD lane (``legoesm.parallel.voronoi_spmd_ocean``).  Aliases, not
+# copies: the ocean lane must exchange exactly the rows the atmosphere lane
+# does (no private cross-module imports — tests/test_no_private_cross_imports).
+# ---------------------------------------------------------------------------
+build_voronoi_partition_infra = _build_voronoi_partition_infra
+build_ppermute_schedule = _build_ppermute_schedule
+ppermute_halo_fill = _ppermute_halo_fill

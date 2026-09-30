@@ -164,18 +164,18 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
 
-    def test_zhang_mcfarlane_tau_cape(self):
+    def test_zhang_mcfarlane_tau(self):
         from legoesm.atmosphere.physics.convection.zhang_mcfarlane import zhang_mcfarlane_convection
         from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
         T, q_v, p_full, p_half = _column()
         A = _aux()
 
         def loss(x):
-            cfg = ZhangMcFarlaneConfig()._replace(tau_cape=x)
+            cfg = ZhangMcFarlaneConfig(land_fraction="none")._replace(tau=x)
             out = zhang_mcfarlane_convection(T, q_v, p_full, p_half, A["u"],
                 A["v"], A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 3600.0, "zhang_mcfarlane.tau_cape")
+        assert_grad_ok(loss, 3600.0, "zhang_mcfarlane.tau")
 
     def test_mass_flux_M_scale(self):
         from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection

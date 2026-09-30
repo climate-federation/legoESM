@@ -166,8 +166,9 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
     """True when *config* is provenance-identical to a stored manifest entry.
 
     Exact hash match, or the SCHEMA-GROWTH case: a field added to the config
-    schema AFTER the manifest was written (top-level key absent from
-    ``stored_resolved``) is ignored PROVIDED it holds its default in *config*.
+    schema AFTER the manifest was written (a key absent from
+    ``stored_resolved``, AT ANY DEPTH -- top level or inside a nested block
+    such as ``dycore``) is ignored PROVIDED it holds its default in *config*.
     Without this, every added ExperimentConfig field bricked every older run
     directory at the next chain link ("manifest written for a DIFFERENT
     config") even though the run is semantically identical — reproduced by
@@ -179,26 +180,66 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
     kind = kind or detect_config_kind(config)
     if compute_config_hash(config, kind) == stored_hash:
         return True
-    # Growth tolerance is TOP-LEVEL and ATMOSPHERE-shaped: ocean records
-    # (required constructor args, nested growth) cannot prove their new
-    # fields are defaults, so the except below returns False for them —
-    # i.e. ocean keeps the pre-change STRICT behaviour, never an exception
-    # (codex 2026-07-27 round 2).
+    # Growth tolerance is ATMOSPHERE-shaped: ocean records (required
+    # constructor args) cannot build a defaults instance to prove their new
+    # fields ARE defaults, so the except below returns False for them -- ocean
+    # keeps the pre-change STRICT behaviour, never an exception (codex
+    # 2026-07-27 round 2).  Depth: NESTED growth counts too since #1028 --
+    # a field added inside ``dycore`` changed that block's value without
+    # adding a top-level key, so the flat version saw no new keys, returned
+    # False, and bricked every older run directory even with the new flag at
+    # its default (codex round 2 on that PR, reproduced).
     try:
         current = _serialize_config(config, kind)
-        stored_keys = set(stored_resolved)
-        new_keys = set(current) - stored_keys
-        if not new_keys:
-            return False
         defaults = _serialize_config(type(config)(), kind)
-        if any(k not in defaults or current[k] != defaults[k]
-               for k in new_keys):
-            return False
-        restricted = {k: v for k, v in current.items() if k in stored_keys}
+        restricted = _restrict_to_stored_shape(current, stored_resolved,
+                                               defaults)
+        if restricted is _REFUSE:
+            return False          # a NEW field sits at a NON-default value
+        if restricted == current:
+            return False          # nothing grew; the hash mismatch is real
         text = json.dumps(restricted, sort_keys=True)
         return hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
     except Exception:
         return False  # cannot prove schema growth: fail closed (strict)
+
+
+# Refusal signal for :func:`_restrict_to_stored_shape`.  It cannot be ``None``:
+# this config schema is full of ``None`` defaults (``A_h``, ``barotropic_solver``,
+# every optional override), so a ``None`` return would be indistinguishable from
+# a legitimately-``None`` field value and would refuse every manifest.  Measured:
+# with ``None`` as the signal, three manifest tests went red, including two that
+# predate this change.
+_REFUSE = object()
+
+
+def _restrict_to_stored_shape(current, stored, defaults):
+    """Project *current* onto the key shape *stored* has, AT ANY DEPTH.
+
+    Returns the projection, or :data:`_REFUSE` when a key present in *current*
+    but absent from *stored* does NOT hold its schema default -- that is a real
+    configuration difference, not schema growth, and the caller must refuse.
+
+    Keys the manifest DOES store are copied verbatim, so tampering with any of
+    them still changes the restricted hash; only genuinely-new keys are
+    dropped, and only after they have been shown to be defaults.
+    """
+    if not isinstance(current, dict) or not isinstance(stored, dict):
+        return current
+    if not isinstance(defaults, dict):
+        defaults = {}
+    out = {}
+    for k, v in current.items():
+        if k in stored:
+            sub = _restrict_to_stored_shape(v, stored[k], defaults.get(k))
+            if sub is _REFUSE:
+                return _REFUSE
+            out[k] = sub
+            continue
+        # A key the manifest never stored: tolerated ONLY as a schema default.
+        if k not in defaults or v != defaults[k]:
+            return _REFUSE
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +684,8 @@ def validate_run_manifest(manifest: dict) -> None:
         )
 
 
-def record_state_digest(manifest_path, state_digest: str) -> Path:
+def record_state_digest(manifest_path, state_digest: str, *,
+                        corner_fill_traced: list[str] | None = None) -> Path:
     """Record the post-run final ``state_digest`` into an existing manifest.
 
     The run-start manifest is otherwise immutable; this is the single sanctioned
@@ -651,6 +693,8 @@ def record_state_digest(manifest_path, state_digest: str) -> Path:
     that ``legoesm reproduce --check`` has a reference to compare a rerun's final
     state against.  The manifest is validated, then rewritten atomically with the
     digest set — provenance (config/env) is never touched, only the result.
+    ``corner_fill_traced`` records the cube-vertex fill modes the run's halo
+    fills traced with (the mode is a process global read at trace time).
     """
     manifest_path = Path(manifest_path)
     if manifest_path.is_dir():
@@ -658,6 +702,8 @@ def record_state_digest(manifest_path, state_digest: str) -> Path:
     manifest = read_run_manifest(manifest_path)
     validate_run_manifest(manifest)
     manifest["result"]["state_digest"] = state_digest
+    if corner_fill_traced is not None:
+        manifest["result"]["corner_fill_traced"] = list(corner_fill_traced)
     tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)

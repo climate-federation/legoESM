@@ -1780,8 +1780,8 @@ class SpectralPrimitiveEquationModel:
         coord = self.sigma_coord
         # Grid-space layer mass dp from lnps (one SH synthesis).  On pure sigma
         # the per-column p_s cancels in the borrow rescale, but real dp is
-        # correct on hybrid too and keeps the global net-negative-column
-        # residual mass-weighted.
+        # correct on hybrid too; with the Gaussian cell area it keeps the
+        # global net-negative-column residual mass-weighted.
         p_s = jnp.exp(sh_synthesis(self.grid, state.lnps_hat.data))
         if isinstance(coord, HybridSigmaPressureCoordinate):
             dp = jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)  # +weight contract
@@ -1790,7 +1790,8 @@ class SpectralPrimitiveEquationModel:
         tracers_out, _ = apply_water_positivity(
             state.tracers, None, dp,
             conservative=self.config.conservative_tracer_clamp,
-            energy_consistent=False)  # T is spectral here — borrow is the E-C path
+            energy_consistent=False,  # T is spectral here — borrow is the E-C path
+            area=self.grid.grid_area)
         return state._replace(tracers=tracers_out)
 
     def _ensure_si_data_leapfrog(self, dt: float):

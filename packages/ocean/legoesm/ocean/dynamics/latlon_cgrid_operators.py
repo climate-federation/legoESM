@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
@@ -42,6 +43,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_scalar,
     fold_row,
     pad_ns_vector_v,
+    pad_lon_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
     interp_u_to_vface_4pt,
@@ -127,7 +129,14 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+        # Layout-aware ghost: pivot-row-stored meshes (eORCA025) source the
+        # row BELOW the pivot with the U-stagger map; halo-row-stored keeps
+        # the legacy byte-identical formula (see fold_ghost_source_T).
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
+        north = fold_row(fold_ghost_source_T(interior, fold),
+                         fold_perm_u(fold), fold.vector_sign_u,
                          fold.perm_T.shape[0])
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
@@ -471,9 +480,11 @@ def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
     ``(n_lat+1, n_lon+1)``.
 
     On a lat-lon grid ``f`` depends only on latitude, and the vertex latitude
-    equals the v-face latitude, so the vertex ``f`` is ``grid.f_v`` extended by
-    one periodic-wrap column.  This is the single shared ``f`` value that makes
-    the C-grid Coriolis energy-conserving on a β-plane (see
+    equals the v-face latitude, so the generic vertex ``f`` is ``grid.f_v``
+    extended by one periodic-wrap column.  Literal NEMO EEN/ENE arms instead
+    use :func:`nemo_een_ene_vertex_coriolis`, because a curvilinear V point is
+    not NEMO's F point.  This shared generic value makes the C-grid Coriolis
+    energy-conserving on a β-plane (see
     :func:`coriolis_cgrid_energy_conserving`).
     """
     if hasattr(grid, "f_v"):
@@ -483,6 +494,88 @@ def vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
         f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
         f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
     return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def assert_een_planetary_metric_term_vanishes(grid) -> None:
+    """Refuse ``vorticity_scheme="een_planetary"`` on a non-Cartesian mesh.
+
+    NEMO's flux-form vorticity arm is ``vor_een`` with ``kvor = np_CME``
+    (``dynvor.F90:874`` routes ``np_EEN``; ``dyn_vor_init`` sets
+    ``ntot = np_CME`` for ``np_FLX_up3`` at ``dynvor.F90:891-893``).  Its
+    vertex field is NOT the planetary vorticity alone
+    (``dynvor.F90:780-783``)::
+
+        zwz = ( ff_f + (pv(i+1,j) + pv(i,j)) * di_e2v_2e1e2f
+                     - (pu(i,j+1) + pu(i,j)) * dj_e1u_2e1e2f ) * z1_e3f
+
+    The two metric coefficients are first differences of the mesh's own scale
+    factors (``dynvor.F90:905-908``)::
+
+        di_e2v_2e1e2f(i,j) = ( e2v(i+1,j) - e2v(i,j) ) * 0.5 * r1_e1e2f(i,j)
+        dj_e1u_2e1e2f(i,j) = ( e1u(i,j+1) - e1u(i,j) ) * 0.5 * r1_e1e2f(i,j)
+
+    so they are bitwise zero exactly when every scale factor is one repeated
+    constant -- a Cartesian mesh such as VORTEX's, whose ``usr_def_hgr`` assigns
+    ``pe1*(:,:) = rn_dy`` and ``pe2*(:,:) = rn_dx``
+    (``tests/VORTEX/MY_SRC/usrdef_hgr.F90:160-163``).  Only then does
+    ``np_CME`` collapse onto ``np_COR`` (``dynvor.F90:750-752``) and the
+    legoESM transcription -- the AL81 triad fed a zero relative vorticity --
+    become the whole operator rather than most of it.
+
+    Raises ``ValueError`` when any scale factor varies, because the missing
+    metric term would otherwise be a silent transcription gap.
+    """
+    import numpy as _np
+    for name in ("dx_u", "dx_v", "dy_u", "dy_v", "dx_T", "dy_T",
+                 "dx_vtx", "dy_vtx"):
+        sf = getattr(grid, name, None)
+        if sf is None:
+            continue
+        arr = _np.asarray(sf)
+        if arr.size == 0:
+            continue
+        if not _np.all(arr == arr.flat[0]):
+            raise ValueError(
+                'vorticity_scheme="een_planetary" transcribes NEMO\'s '
+                "np_CME vertex field WITHOUT its metric term, which is exactly "
+                "zero only on a constant-scale-factor mesh (dynvor.F90:"
+                f"905-908). This grid's {name} varies, so the metric term is "
+                "live and the transcription would be incomplete.")
+
+
+def nemo_een_ene_vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Literal NEMO F-point Coriolis for the NEMO EEN/ENE vorticity arms.
+
+    File-backed NEMO cards carry native ``ff_f`` separately from generic
+    ``f_v``.  NEMO ``dynvor.F90`` uses ``ff_f`` in ENE/ENS/EEN, while its
+    T-point energy arm uses ``ff_t``.
+
+    A grid with no native ``ff_f`` falls back to :func:`vertex_coriolis` ONLY
+    while its F points and V points share a latitude, i.e. on a rectilinear
+    (beta-plane / regular lat-lon) grid, where the generic value IS the F-point
+    value.  On a CURVILINEAR grid (an active tripolar fold) they are different
+    staggerings, so the fallback would silently substitute a different operand:
+    that case raises instead of running the wrong Coriolis field.
+    """
+    native = getattr(grid, "ff_f", None)
+    if native is None:
+        fold = getattr(grid, "fold", None)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            raise ValueError(
+                "the literal NEMO EEN/ENE vorticity arm needs the mesh's "
+                "native F-point Coriolis `ff_f`, and this curvilinear grid "
+                "carries none (grid.ff_f is None). On a curvilinear mesh the "
+                "V-point field `f_v` is a DIFFERENT staggering, so it is not "
+                "a substitute. Load a mesh file that supplies `ff_f`, or "
+                "select a generic vorticity scheme.")
+        return vertex_coriolis(grid)
+    expected = (int(grid.n_lat), int(grid.n_lon))
+    if tuple(native.shape) != expected:
+        raise ValueError(
+            f"grid.ff_f shape {native.shape} != native NEMO shape {expected}"
+        )
+    from legoesm.grids.latlon import nemo_ff_f_to_vertex
+    return nemo_ff_f_to_vertex(native)
 
 
 # Back-compat internal alias (promoted to public for the ene_total consumer;
@@ -578,6 +671,39 @@ def coriolis_cgrid_energy_conserving(
 # =============================================================================
 # Vector Laplacian: grad(div) - k x grad(curl)
 # =============================================================================
+
+
+def _nemo_vor_curl_bracket_cgrid(
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Compiled ``dynvor.f90:538-540`` circulation bracket on F points."""
+    sr = nemo_source_round
+    is_3d = u.ndim == 3
+    bu = (..., jnp.newaxis) if is_3d else (...,)
+    e1u = jnp.asarray(grid.dx_u)[bu]
+    e2v = jnp.asarray(grid.dy_v)[bu]
+    zu = sr(e1u * u)
+    zv = sr(e2v * v)
+    zv_pad = pad_lon_cgrid(zv, halo=1)
+    dv = sr(zv_pad[:, 1:] - zv_pad[:, :-1])
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    zu_pad = pad_with_pole_bc_lat(
+        zu, halo=1, south_value=0.0, north_value=0.0)
+    # south-minus-north is the written ``-(e1u*u north-e1u*u south)``.
+    du = sr(zu_pad[:-1] - zu_pad[1:])
+    return sr(dv + du)
+
+
+def nemo_vor_ene_vorticity_cgrid(
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Literal relative vorticity in compiled ``vor_ene`` source order."""
+    sr = nemo_source_round
+    bracket = _nemo_vor_curl_bracket_cgrid(u, v, grid)
+    r1_area = sr(1.0 / jnp.asarray(grid.area_q))
+    if bracket.ndim == 3:
+        r1_area = r1_area[..., jnp.newaxis]
+    return sr(bracket * r1_area)
 
 
 def recover_velocity_from_streamfunction(
@@ -1379,7 +1505,6 @@ def nemo_ldf_lap_viscosity_cgrid(
     ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
     ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
-
     Returns
     -------
     visc_u, visc_v : the viscous momentum tendency (coefficient embedded).
@@ -1490,7 +1615,15 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                              jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
+    metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                                      jnp.ndarray, jnp.ndarray,
+                                      jnp.ndarray] | None = None,
+    return_intermediates: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
+]:
     r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity, e3-THICKNESS-WEIGHTED
     div/curl (#1455 topographic-step residual fix).
 
@@ -1564,6 +1697,11 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     h_k : cell-centre layer thickness (NEMO e3t), same shape as ``u``'s
         cell-centre analogue (2-D or 3-D matching ``u``/``v``).
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
+    metric_reciprocal_operands : optional six-tuple
+        Stored ``r1_e1e2t``, ``r1_e1e2f``, ``r1_e1u``, ``r1_e2v``,
+        ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
+        these as dynamic given inputs so XLA cannot replace the compiled
+        multiply-then-divide statements with reciprocal multiplication.
 
     Returns
     -------
@@ -1582,20 +1720,127 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_eff = u if u_mask is None else u * _bm(u_mask)
     v_eff = v if v_mask is None else v * _bm(v_mask)
 
-    # Thickness at faces/vertex (e3u/e3v/e3f analogues), min-rule (same
-    # convention as h_u/h_v built for the vertical-velocity/PV stages).
-    h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k, grid)
-    h_vtx = min_cell_to_vertex(h_k, grid)
+    # Historical single-thickness path remains unchanged for non-WS callers.
+    # The NEMO identity path supplies the six distinct operands read by
+    # dynldf_lev.f90:123,127-129,135,139.
+    if thickness_operands is None:
+        e3t_kbb = h_k
+        e3u_kbb = min_cell_to_uface(h_k)
+        e3v_kbb = min_cell_to_vface(h_k, grid)
+        e3f_live = min_cell_to_vertex(h_k, grid)
+        e3u_kmm = e3u_kbb
+        e3v_kmm = e3v_kbb
+    else:
+        (e3t_kbb, e3u_kbb, e3v_kbb, e3f_live,
+         e3u_kmm, e3v_kmm) = thickness_operands
+
+    if thickness_operands is not None:
+        # Literal compiled dynldf_lev.f90:121-140 evaluation.  The generic
+        # finite-volume helpers are algebraically equivalent, but regroup the
+        # stored reciprocal and metric products and therefore cannot close a
+        # bitwise oracle row.
+        sr = nemo_source_round
+        # XLA may reassociate ``(a*b)/c`` as ``a*(b/c)`` inside a fused graph.
+        # NEMO stores the product before the division in dynldf_lev.f90:127,
+        # :135 and :139.  These barriers are arithmetic provenance, not a
+        # stabilizer: they preserve the compiled statement's fp64 rounding.
+        sb = jax.lax.optimization_barrier
+        def sbr(value):
+            return sb(sr(value))
+
+        e2u = jnp.asarray(grid.dy_u)[..., jnp.newaxis]
+        e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
+        zu = sbr(sbr(e2u * e3u_kbb) * u_eff)
+        zv = sbr(sbr(e1v * e3v_kbb) * v_eff)
+        dx = sbr(zu[:, 1:] - zu[:, :-1])
+        dy = sbr(zv[1:] - zv[:-1])
+        flux_sum = sbr(dx + dy)
+        if metric_reciprocal_operands is None:
+            r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
+            r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+            r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
+            r1_e2v = sr(
+                1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30)
+            )[..., jnp.newaxis]
+            r1_e2u = sr(1.0 / jnp.asarray(grid.dy_u))[..., jnp.newaxis]
+            r1_e1v = sr(
+                1.0 / jnp.maximum(jnp.asarray(grid.dx_v), 1.0e-30)
+            )[..., jnp.newaxis]
+        else:
+            (r1_area_t, r1_area_f, r1_e1u, r1_e2v,
+             r1_e2u, r1_e1v) = (
+                jnp.asarray(value)[..., jnp.newaxis]
+                for value in metric_reciprocal_operands)
+        ahmt_live = _bc(ahmt)
+        if mask is not None:
+            ahmt_live = sr(ahmt_live * _bm(mask))
+        h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
+        zdiv_scale = jax.lax.div(
+            jax.lax.mul(ahmt_live, r1_area_t), h_k_safe)
+        zdiv = sbr(zdiv_scale * flux_sum)
+
+        curl_bracket = _nemo_vor_curl_bracket_cgrid(u_eff, v_eff, grid)
+        ahmf_live = _bc(ahmf)
+        if mask is not None:
+            fmask = (vertex_mask if vertex_mask is not None
+                     else compute_vertex_mask(mask, grid=grid))
+            ahmf_live = sr(ahmf_live * _bm(fmask))
+        zcur_scale = sbr(sbr(ahmf_live * e3f_live) * r1_area_f)
+        zcur = sbr(zcur_scale * curl_bracket)
+
+        zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
+        div_dx = sbr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
+        grad_div_u = sbr(div_dx * r1_e1u)
+
+        from legoesm.grids.halo_latlon import (
+            pad_with_pole_bc_lat, zero_polar_lat_ends,
+        )
+        zdiv_pad_y = pad_with_pole_bc_lat(
+            zdiv, halo=1, south_value=0.0, north_value=0.0)
+        div_dy = sbr(zdiv_pad_y[1:] - zdiv_pad_y[:-1])
+        grad_div_v = zero_polar_lat_ends(sbr(div_dy * r1_e2v))
+
+        curl_dy = sbr(zcur[1:] - zcur[:-1])
+        curl_u = jax.lax.div(
+            jax.lax.mul(-curl_dy, r1_e2u),
+            jnp.where(e3u_kmm > 0.0, e3u_kmm, 1.0))
+        curl_dx = sbr(zcur[:, 1:] - zcur[:, :-1])
+        curl_v = zero_polar_lat_ends(jax.lax.div(
+            jax.lax.mul(curl_dx, r1_e1v),
+            jnp.where(e3v_kmm > 0.0, e3v_kmm, 1.0)))
+        visc_u = sbr(curl_u + grad_div_u)
+        visc_v = sbr(curl_v + grad_div_v)
+        if u_mask is not None:
+            visc_u = sbr(visc_u * _bm(u_mask))
+        if v_mask is not None:
+            visc_v = sbr(visc_v * _bm(v_mask))
+        if return_intermediates:
+            return visc_u, visc_v, {
+                "div_u_product": zu,
+                "div_v_product": zv,
+                "div_bracket": flux_sum,
+                "zdiv_scale": zdiv_scale,
+                "zdiv": zdiv,
+                "curl_bracket": curl_bracket,
+                "zcur_scale": zcur_scale,
+                "zcur": zcur,
+                "grad_div_u": grad_div_u,
+                "grad_div_v": grad_div_v,
+                "curl_u": curl_u,
+                "curl_v": curl_v,
+                "visc_u": visc_u,
+                "visc_v": visc_v,
+            }
+        return visc_u, visc_v
 
     # 1. e3-weighted divergence at T-points: divergence_cgrid on the
     #    thickness-weighted faces reproduces NEMO's e2u*e3u*u / e1v*e3v*v
     #    flux sum exactly (SAME e1/e2 face metrics); ahmt/e3t is the outer
     #    scale (h90:27-29).
-    div_e3 = divergence_cgrid(h_u * u_eff, h_v * v_eff, grid)
+    div_e3 = divergence_cgrid(e3u_kbb * u_eff, e3v_kbb * v_eff, grid)
     if mask is not None:
         div_e3 = div_e3 * _bm(mask)
-    h_k_safe = jnp.where(h_k > 0.0, h_k, 1.0)  # dry T-cell: div_e3 already 0
+    h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
     zdiv = div_e3 * _bc(ahmt) / h_k_safe
 
     # 2. e3-weighted vorticity at F-points: curl_vertex_cgrid is NEMO's
@@ -1605,7 +1850,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         vmask = (vertex_mask if vertex_mask is not None
                  else compute_vertex_mask(mask, grid=grid))
         zeta = zeta * _bm(vmask)
-    zcur = zeta * _bc(ahmf) * h_vtx
+    zcur = zeta * _bc(ahmf) * e3f_live
 
     # 3. grad(zdiv) − k×grad(zcur)/e3u,e3v (h90:32-52; curl branch alone
     #    divides by the outer face thickness, div branch does not).
@@ -1613,8 +1858,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     grad_div_v = gradient_y_cgrid(zdiv, grid)
     grad_curl_u = gradient_curl_to_u(zcur, grid)
     grad_curl_v = gradient_curl_to_v(zcur, grid)
-    h_u_safe = jnp.where(h_u > 0.0, h_u, 1.0)   # dry u-face: grad_curl_u masked to 0 below
-    h_v_safe = jnp.where(h_v > 0.0, h_v, 1.0)
+    h_u_safe = jnp.where(e3u_kmm > 0.0, e3u_kmm, 1.0)
+    h_v_safe = jnp.where(e3v_kmm > 0.0, e3v_kmm, 1.0)
 
     visc_u = grad_div_u - grad_curl_u / h_u_safe
     visc_v = grad_div_v + grad_curl_v / h_v_safe
@@ -3729,6 +3974,175 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def _nemo_hpg_sco_literal_cgrid_impl(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+    *,
+    return_components: bool = False,
+    _source_round: bool = True,
+) -> tuple[jnp.ndarray, ...]:
+    """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
+
+    ``rhd`` is NEMO's dimensionless density anomaly and ``e3w`` /
+    ``gdept_z0`` are the live ``Kmm`` operands.  The operation order follows
+    NEMO 5.0.2 ``dynhpg.F90:340-390``: a surface seed, a top-down cumulative
+    along-level pressure term, and the level-local terrain correction.  The
+    returned arrays use legoESM's redundant west/south face layout.
+    """
+    rhd = jnp.asarray(rhd)
+    e3w = jnp.asarray(e3w, dtype=rhd.dtype)
+    gdept_z0 = jnp.asarray(gdept_z0, dtype=rhd.dtype)
+    sr = nemo_source_round if _source_round else lambda value: value
+
+    def add(left, right):
+        return sr(left + right)
+
+    def subtract(left, right):
+        return sr(left - right)
+
+    def multiply(left, right):
+        return sr(left * right)
+
+    one = jnp.asarray(1.0, dtype=rhd.dtype)
+    half = jnp.asarray(0.5, dtype=rhd.dtype)
+    r1_e1u = sr(one / jnp.asarray(grid.dx_u[:, 1:], dtype=rhd.dtype))
+    r1_e2v = sr(one / jnp.asarray(grid.dy_v[1:, :], dtype=rhd.dtype))
+    zcoef0 = multiply(-jnp.asarray(g, dtype=rhd.dtype), half)
+
+    rhd_i1 = jnp.roll(rhd, -1, axis=1)
+    rhd_j1 = jnp.roll(rhd, -1, axis=0)
+    e3w_i1 = jnp.roll(e3w, -1, axis=1)
+    e3w_j1 = jnp.roll(e3w, -1, axis=0)
+    dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
+    dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
+
+    zhpi = multiply(
+        multiply(zcoef0, r1_e1u),
+        subtract(
+            multiply(e3w_i1[..., 0], rhd_i1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
+    zhpj = multiply(
+        multiply(zcoef0, r1_e2v),
+        subtract(
+            multiply(e3w_j1[..., 0], rhd_j1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
+    u_levels = []
+    v_levels = []
+    u_zhpi_levels = []
+    v_zhpj_levels = []
+    u_zuap_levels = []
+    v_zvap_levels = []
+    for jk in range(rhd.shape[-1]):
+        if jk > 0:
+            zhpi = add(
+                zhpi,
+                multiply(
+                    multiply(zcoef0, r1_e1u),
+                    subtract(
+                        multiply(
+                            e3w_i1[..., jk],
+                            add(rhd_i1[..., jk], rhd_i1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+            zhpj = add(
+                zhpj,
+                multiply(
+                    multiply(zcoef0, r1_e2v),
+                    subtract(
+                        multiply(
+                            e3w_j1[..., jk],
+                            add(rhd_j1[..., jk], rhd_j1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+        zuap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_i1[..., jk], rhd[..., jk])),
+                subtract(dep_i1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e1u,
+        )
+        zvap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_j1[..., jk], rhd[..., jk])),
+                subtract(dep_j1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e2v,
+        )
+        u_levels.append(add(zhpi, zuap))
+        v_levels.append(add(zhpj, zvap))
+        u_zhpi_levels.append(zhpi)
+        v_zhpj_levels.append(zhpj)
+        u_zuap_levels.append(zuap)
+        v_zvap_levels.append(zvap)
+
+    native_u = jnp.stack(u_levels, axis=-1)
+    native_v = jnp.stack(v_levels, axis=-1)
+    result = (
+        jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
+        jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
+    )
+    if not return_components:
+        return result
+
+    def _u_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([native[:, -1:, :], native], axis=1)
+
+    def _v_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+    return result + (
+        _u_redundant(u_zhpi_levels), _v_redundant(v_zhpj_levels),
+        _u_redundant(u_zuap_levels), _v_redundant(v_zvap_levels),
+    )
+
+
+_nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
+    _nemo_hpg_sco_literal_cgrid_impl,
+    static_argnames=("return_components", "_source_round"))
+
+
+def nemo_hpg_sco_literal_cgrid(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+    *,
+    return_components: bool = False,
+    _source_round: bool = True,
+) -> tuple[jnp.ndarray, ...]:
+    """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
+    if isinstance(rhd, jax.core.Tracer):
+        return _nemo_hpg_sco_literal_cgrid_impl(
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components, _source_round=_source_round)
+    with jax.disable_jit(False):
+        return _nemo_hpg_sco_literal_cgrid_compiled(
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components, _source_round=_source_round)
+
+
 def partial_cell_pgf_correction_x(
     centroid_depth: jnp.ndarray,
     rho_prime: jnp.ndarray,
@@ -4063,10 +4477,16 @@ def density_jacobian_pgf_smc03_y(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        rho_F = rho_per_cell[-1:, fold.perm_T, :]
-        h_F = h_partial[-1:, fold.perm_T, :]
-        z_c_F = z_centroid[-1:, fold.perm_T, :]
-        sigma_F = sigma[-1:, fold.perm_T, :]
+        # Beyond-the-fold partner cells: halo layout permutes the stored top
+        # row (legacy); pivot layout permutes the row BELOW the pivot
+        # (crossing the fold from (i, J) lands on (perm_T(i), J-1);
+        # permuting the stored pivot row reads the land mirror twins —
+        # codex fold-fix RED 6).
+        _pj = -2 if bool(getattr(fold, "pivot_row_stored", False)) else -1
+        rho_F = rho_per_cell[_pj:_pj + 1 or None, fold.perm_T, :]
+        h_F = h_partial[_pj:_pj + 1 or None, fold.perm_T, :]
+        z_c_F = z_centroid[_pj:_pj + 1 or None, fold.perm_T, :]
+        sigma_F = sigma[_pj:_pj + 1 or None, fold.perm_T, :]
         z_c_L = z_centroid[-1:]
         z_target_fold = jnp.minimum(z_c_L, z_c_F)
         P_fold = compute_pressure_at_target_smc03(
@@ -4103,7 +4523,13 @@ def pv_flux_ene(
     vtx_mask: jnp.ndarray,
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    q_boundary: str = "neumann_fill",
+    return_operands: bool = False,
+    metric_widths: tuple | None = None,
+    metric_reciprocals: tuple | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+]:
     """NEMO ``vor_ene`` — Sadourny (1975) ENERGY-conserving 2-point PV flux.
 
     Transcription of NEMO ``dynvor.F90::vor_ene`` (the GYRE default
@@ -4162,15 +4588,36 @@ def pv_flux_ene(
     # then zwz /= e3f) so the planetary term also gets the F-point
     # thickness weighting — the two are one operator, not two.
     total_vort = zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis])
-    q = total_vort / jnp.maximum(h_vtx, eps_h)
+    if metric_widths is None:
+        q = total_vort / jnp.maximum(h_vtx, eps_h)
+    else:
+        q = nemo_source_round(
+            nemo_source_round(total_vort)
+            / jnp.maximum(h_vtx, eps_h))
     # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
     # planetary f is smooth everywhere, so fill the whole q (idempotent at
     # interior wet vertices).
-    q = neumann_fill_vertex(q, vtx_mask)
+    if q_boundary == "neumann_fill":
+        q = neumann_fill_vertex(q, vtx_mask)
+    elif q_boundary != "nemo_live":
+        raise ValueError(
+            "pv_flux_ene: q_boundary must be 'neumann_fill' or 'nemo_live'; "
+            f"got {q_boundary!r}")
 
     # --- 2. Mass fluxes at u/v faces (h·u, h·v), closed faces → 0 ---
-    F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
-    F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+    if metric_widths is None:
+        F_u = h_u * u * u_mask_3d        # (n_lat, n_lon+1, nlev)
+        F_v = h_v * v * v_mask_3d        # (n_lat+1, n_lon, nlev)
+    else:
+        e1u, e1v, e2u, e2v = metric_widths
+        # dynvor.f90:559-562: preserve the written left association
+        # (metric*e3)*velocity.  The masks remain an exact zero/one closure.
+        F_u = nemo_source_round(
+            nemo_source_round(jnp.asarray(e2u)[..., jnp.newaxis] * h_u) * u)
+        F_v = nemo_source_round(
+            nemo_source_round(jnp.asarray(e1v)[..., jnp.newaxis] * h_v) * v)
+        F_u = nemo_source_round(F_u * u_mask_3d)
+        F_v = nemo_source_round(F_v * v_mask_3d)
 
 
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
@@ -4200,9 +4647,16 @@ def pv_flux_ene(
     _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
     F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
     F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
-    diag_vortcor_u = 0.25 * (
-        q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
-    )
+    if metric_widths is None:
+        diag_vortcor_u = 0.25 * (
+            q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
+        )
+    else:
+        zy1 = nemo_source_round(F_v_S_W + F_v_S_E)
+        zy2 = nemo_source_round(F_v_N_W + F_v_N_E)
+        _u_inner = nemo_source_round(
+            nemo_source_round(q_S_u * zy1)
+            + nemo_source_round(q_N_u * zy2))
 
     # --- 4. v-face flux: -¼ ( q_W·(F_u_SW+F_u_NW) + q_E·(F_u_SE+F_u_NE) ) ---
     # q[:, :-1]/q[:, 1:] are the west/east vertices of each v-face.
@@ -4218,10 +4672,35 @@ def pv_flux_ene(
     F_u_S_E = F_u_south[:, 1:, :]
     F_u_N_W = F_u_north[:, :-1, :]
     F_u_N_E = F_u_north[:, 1:, :]
-    diag_vortcor_v = -0.25 * (
-        q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
-    )
+    if metric_widths is None:
+        diag_vortcor_v = -0.25 * (
+            q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
+        )
+    else:
+        zx1 = nemo_source_round(F_u_S_W + F_u_N_W)
+        zx2 = nemo_source_round(F_u_S_E + F_u_N_E)
+        _v_inner = nemo_source_round(
+            nemo_source_round(q_W_v * zx1)
+            + nemo_source_round(q_E_v * zx2))
 
+    if metric_widths is not None:
+        if metric_reciprocals is None:
+            r1_e1u = nemo_source_round(1.0 / jnp.asarray(e1u))
+            r1_e2v = nemo_source_round(1.0 / jnp.asarray(e2v))
+        else:
+            r1_e1u, r1_e2v = metric_reciprocals
+        diag_vortcor_u = nemo_source_round(
+            nemo_source_round(0.25 * jnp.asarray(r1_e1u)[..., jnp.newaxis])
+            * _u_inner)
+        diag_vortcor_v = -nemo_source_round(
+            nemo_source_round(0.25 * jnp.asarray(r1_e2v)[..., jnp.newaxis])
+            * _v_inner)
+
+    if return_operands:
+        # WRITE-only oracle-fidelity seam.  Return the exact intermediates
+        # consumed above rather than rebuilding their formulas in a probe;
+        # production callers retain the historical two-array return.
+        return diag_vortcor_u, diag_vortcor_v, (q, F_u, F_v)
     return diag_vortcor_u, diag_vortcor_v
 
 

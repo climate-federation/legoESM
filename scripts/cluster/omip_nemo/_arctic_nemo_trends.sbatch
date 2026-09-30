@@ -19,7 +19,7 @@
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/legoESM
 cd $REPO || exit 1
-export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 $PY -u - <<'PYEOF'
 import sys

@@ -451,7 +451,8 @@ def interp_woa_sss_to_grid(
     ----------
     sss_woa : array ``(n_lat_woa, n_lon_woa)`` [PSU]
     lat_woa : array ``(n_lat_woa,)`` degrees, ascending
-    lon_woa : array ``(n_lon_woa,)`` degrees in [0, 360)
+    lon_woa : array ``(n_lon_woa,)`` degrees, ascending, uniform, any origin
+        (0.5..359.5 and -179.5..179.5 both work)
     lat_target : array of shape ``S`` — degrees of the model grid
     lon_target : array of shape ``S`` — degrees of the model grid
         Both must share the same shape ``S``.
@@ -467,7 +468,7 @@ def interp_woa_sss_to_grid(
     dlon = 360.0 / nlon_w
 
     fi_lat = jnp.clip((lat_target - lat_woa[0]) / dlat, 0.0, nlat_w - 1.001)
-    fi_lon = jnp.mod(lon_target, 360.0) / dlon
+    fi_lon = jnp.mod(lon_target - lon_woa[0], 360.0) / dlon
     i0 = jnp.floor(fi_lat).astype(jnp.int32)
     j0 = jnp.floor(fi_lon).astype(jnp.int32)
     di = fi_lat - i0

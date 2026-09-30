@@ -65,7 +65,7 @@ spurious energy SOURCE of
 
     L_f * (frozen precipitation rate)  =  3.87 W/m^2 per mm/day
 
-(L_f = 3.34e5 J/kg; 1 mm/day = 1/86400 kg/m^2/s).  Sign: dE/dt too HIGH by X
+(L_f from ``legoesm.constants``; 1 mm/day = 1/86400 kg/m^2/s).  Sign: dE/dt too HIGH by X
 makes ``residual = toa_net - dE/dt`` too low by X, hence LEAK too HIGH by X --
 a POSITIVE apparent leak, which is the sign observed.
 
@@ -89,21 +89,11 @@ their absence as "the tracker did not fire" is wrong, and this script reads the
 right artifact.
 
 DO NOT QUOTE A NUMBER FROM THIS WITHOUT RUNNING THE CROSS-CHECK.
-``scripts/validate/mpas_energy_sampling_crosscheck.py`` compares these SAMPLED
-channels against the run's own CMOR time-accumulated means.  On the first real
-run (job 9632045) the sampled sensible heat flux was 8.0 W/m^2 against an
-accumulated 20.5 -- 2.5x too small, and 12.4 of an apparent 34.7 W/m^2 "leak".
-The lane samples at a fixed model clock time (#1353), which recovers the global
-mean of insolation but NOT of a land-dominated, asymmetric-diurnal field like
-sensible heat.  Until the tracker is fed interval means, the number here is an
-upper bound contaminated by aliasing, not a leak.
-
-THE FIX, for whoever picks this up: feed the tracker from
-``ModelDriver._mpas_sfc_accum.mean(slot)`` -- the ``_MPASSfcFluxAccum``
-interval means CMOR already receives.  It covers slots 2-7 (rlut, rsut, rsdt,
-hfss, hfls) but NOT slots 0 and 1 (``sw_net_sfc``, ``lw_net_sfc``), which are
-the largest term in the leak sum, so extending it to those two is the real
-work -- and it touches that class's checkpoint save/restore contract.
+``scripts/validate/mpas_energy_sampling_crosscheck.py`` compares these
+channels against the run's own CMOR time-accumulated means.  The tracker is
+fed ``ModelDriver._mpas_sfc_accum`` interval means (slots 0-7) when the CMOR
+feed is on and stamps ``energy_flux_interval_mean``; ``assert_interval_means``
+below refuses a snapshot-sourced series.
 
 Prints numbers only.
 """
@@ -114,11 +104,13 @@ import pathlib
 
 import numpy as np
 
+from legoesm import constants
+
 _NEEDED = ("energy_toa_net", "energy_dE_dt", "energy_residual",
            "sw_net_sfc", "lw_net_sfc", "hfss", "hfls")
 # Present on the MPAS lightweight series; used for the thermal/latent split and
 # the water budget. Absent -> those columns are simply not printed.
-_OPTIONAL = ("CWV", "moisture_residual", "T_atm", "days",
+_OPTIONAL = ("CWV", "moisture_residual", "days",
              "energy_flux_interval_mean",
              # `precip` feeds the frozen-precipitation energy bound. Omitting
              # it here silently disabled that whole block -- the same
@@ -233,7 +225,7 @@ def main(argv=None) -> int:
     print(provenance)
     print(f"{args.timeseries}  ({int(keep.sum())} samples after day "
           f"{args.skip_days:g} of {len(days)}; first sample always dropped, "
-          f"dE_dt is zero there by construction)")
+          "dE_dt is zero there by construction)")
     hdr = (f"{'day':>7s} {'toa_net':>9s} {'dE/dt':>9s} {'residual':>9s} "
            f"{'sfc_rad':>9s} {'hfss':>8s} {'hfls':>8s} {'LEAK':>9s}")
     print(hdr)
@@ -247,7 +239,6 @@ def main(argv=None) -> int:
     # through a boundary flux" from "the column warmed while it dried".
     # Frozen-precipitation energy bound (see the prediction in the docstring).
     if "precip" in t and len(t["precip"]) == len(days):
-        from legoesm import constants
         lf_precip = constants.L_f * t["precip"] / 86400.0   # mm/day -> W/m^2
         print()
         print("frozen-precipitation energy gap, UPPER BOUND (all precip "
@@ -264,7 +255,6 @@ def main(argv=None) -> int:
                   f"  leak-bound {(_l[_f] - _b[_f]).mean():.3f} W/m^2")
 
     if "CWV" in t and len(t["CWV"]) == len(days):
-        from legoesm import constants
         dt_s = np.gradient(days) * 86400.0
         d_cwv = np.gradient(t["CWV"])
         latent = constants.L_v * d_cwv / np.maximum(dt_s, 1e-30)

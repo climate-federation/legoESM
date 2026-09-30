@@ -131,6 +131,89 @@ def test_use_clubb_cloud_fraction_flag_flows_to_config():
     assert cfg_neg.use_clubb_cloud_fraction is False
 
 
+def test_clubb_prognostic_flag_reaches_the_turbulence_kernel():
+    """--clubb-prognostic must round-trip AND reach the nested scheme config.
+
+    The round-trip alone is not enough: ``turbulence_config_for`` is the single
+    source every dycore's kernel is built from, so a flag that reaches
+    ``ExperimentConfig`` but not that function is inert on every backend while
+    reporting success. Both halves are asserted here.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clubb_prognostic is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--clubb-prognostic",
+    ]), parser))
+    assert cfg_on.clubb_prognostic is True
+    # the half that actually decides what runs
+    assert turbulence_config_for(cfg_on).clubb.prognostic is True
+    # and the diagnostic default really is the other value, so the assertion
+    # above cannot pass by the field simply defaulting True.  Without the flag
+    # the nested sub-config is left as None and dispatch substitutes a fresh
+    # CLUBBConfig(), so ask what dispatch will actually run rather than reading
+    # a slot that is legitimately empty.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    cfg_diag = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+    ]), parser))
+    diag_tc = materialize_sub_config(turbulence_config_for(cfg_diag))
+    assert diag_tc.clubb.prognostic is False
+
+
+def test_clubb_prognostic_under_another_closure_is_refused():
+    """Prognostic moments are a CLUBB feature; asking for them under Louis is a
+    configuration error, not something to ignore quietly."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--clubb-prognostic",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg)
+
+
+def test_clubb_prognostic_not_swallowed_by_a_turbulence_override():
+    """An explicit turbulence override is authoritative, but it must not make
+    the prognostic request vanish.
+
+    Found by review: the threading sat inside the no-override branch, so a run
+    setting BOTH an override and clubb_prognostic resolved to the DIAGNOSTIC
+    closure while reporting nothing -- the inert-knob failure this repo keeps
+    hitting. Refusing is correct; silently honouring the flag would instead
+    rewrite an object the caller declared authoritative.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    base = ExperimentConfig(turbulence="clubb", clubb_prognostic=True)
+    diagnostic_override = base._replace(
+        turbulence_override=TurbulenceConfig(scheme="clubb"))
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(diagnostic_override)
+
+    # an override that DOES select it resolves normally
+    ok = base._replace(turbulence_override=TurbulenceConfig(
+        scheme="clubb", clubb=CLUBBConfig(prognostic=True)))
+    assert turbulence_config_for(ok).clubb.prognostic is True
+    # and an override with the flag OFF is untouched (no false positive)
+    off = ExperimentConfig(turbulence="clubb", clubb_prognostic=False)._replace(
+        turbulence_override=TurbulenceConfig(scheme="clubb"))
+    assert turbulence_config_for(off).scheme == "clubb"
+
+
 def test_convective_precip_efficiency_cli_wiring_929():
     """#929: the shared --convective-precip-efficiency knob reaches the config
     for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
@@ -224,7 +307,7 @@ def test_multilayer_land_accepted_on_mpas():
     (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--grid-type", "mpas", "--discretization", "mpas",
         "--use-multilayer-land",
     ]), parser)
@@ -535,7 +618,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
-        "--use-multilayer-land",
+        "--use-multilayer-land", "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
@@ -664,6 +747,173 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     ]), parser))
     assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
     # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
+
+
+def test_snow_albedo_ageing_flags_flow_to_config():
+    """--snow-age-activation-K and --land-snow-tau-days round-trip.
+
+    Both exist because every snow-covered polar cell measured the fully-aged
+    albedo 0.521 against an observed 0.70-0.82, and an arm moving the activation
+    temperature ALONE left it unchanged: the e-folding time is the binding
+    parameter and used to be a hardcoded calibrated constant no run could
+    select.  Neither had a round-trip test before.
+    """
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.snow_age_activation_K is None
+    assert cfg_default.land_snow_tau_days == 150.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--snow-age-activation-K", "5000",
+        "--land-snow-tau-days", "60",
+    ]), parser))
+    assert cfg.snow_age_activation_K == 5000.0
+    assert cfg.land_snow_tau_days == 60.0
+    cfg.validate_strict()
+
+
+def test_land_soil_freeze_thaw_round_trip_and_decks():
+    """The flag reaches ExperimentConfig both ways, and each deck states its
+    value explicitly: production ON (user 2026-09-26), the preserved old deck
+    OFF so it still reproduces the arms it exists for."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_soil_freeze_thaw is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-soil-freeze-thaw"]), parser))
+    assert cfg1.land_soil_freeze_thaw is True
+    cfg2 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-soil-freeze-thaw"]), parser))
+    assert cfg2.land_soil_freeze_thaw is False
+    for deck, want in (("amip_production.yaml", True),
+                       ("amip_sundqvist_l36.yaml", False)):
+        p = build_arg_parser()
+        rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), p)
+        assert rows.get("land_soil_freeze_thaw") is want, deck
+        p.set_defaults(**rows)
+        cfg = build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS), p))
+        assert cfg.land_soil_freeze_thaw is want, deck
+
+
+def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
+    """CLM5 e_ice reaches ExperimentConfig, production states it explicitly
+    (user 2026-09-28), and a value outside [0, 10] is refused."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_soil_ice_impedance_exponent == 6.0
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-soil-ice-impedance-exponent", "3.5"]), parser))
+    assert cfg1.land_soil_ice_impedance_exponent == 3.5
+    p = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_soil_ice_impedance_exponent") == 6.0
+    for bad in ("-1", "11", "nan"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+            base + ["--land-soil-ice-impedance-exponent", bad]), parser))
+        with pytest.raises(ValueError, match="land_soil_ice_impedance_exponent"):
+            cfg.validate_strict()
+    slab = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-ice-impedance-exponent", "3"]), parser))
+    with pytest.raises(ValueError, match="requires use_multilayer_land"):
+        slab.validate_strict()
+
+
+def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-freeze-thaw"]), parser))
+    with pytest.raises(ValueError, match="land_soil_freeze_thaw"):
+        cfg.validate_strict()
+
+
+def test_land_canopy_flags_round_trip_and_production_pin():
+    """--land-canopy-stress-b0 / --land-canopy-interception reach
+    ExperimentConfig both ways, and the production deck pins the current
+    values (b0 stressed, interception off)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--land-surface-scheme", "two_leaf"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_stress_b0 is True
+    assert cfg0.land_canopy_interception is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-canopy-stress-b0", "--land-canopy-interception"]),
+        parser))
+    assert cfg1.land_canopy_stress_b0 is False
+    assert cfg1.land_canopy_interception is True
+    try:   # flat analytical topography fails validation for its own reason
+        cfg1.validate_strict()
+    except ValueError as e:
+        assert "land_canopy" not in str(e)
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_canopy_stress_b0") is True
+    assert rows.get("land_canopy_interception") is False
+
+
+@pytest.mark.parametrize("flag", ["--land-canopy-interception",
+                                  "--no-land-canopy-stress-b0"])
+def test_land_canopy_flags_without_two_leaf_are_refused(flag):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-surface-scheme", "simple_seb", flag]), parser))
+    with pytest.raises(ValueError, match="two_leaf"):
+        cfg.validate_strict()
+
+
+@pytest.mark.parametrize("bad", ["0.1", "500"])
+def test_land_snow_tau_days_out_of_range_is_refused(bad):
+    """0.5 d is melting spring snow and 400 d spans the cold plateau; outside
+    that the value is not a snow-ageing timescale."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-snow-tau-days", bad]), parser))
+    with pytest.raises(ValueError, match="land_snow_tau_days"):
+        cfg.validate_strict()
+
+
+def test_snow_albedo_responds_to_the_ageing_timescale():
+    """The parameter must be load-bearing, not merely present: at a fixed snow
+    age, lengthening the e-folding time has to RAISE the albedo, and at the
+    calibrated 3.674 days a two-month-old pack has to sit on its floor -- which
+    is the defect that motivated the knob."""
+    import jax.numpy as jnp
+    from legoesm.surface_albedo import LandAlbedoConfig, snow_albedo
+    age_s = jnp.asarray([60.0 * 86400.0])
+    short = LandAlbedoConfig(tau_snow_decay=3.674 * 86400.0)
+    long_ = LandAlbedoConfig(tau_snow_decay=60.0 * 86400.0)
+    a_short = float(snow_albedo(age_s, short)[0])
+    a_long = float(snow_albedo(age_s, long_)[0])
+    assert a_short == pytest.approx(short.alpha_snow_min, abs=1e-3)
+    assert a_long > a_short + 0.05
+
+
+def test_mpas_qv_biharmonic_flag_flows_to_config():
+    """--mpas-qv-smooth-del4-m4s round-trip (scale-selective companion to the
+    Laplacian, 2026-09-11); default OFF, and the two coefficients are
+    independent so an arm can move one without the other."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_qv_smooth_del4_m4s == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-qv-smooth-del4-m4s", "3.6e14",
+    ]), parser))
+    assert cfg.mpas_qv_smooth_del4_m4s == 3.6e14
+    assert cfg.mpas_qv_smooth_del2_m2s == 0.0
 
 
 def test_mpas_land_beta_soil_flag_flows_to_config():
@@ -1009,7 +1259,7 @@ def test_surface_tiled_flags_flow_to_config():
     and validate together with --slab-land-active + --turbulence louis."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1058,7 +1308,7 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", scheme,
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1075,7 +1325,7 @@ def test_soil_bucket_flags_flow_to_config():
     and validate together with an active land tile."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1104,7 +1354,7 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket"]),
+        ["--dataset", "analytical", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1142,7 +1392,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
     """--land-stomatal-beta round-trips and validates with the bucket on."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1204,6 +1454,26 @@ def test_bechtold_cape_threshold_flows_to_config():
     cfg = build_config_from_args(args)
     assert cfg.bechtold_cape_threshold == 10.0
     assert cfg.validate_strict() is None
+
+
+def test_bechtold_rain_vapor_sink_flows_to_config_and_kernel():
+    """The rain vapour-sink selector threads CLI -> ExperimentConfig ->
+    BechtoldConfig; the default is the formation-local debit and the legacy
+    vapour-mass spread stays selectable for the A/B; validate_strict refuses
+    anything else."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert cfg.bechtold_rain_vapor_sink == "formation"
+    cfg_legacy = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "bechtold",
+         "--bechtold-rain-vapor-sink", "vapour_mass"]), parser))
+    assert cfg_legacy.bechtold_rain_vapor_sink == "vapour_mass"
+    with pytest.raises(ValueError, match="bechtold_rain_vapor_sink"):
+        cfg._replace(bechtold_rain_vapor_sink="bogus").validate_strict()
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    assert _resolve_convection(cfg)[1].rain_vapor_sink == "formation"
+    assert _resolve_convection(cfg_legacy)[1].rain_vapor_sink == "vapour_mass"
 
 
 def test_bechtold_subsidence_solve_flows_to_config():
@@ -1924,64 +2194,179 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
-    production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
-    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
+    production AMIP parametrization.
+
+    Re-baselined 2026-09-23 (user decision): the production atmospheric physics
+    suite is CAM6 -- the CAM 32-level hybrid table, CLUBB cloud fraction,
+    the Zhang-McFarlane convection port, orographic-only gravity waves, the
+    CESM Large-Yeager surface fluxes and the 1800 s physics step with three
+    macro/micro sub-steps.  The outgoing Sundqvist/L36 deck is asserted
+    separately below so both remain pinned.
+
+    The grid keys are recipe-sensitive together, so a change here is a
+    stability A/B, not an edit."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
-    # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production lane moved off the cubed sphere on 2026-07-24 and this test
-    # was not moved with it, so it asserted the retired C48/L40 cube deck
-    # against a config that had been the icosahedral MPAS one for weeks --
-    # red on main, and blind to any further drift while it was.  Values below
-    # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
-    # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
-    # ladder).  The five keys are recipe-sensitive together (the YAML header
-    # records that L40 + hybrid + automatic dt blew up on day one), so a change
-    # here is a stability A/B, not an edit.
+    # resolution/nlev/discretization are CLI dests baked into cfg.grid, so
+    # assert them at the args level the YAML controls.
     assert args.resolution == 6
-    assert args.nlev == 30
+    assert args.nlev == 32                 # CAM6 L32 hybrid table
+    assert args.vertical_coord == "cam_l32"
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
     assert args.grid_type == "mpas"
     assert args.dt == 112.5
     cfg = build_config_from_args(args)
-    assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    # orographic AND non-orographic; the orographic-only spelling is the
-    # older deck's.
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
-    assert cfg.microphysics == "morrison"
-    assert cfg.cloud_scheme == "sundqvist"
-    assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"
-    # No tiled surface on this lane -- the tiled port is open work, and the
-    # deck says so at the field.
+    assert cfg.convection == "zhang_mcfarlane"   # CAM6 zm_conv port
+    # CAM6 f09 L32 (non-WACCM) runs OROGRAPHIC drag only: build-namelist sets
+    # use_gw_front and use_gw_convect_dp false below 60 levels.
+    assert cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.microphysics == "morrison"        # MG2 port is run 2
+    assert cfg.cloud_scheme == "cam6_clubb"
+    assert cfg.use_clubb_cloud_fraction is True
+    assert cfg.radiation == "rrtmg"              # rrtmgp builder alias
+    assert cfg.turbulence == "clubb"
+    assert cfg.clubb_prognostic is True
+    assert cfg.surface_bulk_scheme == "large_yeager_cesm"
+    # CAM6 cadence: physics every 1800 s, radiation hourly, CLUBB+micro
+    # sub-cycled three times at 600 s inside each physics step.
+    assert args.physics_update_steps == 16
+    assert args.rad_update_steps == 32
+    assert args.cld_macmic_num_steps == 3
+    # No tiled surface on this lane -- the tiled port is open work.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
-    # convective_cloud OFF since 2026-08-22.  It was on to mirror the canonical
-    # tuned base, but the tropical-rain campaign runs that reproduced observed
-    # ocean rain (0.89 of observed) all ran with it OFF, and production runs
-    # with it on reached only 0.48-0.61.  Production now carries the campaign
-    # science configuration rather than leaving it to a side deck; see the
-    # folded-in block at the end of amip_production.yaml.
+    # convective_cloud is a real scientific lever, not boilerplate: it was
+    # flipped OFF on 2026-08-22 because the tropical-rain runs that reproduced
+    # observed ocean rain all ran with it off.  cam6_clubb refuses it anyway
+    # (deepcu is CAM6's own deep-convective cloud term), so it stays pinned.
     assert cfg.convective_cloud is False
-    # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    # PROVISIONAL cloud tuning (#899): rh_crit 0.85.
-    assert cfg.cloud_rh_crit == pytest.approx(0.85)
-    # q_c 5e-6, the campaign value, folded in 2026-08-22 with the rest of the
-    # tropical-rain configuration (production had 1e-4, twenty times larger).
-    # This assertion is the reason the divergence was found at all, so it is
-    # updated rather than removed.
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
-    # The detrained-condensate to convective-rain split, on since the
-    # bechtold rain-split landed.
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
+    # User table 2026-09-24, "production now, matches CAM6", three rows set
+    # EXPLICITLY so nothing rests on a code default (the defaults are the
+    # opposite of all three): the closure's liquid handed to cloud water; the
+    # post-step supersaturation drain off (CAM clubb_do_liqsupersat=.false.);
+    # and the drain's ice-curve blend off.  Plus the two floors the partition's
+    # own guard forces to zero.  Pinned THROUGH the driver on every config the
+    # lever reaches, because a row that lands on ExperimentConfig but not on
+    # the nested scheme config would report success while changing nothing.
+    assert cfg.clubb_liquid_partition is True
+    assert cfg.hard_saturation_adjustment is False
+    assert cfg.hard_sat_ice_curve is False
+    assert cfg.cloud_q_c_diagnostic == 0.0
+    assert cfg.cloud_conv_cloud_condensate == 0.0
+    from legoesm.driver.physics_pipeline import (
+        _resolve_microphysics, turbulence_config_for,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    assert materialize_sub_config(
+        turbulence_config_for(cfg)).clubb.liquid_partition is True
+    assert _resolve_microphysics(cfg)[1].liquid_from_closure is True
+    # User decision 2026-09-25 (run 4): NO in-cloud inhomogeneity thinning,
+    # matching CAM6 whose RRTMG applies no such factor.  "constant" with
+    # factor 1.0 is the no-thinning path.  Pinned on the RESOLVED cloud
+    # config and on its EFFECT: the liquid path handed to radiation equals
+    # the raw grid-mean path, which two_region (the old row) would thin.
+    assert cfg.cloud_optics_inhomogeneity == "constant"
+    assert cfg.cloud_inhomogeneity_factor == 1.0
+    _assert_optics_thinning(cfg, thinned=False)
+
+
+def _assert_optics_thinning(cfg, *, thinned: bool):
+    """Build the lane's cloud config from ``cfg`` and measure the thinning.
+
+    A saturated, cloudy, warm column: with no inhomogeneity factor the liquid
+    water path handed to radiation is EXACTLY ``q_c * dp / g``; two_region at
+    fsd 1.0 thins it.  Asserting the effect, not the field, is what makes the
+    production pin non-vacuous against a renamed or ignored selector.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties,
+    )
+    # The MPAS lane's own builder (model_driver._run_mpas), so the pin reads
+    # the config the run would radiate with, not the YAML.
+    from legoesm.driver.model_driver import _standalone_cloud_config
+    cloud_cfg = _standalone_cloud_config(
+        cfg, cfg.cloud_scheme, allow_convective_cloud=True)
+    assert cloud_cfg.cloud_partial_coverage_optics == "none"
+    T = jnp.full((1, 4), 285.0)
+    p_full = jnp.array([[70000.0, 80000.0, 90000.0, 95000.0]])
+    dp = jnp.full((1, 4), 5000.0)
+    q_v = jnp.full((1, 4), 8.0e-3)
+    q_c = jnp.full((1, 4), 4.0e-4)
+    p_half = jnp.array([[65000.0, 75000.0, 85000.0, 92500.0, 97500.0]])
+    props = compute_cloud_properties(
+        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
+        q_ice=jnp.zeros_like(q_c),
+        cloud_fraction_override=jnp.full((1, 4), 0.5),
+        # cam6_clubb's tropopause switch needs these; harmless to the others.
+        lat=jnp.zeros((1,)), p_half=p_half)
+    raw = q_c * dp / constants.g
+    ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
+    if thinned:
+        assert ratio < 0.95, f"expected two_region thinning, got ratio {ratio}"
+    else:
+        assert ratio == 1.0, f"expected NO thinning, got ratio {ratio}"
+
+
+def test_sundqvist_l36_deck_still_round_trips():
+    """The outgoing production deck stays RUNNABLE and unchanged under its new
+    name, so every result measured against it reproduces -- including
+    cam6_base60, the paired baseline of the CAM6 run-1 comparison.  It must
+    carry NEITHER numerical lever, which is what makes it that baseline."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.resolution == 6
+    assert args.nlev == 36
+    assert args.vertical_coord == "sigma"
+    assert args.discretization == "mpas"
+    assert args.dt == 112.5
+    assert args.mpas_vert_advection_scheme == "van_leer"
+    cfg = build_config_from_args(args)
+    # The deck is silent on the damper, so the CLI dest stays None and the
+    # CODE default is what the run gets.  Assert the RESOLVED value, which is
+    # what makes this deck the neither-lever baseline.
+    assert cfg.dycore.mpas_div_damp4_scale == 0.0
+    assert cfg.convection == "bechtold"
+    assert cfg.cloud_scheme == "sundqvist"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
+    assert cfg.surface_bulk_scheme == "coare3"
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
+    # This deck RUNS PROGNOSTIC CLUBB, so the 2026-09-24 three-row decision
+    # could reach it -- it must not.  The campaign pair's pre-registration
+    # rests on this deck resolving to the OPPOSITE of all three rows, through
+    # the driver, on every config the lever reaches.
+    assert cfg.turbulence == "clubb" and cfg.clubb_prognostic is True
+    assert cfg.clubb_liquid_partition is False
+    assert cfg.hard_saturation_adjustment is True
+    assert cfg.hard_sat_ice_curve is True
+    from legoesm.driver.physics_pipeline import (
+        _resolve_microphysics, turbulence_config_for,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    assert materialize_sub_config(
+        turbulence_config_for(cfg)).clubb.liquid_partition is False
+    assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
+    # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
+    # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
+    assert cfg.cloud_optics_inhomogeneity == "two_region"
+    assert cfg.cloud_fsd == 1.0
+    _assert_optics_thinning(cfg, thinned=True)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -2036,11 +2421,26 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     assert trained.surface.bulk_scheme == "constant"
     # _resolve_turbulence had already applied coare3 + gustiness 300:
     resolved = LouisConfig(surface=SurfaceLayerConfig(
-        bulk_scheme="coare3", gustiness_w_zi=300.0))
+        bulk_scheme="coare3", gustiness_w_zi=300.0,
+        z_ref_model_level=False, ocean_q_sfc_saline=True))
     out = _louis_with_preserved_surface(trained, resolved)
     assert out.surface.bulk_scheme == "coare3"        # preserved, not clobbered
     assert out.surface.gustiness_w_zi == 300.0
     assert out.surface.Cd_neutral == 1.5e-3           # trained Cd/Ch/z0 kept
+    # the run-resolved surface switches survive too (they were dropped, so
+    # --no-surface-z-ref-model-level never reached the trained lane); the
+    # values are chosen AGAINST the scheme defaults so a drop is visible
+    assert out.surface.z_ref_model_level is False
+    assert out.surface.ocean_q_sfc_saline is True
+    # the production shape (codex round 2): the trained Louis config pins the
+    # height switch False (AIMIP substitutes air T for a missing surface) and
+    # the run-resolved surface carries the scheme default True -- the AMIP
+    # lane has a real surface temperature, so the resolved value must win
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    trained_real = AIMIPClassicalParams.from_defaults().to_louis_config()
+    assert trained_real.surface.z_ref_model_level is False
+    resolved_default = LouisConfig(surface=SurfaceLayerConfig(bulk_scheme="coare3"))
+    assert _louis_with_preserved_surface(trained_real, resolved_default).surface.z_ref_model_level is True
 
 
 def test_aimip_louis_preserve_surface_noop_without_prev():
@@ -2688,7 +3088,8 @@ def test_cloud_optics_inhomogeneity_validate():
 def test_cloud_saturation_scheme_round_trips_and_threads():
     """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
     into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
-    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    #1521 ice-saturation fix); 'liquid' = legacy byte-identical, no longer
+    the default."""
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
@@ -2699,13 +3100,16 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     cc = build_cloud_config(
         cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
     assert cc.saturation_scheme == "mixed_phase"
-    # default: 'liquid' => CloudConfig default (legacy path).
+    # saying nothing => the field default, which is 'mixed_phase' since
+    # 2026-09-17 (the 'liquid' curve made cold cloud impossible: at 230 K /
+    # 900 hPa ice-saturated air reads RH 0.662 against rh_crit 0.85).
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.cloud_saturation_scheme == "liquid"
+    assert d.cloud_saturation_scheme == "mixed_phase"
     assert build_cloud_config(
         d.cloud_scheme,
-        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+        saturation_scheme=d.cloud_saturation_scheme
+    ).saturation_scheme == "mixed_phase"
 
 
 def test_cloud_saturation_scheme_validate():
@@ -2839,19 +3243,22 @@ def test_diagnostic_condensate_scheme_validate_strict():
             cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
 
 
-def test_use_clubb_cloud_fraction_rejected_on_mpas_spectral():
-    """use_clubb_cloud_fraction is enforced only inside build_physics_pipeline,
-    which mpas/spectral never build — so validate_strict must reject the opt-in
-    there rather than let it silently no-op (audit 2026-07-17 dispatch-hardening)."""
+def test_use_clubb_cloud_fraction_rejected_on_spectral_only():
+    """use_clubb_cloud_fraction is enforced by build_physics_pipeline (cd-grid)
+    and combined.make_physics (MPAS); the spectral standalone path builds
+    neither, so validate_strict must reject the opt-in there rather than let
+    it silently no-op (audit 2026-07-17 dispatch-hardening).  MPAS became a
+    legal lane with the CAM6 cloud-fraction port (cloud_scheme='cam6_clubb')."""
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
-    for bad_disc in ("spectral", "mpas"):
+    for bad_disc in ("spectral",):
         with pytest.raises(ValueError, match="silently no-op"):
             ExperimentConfig(
                 turbulence="clubb", use_clubb_cloud_fraction=True,
                 dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
-    # cd-grid aliases DO build the pipeline, so the guard must not block them
-    # (the pipeline's own turbulence=='clubb' check still applies).
-    for ok_disc in ("centered", "finite_volume"):
+    # cd-grid aliases DO build the pipeline and MPAS builds make_physics, so
+    # the guard must not block them (their own turbulence=='clubb' checks
+    # still apply).
+    for ok_disc in ("centered", "finite_volume", "mpas"):
         try:
             ExperimentConfig(
                 turbulence="clubb", use_clubb_cloud_fraction=True,
@@ -2915,7 +3322,7 @@ def test_latlon24_production_variant_pins_polar_filter():
     # gained the non-orographic component; this assertion still named the
     # orographic-only spelling and so went red with it.
     assert cfg.convection == "sbm"
-    assert cfg.gravity_wave_drag == "mcfarlane+hines"
+    assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
@@ -3799,3 +4206,544 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.output.diag_days == pytest.approx(5.0)
+
+
+_FV3_DUO_ARGV = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+                 "--discretization", "fv3_duo", "--resolution", "12",
+                 "--nlev", "5", "--precision", "fp64",
+                 "--radiation", "none", "--convection", "none",
+                 "--microphysics", "none", "--turbulence", "none",
+                 "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+
+
+def _fv3_duo_cfg(extra):
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(_FV3_DUO_ARGV + extra), parser)
+    return build_config_from_args(args)
+
+
+def test_fv3_duo_windows_flags_round_trip_and_validate():
+    """--fv3-duo-windows KT + --fv3-duo-window-pad PAD reach DycoreConfig
+    and pass validate_strict together; the defaults are None (face
+    layout), so an unset pair changes nothing."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_windows is None
+    assert cfg.dycore.fv3_duo_window_pad is None
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"])
+    assert cfg.dycore.fv3_duo_windows == 2
+    assert cfg.dycore.fv3_duo_window_pad == 5
+    cfg.validate_strict()
+
+
+def test_fv3_duo_column_lane_flag_round_trips_and_validates():
+    """--fv3-duo-column-lane reaches DycoreConfig (default False) and
+    validate_strict refuses it with the window layout."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_column_lane is False
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    assert cfg.dycore.fv3_duo_column_lane is True
+    cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
+                        "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="rung 7"):
+        cfg.validate_strict()
+    cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
+    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
+    with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_without_pad_is_refused():
+    """The pad is a measured per-deck halo width, never defaulted."""
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "2"])
+    with pytest.raises(ValueError, match="fv3_duo_window_pad is REQUIRED"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_window_pad_without_windows_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="without dycore.fv3_duo_windows"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_below_two_is_refused():
+    cfg = _fv3_duo_cfg(["--fv3-duo-windows", "1", "--fv3-duo-window-pad", "5"])
+    with pytest.raises(ValueError, match="int >= 2"):
+        cfg.validate_strict()
+
+
+def test_fv3_duo_windows_on_another_discretization_is_refused():
+    parser = build_arg_parser()
+    argv = [a if a != "fv3_duo" else "cdgrid" for a in _FV3_DUO_ARGV]
+    args = _postprocess_args(parser.parse_args(
+        argv + ["--fv3-duo-windows", "2", "--fv3-duo-window-pad", "5"]),
+        parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="only meaningful with"):
+        cfg.validate_strict()
+
+
+def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
+    """--cloud-cover-condensate-q-ref threads into ExperimentConfig (None by
+    default = scheme default, off); out-of-range refused by validate_strict."""
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert base.cloud_cover_condensate_q_ref is None
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "3e-5"]),
+        parser))
+    assert cfg.cloud_cover_condensate_q_ref == 3.0e-5
+    bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "0.5"]),
+        parser))
+    with pytest.raises(Exception, match="cloud_cover_condensate_q_ref"):
+        bad.validate_strict()
+
+
+def test_convective_rain_to_surface_round_trips():
+    """--convective-rain-to-surface reaches ExperimentConfig AND the
+    ConvectionConfig the combined-physics lanes build from it."""
+    from legoesm.driver.physics_pipeline import convection_config_for
+
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_default.convective_rain_to_surface is True      # default since 2026-09-16
+    assert convection_config_for(cfg_default).rain_to_surface is True
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-convective-rain-to-surface",
+    ]), parser))
+    assert cfg.convective_rain_to_surface is False
+    assert convection_config_for(cfg).rain_to_surface is False
+
+
+def test_surface_height_and_saline_flags_round_trip():
+    """--surface-z-ref-model-level / --surface-ocean-q-sfc-saline reach
+    ExperimentConfig AND the surface sub-config turbulence_config_for builds."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    default_cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--turbulence", "louis"]), parser))
+    # CLI defaults are None = the scheme's own value: the real level height
+    # is True at SurfaceLayerConfig (the production default, one place); the
+    # sea-water humidity resolves to on where the lane can honour it.
+    assert default_cfg.surface_z_ref_model_level is None
+    assert default_cfg.surface_ocean_q_sfc_saline is None
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    assert SurfaceLayerConfig().z_ref_model_level is True
+    assert turbulence_config_for(default_cfg).louis.surface.z_ref_model_level is True
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--surface-bulk-scheme", "coare3",
+        "--surface-z-ref-model-level", "--surface-ocean-q-sfc-saline",
+    ]), parser))
+    assert cfg.surface_z_ref_model_level is True
+    assert cfg.surface_ocean_q_sfc_saline is True
+    cfg = cfg._replace(grid=cfg.grid._replace(grid_type="mpas"))
+    surf = turbulence_config_for(cfg).louis.surface
+    assert surf.z_ref_model_level is True
+    assert surf.ocean_q_sfc_saline is True
+    assert surf.bulk_scheme == "coare3"
+    # a lane with no ocean/land separation cannot honour the explicit request
+    with pytest.raises(ValueError, match="separates ocean from land"):
+        turbulence_config_for(cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")))
+
+
+def test_bechtold_M_b_max_threads_and_validates():
+    """bechtold_M_b_max (the cloud-base mass-flux cap) threads into the
+    hot-loop BechtoldConfig on BOTH resolvers and through the --params map;
+    the default reproduces the production value (0.02, the value the old
+    getattr fallback imposed because the field did not exist); validate_strict
+    enforces the scheme's declared range (0.02, 0.15).  Before this wiring
+    the cap could not be set from any MIP driver: the pipeline read a field
+    named ``bechtold_m_b_max`` that no config carried."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP
+
+    cfg = ExperimentConfig(convection="bechtold", bechtold_M_b_max=0.08)
+    assert _resolve_convection(cfg)[1].M_b_max == 0.08
+    assert convection_config_for(cfg).bechtold.M_b_max == 0.08
+    assert _resolve_convection(ExperimentConfig(convection="bechtold"))[1].M_b_max == 0.05   # default since 2026-09-16
+    assert _ATM_SCALAR_PARAM_MAP["atm.conv.BechtoldConfig.M_b_max"] == "bechtold_M_b_max"
+    with pytest.raises(ValueError, match="bechtold_M_b_max"):
+        ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
+
+
+def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
+    """--bechtold-enable-cmt reaches the BechtoldConfig leaf on both resolvers.
+    The None default keeps every lane where it was before the MPAS wiring:
+    OFF on MPAS (the bridge handed the scheme zero winds), ON elsewhere
+    (BechtoldConfig.enable_cmt); codex review of 2bfdf5413 caught the first
+    version silently switching the spectral lane's CMT off."""
+    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--bechtold-enable-cmt"]), parser))
+    assert cfg.bechtold_enable_cmt is True
+    assert _resolve_convection(cfg)[1].enable_cmt is True
+    assert convection_config_for(cfg).bechtold.enable_cmt is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--no-bechtold-enable-cmt"]), parser))
+    assert convection_config_for(off).bechtold.enable_cmt is False
+    dflt = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert dflt.bechtold_enable_cmt is None
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
+
+
+def test_persistent_dgrid_flag_flows_to_config_1028():
+    """--persistent-dgrid reaches DycoreConfig, and OFF is the default.
+
+    #1028: carrying the cube's winds in FV3 D staggering between steps (rather
+    than projecting to the corners and back every step) moved a 200-day C36
+    Held-Suarez jet from 13.0 to 38.6 m/s.  The knob is only useful if a run
+    script can select it, and only safe if the default leaves every existing
+    run byte-identical -- both are asserted here.
+    """
+    parser = build_arg_parser()
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+    ]), parser))
+    assert off.dycore.persistent_dgrid is False
+
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--persistent-dgrid",
+    ]), parser))
+    assert on.dycore.persistent_dgrid is True
+
+    # A YAML that turns it on can still be overridden back off from the CLI.
+    parser2 = build_arg_parser()
+    parser2.set_defaults(persistent_dgrid=True)
+    back_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-persistent-dgrid",
+    ]), parser2))
+    assert back_off.dycore.persistent_dgrid is False
+
+
+def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
+    """The CLUBB upper domain limit (CAM trop_cloud_top_press) was a scheme
+    field no run could set; the flag threads it through the same single source
+    the prognostic flag uses, and None keeps the scheme's own 0 (off)."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    assert cfg_off.clubb_trop_cloud_top_press is None
+    tc_off = turbulence_config_for(cfg_off)
+    assert tc_off.clubb is None or tc_off.clubb.trop_cloud_top_press == 0.0
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb",
+         "--clubb-trop-cloud-top-press", "15000"]), parser))
+    assert turbulence_config_for(cfg_on).clubb.trop_cloud_top_press == 15000.0
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "louis",
+         "--clubb-trop-cloud-top-press", "15000"]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg_bad)
+
+
+def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
+    """The cloud-base mixing probe threads through the same single source as
+    the CLUBB top-press knob; None keeps the scheme's own 1.0 and the band
+    lands on the kernel config.  The --params class router does NOT reach
+    CLUBBConfig on the MPAS lane (the run refused with 'route into the built
+    pipeline's config attributes'), which is why this is a driver field."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    assert cfg_off.clubb_q_flux_scale is None
+    from legoesm.atmosphere.physics.turbulence.integration import materialize_sub_config
+    tc_off = materialize_sub_config(turbulence_config_for(cfg_off)).clubb
+    assert (tc_off.q_flux_scale, tc_off.q_flux_scale_sigma_lo,
+            tc_off.q_flux_scale_sigma_hi) == (1.0, 0.0, 1.0)
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb",
+         "--clubb-q-flux-scale", "2.5",
+         "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
+    tc_on = turbulence_config_for(cfg_on).clubb
+    assert (tc_on.q_flux_scale, tc_on.q_flux_scale_sigma_lo,
+            tc_on.q_flux_scale_sigma_hi) == (2.5, 0.8, 0.95)
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "louis",
+         "--clubb-q-flux-scale", "2.5",
+         "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg_bad)
+    # The pipeline refuses on its own (validate_strict may not have run):
+    # prognostic closure, a missing band, and an override that does not carry it.
+    with pytest.raises(ValueError, match="clubb_prognostic=True does not read it"):
+        turbulence_config_for(cfg_on._replace(clubb_prognostic=True))
+    with pytest.raises(ValueError, match="requires clubb_q_flux_scale_sigma_band"):
+        turbulence_config_for(cfg_on._replace(clubb_q_flux_scale_sigma_band=None))
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(cfg_on._replace(
+            turbulence_override=TurbulenceConfig(scheme="clubb")))
+    # ... even when the override carries the same scale (its band may differ).
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(cfg_on._replace(turbulence_override=TurbulenceConfig(
+            scheme="clubb", clubb=CLUBBConfig(q_flux_scale=2.5))))
+    # The MPAS lane (model_driver) builds its turbulence config through this
+    # same turbulence_config_for, so the analytical-lane assertion covers it.
+
+
+def test_clubb_q_flux_scale_validate_strict_refuses_bad_band_scheme_and_prognostic():
+    """validate_strict refuses the probe without a band, a reversed band, the
+    prognostic closure, a band with no scale, an out-of-bounds scale and a
+    non-CLUBB scheme; the well-formed pair passes."""
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    base._replace(clubb_q_flux_scale=2.5,
+                  clubb_q_flux_scale_sigma_band=(0.8, 0.95)).validate_strict()
+    # A YAML-style list band is accepted by validate_strict (normalised by value).
+    base._replace(clubb_q_flux_scale=2.5,
+                  clubb_q_flux_scale_sigma_band=[0.8, 0.95]).validate_strict()
+    for kw, msg in (
+        (dict(clubb_q_flux_scale=2.5), "needs clubb_q_flux_scale_sigma_band"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.9, 0.8)),
+         "0 <= lo < hi <= 1"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.95),
+              clubb_prognostic=True), "prognostic closure does not read it"),
+        (dict(clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "does nothing on its own"),
+        (dict(clubb_q_flux_scale=50.0, clubb_q_flux_scale_sigma_band=(0.8, 0.95)),
+         r"clubb_q_flux_scale=50"),
+        (dict(clubb_q_flux_scale=float("nan"), clubb_q_flux_scale_sigma_band=(0.8, 0.95)),
+         r"clubb_q_flux_scale=nan"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.9, 0.95)),
+         "0 <= lo < hi <= 1"),
+        (dict(clubb_q_flux_scale=2.5, clubb_q_flux_scale_sigma_band=(0.8, 0.95),
+              turbulence_override=TurbulenceConfig(scheme="clubb")),
+         "refused with a turbulence_override"),
+        (dict(turbulence="louis", clubb_q_flux_scale=2.5,
+              clubb_q_flux_scale_sigma_band=(0.8, 0.95)), "is a CLUBB field"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            base._replace(**kw).validate_strict()
+
+
+def test_clubb_trop_cloud_top_press_validate_strict_bounds_and_scheme():
+    """validate_strict refuses the taper under a non-CLUBB scheme (which the
+    pipeline's late check cannot see behind a turbulence_override or the
+    FV 'none' early return) and refuses non-physical pressures."""
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    base._replace(clubb_trop_cloud_top_press=15000.0).validate_strict()
+    for bad in (-1.0, float("nan"), float("inf"), 1.0e9):
+        with pytest.raises(ValueError, match="clubb_trop_cloud_top_press"):
+            base._replace(clubb_trop_cloud_top_press=bad).validate_strict()
+    with pytest.raises(ValueError, match="CLUBB field"):
+        base._replace(turbulence="louis",
+                      clubb_trop_cloud_top_press=15000.0).validate_strict()
+
+
+def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
+    """--clubb-liquid-partition must round-trip AND reach the nested config.
+
+    Same two halves as the prognostic flag: a lever that lands on
+    ``ExperimentConfig`` but never on the CLUBB sub-config would report success
+    while the closure kept throwing its liquid away.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clubb_liquid_partition is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--clubb-prognostic",
+        "--clubb-liquid-partition",
+    ]), parser))
+    assert cfg_on.clubb_liquid_partition is True
+    assert turbulence_config_for(cfg_on).clubb.liquid_partition is True
+
+    # ... and the default really is the other value on the same lane, so the
+    # assertion above cannot pass by the sub-config defaulting True.
+    cfg_plain = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+        "--clubb-prognostic",
+    ]), parser))
+    plain_tc = materialize_sub_config(turbulence_config_for(cfg_plain))
+    assert plain_tc.clubb.liquid_partition is False
+
+
+def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():
+    """The exchanged liquid is the POST-ADVANCE PDF's rcm.
+
+    Only CLUBB diagnoses one, and only the prognostic path advances the moments
+    it is computed from, so both are hard requirements rather than hints.
+    """
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    wrong_closure = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--clubb-liquid-partition",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(wrong_closure)
+
+    diagnostic = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+        "--clubb-liquid-partition",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires clubb_prognostic=True"):
+        turbulence_config_for(diagnostic)
+
+
+def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
+    """``--microphysics kessler`` on the duo argv reaches the config and
+    passes the lane's default-deny wall (Kessler alone is the one routed
+    scheme); a second active scheme next to it is still refused."""
+    from legoesm.driver.component_factory import _refuse_fv3_duo_non_default
+    cfg = _fv3_duo_cfg(["--microphysics", "kessler"])
+    assert cfg.microphysics == "kessler"
+    cfg.validate_strict()
+    _refuse_fv3_duo_non_default(cfg)
+    cfg = _fv3_duo_cfg(["--microphysics", "kessler", "--turbulence", "louis"])
+    _refuse_fv3_duo_non_default(cfg)          # the wall allows the field...
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
+        create_atmosphere_dycore(cfg, create_cubed_sphere(12),
+                                 create_sigma_coordinate(5))
+
+
+def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
+    """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
+    the kernel is built from, not stop at ExperimentConfig."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+
+    parser = build_arg_parser()
+    base = ["--grid", "gaussian", "--resolution", "21",
+            "--convection", "tiedtke"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--convective-buoyancy-death-memory"]),
+        parser))
+    assert cfg_on.convective_buoyancy_death_memory is True
+    assert _resolve_convection(cfg_off)[1].buoyancy_death_memory is False
+    assert _resolve_convection(cfg_on)[1].buoyancy_death_memory is True
+
+
+@pytest.mark.parametrize("scheme", ["bechtold", "kain_fritsch", "sbm"])
+def test_buoyancy_death_memory_refused_off_tiedtke_in_python_config(scheme):
+    """A config built in Python (no CLI) must refuse the flag with any scheme
+    that does not read it, exactly as the CLI does."""
+    from legoesm.driver.config import ExperimentConfig
+    cfg = ExperimentConfig(convection=scheme,
+                           convective_buoyancy_death_memory=True)
+    with pytest.raises(ValueError, match="convective_buoyancy_death_memory"):
+        cfg.validate_strict()
+    # control: the same scheme with the flag at its default is not refused for it
+    try:
+        cfg._replace(convective_buoyancy_death_memory=False).validate_strict()
+    except ValueError as e:
+        assert "convective_buoyancy_death_memory" not in str(e)
+    # and Tiedtke with the flag on is not refused for it
+    try:
+        cfg._replace(convection="tiedtke").validate_strict()
+    except ValueError as e:
+        assert "convective_buoyancy_death_memory" not in str(e)
+
+
+def test_corner_fill_flag_round_trip_and_production_pin(capsys):
+    parser = build_arg_parser()
+    default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert default.dycore.corner_fill == "avg"
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--corner-fill", "fv3_bgrid_xdir"]), parser))
+    assert cfg.dycore.corner_fill == "fv3_bgrid_xdir"
+    cfg.validate_strict()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical", "--corner-fill", "fv3_bgrid"])
+    assert "invalid choice" in capsys.readouterr().err
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = Path(__file__).resolve().parents[2] / "config/amip/amip_production.yaml"
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    assert keys["corner_fill"] == "avg"                          # deck -> loader
+    parser.set_defaults(**keys)
+    cfg = build_config_from_args(parser.parse_args([]))           # loader -> config
+    assert cfg.dycore.corner_fill == "avg"
+
+
+def test_zm_land_fraction_flows_to_config_and_kernel():
+    """--zm-land-fraction threads CLI -> ExperimentConfig -> ZhangMcFarlaneConfig;
+    the default requires a land fraction; validate_strict refuses anything else."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]), parser))
+    assert cfg.zm_land_fraction == "required"
+    cfg_aqua = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--convection", "zhang_mcfarlane",
+         "--zm-land-fraction", "none"]), parser))
+    assert cfg_aqua.zm_land_fraction == "none"
+    with pytest.raises(ValueError, match="zm_land_fraction"):
+        cfg._replace(zm_land_fraction="bogus").validate_strict()
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    assert _resolve_convection(cfg)[1].land_fraction == "required"
+    assert _resolve_convection(cfg_aqua)[1].land_fraction == "none"
+    # The legacy AMIP export keeps the policy ("none" used to come back
+    # "required", so a reloaded aquaplanet config failed setup).
+    from legoesm.driver.config import ExperimentConfig
+    for c in (cfg, cfg_aqua):
+        assert ExperimentConfig.from_amip_config(
+            c.to_amip_config()).zm_land_fraction == c.zm_land_fraction
+
+
+def test_production_deck_pins_the_zm_land_fraction_policy():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    keys = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"),
+        build_arg_parser())
+    assert keys["convection"] == "zhang_mcfarlane"
+    assert keys["zm_land_fraction"] == "required"
+
+
+def test_mpas_land_params_refresh_flag_flows_to_config():
+    """--mpas-land-params-refresh round-trip: default ON (user 2026-09-29),
+    --no- form reaches the config, and a YAML false pin is honoured."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_params_refresh is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-mpas-land-params-refresh",
+    ]), parser))
+    assert cfg_off.mpas_land_params_refresh is False
+
+    parser2 = build_arg_parser()
+    parser2.set_defaults(mpas_land_params_refresh=False)   # simulates a YAML pin
+    cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical"]), parser2))
+    assert cfg_pin.mpas_land_params_refresh is False

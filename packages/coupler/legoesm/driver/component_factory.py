@@ -131,6 +131,9 @@ class DiffusionCoeffs(NamedTuple):
     # smoothing that stabilizes vertical computational modes (the cldG abs-145
     # tropical sawtooth died with BOTH scaled 0.25).
     K_h_A: float = None
+    # Divergence-SELECTIVE biharmonic damping [m^4/s] (CAM-FV ldiv4).  Only
+    # the MPAS hydrostatic lane consumes it; 0.0 = off, byte-identical.
+    div_damp4: float = 0.0
 
 
 def _grid_min_dx(grid) -> float:
@@ -155,6 +158,17 @@ def _grid_min_dx(grid) -> float:
         # dycore is needed for stable 2deg global runs (TODO).
         return float(jnp.min(jnp.asarray(grid.dx))) / 2.0
     return 1e5
+
+
+def _grid_cell_area(grid, dx_min: float) -> float:
+    """Smallest cell area [m^2], the ``L^2`` of CAM-FV's divergence damping.
+
+    MPAS/Voronoi carries ``areaCell`` directly; every other grid falls back
+    to ``dx_min**2``, which is the same quantity for a quasi-uniform mesh.
+    """
+    if hasattr(grid, 'areaCell'):
+        return float(jnp.min(jnp.asarray(grid.areaCell)))
+    return float(dx_min) ** 2
 
 
 def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
@@ -196,8 +210,34 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
 
     _khs = getattr(dc, "k_h_scale", None)
     K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
+
+    # Divergence-selective biharmonic damping, scaled from CAM-FV's ``ldiv4``
+    # (cd_core.F90:620-684): CAM sets tau4 = 0.01/dt and multiplies by the
+    # SQUARE of the cell area, so nu_div4 = 0.01 * L^4 / dt with L^2 the cell
+    # area.  The Earth-radius factors are consistent (CAM's angular divergence
+    # supplies one ae, its angular Laplacian two, cdtau4 the fourth), verified
+    # in review -- no metric factor is missing.
+    #
+    # CAM-INSPIRED, NOT IDENTICAL, and the difference is not a detail:
+    #  * CAM applies this once per ACOUSTIC substep, we apply it once per
+    #    dycore step, so matching the nondimensional 0.01 matches the per-
+    #    APPLICATION damping fraction, never the damping per simulated second.
+    #  * CAM's coefficient is per-cell and sits INSIDE the final gradient;
+    #    ours is one global scalar outside it, built from the SMALLEST cell.
+    #    On the res6 mesh areaCell spans a factor 1.60, so the coarsest cells
+    #    receive 1/1.60^2 = 39% of the nominal rate.  Quasi-uniform meshes
+    #    only; a variable-resolution mesh needs the per-cell form.
+    #  * The discrete eigenvalues and the SSP-RK54 stability function differ
+    #    from CAM's, so the realised per-step damping differs too (measured
+    #    21.8% of the strongest scalar-Laplacian mode, against CAM's nominal
+    #    1% per application before its own integrator).
+    # The scale is therefore a CALIBRATION KNOB whose 1.0 means "CAM's own
+    # nondimensional rate", not "CAM's behaviour".  res6 at dt=112.5 s gives
+    # 7.235e15 m^4/s at scale 1.0.
+    nu_div4_cam = 0.01 * _grid_cell_area(grid, dx_min) ** 2 / DT
+    div_damp4 = getattr(dc, "mpas_div_damp4_scale", 0.0) * nu_div4_cam
     return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
-                           K_h_A=K_h_A)
+                           K_h_A=K_h_A, div_damp4=div_damp4)
 
 
 # Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
@@ -300,6 +340,7 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # guard above refuses every other mode). The three engineering knobs
     # it selects are dual-reviewed and parity-gated (PR #1656).
     "distributed", "distributed_mode",
+    "dycore.fv3_duo_windows", "dycore.fv3_duo_window_pad",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
@@ -381,6 +422,24 @@ def resolve_fv3_duo_layout(*, world: int, n_local: int, n_global: int,
     return "single"
 
 
+def _ledger_level_weight(config, sigma):
+    """(nlev,) band weight for the budget ledger, or None for the full column.
+
+    Shared by the physics factory and the dycore so the two halves of the
+    ledger table cannot be banded differently.
+    """
+    band = getattr(getattr(config, "output", None), "budget_ledger_sigma_band", None)
+    if band is None:
+        return None
+    if not hasattr(sigma, "sigma_half"):
+        raise ValueError(
+            "budget_ledger_sigma_band needs a sigma vertical coordinate; this "
+            "run's coordinate has no sigma_half, so a single band does not "
+            "select one pressure range.")
+    from legoesm.diagnostics.process_ledger import sigma_band_weight
+    return sigma_band_weight(sigma.sigma_half, float(band[0]), float(band[1]))
+
+
 def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
     """Refuse EVERY non-default, non-allow-listed field, all at once.
 
@@ -408,10 +467,114 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
             f"choose a lane that supports them.")
 
 
+def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
+    """The FV3 duo as a COLUMN model for the MPAS lane (route A).
+
+    The MPAS lane consumes the whole ExperimentConfig surface, so the
+    closed lane's default-deny wall does not apply; what the column lane
+    cannot honour yet is refused HERE, by name, so nothing is silently
+    inert (the wall's failure mode):
+      * the MPAS-lane numerics knobs that edit the state after the step
+        (top sponge, q_v del2/del4 smoothing): the columns are a VIEW of
+        the duo bundle and the model refuses wind edits; q_v smoothing
+        is OFF on the duo by decision (user 2026-09-26);
+      * held_suarez_forcing: the closed lane's FV3 hswf is the certified
+        HS on this dycore; the MPAS lane's HS drops the meridional drag;
+      * distributed / windows / NH / km outside {5, 10} (rung 7 / M4).
+    """
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel,
+    )
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig,
+        FV3DuoDynamicsModel,
+    )
+    from legoesm.grids.factory import create_fv3_duo_grid
+
+    refused = []
+    if getattr(config, "sponge_enabled", False):
+        refused.append("sponge_enabled=True (post-step wind edit)")
+    for k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
+        if float(getattr(config, k, 0.0) or 0.0) != 0.0:
+            refused.append(f"{k}={getattr(config, k)!r} (q_v smoothing is "
+                           "OFF on the duo, decision 2026-09-26)")
+    if config.held_suarez_forcing:
+        refused.append("held_suarez_forcing=True (use the closed duo lane's "
+                       "certified FV3 hswf)")
+    if config.distributed:
+        refused.append("distributed=True (single-process; windows are rung 7)")
+    if model_type != "hydrostatic":
+        refused.append(f"model_type={model_type!r} (hydrostatic only: the "
+                       "column increments rebuild the hydrostatic pressures)")
+    if config.precision not in ("fp64", "float64", "mixed_fp64_storage"):
+        refused.append(f"precision={config.precision!r} (fp64 only)")
+    # the vertical table follows nlev: the certified analytic branch at
+    # 5/10, CAM6's L32 table at 32 (user decision 2026-09-26: CAM L32)
+    eta = {5: "analytic", 10: "analytic", 32: "cam6_l32"}.get(gc.nlev)
+    if eta is None:
+        refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}} "
+                       "or the CAM6 L32 table at 32)")
+    # Anything the driver regrids onto self.grid in setup() lands on the
+    # STANDARD cubed-sphere cell centres, which are NOT the duo's A-grid
+    # (MEASURED 2026-09-26, C12: 1.6 deg offsets on matching faces, faces
+    # 2-4 permuted) -- until M6 builds the forcings on the column mesh,
+    # every such input is refused rather than misplaced.
+    if config.dataset != "analytical":
+        refused.append(f"dataset={config.dataset!r} (SST/SIC regrid on the "
+                       "driver grid is M6)")
+    if config.topography != "flat":
+        refused.append(f"topography={config.topography!r} (an elevation "
+                       "file is M6; with ic='era5' the terrain is ERA5's own "
+                       "phis, del-2 filtered topo_smoothing passes, as on "
+                       "the MPAS lane)")
+    if config.use_multilayer_land:
+        refused.append("use_multilayer_land=True (land data regrid is M6)")
+    if config.radiation != "none":
+        refused.append(f"radiation={config.radiation!r} (ozone/aerosol/solar "
+                       "boundary regrids are M6)")
+    # The column model's mass block is FV3's nwat=3 warm-rain block; a
+    # scheme that moves water into ice / snow / graupel would have that
+    # water DROPPED (codex 2026-09-26: Morrison nucleation takes vapour
+    # and hands ice, which no slot receives).  Until the nwat=6 block is
+    # ported, only warm-rain microphysics and no convection.
+    if config.microphysics not in ("none", "kessler"):
+        refused.append(f"microphysics={config.microphysics!r} (ice species; "
+                       "the nwat=6 mass block is not ported)")
+    if config.convection != "none":
+        refused.append(f"convection={config.convection!r} (detrained ice; "
+                       "the nwat=6 mass block is not ported)")
+    # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
+    # duo reads none of them, so a non-default value would be inert
+    d_def = type(config.dycore)()
+    inert = [f for f in config.dycore._fields
+             if f.startswith("mpas_")
+             and getattr(config.dycore, f) != getattr(d_def, f)]
+    if inert:
+        refused.append("dycore." + ", dycore.".join(inert)
+                       + " (MPAS-dycore knobs the duo does not read)")
+    if getattr(config.output, "budget_ledger", False):
+        refused.append("output.budget_ledger=True (the column model exports "
+                       "no per-step ledger)")
+    if refused:
+        raise ValueError(
+            "fv3_duo column lane cannot honour: " + "; ".join(refused))
+    moist = any(getattr(config, k) != "none"
+                for k in ("microphysics", "convection", "turbulence"))
+    bundle = create_fv3_duo_grid(gc.resolution)
+    if bundle.ctx_np.get("ectx") is None:
+        raise ValueError("fv3_duo column lane needs the duo ext bundle "
+                         "(ctx['ectx'] with amat6) for the c2l column winds")
+    dyn = FV3DuoDynamicsModel(
+        bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
+                             storage_dtype="float64", moist=moist, eta=eta))
+    return FV3DuoColumnModel(dyn)
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
     sigma,
+    coeff_grid=None,
 ) -> Any:
     """Resolve and instantiate the configured atmosphere dynamical core.
 
@@ -423,6 +586,12 @@ def create_atmosphere_dycore(
         Horizontal grid (cubed-sphere, Gaussian, lat-lon, etc.).
     sigma
         Vertical coordinate.
+    coeff_grid
+        Grid the diffusion coefficients are derived from.  Under a cell
+        partition ``grid`` is the rank-local mesh; its min(dcEdge) /
+        min(areaCell) are rank-dependent, so the GLOBAL mesh must be passed
+        here or every rank integrates a different viscosity.  ``None`` means
+        ``grid``.
 
     Returns
     -------
@@ -455,8 +624,10 @@ def create_atmosphere_dycore(
         _fail_unsupported(model_type, discretization, grid_type)
 
     solver_name = _DRIVER_SUPPORTED[key]
-    diff = compute_diffusion(grid, dc)
-    warn_if_diffusion_unstable(solver_name, diff, grid, dc.dt)
+    if coeff_grid is None:
+        coeff_grid = grid
+    diff = compute_diffusion(coeff_grid, dc)
+    warn_if_diffusion_unstable(solver_name, diff, coeff_grid, dc.dt)
 
     logger.info(
         "Atmosphere: model_type=%s, discretization=%s, grid=%s -> %s",
@@ -612,11 +783,9 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
         )
-        # Compute hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
-        n_max = grid.n_max
-        a = grid.radius
-        eig_max = n_max * (n_max + 1) / (a * a)
-        hyperdiff = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+        # Hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
+        from legoesm.grids.gaussian import hyperdiff_coeff_for_efold
+        hyperdiff = hyperdiff_coeff_for_efold(grid, 0.5 * 3600.0)
         # Spectral hydrostatic PE runs the 5-stage SSP-RK54 by default (spectral
         # stability).  It ALSO supports the semi-implicit LEAPFROG path, which
         # evaluates physics ONCE per step and is the integrator #405 requires to
@@ -721,6 +890,20 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
+            sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
+            # Divergence-selective biharmonic damping (CAM-FV ldiv4).  The
+            # vector del2/del4 above damp rotational and divergent modes
+            # alike; this one is the piece CAM applies at every level and we
+            # had computed (``div_damp``) but never handed to this core.
+            nu_div4=diff.div_damp4,
+            # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
+            # dynamics and clips rows, so it needs the SAME weight the physics
+            # rows use; without it those two rows stay full-column while the
+            # rest are banded and the table does not partition. Measured that
+            # way once: dynamics read 1.1504 identically in a full-column, a
+            # free-troposphere and a boundary-layer run.
+            budget_ledger_level_weight=_ledger_level_weight(config, sigma),
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
@@ -755,6 +938,9 @@ def create_atmosphere_dycore(
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
+    if (solver_name == "fv3_duo_primitive_equations"
+            and getattr(config.dycore, "fv3_duo_column_lane", False)):
+        return _create_fv3_duo_column_model(config, gc, model_type)
     if solver_name == "fv3_duo_primitive_equations":
         # Slice 1 contract, enforced LOUDLY. The core SUPPORTS moist
         # coupling (zvir != 0) on both arms now, but this lane never
@@ -770,13 +956,29 @@ def create_atmosphere_dycore(
                          "turbulence", "gravity_wave_drag")
             if getattr(config, name) != "none"
         }
-        if _physics_on:
+        # The ONE routed scheme: Kessler warm rain, the shared column core
+        # applied by _run_fv3_duo._fv3_duo_apply_kessler after each step
+        # (apply_kessler_step_sixface_jax).  Alone -- with Held-Suarez the
+        # ordering of two operator-split forcings is an uncertified choice.
+        kessler_alone = _physics_on == {"microphysics": "kessler"}
+        if kessler_alone and config.held_suarez_forcing:
+            raise ValueError(
+                "fv3_duo: microphysics='kessler' together with "
+                "held_suarez_forcing is not certified (two operator-split "
+                "forcings, unmeasured ordering); choose one.")
+        if kessler_alone and model_type != "hydrostatic":
+            raise ValueError(
+                "fv3_duo Kessler is hydrostatic-only: the bridge reads "
+                "pt as temperature on the hydrostatic post-remap state; "
+                f"model_type={model_type!r} + kessler is uncertified.")
+        if _physics_on and not kessler_alone:
             raise ValueError(
                 f"fv3_duo runs DRY dynamics: the certified fv_dynamics "
                 f"lane refuses moist coupling (fv3_dynamics.py:301-311) "
                 f"and the driver lane routes no scheme tendencies (the "
                 f"only physics it runs is the certified Held-Suarez step, "
-                f"--held-suarez-forcing), so these active schemes would "
+                f"--held-suarez-forcing, or Kessler microphysics ALONE), "
+                f"so these active schemes would "
                 f"be silently inert: {_physics_on}. Set them all to "
                 f"'none' (with --allow-disabled-physics in run_amip).")
         if config.held_suarez_forcing and model_type != "hydrostatic":
@@ -876,6 +1078,10 @@ def create_atmosphere_dycore(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),
             storage_dtype=_storage_dtype,
+            # Kessler => MOIST dynamics (user 2026-09-24): a moist scheme
+            # on the adiabatic core is the misleading configuration GLM
+            # flagged, so the coupling follows the scheme, never a knob.
+            moist=(config.microphysics == "kessler"),
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").
@@ -913,6 +1119,31 @@ def create_atmosphere_dycore(
         # unit-tested in test_fv3_duo_layout_policy.
         multiprocess = config.distributed
         devs = jax.devices() if multiprocess else jax.local_devices()
+        kt = config.dycore.fv3_duo_windows
+        if kt is not None:
+            # EXPLICIT window SPMD (M6 in the driver): 6*kt*kt devices, one
+            # window each, on a (face, tile_i, tile_j) mesh.  No auto-
+            # selection and no tolerance on the count: a mismatch is a
+            # mis-built launch, refused (user call 2026-09-21).
+            pad = config.dycore.fv3_duo_window_pad
+            need = 6 * kt * kt
+            if len(devs) != need:
+                raise ValueError(
+                    f"fv3_duo_windows={kt} needs exactly {need} "
+                    f"{'global' if multiprocess else 'local'} devices "
+                    f"(6*kt*kt, one window each); found {len(devs)}. Launch "
+                    f"{need} ranks with --distributed --distributed-mode "
+                    f"spmd, or drop --fv3-duo-windows for the face layout.")
+            mesh = Mesh(np.array(devs).reshape(6, kt, kt),
+                        ("face", "tile_i", "tile_j"))
+            logger.info(
+                "  fv3_duo layout: WINDOW-sharded, kt=%d pad=%d over %d %s "
+                "device(s) (one window each) + face-batched%s", kt, pad,
+                len(devs), "global" if multiprocess else "local",
+                " [multi-process SPMD]" if multiprocess else "")
+            return FV3DuoDynamicsModel(
+                bundle, cfg, step_spmd_mesh=mesh, step_windows=(kt, pad),
+                step_face_batched=True)
         layout = resolve_fv3_duo_layout(
             world=max(jax.process_count(), launcher_world_size()),
             n_local=jax.local_device_count(),

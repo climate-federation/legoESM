@@ -31,7 +31,15 @@ visibly.
 Usage:
     regrid_land_ic.py --source data/lmip_soil_ic/restart_1985_d000h00.npz \
         --surfdata data/legoesm_surfdata_c260716.nc \
-        --target-grid mpas --target-resolution 4 --out <path.npz>
+        --target-grid mpas --target-resolution 4 --out <path.npz> \
+        --source-soil-column 10,3.0,2.0 \
+        --source-soil-hydraulics clapp_hornberger surfdata_cosby \
+            data/legoesm_surfdata_c260716.nc
+
+    The soil-hydraulics attestation is needed while the source predates the
+    stamp.  To stamp an IC already on its grid without regridding it (arrays
+    unchanged), add --stamp-only and give only --source, --out and
+    --source-soil-hydraulics.
 """
 from __future__ import annotations
 
@@ -45,6 +53,16 @@ import numpy as np
 
 _STATE_FIELDS = ("T_soil", "psi_soil", "theta_soil", "runoff_surface",
                  "runoff_subsurface", "snow_depth", "snow_age")
+# Per-file fields copied unchanged.  Anything else a source carries (the optional
+# water reservoirs, canopy water, TgC, carbon pools, frozen fraction) is
+# per-column state this script does not remap, so such a source is refused
+# rather than written with another grid's columns attached.
+_COPIED_FIELDS = ("restart_version", "land_mode", "t_end_s", "n_steps_completed",
+                  "metadata_json", "soil_dz", "soil_z_interface",
+                  "soil_hydraulics_json")
+# Belongs to the SOURCE grid's columns; a regridded state is converted in full
+# on load, so it is dropped rather than attached to the wrong columns.
+_DROPPED_FIELDS = ("soil_hydraulics_column_sig",)
 
 
 def _cols_rad(grid) -> tuple[np.ndarray, np.ndarray]:
@@ -95,13 +113,13 @@ def main(argv=None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", required=True, help="spun-up land restart .npz")
-    ap.add_argument("--surfdata", required=True,
+    ap.add_argument("--surfdata", default=None,
                     help="harmonized surfdata that defines the source land mask")
-    ap.add_argument("--target-grid", required=True,
+    ap.add_argument("--target-grid", default=None,
                     help="target grid type (e.g. mpas, latlon)")
-    ap.add_argument("--target-resolution", type=int, required=True)
+    ap.add_argument("--target-resolution", type=int, default=None)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--source-soil-column", required=True,
+    ap.add_argument("--source-soil-column", default=None,
                     help="attest the SOURCE state's soil column as "
                          "'n_layers,depth_m,growth' (e.g. '10,3.0,2.0'). The "
                          "source file predates the soil-column stamp, so its "
@@ -111,9 +129,58 @@ def main(argv=None) -> int:
                          "this a source on a same-layer-count but different-"
                          "depth column would be silently certified as "
                          "calibrated (codex).")
+    ap.add_argument("--source-soil-hydraulics", nargs=3, default=None,
+                    metavar=("CURVE", "SOURCE", "PARAMETER_FILE"),
+                    help="attest the soil hydraulics an UNSTAMPED source was "
+                         "evolved under, e.g. clapp_hornberger surfdata_cosby "
+                         "data/legoesm_surfdata_c260716.nc. Refused when the "
+                         "source already carries a stamp. Recorded as attested, "
+                         "with the source's md5.")
+    ap.add_argument("--stamp-only", action="store_true",
+                    help="do not regrid: write --source unchanged plus the "
+                         "attested soil-hydraulics stamp to --out (for an IC "
+                         "already on its target grid).")
     args = ap.parse_args(argv)
+    if not args.stamp_only:
+        missing = [f for f in ("surfdata", "target_grid", "target_resolution",
+                               "source_soil_column")
+                   if getattr(args, f) is None]
+        if missing:
+            ap.error("regridding needs " + ", ".join(
+                "--" + m.replace("_", "-") for m in missing))
 
     src = np.load(args.source, allow_pickle=False)
+    extra = sorted(set(src.files) - set(_STATE_FIELDS) - set(_COPIED_FIELDS)
+                   - set(_DROPPED_FIELDS))
+    if extra and not args.stamp_only:
+        raise SystemExit(
+            f"source carries per-column fields this script does not remap: "
+            f"{extra}. Refusing rather than attaching them to the wrong columns.")
+    from legoesm.land.restart import file_md5, soil_hydraulics_stamp
+    hyd_json = None
+    if "soil_hydraulics_json" in src.files:
+        if args.source_soil_hydraulics:
+            raise SystemExit(
+                "the source already records its soil hydraulics; "
+                "--source-soil-hydraulics would overrule the file.")
+    else:
+        if not args.source_soil_hydraulics:
+            raise SystemExit(
+                "the source records no soil hydraulics; state them with "
+                "--source-soil-hydraulics CURVE SOURCE PARAMETER_FILE.")
+        curve, source, pfile = args.source_soil_hydraulics
+        stamp = soil_hydraulics_stamp(curve, source, pfile)
+        stamp.update(attested=True, attested_source_md5=file_md5(args.source))
+        hyd_json = np.array(json.dumps(stamp))
+    if args.stamp_only:
+        if hyd_json is None:
+            raise SystemExit("--stamp-only: the source is already stamped.")
+        out = {k: src[k] for k in src.files}
+        out["soil_hydraulics_json"] = hyd_json
+        np.savez_compressed(args.out, **out)
+        print(f"wrote {args.out}: {args.source} unchanged plus its "
+              "soil-hydraulics stamp")
+        return 0
     meta = json.loads(str(src["metadata_json"]))
     ncol_src = src["T_soil"].shape[0]
 
@@ -134,7 +201,10 @@ def main(argv=None) -> int:
     nearest = nearest_column_map(src_lat, src_lon, dst_lat, dst_lon,
                                  src_valid=land)
 
-    out = {k: src[k] for k in src.files if k not in _STATE_FIELDS}
+    out = {k: src[k] for k in src.files
+           if k not in _STATE_FIELDS and k not in _DROPPED_FIELDS}
+    if hyd_json is not None:
+        out["soil_hydraulics_json"] = hyd_json
     for k in _STATE_FIELDS:
         out[k] = np.asarray(src[k])[nearest]
 

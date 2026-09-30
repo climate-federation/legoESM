@@ -54,8 +54,12 @@ def _channel(outer_integrator="forward_euler", n_lat=8, n_lon=16, **cfg_kw):
     )
     grid = create_latlon_grid(n_lat, n_lon)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    nemo_prognostic_barotropic_velocity = cfg_kw.pop(
+        "_nemo_prognostic_barotropic_velocity", False)
     state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
+        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0,
+        nemo_prognostic_barotropic_velocity=(
+            nemo_prognostic_barotropic_velocity))
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
@@ -193,8 +197,8 @@ def test_boxcar_ab3_live_split_runs_no_nan():
     # NEMO nn_bt_flt=2 (barotropic_time_filter="nemo_boxcar_ab3") = the AB3
     # velocity predictor + ts_bck_interp(alpha=0) ssh temporal dissipation +
     # boxcar averaging, composed WITH the live EEN barotropic Coriolis (the
-    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing (only
-    # nemo_ab3am4 is rejected with the live split), and it must step finite.
+    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing and it
+    # must step finite.
     state, model = _leapfrog_channel(
         barotropic_coriolis="een", barotropic_coriolis_split="live",
         barotropic_time_filter="nemo_boxcar_ab3")
@@ -210,24 +214,33 @@ def test_leapfrog_before_seed_wide_halo_not_implemented():
     # The MLF before-level barotropic seed is not wired into the wide-halo path;
     # the leap-frog step must raise NotImplementedError rather than silently drop
     # the Nbb seed (barotropic_wide_halo=True + a non-ab3 filter reaches the
-    # before-state guard). First step is a forward-Euler start (no seed), so
-    # advance one step to populate the before-fields, then the seeded pass fires.
+    # before-state guard).
+    #
+    # #1729: this used to need TWO steps, because the Euler start returned
+    # before the seeded pass. It does not any more -- the start is the same
+    # program with rDt=dt and Nbb:=Nnn, so it seeds the barotropic mode from
+    # the before level like every other step and the guard fires on step ONE.
+    # That is strictly better: the run refuses before doing any work.
     state, model = _leapfrog_channel(
         barotropic_time_filter="nemo_boxcar_centred",
         barotropic_wide_halo=True, barotropic_local_subcycle_clamp=True)
-    s = model.step(state, dt=_DT)   # forward-Euler start (no before-seed yet)
     with pytest.raises(NotImplementedError, match="wide-halo"):
-        model.step(s, dt=_DT)       # leapfrog pass → before-seed → guard
+        model.step(state, dt=_DT)
 
 
-def test_ab3am4_live_split_still_rejected():
-    # nemo_ab3am4 (nn_bt_flt=3, cross-window carry => substep-0 extrapolates)
-    # stays incompatible with the live split; only the ramp-every-step
-    # nemo_boxcar_ab3 (nn_bt_flt=2) is allowed.
-    with pytest.raises(ValueError, match="nemo_ab3am4"):
-        _leapfrog_channel(barotropic_coriolis="een",
-                          barotropic_coriolis_split="live",
-                          barotropic_time_filter="nemo_ab3am4")
+def test_ab3am4_live_split_runs_no_nan():
+    # GYRE's resolved nn_bt_flt=3 path deliberately combines the AB3/AM4
+    # predictor with live ENE Coriolis. The pre-step Kmm subtraction and the
+    # mid-step live operator therefore need not cancel after substep zero.
+    state, model = _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_time_filter="nemo_ab3am4",
+        _nemo_prognostic_barotropic_velocity=True)
+    s = state
+    for _ in range(4):
+        s = model.step(s, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.u.data)))
+    assert np.all(np.isfinite(np.asarray(s.v.data)))
 
 
 def test_unknown_vorticity_scheme_raises():
@@ -284,7 +297,7 @@ def test_leapfrog_first_step_is_euler():
     # matched forward-Euler reference with the SAME Coriolis/vorticity placement
     state_fe, model_fe = _channel(
         "forward_euler", coriolis_scheme="explicit_ab2",
-        vorticity_scheme="een_total", momentum_time_integrator="rk3_ws")
+        vorticity_scheme="een_total", momentum_time_integrator="rk3")
     s_lf = model_lf.step(state, dt=_DT)
     # Nbb == pre-step now (unfiltered)
     np.testing.assert_allclose(
@@ -550,7 +563,7 @@ def test_een_total_puts_coriolis_in_rhs():
             A_h=0.0, bottom_drag_r=0.0, n_barotropic_substeps=8,
             enable_runtime_checks=False, implicit_vertical_mixing=True,
             coriolis_scheme=cor, vorticity_scheme=vs,
-            momentum_time_integrator="rk3_ws")
+            momentum_time_integrator="rk3")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         tend = model.tendencies(state, None)
         return np.asarray(tend.du_dt.data)
@@ -1059,9 +1072,9 @@ def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
     seen = []
     orig = _pemod.nemo_bottom_drag_rate_faces
 
-    def _spy(u, v, h_k, z_coord, config, grid):
+    def _spy(u, v, h_k, z_coord, config, grid, **kwargs):
         seen.append((np.asarray(u), np.asarray(v)))
-        return orig(u, v, h_k, z_coord, config, grid)
+        return orig(u, v, h_k, z_coord, config, grid, **kwargs)
 
     _pemod.nemo_bottom_drag_rate_faces = _spy
     try:
@@ -1135,9 +1148,9 @@ def test_leapfrog_vmix_drag_rate_uses_the_step_entry_velocity():
     seen = []
     orig = _pemod.nemo_bottom_drag_rate_faces
 
-    def _spy(u, v, h_k, z_coord, config, grid):
+    def _spy(u, v, h_k, z_coord, config, grid, **kwargs):
         seen.append((_tb.extract_stack()[-2].name, np.asarray(u)))
-        return orig(u, v, h_k, z_coord, config, grid)
+        return orig(u, v, h_k, z_coord, config, grid, **kwargs)
 
     _pemod.nemo_bottom_drag_rate_faces = _spy
     try:

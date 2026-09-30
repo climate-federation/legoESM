@@ -161,6 +161,62 @@ def test_zdf_tendency_active_with_constant_closure(state, grid, z_coord):
     assert jnp.allclose(result.dS_zdf, want_S, rtol=1e-10, atol=1e-14)
 
 
+def _nemo_literal_tke_probe_config():
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig,
+        VerticalMixingConfig,
+    )
+
+    vm = VerticalMixingConfig(
+        scheme="tke",
+        tke=TKEConfig(tke_matrix_evaluation="nemo_literal"),
+    )
+    return LatLonCGridOceanConfig.from_flat(
+        A_h=0.0,
+        A_v=0.0,
+        K_v=0.0,
+        bottom_drag_r=0.0,
+        implicit_vertical_mixing=False,
+        physics=OceanPhysicsConfig(vertical_mixing=vm),
+    )
+
+
+def test_nemo_literal_tke_probe_requires_base_rn_dt(state, grid, z_coord):
+    """A leapfrog momentum ``rDt`` is not NEMO's TKE ``rn_Dt``."""
+    cfg = _nemo_literal_tke_probe_config()
+    with pytest.raises(ValueError, match="tke_rn_dt.*nemo_literal"):
+        probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0)
+
+
+def test_nemo_literal_tke_probe_forwards_base_rn_dt(
+    state, grid, z_coord, monkeypatch,
+):
+    """The probe mirrors production's dedicated TKE timestep channel."""
+    import legoesm.ocean.physics.vertical_mixing as vertical_mixing
+
+    cfg = _nemo_literal_tke_probe_config()
+    seen = {}
+
+    def _capture_dt(*args, **kwargs):
+        seen["dt_tke"] = kwargs["dt_tke"]
+        shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+        zeros = jnp.zeros(shape, dtype=state.T.data.dtype)
+        return zeros, zeros
+
+    monkeypatch.setattr(
+        vertical_mixing, "compute_vertical_K_profiles", _capture_dt)
+    probe_latlon_cgrid(
+        state,
+        grid,
+        z_coord,
+        cfg,
+        dt=600.0,
+        tke_rn_dt=300.0,
+    )
+    assert seen["dt_tke"] == 300.0
+
+
 # ---------------------------------------------------------------------------
 # 1. End-to-end probe runs and returns finite arrays
 # ---------------------------------------------------------------------------

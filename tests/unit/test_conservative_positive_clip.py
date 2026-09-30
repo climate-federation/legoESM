@@ -509,6 +509,20 @@ class TestGlobalResidualRedistribution:
         np.testing.assert_allclose(float(jnp.sum(out * w)), t_in, rtol=1e-12)
         assert float(out.min()) >= 0.0
 
+    def test_area_weighted_total_conserved_on_non_equal_area_grid(self):
+        """Lat-lon-like cell areas (cos lat, 40 rows): the global residual must
+        be conserved in the AREA-weighted total, i.e. the physical mass."""
+        from legoesm.core.conservation import apply_water_positivity
+        q, w = self._spiky(seed=1)
+        area = jnp.cos(jnp.linspace(-1.5, 1.5, q.shape[0]))
+        out, _ = apply_water_positivity(
+            {"q_v": q}, None, w, conservative=True, energy_consistent=False,
+            area=area)
+        t_in = float(jnp.sum(q * w * area[:, None]))
+        t_out = float(jnp.sum(out["q_v"] * w * area[:, None]))
+        np.testing.assert_allclose(t_out, t_in, rtol=1e-12)
+        assert float(out["q_v"].min()) >= 0.0
+
     def test_identical_to_column_variant_when_no_negative_columns(self):
         from legoesm.core.conservation import (
             conservative_positive_clip, conservative_positive_clip_global,

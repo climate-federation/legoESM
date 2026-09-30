@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
     tidy_throughput_fields)
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -94,6 +95,21 @@ MPAS_PARITY_MAX_STEPS = 8
 # dry mass to the pre-step value each step, so the drift over a smoke window
 # is the allreduce rounding floor, not scheme drift.
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
+
+
+def dt_for(subdivision):
+    """Fixed-Courant timestep: 300 s at s4, halved per level (dt ~ dx).
+
+    Largest finite dt over 200 steps on 4 GPUs: s7 50, s8 25, s9 12.5,
+    s10 4.69 s (75/37.5/18.75/9.375 blow up); this law sits at or below each.
+    The old max(600*4^(4-s), 30) law went non-finite at s10.
+    """
+    return 300.0 * 2.0 ** (4 - subdivision)
+
+
+def nu_del4_for(subdivision):
+    """del4 coefficient for this subdivision (shared law, hyperdiff.py)."""
+    return hyperdiff_coeff(subdivision, "icosahedral")
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
@@ -128,10 +144,12 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
             f"count divides --reorder-for ({reorder_target}).")
     sigma = create_sigma_coordinate(nlev)
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
-    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
-    # energy-conserving PV flux, SSP-RK3, global mass fixer.
+    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion
+    # (scaled with resolution, nu_del4_for), energy-conserving PV flux,
+    # SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
+        nu_del4=nu_del4_for(subdivision), nu_del4_ps=nu_del4_for(subdivision),
+        fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -165,6 +183,18 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
 def _block(state):
     jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
                            if leaf is not None])
+
+
+def _state_is_finite(state) -> bool:
+    """True when every floating leaf of the (possibly sharded) state is finite.
+
+    Every process must call this: the reduction over a global array is a
+    collective under multi-controller.
+    """
+    import jax.numpy as jnp
+    flags = [jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(state)
+             if jnp.issubdtype(getattr(x, "dtype", np.int8), jnp.inexact)]
+    return bool(jnp.all(jnp.stack(flags))) if flags else True
 
 
 def _global_dry_mass(state, mesh):
@@ -246,8 +276,8 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
-                   help="timestep [s]; default auto: 600 * 4**(4-L) "
-                        "(CFL: dx halves per level), min 30 s.")
+                   help="timestep [s]; default auto: 300 * 2**(4-L) "
+                        "(fixed Courant: dt halves with dx, no floor).")
     p.add_argument("--out", type=str,
                    default="results/a1/mpas_spmd_scaling.jsonl")
     p.add_argument(
@@ -335,7 +365,7 @@ def main() -> int:
 
     dt = args.dt
     if dt is None:
-        dt = max(600.0 * 4.0 ** (4 - args.subdivision), 30.0)
+        dt = dt_for(args.subdivision)
 
     reorder_for = args.reorder_for if args.reorder_for is not None else nd
     if reorder_for < nd:
@@ -343,6 +373,12 @@ def main() -> int:
             f"--reorder-for ({reorder_for}) must be >= --n-devices ({nd}): "
             f"the ghost padding only guarantees divisibility for the "
             f"partition target.")
+    # Precision: the state dtype comes from the precision POLICY (default
+    # fp32), NOT JAX_ENABLE_X64 — set it to match the x64 flag or the
+    # "float64" arm silently runs fp32 state.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64() if jax.config.jax_enable_x64
+               else PrecisionPolicy.fp32())
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
         moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
@@ -542,6 +578,15 @@ def main() -> int:
     hlo_cp = (hlo_census.get("collective_permute")
               if hlo_census else None)
 
+    # A blown-up trajectory times NaN arithmetic, not the model: the fixed
+    # 1e16 del4 went non-finite at s7+ within 4 steps and every such ladder
+    # row serialized as data.  Stamp it; plot_nature_scaling refuses
+    # valid=false / finite_ok=false rows.
+    finite_ok = _state_is_finite(s)
+    if not finite_ok and jax.process_index() == 0:
+        print("ERROR: final state is NON-FINITE; the record is marked "
+              "INVALID (finite_ok=false, valid=false).", flush=True)
+
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
         final_global = (gather_voronoi_state_spmd(s, dev_config)
@@ -604,6 +649,7 @@ def main() -> int:
     med = float(np.median(steady))
     rec = dict(
         component="mpas_atm",
+        finite_ok=finite_ok, valid=finite_ok,
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
@@ -679,8 +725,17 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
+            "nu_del4": nu_del4_for(args.subdivision),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
+            # The NCCL transport the arm ran with: the channel count moves
+            # the s9 ATMOSPHERE step 17% at 128 GPUs, so rows at different settings are
+            # different measurements (plot_nature_scaling.py refuses mixes).
+            "nccl_env": {
+                k: os.environ.get(k, "")
+                for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
+                          "NCCL_P2P_NET_CHUNKSIZE")
+            },
             "halo_knobs": {
                 k: os.environ.get(k, "")
                 for k in ("LEGOESM_MPAS_WIDE_HALO",

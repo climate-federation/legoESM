@@ -58,6 +58,7 @@ __param_spec__ = {
             "tke_surface_min": "numerics: floor/cap",
         },
         "params": {
+            "surface_flux_coeff": {"units": "1", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "FESOM2 namelist tke_cd (3.75) / Veros surface TKE flux (1.0)", "shape": None},
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
@@ -115,7 +116,6 @@ __param_spec__ = {
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
-            "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
             "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
@@ -248,7 +248,6 @@ class TKEConfig(NamedTuple):
                                      # SINGLE length: l_eps = l_k = min(lup,ldn)).
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
-    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     # NEMO dry-w-point TKE.  NEMO closes tke_tke with
     #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
     # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
@@ -266,6 +265,44 @@ class TKEConfig(NamedTuple):
     # Requires positivity="floor" (the Veros positivity branch returns before
     # the `MAX(en,rn_emin)` this mask rides on).
     tke_dry_wmask: bool = False
+    # ----- NEMO rmxl_min provenance (zdftke.F90:841-848) -----------------
+    # NEMO picks the mixing-length floor in TWO arms:
+    #   ln_zdfiwm=.TRUE.  -> rn_emin FORCED to 1e-10 and rmxl_min FORCED to
+    #                        1e-3 (zdftke.F90:842-843); the derivation below
+    #                        is never evaluated.
+    #   ln_zdfiwm=.FALSE. -> rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin))
+    #                        (zdftke.F90:846), i.e. derived from c_k and
+    #                        tke_background, and the namelist floor is unused.
+    # ``False`` (DEFAULT, main's behaviour): the floor IS ``mxl_min``, whatever
+    #   the card set.  That is also the correct value for an ln_zdfiwm=.TRUE.
+    #   card, which simply sets ``mxl_min=1.0e-3`` (ORCA1, ORCA2).
+    # ``True``: take the ln_zdfiwm=.FALSE. derivation.  Only a NEMO-literal
+    #   card that runs ln_zdfiwm=.FALSE. selects it (GYRE, DINO).  The
+    #   derivation is evaluated in binary64 and RAISES without x64, so the
+    #   requirement lands only on the cards that ask for it.
+    nemo_derived_mxl_min: bool = False
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:602 evaluates
+    # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
+    # the anchor is built from ``taum`` alone and a caller that has no
+    # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked
+    # statement, and a missing ``surface_tmask`` is a hard error.  Only the
+    # NEMO-literal cards select it.
+    nemo_mxl0_surface_tmask: bool = False
+    # ----- NEMO rn_mxl0: the ln_mxl0 surface-anchor FLOOR ------------------
+    # ``tke_avn`` floors the wind anchor at ``rn_mxl0``
+    # (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
+    # zdftke.f90:610), so on a CALM column the anchor IS this value.
+    # ``zdf_tke_init`` then OVERWRITES the namelist ``rn_mxl0`` with the
+    # active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
+    # (shipped zdftke.F90:859-862; GYRE ppsrc zdftke.f90:828-831).
+    # ``False`` (DEFAULT, main's behaviour): NO overwrite -- the floor is the
+    #   card's own ``mxl0_min_m``, i.e. the namelist ``rn_mxl0``.  DECISION 72
+    #   (user, 2026-09-28) keeps the ORCA1 OMIP card on this arm.
+    # ``True``: take NEMO's overwrite, i.e. the mixing-length floor.  Only the
+    #   NEMO-literal cards select it (GYRE and everything built on it, the
+    #   ORCA2-zps testcase card, and the NEMO DINO cards).
+    nemo_mxl0_rmxl_min_overwrite: bool = False
+    mxl0_min_m: float = 0.04             # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -287,6 +324,10 @@ class TKEConfig(NamedTuple):
     #                             the implicit solve. ~60x larger surface TKE
     #                             than the flux BC under an ~0.07 Pa wind.
     surface_bc: str = "veros_flux"
+    # Multiplies the Veros wind-work surface TKE flux (|tau|/rho0)^1.5.
+    # FESOM2 applies cd = 3.75 (namelist tke_cd); Veros uses 1.0.
+    # Default 1.0 keeps existing runs bit-identical.
+    surface_flux_coeff: float = 1.0
     # Surface TKE BC PLACEMENT (Phase-2 #1317 T3 — the #1 ranked suspect).
     # NEMO holds en(1) at the z=0 W-POINT and SOLVES the tridiagonal from
     # jk=2, the first INTERIOR w-level (zdftke.F90:264,403-410).
@@ -614,7 +655,7 @@ class TKEConfig(NamedTuple):
     tke_langmuir_evaluation: str = "vectorized"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
-    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
     # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
     # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
     tke_shear_evaluation_stage: str = "implicit_solve_state"
@@ -690,20 +731,10 @@ class TKEConfig(NamedTuple):
     #   BC — the prior legoESM behaviour).
     # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
     #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
-    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
-    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
-    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
-    #   column here reaches the max depth) these coincide exactly; on
-    #   variable topography (a shallower column) the true seafloor
-    #   interface sits SHALLOWER than the array's last row, so the pin
-    #   lands one level below the real bottom (a masked/dry level there —
-    #   downstream wet-interface masking prevents any leak into wet cells,
-    #   so this is NOT a correctness bug, but the BC does not fire at the
-    #   physically correct row on shallow columns). Physics-validator
-    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
-    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
-    #   bottom_level-relative scatter is the documented follow-up before
-    #   any abyssal-tendency certification.
+    #   a Dirichlet identity row at each column's bathymetry-relative
+    #   ``bottom_level``-adjacent W interface when the caller supplies a
+    #   partial-cell bottom index.  The legacy flat-bottom interface remains
+    #   supported by pinning ``e_new[..., -1]`` when no bottom index exists.
     #   Requires the model-step caller to thread the bottom-cell velocities
     #   + the NEMO bottom-drag rate (reusing
     #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no
@@ -786,12 +817,13 @@ class TKEConfig(NamedTuple):
     #   full wave TKE even under compact ice.  Nonzero modes thread
     #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
     #   into the kernels' built-in ``(1-ice_frac)`` factor:
-    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     1 -> eff = tanh(10*fi)   (factor 1-tanh(10*fi), NEMO nn_eice=1)
+    #     2 -> eff = fi            (factor 1-fi, NEMO nn_eice=2)
     #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
     #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
     #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
     #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
-    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class KPPConfig(NamedTuple):
@@ -820,7 +852,6 @@ class KPPConfig(NamedTuple):
     K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
-    c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
     # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
     # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
@@ -864,17 +895,18 @@ class KPPConfig(NamedTuple):
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
     # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
-    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   (NEMO nn_eice numbering; mirrors TKEConfig.eice).  Compact sea ice caps
     #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
     #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
     #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
-    #   1 = linear eff=fi (factor 1-fi; NOT NEMO nn_eice=1 = 1-tanh(10fi));
+    #   1 = eff=tanh(10fi) (factor 1-tanh(10fi));
+    #   2 = linear eff=fi (factor 1-fi);
     #   3 = eff=min(4*fi,1) (max(0,1-4*fi), matches NEMO nn_eice=3, mixing
     #   killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
     #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
-    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class CATKEConfig(NamedTuple):
@@ -1024,3 +1056,76 @@ class VerticalMixingConfig(NamedTuple):
     # Unknown values raise (dispatch hardening); consulted only by
     # ``compute_vertical_K_profiles`` (k_profiles.py).
     vmix_background_mode: str = "additive"
+
+
+# --- FESOM2-JAX FORCA20 TKE constants (fesom_jax/config.py, fesom_jax/tke.py,
+#     fesom_jax/cvmix_tke.py; CORE2 namelist) ---
+_FESOM2_TKE_CD = 3.75           # namelist tke_cd: surface TKE flux coefficient
+_FESOM2_TKE_C66 = 6.6           # Prandtl law Pr = clamp(6.6 Ri, 1, 10)
+_FESOM2_A_VER = 1.0e-4          # background vertical viscosity [m^2/s]
+_FESOM2_K_VER = 1.0e-5          # background vertical diffusivity [m^2/s]
+_FESOM2_KAPPAM_MAX = 100.0      # KappaM ceiling [m^2/s]
+_FESOM2_TKE_MIN = 1.0e-6        # TKE floor [m^2/s^2]
+
+
+def tke_fesom2_card() -> TKEConfig:
+    """TKE constant set matching the FESOM2-JAX reference closure (TkeConfig).
+
+    Field-by-field mapping to FESOM2 (fesom_tke.c / cvmix_tke, TkeConfig):
+
+    - prognostic=True             FESOM2 carries prognostic TKE (one backward-
+                                   Euler step per model step); legoESM default
+                                   is the diagnostic Mode-B chain.
+    - prandtl_mode="richardson"   FESOM2 Pr = clamp(6.6*Ri, 1, 10); the Veros
+                                   "richardson" branch is clamp(prandtl_ri_coeff*Ri, 1, 10).
+    - prandtl_ri_coeff=6.6        FESOM2 TKE_C66.
+    - enable_kappaH_profile=False FESOM2 background Kv is a constant (no Bryan-Lewis).
+    - kappaM_min=1.0e-4           FESOM2 A_VER (background Av).
+    - kappaH_min=1.0e-5           FESOM2 K_VER (background Kv).
+    - kappaM_max=100.0            FESOM2 kappaM_max (binds only off the "unit" Prandtl path).
+    - tke_background=1.0e-6       FESOM2 tke_min (interior floor).
+    - tke_surface_min=1.0e-6      FESOM2 has ONE floor (tke_min); legoESM's
+                                   separate 1e-4 surface floor would hold 100x
+                                   FESOM's TKE under weak wind.
+    - surface_bc="veros_flux"     FESOM2 Neumann (flux) surface BC.
+    - surface_flux_coeff=3.75     FESOM2 namelist tke_cd multiplying (|tau|/rho0)^1.5.
+    - kappa_convention="veros_sqrte"  FESOM2 KappaM = c_k*mxl*sqrt(tke) (Veros);
+                                   the legacy Gaspar form uses sqrt(2 tke).
+    - n2_mode="nemo_bn2"          SIGNED N^2 from the locally linearised EOS
+                                   (NEMO bn2: alpha dT/dz - beta dS/dz), the same
+                                   construction as FESOM2's pressure_bv; a signed
+                                   mode also selects the Veros/FESOM2 single
+                                   buoyancy length with the wall recursion for
+                                   mxl_choice 2, where the legacy clipped in-situ
+                                   N^2 selects the two-cell Bougeault-Lacarrere
+                                   cap. ("adiabatic" is not wired on MPAS.)
+
+    Already equal by default and left untouched: c_k 0.1, c_eps 0.7,
+    alpha_tke 30, mxl_min 1e-8, tke_mxl_choice 2 (Blanke-Delecluse).
+
+    NOT matched: the surface-flux injection thickness -- FESOM2 divides the
+    flux by hnode/2 (cvmix_tke dzt_surf, Veros' 0.5*dzw_top) while the legacy
+    slots here divide by the interior centre spacing (half the source on
+    equal layers); the Veros slots (veros_dz_slots=True) are not wired on the
+    MPAS ocean, so the card keeps the legacy slots on BOTH lanes rather than
+    differ per lane. FESOM2 adds its Av/Kv backgrounds to the TKE-derived
+    diffusivities, legoESM applies kappaM_min/kappaH_min as floors (max), so
+    the two differ where the closure's K falls below the background; FESOM2's
+    tke_min is a per-step hard floor on the field, legoESM's tke_background is
+    the closure's seed/floor value, not a bit-identical implementation.
+    """
+    return TKEConfig(
+        prognostic=True,
+        prandtl_mode="richardson",
+        prandtl_ri_coeff=_FESOM2_TKE_C66,
+        enable_kappaH_profile=False,
+        kappaM_min=_FESOM2_A_VER,
+        kappaH_min=_FESOM2_K_VER,
+        kappaM_max=_FESOM2_KAPPAM_MAX,
+        tke_background=_FESOM2_TKE_MIN,
+        tke_surface_min=_FESOM2_TKE_MIN,
+        surface_bc="veros_flux",
+        surface_flux_coeff=_FESOM2_TKE_CD,
+        kappa_convention="veros_sqrte",
+        n2_mode="nemo_bn2",
+    )

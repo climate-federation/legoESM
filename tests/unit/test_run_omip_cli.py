@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.run.run_omip import build_config_from_args, parse_args
@@ -70,6 +73,35 @@ def test_enable_latlon_spmd_flags_round_trip():
     assert cfg.spmd_n_devices == 4
 
 
+def test_enable_mpas_spmd_flags_round_trip():
+    """--enable-mpas-spmd parses and reaches OMIPRunConfig (the Voronoi SPMD
+    ocean lane); it shares --spmd-n-devices / --multicontroller with the
+    lat-band lane."""
+    args = parse_args(["--grid", "mpas"])
+    assert args.enable_mpas_spmd is False
+    cfg = build_config_from_args(args)
+    assert cfg.enable_mpas_spmd is False
+
+    args = parse_args(["--grid", "mpas", "--enable-mpas-spmd",
+                       "--spmd-n-devices", "8"])
+    cfg = build_config_from_args(args)
+    assert cfg.enable_mpas_spmd is True
+    assert cfg.enable_latlon_spmd is False
+    assert cfg.spmd_n_devices == 8
+
+
+def test_mpas_lloyd_flag_round_trip():
+    """--mpas-lloyd defaults to the production SCVT (50) and parses."""
+    assert parse_args(["--grid", "mpas"]).mpas_lloyd == 50
+    assert parse_args(["--grid", "mpas", "--mpas-lloyd", "0"]).mpas_lloyd == 0
+
+
+def test_no_final_snapshot_flag_round_trip():
+    """--no-final-snapshot is off by default; probe arms select it."""
+    assert parse_args(["--grid", "mpas"]).no_final_snapshot is False
+    assert parse_args(["--grid", "tripole", "--no-final-snapshot"]).no_final_snapshot is True
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
@@ -99,6 +131,17 @@ def test_multicontroller_without_spmd_refused():
     assert args.enable_latlon_spmd is False
     with pytest.raises(SystemExit, match="requires --enable-latlon-spmd"):
         run_omip_single("latlon", args)
+
+
+def test_mpas_k_zeta_bih_pin_round_trips():
+    """--mpas-k-zeta-bih pins the biharmonic vorticity damping; absent = derived
+    from the mesh spacing (None reaches _create_setup, which leaves the model to
+    scale it)."""
+    assert parse_args(["--grid", "mpas"]).mpas_k_zeta_bih is None
+    assert parse_args(["--grid", "mpas", "--mpas-k-zeta-bih", "1e14"]
+                      ).mpas_k_zeta_bih == 1.0e14
+    assert parse_args(["--grid", "mpas", "--mpas-k-zeta-bih", "0"]
+                      ).mpas_k_zeta_bih == 0.0
 
 
 def test_jra55_sea_ice_flag_parses():
@@ -658,7 +701,8 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
     class SetupReached(Exception):
         pass
 
-    def capture(dz, **kwargs):
+    def capture(dz, t_depth_ref_m=None, **kwargs):
+        seen["t_depth_ref_m"] = t_depth_ref_m
         seen.update(kwargs)
         raise SetupReached
 
@@ -667,7 +711,86 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
         run_omip._create_setup(
             "mpas", "ico1", 3, 60.0, "full", "type1",
             dz_ref_override=np.array([10.0, 20.0, 30.0]))
-    assert seen == {"nemo_e3w_source": "depth_difference"}
+    assert seen == {"t_depth_ref_m": None, "nemo_e3w_source": "depth_difference"}
+
+
+def test_viscosity_overrides_reach_the_plain_latlon_lane():
+    """--A-h / --K-h used to be read only by the realistic-bathymetry branch,
+    so on every other lane (the tripole NEMO-mesh lane included) they parsed
+    and did nothing.  A 1/12 degree run needs a viscosity ~30x below the ~5
+    degree default to satisfy the explicit stability limit, so an inert flag
+    there is a silently unstable run."""
+    import scripts.run.run_omip as run_omip
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1",
+        A_h_override=3.0e3, K_h_override=2.0e3)
+    assert float(cfg.lateral_viscosity.A_h) == 3.0e3
+    assert float(cfg.K_h) == 2.0e3
+
+    _, _, cfg_default, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1")
+    assert float(cfg_default.lateral_viscosity.A_h) == 1.0e5    # default untouched
+
+
+def test_overrides_reach_the_tripole_recipe(monkeypatch, tmp_path):
+    """The tripole lane does NOT build its configuration in the branch the
+    other two tests cover: it calls the NEMO-match recipe, which the driver
+    used to invoke with its physics argument only.  A probe arm that lowered
+    the viscosity by a factor of 33 therefore reproduced the baseline to three
+    digits -- the knob reached nothing.  Pin that the overrides now arrive as
+    recipe fields, and that an un-overridden run still asks for the recipe
+    default."""
+    import scripts.run.run_omip as run_omip
+    from legoesm.ocean.fidelity import nemo_match_recipe
+
+    seen = {}
+    real = nemo_match_recipe.nemo_match_tripole_model_config
+
+    def capture(cfg=None, **kw):
+        seen["cfg"] = cfg
+        return real(cfg, **kw)
+
+    monkeypatch.setattr(nemo_match_recipe,
+                        "nemo_match_tripole_model_config", capture)
+    # reuse the synthetic NEMO-like mesh the tripole grid tests write, so this
+    # needs no data files
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "grids"))
+    from test_tripole_multifile_mesh import _write_tripole_like_mesh
+    mesh = tmp_path / "mesh.nc"
+    _write_tripole_like_mesh(mesh, 8, 12, dead_north_row=False)
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "tripole", "eorca1", 3, 1000.0, "none", "type1",
+        tripole_mesh=str(mesh), tripole_fold_convention="(n_lon-i)%n_lon",
+        A_h_override=3.0e3, pgf_scheme="smc03")
+    assert seen["cfg"] is not None
+    assert seen["cfg"].A_h == 3.0e3
+    assert seen["cfg"].pgf_scheme == "smc03"
+    assert cfg.pgf_scheme == "smc03"
+    assert float(cfg.lateral_viscosity.A_h) == 3.0e3
+
+    seen.clear()
+    run_omip._create_setup("tripole", "eorca1", 3, 1000.0, "none", "type1",
+                           tripole_mesh=str(mesh),
+                           tripole_fold_convention="(n_lon-i)%n_lon")
+    assert seen["cfg"] is None          # recipe default, byte-identical
+
+
+def test_pgf_scheme_override_reaches_the_plain_latlon_lane():
+    """Same inert-flag defect as the viscosity overrides: the pressure-gradient
+    scheme selector was read only by the realistic-bathymetry branch.  The
+    tripole lane now carries partial cells, where the density-Jacobian scheme
+    is the one built for the geometry, so the selector has to reach it."""
+    import scripts.run.run_omip as run_omip
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1", pgf_scheme="smc03")
+    assert cfg.pgf_scheme == "smc03"
+
+    _, _, cfg_default, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1")
+    assert cfg_default.pgf_scheme == "adcroft"    # default untouched
 
 
 @pytest.mark.parametrize("bad,match", [
@@ -860,3 +983,130 @@ def test_runoff_map_not_built_when_routing_is_off():
     args = parse_args(["--grid", "mpas"])
     assert _build_runoff_map_for_run(
         args, object(), "mpas", np.ones((4, 4), dtype=bool)) is None
+
+
+def test_tripole_mesh_flags_parse():
+    """--tripole-mesh (pathsep-joined split mesh) and
+    --tripole-strip-north-rows (dead T-pivot halo row) reach args; defaults
+    keep the registry mesh + the mesh as stored."""
+    import os
+    a = parse_args(["--grid", "tripole"])
+    assert a.tripole_mesh is None and a.tripole_strip_north_rows == 0
+    spec = os.pathsep.join(["h.nc", "z.nc", "m.nc"])
+    a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
+                    "--tripole-strip-north-rows", "1"])
+    assert a.tripole_mesh == spec and a.tripole_strip_north_rows == 1
+    assert a.tripole_fold_convention == "auto"
+    assert a.tripole_closed_seas is None
+    a = parse_args(["--grid", "tripole", "--tripole-closed-seas", "marmara,black_sea"])
+    assert a.tripole_closed_seas == "marmara,black_sea"
+    a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
+                    "--tripole-fold-convention", "(n_lon-i)%n_lon"])
+    assert a.tripole_fold_convention == "(n_lon-i)%n_lon"
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "tripole", "--tripole-fold-convention", "bogus"])
+
+
+def test_spmd_sea_ice_guard_slab_only():
+    """--enable-latlon-spmd + --jra55-sea-ice is allowed ONLY for the slab
+    thermodynamic tile (dynamics none, one category); dynamics/ITD run their
+    halo pads outside the sharded ocean body and must be refused."""
+    from scripts.run.run_omip import _spmd_sea_ice_guard
+    _spmd_sea_ice_guard("none", 1)                    # slab: allowed
+    for dyn, ncat in (("evp", 1), ("mevp", 1), ("free_drift", 1), ("none", 3)):
+        with pytest.raises(SystemExit, match="slab thermodynamic tile"):
+            _spmd_sea_ice_guard(dyn, ncat)
+
+
+def test_spmd_device_count_off_and_single_controller():
+    from scripts.run.run_omip import _spmd_device_count
+    off = build_config_from_args(parse_args(["--grid", "tripole"]))
+    assert _spmd_device_count(off) == 1
+    on = build_config_from_args(parse_args([
+        "--grid", "tripole", "--enable-latlon-spmd", "--spmd-n-devices", "3"]))
+    assert _spmd_device_count(on) == 3
+
+
+def test_frazil_flag_round_trips_and_defaults_off():
+    assert parse_args(["--grid", "mpas"]).frazil is False
+    assert parse_args(["--grid", "mpas", "--frazil"]).frazil is True
+    assert parse_args(["--grid", "mpas", "--frazil", "--no-frazil"]).frazil is False
+
+
+def test_tke_card_round_trip_and_rejection():
+    """--tke-card fesom2 selects the prognostic FESOM2 constant set; unknown
+    cards are refused by argparse AND by the builder (dispatch hardening)."""
+    import argparse
+
+    import scripts.run.run_omip as run_omip
+
+    args = run_omip.parse_args(["--vertical-mixing-scheme", "tke", "--tke-card", "fesom2"])
+    vm = run_omip.build_vertical_mixing_config_from_args(args)
+    assert vm.scheme == "tke"
+    assert vm.tke.prognostic is True
+    assert vm.tke.surface_flux_coeff == 3.75
+    assert vm.tke.prandtl_mode == "richardson"
+    assert vm.tke.enable_kappaH_profile is False
+
+    dflt = run_omip.build_vertical_mixing_config_from_args(
+        run_omip.parse_args(["--vertical-mixing-scheme", "tke"]))
+    assert dflt.tke.prognostic is False
+    assert dflt.tke.surface_flux_coeff == 1.0
+    assert dflt.tke.prandtl_mode == "unit"
+
+    with pytest.raises(SystemExit):
+        run_omip.parse_args(["--tke-card", "bogus"])
+    ns = run_omip.parse_args(["--vertical-mixing-scheme", "tke"])
+    ns = argparse.Namespace(**{**vars(ns), "tke_card": "bogus"})
+    with pytest.raises(ValueError, match="unknown --tke-card"):
+        run_omip.build_vertical_mixing_config_from_args(ns)
+
+
+def test_ic_from_fesom_mesh_round_trip():
+    a = parse_args(["--grid", "mpas"])
+    assert a.ic_from_fesom_mesh is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20"])
+    assert a.ic_from_fesom_mesh == "/meshes/forca20"
+    assert a.woa_init is True
+    assert a.ic_cache_dir is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20",
+                    "--ic-cache-dir", "/work/ic_cache"])
+    assert a.ic_cache_dir == "/work/ic_cache"
+
+
+def test_driver_forwards_ic_cache_dir_to_the_fesom_initializer():
+    import inspect
+    from scripts.run import run_omip
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index("init_ocean_from_fesom_mesh(")
+    assert 'cache_dir=getattr(args, "ic_cache_dir", None)' in src[i:i + 600]
+
+
+def test_kpp_cfl_cap_follows_the_run_dt():
+    """KPPConfig.cfl_cap_dt_s must equal the dynamics dt (default 300 s
+    matched only the MPAS default), so the driver sets it from --dt."""
+    import inspect
+    from scripts.run import run_omip
+    cfg = build_config_from_args(parse_args(["--grid", "mpas", "--dt", "600"]))
+    assert cfg.vertical_mixing.kpp.cfl_cap_dt_s == 300.0          # config default
+    assert run_omip.with_kpp_cfl_dt(cfg, 600.0).vertical_mixing.kpp.cfl_cap_dt_s == 600.0
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index('dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]')
+    assert "run_config = with_kpp_cfl_dt(run_config, dt)" in src[i:i + 200]
+    assert src.index("vertical_mixing=run_config.vertical_mixing") > i
+
+
+def test_kpp_cfl_cap_explicit_value_disagreeing_with_dt_raises():
+    """An explicitly set KPP CFL cap that disagrees with the run dt must not
+    be silently overwritten; the effective cap is recorded in run_config.json."""
+    import inspect
+    from scripts.run import run_omip
+    cfg = build_config_from_args(parse_args(["--grid", "mpas"]))
+    vm = cfg.vertical_mixing
+    user = cfg._replace(vertical_mixing=vm._replace(
+        kpp=vm.kpp._replace(cfl_cap_dt_s=900.0)))
+    with pytest.raises(ValueError, match="must use the run dt"):
+        run_omip.with_kpp_cfl_dt(user, 600.0)
+    assert run_omip.with_kpp_cfl_dt(user, 900.0).vertical_mixing.kpp.cfl_cap_dt_s == 900.0
+    src = inspect.getsource(run_omip.run_omip_single)
+    assert '"kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s)' in src

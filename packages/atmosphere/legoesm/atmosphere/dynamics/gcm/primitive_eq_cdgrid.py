@@ -51,7 +51,7 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree, finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -142,8 +142,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Apply zero_mean_tendency() to dp_s/dt every RK stage. Requires MPI allreduce.
     use_async_halo: bool = False
         # MPI interior/boundary split for compute-comm overlap.
-    use_fv3_lin_pgf: bool = False
-        # FV3 Lin (1997) cross-product PGF. FV3_3D iter 4: INERT — needs forward-backward stepping
         # for stability with RK3 (CFL-incompatible). Retained for future iter.
     div_damp_dddmp: float = 0.0
         # FV3_3D iter 5: adaptive Smag div damping. FV3 sw_core.F90:1720
@@ -363,8 +361,7 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
-    # FV3_3D iter 4: Lin (1997) cross-product PGF not stable with RK3 (needs forward-backward);
-    # use_fv3_lin_pgf flag inert here.
+    # Lin (1997) cross-product PGF is not stable with RK3 (needs forward-backward).
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
@@ -2030,11 +2027,20 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.cdgrid.base.area)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` SKIPS downcasts by default, so in ``mixed``
+        # this line never rounded the mass fixer's float64 back out of the bulk
+        # state -- adversarial review traced winds, temperature and every
+        # tracer arriving float64 on step TWO.  ``finalize_to_storage`` is the
+        # downcasting version and keeps ``p_s`` at the accumulate dtype on
+        # purpose (the exact mass correction is load-bearing).  It is a no-op
+        # whenever storage and accumulate share a dtype, i.e. in every mode
+        # except mixed, so fp32/fp64 stay byte-identical.
+        state_out = finalize_to_storage(cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache as _lru_cache
 
 import jax.numpy as jnp
 import numpy as np
@@ -66,17 +67,20 @@ class DINOConfig:
     lon_west_deg: float = -50.0    # western basin boundary
     lon_east_deg: float = 0.0      # eastern basin boundary
     lat_max_deg: float = 70.0      # symmetric N/S truncation latitude
-    #   NB on the nemo_faithful_grid path the row count is fixed (n_lat=195),
-    #   so the Mercator projection truncates the outermost T-centre at ±69.151°
-    #   (NEMO's merc_proj) — this 70° gates the valid range, not the exact edge.
+    #   NB on the nemo_faithful_grid path the row count is fixed (n_lat=199 by
+    #   NEMO's merc_proj), so the Mercator projection puts the outermost
+    #   T-centre at ±69.852° — this 70° gates the valid range, not the exact
+    #   edge, and it is NOT read on that path.
     # Opt-in: build the standalone lat-lon grid on NEMO's EXACT DINO R1 mesh
-    # (mesh-verified: T-centres lon [1.5,48.5] / faces [1,49], 48 zonal cells,
-    # 195 meridional rows with the equator ON a T-point at ±69.151°) instead of
-    # the legoESM [-50,0]/198×50 default. Default OFF so existing DINO runs are
-    # byte-identical (the 48° vs 50° basin is not comparable). When ON, the lon
-    # frame + sill anchor MUST be NEMO's — use ``nemo_faithful_dino_config`` (it
-    # co-sets lon_west/lon_east/sill_lon_m_deg); ``dino_lat_lon_grid`` raises if
-    # the frame is inconsistent. See docs/ocean/fidelity/dino_tendency_certificate.md.
+    # -- 52 zonal cells (T-centres lon [-0.5,50.5], U-faces [0,51]) x 199
+    # meridional rows with the equator ON a T-point, outermost T-centre
+    # ±69.852°, bit-exact against NEMO's own mesh_mask -- instead of the
+    # legoESM [-50,0]/198×50 default. Default OFF so existing DINO runs are
+    # byte-identical (the 50°-basin analytic bowl is not comparable). When ON,
+    # the lon frame, sill anchor and vertical coordinate MUST be NEMO's — use
+    # ``nemo_faithful_dino_config`` (it co-sets them); ``dino_lat_lon_grid``
+    # raises if the frame is inconsistent. Gated by
+    # scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py.
     nemo_faithful_grid: bool = False
     channel_lat_south_deg: float = -65.0  # southern edge of re-entrant channel
     channel_lat_north_deg: float = -45.0  # northern edge of re-entrant channel
@@ -576,14 +580,22 @@ class DINOConfig:
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
     # the avm factor — see tke_prandtl_ri below, now wired to "nemo_ri").
-    # T18/T19 — mixing-length floors: NEMO's ln_mxl0 init OVERWRITES BOTH
-    # rn_mxl0 (surface) and rmxl_min (interior) to the SAME derived value
-    # rmxl_min=1e-6/(rn_ediff*sqrt(rn_emin))=0.01 m for DINO's rn_ediff=0.1,
-    # rn_emin=1e-6 (zdftke.F90:846,859-863) — the namelist rn_mxl0=0.04 is
-    # DEAD CODE once ln_mxl0=T. legoESM defaults: mxl_min=1e-8 (interior,
-    # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
-    tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
-    tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T18/T19 — non-NEMO recipes retain their configured mixing-length floor.
+    # NEMO choices derive rmxl_min from c_k/tke_background in the shared TKE
+    # implementation (shipped zdftke.F90:845-847), so this field is not a
+    # hidden NEMO-card choice.
+    tke_mxl_min_m: float = 1.0e-8                # non-NEMO configured floor
+    # NEMO rmxl_min arm (zdftke.F90:841-848).  False (DEFAULT, main's
+    # behaviour): the floor IS tke_mxl_min_m.  True: DINO sets no ln_zdfiwm, so
+    # namelist_ref:1200 leaves it .FALSE. and zdf_tke_init DERIVES
+    # rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m (:846).  Only the NEMO
+    # DINO cards select it; a generic DINO recipe keeps its configured floor.
+    tke_nemo_derived_mxl_min: bool = False
+    tke_nemo_mxl0_rmxl_min_overwrite: bool = False
+    # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+    # :640-642 is the rn_mxl0 floor that follows it.
+    # Only the NEMO DINO cards select the masked statement.
+    tke_nemo_mxl0_surface_tmask: bool = False
     # T18b — DRY-w-point TKE: NEMO closes tke_tke with
     # `en = MAX(en,rn_emin) * wmask` (cfgs/DINO/MY_SRC/zdftke.F90:565 =
     # upstream src/OCE/ZDF/zdftke.F90:469), so en is EXACTLY 0 below the
@@ -902,6 +914,14 @@ class DINOConfig:
     # dynspg_ts.F90:963-966,978-979).  The kamm cards override to
     # "nemo_ssh_avg" (see the card comment in DINO_RECIPES).
     barotropic_seed_face_depth: str = "min_rule"
+    # BarotropicConfig.nemo_prognostic_barotropic_state, threaded 1:1 via
+    # from_flat.  False (DEFAULT, main's behaviour): no prognostic external
+    # mode is allocated in the initial state and the barotropic window seeds
+    # from the 3-D reduction.  True: the state carries NEMO's uu_b/vv_b pair
+    # (oce.F90:39,99) and the window reads it (dynspg_ts.F90:484-500).  Only
+    # the NEMO DINO cards select it; every other DINO recipe carries no new
+    # prognostic state.
+    nemo_prognostic_barotropic_state: bool = False
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -973,6 +993,10 @@ class DINOConfig:
     # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
     # Literal default keeps every non-DINO-fidelity recipe byte-identical.
     zad_qco_evaluation: str = "generic"
+    # Which NEMO program's after-SSH slot the first wzv call reads; stated
+    # per card, never inferred (decision 75).  Empty on a card that resolves
+    # the nemo_literal ZAD branch is a hard error at step time.
+    nemo_first_wzv_after_ssh: str = ""
     # Coupled post-barotropic WZV call-2 hdiv x Kaa-r3t evaluation.
     wzv_call2_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
@@ -1189,7 +1213,7 @@ DINO_RECIPES: dict[str, dict] = {
     # === match. See docs/ocean/fidelity/dino_setup_audit.md + the setup+namelist
     # === audit. ONE piece is not yet config-matchable and is flagged TODO below
     # === (Madec ln_traldf_iso + ln_ldfeiv). Grid: pair with nemo_faithful_dino_config
-    # === for NEMO's exact 48x195 mesh + bathymetry frame.
+    # === for NEMO's exact 52x199 mesh + bathymetry frame.
     "nemo_dino_kamm": {
         # -- EOS (nameos: ln_seos=T, rn_lambda1=0.06, rn_mu1=1.497e-4) --
         "eos": "nemo_seos",
@@ -1221,7 +1245,15 @@ DINO_RECIPES: dict[str, dict] = {
         #    NEMO-faithful prognostic closure; cures the eq surface avm 32×
         #    over-mixing (mxl 16.8 m vs NEMO ~0.2 m). --
         "tke_prognostic": True,                  # NEMO prognostic en at model dt
-        "tke_mxl_choice": 3,                     # nn_mxl=3 lup/ldown + ln_mxl0 (rn_mxl0=0.04)
+        "tke_mxl_choice": 3,                     # nn_mxl=3 lup/ldown + ln_mxl0
+        # ln_mxl0 overwrites rn_mxl0 with rmxl_min (zdftke.F90:859-862), and
+        # DINO runs ln_zdfiwm=.FALSE. (namelist_ref:1200), so the anchor floor
+        # is the DERIVED 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m, not 0.04.
+        "tke_nemo_derived_mxl_min": True,
+        # ln_mxl0=.TRUE., so zdf_tke_init overwrites rn_mxl0 with rmxl_min
+        # (zdftke.F90:859-862): the anchor floor IS the mixing-length floor.
+        "tke_nemo_mxl0_rmxl_min_overwrite": True,
+        "tke_nemo_mxl0_surface_tmask": True,
         "tke_n2_mode": "nemo_bn2",               # zdftke consumes eosbn2's rn2
         "tke_surface_bc": "nemo_dirichlet",      # en(1)=MAX(rn_emin0, rn_ebb·taum/rho0)
         "tke_dissipation": "nemo_1p5_split",     # zdftke zfact2/zfact3 1.5/0.5 split
@@ -1237,8 +1269,6 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_two_level_trigger": True,    # zdfevd MIN(rn2,rn2b) (zdfevd.F90:119)
         # -- Phase-2 #1317 Tier C: small faithful items (tke_prandtl_ri --
         #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
-        "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
-        "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
         # `en = MAX(en,rn_emin)*wmask` (MY_SRC/zdftke.F90:565 = upstream
         # :469) -> en==0 below the seafloor -> zmxlm==rmxl_min (:759 / :651)
         "tke_dry_wmask": True,
@@ -1416,6 +1446,15 @@ DINO_RECIPES: dict[str, dict] = {
         # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
         # thickness alone worsens it, so expose only the coupled selector.
         "zad_qco_evaluation": "nemo_literal",
+        # Which program's after-SSH the FIRST wzv call reads.  Both
+        # nemo_dino_kamm cards state the leapfrog's ssh_nxt continuity
+        # prediction, which is what round 39 MEASURED on this card as the
+        # pair that closes ZAD, and what these cards have always resolved to.
+        # STATED, not inferred (decision 75).  See the VORTEX round-5 receipt
+        # for the open item: the non-MLF card's own NEMO build has not been
+        # re-read for which of the two it runs, so this records the measured
+        # value rather than a re-derivation.
+        "nemo_first_wzv_after_ssh": "leapfrog_continuity",
         "wzv_call2_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
@@ -1445,7 +1484,7 @@ DINO_RECIPES: dict[str, dict] = {
         # approximation -- NOT the true finite-difference R*dphi legoESM's
         # default "exact" convention computes. Closes the e2t (-1.27e-5..
         # +9.5e-6) / e1e2t (-2.5e-5..+4.1e-5) mesh_mask residual to ~1e-7
-        # (roundoff) on the DINO R1 48x195 mesh. See
+        # (roundoff) on the DINO R1 52x199 mesh. See
         # legoesm.grids.latlon.create_mercator_grid's docstring for the
         # NEMO citation. Since #1455 it ALSO puts the two v-face scale
         # factors on NEMO's own V-point Mercator latitude gphiv
@@ -1540,6 +1579,41 @@ DINO_RECIPES: dict[str, dict] = {
         # ``TestBarotropicSeedFaceDepth::
         # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
+        # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
+        # (oce.F90:39,99) -- but NOT ON THIS CARD, and the reason is the
+        # stepper DINO compiles.  legoESM's carried pair has ONE slot: the
+        # substep loop commits the window-averaged external solution at the
+        # end of a step and reads it back at the start of the next one.  That
+        # is right under the RK3 stepper, whose end-of-step swap is
+        # "Nrhs = Nbb ; Nbb = Naa ; Naa = Nrhs" (src/OCE/stprk3.F90:213,
+        # compiled ppsrc line 216), so the committed pair IS the next step's
+        # Kbb.  It is WRONG under the modified leap-frog, whose rotation is
+        # "Nrhs = Nbb ; Nbb = Nnn ; Nnn = Naa ; Naa = Nrhs"
+        # (cfgs/DINO/BLD/ppsrc/nemo/stpmlf.f90:577-580), which puts a value
+        # committed at the end of step n at the NOW level on step n+1, not the
+        # BEFORE level.  DINO compiles no key_RK3 (cfgs/DINO/cpp_DINO.fcm
+        # declares only "key_qco key_vco_3d") and therefore runs stp_MLF
+        # (cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185).  DINO also sets
+        # ln_bt_fw = .false. (RUN_TRAJ/ocean.output:1074), so its window seed
+        # takes the CENTRED branch and reads puu_b(:,:,Kbb) -- the BEFORE
+        # level, one rotation older
+        # (cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:489-491).  A one-slot carry
+        # cannot deliver that level, so selecting the RK3 arrangement here fed
+        # the seed a state one time level too new.  This is a rollback to the
+        # reduction-based seed that produced every certified DINO number, not
+        # the faithful end state: NEMO does carry the pair prognostically, and
+        # doing that on an MLF card needs a SECOND slot rotated with Nbb/Nnn.
+        # That is named follow-up work, not started here.  MEASURED COST on the
+        # certified from-rest month: day-30 wet 3-D temperature rms against
+        # NEMO's RUN_TRAJ kt=960 went 2.040e-03 K -> 6.982e-03 K, a factor
+        # 3.42, and stayed there for three weeks because no landing gate ran
+        # DINO from rest.  This dict is the shared NEMO-DINO base, so the
+        # forward-Euler card inherits the same value; only the MLF card was
+        # measured, because the Euler card has its own step-5 implicit-solve
+        # instability (round 184) and cannot complete the month.  See docs/ocean/fidelity/testcases/
+        # nemo_testcases_l2_gyre_dino_month_regression_receipt.md.  The GYRE
+        # testcase cards DO compile key_RK3 and keep the carried pair.
+        "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -2666,6 +2740,34 @@ def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
     ``cfg.vertical_coordinate`` ("zstar" | "masked_zco")."""
     if cfg is None:
         cfg = DINOConfig()
+    if cfg.nemo_faithful_grid:
+        # 36 reference levels from NEMO's own e3t_0/gdept_0 wrapped in a
+        # FULL-STEP staircase cut at NEMO's own per-column k_bot.  Level 36 is
+        # NEMO's permanently dry dummy and stays dry here too.
+        #
+        # THE LADDER (#1728, round 61; measured by
+        # scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py
+        # section 4 and by spg_kt1_barotropic_ladder.py rung R0).  NEMO's DINO
+        # carries TWO vertical ladders and this card used to run on the wrong
+        # one.  usr_def_zgr calls zgr_sco_mi96 on a FLAT column (zflat = zHmax
+        # = 4000 m, usrdef_zgr.F90:107-118), so the 3-D e3t_0 it returns is
+        # horizontally UNIFORM -- the column-to-column spread over the 342134
+        # wet cells is exactly 0.0 at every level -- but it is NOT the 1-D
+        # reference ladder e3t_1d.  The two agree for k = 1..25 and then part
+        # company: e3t_0/e3t_1d = 0.979, 0.945, 0.924, 0.915, 0.919, 0.935,
+        # 0.965, 1.009, 1.070, 1.148 at k = 26..35.  On the 1-D ladder the
+        # layer thicknesses differed from NEMO's by up to 70.4 m on 94134 of
+        # 342134 wet cells and the u-face column depth by up to 104.2 m (4.0%)
+        # on a quarter of the wet faces.
+        #
+        # The domain below now stands on NEMO's own ladder: the bridge call in
+        # _nemo_faithful_dino_domain pins e3t_mode="both".
+        if cfg.vertical_coordinate != "masked_zco":
+            raise ValueError(
+                "nemo_faithful_grid=True builds a masked full-step staircase "
+                f"and needs vertical_coordinate='masked_zco'; got "
+                f"{cfg.vertical_coordinate!r}.")
+        return nemo_faithful_dino_domain().z_coord
     z_ref = create_dino_z_star(cfg)
     if cfg.vertical_coordinate == "zstar":
         return z_ref
@@ -2811,26 +2913,38 @@ def dino_mpas_initial_state_arrays(
 # A_h(j) = 0.5·U_M·dx(j) = (0.5·U_M·R·Δλ)·cos(φ(j)).
 # ---------------------------------------------------------------------
 
-# NEMO DINO R1 exact grid (mesh_mask-verified against our NEMO 5.0.2 build):
-# 48 zonal T-cells over faces [1°, 49°] (T-centres [1.5, 48.5]); 195 meridional
-# rows with the equator ON a T-point (j=97, ±69.151° at the truncation). The lat
-# count is NEMO's merc_proj truncation (K=97), NOT the floor-based auto-count, so
-# it is passed explicitly. create_mercator_grid reproduces glamt/gphit to 3e-6°.
-_NEMO_DINO_NLON = 48
-_NEMO_DINO_NLAT = 195
-_NEMO_DINO_LON_WEST = 1.0    # western cell FACE (rn_lam_min frame)
-_NEMO_DINO_LON_EAST = 49.0   # eastern cell FACE
+# NEMO DINO R1 exact grid, TRUE FRAME.  NEMO 5.0.2's DINO domain is 52 zonal
+# T-cells x 199 meridional rows: usr_def_nam derives jpi = (rn_lam_max -
+# rn_lam_min)/rn_e1_deg + 2 = 52 and jpj = nn_jeq_s - nn_jeq_n + 1 = 199
+# (usrdef_nam.F90:141-155; confirmed by RUN_TRAJ/ocean.output:39-40, and by the
+# haloless mesh_mask.nc's own 52x199 dimensions).  T-centres run lon
+# -0.5..50.5 and the U-faces 0..51; the equator is ON a T-point (row 100 of
+# 199).  A run log's jpiglo=56 / jpjglo=203 are these plus 2*nn_hls.
+#
+# UNTIL 2026-09-08 THESE READ 48/195 AND FACES [1,49] -- the halo-strip-era
+# frame, from before #1313 established that NEMO 5 writes mesh_mask WITHOUT
+# halos.  Every certified DINO twin has run on the true frame (via the bridged
+# mesh); only this standalone path had not, so a standalone run and a twin run
+# were not the same experiment.
+_NEMO_DINO_NLON = 52
+_NEMO_DINO_NLAT = 199
+_NEMO_DINO_LON_WEST = 0.0    # westernmost U-face = zgr_get_boundaries pminlam
+_NEMO_DINO_LON_EAST = 51.0   # easternmost  U-face = zgr_get_boundaries pmaxlam
 
 
 def nemo_faithful_dino_config(base: DINOConfig | None = None) -> DINOConfig:
     """A DINOConfig on NEMO's exact DINO R1 grid frame (opt-in, mesh-verified).
 
-    Sets ``nemo_faithful_grid`` and co-sets the coupled longitude frame the
-    bathymetry needs — the basin walls (``lon_west_deg``/``lon_east_deg``) and
-    the Drake sill anchor (``sill_lon_m_deg``, which is anchored at the western
-    wall) — to NEMO's [1°, 49°] frame. Use this instead of flipping
+    Sets ``nemo_faithful_grid`` and co-sets everything that has to move with
+    it: the basin walls (``lon_west_deg``/``lon_east_deg``) and the Drake sill
+    anchor (``sill_lon_m_deg``, anchored at the western wall) to NEMO's
+    [0°, 51°] frame, and ``vertical_coordinate`` to ``"masked_zco"`` because
+    NEMO's DINO is ``ln_zco`` full-step. Use this instead of flipping
     ``nemo_faithful_grid`` alone, which would leave the bathymetry in the
-    legoESM [-50°, 0°] frame and mark the whole grid as land.
+    legoESM [-50°, 0°] frame and mark the whole grid as land. It also pins
+    ``omega`` and ``metric_convention`` to NEMO's, which the mesh already
+    uses; ``dino_lat_lon_grid`` raises rather than let a card disagree with
+    the geometry it is handed.
     """
     import dataclasses
     base = base if base is not None else DINOConfig()
@@ -2840,7 +2954,113 @@ def nemo_faithful_dino_config(base: DINOConfig | None = None) -> DINOConfig:
         lon_west_deg=_NEMO_DINO_LON_WEST,
         lon_east_deg=_NEMO_DINO_LON_EAST,
         sill_lon_m_deg=_NEMO_DINO_LON_WEST,
+        vertical_coordinate="masked_zco",
+        # NEMO's OWN planet.  A bare DINOConfig carries legoesm.constants.Omega,
+        # a four-significant-figure rounding 1.58e-05 relative away, and the
+        # mesh this path builds is NEMO's -- so leaving it would put the config
+        # side and the geometry side on two different Earths (the exact split
+        # #1455 found in the bridge lane).  Every shipped DINO card already
+        # sets this value; the co-set is for the bare `--nemo-faithful-grid`.
+        omega=_NEMO_CONSTANTS.Omega,
+        # NEMO's closed-form isotropic Mercator metric (pe1t == pe2t,
+        # usr_def_hgr.F90:111-119) is what the transcribed mesh reproduces.
+        metric_convention="nemo_isotropic",
     )
+
+
+def nemo_faithful_dino_domain():
+    """See :func:`_nemo_faithful_dino_domain`; keyed on the precision policy.
+
+    The cache MUST be keyed on the storage dtype: the bridge builds its arrays
+    at whatever policy is live on the first call, and a bare ``lru_cache()``
+    would then hand a float32 domain back to a caller that had since selected
+    fp64 (or the reverse) -- silently, and with the two never comparable.
+    """
+    from legoesm.core.precision import get_policy
+    return _nemo_faithful_dino_domain(get_policy().storage)
+
+
+@_lru_cache(maxsize=4)
+def _nemo_faithful_dino_domain(_storage_dtype):
+    """NEMO's DINO domain (geometry, vertical coordinate, land mask), analytic.
+
+    Builds NEMO's mesh from its own namelist with
+    :func:`legoesm.ocean.fidelity.nemo_dino_mesh.nemo_dino_mesh` -- no NEMO
+    file is read -- and then hands it to the SAME bridge, with the SAME
+    arguments (``periodic_i=True, full_step=True``), that the certified DINO
+    twins use on the file-read mesh
+    (``scripts/validate/ocean_fidelity/dino_1226/kamm_run5y_v3.py``).  Going
+    through the bridge rather than re-deriving a geometry is the point: the
+    re-entrant channel, the land ring, the full-step staircase and the
+    face-mask conventions are then the certified ones by construction, not a
+    second implementation that has to be kept in step.
+
+    Cached on the precision policy's storage dtype: the MESH depends only on
+    NEMO's fixed DINO R1 namelist, but the arrays the bridge builds from it are
+    stored at the live policy, and the three driver entry points below each
+    need the same one.
+
+    Returns
+    -------
+    NemoBridgeOutput
+        ``.geometry`` (LatLonCGridGeometry), ``.z_coord`` (full-step), and
+        ``.land_mask`` (NEMO's surface ``tmask``).
+    """
+    import numpy as _np
+    from legoesm.ocean.fidelity.nemo_dino_mesh import nemo_dino_mesh
+    from legoesm.ocean.fidelity.nemo_io import NemoState
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        bridge_nemo_to_legoesm_topo)
+
+    # THIS DOMAIN CANNOT BE BUILT BELOW fp64, and the failure is worth naming
+    # here rather than three frames down.  The mesh carries NEMO's gdept_0 and
+    # e3w_0, whose `mesh_reference` identity (gdept_0[k] - gdept_0[k-1] ==
+    # e3w_0[k]) holds EXACTLY in fp64 -- measured 0.0 over the whole 36-level
+    # ladder -- and misses by 1.2e-4 m once the arrays are cast to float32, so
+    # `create_z_star_from_thicknesses` refuses.  Rule 1c says an oracle
+    # comparison runs fp64 anyway; `run_dino.py` already forces it for every
+    # NEMO-fidelity run.
+    if _storage_dtype is not _np.float64 and _storage_dtype.__name__ != "float64":
+        raise ValueError(
+            "the NEMO-faithful DINO domain requires the fp64 precision policy "
+            f"(storage is {_storage_dtype.__name__}). JAX_ENABLE_X64=1 is NOT "
+            "enough -- call legoesm.core.precision.set_policy("
+            "PrecisionPolicy.fp64()) before building it. run_dino.py does "
+            "this for you on every NEMO-fidelity run.")
+
+    g = nemo_dino_mesh()
+    # The bridge carries a prognostic state across as well; this path starts
+    # FROM REST and dino_lat_lon_state replaces T/S/u/v/eta wholesale, so a
+    # zero state is both sufficient and honest here.  (Passing the analytic
+    # ICs instead would build them twice, in two conventions.)
+    z = _np.zeros(g.tmask.shape, dtype=_np.float64)
+    rest = NemoState(T=z, S=z, u=z, v=z,
+                     ssh=_np.zeros(g.tmask.shape[:2], dtype=_np.float64),
+                     rhd=None)
+    return bridge_nemo_to_legoesm_topo(
+        g, rest, periodic_i=True, full_step=True,
+        # THE LADDER NEMO ACTUALLY INTEGRATES WITH (#1728, decision 27).
+        # DINO is compiled `key_qco key_vco_3d` (cfgs/DINO/cpp_DINO.fcm:1), and
+        # under key_vco_3d every reference scale factor in NEMO's source IS the
+        # 3-D array -- `#define E3t_0(i,j,k) e3t_3d(i,j,k)`, `#define
+        # DEPt_0(i,j,k) gdept_3d(i,j,k)` (domzgr_substitute.h90:102-119).  The
+        # 1-D ladder e3t_1d is reachable only under key_vco_1d (:72-87), which
+        # DINO does not define.  Passing the mode as a LITERAL rather than
+        # leaving it to the bridge's `LEGOESM_NEMO_E3T` default is deliberate:
+        # this card cannot be put back on a grid NEMO does not have.  The
+        # certified twin resolves the same choice the same way
+        # (kamm_twin_90d.resolve_ladder_mode).
+        e3t_mode="both",
+        # The certified twin passes this whenever the card selects NEMO's
+        # literal TKE penetration profile (kamm_twin_90d.py:1311), because
+        # that profile is htau = max(0.5, min(30, 45|sin(lat)|)) in DEGREES
+        # and reconstructing degrees from the radians geometry is too lossy
+        # for it.  Every card this builder serves selects it, and without the
+        # degrees the run ABORTS at step 1 ("requires native T-point degree
+        # latitudes ... grid.native_lat_T_deg is None") -- so the standalone
+        # path has to hand the bridge what the twin hands it, or it is not
+        # the same experiment and does not run at all.
+        carry_native_lat_deg=True)
 
 
 def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
@@ -2851,10 +3071,11 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
     Default ``n_lon = 50`` gives 1° equatorial cells — paper R1.
 
     ``cfg.nemo_faithful_grid`` (opt-in) instead builds NEMO's EXACT DINO R1
-    mesh — 48×195 with the equator on a T-point and faces [1°, 49°] — so a
-    standalone run matches NEMO cell-for-cell (the ``n_lon`` argument is then
-    ignored). The bathymetry lon frame must be NEMO's; build the config via
-    :func:`nemo_faithful_dino_config` (this raises otherwise).
+    mesh — 52×199, equator on a T-point, U-faces [0°, 51°] — so a standalone
+    run matches NEMO cell-for-cell (the ``n_lon`` argument is then ignored) and
+    returns the C-grid GEOMETRY rather than a raw ``LatLonGrid``. The
+    bathymetry lon frame and the vertical coordinate must be NEMO's; build the
+    config via :func:`nemo_faithful_dino_config` (this raises otherwise).
     """
     from legoesm.grids.latlon import create_mercator_grid
 
@@ -2862,34 +3083,50 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
         cfg = DINOConfig()
 
     if cfg.nemo_faithful_grid:
-        # The bathymetry (dino_bathymetry) reads lon_west/lon_east; if they are
-        # not NEMO's [1,49] frame the grid lons fall outside the basin and every
-        # cell is masked land. Fail loudly rather than silently produce a dead
-        # domain — the coupled fields come from nemo_faithful_dino_config.
+        # The bathymetry (dino_bathymetry) and the surface forcing read
+        # lon_west/lon_east; if they are not NEMO's [0,51] frame the grid lons
+        # fall outside the basin and every cell is masked land. Fail loudly
+        # rather than silently produce a dead domain — the coupled fields come
+        # from nemo_faithful_dino_config.
         if (cfg.lon_west_deg, cfg.lon_east_deg) != (
                 _NEMO_DINO_LON_WEST, _NEMO_DINO_LON_EAST):
             raise ValueError(
-                "nemo_faithful_grid=True requires the NEMO [1,49] longitude "
+                f"nemo_faithful_grid=True requires the NEMO "
+                f"[{_NEMO_DINO_LON_WEST:g},{_NEMO_DINO_LON_EAST:g}] longitude "
                 f"frame, got lon_west={cfg.lon_west_deg}, "
                 f"lon_east={cfg.lon_east_deg}. Build the config with "
                 "nemo_faithful_dino_config() so the bathymetry frame + sill "
                 "anchor are co-set."
             )
-        return create_mercator_grid(
-            n_lon=_NEMO_DINO_NLON,
-            lat_max_deg=cfg.lat_max_deg,
-            lon_west_deg=cfg.lon_west_deg,
-            lon_east_deg=cfg.lon_east_deg,
-            equator_on_tpoint=True,
-            n_lat=_NEMO_DINO_NLAT,
-            omega=cfg.omega,
-            # #1226: keep the raw LatLonGrid's own dy/area consistent with
-            # the LatLonCGridGeometry the model actually steps on (built
-            # from cfg.metric_convention via ensure_geometry) — direct
-            # readers of grid.dy/grid.area (diagnostics, CFL) then see the
-            # same convention as the tendencies.
-            metric_convention=cfg.metric_convention,
-        )
+        br = nemo_faithful_dino_domain()
+        geom = br.geometry
+        # The mesh comes from NEMO's namelist, not from cfg, so a cfg field
+        # that WOULD have shaped the old create_mercator_grid call must be
+        # checked rather than silently dropped: agreeing today is not the same
+        # as being wired.  (All three agree for the shipped cards; a
+        # disagreement means the card is asking for a grid this path cannot
+        # build.)
+        if (geom.n_lat, geom.n_lon) != (_NEMO_DINO_NLAT, _NEMO_DINO_NLON):
+            raise ValueError(
+                f"NEMO DINO mesh is {geom.n_lat}x{geom.n_lon}, expected "
+                f"{_NEMO_DINO_NLAT}x{_NEMO_DINO_NLON}.")
+        if float(geom.omega) != float(cfg.omega):
+            raise ValueError(
+                f"nemo_faithful_grid builds Coriolis on NEMO's own rotation "
+                f"rate {float(geom.omega)!r}; the card asks for "
+                f"{float(cfg.omega)!r}. Set DINOConfig.omega to NEMO's "
+                "(legoesm.ocean.constants_config.NEMO_OMEGA).")
+        if cfg.metric_convention != "nemo_isotropic":
+            raise ValueError(
+                "nemo_faithful_grid reproduces NEMO's own isotropic Mercator "
+                "metric (e1t == e2t); the card asks for metric_convention="
+                f"{cfg.metric_convention!r}.")
+        # Returns the C-grid GEOMETRY (not a raw LatLonGrid): it is built from
+        # NEMO's own cell/face latitudes rather than re-derived, which is what
+        # makes it bit-exact, and it is the same object the certified twin
+        # steps on.  Every downstream DINO builder already accepts a geometry
+        # (the twin passes one), and the model constructor takes either.
+        return geom
 
     return create_mercator_grid(
         n_lon=n_lon,
@@ -2899,6 +3136,78 @@ def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
         omega=cfg.omega,
         metric_convention=cfg.metric_convention,
     )
+
+
+def _nemo_dino_domain_for(grid, z_coord, land_mask, cfg):
+    """NEMO's DINO mesh when this run IS the DINO experiment, else None.
+
+    The initial state has to follow the DOMAIN, not a config flag.  A run on
+    NEMO's 52x199x36 DINO frame, with NEMO's own surface ``tmask``, IS the
+    DINO experiment, and its initial condition is ``usr_def_istate``'s --
+    whether it got there through ``run_dino.py --nemo-faithful-grid`` or
+    through the bridge that reads ``mesh_mask.nc``.  Keying on
+    ``cfg.nemo_faithful_grid`` instead would have left the four from-rest
+    twin screens (dino_90d_screen, dino_year_screen, dino_year_screen_
+    fullframe, box_budget_run) on the paper profile, because no recipe sets
+    that flag -- only the CLI and the committed YAML card do.
+
+    All three parts are CHECKED, not assumed: the horizontal frame and its
+    latitudes (:func:`_nemo_dino_source_lat_deg`, which raises rather than
+    guess), the level count, and the surface land mask cell-for-cell.  Any
+    other grid keeps the paper profile, byte-identically.
+    """
+    from legoesm.ocean.fidelity.nemo_dino_mesh import (
+        nemo_dino_domain_size, nemo_dino_mesh)
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
+
+    if land_mask is None:
+        return None
+    # THE CARD HAS TO BE A NEMO CARD TOO.  The geometry alone is not enough: a
+    # veros / mitgcm / oceananigans cross-model card run on the bridged 199x52
+    # frame is deliberately comparing OTHER models on NEMO's domain, and must
+    # keep the paper profile.  Both of these are the card's own existing
+    # declarations, not a new switch -- only nemo_dino_kamm and
+    # nemo_dino_kamm_mlf select the literal NEMO forcing, and
+    # nemo_faithful_dino_config is what the CLI and the committed YAML set.
+    if not (cfg.nemo_faithful_grid
+            or cfg.dino_wind_profile_evaluation == "nemo_literal"):
+        return None
+    if _nemo_dino_source_lat_deg(grid) is None:
+        return None
+    _n_lon, _n_lat, jpk = nemo_dino_domain_size()
+    if int(z_coord.n_levels) != jpk:
+        return None
+    g = nemo_dino_mesh()
+    # The VERTICAL LADDER, not just the level count: NEMO's initial profile is
+    # evaluated at NEMO's gdept_0, so a run whose cells are a different size is
+    # a different experiment even at the same n_levels (a reviewer halved
+    # z_full_ref -- 4000 m to 2000 m -- and got a bit-identical T back).
+    #
+    # NEMO's DINO carries TWO ladders and BOTH are its own (#1728): the 1-D
+    # reference e3t_1d, and the 3-D e3t_0 the run actually integrates
+    # (key_vco_3d, domzgr_substitute.h90:102).  They part company below k=25
+    # by up to 70.4 m, which is 7000x this tolerance.  Testing only e3t_1d
+    # made this a SILENT FALLBACK: the moment the card moved onto NEMO's own
+    # thicknesses the test failed, this returned None, and the run quietly
+    # swapped NEMO's initial state for the analytic paper profile -- measured
+    # cost at step 1, T rms 5.0e-6 -> 1.6e-2 K against NEMO's kt=1, i.e. 127%
+    # of NEMO's own first step.  Neither ladder is "the" ladder here; a run on
+    # either is on NEMO's DINO frame, and a run on neither is not.
+    dz = np.asarray(z_coord.dz_ref, dtype=np.float64).ravel()
+    nemo_ladders = (g.e3t_1d,
+                    effective_vertical_scale_factors(
+                        g, np.asarray(g.tmask) > 0.5, mode="both")[0])
+    if not any(dz.shape == np.shape(lad) and np.allclose(
+            dz, lad, rtol=0.0, atol=_NEMO_DINO_LADDER_TOL_M)
+            for lad in nemo_ladders):
+        return None
+    mask = np.asarray(land_mask)
+    if mask.shape != g.tmask.shape[:2]:
+        return None
+    if not bool(np.array_equal(mask > 0.5, g.tmask[:, :, 0] > 0.5)):
+        return None
+    return g
 
 
 def dino_lat_lon_initial_state_arrays(
@@ -2928,22 +3237,62 @@ def dino_lat_lon_initial_state_arrays(
     T : array (n_lat, n_lon, n_levels) [°C]
     S : array (n_lat, n_lon, n_levels) [g/kg]
     H_bathy : array (n_lat, n_lon) [m]
+        The CONTINUOUS analytic bowl.  On a full-step (masked-zco / NEMO)
+        coordinate this is NOT what the model carries: ``dino_lat_lon_state``
+        replaces it with ``sum(h_partial)``, the level-snapped column depth,
+        so that geometry and state agree at eta=0.  The two differ by up to
+        432 m on the NEMO grid -- which is the quantisation of a continuous
+        bowl onto 35 levels whose deepest is ~475 m thick, not an error.  The
+        snapped value equals NEMO's own ``sum(tmask*e3t_1d)`` exactly.
     land_mask : array (n_lat, n_lon) (1=ocean, 0=land)
     """
     if cfg is None:
         cfg = DINOConfig()
+
+    if land_mask_override is None and cfg.nemo_faithful_grid:
+        # NEMO's own surface tmask (analytically transcribed): the domain is
+        # i-periodic through the ACC channel band and walled elsewhere by REAL
+        # land columns, plus the closed first/last row.  The analytic seam-wall
+        # helper below encodes a DIFFERENT convention (one interior wall column,
+        # no closed N/S rows) and would give a different domain -- which is
+        # exactly the mismatch between the standalone path and every certified
+        # twin that this branch removes.
+        land_mask_override = nemo_faithful_dino_domain().land_mask
 
     lat_deg_1d = jnp.degrees(grid.lat)                        # (n_lat,)
 
     # Bathymetry (shared canonical construction)
     H_bathy = dino_lat_lon_bowl(grid, cfg)
 
-    # ICs: T(lat, z), S(lat, z) — broadcast over longitude
-    T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
-    T = jnp.broadcast_to(T_lat_z[:, None, :],
-                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
-    S = jnp.broadcast_to(S_lat_z[:, None, :],
-                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
+    nemo_mesh = _nemo_dino_domain_for(
+        grid, z_coord, land_mask_override, cfg)
+    if nemo_mesh is not None:
+        # NEMO's OWN initial state (usrdef_istate.F90:129-183, nn_initcase=4),
+        # transcribed once in the module that already owns this mesh.
+        #
+        # The pure (lat, z) formula below cannot express it: NEMO evaluates
+        # the profile at the 3-D ``gdept_0`` (which differs from this
+        # coordinate's ``z_full_ref`` by up to 110 m), takes the meridional
+        # blend's anchors from MAXVAL(gphit) = 69.8517 and from a MINVAL over
+        # WET cells rather than from ``cfg.lat_max_deg`` = 70 and the deepest
+        # REFERENCE level, and calls scalar libm ``tanh``.  Measured effect of
+        # all three at day 0: 2.1e-2 K rms / 8.4e-2 K max, and 1.6e-3 psu rms
+        # (issue #1729).
+        from legoesm.ocean.fidelity.nemo_dino_mesh import nemo_dino_istate
+        _T, _S = nemo_dino_istate(nemo_mesh)
+        # The transcription is fp64 (it has to be, to be bit-exact); the STATE
+        # is stored at whatever the run's coordinate is, exactly as the paper
+        # branch below would be.  An oracle comparison sets the fp64 policy.
+        _dt = jnp.asarray(z_coord.z_full_ref).dtype
+        T = jnp.asarray(_T, dtype=_dt)
+        S = jnp.asarray(_S, dtype=_dt)
+    else:
+        # ICs: T(lat, z), S(lat, z) — broadcast over longitude
+        T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
+        T = jnp.broadcast_to(T_lat_z[:, None, :],
+                             (grid.n_lat, grid.n_lon, z_coord.n_levels))
+        S = jnp.broadcast_to(S_lat_z[:, None, :],
+                             (grid.n_lat, grid.n_lon, z_coord.n_levels))
 
     if land_mask_override is not None:
         # i-periodic / re-entrant (NEMO ln_Iperio): the caller (the NEMO
@@ -3026,6 +3375,9 @@ def dino_lat_lon_state(
         H_max=cfg.H_deep,
         land_mask_override=land_mask,
         H_bathy_override=H_bathy,
+        # The card decides whether this run CARRIES NEMO's prognostic external
+        # mode; a recipe that does not select it allocates no new state.
+        nemo_prognostic_barotropic_velocity=cfg.nemo_prognostic_barotropic_state,
     )
     # Replace T, S with our lat-z structured ICs
     state = state._replace(
@@ -3101,7 +3453,9 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_surface_bc_level=cfg.tke_surface_bc_level,
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
-            mxl0_min_m=cfg.tke_mxl0_min_m,
+            nemo_derived_mxl_min=cfg.tke_nemo_derived_mxl_min,
+            nemo_mxl0_rmxl_min_overwrite=cfg.tke_nemo_mxl0_rmxl_min_overwrite,
+            nemo_mxl0_surface_tmask=cfg.tke_nemo_mxl0_surface_tmask,
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
@@ -3505,6 +3859,8 @@ def dino_lat_lon_model_config(
             EnhancedDiffusionConfig, OceanConvectionConfig,
         )
         from legoesm.ocean.physics.lateral_mixing.config import (
+            BiharmonicConfig,
+            HarmonicConfig,
             LateralMixingConfig,
         )
         from legoesm.ocean.physics.shortwave_penetration import (
@@ -3522,6 +3878,12 @@ def dino_lat_lon_model_config(
             # scheme="none" means this copy remains behaviorally inert.
             lateral_mixing=LateralMixingConfig(
                 scheme="none",
+                # DECISION 75 (operator note BL addendum): stated, not
+                # defaulted.  Both values are the ones main resolves to today and
+                # both are inert on this card; a card's resolved configuration
+                # must not depend on a library default.
+                harmonic=HarmonicConfig(enforce_cfl=False),
+                biharmonic=BiharmonicConfig(enforce_cfl=True),
                 gm_redi=GMRediConfig(
                     slope_face_thickness_evaluation=(
                         cfg.gm_redi_slope_face_thickness_evaluation),
@@ -3593,6 +3955,7 @@ def dino_lat_lon_model_config(
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
         zad_qco_evaluation=cfg.zad_qco_evaluation,
+        nemo_first_wzv_after_ssh=cfg.nemo_first_wzv_after_ssh,
         wzv_call2_evaluation=cfg.wzv_call2_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
@@ -3700,6 +4063,7 @@ def dino_lat_lon_model_config(
         barotropic_seed_evaluation=cfg.barotropic_seed_evaluation,
         barotropic_pgf_evaluation=cfg.barotropic_pgf_evaluation,
         barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
+        nemo_prognostic_barotropic_state=cfg.nemo_prognostic_barotropic_state,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
@@ -3891,7 +4255,8 @@ def dino_mpas_model_config(
         EnhancedDiffusionConfig, OceanConvectionConfig,
     )
     from legoesm.ocean.physics.lateral_mixing.config import (
-        GMRediConfig, LateralMixingConfig, VisbeckConfig,
+        BiharmonicConfig, GMRediConfig, HarmonicConfig, LateralMixingConfig,
+        VisbeckConfig,
     )
     from legoesm.ocean.physics.shortwave_penetration import (
         ShortwavePenetrationConfig,
@@ -3916,6 +4281,12 @@ def dino_mpas_model_config(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
+            # DECISION 75 (operator note BL addendum): stated, not
+            # defaulted.  Both values are the ones main resolves to today and
+            # both are inert on this card; a card's resolved configuration
+            # must not depend on a library default.
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
             gm_redi=GMRediConfig(
                 # Placeholders; ignored at runtime because Visbeck is enabled.
                 # Anchored to visbeck_kappa_min so the static value is non-
@@ -4090,6 +4461,85 @@ EXPERIMENT_CONFIG = {
 # doesn't subtract Q_sr per paper eq 8). See Decisions Log 2026-05-14.
 # ---------------------------------------------------------------------
 
+#: How far ``degrees(grid.lat)`` may sit from NEMO's own ladder and still be
+#: NEMO's DINO frame -- see :func:`_nemo_dino_source_lat_deg`.
+_NEMO_DINO_FRAME_TOL_DEG = 1e-3
+
+#: How far a run's reference cell thicknesses may sit from NEMO's ``e3t_1d``
+#: and still be NEMO's DINO ladder.  Sized like the latitude bound: the fp32
+#: policy moves this ladder by ~2e-4 m on its thickest (475 m) cell, while a
+#: genuinely different ladder differs by metres.
+_NEMO_DINO_LADDER_TOL_M = 1e-2
+
+
+def _nemo_dino_source_lat_deg(grid):
+    """NEMO's own degree-valued ``gphit`` for ``grid``, or ``None``.
+
+    ``nemo_literal`` forcing has to be evaluated at the latitudes NEMO's
+    ``usr_def_hgr`` STORED (usrdef_hgr.F90:95-107), not at a
+    radians->degrees round-trip of them and not at a hand-rebuilt ladder.
+    UNTIL 2026-09-10 this rebuilt the ladder here, deriving its Mercator
+    spacing as ``(lon_east - lon_west) / n_lon`` -- 51/52 = 0.98077 deg on
+    the true frame, against NEMO's ``rn_e1_deg = 1.0`` -- so the latitudes
+    were up to 0.737 deg wrong.  On the standalone card that is 8.8e-3 N/m2
+    of stress, 4% of the 0.1999 N/m2 peak; on the BRIDGED probes, whose
+    lon_east/lon_west differ, the worst measured case is 3.63e-2 N/m2 --
+    18% of peak, and 4.71e-2 on the TKE stress modulus.  There is now no
+    second ladder: the values come from
+    :func:`~legoesm.ocean.fidelity.nemo_dino_mesh.nemo_dino_hgr`, the SAME
+    transcription :func:`nemo_faithful_dino_domain` builds the grid from.
+
+    Returns ``None`` when ``grid`` is not NEMO's DINO frame, in which case
+    the caller evaluates at the grid's OWN cell latitudes -- the only
+    latitudes such a grid has.  A grid that HAS NEMO's shape but not NEMO's
+    latitudes raises: guessing which mesh it is would be the silent
+    substitution this helper exists to prevent.
+
+    THE IDENTIFICATION BOUND IS NOT A TOLERANCE ON THE ANSWER -- the returned
+    ladder is always the exact transcription.  It is sized to separate two
+    measured populations and nothing else: ``degrees(grid.lat)`` sits 1.4e-14
+    deg from the ladder under the fp64 policy and 7.1e-6 deg under the
+    DEFAULT fp32 policy (the geometry is stored at the live policy), while
+    the wrong-spacing ladder this replaced was 0.737 deg away.  1e-3 deg is
+    140x above the fp32 case and 700x below the wrong-mesh case.  A tighter
+    bound was tried and is a TRAP: at 1e-9 an fp32 run silently took the
+    fallback, so the standalone card's stress depended on the global
+    precision policy.
+    """
+    import jax
+
+    from legoesm.ocean.fidelity.nemo_dino_mesh import (
+        nemo_dino_domain_size, nemo_dino_hgr)
+
+    n_lon, n_lat, _jpk = nemo_dino_domain_size()
+    if (int(grid.n_lat), int(grid.n_lon)) != (n_lat, n_lon):
+        return None
+    # LONGITUDES TOO.  A grid shifted by 180 deg has the same shape and the
+    # same latitudes and is emphatically not this basin.
+    lam_t = nemo_dino_hgr()["lam_t"]
+    if not np.allclose(np.asarray(jnp.degrees(grid.lon), dtype=np.float64),
+                       lam_t, rtol=0.0, atol=_NEMO_DINO_FRAME_TOL_DEG):
+        return None
+    if isinstance(grid.lat, jax.core.Tracer):
+        raise ValueError(
+            "dino_lat_lon_surface_forcing_arrays / "
+            "dino_lat_lon_initial_state_arrays are SETUP-time builders and "
+            "read the grid's latitudes as concrete values; they cannot run "
+            "with a traced geometry. Build the forcing and the initial state "
+            "outside jit/vmap and pass the arrays in.")
+    phi_t = nemo_dino_hgr()["phi_t"]                     # (n_lat,) degrees
+    gap = float(np.max(np.abs(
+        np.asarray(jnp.degrees(grid.lat), dtype=np.float64) - phi_t)))
+    if gap > _NEMO_DINO_FRAME_TOL_DEG:
+        raise ValueError(
+            f"grid is {n_lat}x{n_lon} -- NEMO's DINO frame -- but its "
+            f"latitudes are {gap:.3e} deg from NEMO's own ladder, far beyond "
+            f"the {_NEMO_DINO_FRAME_TOL_DEG:g} deg identification bound. "
+            "Refusing to hand it NEMO's latitudes, and refusing to guess "
+            "which mesh it is.")
+    return phi_t
+
+
 def dino_lat_lon_surface_forcing_arrays(
     grid, cfg: DINOConfig | None = None, *, wind_lat_deg=None,
 ):
@@ -4107,41 +4557,33 @@ def dino_lat_lon_surface_forcing_arrays(
     lat_1d = jnp.degrees(grid.lat)               # (n_lat,)
     wind_lat_1d = lat_1d
     if cfg.dino_wind_profile_evaluation == "nemo_literal":
-        if wind_lat_deg is None:
-            # usrdef_hgr.F90:95-107 constructs DINO's stored degree-valued
-            # gphiu directly, before any radians representation exists.  Do
-            # the same for the complete NEMO card.  A lat(rad)->degrees
-            # round-trip moves 154 row-8 columns across the 1e-15 bar.
-            # Scalar ``math`` follows the same libm path as the active NEMO
-            # build (and is bit-identical to its 195 raw gphiu rows); NumPy's
-            # vector transcendental dispatch is not bit-identical here.
-            import math
-            rad = math.pi / 180.0
-            # A bridged NEMO geometry retains two halo rows/columns on each
-            # side (199x52 for the physical 195x48 card).  Its source spacing
-            # is still the physical 48-column spacing.  Ordinary standalone
-            # Mercator grids have no such halo and use their own n_lon.
-            is_nemo_halo_geometry = (
-                grid.n_lat == _NEMO_DINO_NLAT + 4
-                and grid.n_lon == _NEMO_DINO_NLON + 4
-                and (cfg.lon_east_deg - cfg.lon_west_deg) == 48.0
-            )
-            source_n_lon = (_NEMO_DINO_NLON if is_nemo_halo_geometry
-                            else grid.n_lon)
-            rn_e1_deg = ((cfg.lon_east_deg - cfg.lon_west_deg)
-                         / float(source_n_lon))
-            jeq = grid.n_lat // 2
-            half_offset = 0.0 if grid.n_lat % 2 else 0.5
-            wind_lat_deg = [
-                (1.0 / rad) * math.asin(math.tanh(
-                    rn_e1_deg * rad * float(j - jeq + half_offset)))
-                for j in range(grid.n_lat)
-            ]
-        wind_lat_1d = jnp.asarray(wind_lat_deg, dtype=jnp.float64)
-        if wind_lat_1d.shape != lat_1d.shape:
-            raise ValueError(
-                f"wind_lat_deg shape {wind_lat_1d.shape} != grid latitude "
-                f"shape {lat_1d.shape}")
+        sourced = wind_lat_deg is None
+        if sourced:
+            wind_lat_deg = _nemo_dino_source_lat_deg(grid)
+        if wind_lat_deg is not None:
+            wind_lat_1d = jnp.asarray(wind_lat_deg, dtype=jnp.float64)
+            if wind_lat_1d.shape != lat_1d.shape:
+                raise ValueError(
+                    f"wind_lat_deg shape {wind_lat_1d.shape} != grid latitude "
+                    f"shape {lat_1d.shape}")
+            if sourced:
+                # usrdef_sbc.F90:221 evaluates the wind at ``gphiu``, and
+                # :174-181 / :233-238 / :268 evaluate S*, T* and the solar
+                # flux at ``gphit``.  On DINO's Mercator mesh those are the
+                # SAME array -- ``zuj`` and ``ztj`` are the same operand and
+                # go through the same expression (usrdef_hgr.F90:96-97,
+                # :106-107), verified bit-for-bit against mesh_mask -- so the
+                # one ladder serves all four, and taking it from the source
+                # degrees removes the radians round-trip (which moves 8 of the
+                # 199 rows by 1.4e-14 deg under fp64, and 198 of them by
+                # 7.1e-6 deg under the fp32 policy).
+                #
+                # ONLY when we sourced the ladder ourselves.  An EXPLICIT
+                # ``wind_lat_deg`` names the WIND and moves the wind alone: a
+                # caller that deliberately passes a different stagger (gphiv
+                # would move T* by 0.186 K) must not silently redefine the
+                # restoring targets as well.
+                lat_1d = wind_lat_1d
     T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
     S_star_1d = dino_S_star(lat_1d, cfg)
     Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)

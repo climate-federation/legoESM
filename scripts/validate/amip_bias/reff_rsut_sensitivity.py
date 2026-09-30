@@ -16,6 +16,16 @@ radius are computed ONCE with the production cloud config and held fixed; only
                  saw: the run sets aerosol_ccn, which replaces radiation's
                  droplet number from the external aerosol (codex review), so
                  no claim is made that this row equals the run's 7.84 um.
+    arm in-cloud : the PSD radius with the condensate reconstructed IN-CLOUD
+                 (q_c/cf), which is the pairing an AMBIENT droplet number
+                 requires.  Production sets aerosol_ccn, whose AOD-derived
+                 number is in-cloud but takes the grid-mean branch, so this
+                 arm measures the size of that mismatch on the model's own
+                 cloud-fraction distribution rather than from a global mean.
+                 Reviewed by GLM before it was written; it also warned that
+                 a global-mean cube root OVERSTATES the effect, because
+                 x^(1/3) is concave and real cloud fractions are bimodal --
+                 which is exactly why this is measured per column here.
     arms 8/10/12/14 um : uniform overrides -- THE measurement
 
 READING (pre-registered): the issue needs roughly -15 to -20 W/m2 available
@@ -52,13 +62,19 @@ def main(argv=None) -> int:
                    default=[8.0, 10.0, 12.0, 14.0])
     p.add_argument("--n-times", type=int, default=8,
                    help="local-time quadrature points over the diurnal cycle")
+    p.add_argument("--cover-schemes", nargs="*", default=[],
+                   choices=("sundqvist", "xu_randall"),
+                   help="also re-solve the radiation with the cloud COVER "
+                        "closure swapped, everything else held fixed. Cover "
+                        "changes the water paths as well as the fraction, so "
+                        "this reports rsut AND rlut per closure.")
     args = p.parse_args(argv)
 
     import jax
     import jax.numpy as jnp
     from legoesm import constants
     from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-        compute_cloud_properties)
+        _CLOUD_R_EFF_MAX_M, _INHOM_CF_FLOOR, compute_cloud_properties)
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
@@ -104,12 +120,34 @@ def main(argv=None) -> int:
     n_i_vol = n_i * rho if conv == "per_mass" else n_i
 
     # Production cloud config (config/amip/amip_production.yaml).
-    ccfg = CloudConfig(scheme="sundqvist", rh_crit=0.85, q_c_diagnostic=5.0e-6)
+    ccfg = CloudConfig(scheme="sundqvist", rh_crit=0.85, q_c_diagnostic=5.0e-6,
+                       saturation_scheme="mixed_phase")
     cp = compute_cloud_properties(
         T=T, p_full=p_full, q_v=q_v, dp=dp, config=ccfg,
         q_cloud=q_c, q_ice=q_i, n_cloud=n_c_vol, n_ice=n_i_vol)
     kw = cp.to_rrtmg_kwargs()
     r_psd = kw["cloud_r_eff_liq"]
+
+    # IN-CLOUD PAIRING ARM (#1521, 2026-09-10).  The PSD radius goes as
+    # (q_c / N_c)^(1/3), so the ratio is meaningful only if BOTH are on the
+    # same footing.  compute_cloud_properties reconstructs in-cloud
+    # condensate ONLY when the droplet number is dead (``n_cloud <= 1.0``,
+    # the specified-constant fallback).  Production instead sets
+    # ``aerosol_ccn``, whose AOD-derived number is ~1e8 and is an AMBIENT --
+    # i.e. IN-CLOUD -- concentration, so it takes the other branch and is
+    # paired with GRID-MEAN condensate.  Reviewed by GLM before this arm was
+    # written: "Using ambient CCN directly as droplet number therefore
+    # carries the in-cloud convention... The branch predicate is wrong:
+    # 'prognostic vs. specified' is a proxy for the real question, is the
+    # source number cf-diluted?"
+    #
+    # Dividing q_c by cf multiplies the radius by cf^(-1/3) EXACTLY (r_eff is
+    # a pure cube root in q_c at fixed N_c), so the corrected field needs no
+    # second cloud-property solve -- but it does need the SAME clamp the PSD
+    # obeys, or the arm manufactures radii the model could never emit.
+    cf_psd = jnp.clip(cp.cloud_fraction, _INHOM_CF_FLOOR, 1.0)
+    r_incloud = jnp.minimum(r_psd * cf_psd ** (-1.0 / 3.0),
+                            _CLOUD_R_EFF_MAX_M)
 
     # Diurnal quadrature: Jan declination, hour angles at n_times local times.
     doy = 1.0 + day
@@ -126,24 +164,32 @@ def main(argv=None) -> int:
     area_w = jnp.asarray(np.cos(lat) * 0.0 + 1.0)   # SCVT ~equal-area
     area_w = area_w / jnp.sum(area_w)
 
-    def rsut_mean(r_eff_liq):
-        tot = 0.0
+    def _toa(r_eff_liq, kwx=None):
+        """Diurnally-averaged TOA (rsut, rlut) for one set of cloud fields."""
+        kwx = kw if kwx is None else kwx
+        sw = 0.0
+        lw = 0.0
         for mu in cosz_t:
             mu_j = jnp.asarray(np.maximum(mu, 0.0))
             out = solver.solve_columns(
                 T=T, p_full=p_full, p_half=p_half, sfc_temperature=T_sfc,
                 q_v=q_v, cos_zenith=jnp.maximum(mu_j, 1e-4),
                 sfc_albedo=0.06, sfc_emissivity=0.97,
-                cloud_path_liq=kw["cloud_path_liq"],
-                cloud_path_ice=kw["cloud_path_ice"],
+                cloud_path_liq=kwx["cloud_path_liq"],
+                cloud_path_ice=kwx["cloud_path_ice"],
                 cloud_r_eff_liq=r_eff_liq,
-                cloud_r_eff_ice=kw.get("cloud_r_eff_ice"))
+                cloud_r_eff_ice=kwx.get("cloud_r_eff_ice"))
             # Night columns: SW up is 0 when mu ~ 0; the 1e-4 floor keeps the
             # solver defined and contributes ~0 flux.
             day_mask = jnp.asarray(mu > 0.0)
-            tot = tot + jnp.sum(area_w * jnp.where(
+            sw = sw + jnp.sum(area_w * jnp.where(
                 day_mask, out.sw_flux_up[:, 0], 0.0))
-        return float(tot / len(cosz_t))
+            lw = lw + jnp.sum(area_w * out.lw_flux_up[:, 0])
+        n = len(cosz_t)
+        return float(sw / n), float(lw / n)
+
+    def rsut_mean(r_eff_liq):
+        return _toa(r_eff_liq)[0]
 
     print(f"{args.checkpoint}: {ncol} columns, {nlev} levels, day {day:g}, "
           f"{args.n_times}-point diurnal quadrature")
@@ -151,11 +197,35 @@ def main(argv=None) -> int:
                                       r_psd, jnp.nan)) )
     print(f"model's own PSD r_eff, cloudy-column mean: "
           f"{np.nanmean(np.asarray(jnp.where(kw['cloud_path_liq'] > 1e-4, r_psd, jnp.nan))) * 1e6:.2f} um")
+    _cloudy = np.asarray(kw["cloud_path_liq"]) > 1e-4
+    _cf_np = np.asarray(cf_psd)
+    _r_a = np.asarray(r_psd)
+    _r_b = np.asarray(r_incloud)
+    print(f"cloud fraction over cloudy points: mean {_cf_np[_cloudy].mean():.3f}, "
+          f"median {np.median(_cf_np[_cloudy]):.3f}, "
+          f"5th pct {np.percentile(_cf_np[_cloudy], 5):.3f}")
+    print(f"in-cloud pairing would move r_eff "
+          f"{_r_a[_cloudy].mean() * 1e6:.2f} -> {_r_b[_cloudy].mean() * 1e6:.2f} um "
+          f"(cloudy-point mean; ratio {(_r_b[_cloudy] / _r_a[_cloudy]).mean():.3f}, "
+          f"cap binds on {100.0 * float((_r_b >= _CLOUD_R_EFF_MAX_M)[_cloudy].mean()):.2f}% "
+          f"of cloudy points)")
+    # CONTROL: the correction must be the IDENTITY where the layer is
+    # overcast.  If this prints anything but ~1.000 the arm is measuring its
+    # own arithmetic rather than the pairing.
+    _oc = _cloudy & (_cf_np > 0.999)
+    if _oc.any():
+        print(f"  control, overcast points (cf > 0.999): ratio "
+              f"{(_r_b[_oc] / _r_a[_oc]).mean():.6f} (must be 1.000000)")
+    else:
+        print("  control SKIPPED: no overcast cloudy points in this checkpoint")
     print()
     print(f"{'arm':>10s} {'rsut [W/m2]':>12s} {'delta vs PSD':>13s}")
     base = rsut_mean(r_psd)
     print(f"{'PSD(ckpt)':>10s} {base:12.3f} {0.0:13.3f}")
     prev_r, prev_v = None, None
+    r_ic = rsut_mean(r_incloud)
+    print(f"{'in-cloud':>10s} {r_ic:12.2f} {r_ic - base:13.2f}"
+          f"   <- pairing correction, NOT a uniform radius override")
     for r_um in args.radii_um:
         v = rsut_mean(jnp.full_like(r_psd, r_um * 1e-6))
         print(f"{r_um:8.1f}um {v:12.3f} {v - base:13.3f}")
@@ -164,6 +234,31 @@ def main(argv=None) -> int:
                   f"{(v - prev_v) / (r_um - prev_r):+.3f} W/m2/um "
                   f"over {prev_r:g}-{r_um:g} um")
         prev_r, prev_v = r_um, v
+
+    # COVER-CLOSURE ARMS.  Swapping the closure moves the cloud FRACTION and,
+    # through the radiative condensate floor and the in-cloud scaling, the
+    # water PATHS too -- so each arm needs its own compute_cloud_properties
+    # solve and its own PSD radius, not just a different fraction.  Both
+    # numbers are reported: a closure that trades cover for optical depth can
+    # brighten in the shortwave and still change the longwave more.
+    if args.cover_schemes:
+        print()
+        print(f"{'cover':>12s} {'rsut [W/m2]':>12s} {'rlut [W/m2]':>12s} "
+              f"{'cf mean':>9s} {'LWP':>8s} {'IWP':>8s}")
+        for sch in args.cover_schemes:
+            cfg_s = ccfg._replace(scheme=sch)
+            cp_s = compute_cloud_properties(
+                T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg_s,
+                q_cloud=q_c, q_ice=q_i, n_cloud=n_c_vol, n_ice=n_i_vol)
+            kw_s = cp_s.to_rrtmg_kwargs()
+            sw_s, lw_s = _toa(kw_s["cloud_r_eff_liq"], kw_s)
+            _cf_s = float(np.mean(np.asarray(cp_s.cloud_fraction)))
+            _lwp = float(np.mean(np.sum(np.asarray(kw_s["cloud_path_liq"]), axis=1)))
+            _iwp = float(np.mean(np.sum(np.asarray(kw_s["cloud_path_ice"]), axis=1)))
+            print(f"{sch:>12s} {sw_s:12.3f} {lw_s:12.3f} {_cf_s:9.4f} "
+                  f"{_lwp * 1e3:8.2f} {_iwp * 1e3:8.2f}")
+        print("  LWP/IWP are grid-mean column paths [g/m2] as handed to the "
+              "solver; cf mean is over all layers.")
     return 0
 
 

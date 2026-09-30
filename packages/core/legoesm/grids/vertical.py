@@ -209,6 +209,45 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
     )
 
 
+SIGMA_LAYOUTS = ("standard", "l30_trop_logstrat")
+# The L30 grid's fourth interface (0.01 + 3 * 0.033) is where the log-spaced
+# stratosphere joins the retained troposphere; a lid above 0.05 would leave
+# the new layers too thin to resolve in float32 (interfaces collapse near the
+# join), so the layout accepts sigma_top in (0, 0.05].
+L30_LOGSTRAT_JOIN = 0.109
+L30_LOGSTRAT_SIGMA_TOP_MAX = 0.05
+
+
+def l30_trop_logstrat_sigma_half(n_levels: int, sigma_top: float, dtype) -> jnp.ndarray:
+    """Half-level sigmas for the L30-troposphere / log-stratosphere layout.
+
+    Keeps the production L30 sigma grid's bottom 27 layers EXACTLY
+    (``jnp.linspace(0.01, 1.0, 31, dtype)[3:]``, join at sigma 0.109) and
+    replaces its top three layers by ``n_levels - 27`` layers uniform in
+    ln(sigma) from ``sigma_top`` to the join (at p_s 1000 hPa, n_levels 36,
+    sigma_top 0.002: 2.0-3.1, 3.1-4.9, 4.9-7.6, 7.6-11.8, 11.8-18.4,
+    18.4-28.7, 28.7-44.8, 44.8-69.9, 69.9-109 hPa).  Raises ValueError unless
+    ``n_levels >= 28`` and ``0 < sigma_top < 0.109``.
+    """
+    if n_levels < 28:
+        raise ValueError(
+            f"n_levels must be >= 28 for the l30_trop_logstrat layout, got {n_levels}")
+    # Validation on Python floats (no traced values): the join is the fourth
+    # L30 interface, 0.01 + 3*0.033; the top must leave every new layer a
+    # thickness resolvable in the working dtype, hence the margin.
+    join_f = L30_LOGSTRAT_JOIN
+    if not 0.0 < sigma_top <= L30_LOGSTRAT_SIGMA_TOP_MAX:
+        raise ValueError(
+            "sigma_top must satisfy 0 < sigma_top <= "
+            f"{L30_LOGSTRAT_SIGMA_TOP_MAX} (below the L30 join {join_f:.4g}), got {sigma_top}")
+    old_half = jnp.linspace(0.01, 1.0, 31, dtype=dtype)
+    join = old_half[3]
+    n = n_levels - 27
+    upper = sigma_top * (join / sigma_top) ** (jnp.arange(n + 1, dtype=dtype) / n)
+    upper = upper.at[0].set(sigma_top).at[-1].set(join)
+    return jnp.concatenate((upper[:-1], old_half[3:]))
+
+
 def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
@@ -216,6 +255,8 @@ def create_sigma_coordinate(
     tropopause_refine: float = 1.0,
     sigma_refine: float = 0.12,
     refine_width: float = 0.45,
+    *,
+    layout: str = "standard",
 ) -> SigmaCoordinate:
     """Create a sigma coordinate (uniform by default).
 
@@ -239,6 +280,10 @@ def create_sigma_coordinate(
         level count — the fix for the unresolved tropical cold point.
     sigma_refine, refine_width : float
         Centre (in sigma) and log-sigma half-width of the refinement.
+    layout : str
+        One of ``SIGMA_LAYOUTS``: ``"standard"`` (default) keeps the uniform
+        or tropopause-refined placement; ``"l30_trop_logstrat"`` pins the L30
+        grid below sigma 0.109 and adds log-spaced layers up to ``sigma_top``.
 
     Returns
     -------
@@ -255,7 +300,16 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    if tropopause_refine == 1.0:
+    if layout not in SIGMA_LAYOUTS:
+        raise ValueError(
+            f"layout must be one of SIGMA_LAYOUTS={SIGMA_LAYOUTS}, got {layout!r}")
+    if layout == "l30_trop_logstrat":
+        if tropopause_refine != 1.0:
+            raise ValueError(
+                "layout='l30_trop_logstrat' requires tropopause_refine == 1.0, "
+                f"got tropopause_refine={tropopause_refine}")
+        sigma_half = l30_trop_logstrat_sigma_half(n_levels, sigma_top, dtype)
+    elif tropopause_refine == 1.0:
         # Uniform (default) — kept as the literal linspace so the untouched
         # path stays bit-identical to the pre-refinement code.
         sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
@@ -651,7 +705,10 @@ def _vertical_advection_upwind_sigma(
     return -sigma_dot_full * grad
 
 
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+# "sb" is the conservative Simmons-Burridge flux form, HYBRID-lane only
+# (:func:`vertical_advection_hybrid_sb`); "van_leer" is SIGMA-lane only.
+# Each lane refuses the other's scheme rather than run it silently inert.
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb")
 
 
 def van_leer_face_values_sigma(
@@ -671,6 +728,25 @@ def van_leer_face_values_sigma(
     :func:`_vertical_advection_van_leer_sigma` for the derivation, the
     boundary treatment and the monotonicity scope.
     """
+    return _van_leer_face_values(field, sigma_coord.dsigma_full,
+                                 sigma_coord.dsigma)
+
+
+def _pad_last(x: jax.Array, before: int, after: int) -> jax.Array:
+    return jnp.pad(x, ((0, 0),) * (x.ndim - 1) + ((before, after),), mode="edge")
+
+
+def _van_leer_face_values(
+    field: jax.Array,
+    dc_full: jax.Array,
+    d_layer: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Metric-aware van-Leer face values on any monotone vertical coordinate.
+
+    ``dc_full`` (..., nlev-1) are centre-to-centre spacings and ``d_layer``
+    (..., nlev) layer thicknesses, in the same unit (sigma or Pa); both may be
+    1-D (sigma) or carry the column axes (hybrid pressure).
+    """
     from legoesm.core.flux_limiters import (
         grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
     )
@@ -678,7 +754,7 @@ def van_leer_face_values_sigma(
     nlev = field.shape[-1]
     if nlev < 4:
         raise ValueError(
-            f"the van-Leer sigma reconstruction needs at least 4 vertical "
+            f"the van-Leer vertical reconstruction needs at least 4 vertical "
             f"levels for its 4-cell stencil; got nlev={nlev}."
         )
     # Linear-extrapolation ghosts: f_{-1} = 2f_0 - f_1 places the ghost one
@@ -697,12 +773,14 @@ def van_leer_face_values_sigma(
     f_jp1 = fp[..., 3:nlev + 4]
     # Centre-to-centre spacings, edge-padded: dc_up/dc_loc/dc_dn at face j are
     # sigma_full[j-1]-sigma_full[j-2], [j]-[j-1], [j+1]-[j].
-    dcp = jnp.pad(sigma_coord.dsigma_full, (2, 2), mode="edge")  # (nlev+3,)
-    dc_up, dc_loc, dc_dn = dcp[0:nlev + 1], dcp[1:nlev + 2], dcp[2:nlev + 3]
+    dcp = _pad_last(dc_full, 2, 2)  # (..., nlev+3)
+    dc_up = dcp[..., 0:nlev + 1]
+    dc_loc = dcp[..., 1:nlev + 2]
+    dc_dn = dcp[..., 2:nlev + 3]
     # MUSCL face weights: donor half-thickness / centre-to-centre distance.
     # Exactly 0.5 each on a uniform grid.
-    dsp = jnp.pad(sigma_coord.dsigma, (1, 1), mode="edge")  # (nlev+2,)
-    d_above, d_below = dsp[:-1], dsp[1:]                    # (nlev+1,)
+    dsp = _pad_last(d_layer, 1, 1)  # (..., nlev+2)
+    d_above, d_below = dsp[..., :-1], dsp[..., 1:]          # (..., nlev+1)
     d_sum = d_above + d_below
 
     eps = 1e-30
@@ -1379,6 +1457,137 @@ def make_hybrid_levels(
         )
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
+
+
+# --- CAM6 L32 hybrid interface coefficients (CESM2.1 cam_vcoords_L32_c180105.nc) ---
+# p_half[k] = A_half[k] * P0 + B_half[k] * p_s with P0 = 1e5 Pa, top at 2.255 hPa
+# (CAM6 / CESM2 default 32-level grid, Danabasoglu et al. 2020).  Layer mass
+# is positive for every p_s >= 500 hPa (min dp = 277.6 Pa, independent of
+# p_s in the pure-pressure top), unlike make_hybrid_levels' analytic A(eta),
+# which inverts below ~656 hPa.  Values are the file's float64 contents.
+CAM6_L32_HYAI = (
+    0.00225523952394724, 0.00503169186413288, 0.0101579474285245,
+    0.0185553170740604, 0.0297346755951211, 0.0392730012536049,
+    0.0471144989132881, 0.0562404990196228, 0.0668004974722862,
+    0.0807014182209969, 0.0949410423636436, 0.11169321089983,
+    0.131401270627975, 0.154586806893349, 0.181863352656364,
+    0.17459799349308, 0.166050657629967, 0.155995160341263,
+    0.14416541159153, 0.130248308181763, 0.113875567913055,
+    0.0946138575673103, 0.0753444507718086, 0.0576589405536652,
+    0.0427346378564835, 0.0316426791250706, 0.0252212174236774,
+    0.0191967375576496, 0.0136180268600583, 0.00853108894079924,
+    0.00397881818935275, 0.0, 0.0,
+)
+CAM6_L32_HYBI = (
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0393548272550106, 0.0856537595391273, 0.140122056007385,
+    0.204201176762581, 0.279586911201477, 0.368274360895157,
+    0.47261056303978, 0.576988518238068, 0.672786951065063,
+    0.753628432750702, 0.813710987567902, 0.848494648933411,
+    0.881127893924713, 0.911346435546875, 0.938901245594025,
+    0.963559806346893, 0.985112190246582, 1.0,
+)
+CAM6_L32_P0 = 1.0e5
+
+
+def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoordinate:
+    """CAM6's 32-level hybrid grid from its published interface coefficients.
+
+    ``p_ref`` must equal the table's own P0 (1e5 Pa): the A coefficients
+    are defined against it, so another reference pressure would silently
+    move every interface.
+    """
+    if p_ref != CAM6_L32_P0:
+        raise ValueError(
+            f"CAM6 L32 coefficients are defined against P0 = {CAM6_L32_P0} Pa; "
+            f"got p_ref={p_ref}")
+    A_half = jnp.asarray(CAM6_L32_HYAI, dtype=jnp.float64)
+    B_half = jnp.asarray(CAM6_L32_HYBI, dtype=jnp.float64)
+    return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
+
+
+def assert_hybrid_valid_for_surface_pressure(
+    coord, p_s_min_Pa: float, *, context: str = "",
+) -> None:
+    """Refuse a hybrid coordinate that would carry NEGATIVE layer mass.
+
+    ``B(eta) = eta**transition_exponent`` makes ``dB/deta -> exponent`` at the
+    surface, so a near-surface layer has positive mass only while ``p_s`` stays
+    above a threshold the coordinate alone fixes.  Below it ``dp_from_hybrid``
+    returns negative thicknesses, and that feeds the dycore -- not a
+    diagnostic.
+
+    Why this is an error and not a warning (#1029).  The warning has existed,
+    nothing passed ``p_s_min_Pa``, and the default L40 coordinate forbids
+    surface pressures under 663.9 hPa, i.e. elevations above about 3450 m.
+    Measured against 1-degree ETOPO that is **0.92% of the planet by area** --
+    the Tibetan Plateau, the Andean altiplano, the Greenland and Antarctic
+    domes -- and the figure is the same at 30, 32 and 40 levels.  On the
+    idealized ``held_suarez_topo`` reproducer, TWO cells in that regime killed
+    a 200-day run inside 200 steps.  A condition that lethal, silently active
+    over a percent of the globe, is not something to keep warning about.
+
+    Remedies, measured on the same probe
+    (``scripts/validate/hybrid_negative_layer_mass_exposure.py``):
+
+    * ``transition_exponent=2`` admits p_s down to ~498 hPa (~5870 m) and is
+      valid over 100% of ETOPO;
+    * ``vertical_coord='sigma'`` has no such threshold at all;
+    * a coarser ``nlev`` does NOT help -- the threshold barely moves with it.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+        The coordinate to validate.  Objects without ``A_half``/``B_half``
+        (sigma, the CAM table) are not hybrid in this sense and pass.
+    p_s_min_Pa : float
+        The lowest surface pressure this run will actually produce.
+    context : str, optional
+        Prepended to the message, e.g. the grid and level count, so the error
+        names the run rather than only the coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the coordinate inverts at or above ``p_s_min_Pa``.
+    """
+    import numpy as np
+
+    A_half = getattr(coord, "A_half", None)
+    B_half = getattr(coord, "B_half", None)
+    if A_half is None or B_half is None:
+        return
+    if not np.isfinite(p_s_min_Pa) or p_s_min_Pa <= 0.0:
+        raise ValueError(
+            f"p_s_min_Pa must be a positive, finite pressure in Pa; "
+            f"got {p_s_min_Pa!r}. A non-finite minimum usually means the "
+            f"surface geopotential has not been built yet."
+        )
+
+    thr = float(hybrid_min_valid_surface_pressure(
+        np.asarray(A_half), np.asarray(B_half), constants.p_ref))
+    if thr <= 0.0 or p_s_min_Pa > thr:
+        return
+
+    # Make the threshold legible: "663.9 hPa" does not obviously read as
+    # "forbids the Tibetan Plateau".
+    z_thr = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / thr))
+    z_run = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / p_s_min_Pa))
+    where = f"{context}: " if context else ""
+    raise ValueError(
+        f"{where}this hybrid coordinate carries NEGATIVE layer mass below "
+        f"p_s = {thr / 100:.1f} hPa (about {z_thr:.0f} m of orography), and "
+        f"this run reaches p_s = {p_s_min_Pa / 100:.1f} hPa (about "
+        f"{z_run:.0f} m). The near-surface layers invert there and the "
+        f"negative thicknesses go into the dycore, not just a diagnostic "
+        f"(#1029: two such cells killed a 200-day idealized run in 200 "
+        f"steps). Fix by setting grid.transition_exponent=2 (valid to "
+        f"~498 hPa / ~5870 m, i.e. all of ETOPO), or "
+        f"grid.vertical_coord='sigma' (no threshold). Raising nlev does not "
+        f"help; the threshold barely moves with it."
+    )
 
 
 def standard_hybrid_levels(
@@ -2892,11 +3101,57 @@ def vertical_advection_hybrid_sb(
     return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
 
 
+def vertical_advection_hybrid_van_leer(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Conservative, slope-limited (van Leer) tracer vertical advection, hybrid.
+
+    Face-minus-cell increment form of :func:`_vertical_advection_van_leer_sigma`
+    with the interface mass flux ``mdot`` [Pa/s, > 0 downward, 0 at top and
+    surface] and the column's own layer thickness ``dp_k``::
+
+        -[mdot_{k+1/2}(q_{k+1/2} - f_k) - mdot_{k-1/2}(q_{k-1/2} - f_k)] / dp_k
+
+    This is the flux divergence minus ``f_k (mdot_{k+1/2}-mdot_{k-1/2})/dp_k``,
+    so paired with the continuity that built ``mdot`` the column sum of
+    ``dp*f`` telescopes to the zero boundary fluxes -- the property
+    :func:`vertical_advection_hybrid` (advective upwind on half->full averaged
+    fluxes) lacks.  A constant field has zero tendency at every level.  Scope:
+    this closes the VERTICAL term only; the MPAS horizontal tracer operator is
+    advective and not paired with the layer-thickness continuity.
+
+    Face values: the metric-aware van-Leer reconstruction in pressure,
+    clipped to the two adjacent cells.  The faces next to the top and bottom
+    layers use the donor cell instead: a reconstructed value there is downwind
+    of the boundary layer for inflow into the domain interior (see the sigma
+    kernel's docstring for the instability), and a face shared by two cells
+    must carry ONE value for the telescoping to hold.
+    """
+    dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
+    dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
+    q_pos, q_neg = _van_leer_face_values(field, dc, dp)              # (..., nlev+1)
+    donor_pos = jnp.concatenate([field[..., :1], field], axis=-1)    # cell above
+    donor_neg = jnp.concatenate([field, field[..., -1:]], axis=-1)   # cell below
+    nlev = field.shape[-1]
+    edge = jnp.zeros(nlev + 1, dtype=bool).at[jnp.array([1, nlev - 1])].set(True)
+    q_pos = jnp.where(edge, donor_pos, q_pos)
+    q_neg = jnp.where(edge, donor_neg, q_neg)
+    q_face = jnp.where(mass_flux > 0, q_pos, q_neg)
+    inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)
+    return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
+
+
 def vertical_advection_theta_hybrid(
     T: jax.Array,
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
+    *,
+    conservative: bool = False,
 ) -> jax.Array:
     """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
 
@@ -2942,8 +3197,13 @@ def vertical_advection_theta_hybrid(
     # Potential temperature θ = T / exner = T·(p₀/p)^κ
     theta = T / exner
 
-    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
-    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+    # Advect θ, then convert back: -exner·F·∂θ/∂p.  ``conservative=True``
+    # swaps the upwind advective operator for the Simmons-Burridge flux form,
+    # which satisfies the discrete product rule (column residual 6.7e-16
+    # against the advective form's 3.8e-2 of the interfacial exchange on the
+    # CAM L32 table); the exner round-trip is identical either way.
+    _op = vertical_advection_hybrid_sb if conservative else vertical_advection_hybrid
+    return exner * _op(theta, mass_flux, p_s, coord)
 
 
 def sb81_omega_over_p_dyn(

@@ -643,9 +643,17 @@ def build_jra55_cache(
 
     chunks = {"time": RECORDS_PER_DAY,  # 1 day of 3-hourly = ~4 MB/var
               "lat": n_dst_lat, "lon": n_dst_lon}
-    cache_ds.chunk(chunks).to_zarr(
-        str(out), mode="w", consolidated=True,
-    )
+    try:
+        cache_ds.chunk(chunks).to_zarr(
+            str(out), mode="w", consolidated=True,
+        )
+    except ImportError:
+        # No dask in the environment: the arrays are already in memory, so
+        # write eagerly with the same on-disk chunking via ``encoding``.
+        enc = {v: {"chunks": tuple(chunks[d] for d in cache_ds[v].dims)}
+               for v in list(cache_ds.data_vars) + list(cache_ds.coords)
+               if all(d in chunks for d in cache_ds[v].dims)}
+        cache_ds.to_zarr(str(out), mode="w", consolidated=True, encoding=enc)
     if progress:
         print(f"[jra55_do] cache written: {out}")
     return out

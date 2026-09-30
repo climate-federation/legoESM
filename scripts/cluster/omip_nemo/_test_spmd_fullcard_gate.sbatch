@@ -12,7 +12,7 @@
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 echo "HEAD+dirty: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 export XLA_FLAGS=--xla_force_host_platform_device_count=4

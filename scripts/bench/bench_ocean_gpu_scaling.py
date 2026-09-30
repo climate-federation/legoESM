@@ -172,7 +172,7 @@ def _time_step(model, state, n_warmup: int, n_timing: int, dt: float):
 def _bench_one(label: str, build_fn, key, prec: str,
                solver_tag: str = "default") -> TimingResult:
     import jax, jax.numpy as jnp
-    model, state, n_cells = build_fn(key, prec == "float64")
+    model, state, n_cells = build_fn(key, prec in ("float64", "mixed"))
     compile_s, warmup_s, timing_s = _time_step(
         model, state, N_WARMUP, N_TIMING, DT_BAROCLINIC,
     )
@@ -214,7 +214,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--output-dir", default="results/scaling_gpu_ocean")
     p.add_argument("--no-timestamp", action="store_true")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64")
     p.add_argument("--grids", default="latlon,mpas",
                    help="Comma list of {latlon,mpas}")
@@ -247,6 +247,18 @@ def main() -> int:
 
     _configure_jax(args.precision)
     import jax
+    # The ocean STATE storage dtype comes from the precision POLICY
+    # (rest_state_* use get_policy().storage, default fp32) — the x64 flag
+    # alone does NOT change it.  Set the policy per arm so f32/f64/mixed are
+    # real; mixed = fp32 storage/compute + fp64 accumulate (GPU-bandwidth
+    # scaling with fp64 stability).  Clear the env-gated f32-solve knobs so a
+    # stray export cannot silently contaminate the f64 arm.
+    os.environ.pop("LEGOESM_VMIX_F32_SOLVE", None)
+    os.environ.pop("LEGOESM_BAROCLINIC_F32", None)
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy({"float32": PrecisionPolicy.fp32,
+                "float64": PrecisionPolicy.fp64,
+                "mixed": PrecisionPolicy.mixed}[args.precision]())
     out_dir = Path(args.output_dir)
     if not args.no_timestamp:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

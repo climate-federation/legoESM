@@ -34,11 +34,14 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import equinox as eqx
+import jax
 from jax import lax
+from jax.experimental import checkify
 import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.precision import resolve_dtype
+from legoesm.core.source_rounding import nemo_source_round
 
 # ==============================================================================
 # Ocean constants
@@ -52,6 +55,38 @@ from legoesm.core.precision import resolve_dtype
 # source of truth.
 rho_0 = constants.rho_ocean         # Reference seawater density [kg/m^3]
 c_sw = constants.c_sw               # Specific heat of seawater [J/(kg*K)]
+
+
+def nemo_potential_temperature_from_conservative(ct, salinity):
+    """NEMO TEOS-10 surface CT-to-potential-temperature approximation.
+
+    Literal 5/3 rational recurrence from NEMO 5.0.2
+    ``eosbn2.F90:eos_pt_from_ct_t`` (lines 1519-1542).  NEMO's ``sbc_ssm``
+    applies this conversion to ``sst_m`` when ``ln_teos10`` is true; GYRE's
+    freshwater heat-content correction then consumes that potential
+    temperature even though its Haney restoring term consumes ``ts(Kbb)``.
+    """
+    ct = jnp.asarray(ct)
+    salinity = jnp.asarray(salinity, dtype=ct.dtype)
+    zt = ct * jnp.asarray(1.0 / 40.0, dtype=ct.dtype)
+    zs = jnp.sqrt(
+        jnp.abs(salinity + jnp.asarray(5.0, dtype=ct.dtype))
+        * jnp.asarray(0.875 / 35.16504, dtype=ct.dtype))
+    zn = -2.1385727895e-01 * zt - 2.7674419971e-01 * zs + 1.0728094330
+    zn = zn * zt + (2.6366564313 * zs + 3.3546960647) * zs - 7.8012209473
+    zn = (zn * zt + ((1.8835586562 * zs + 7.3949191679) * zs
+                     - 3.3937395875) * zs - 5.6414948432)
+    zn = (zn * zt + (((3.5737370589 * zs - 1.5512427389e+01) * zs
+                      + 2.4625741105e+01) * zs
+                     + 1.9912291000e+01) * zs - 3.2191146312e+01)
+    zn = (zn * zt + ((((5.7153204649e-01 * zs - 3.0943149543) * zs
+                       + 9.3052495181) * zs - 9.4528934807) * zs
+                     + 3.1066408996) * zs - 4.3504021262e-01)
+    zd = ((2.0035003456 * zt - 3.4570358592e-01 * zs
+           + 5.6471810638) * zt
+          + (1.5393993508 * zs - 6.9394762624) * zs
+          + 1.2750522650e+01)
+    return ct + zn / zd
 T_freeze_ocean = constants.T_freeze_ocean  # Freezing point of seawater [K]
 scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 
@@ -636,7 +671,9 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw_gdept_0: jnp.ndarray | None = None,
     zrw_gdepw_0: jnp.ndarray | None = None,
     zrw_stretch: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    _alpha_beta_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    _return_intermediate: str = "",
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
 
     ``eos_form`` selects where alpha/beta come from. ``"seos"`` (default,
@@ -724,7 +761,16 @@ def compute_buoyancy_frequency_nemo_bn2(
         eos_gdept = lax.optimization_barrier(
             jnp.asarray(zrw_gdept_0)
             * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
-    if eos_form == "teos10":
+    if _alpha_beta_override is not None:
+        alpha, beta = (
+            jnp.asarray(_alpha_beta_override[0]),
+            jnp.asarray(_alpha_beta_override[1]),
+        )
+        if alpha.shape != T.shape or beta.shape != T.shape:
+            raise ValueError(
+                "the private bn2 alpha/beta override must match T/S shape; "
+                f"got alpha={alpha.shape}, beta={beta.shape}, T={T.shape}")
+    elif eos_form == "teos10":
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
@@ -748,7 +794,32 @@ def compute_buoyancy_frequency_nemo_bn2(
         e3w = gd_lo - gd_up                                    # explicit legacy
     dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
     dS = S[..., :-1] - S[..., 1:]
-    return g * (a_w * dT - b_w * dS) / e3w
+    temperature_contribution = a_w * dT
+    salinity_contribution = b_w * dS
+    contribution_difference = temperature_contribution - salinity_contribution
+    gravity_product = g * contribution_difference
+    thickness_division = gravity_product / e3w
+    if not _return_intermediate:
+        return thickness_division
+    intermediates = {
+        "zrw": zrw,
+        "zaw": a_w,
+        "zbw": b_w,
+        "temperature_contribution": temperature_contribution,
+        "salinity_contribution": salinity_contribution,
+        "contribution_difference": contribution_difference,
+        "gravity_product": gravity_product,
+        "thickness_division": thickness_division,
+        # The shared implementation does not yet apply NEMO's trailing wmask;
+        # this selector intentionally exposes the value production returns so
+        # the gate can score that missing source boundary, including -0/+0.
+        "masked_rn2": thickness_division,
+    }
+    if _return_intermediate not in intermediates:
+        raise ValueError(
+            f"unknown private bn2 intermediate {_return_intermediate!r}; "
+            f"expected one of {tuple(intermediates)}")
+    return thickness_division, intermediates[_return_intermediate]
 
 
 def nemo_bn2_live_geometry(
@@ -971,17 +1042,56 @@ _ROQUET_EOS80 = {
     "EOS012": 2.1836324814, "EOS112": -3.4453674320e-01, "EOS022": -1.2548163097,
     # zn3 (depth^3)
     "EOS003": 1.8729078427e-02, "EOS103": -5.7238495240e-02, "EOS013": 3.8306136687e-01,
+    # thermal expansion / haline contraction, eosbn2.F90:2175-2246
+    "ALP000": -2.5218796628e-01, "ALP100": 3.4119354654e-01,
+    "ALP200": -2.2119589983e-01, "ALP300": 1.8082347094e-01,
+    "ALP400": -3.6936026529e-02, "ALP500": -5.0091801383e-03,
+    "ALP010": 1.2789915300, "ALP110": -1.2021756164,
+    "ALP210": 8.4037519952e-01, "ALP310": -4.1905788542e-01,
+    "ALP410": 9.8855300959e-02, "ALP020": -1.2634838399,
+    "ALP120": 1.6112195176, "ALP220": -7.5817155402e-01,
+    "ALP320": 4.7006963580e-02, "ALP030": 8.0812310102e-01,
+    "ALP130": -1.0102374985, "ALP230": 4.8340368631e-01,
+    "ALP040": -1.5098959754e-01, "ALP140": -1.4394226233e-02,
+    "ALP050": 3.6780433255e-02, "ALP001": 3.9631611467e-01,
+    "ALP101": 1.9159845880e-02, "ALP201": -1.0286156825e-01,
+    "ALP301": 1.6738969362e-02, "ALP011": -4.9997430930e-01,
+    "ALP111": 9.7335338937e-03, "ALP211": 6.0887771651e-02,
+    "ALP021": 2.6149576513e-01, "ALP121": -1.6671866715e-02,
+    "ALP031": -5.9503008642e-02, "ALP002": -5.4590812035e-02,
+    "ALP102": 8.6134185799e-03, "ALP012": 6.2740815484e-02,
+    "ALP003": -9.5765341718e-03,
+    "BET000": 2.1420623987, "BET100": -9.3752598635,
+    "BET200": 1.9446303907e+01, "BET300": -1.8632235232e+01,
+    "BET400": 8.9390837485, "BET500": -1.7142465871,
+    "BET010": -1.7059677327e-01, "BET110": 2.2119589983e-01,
+    "BET210": -2.7123520642e-01, "BET310": 7.3872053057e-02,
+    "BET410": 1.2522950346e-02, "BET020": 3.0054390409e-01,
+    "BET120": -4.2018759976e-01, "BET220": 3.1429341406e-01,
+    "BET320": -9.8855300959e-02, "BET030": -2.6853658626e-01,
+    "BET130": 2.5272385134e-01, "BET230": -2.3503481790e-02,
+    "BET040": 1.2627968731e-01, "BET140": -1.2085092158e-01,
+    "BET050": 1.4394226233e-03, "BET001": -2.2271304375e-01,
+    "BET101": 5.5453416919e-01, "BET201": -6.2815936268e-01,
+    "BET301": 2.0601115202e-01, "BET011": -9.5799229402e-03,
+    "BET111": 1.0286156825e-01, "BET211": -2.5108454043e-02,
+    "BET021": -2.4333834734e-03, "BET121": -3.0443885826e-02,
+    "BET031": 2.7786444526e-03, "BET002": -4.2811838287e-02,
+    "BET102": 5.1355066072e-02, "BET012": -4.3067092900e-03,
+    "BET003": -7.1548119050e-04,
 }
 
 
-def nemo_roquet_eos(
+def _nemo_roquet_eos_impl(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
     *,
     coeffs: dict | None = None,
     rho0: float = rho_0,
-) -> jnp.ndarray:
+    geometric_depth_m: jnp.ndarray | None = None,
+    return_intermediates: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
     """In-situ density [kg/m³] from the NEMO Roquet-55 polynomial EOS (EOS-80).
 
     Reproduces NEMO ``eos_insitu`` (``eosbn2.F90``): the Horner sum ``zn`` in
@@ -1020,38 +1130,205 @@ def nemo_roquet_eos(
     array : In-situ density [kg/m³].
     """
     c = _ROQUET_EOS80 if coeffs is None else coeffs
-    zh = (p / (rho0 * constants.g)) * c["r1_Z0"]
-    zt = T * c["r1_T0"]
+    depth_m = (
+        p / (rho0 * constants.g)
+        if geometric_depth_m is None
+        else jnp.asarray(geometric_depth_m, dtype=T.dtype)
+    )
+    zh = lax.optimization_barrier(depth_m * c["r1_Z0"])
+    zt = lax.optimization_barrier(T * c["r1_T0"])
     # S + rdeltaS > 0 for all physical S (rdeltaS = 20), so abs() never kinks
     # and sqrt of a strictly-positive argument keeps the gradient finite.
-    zs = jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"])
-    # Horner form (NEMO eosbn2.F90:265-286): each zn_k is the coefficient of
-    # zh^k, itself a Horner-in-zt whose zt-coefficients are Horner-in-zs.
-    # Explicit intermediates (a_i = zt^i coeff of zn0; b_i = zt^i coeff of zn1)
-    # keep the nesting balanced and reviewable.
-    zn3 = c["EOS013"] * zt + c["EOS103"] * zs + c["EOS003"]
-    zn2 = ((c["EOS022"] * zt + c["EOS112"] * zs + c["EOS012"]) * zt
-           + (c["EOS202"] * zs + c["EOS102"]) * zs + c["EOS002"])
-    b4 = c["EOS041"]
-    b3 = c["EOS131"] * zs + c["EOS031"]
-    b2 = (c["EOS221"] * zs + c["EOS121"]) * zs + c["EOS021"]
-    b1 = ((c["EOS311"] * zs + c["EOS211"]) * zs + c["EOS111"]) * zs + c["EOS011"]
-    b0 = ((((c["EOS401"] * zs + c["EOS301"]) * zs + c["EOS201"]) * zs
-           + c["EOS101"]) * zs + c["EOS001"])
-    zn1 = (((b4 * zt + b3) * zt + b2) * zt + b1) * zt + b0
-    a6 = c["EOS060"]
-    a5 = c["EOS150"] * zs + c["EOS050"]
-    a4 = (c["EOS240"] * zs + c["EOS140"]) * zs + c["EOS040"]
-    a3 = ((c["EOS330"] * zs + c["EOS230"]) * zs + c["EOS130"]) * zs + c["EOS030"]
-    a2 = ((((c["EOS420"] * zs + c["EOS320"]) * zs + c["EOS220"]) * zs
-           + c["EOS120"]) * zs + c["EOS020"])
-    a1 = (((((c["EOS510"] * zs + c["EOS410"]) * zs + c["EOS310"]) * zs
-            + c["EOS210"]) * zs + c["EOS110"]) * zs + c["EOS010"])
-    a0 = ((((((c["EOS600"] * zs + c["EOS500"]) * zs + c["EOS400"]) * zs
-             + c["EOS300"]) * zs + c["EOS200"]) * zs + c["EOS100"]) * zs + c["EOS000"])
-    zn0 = ((((((a6 * zt + a5) * zt + a4) * zt + a3) * zt + a2) * zt + a1) * zt + a0)
-    zn = ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+    zs = lax.optimization_barrier(
+        jnp.sqrt(jnp.abs(S + c["rdeltaS"]) * c["r1_S0"]))
+    # Horner form (NEMO eosbn2.F90:265-286).  The oracle is compiled without
+    # FMA/fast-math and rounds every source multiply/add.  A barrier only after
+    # each completed znN is too late: XLA may contract/reassociate *inside* the
+    # long statement (the GYRE operand dump first saw 4 ulp at zn0).  These two
+    # tiny helpers retain every source operation while keeping one evaluator.
+    def _fadd(first, *rest):
+        value = first
+        for term in rest:
+            value = nemo_source_round(value + term)
+        return value
+
+    def _fmul(left, right):
+        return nemo_source_round(left * right)
+
+    def _horner(variable, *coefficients):
+        value = coefficients[0]
+        for coefficient in coefficients[1:]:
+            value = _fadd(_fmul(value, variable), coefficient)
+        return value
+
+    zn3 = _fadd(_fmul(c["EOS013"], zt), _fmul(c["EOS103"], zs), c["EOS003"])
+    zn2 = _fadd(
+        _fmul(_fadd(_fmul(c["EOS022"], zt), _fmul(c["EOS112"], zs),
+                    c["EOS012"]), zt),
+        _fmul(_fadd(_fmul(c["EOS202"], zs), c["EOS102"]), zs),
+        c["EOS002"],
+    )
+    zn1_1 = _fadd(
+        _fmul(c["EOS041"], zt), _fmul(c["EOS131"], zs), c["EOS031"])
+    zn1_2 = _fadd(
+        _fmul(zn1_1, zt),
+        _fmul(_fadd(_fmul(c["EOS221"], zs), c["EOS121"]), zs),
+        c["EOS021"],
+    )
+    zn1_3 = _fadd(
+        _fmul(zn1_2, zt),
+        _fmul(_horner(zs, c["EOS311"], c["EOS211"], c["EOS111"]), zs),
+        c["EOS011"],
+    )
+    zn1 = _fadd(
+        _fmul(zn1_3, zt),
+        _fmul(_horner(zs, c["EOS401"], c["EOS301"], c["EOS201"],
+                      c["EOS101"]), zs),
+        c["EOS001"],
+    )
+    zn0_1 = _fadd(
+        _fmul(c["EOS060"], zt), _fmul(c["EOS150"], zs), c["EOS050"])
+    zn0_2 = _fadd(
+        _fmul(zn0_1, zt),
+        _fmul(_fadd(_fmul(c["EOS240"], zs), c["EOS140"]), zs),
+        c["EOS040"],
+    )
+    zn0_3 = _fadd(
+        _fmul(zn0_2, zt),
+        _fmul(_horner(zs, c["EOS330"], c["EOS230"], c["EOS130"]), zs),
+        c["EOS030"],
+    )
+    zn0_4 = _fadd(
+        _fmul(zn0_3, zt),
+        _fmul(_horner(zs, c["EOS420"], c["EOS320"], c["EOS220"],
+                      c["EOS120"]), zs),
+        c["EOS020"],
+    )
+    zn0_5 = _fadd(
+        _fmul(zn0_4, zt),
+        _fmul(_horner(zs, c["EOS510"], c["EOS410"], c["EOS310"],
+                      c["EOS210"], c["EOS110"]), zs),
+        c["EOS010"],
+    )
+    zn0 = _fadd(
+        _fmul(zn0_5, zt),
+        _fmul(_horner(zs, c["EOS600"], c["EOS500"], c["EOS400"],
+                      c["EOS300"], c["EOS200"], c["EOS100"]), zs),
+        c["EOS000"],
+    )
+    zn = _horner(zh, zn3, zn2, zn1, zn0)
+    if return_intermediates:
+        # WRITE-only diagnostic seam in the source order of NEMO 5.0.2
+        # eosbn2.F90:260-287.  The production result is still the same final
+        # ``zn`` object; callers cannot replace any operand through this seam.
+        return depth_m, zh, zt, zs, zn0, zn1, zn2, zn3, zn
     return zn   # in-situ density [kg/m³]
+
+
+_nemo_roquet_eos_compiled = jax.jit(
+    _nemo_roquet_eos_impl, static_argnames=("return_intermediates",))
+
+
+def nemo_roquet_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+    return_intermediates: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
+    """Evaluate the shared NEMO Roquet polynomial with one arithmetic regime.
+
+    ``lax.optimization_barrier`` is intentionally a no-op under an outer
+    :func:`jax.disable_jit` context.  Running the literal polynomial eagerly
+    consequently changed its multiply/add contraction and, after hydrostatic
+    integration, produced a false 1e-9--1e-7 trajectory split.  Re-enable the
+    cached literal kernel locally so eager diagnostics and production JIT call
+    the same compiled arithmetic.  This remains a single differentiable JAX
+    implementation; it is neither a card selector nor a host callback.
+    """
+    if isinstance(T, jax.core.Tracer):
+        return _nemo_roquet_eos_impl(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m,
+            return_intermediates=return_intermediates)
+    with jax.disable_jit(False):
+        return _nemo_roquet_eos_compiled(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m,
+            return_intermediates=return_intermediates)
+
+
+def _nemo_roquet_density_anomaly_ratio_impl(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
+    return_intermediates: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
+    """Return NEMO's literal ``prd = (zn * r1_rho0 - 1) * tmask``.
+
+    ``prd`` is the dimensionless density anomaly consumed by ``dynhpg``.
+    Dividing before subtracting reproduces NEMO 5.0.2
+    ``eosbn2.F90:288``; ``(zn-rho0)/rho0`` is algebraically equivalent but
+    loses different fp64 bits.  The Roquet polynomial remains implemented
+    once, in :func:`nemo_roquet_eos`.
+    """
+    # eosbn2.F90:288 has two source-level rounded operations.  Preserve that
+    # boundary in the compiled path instead of permitting contraction across
+    # the multiply and subtract.  ``tmask`` is optional only for standalone
+    # EOS evaluation; every NEMO dynamics caller supplies the real 3-D mask.
+    eos_result = nemo_roquet_eos(
+        T, S, p, coeffs=coeffs, rho0=rho0,
+        geometric_depth_m=geometric_depth_m,
+        return_intermediates=return_intermediates)
+    if return_intermediates:
+        depth_m, zh, zt, zs, zn0, zn1, zn2, zn3, zn = eos_result
+    else:
+        zn = eos_result
+    zn_rho = nemo_source_round(zn * (1.0 / rho0))
+    prd = nemo_source_round(zn_rho - 1.0)
+    ztm = jnp.asarray(1.0 if tmask is None else tmask, dtype=prd.dtype)
+    prd = nemo_source_round(prd * ztm)
+    if return_intermediates:
+        return (T, S, depth_m, zh, zt, zs, ztm,
+                zn0, zn1, zn2, zn3, zn, prd)
+    return prd
+
+
+_nemo_roquet_density_anomaly_ratio_compiled = jax.jit(
+    _nemo_roquet_density_anomaly_ratio_impl,
+    static_argnames=("return_intermediates",))
+
+
+def nemo_roquet_density_anomaly_ratio(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    coeffs: dict | None = None,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
+    return_intermediates: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
+    """Return NEMO's literal masked ``rho/rho0 - 1`` arithmetic."""
+    if isinstance(T, jax.core.Tracer):
+        return _nemo_roquet_density_anomaly_ratio_impl(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m, tmask=tmask,
+            return_intermediates=return_intermediates)
+    with jax.disable_jit(False):
+        return _nemo_roquet_density_anomaly_ratio_compiled(
+            T, S, p, coeffs=coeffs, rho0=rho0,
+            geometric_depth_m=geometric_depth_m, tmask=tmask,
+            return_intermediates=return_intermediates)
 
 
 # ==============================================================================
@@ -1126,12 +1403,31 @@ _ROQUET_TEOS10 = {
 }
 
 
+def nemo_teos10_density_anomaly_ratio(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    *,
+    rho0: float = rho_0,
+    geometric_depth_m: jnp.ndarray | None = None,
+    tmask: jnp.ndarray | None = None,
+    return_intermediates: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
+    """TEOS-10 specialization of NEMO's source-associated ``rhd`` value."""
+    return nemo_roquet_density_anomaly_ratio(
+        T, S, p, coeffs=_ROQUET_TEOS10, rho0=rho0,
+        geometric_depth_m=geometric_depth_m, tmask=tmask,
+        return_intermediates=return_intermediates)
+
+
 _NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's
 # constants.rho_ocean is 1025, and using it here biases alpha, beta and
 # hence N2 high by 1026/1025 = +0.0976% (codex 9408213 #6).
 
 
-def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = _NEMO_RHO0):
+def nemo_roquet_alpha_beta(
+    T, S, depth_m, rho0: float = _NEMO_RHO0, *, eos_form: str = "teos10"
+):
     r"""NEMO ``rab_3d`` thermal expansion / haline contraction (polynomial EOS).
 
     Transcribes ``eosbn2.F90:1108-1143`` verbatim for the
@@ -1156,7 +1452,13 @@ def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = _NEMO_RHO0):
     ``S + rdeltaS``, which is strictly positive for physical salinity, so the
     kink is unreachable and the gradient stays finite.
     """
-    c = _ROQUET_TEOS10
+    if eos_form in ("teos10", "nemo_teos10"):
+        c = _ROQUET_TEOS10
+    elif eos_form in ("eos80", "nemo_eos80"):
+        c = _ROQUET_EOS80
+    else:
+        raise ValueError(
+            "eos_form must name NEMO's 'teos10' or 'eos80' coefficient set")
     zh = jnp.asarray(depth_m) * c["r1_Z0"]
     zt = jnp.asarray(T) * c["r1_T0"]
     zs = jnp.sqrt(jnp.abs(jnp.asarray(S) + c["rdeltaS"]) * c["r1_S0"])
@@ -1275,7 +1577,20 @@ def unesco80_eos(
     Parameters
     ----------
     T : array
-        Potential temperature [°C]. Valid range: -2 to 40 °C.
+        IN-SITU temperature [°C] (IPTS-68). Valid range: -2 to 40 °C.
+
+        This said "Potential temperature" until 2026-09-11 and that was
+        WRONG. UNESCO 1980 is the in-situ standard; the potential-temperature
+        refit is Jackett & McDougall 1995, a different polynomial. Measured
+        against the published in-situ check value
+        ``rho(S=35, T=25, p=10000 dbar) = 1062.538``, this function returns
+        1062.5382 -- agreement to 2e-4 kg/m³, which it could not achieve if
+        it were a θ-form. Every prognostic tracer in this package is
+        POTENTIAL temperature, so callers must convert with
+        :func:`potential_temperature`'s inverse before using this EOS;
+        feeding θ straight in leaves the deep ocean too dense by roughly the
+        adiabatic compression term. The OMIP runner refuses to select it for
+        exactly this reason (``_OMIP_EOS_FORMS``).
     S : array
         Practical salinity [PSU]. Valid range: 0 to 42 PSU.
     p : array
@@ -1528,6 +1843,36 @@ def potential_temperature(
 
     xk = h * adiabatic_temperature_gradient(S, t, p)
     return t + (xk - 2.0 * q) / 6.0
+
+
+# Fixed numerical inverse iterations, not a physical closure parameter.
+_INSITU_ITERATIONS = 8
+
+
+def in_situ_temperature(S, theta_C, p_dbar):
+    """Invert surface-referenced :func:`potential_temperature`, in Celsius.
+
+    Reverse pressure integration supplies the initial estimate. Fixed residual
+    corrections invert the discrete forward conversion (reverse integration
+    alone has truncation error). JIT/grad-safe for seawater in the EOS regime.
+    Pressure is sea pressure in dbar, as in the forward conversion.
+    The final forward residual must be <= 1e-12 K (float64) or 1e-5 K
+    (float32). This guards the fixed iteration count's convergence assumption
+    for this EOS. Value checks are inert in eager/plain JIT execution: compile
+    ``jax.jit(checkify.checkify(fn))`` with user checks enabled (the default)
+    and call ``err.throw()`` outside JIT to enforce them.
+    """
+    initial = potential_temperature(S, theta_C, 0.0, p_dbar)
+
+    def correct(_, t):
+        return t + (theta_C - potential_temperature(S, t, p_dbar))
+
+    final = lax.fori_loop(0, _INSITU_ITERATIONS, correct, initial)
+    residual = jnp.abs(theta_C - potential_temperature(S, final, p_dbar))
+    tolerance = 1e-12 if final.dtype == jnp.float64 else 1e-5
+    checkify.debug_check(jnp.all(jnp.isfinite(residual) & (residual <= tolerance)),
+                         "EOS: in-situ temperature inverse residual exceeds tolerance")
+    return final
 
 
 # ==============================================================================
@@ -2948,7 +3293,13 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
+    # differentiating the unguarded square root produces 0*inf -> NaN.
+    # Guard inside sqrt as well as outside; retain the exact forward value.
+    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    nonzero = sal_abs > 0.0
+    zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
+        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
     poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
              + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
     tf = poly * jnp.asarray(S_psu)

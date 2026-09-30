@@ -75,7 +75,7 @@ from legoesm.core.fv3_mapz import (
 from legoesm.core.fv3_native_state_3d import (
     field_shape,
 )
-from legoesm.core.fv3_phase3d_common import require_f64_jax
+from legoesm.core.fv3_phase3d_common import batch_size, require_f64_jax
 from legoesm.core.fv3_tracer2d import (
     alloc_flux_capacitors,
     require_tracer_2d_1l_lane,
@@ -134,7 +134,8 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
     """
     delp = jnp.asarray(delp)
     require_f64_jax("p_var_hydrostatic", {"delp": delp})
-    want = (6,) + tuple(field_shape("delp", n, ng, km))
+    nb = delp.shape[0]            # 6 faces, or 6*kt*kt windows
+    want = (nb,) + tuple(field_shape("delp", n, ng, km))
     if delp.shape != want:
         raise ValueError(f"p_var_hydrostatic: delp must be {want}, got "
                          f"{delp.shape}")
@@ -161,7 +162,7 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
         acc = acc + x
         lnp = jnp.log(acc)
         return acc, (acc, lnp, jnp.exp(akap * lnp))
-    acc0 = jnp.zeros((6, n, n), dtype=dt) + ptop
+    acc0 = jnp.zeros((nb, n, n), dtype=dt) + ptop
     # lax.scan returns (final_carry, stacked_ys) -- TWO values. The
     # three stage outputs come back inside ys, so they unpack from
     # the second element, never from the call.
@@ -169,18 +170,19 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
 
     # :80-83  pe(i,1,j) = ptop ; pk(i,j,1) = ptop**cappa
     pek = ptop ** akap
-    pe = jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)), dtype=dt)
+    pe = jnp.zeros((nb,) + tuple(field_shape("pe", n, ng, km)), dtype=dt)
     pe = pe.at[:, 1:n + 1, 0, 1:n + 1].set(ptop)
     pe = pe.at[:, 1:n + 1, 1:km + 1, 1:n + 1].set(
         jnp.transpose(pe_c, (1, 2, 0, 3)))           # (6,i,k,j)
-    pk = jnp.zeros((6,) + tuple(field_shape("pk", n, ng, km)), dtype=dt)
+    pk = jnp.zeros((nb,) + tuple(field_shape("pk", n, ng, km)), dtype=dt)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 0].set(pek)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 1:km + 1].set(
         jnp.transpose(pk_c, (1, 2, 3, 0)))           # (6,i,j,k)
-    peln = jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)), dtype=dt)
+    peln = jnp.zeros((nb,) + tuple(field_shape("peln", n, ng, km)),
+                     dtype=dt)
     peln = peln.at[:, :, 1:km + 1, :].set(jnp.transpose(lnp_c, (1, 2, 0, 3)))
     # :110-112  ps = pe(i,km+1,j)
-    ps = jnp.zeros((6,) + tuple(field_shape("ps", n, ng, km)), dtype=dt)
+    ps = jnp.zeros((nb,) + tuple(field_shape("ps", n, ng, km)), dtype=dt)
     ps = ps.at[:, ia:ia + n, ia:ia + n].set(pe[:, 1:n + 1, km, 1:n + 1])
     # :114-125 peln(:,1,:).  jnp.where: both arms total and finite -- the
     # dead log arm is clamped at PTOP_MIN, which cannot alter the live
@@ -582,13 +584,14 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "area-weighted and use rsin2/cosa_s "
                 "(fv_mapz.F90:650-656).")
     n, ng = ctx.n, ctx.ng
-    want_delp = (6,) + tuple(field_shape("delp", n, ng, km))
+    nb = batch_size(ctx)          # 6 faces, or the window ctx's 6*kt*kt
+    want_delp = (nb,) + tuple(field_shape("delp", n, ng, km))
     for nm in ("delp", "pt", "u", "v"):
         if nm not in state:
             raise ValueError(f"state is missing '{nm}'")
-        if state[nm].shape[0] != 6:
-            raise ValueError(f"state['{nm}'] must lead with 6 faces, got "
-                             f"{state[nm].shape}")
+        if state[nm].shape[0] != nb:
+            raise ValueError(f"state['{nm}'] must lead with {nb} faces/"
+                             f"windows, got {state[nm].shape}")
     for nm in ("delp", "pt"):
         if state[nm].shape != want_delp:
             raise ValueError(f"state['{nm}'] must be {want_delp}, got "
@@ -596,9 +599,9 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     for nm in ("ps", "pe", "peln", "pk", "pkz"):
         if nm not in press:
             raise ValueError(f"press is missing '{nm}'")
-        if press[nm].shape[0] != 6:
-            raise ValueError(f"press['{nm}'] must lead with 6 faces, got "
-                             f"{press[nm].shape}")
+        if press[nm].shape[0] != nb:
+            raise ValueError(f"press['{nm}'] must lead with {nb} faces/"
+                             f"windows, got {press[nm].shape}")
     nq = len(q)
     for i, qt in enumerate(q):
         if qt.shape != want_delp:
@@ -626,7 +629,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     w_limiter = bool(w_limiter) if w_limiter is not None else False
 
     if omga is None:
-        omga = jnp.zeros(want_delp, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from state["delp"]
+        omga = jnp.zeros(want_delp, dtype=state["delp"].dtype)
     ak = jnp.asarray(ak)
     bk = jnp.asarray(bk)
     require_f64_jax("fv_dynamics_step",
@@ -670,11 +674,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     if abs(consv_te) > _CONSV_MIN:
         _gs = ctx.gs6
         _stack = lambda k: jnp.asarray(  # noqa: E731
-            np.stack([np.asarray(_gs[t][k]) for t in range(6)]))
+            np.stack([np.asarray(_gs[t][k]) for t in range(nb)]))
         _rsin2, _cosa_s = _stack("rsin2"), _stack("cosa_s")
         _area = _stack("area")
         _hs = jnp.asarray(np.stack([_hs_face_jax(ctx, t, n, ng)
-                                    for t in range(6)]))
+                                    for t in range(nb)]))
         qc = (zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
               if zvir != 0.0 else None)
         te0_2d = total_energy_2d_hydrostatic_jax(
@@ -731,7 +735,9 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         # dyn_core.F90:313-316 sits INSIDE dyn_core: one zeroing per n_map
         # call (never per acoustic sub-step); k_split=1 makes it once per
         # fv_dynamics_step.  This module owns the zeroing (D3).
-        fc = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
+        fc = (alloc_flux_capacitors(n, ng, km, dtype=st["delp"].dtype,
+                                    nb=nb)
+              if nq > 0 else None)
         # :502 dyn_core; press_out's role is taken by ac["press"] (the
         # callee contract supplies it, replacing the spec's length check)
         ac = acoustic_loop_3d(ctx, st, mdt, km, batched=batched,
@@ -755,6 +761,24 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
+            # WINDOW lane: the tracer step is a phase of its own between
+            # the acoustic loop and the remap, and like every acoustic
+            # substep it needs its seam pads rebuilt from the owners at
+            # ENTRY (acoustic_loop_3d does this for state/nh/flux_cap).
+            # Without it the tracer's pad NaN (the outer stencil-reach
+            # cells, expected) survived into the next step and ate ~2
+            # cells inward per step, reaching owned cells at step 3
+            # (C24 kt=2 pad=5 n_split=8; gate jobs 9910440/1, probe
+            # 9912744; forced refresh before OR after the step confines
+            # it, jobs 9912821/2).  No-op on the six-face lane.
+            # One tracer per key (each (nb, W, W, km), the layout pt already
+            # relies on) in ONE firing -- NOT km*nq merged into the trailing
+            # axis, which can collide with a horizontal extent and trip the
+            # layout classifier (codex: nq=4, km=5 at C24 gives 20 = n_w+1).
+            _wc = getattr(getattr(ctx, "tab", None), "window_comm", None)
+            if _wc is not None:
+                _ref = _wc.refresh({f"q{i}": _q_in[:, i] for i in range(nq)})
+                _q_in = jnp.stack([_ref[f"q{i}"] for i in range(nq)], axis=1)
             _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
@@ -885,7 +909,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             om = o.omga
         else:
             fs = []
-            for t in range(6):
+            for t in range(nb):
                 fs.append(lagrangian_to_eulerian(
                     pe=pr["pe"][t], peln=pr["peln"][t], pk=pr["pk"][t],
                     pkz=pr["pkz"][t], delp=st["delp"][t], pt=st["pt"][t],
@@ -985,7 +1009,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                                  sphum_index=sphum_index, r_vir=zvir,
                                  dtmp=dtmp, cp=cp_air, n=n, ng=ng,
                                  fixer_on=True)
-                    for t in range(6)])
+                    for t in range(nb)])
 
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 

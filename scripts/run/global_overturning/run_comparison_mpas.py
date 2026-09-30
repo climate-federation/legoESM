@@ -15,7 +15,7 @@ Key settings (shared with lat-lon):
   - Adcroft PGF, implicit-CN barotropic
   - Per-timestep scalar diagnostics, daily 3D snapshots
 
-MPAS-only: K_zeta_bih=1e14 (TRiSK null mode damping).
+MPAS-only: K_zeta_bih (TRiSK null mode damping), derived from the mesh spacing.
 
 Usage:
     CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_mpas.py
@@ -314,7 +314,9 @@ def main():
     p.add_argument("--save-every-days", type=int, default=1,
                    help="Save restart and snapshot every N days (default 1).")
     p.add_argument("--k-zeta-bih", type=float, default=None,
-                   help="Override K_zeta_bih (default: use 1e14).")
+                   help="Override K_zeta_bih (default: derive it from the "
+                        "mesh spacing as K_ref*(dx/dx_ref)^3, anchored on the "
+                        "ico6 mesh where 1e14 was tuned).")
     p.add_argument("--apvm-dt", type=float, default=None,
                    help="Override apvm_dt [s] (default: 0 = disabled).")
     p.add_argument("--b-h", type=float, default=None,
@@ -443,7 +445,8 @@ def main():
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
         bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
-        K_zeta_bih=args.k_zeta_bih if args.k_zeta_bih is not None else 1e14,
+        # None => derived from the mesh spacing (dx^3, ico6-anchored).
+        K_zeta_bih=args.k_zeta_bih,
         B_h=args.b_h if args.b_h is not None else 0.0,
         apvm_dt=args.apvm_dt if args.apvm_dt is not None else 0.0,
         equatorial_visc_boost=0.0,
@@ -518,7 +521,7 @@ def main():
         "K_v": float(config.K_v),
         "C_smag_lap": float(config.C_smag_lap),
         "B_h": float(config.B_h),
-        "K_zeta_bih": float(config.K_zeta_bih),
+        "K_zeta_bih": float(model.config.K_zeta_bih),
         "apvm_dt": float(config.apvm_dt),
         "equatorial_visc_boost": float(config.equatorial_visc_boost),
         "bottom_drag_r": float(config.bottom_drag_r),
@@ -556,7 +559,7 @@ def main():
     print(f"  Config:")
     print(f"    A_h={config.A_h:.0e}, C_smag_lap={config.C_smag_lap}")
     print(f"    A_v={config.A_v:.0e}, K_v={config.K_v:.0e}")
-    print(f"    K_zeta_bih={config.K_zeta_bih:.0e} (MPAS-only)")
+    print(f"    K_zeta_bih={model.config.K_zeta_bih:.0e} (MPAS-only)")
     print(f"    GM/Redi: κ_GM={config.gm_redi.kappa_GM}, "
           f"κ_Redi={config.gm_redi.kappa_Redi}, "
           f"S_max={config.gm_redi.S_max}")

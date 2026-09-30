@@ -40,7 +40,13 @@ first):
      4.11e-3 Sv here (ACC of the restart's now level 61.946220 Sv against its
      before level 61.950334 Sv), so the Euler start injects about 2.06e-3 Sv at
      t=0. This one DOES grow, and it is the dominant term at long lead.
-  3. it skips NEMO's step-1 after-level reconciliation (#1640 finding 3).
+  3. it USED to skip NEMO's step-1 after-level reconciliation (#1640 finding
+     3) and to drop the whole surface tracer tendency on that step. #1729
+     closed both: the Euler start is now a parameterisation of the ordinary
+     step, not an early return. CONSEQUENCE, so nobody reads an old number as
+     comparable -- ``--legacy-euler-start`` still selects the Euler START
+     MODE, but its step 1 is no longer the step 1 those pre-2026-08-24
+     artifacts were produced with.
 
 RETRACTED: an earlier version of this docstring said the Euler trajectory "IS
 the two-point running mean of the true one" full stop. That both OVERSTATES the
@@ -2410,8 +2416,12 @@ def _parse_args(argv=None):
                         "half a step at every frequency AND injects a "
                         "permanent perturbation of half a leap-frog step of "
                         "tendency (~2.06e-3 Sv of circumpolar transport on the "
-                        "day-180 restart), and it skips NEMO's step-1 "
-                        "after-level reconciliation. Prints a loud banner.")
+                        "day-180 restart). Prints a loud banner. NOTE "
+                        "(#1729): it no longer skips NEMO's step-1 after-level "
+                        "reconciliation -- the Euler start now runs the same "
+                        "body every other step runs -- so this flag reproduces "
+                        "the START MODE of pre-2026-08-24 arms, NOT their "
+                        "numbers.")
     p.add_argument("--vmix-scheme", default=None,
                     help="override DINOConfig.vmix_scheme (e.g. 'constant' for "
                          "the #1317 TKE-vs-constant-mixing discriminator); "

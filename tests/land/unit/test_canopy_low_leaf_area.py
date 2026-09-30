@@ -137,3 +137,20 @@ def test_the_pins_stay_off_on_a_column_with_leaves():
     assert bool(converged)
     assert abs(float(x[0]) - float(x[4])) > 1e-3, "leaf pinned to canopy air"
     assert abs(float(x[2]) - 400.0) > 1e-3, "leaf Ci pinned to ambient"
+
+
+@pytest.mark.parametrize("lai", [1e-5, 1e-4, 1e-3])
+def test_a_sparse_canopy_at_night_converges_near_the_canopy_air(lai):
+    """Sparse leaves at night, just above the bare-ground pin: the solve must
+    converge and the leaves sit within a few K of the canopy air.  A latent-heat
+    cap that leaked a leaf-area-independent -0.2 W/m2 at zero flux drove
+    Tf - Tc ~ 0.005/LAI K (50 K at LAI 1e-4) and stalled below LAI ~1e-5."""
+    b = _bundle(LAI=lai, fSun=0.036)._replace(
+        SZA=jnp.asarray(90.0), APAR_Sun=jnp.asarray(0.0), APAR_Sh=jnp.asarray(0.0),
+        ASW_Sun=jnp.asarray(0.0), ASW_Sh=jnp.asarray(0.0), ASW_Soil=jnp.asarray(0.0),
+        La=jnp.asarray(250.0), Ta=jnp.asarray(265.0), Tv_atm=jnp.asarray(265.5),
+        Ts_bc=jnp.asarray(264.8), q_atm=jnp.asarray(0.002))
+    x0 = jnp.array([265.0, 265.0, 280.0, 280.0, 265.0, 0.002])
+    x, _n, converged = solve_canopy_closure(x0, b, CanopyConfig())
+    assert bool(converged)
+    assert float(jnp.max(jnp.abs(x[:2] - x[4]))) < 5.0

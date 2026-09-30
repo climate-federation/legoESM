@@ -46,6 +46,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+# #1028: the D-grid -> cell-centre wind view used wherever the column physics
+# reads winds while the run carries FV3 D-staggered cube winds.
+from legoesm.core.operators_cdgrid import dgrid_to_center_vector
 from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
@@ -423,9 +426,15 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
     # ocean-only runs this zeros array is carried but never read.
     if T_land is None:
         T_land = jnp.zeros_like(state.p_s.data)
+    # #1028: the cube hydrostatic lane may carry FV3 D-staggered winds
+    # (u_d/v_d at corners) instead of cell-centre u/v.  The carry stores the
+    # arrays verbatim either way -- it is the state TYPE, rebuilt by
+    # _rebuild_state, that tells the dycore which staggering they are.
+    _u_leaf = state.u_d if hasattr(state, "u_d") else state.u
+    _v_leaf = state.v_d if hasattr(state, "v_d") else state.v
     return SegmentCarry(
-        u=_promote(state.u.data, storage),
-        v=_promote(state.v.data, storage),
+        u=_promote(_u_leaf.data, storage),
+        v=_promote(_v_leaf.data, storage),
         T=_promote(state.T.data, storage),
         p_s=_promote(state.p_s.data, storage),
         phis=_promote(state.phis.data, storage),
@@ -510,9 +519,17 @@ def unpack_carry(carry, state_template):
     read them directly off the carry (like ``q_i`` / ``tke``) to keep the
     long-standing 10-tuple signature stable.
     """
+    # #1028: mirror of pack_carry -- restore onto u_d/v_d when the template
+    # is the D-staggered cube state, onto u/v otherwise.
+    _wind_kw = (
+        {"u_d": state_template.u_d.replace(data=carry.u),
+         "v_d": state_template.v_d.replace(data=carry.v)}
+        if hasattr(state_template, "u_d") else
+        {"u": state_template.u.replace(data=carry.u),
+         "v": state_template.v.replace(data=carry.v)}
+    )
     new_state = state_template._replace(
-        u=state_template.u.replace(data=carry.u),
-        v=state_template.v.replace(data=carry.v),
+        **_wind_kw,
         T=state_template.T.replace(data=carry.T),
         p_s=state_template.p_s.replace(data=carry.p_s),
         phis=state_template.phis.replace(data=carry.phis),
@@ -713,6 +730,36 @@ class SegmentForcing(NamedTuple):
     # pytree carries no spurious empty leaf.
     sfc_shflx_override: jax.Array | None = None
     sfc_lhflx_override: jax.Array | None = None
+    # Prescribed ERA5 / coupler surface MOMENTUM fluxes — the surface stress
+    # [Pa, stress ON THE ATMOSPHERE, opposite in sign to the wind — the
+    # convention of surface_layer.compute_surface_fluxes] for this segment.
+    # When present the stress becomes the LOWER BOUNDARY CONDITION of
+    # whatever turbulence scheme runs (folded into the kernel config via
+    # fold_prescribed_surface_fluxes -> config.surface.prescribed_tau_*_pa),
+    # or, on the bulk-BL path, an explicit lowest-layer momentum kick in
+    # physics_step_no_rad.  ``None`` (default) keeps the scheme's own / bulk
+    # drag — byte-identical.  Grid-shaped, like sst/sic; kept None (not a
+    # (0,) placeholder) so no module-scope device op is created at import.
+    sfc_taux_override: jax.Array | None = None
+    sfc_tauy_override: jax.Array | None = None
+    # Prescribed ERA5 / coupler surface RADIATIVE fluxes [W/m2] — upwelling
+    # LW, upwelling SW, downwelling SW at the surface.  When present,
+    # PhysicsPipeline.compute_radiation_core forms the radiative surface BC
+    # from them: T_rad = (LW_up / sigma_sb)**0.25 with emissivity 1, and
+    # albedo = SW_up / SW_down where SW_down >= 1 W/m2 (else the run's own
+    # albedo after the coupler overrides).  The TURBULENT surface temperature
+    # (sst/sic/T_land blend) is deliberately NOT replaced — the turbulent
+    # fluxes are prescribed too when this is used (phase-2 doctrine: one
+    # authoritative flux set).  ``None`` (default) keeps the internal
+    # radiative surface — byte-identical.  Grid-shaped, like sst/sic.
+    sfc_lw_up: jax.Array | None = None
+    sfc_sw_up: jax.Array | None = None
+    sfc_sw_down: jax.Array | None = None
+    # Static land fraction [0..1], grid-shaped like sst/sic.  Consumed by the
+    # learned physics wrappers (phase 2, part 2) that share the step_unified
+    # signature; the classical pipeline accepts and ignores it.  ``None``
+    # (default) — byte-identical.
+    land_frac: jax.Array | None = None
     # Transient land-use cover — the per-segment multilayer land surface params
     # (``LandSurfaceParams`` pytree: per-column albedo_veg / emissivity / LAI /
     # canopy-structure) a coupled or AMIP driver re-materialises each segment as
@@ -771,6 +818,12 @@ def pack_forcing(
     sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
+    sfc_taux_override=None,
+    sfc_tauy_override=None,
+    sfc_lw_up=None,
+    sfc_sw_up=None,
+    sfc_sw_down=None,
+    land_frac=None,
     land_ml_params=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
@@ -798,6 +851,26 @@ def pack_forcing(
         (default) leaves the atmosphere computing its own bulk surface fluxes —
         byte-identical for AMIP / standalone runs.  When present the atmosphere
         surface tendency consumes these instead, closing the air-sea budget.
+    sfc_taux_override, sfc_tauy_override : jax.Array or None
+        Prescribed surface momentum flux [Pa, stress ON THE ATMOSPHERE,
+        opposite in sign to the wind] for this segment (grid-shaped, like
+        sst/sic).  ``None`` (default) keeps the scheme's own / bulk surface
+        drag.  When present the stress is the lower boundary condition of
+        whatever turbulence scheme runs (folded into the kernel config), or
+        the explicit lowest-layer momentum kick on the bulk-BL path.
+    sfc_lw_up, sfc_sw_up, sfc_sw_down : jax.Array or None
+        Prescribed surface radiative fluxes [W/m2] for this segment
+        (grid-shaped, like sst/sic): upwelling LW, upwelling SW, downwelling
+        SW.  ``None`` (default) keeps the internal radiative surface —
+        byte-identical.  When present compute_radiation_core forms the
+        radiative BC T_rad = (LW_up / sigma_sb)**0.25 (emissivity 1) and
+        albedo = SW_up / SW_down where SW_down >= 1 W/m2 (else the run's own
+        albedo, after the coupler overrides).
+    land_frac : jax.Array or None
+        Static land fraction [0..1] (grid-shaped, like sst/sic).  Consumed by
+        the learned physics wrappers (phase 2, part 2) that share the
+        ``step_unified`` signature; the classical pipeline accepts and
+        ignores it.  ``None`` (default).
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -845,6 +918,26 @@ def pack_forcing(
             None if sfc_lhflx_override is None
             else jnp.asarray(sfc_lhflx_override)
         ),
+        sfc_taux_override=(
+            None if sfc_taux_override is None
+            else jnp.asarray(sfc_taux_override)
+        ),
+        sfc_tauy_override=(
+            None if sfc_tauy_override is None
+            else jnp.asarray(sfc_tauy_override)
+        ),
+        sfc_lw_up=(
+            None if sfc_lw_up is None else jnp.asarray(sfc_lw_up)
+        ),
+        sfc_sw_up=(
+            None if sfc_sw_up is None else jnp.asarray(sfc_sw_up)
+        ),
+        sfc_sw_down=(
+            None if sfc_sw_down is None else jnp.asarray(sfc_sw_down)
+        ),
+        land_frac=(
+            None if land_frac is None else jnp.asarray(land_frac)
+        ),
         # LandSurfaceParams pytree (or None) — passed through as-is; its leaves
         # are already jax arrays from the provider rebuild, no jnp.asarray coerce.
         land_ml_params=land_ml_params,
@@ -861,6 +954,8 @@ GRID_SHAPED_FORCING_FIELDS = (
     "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
     "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
     "sfc_shflx_override", "sfc_lhflx_override",
+    "sfc_taux_override", "sfc_tauy_override",
+    "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac",
 )
 
 
@@ -1112,7 +1207,7 @@ def _clear_sky_toa_pass(clear_sky_fresh, need_rad,
 
 def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                                need_rad, doy_step, sod_step, statics,
-                               moist=None):
+                               moist=None, u_cc=None, v_cc=None):
     """The single-rank (``owned_face_ids is None``) operator-split physics body:
     ``step_unified`` on the whole column set, then the Euler write-back +
     accumulators.  Extraction of the former ``_single_step`` ``else`` body
@@ -1130,6 +1225,14 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     from legoesm.core.conservation import energy_consistent_moisture_floor
     if moist is None:
         moist = {_nm: getattr(carry, _nm) for _nm in _MOIST_FIELDS}
+    # #1028: physics is a COLUMN closure and reads winds at cell centres.  On
+    # the persistent-D cube lane the carried winds sit at D-grid corners, so
+    # the caller passes a cell-centre VIEW here, while ``u_new``/``v_new`` stay
+    # the native carried arrays the finalizer writes back into the carry.  Off
+    # that lane the two are the same object and everything below is
+    # byte-identical.
+    if u_cc is None:
+        u_cc, v_cc = u_new, v_new
 
     # --- Budget ledger: DYNAMICS row (store delta across the dycore step,
     # incl. the dry-mass fixer's p_s adjustment and — with advect_moisture —
@@ -1141,10 +1244,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         _led_q_names = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
         _led_before = column_store_snapshot(
             carry.p_s, statics.dsigma, carry.T,
-            *(getattr(carry, _n) for _n in _led_q_names))
+            *(getattr(carry, _n) for _n in _led_q_names),
+            area=statics.grid.grid_area)
         _led_after = column_store_snapshot(
             p_s_new, statics.dsigma, T_new,
-            *(moist[_n] for _n in _led_q_names))
+            *(moist[_n] for _n in _led_q_names),
+            area=statics.grid.grid_area)
         _led_dynamics = (_led_after - _led_before) / statics.dt
     _dm_in = {}
     for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
@@ -1158,7 +1263,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         need_rad,
         T_new, p_s_new,
         moist["q_v"], moist["q_c"], moist["q_r"], carry.conv_prog,
-        u_new, v_new,
+        u_cc, v_cc,
         statics.forcing.sst, statics.forcing.sic, statics.lat, statics.lon,
         doy_step, sod_step, statics.dt,
         statics.forcing.solar_weights, statics.forcing.s_0,
@@ -1176,6 +1281,13 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
         sfc_shflx_override=statics.forcing.sfc_shflx_override,
         sfc_lhflx_override=statics.forcing.sfc_lhflx_override,
+        sfc_taux_override=statics.forcing.sfc_taux_override,
+        sfc_tauy_override=statics.forcing.sfc_tauy_override,
+        sfc_lw_up=statics.forcing.sfc_lw_up,
+        sfc_sw_up=statics.forcing.sfc_sw_up,
+        sfc_sw_down=statics.forcing.sfc_sw_down,
+        land_frac=statics.forcing.land_frac,
+        phis=carry.phis,
         T_land=carry.T_land, land_ml=carry.land_ml,
         land_ml_params=statics.forcing.land_ml_params,
         conv_precip=carry.conv_precip_prev,
@@ -1219,12 +1331,15 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                 ghg_vmr_override=statics.ghg_vmr_override,
                 q_c=None, q_i=None, N_c=None, N_i=None,
                 cloud_scheme="none",
-                u=u_new, v=v_new, dt=statics.dt,
+                u=u_cc, v=v_cc, dt=statics.dt,
                 T_land=carry.T_land, land_ml=carry.land_ml,
                 land_ml_params=statics.forcing.land_ml_params,
                 sfc_albedo_override=statics.forcing.sfc_albedo_override,
                 sfc_T_override=statics.forcing.sfc_T_override,
                 sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
+                sfc_lw_up=statics.forcing.sfc_lw_up,
+                sfc_sw_up=statics.forcing.sfc_sw_up,
+                sfc_sw_down=statics.forcing.sfc_sw_down,
                 conv_precip=carry.conv_precip_prev,
                 w_land=carry.w_land, snow=carry.snow,
             )
@@ -1307,10 +1422,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
             None if moist["q_s"] is None
             else moist["q_s"] + statics.dt * phys_out.dq_s_dt,
             None if moist["q_g"] is None
-            else moist["q_g"] + statics.dt * phys_out.dq_g_dt)
+            else moist["q_g"] + statics.dt * phys_out.dq_g_dt,
+            area=statics.grid.grid_area)
         _led_clipped = column_store_snapshot(
             p_s_new, statics.dsigma, T_upd,
-            q_v_upd, q_c_upd, q_r_upd, q_i_upd, q_s_upd, q_g_upd)
+            q_v_upd, q_c_upd, q_r_upd, q_i_upd, q_s_upd, q_g_upd,
+            area=statics.grid.grid_area)
         _led_clips = (_led_clipped - _led_raw) / statics.dt
         _led_step = phys_out.budget_ledger.astype(_led_clips.dtype)
         _led_step = _led_step.at[ROW_DYNAMICS].set(_led_dynamics)
@@ -1403,7 +1520,8 @@ def finalize_split_step(carry, lz, statics):
     if statics.budget_ledger:
         from legoesm.diagnostics.process_ledger import column_store_snapshot
         _led_tail_before = column_store_snapshot(
-            p_s_new, statics.dsigma, T_upd, q_v_upd)
+            p_s_new, statics.dsigma, T_upd, q_v_upd,
+            area=statics.grid.grid_area)
 
     # --- Saturation adjustment ---
     if statics.do_sat_adjust:
@@ -1431,7 +1549,8 @@ def finalize_split_step(carry, lz, statics):
             ROW_CLIPS, column_store_snapshot,
         )
         _led_tail_after = column_store_snapshot(
-            p_s_new, statics.dsigma, T_upd, q_v_upd)
+            p_s_new, statics.dsigma, T_upd, q_v_upd,
+            area=statics.grid.grid_area)
         _led_tail_rate = (_led_tail_after - _led_tail_before) / statics.dt
         _led_step = lz.budget_ledger_step.at[ROW_CLIPS].add(_led_tail_rate)
         _led_accum = (carry.budget_ledger_accum
@@ -1575,6 +1694,7 @@ def build_segment_fn(
     advect_moisture: bool = False,
     tiled_step_fn=None,
     budget_ledger: bool = False,
+    persistent_dgrid: bool = False,
 ):
     """Build a compiled segment function.
 
@@ -1706,6 +1826,24 @@ def build_segment_fn(
         ``run_segment(carry: SegmentCarry, n_steps: int,
         forcing: SegmentForcing) -> SegmentCarry``
     """
+    # #1028 dispatch hardening: the persistent-D wind layout is wired for the
+    # single-rank cube lane.  The MPI owned-face branch slices winds with
+    # ``[owned_face_ids]`` on arrays that would now be (n+1) in both horizontal
+    # directions, and the tiled adapter converts to cell centres by
+    # construction -- refuse LOUDLY rather than silently running the damped
+    # cell-centre path this flag exists to remove.
+    if persistent_dgrid:
+        if owned_face_ids is not None:
+            raise ValueError(
+                "persistent_dgrid=True is not supported with owned_face_ids "
+                "(MPI face-sharded physics): the owned-face slicing is written "
+                "for cell-centre (n) arrays, not D-grid corner (n+1) arrays.")
+        if tiled_step_fn is not None:
+            raise ValueError(
+                "persistent_dgrid=True is not supported with a tiled step: "
+                "the tiled adapter enters and exits at cell centres by "
+                "construction (tiled_step_adapter), so the round trip this "
+                "flag removes would still happen every step.")
     from legoesm.core.conservation import (
         fix_moisture_hydrostatic, fix_ps_mass_target,
         energy_consistent_moisture_floor,
@@ -1898,13 +2036,27 @@ def build_segment_fn(
             else:
                 dyn_state = _dynamics_model.step(
                     _rebuild_state(carry, _dynamics_model,
-                                   advect_moisture=advect_moisture),
+                                   advect_moisture=advect_moisture,
+                                   persistent_dgrid=persistent_dgrid),
                     _dt,
                 )
 
             T_new = dyn_state.T.data
-            u_new = dyn_state.u.data
-            v_new = dyn_state.v.data
+            # #1028: the cube hydrostatic lane may carry FV3 D-staggered winds.
+            # ``u_new``/``v_new`` are ALWAYS the native carried arrays (they go
+            # straight back into the carry); ``u_cc``/``v_cc`` are the
+            # cell-centre view the column physics reads.  Off the persistent-D
+            # lane they are the same arrays, so the whole body is
+            # byte-identical.
+            _dgrid_winds = hasattr(dyn_state, "u_d")
+            if _dgrid_winds:
+                u_new = dyn_state.u_d.data
+                v_new = dyn_state.v_d.data
+                u_cc, v_cc = dgrid_to_center_vector(u_new, v_new)
+            else:
+                u_new = dyn_state.u.data
+                v_new = dyn_state.v.data
+                u_cc, v_cc = u_new, v_new
             p_s_new = dyn_state.p_s.data
 
             # --- Advected moisture (issue #771) ---
@@ -2025,6 +2177,13 @@ def build_segment_fn(
                     sfc_emissivity_override=forcing.sfc_emissivity_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
+                    sfc_taux_override=forcing.sfc_taux_override,
+                    sfc_tauy_override=forcing.sfc_tauy_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
+                    land_frac=forcing.land_frac,
+                    phis=carry.phis[_ofi],
                     T_land=_T_land_in, land_ml=carry.land_ml,
                     land_ml_params=forcing.land_ml_params,
                     conv_precip=carry.conv_precip_prev[_ofi],
@@ -2060,6 +2219,9 @@ def build_segment_fn(
                             sfc_albedo_override=forcing.sfc_albedo_override,
                             sfc_T_override=forcing.sfc_T_override,
                             sfc_emissivity_override=forcing.sfc_emissivity_override,
+                            sfc_lw_up=forcing.sfc_lw_up,
+                            sfc_sw_up=forcing.sfc_sw_up,
+                            sfc_sw_down=forcing.sfc_sw_down,
                             conv_precip=carry.conv_precip_prev[_ofi],
                             w_land=_w_land_in, snow=_snow_in,
                         )
@@ -2237,7 +2399,8 @@ def build_segment_fn(
                     need_rad, _doy_step, _sod_step, _split_statics,
                     moist={"q_v": q_v_dyn, "q_c": q_c_dyn, "q_r": q_r_dyn,
                            "q_i": q_i_dyn, "q_s": q_s_dyn, "q_g": q_g_dyn,
-                           "N_c": N_c_dyn, "N_r": N_r_dyn, "N_i": N_i_dyn})
+                           "N_c": N_c_dyn, "N_r": N_r_dyn, "N_i": N_i_dyn},
+                    u_cc=u_cc, v_cc=v_cc)
 
             # Shared operator-split TAIL (sat-adjust, moisture fixer/smoothing,
             # Rayleigh, carry pack) — ONE source for both branches.
@@ -2401,6 +2564,13 @@ def build_segment_fn(
         # exactly as ``_make_single_step`` does (keys captured in closure;
         # values dynamic).
         _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
+        # #1028: the surface scheme inside radiation reads winds at cell
+        # centres.  With persistent D-grid winds the carry holds corner arrays,
+        # so take a read-only cell-centre view; off that lane these ARE
+        # carry.u/carry.v and the calls below are byte-identical.
+        _u_phys, _v_phys = (
+            dgrid_to_center_vector(carry.u, carry.v) if persistent_dgrid
+            else (carry.u, carry.v))
 
         # Clear-sky diagnostic (#843): the unfused rad refresh runs once per
         # radiation cycle, so a static Python gate (no need_rad — this IS the
@@ -2462,6 +2632,10 @@ def build_segment_fn(
                     land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
                     conv_precip=_own(carry.conv_precip_prev),
                     w_land=_w_land_in, snow=_snow_in,
                 )
@@ -2485,6 +2659,10 @@ def build_segment_fn(
                         land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
+                        sfc_emissivity_override=forcing.sfc_emissivity_override,
+                        sfc_lw_up=forcing.sfc_lw_up,
+                        sfc_sw_up=forcing.sfc_sw_up,
+                        sfc_sw_down=forcing.sfc_sw_down,
                         conv_precip=_own(carry.conv_precip_prev),
                         w_land=_w_land_in, snow=_snow_in,
                     )
@@ -2526,11 +2704,15 @@ def build_segment_fn(
                     q_c=carry.q_c, q_i=carry.q_i,
                     N_c=carry.N_c, N_i=carry.N_i,
                     cloud_scheme=pipeline._cloud_scheme,
-                    u=carry.u, v=carry.v, dt=_dt,
+                    u=_u_phys, v=_v_phys, dt=_dt,
                     T_land=carry.T_land, land_ml=carry.land_ml,
                     land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
                     conv_precip=carry.conv_precip_prev,
                     w_land=carry.w_land, snow=carry.snow,
                 )
@@ -2549,11 +2731,15 @@ def build_segment_fn(
                         ghg_vmr_override=_ghg_vmr_override,
                         q_c=None, q_i=None, N_c=None, N_i=None,
                         cloud_scheme="none",
-                        u=carry.u, v=carry.v, dt=_dt,
+                        u=_u_phys, v=_v_phys, dt=_dt,
                         T_land=carry.T_land, land_ml=carry.land_ml,
                         land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
+                        sfc_emissivity_override=forcing.sfc_emissivity_override,
+                        sfc_lw_up=forcing.sfc_lw_up,
+                        sfc_sw_up=forcing.sfc_sw_up,
+                        sfc_sw_down=forcing.sfc_sw_down,
                         conv_precip=carry.conv_precip_prev,
                         w_land=carry.w_land, snow=carry.snow,
                     )
@@ -3071,7 +3257,8 @@ _ADVECTED_TRACER_NAMES = (
 )
 
 
-def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
+def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False,
+                   persistent_dgrid: bool = False):
     """Rebuild the model's expected state type from raw carry arrays.
 
     The dynamics model expects a NamedTuple with Field-wrapped arrays.
@@ -3092,9 +3279,21 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
         from legoesm.core.state import HydrostaticState
         StateType = HydrostaticState
 
+    # #1028: with persistent D-grid winds the carry holds CORNER arrays
+    # (6, n+1, n+1, nlev) and the state that owns them is FV3HydrostaticState,
+    # whose wind leaves are named u_d/v_d.  The caller decides -- the model's
+    # ``_state_type`` is the cell-centre state on this dycore either way, so
+    # keying off it would silently rebuild a cell-centre state around corner
+    # arrays (found by the #1028 gate).
+    if persistent_dgrid:
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            FV3HydrostaticState,
+        )
+        StateType = FV3HydrostaticState
+    _wname, _vname = ("u_d", "v_d") if persistent_dgrid else ("u", "v")
     # Build Fields with minimal metadata
-    u_f = Field(carry.u, name="u", dims=("face", "x", "y", "level"), units="m/s")
-    v_f = Field(carry.v, name="v", dims=("face", "x", "y", "level"), units="m/s")
+    u_f = Field(carry.u, name=_wname, dims=("face", "x", "y", "level"), units="m/s")
+    v_f = Field(carry.v, name=_vname, dims=("face", "x", "y", "level"), units="m/s")
     T_f = Field(carry.T, name="T", dims=("face", "x", "y", "level"), units="K")
     p_s_f = Field(carry.p_s, name="p_s", dims=("face", "x", "y"), units="Pa")
     phis_f = Field(carry.phis, name="phis", dims=("face", "x", "y"), units="m2/s2")
@@ -3112,7 +3311,9 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
             for nm in _ADVECTED_TRACER_NAMES
             if getattr(carry, nm) is not None
         }
-        return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f,
+        return StateType(**{_wname: u_f, _vname: v_f},
+                         T=T_f, p_s=p_s_f, phis=phis_f,
                          tracers=tracers)
 
-    return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f)
+    return StateType(**{_wname: u_f, _vname: v_f},
+                     T=T_f, p_s=p_s_f, phis=phis_f)

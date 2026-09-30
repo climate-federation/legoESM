@@ -145,3 +145,51 @@ def test_first_window_negative_lo_finite():
         day_of_year=200, year_len_days=365.0,
         t_frac_lo=-0.5 / 24.0, t_frac_up=0.5 / 24.0))
     assert np.all(np.isfinite(f)) and np.all(f >= 0.0)
+
+
+def test_dm2dc_sw_factor_mpas_paired_cell_coords():
+    """The applicator's shared ``dm2dc_sw_factor`` handles the MPAS Voronoi
+    mesh: 1-D PAIRED ``latCell``/``lonCell`` (radians) each carrying its own
+    (lat, lon), returning a per-cell ``(nCells,)`` factor -- not a meshgrid.
+
+    Two contracts:
+      * mean-preserving -- the window-weighted sum of the factor over a full
+        day is ~1 at every daylit cell (defining property of sbc_dcy);
+      * NON-VACUOUS -- a single local-noon window factor is finite, >= 0 and
+        NOT identically 1 (proving the diurnal shape is actually applied on
+        the MPAS branch, not silently passed through).
+    """
+    from types import SimpleNamespace
+    from legoesm.ocean.coupler.omip2_applicator import dm2dc_sw_factor
+
+    # Paired 1-D cell centres spanning latitudes/longitudes (radians), the
+    # SAME attribute names the run driver reads for the MPAS grid.
+    lat_deg = np.array([-55.0, -30.0, -5.0, 5.0, 20.0, 45.0, 60.0, 0.0])
+    lon_deg = np.array([0.0, 40.0, 90.0, 140.0, 200.0, 250.0, 300.0, 350.0])
+    grid = SimpleNamespace(
+        latCell=np.deg2rad(lat_deg), lonCell=np.deg2rad(lon_deg))
+    nCells = lat_deg.shape[0]
+
+    day, year_len = 80, 365.0
+    n_win = 24
+    dt_frac = 1.0 / n_win
+
+    # Full-day window-weighted mean of the factor (mean-preservation).
+    acc = np.zeros(nCells)
+    for k in range(n_win):
+        t_lo = k * dt_frac
+        fac = dm2dc_sw_factor(grid, (day, year_len, t_lo, t_lo + dt_frac))
+        assert np.asarray(fac).shape == (nCells,)
+        assert np.all(np.isfinite(fac)) and np.all(np.asarray(fac) >= 0.0)
+        acc += np.asarray(fac) * dt_frac
+
+    # Daylit cells (day 80 is post-equinox: all these latitudes see the sun).
+    np.testing.assert_allclose(acc, 1.0, atol=1e-9)
+
+    # Non-vacuity: a single local-noon window must NOT be identically 1.
+    t_noon_lo = 0.5 - 0.5 * dt_frac
+    fac_noon = np.asarray(dm2dc_sw_factor(
+        grid, (day, year_len, t_noon_lo, t_noon_lo + dt_frac)))
+    assert fac_noon.shape == (nCells,)
+    assert np.all(np.isfinite(fac_noon))
+    assert np.max(np.abs(fac_noon - 1.0)) > 0.5

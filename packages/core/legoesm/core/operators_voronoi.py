@@ -791,6 +791,38 @@ def vector_laplacian_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     return -vector_laplacian_del2_3d(del2_u, mesh)
 
 
+def div_damp_del4_3d(u_edge_3d, mesh):
+    """Divergence-SELECTIVE biharmonic operator ``grad(del2(div(u)))``.
+
+    The vector Laplacians above damp the rotational and divergent parts of
+    the wind together.  This one damps only the divergent part: it is the
+    curl-free half of ``vector_laplacian_del4_3d``, since ``grad`` of a
+    scalar has no curl, so balanced (rotational) flow is untouched.
+
+    Used as ``du/dt -= nu_div4 * div_damp_del4_3d(u, mesh)``, the same sign
+    convention as the biharmonic term ``-nu_del4 * del2(del2(u))``.
+
+    This is CAM-FV's ``ldiv4`` written for an unstructured C-grid
+    (``cd_core.F90`` lines 620-684, selected by ``fv_div24del2flag=4``,
+    which is the CAM6 physics default at every horizontal grid).  A
+    pure-pressure (B=0) layer cannot absorb divergence into its own mass,
+    so continuity turns whatever divergence survives into vertical mass
+    flux; damping the divergent mode selectively is what keeps the
+    isobaric top of a hybrid table quiet without also damping the jets.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    div_c = divergence_cell_3d(u_edge_3d, mesh)
+    return gradient_edge_3d(laplacian_cell_3d(div_c, mesh), mesh)
+
+
 def laplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
     """Scalar Laplacian ``∇²f = div(grad(f))`` at cell centres, all levels.
 
@@ -853,7 +885,8 @@ def bilaplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
 
 
 def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
-    """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
+    """Smagorinsky biharmonic viscosity: ``-del2(B_smag * del2(u))``,
+    ``B_smag = C_smag^2 * Delta^4 * |D|`` [m^4/s].
 
     Flow-dependent biharmonic viscosity using the Smagorinsky (1963)
     formulation.  The strain rate is decomposed into divergence (tension)
@@ -864,9 +897,9 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
     *between* the two Laplacian applications, following the standard
     MPAS-Ocean / ICON-O approach::
 
-        del2(u)  ->  multiply by A_smag  ->  del2 again  ->  negate
+        del2(u)  ->  multiply by B_smag  ->  del2 again  ->  negate
 
-    This is NOT equivalent to ``A_smag * del4(u)`` when A_smag varies
+    This is NOT equivalent to ``B_smag * del4(u)`` when B_smag varies
     in space.
 
     Parameters
@@ -900,11 +933,17 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
     # --- Smagorinsky coefficient [m²/s] at edges ---
     # Geometric mean of primal/dual edge lengths as grid scale.
     delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)  # (nEdges,)
-    A_smag = (C_smag * delta_edge[:, None]) ** 2 * deformation  # (nEdges, nlev)
+    # Biharmonic coefficient [m^4/s]: B = (C Delta)^2 Delta^2 |D| = C^2 Delta^4 |D|,
+    # the convention of the lat-lon stress-tensor form
+    # (latlon_cgrid_operators.smagorinsky_biharmonic_tendency_cgrid) and MOM6.
+    # vector_laplacian_del2_3d is dimensional (1/m^2), so a Laplacian-units
+    # (C Delta)^2 |D| coefficient here was short by Delta^2.
+    B_smag = ((C_smag * delta_edge[:, None]) ** 2
+              * delta_edge[:, None] ** 2 * deformation)  # (nEdges, nlev)
 
-    # --- Two-pass biharmonic: -del2(A_smag * del2(u)) ---
+    # --- Two-pass biharmonic: -del2(B_smag * del2(u)) ---
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
-    intermediate = A_smag * del2_u                        # (nEdges, nlev)
+    intermediate = B_smag * del2_u                        # (nEdges, nlev)
     if mid_refresh is not None:
         # Distributed mid-operator refresh — see vector_laplacian_del4_3d.
         (intermediate,) = mid_refresh(intermediate)
@@ -1281,6 +1320,67 @@ def scalar_del2_cell_3d(q_cell_3d, mesh):
     """
     grad = gradient_edge_3d(q_cell_3d, mesh)  # (nEdges, nlev)
     return divergence_cell_3d(grad, mesh)
+
+
+def scalar_del4_cell_3d(q_cell_3d, mesh, *, mid_refresh=None):
+    """Biharmonic (``-del2(del2)``) of a cell scalar, all levels.
+
+    Sign convention matches :func:`vector_laplacian_del4_3d`: the returned
+    tendency DAMPS when added as ``q + dt * nu4 * scalar_del4_cell_3d(q)``,
+    because ``del2(del2)`` of a wave carries ``+k^4``.
+
+    Why a scalar biharmonic exists alongside the Laplacian: a coefficient
+    strong enough to hold grid-scale noise down with a Laplacian also flattens
+    the resolved gradients, because the Laplacian's damping falls off slowly
+    with scale.  The biharmonic's selectivity follows exactly, with no
+    continuum approximation: since it is ``-del2(del2)``, its eigenvalue on
+    every mesh eigenmode is exactly MINUS THE SQUARE of the Laplacian's, so the
+    ratio of damping between any two scales is SQUARED.  Measured on the
+    40962-cell SCVT at subdivision 6 (Rayleigh quotients on degree-166 and
+    degree-83 zonal harmonics, i.e. 240 km and 479 km wavelengths): the
+    Laplacian damps the shorter scale 2.47x faster than the longer one, the
+    biharmonic 6.08x.  The textbook continuum figures for those two scales are
+    4 and 16 — do NOT quote them for this operator; the discrete values are
+    smaller and are what the filter actually delivers.
+
+    Each pass conserves ``sum_c A_c q_c`` per level exactly (in exact
+    arithmetic), so the composition does too.  Note this is the MIXING-RATIO
+    integral, not water: with varying layer mass it does not conserve column
+    water vapour, exactly as for the Laplacian.
+
+    NOT monotone: unlike the Laplacian this has no discrete maximum principle,
+    so an explicit update can overshoot and undershoot near sharp gradients and
+    the caller's positivity floor is load-bearing rather than a no-op.  The
+    explicit stability bound is ``nu4 * dt * g_max^2 <= 1/2`` with ``g_max``
+    from :func:`scalar_del2_cell_cfl_factor`.  Gershgorin on the Laplacian
+    gives ``|lambda| <= 2*g_max`` (diagonal ``-g_c``, off-diagonal row sum
+    ``g_c``) — NOT ``g_max``; the biharmonic's spectral radius is therefore at
+    most ``4*g_max^2``, and forward-Euler stability ``nu4*|lambda|*dt <= 2``
+    reduces to the bound above.  Measured on the 40962-cell SCVT at
+    subdivision 6 the Laplacian's spectral radius is ``1.364 * g_max``, inside
+    the factor-two bound, so the guard is conservative by about a factor two.
+
+    Parameters
+    ----------
+    q_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mid_refresh : Callable(array) -> array, optional
+        Distributed-only halo refresh applied to the INTERMEDIATE Laplacian,
+        for a partition whose halo is only one cell deep — the two-pass stencil
+        reaches two.  MEASURED: at this partitioner's default halo depth the
+        local mesh already carries the second ring, so owned cells match serial
+        to 1e-13 WITHOUT this argument (test_biharmonic_owned_cells_match_
+        serial).  It is therefore redundant in the default configuration and is
+        kept for a shallower one.  ``None`` is the byte-identical default.
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev) — ``-del2(del2(q))``, units [q]/m^4.
+    """
+    lap = scalar_del2_cell_3d(q_cell_3d, mesh)
+    if mid_refresh is not None:
+        lap = mid_refresh(lap)
+    return -scalar_del2_cell_3d(lap, mesh)
 
 
 def scalar_del2_cell_cfl_factor(mesh):

@@ -303,7 +303,8 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
             zhang_mcfarlane_convection,
         )
         out, _prof = zhang_mcfarlane_convection(
-            T, q_v, p_full, p_half, u, v, carry, _DT, ZhangMcFarlaneConfig(),
+            T, q_v, p_full, p_half, u, v, carry, _DT,
+            ZhangMcFarlaneConfig(land_fraction="none"),  # landless test columns
         )
         return out
     raise ValueError(f"unknown convection scheme {scheme!r}")
@@ -411,12 +412,13 @@ class TestConvectionLeafGrad:
             f"convection({scheme}) w.r.t. carry: gradient has NaN/Inf"
         )
         gmax = float(jnp.max(jnp.abs(grad)))
-        if scheme == "kain_fritsch":
+        if scheme in ("kain_fritsch", "zhang_mcfarlane"):
             # NON-DIFFERENTIABLE BY CONSTRUCTION (documented): KF discards the
-            # incoming carry (`del conv_prog_profile`), so d(tend)/d(carry) is
-            # structurally 0.  Asserting the zero pins the property.
+            # incoming carry (`del conv_prog_profile`) and the CAM6 ZM port
+            # diagnoses its cloud-base mass flux every step (no CAPE-relaxation
+            # memory), so d(tend)/d(carry) is structurally 0 for both.
             assert gmax == 0.0, (
-                "Kain-Fritsch is documented as diagnostic (it deletes the "
+                f"{scheme} is documented as diagnostic (it does not read the "
                 f"incoming carry) yet d(tend)/d(carry) = {gmax:.3e} != 0 — "
                 "the carry became live; update this expectation."
             )
@@ -458,6 +460,11 @@ class TestConvectionLeafGrad:
     @pytest.mark.parametrize("scheme", _CONV_SCHEMES)
     def test_trigger_smoothness_sweep(self, scheme, col):
         """The TRIGGER itself, isolated from the tendency magnitude.
+
+        zhang_mcfarlane is the faithful CAM6 port: its trigger is the oracle's
+        hard ``ideep = cape > capelmt`` gate (a step by construction, so
+        ``convective_mask`` is exactly 0/1 and its gradient is 0); the smooth
+        sigmoid trigger this sweep measures does not exist there.
 
         Every scheme here gates on
         ``cape_trigger = sigmoid(sharpness * (CAPE - threshold))``
@@ -504,6 +511,8 @@ class TestConvectionLeafGrad:
             gradient at a live CAPE with an interior mask would be a real
             defect — a detached branch masquerading as a smooth trigger.
         """
+        if scheme == "zhang_mcfarlane":
+            pytest.skip("CAM6 ZM uses the oracle's hard cape > capelmt gate")
         # Stabilization blend toward an isothermal column at T_surface; q_v is
         # recomputed at FIXED RH so the moisture field follows the sounding
         # instead of the column merely becoming supersaturated.

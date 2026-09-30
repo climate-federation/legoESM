@@ -2311,6 +2311,11 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
         # cos_lat_v is a v-FACE (n_lat+1,) field -> vface(), not t().
         cos_lat_v=vface(geom.cos_lat_v),
+        # lat_v is the same v-FACE axis.  Optional (None on builders with no
+        # face array, e.g. tripole), and a band that kept the GLOBAL array
+        # would then be sharded on the n_lat axis by sharded_ocean_step --
+        # caught by test_build_band_grids' per-field stagger audit.
+        lat_v=(vface(geom.lat_v) if geom.lat_v is not None else None),
         lat=t(geom.lat),
         fold=band_fold,
         # Partial-periodic seam wall is a per-lat-row (n_lat,) profile —
@@ -2320,6 +2325,7 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
                         if geom.seam_wall_rows is not None else None),
         native_lat_T_deg=(t(geom.native_lat_T_deg)
                           if geom.native_lat_T_deg is not None else None),
+        ff_f=(t(geom.ff_f) if geom.ff_f is not None else None),
         # lon, dlon, dlat, radius, n_lon pass through unchanged.
     )
 

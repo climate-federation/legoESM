@@ -18,6 +18,7 @@ import pytest
 from jax import config as _jax_config
 _jax_config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.core.fv3_native_physics_coupling import (
     update_dwinds_phys_duo,
     update_dwinds_phys_duo_jax,
@@ -142,7 +143,7 @@ from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
 )
 
 NPZ = 20
-R_E = 6.371e6
+R_E = constants.R_earth
 
 
 def _hs_column(n=5, npz=NPZ, seed=1):
@@ -173,7 +174,7 @@ def _hs_ref(pt, ua, va, delp, peln, pkz, pe, lat, pdt, strat, radius=R_E):
     ny, nx, npz = pt.shape
     sday = 86400.0; akap = 2.0 / 7.0; p0 = 1.0e5
     rdt = 1.0 / pdt
-    rr = radius / 6371.0e3
+    rr = radius / constants.R_earth
     kf = sday * rr
     rkv = pdt / (1.0 * kf); rka = pdt / (40.0 * kf); rks = pdt / (4.0 * kf)
     t_ms = 10.0 * rr; t_st = 40.0 * rr
@@ -531,3 +532,214 @@ def test_apply_held_suarez_step_refuses_unknown_backend(hs_case):
     with pytest.raises(ValueError, match="backend"):
         apply_held_suarez_step(ctx, state, press, dt=1800.0, n=N, ng=NG,
                                km=KM_HS, backend="fortran")
+
+
+# ---------------------------------------------------------------------------
+# apply_held_suarez_step_sixface_jax: the face-stacked pure-JAX twin used
+# where the NumPy authority cannot run (multi-process SPMD, whose leaves are
+# not host-addressable).  Pinned to the authority on the SAME synthetic
+# six-face case; the authority keeps the certified score.
+# ---------------------------------------------------------------------------
+from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
+    apply_held_suarez_step_sixface_jax,
+    stack_held_suarez_metrics,
+)
+
+
+@pytest.fixture(scope="module")
+def hs_sixface_case(hs_case):
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+    ctx, state, press = hs_case
+    tab = build_jax_duo_stepper_context(ctx).tab
+    state6 = {nm: np.stack([face[nm] for face in state])
+              for nm in ("u", "v", "pt", "delp")}
+    press6 = {nm: np.stack([np.asarray(face[nm]) for face in press])
+              for nm in ("pe", "peln", "pkz")}
+    amat6, lat6, wv6 = stack_held_suarez_metrics(ctx)
+    return ctx, state, press, tab, state6, press6, amat6, lat6, wv6
+
+
+def _numpy_authority_result(ctx, state, press):
+    st = [{k: np.array(v) for k, v in face.items()} for face in state]
+    pr = [{k: np.asarray(v) for k, v in face.items()} for face in press]
+    apply_held_suarez_step(ctx, st, pr, dt=1800.0, n=N, ng=NG, km=KM_HS,
+                           strat=True, backend="numpy")
+    return {nm: np.stack([face[nm] for face in st]) for nm in ("u", "v", "pt")}
+
+
+def test_sixface_jax_matches_the_numpy_authority(hs_sixface_case):
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    ref = _numpy_authority_result(ctx, state, press)
+    out = apply_held_suarez_step_sixface_jax(
+        state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+        km=KM_HS, strat=True)
+    for nm in ("u", "v", "pt"):
+        got = np.asarray(out[nm])
+        assert got.dtype == np.float64, nm
+        assert np.isfinite(got).all(), nm
+        err = np.abs(got - ref[nm]).max()
+        assert np.allclose(got, ref[nm], atol=1e-11, rtol=1e-12), (nm, err)
+    # non-vacuous: the step moved every prognostic it owns
+    for nm in ("u", "v", "pt"):
+        assert np.abs(np.asarray(out[nm]) - state6[nm]).max() > 0.0, nm
+    # delp is read-only to HS and comes back untouched (same object)
+    assert out["delp"] is state6["delp"]
+
+
+def test_sixface_jax_jit_equals_eager(hs_sixface_case):
+    import jax
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+
+    def f(state6, press6):
+        return apply_held_suarez_step_sixface_jax(
+            state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+            km=KM_HS, strat=True)
+    eager = f(state6, press6)
+    jitted = jax.jit(f)(state6, press6)
+    for nm in ("u", "v", "pt"):
+        np.testing.assert_allclose(np.asarray(jitted[nm]),
+                                   np.asarray(eager[nm]), rtol=0, atol=1e-13,
+                                   err_msg=nm)
+
+
+def test_sixface_jax_refuses_wrong_pt_shape(hs_sixface_case):
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    bad = {**state6, "pt": state6["pt"][:, :, :, :KM_HS - 1]}
+    with pytest.raises(ValueError, match="pt"):
+        apply_held_suarez_step_sixface_jax(
+            bad, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+            km=KM_HS)
+
+
+def test_stack_held_suarez_metrics_refuses_missing_ectx(hs_case):
+    ctx, _, _ = hs_case
+    with pytest.raises(ValueError, match="ectx"):
+        stack_held_suarez_metrics({**ctx, "ectx": None})
+
+
+@pytest.mark.parametrize("pass_name,target", [
+    ("PASS0-dgrid", "exchange_dgrid_vector_halos"),
+    ("PASS2-agrid", "exchange_agrid_scalar_halos"),
+])
+def test_sixface_jax_match_is_not_vacuous(hs_sixface_case, monkeypatch,
+                                          pass_name, target):
+    """Non-vacuity: with either halo exchange replaced by the identity the
+    twin must LEAVE the 1e-11 envelope of the authority -- otherwise the
+    match test above could not detect a dropped pass."""
+    import legoesm.grids.fv3_duo_halos as halos
+    ctx, state, press, tab, state6, press6, amat6, lat6, wv6 = hs_sixface_case
+    ref = _numpy_authority_result(ctx, state, press)
+    if target == "exchange_dgrid_vector_halos":
+        monkeypatch.setattr(halos, target, lambda u, v, tab: (u, v))
+    else:
+        monkeypatch.setattr(halos, target, lambda f, tab, ring="stepper": f)
+    out = apply_held_suarez_step_sixface_jax(
+        state6, press6, tab, amat6, lat6, wv6, dt=1800.0, n=N, ng=NG,
+        km=KM_HS, strat=True)
+    worst = max(np.abs(np.asarray(out[nm]) - ref[nm]).max()
+                for nm in ("u", "v", "pt"))
+    assert worst > 1e-11, (pass_name, worst)
+
+
+# ---------------------------------------------------------------------
+# fv_update_phys, nwat > 0 (the moist scalar block): analytic gates --
+# every oracle deck runs nwat = 0, so there is no Fortran receipt
+# ---------------------------------------------------------------------
+
+def _moist_case(seed=5):
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
+    rng = np.random.default_rng(seed)
+    n, ng, km = 4, 3, 3
+    m = n + 2 * ng
+    pt = 250.0 + 40.0 * rng.random((m, m, km))
+    delp = 1.0e4 + 2.0e3 * rng.random((m, m, km))
+    q = [1e-2 * rng.random((m, m, km)), 1e-3 * rng.random((m, m, km)),
+         1e-3 * rng.random((m, m, km))]
+    # small enough that q + dt*q_dt stays positive (moist_cp is only
+    # meaningful for non-negative water)
+    q_dt = [1e-7 * rng.standard_normal((m, m, km)) for _ in range(3)]
+    t_dt = 1e-3 * rng.standard_normal((m, m, km))
+    kw = dict(n=n, ng=ng, cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR,
+              c_liq=FV3_C_LIQ)
+    return pt, delp, q, q_dt, t_dt, kw, slice(ng, ng + n)
+
+
+def test_moist_update_identity_at_zero_tendency():
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, _, _, kw, _ = _moist_case()
+    z = [np.zeros_like(a) for a in q]
+    pt2, delp2, q2, ps_dt = fv_update_phys_moist_duo_jax(
+        pt, delp, q, np.zeros_like(pt), z, 600.0, **kw)
+    assert np.array_equal(np.asarray(ps_dt), np.ones_like(np.asarray(ps_dt)))
+    assert np.array_equal(np.asarray(pt2), pt)
+    assert np.array_equal(np.asarray(delp2), delp)
+    for a, b in zip(q2, q):
+        assert np.array_equal(np.asarray(a), b)
+
+
+def test_moist_update_conserves_dry_air_mass_and_moves_total_water():
+    """delp*(1 - sum q) -- the DRY air in the layer -- is invariant
+    (that is what ``delp *= ps_dt`` + ``q /= ps_dt`` encode), while the
+    layer's total water changes by exactly delp*dt*sum(q_dt)."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case()
+    dt = 600.0
+    _, delp2, q2, _ = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt,
+                                                   dt, **kw)
+    delp2 = np.asarray(delp2); q2 = [np.asarray(a) for a in q2]
+    dry_before = (delp * (1.0 - sum(q)))[ci, ci]
+    dry_after = (delp2 * (1.0 - sum(q2)))[ci, ci]
+    assert np.allclose(dry_after, dry_before, rtol=1e-13, atol=0)
+    water_before = (delp * sum(q))[ci, ci]
+    water_after = (delp2 * sum(q2))[ci, ci]
+    assert np.allclose(water_after - water_before,
+                       (delp * dt * sum(q_dt))[ci, ci], rtol=1e-12, atol=0)
+    assert np.abs(delp2 - delp)[ci, ci].max() > 0.0
+    # halos untouched
+    halo = np.ones(delp.shape[:2], bool); halo[ci, ci] = False
+    assert np.array_equal(delp2[halo], delp[halo])
+
+
+def test_moist_update_heating_carries_cp_over_moist_cp():
+    """pt moves by t_dt*dt*cp_air/cvm with cvm from moist_cp on the
+    UPDATED, renormalised tracers (fv_update_phys.F90:367-371) -- the
+    dry twin's factor of exactly 1 is the special case q = 0."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax, moist_cp_warm_rain)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case()
+    dt = 600.0
+    pt2, _, _, _ = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt,
+                                                **kw)
+    # expectation written out INDEPENDENTLY of the twin and of
+    # moist_cp_warm_rain (codex 2026-09-24: deriving it from the twin's
+    # own q2 made the gate circular): the renormalised tracers and the
+    # nwat=4 heat capacity straight from the Fortran formulas
+    ps_dt = 1.0 + dt * (q_dt[0] + q_dt[1] + q_dt[2])
+    qa = [(a + dt * b) / ps_dt for a, b in zip(q, q_dt)]
+    qd = qa[1] + qa[2]
+    cvm = ((1.0 - (qa[0] + qd)) * 1004.6 + qa[0] * (4.0 * 461.5)  # const-ok: FV3 oracle values, written out so the gate is independent of the constants module
+           + qd * 4218.0)  # const-ok: gfdl_mp.F90:89
+    exp = pt + t_dt * dt * 1004.6 / cvm  # const-ok: gfs_constants.h:47
+    assert np.allclose(np.asarray(pt2)[ci, ci], exp[ci, ci], rtol=1e-14, atol=0)
+    # the factor is genuinely below one where there is water (cp_vapor,
+    # c_liq > cp_air), so a dry-factor twin cannot pass this
+    assert (1004.6 / cvm)[ci, ci].max() < 1.0  # const-ok: as above
+    assert np.allclose(np.asarray(moist_cp_warm_rain(
+        qa[0], qa[1], qa[2], cp_air=kw["cp_air"], cp_vapor=kw["cp_vapor"],
+        c_liq=kw["c_liq"])), cvm, rtol=1e-15, atol=0)
+    z = [np.zeros_like(a) for a in q]
+    pt_dry, _, _, _ = fv_update_phys_moist_duo_jax(pt, delp, z, t_dt, z, dt,
+                                                   **kw)
+    assert np.allclose(np.asarray(pt_dry)[ci, ci], (pt + t_dt * dt)[ci, ci],
+                       rtol=1e-15, atol=0)
+
+
+def test_moist_update_refuses_the_wrong_tracer_count():
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, _ = _moist_case()
+    with pytest.raises(ValueError, match="warm-rain tracers"):
+        fv_update_phys_moist_duo_jax(pt, delp, q[:2], t_dt, q_dt, 600.0, **kw)

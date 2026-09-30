@@ -197,6 +197,8 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
     "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
     "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
+    "atm.micro.MorrisonConfig.autocon_fact": "morrison_autocon_fact",
+    "atm.micro.MorrisonConfig.accre_enhan_fact": "morrison_accre_enhan_fact",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
@@ -208,11 +210,10 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.M_b_max": "bechtold_M_b_max",
     "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
     "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
-    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
-    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.capdcycl_land_tau_scale": "bechtold_capdcycl_land_tau_scale",
     "atm.conv.BechtoldConfig.subcloud_evap_scale": "bechtold_subcloud_evap_scale",
     "atm.conv.BechtoldConfig.rhebc_land": "bechtold_rhebc_land",
@@ -258,6 +259,23 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # Zhang-McFarlane + CLUBB tunables -> _resolve_convection's ZM branch and
+    # turbulence_config_for (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS in
+    # driver/config.py), the resolvers every lane (MPAS included) consumes.
+    "atm.conv.ZhangMcFarlaneConfig.c0_lnd": "zm_c0_lnd",
+    "atm.conv.ZhangMcFarlaneConfig.c0_ocn": "zm_c0_ocn",
+    "atm.conv.ZhangMcFarlaneConfig.ke": "zm_ke",
+    "atm.conv.ZhangMcFarlaneConfig.dmpdz": "zm_dmpdz",
+    "atm.conv.ZhangMcFarlaneConfig.tau": "zm_tau",
+    "atm.conv.ZhangMcFarlaneConfig.capelmt": "zm_capelmt",
+    "atm.turb.CLUBBParams.C14": "clubb_c14",
+    "atm.turb.CLUBBParams.C8": "clubb_c8",
+    "atm.turb.CLUBBParams.C11": "clubb_c11",
+    "atm.turb.CLUBBParams.C11b": "clubb_c11b",
+    "atm.turb.CLUBBParams.gamma_coef": "clubb_gamma_coef",
+    "atm.turb.CLUBBParams.gamma_coefb": "clubb_gamma_coefb",
+    "atm.turb.CLUBBParams.beta": "clubb_beta",
+    "atm.turb.CLUBBParams.c_K10": "clubb_c_k10",
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).

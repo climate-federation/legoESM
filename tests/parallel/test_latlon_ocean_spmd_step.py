@@ -474,3 +474,194 @@ def test_sharded_ocean_step_global_matches_explicit_scatter_gather():
         # and both match the single-device forced reference to the FP floor
         np.testing.assert_allclose(wrp, ref, atol=2.0e-4, rtol=1.0e-3,
                                    err_msg=f"global wrapper vs serial {nm}")
+
+
+# ---------------------------------------------------------------------------
+# Tripole (active bipolar fold) + prognostic slab sea-ice tile under SPMD
+# (the ORCA12 / eORCA lane enablers, 2026-09).
+# ---------------------------------------------------------------------------
+
+def _tripole_perturbed_state(grid, z_coord):
+    """Rest state on a synthetic tripole geometry + perturbations that are
+    NON-ZERO at the fold row, so the seam exchange is load-bearing.  The cap
+    (last) v-row is masked as the tripole convention requires (the sharded
+    v-carrier drops it and reconstructs the wall)."""
+    n_lat, n_lon = int(grid.n_lat), int(grid.n_lon)
+    nlev = z_coord.n_levels
+    land = np.ones((n_lat, n_lon))
+    H = 4000.0 * land
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0, land_mask_override=jnp.asarray(land),
+        H_bathy_override=jnp.asarray(H))
+    rng = np.random.default_rng(11)
+    u = 0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev))
+    v = 0.02 * rng.standard_normal((n_lat + 1, n_lon, nlev))
+    v[-1] = 0.0                               # cap wall (v_mask[-1] == 0)
+    eta = 0.005 * rng.standard_normal((n_lat, n_lon))
+    T = (5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+         + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))
+    vm = np.asarray(state.v_mask.data).copy()
+    vm[-1] = 0.0
+    return state._replace(
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+        v_mask=state.v_mask.replace(data=jnp.asarray(vm)),
+        eta=state.eta.replace(data=jnp.asarray(eta)),
+        T=state.T.replace(data=jnp.asarray(T)))
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_tripole_ocean_spmd_matches_single_device():
+    """The lat-band SPMD step on a grid with an ACTIVE bipolar fold (the
+    eORCA / ORCA12 layout, here `create_synthetic_tripole`) must match the
+    serial step: the fold lives on the north band only, interior bands see
+    the band halo.  This is the gate for lifting run_omip's
+    ``--enable-latlon-spmd requires --grid latlon`` refusal for tripole."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon,
+        make_sharded_ocean_step,
+        shard_state_latlon,
+    )
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+    assert bool(grid.fold.is_active)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat()
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    state0 = _tripole_perturbed_state(grid, z_coord)
+    dt, n_steps = 600.0, 3
+    s = state0
+    for _ in range(n_steps):
+        s = model.step(s, dt)
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    for _ in range(n_steps):
+        ss = step(ss, dt)
+    ss = gather_state_latlon(ss, dev.mesh)
+    _ATOL, _RTOL = 2.0e-4, 1.0e-3
+    for nm in ("u", "v", "eta", "T", "S"):
+        a = np.asarray(getattr(s, nm).data)
+        b = np.asarray(getattr(ss, nm).data)
+        np.testing.assert_allclose(b, a, atol=_ATOL, rtol=_RTOL,
+                                   err_msg=f"tripole SPMD {nm} mismatch")
+    # the seam rows actually moved (the test is not a rest fixed point)
+    assert np.abs(np.asarray(s.T.data)[-1]
+                  - np.asarray(state0.T.data)[-1]).max() > 0
+
+
+def _slab_ice_inputs(n_lat, n_lon):
+    from legoesm import constants
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.core.field import Field
+    from legoesm.ice.state import SeaIceState
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+    rng = np.random.default_rng(5)
+    shp = (n_lat, n_lon)
+    lat = np.linspace(-80, 80, n_lat)[:, None] * np.ones((1, n_lon))
+    dims = ("y", "x")
+
+    def fld(a, name):
+        return Field(jnp.asarray(a), name=name, dims=dims, units="")
+    conc = np.clip((np.abs(lat) - 60.0) / 20.0, 0.0, 0.9)
+    ice = SeaIceState(
+        h_ice=fld(1.5 * conc, "h_ice"),
+        T_ice=fld(np.full(shp, float(constants.T_freeze_ocean) - 5.0),
+                  "T_ice"),
+        concentration=fld(conc, "concentration"))
+    T_air = 300.0 - 40.0 * (np.abs(lat) / 80.0) ** 2
+    o = np.ones(shp)
+    atm = AtmToSurface(
+        sw_down=jnp.asarray(200.0 * o), lw_down=jnp.asarray(300.0 * o),
+        precip_total=jnp.asarray(1e-5 * o), precip_snow=jnp.asarray(0.0 * o),
+        T_lowest=jnp.asarray(T_air), q_lowest=jnp.asarray(3e-3 * o),
+        u_lowest=jnp.asarray(5.0 * o + rng.standard_normal(shp)),
+        v_lowest=jnp.asarray(rng.standard_normal(shp)),
+        p_lowest=jnp.asarray(1e5 * o), p_surface=jnp.asarray(1e5 * o),
+        rho_lowest=jnp.asarray(1.25 * o), cos_zenith=jnp.asarray(0.5 * o),
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        has_precipitation=jnp.asarray(1.0))
+    sst_K = jnp.asarray(T_air - 2.0)
+    sf = OceanSurfaceForcing(sw_down=jnp.asarray(200.0 * o),
+                             q_net=jnp.asarray(120.0 * o),
+                             tau_x=jnp.asarray(0.1 * o),
+                             tau_y=jnp.asarray(0.02 * o))
+    fw = FreshwaterForcing(precip=jnp.asarray(1e-5 * o),
+                           evap=jnp.asarray(4e-6 * o),
+                           runoff=jnp.asarray(0.0 * o),
+                           ice_fw=jnp.asarray(0.0 * o))
+    mask = jnp.asarray((rng.uniform(size=shp) > 0.2).astype(float))
+    return ice, atm, sst_K, sf, fw, mask
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_slab_ice_tile_spmd_matches_single_device():
+    """The prognostic SLAB sea-ice tile the JRA55 block scan carries next to
+    the ocean state (``omip_sea_ice_surface_forcing``, dynamics off, one
+    category) is elementwise, so laid out on the ocean's lat bands by
+    ``shard_cell_pytree_latlon`` it must reproduce the single-device step
+    through a jitted 3-step scan, and ``gather_cell_pytree_latlon`` must
+    round-trip the layout.  This is the gate for lifting run_omip's
+    ``--enable-latlon-spmd does not support --jra55-sea-ice`` refusal."""
+    from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_cell_pytree_latlon,
+        shard_cell_pytree_latlon,
+        shard_forcing_latlon,
+    )
+    n_lat, n_lon, dt = 48, 96, 3600.0
+    ice0, atm, sst_K, sf, fw, mask = _slab_ice_inputs(n_lat, n_lon)
+    cfg = SeaIceConfig()
+
+    @jax.jit
+    def run(ice, atm, sst_K, sf, fw, mask):
+        def body(carry, _):
+            new_ice, fw_o, sf_o = omip_sea_ice_surface_forcing(
+                ice_state=carry, ice_config=cfg, atm=atm, ocean_sst_K=sst_K,
+                open_ocean_sf=sf, open_ocean_fw=fw, dt=dt, grid=None,
+                ocean_mask=mask)
+            return new_ice, (fw_o.ice_fw, sf_o.q_net)
+        final, (ice_fw, q_net) = jax.lax.scan(body, ice, None, length=3)
+        return final, ice_fw, q_net
+
+    ref_ice, ref_fw, ref_q = run(ice0, atm, sst_K, sf, fw, mask)
+
+    dev = create_latlon_mesh(n_devices=4)
+    ice_s = shard_cell_pytree_latlon(ice0, dev.mesh)
+    for leaf in jax.tree.leaves(ice_s):
+        assert leaf.sharding.spec[0] == "lat", leaf.sharding
+    back = gather_cell_pytree_latlon(ice_s, dev.mesh, to_host=True)
+    for a, b in zip(jax.tree.leaves(back), jax.tree.leaves(ice0)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    atm_s = shard_forcing_latlon(atm, dev.mesh)
+    sf_s = shard_forcing_latlon(sf, dev.mesh)
+    fw_s = shard_forcing_latlon(fw, dev.mesh)
+    sst_s = shard_forcing_latlon(sst_K, dev.mesh)
+    mask_s = shard_forcing_latlon(mask, dev.mesh)
+    out_ice, out_fw, out_q = run(ice_s, atm_s, sst_s, sf_s, fw_s, mask_s)
+    out_ice = gather_cell_pytree_latlon(out_ice, dev.mesh, to_host=True)
+    for nm in ice0._fields:
+        np.testing.assert_allclose(
+            np.asarray(getattr(out_ice, nm).data),
+            np.asarray(getattr(ref_ice, nm).data), rtol=1e-12, atol=1e-12,
+            err_msg=f"slab ice SPMD {nm} mismatch")
+    np.testing.assert_allclose(np.asarray(out_fw), np.asarray(ref_fw),
+                               rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(np.asarray(out_q), np.asarray(ref_q),
+                               rtol=1e-12, atol=1e-9)
+    # the tile actually evolved (not a no-op fixed point)
+    assert np.abs(np.asarray(ref_ice.h_ice.data)
+                  - np.asarray(ice0.h_ice.data)).max() > 0

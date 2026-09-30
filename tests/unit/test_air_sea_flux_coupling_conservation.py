@@ -21,8 +21,9 @@ fix works (norms alone do not certify it):
      heat/water into the ocean for an all-ocean (aquaplanet) cell -- the air-sea
      energy AND water budgets close;
   3. override = None is byte-identical to the old self-flux path;
-  4. the override is incompatible with a turbulence scheme that owns surface
-     exchange -> the pipeline raises (no silent double-count).
+  4. with a turbulence scheme that owns surface exchange the override is
+     folded into the kernel's lower boundary condition (it replaces the
+     scheme's bulk flux; no double-count).
 """
 from __future__ import annotations
 
@@ -45,6 +46,15 @@ def _sigma(nlev=NLEV):
         sigma_full = jnp.linspace(0.1, 0.95, nlev)
         sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         dsigma = jnp.diff(jnp.linspace(0.05, 1.0, nlev + 1))
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _S()
 
 
@@ -328,25 +338,35 @@ class TestAirSeaBudgetCloses:
                             rtol=1e-9, atol=1e-12)
 
 
-class TestTurbulenceIncompatibility:
-    """The shared-flux override must not silently double-count against a
-    turbulence scheme that owns the surface BC."""
+class TestTurbulenceLowerBC:
+    """The shared-flux override is the turbulence scheme's LOWER BOUNDARY
+    CONDITION (folded into the kernel's surface config for the call), so it
+    replaces the scheme's own bulk flux instead of double-counting it — and
+    the former "incompatible with a turbulence scheme" refusal is gone."""
 
-    def test_override_with_turbulence_raises(self):
-        pipe, _ = _pipeline(turbulence="louis")
-        inp, shape_2d = _base_inputs(pipe)
-        dt = 600.0
+    def _step(self, pipe, shape_2d, shf):
+        inp, _ = _base_inputs(pipe)
         held3 = jnp.zeros((*shape_2d, NLEV))
         held2 = jnp.zeros(shape_2d)
-        with pytest.raises(ValueError, match="surface-flux override"):
-            pipe.physics_step_no_rad(
-                inp["T"], inp["p_s"], inp["q_v"], inp["q_c"], inp["q_r"],
-                jnp.zeros((pipe.adapter.ncol,)),
-                inp["u"], inp["v"], inp["sst"], inp["sic"], inp["lat"], dt,
-                held3, held2, held2, held2, held2, held2,
-                sfc_shflx_override=jnp.full(shape_2d, 10.0),
-                sfc_lhflx_override=jnp.full(shape_2d, 10.0),
-            )
+        return pipe.physics_step_no_rad(
+            inp["T"], inp["p_s"], inp["q_v"], inp["q_c"], inp["q_r"],
+            jnp.zeros((pipe.adapter.ncol,)),
+            inp["u"], inp["v"], inp["sst"], inp["sic"], inp["lat"], 600.0,
+            held3, held2, held2, held2, held2, held2,
+            sfc_shflx_override=jnp.full(shape_2d, shf),
+            sfc_lhflx_override=jnp.zeros(shape_2d),
+        )
+
+    def test_override_with_turbulence_folds_into_the_kernel(self):
+        pipe, _ = _pipeline(turbulence="louis")
+        _, shape_2d = _base_inputs(pipe)
+        out_pos = self._step(pipe, shape_2d, 50.0)
+        out_neg = self._step(pipe, shape_2d, -50.0)
+        # the kernel echoes the prescribed flux (it IS its surface flux)
+        np.testing.assert_allclose(np.asarray(out_pos.shflx), 50.0)
+        np.testing.assert_allclose(np.asarray(out_neg.shflx), -50.0)
+        assert float(jnp.mean(out_pos.dT_dt[..., -1])) > float(
+            jnp.mean(out_neg.dT_dt[..., -1]))
 
 
 class TestCoupledDriverWiring:
@@ -378,15 +398,72 @@ class TestCoupledDriverWiring:
             _atm=atm, _last_sfc_response=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
+
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a blended response exists, its SH/LH flow through.
+        # Once a blended response exists, its LH is the tile MASS flux times
+        # the atmosphere's L_v, and its SH carries the (L_vap - L_v)*E
+        # remainder so energy closes (see the tests below).
+        from legoesm import constants
         sh = jnp.full((6, 4, 4), 22.0)
-        lh = jnp.full((6, 4, 4), 77.0)
-        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
+        mf = jnp.full((6, 4, 4), 77.0 / constants.L_v)
+        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=mf * 2.44e6,
+                                                 surface_mass_flux=mf)
         got_sh, got_lh = atm.get_sfc_flux_override(0.0)
-        assert jnp.array_equal(got_sh, sh)
-        assert jnp.array_equal(got_lh, lh)
+        np.testing.assert_allclose(got_sh, sh + mf * (2.44e6 - constants.L_v),
+                                   rtol=1e-12)
+        np.testing.assert_allclose(got_lh, 77.0, rtol=1e-12)
+
+    def test_hook_hands_the_tile_mass_flux_scaled_by_the_atmosphere_L_v(self):
+        """Water conservation across the coupler: the atmosphere derives its
+        moisture source as lhflx / L_v, so the hook must hand it
+        surface_mass_flux * L_v, not the tile's lhflx (which used L_vap(SST)
+        under the aerobulk convention, ~2 % smaller)."""
+        from types import SimpleNamespace
+        from legoesm import constants
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        shflx, lhflx = atm.get_sfc_flux_override(0.0)
+        # sensible carries the (L_vap - L_v)*E remainder (energy closure)
+        np.testing.assert_allclose(
+            shflx, resp.shflx + evap * (2.44e6 - constants.L_v), rtol=1e-12)
+        np.testing.assert_allclose(lhflx / constants.L_v, evap, rtol=1e-12)
+        assert not np.allclose(lhflx, resp.lhflx)
+        drv._last_sfc_response = SimpleNamespace(shflx=resp.shflx, lhflx=resp.lhflx,
+                                                 surface_mass_flux=None)
+        with pytest.raises(ValueError, match="surface_mass_flux"):
+            atm.get_sfc_flux_override(0.0)
+
+    def test_hook_closes_water_and_energy_together(self):
+        """The atmosphere's turbulent energy input (sensible + latent it is
+        handed) must equal the ocean tile's turbulent heat loss
+        (shflx + lhflx), while its moisture source stays the tile mass flux."""
+        from types import SimpleNamespace
+        from legoesm import constants
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        sh_atm, lh_atm = atm.get_sfc_flux_override(0.0)
+        np.testing.assert_allclose(lh_atm / constants.L_v, evap, rtol=1e-12)
+        np.testing.assert_allclose(sh_atm + lh_atm, resp.shflx + resp.lhflx,
+                                   rtol=1e-12)
 
     def test_assemble_ocean_forcing_sw_down_is_net(self):
         """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,
@@ -400,6 +477,7 @@ class TestCoupledDriverWiring:
         tile = types.SimpleNamespace(
             albedo=jnp.full(shape, 0.06), lw_up=jnp.full(shape, 400.0),
             shflx=jnp.full(shape, 12.0), lhflx=jnp.full(shape, 60.0),
+            surface_mass_flux=jnp.full(shape, 60.0) / constants.L_v,
             tau_x=z, tau_y=z,
         )
         sst = jnp.full(shape, 290.0)

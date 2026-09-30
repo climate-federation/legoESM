@@ -590,6 +590,63 @@ class TestCreateTripoleGridFoldDefault:
                 geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
         assert geom is not None
 
+    def test_native_u_fields_start_at_redundant_east_face(self):
+        """NEMO U(i) is T(i)'s east face; legoESM U[0] is the west image."""
+        from legoesm.grids.tripole import (
+            _compute_rotation_angles,
+            create_tripole_grid,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh.nc")
+            n_lat, n_lon = 8, 16
+            _write_synthetic_mesh_mask(
+                path, n_lat=n_lat, n_lon=n_lon, curved_fold=True)
+            with netcdf4.Dataset(path, "a") as ds:
+                columns = np.arange(n_lon, dtype=np.float64)[None, :]
+                rows = np.arange(n_lat, dtype=np.float64)[:, None]
+                ds["e1u"][:] = 1000.0 + 10.0 * rows + columns
+                ds["e2u"][:] = 2000.0 + 10.0 * rows + columns
+                ds["e1v"][:] = 3000.0 + 10.0 * rows + columns
+                ds["e2v"][:] = 4000.0 + 10.0 * rows + columns
+                glamu = np.asarray(ds["glamu"][:])
+                gphiu = np.asarray(ds["gphiu"][:])
+                glamv = np.asarray(ds["glamv"][:])
+                gphiv = np.asarray(ds["gphiv"][:])
+                e1u = np.asarray(ds["e1u"][:])
+                e2u = np.asarray(ds["e2u"][:])
+                e1v = np.asarray(ds["e1v"][:])
+                e2v = np.asarray(ds["e2v"][:])
+                gphit = np.asarray(ds["gphit"][:])
+
+            grid = create_tripole_grid(
+                path, dtype=jnp.float64,
+                fold_convention="(n_lon-i)%n_lon")
+
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, 1:], e1u)
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, 1:], e2u)
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, 0], e1u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, 0], e2u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dx_u)[:, -1], e1u[:, -1])
+        np.testing.assert_array_equal(np.asarray(grid.dy_u)[:, -1], e2u[:, -1])
+
+        # V metrics and generic V-face Coriolis retain their pre-change map.
+        np.testing.assert_array_equal(np.asarray(grid.dx_v)[1:], e1v)
+        np.testing.assert_array_equal(np.asarray(grid.dy_v)[1:], e2v)
+        f_t = grid.f_T
+        expected_f_v = jnp.concatenate(
+            [f_t[0:1], 0.5 * (f_t[:-1] + f_t[1:]), f_t[-1:]], axis=0)
+        np.testing.assert_array_equal(np.asarray(grid.f_v),
+                                      np.asarray(expected_f_v))
+
+        native_cos_u, native_sin_u, _, _ = _compute_rotation_angles(
+            jnp.asarray(glamu), jnp.asarray(gphiu),
+            jnp.asarray(glamv), jnp.asarray(gphiv), grid.fold.cap_j)
+        np.testing.assert_array_equal(
+            np.asarray(grid.cos_alpha_u)[:, 1:], np.asarray(native_cos_u))
+        np.testing.assert_array_equal(
+            np.asarray(grid.sin_alpha_u)[:, 1:], np.asarray(native_sin_u))
+
 
 class TestPadCoversEveryGeometryField:
     """The pad must grow EVERY array field per its stagger — the tripwire.
@@ -646,6 +703,30 @@ class TestPadCoversEveryGeometryField:
         assert bool(np.all(np.isfinite(b[:n_pad])))
         assert bool(np.all(b[:n_pad] > 0.0))
 
+    def test_lat_v_new_entries_are_south_faces_not_row_centres(self):
+        """``lat_v[j]`` is the SOUTH FACE of T row ``j``
+        (``compute_v_face_coords``: ``lat[0] - dlat/2`` at the south end), so
+        the pad's new entries sit a HALF CELL below the new rows' centres.
+        Putting the row centres there instead — the first version of this
+        fix, caught in review — passes the shape tripwire above and is still
+        half a cell wrong on the axis the overturning diagnostics label.
+        The surviving entries must also be bit-exact at offset ``n_pad``."""
+        import numpy as np
+        g, gp, n_lat, n_pad = self._padded_pair()
+        a = np.asarray(g.lat_v)
+        b = np.asarray(gp.lat_v)
+        np.testing.assert_array_equal(
+            b[n_pad:], a, err_msg="lat_v wet entries not preserved")
+        assert bool(np.all(np.diff(b) > 0.0)), "lat_v must increase northward"
+        lat_T_pad = np.asarray(gp.lat_T)
+        centres = lat_T_pad[:n_pad].mean(axis=1)
+        dlat = float(np.mean(lat_T_pad[n_pad] - lat_T_pad[n_pad - 1]))
+        tol = 100.0 * float(np.finfo(b.dtype).eps) * float(np.max(np.abs(b)))
+        np.testing.assert_allclose(b[:n_pad], centres - 0.5 * dlat,
+                                   rtol=0.0, atol=tol)
+        # and the negative control: the row CENTRES are NOT what is stored
+        assert not np.allclose(b[:n_pad], centres, rtol=0.0, atol=tol)
+
     def test_past_pole_extrapolation_warns_but_keeps_the_contract(self, capsys):
         """A past-the-pole extrapolation (the synthetic full-sphere grid does
         this legitimately) must WARN loudly, and the land-row contract —
@@ -691,3 +772,223 @@ class TestPadCoversEveryGeometryField:
         assert got.shape == (n_lat + n_pad,)
         np.testing.assert_array_equal(got[n_pad:], np.asarray(seam))
         assert bool(np.all(got[:n_pad] == 1.0)), "new land rows must be walled"
+
+
+# -------------------------------------------------------------------------
+# u-point metric alignment (the NEMO C-grid index convention)
+# -------------------------------------------------------------------------
+def _write_mesh_with_varying_u_metrics(path, n_lat=8, n_lon=16):
+    """Mesh whose e1u/e2u VARY ALONG A ROW, with a curved (unambiguous) fold.
+
+    The shared fixture above writes uniform metrics, under which a one-column
+    shift of e1u/e2u is exactly the identity -- so it cannot see this bug.
+    Varying them along i is what makes the alignment observable at all, and is
+    the situation on a real ORCA mesh north of ~20N.
+    """
+    ds = netcdf4.Dataset(path, "w")
+    ds.createDimension("y", n_lat)
+    ds.createDimension("x", n_lon)
+    i = np.arange(n_lon)
+    glamt = np.broadcast_to(
+        np.linspace(0.0, 360.0, n_lon, endpoint=False)[None, :],
+        (n_lat, n_lon)).astype(np.float64)
+    gphit = np.array(np.broadcast_to(
+        np.linspace(-80.0, 80.0, n_lat)[:, None], (n_lat, n_lon)),
+        dtype=np.float64)
+    gphit[-1, :] = 80.0 + 5.0 * np.cos(2.0 * np.pi * i / n_lon)
+    ones = np.ones((n_lat, n_lon), dtype=np.float64)
+    # distinct along-i profiles for e1u and e2u so a swap cannot pass either
+    e1u = 1.0e4 * (1.0 + 0.10 * i)[None, :] * ones
+    e2u = 1.0e4 * (1.0 + 0.37 * i)[None, :] * ones
+    for name, arr in (
+        ("glamt", glamt), ("gphit", gphit),
+        ("glamu", glamt), ("gphiu", gphit),
+        ("glamv", glamt), ("gphiv", gphit),
+        ("e1t", ones * 1.0e4), ("e2t", ones * 1.0e4),
+        ("e1u", e1u), ("e2u", e2u),
+        ("e1v", ones * 1.0e4), ("e2v", ones * 1.0e4),
+        ("tmask", ones), ("umask", ones), ("vmask", ones),
+    ):
+        v = ds.createVariable(name, "f8", ("y", "x"))
+        v[:] = arr
+    ds.close()
+    return e1u, e2u
+
+
+class TestUPointMetricAlignment:
+    """NEMO's u-point ``i`` is EAST of T-cell ``i``; ours is WEST of cell ``i``.
+
+    MEASURED on the real mesh, not taken from documentation: on the 1-degree
+    part of eORCA1 ``glamu - glamt = +0.5000`` deg.  So our face ``i`` carries
+    NEMO's ``e1u[i-1]`` and face 0 wraps to the LAST column.
+
+    These tests FAIL against the previous construction, which appended
+    ``e1u[:, 0:1]`` and so handed every face the metric of the face one column
+    EAST -- a bug that is invisible on a uniform mesh and worth several to
+    twenty percent on every zonal face north of 30N of a real ORCA grid.
+    """
+
+    def _grid(self, tmp):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        path = os.path.join(tmp, "mesh_varying.nc")
+        e1u, e2u = _write_mesh_with_varying_u_metrics(path)
+        return create_tripole_grid(path), e1u, e2u
+
+    def test_u_face_takes_the_metric_of_the_face_to_its_west(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            # face i (i>=1) carries NEMO's u-point i-1
+            np.testing.assert_allclose(dx_u[:, 1:], e1u, rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+    def test_wrap_column_is_the_last_not_the_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, e1u, e2u = self._grid(tmp)
+            dx_u = np.asarray(grid.dx_u, dtype=np.float64)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dx_u[:, 0], e1u[:, -1], rtol=1e-6)
+            np.testing.assert_allclose(dy_u[:, 0], e2u[:, -1], rtol=1e-6)
+            # and NOT the first column, which is what the old build used
+            assert not np.allclose(dy_u[:, 0], e2u[:, 0], rtol=1e-6)
+
+    def test_metric_and_coriolis_reference_the_same_cell_pair(self):
+        """f at a u-face averages cells i-1 and i, so the metric must too.
+
+        This is the internal consistency the bug broke: the Coriolis
+        construction already used the WEST convention while the metric used the
+        EAST one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            grid, _e1u, e2u = self._grid(tmp)
+            f_T = np.asarray(grid.f_T, dtype=np.float64)
+            f_u = np.asarray(grid.f_u, dtype=np.float64)
+            expected = 0.5 * (np.roll(f_T, 1, axis=1) + f_T)
+            np.testing.assert_allclose(f_u[:, :f_T.shape[1]], expected,
+                                       rtol=1e-6, atol=1e-12)
+            dy_u = np.asarray(grid.dy_u, dtype=np.float64)
+            np.testing.assert_allclose(dy_u[:, 1:], e2u, rtol=1e-6)
+
+    def test_u_rotation_angles_pad_like_the_u_metrics(self):
+        """The U ANGLES must sit on the same faces as the U METRICS.
+
+        ``_compute_rotation_angles`` returns the angle at NEMO's u-point
+        ``i`` (east of T-cell ``i``), exactly as ``e1u`` does, so the padded
+        array must carry it at face ``i+1`` and wrap the LAST column into
+        face 0.  The previous build appended the FIRST column instead, which
+        put the angle of the face one column EAST on every face while the
+        metric beside it had already been corrected -- the two operands of
+        the same rotation then referred to different faces.
+        """
+        from legoesm.grids.tripole import (
+            _compute_rotation_angles,
+            _read_nemo_mesh_mask,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mesh_varying.nc")
+            _write_mesh_with_varying_u_metrics(path)
+            from legoesm.grids.tripole import create_tripole_grid
+
+            grid = create_tripole_grid(path)
+            raw = _read_nemo_mesh_mask(path)
+            c_raw, s_raw, _, _ = _compute_rotation_angles(
+                raw["glamu"], raw["gphiu"], raw["glamv"], raw["gphiv"],
+                int(grid.fold.cap_j))
+            c_raw = np.asarray(c_raw, dtype=np.float64)
+            s_raw = np.asarray(s_raw, dtype=np.float64)
+            # non-vacuity: the angle must really vary along i, else any
+            # padding passes
+            assert np.ptp(s_raw[-1, :]) > 1.0e-6
+            cos_u = np.asarray(grid.cos_alpha_u, dtype=np.float64)
+            sin_u = np.asarray(grid.sin_alpha_u, dtype=np.float64)
+            # The stored grid is float32 by default, so the comparison is at
+            # single precision; the misalignment this pins is O(0.1), five
+            # orders of magnitude above that.
+            np.testing.assert_allclose(cos_u[:, 1:], c_raw, rtol=1e-6)
+            np.testing.assert_allclose(sin_u[:, 1:], s_raw, rtol=1e-6)
+            np.testing.assert_allclose(sin_u[:, 0], s_raw[:, -1], rtol=1e-6)
+            # The wrap column alone cannot discriminate: the raw array's own
+            # padding makes its last column a copy of its first. The layout
+            # question is settled on the INTERIOR: under the old APPEND build
+            # the first n_lon faces carried the raw array unshifted, and that
+            # must now be false.
+            assert not np.allclose(sin_u[:, :-1], s_raw, rtol=1e-6)
+
+
+class TestMeshCoriolisIsOptIn:
+    """``ff_t`` from the mesh file changes ``f_T``, so a card must ask for it.
+
+    NEMO reads ``ff_t``/``ff_f`` from ``cn_domcfg`` whenever both exist
+    (``domhgr.F90:222-227``), but ORCA's stored values differ from
+    ``2*Omega*sin(lat)`` in the last bits, so adopting them silently would
+    move every tripole run (ORCA1 OMIP production included).
+    """
+
+    def _mesh(self, tmp, ff_t_value):
+        path = os.path.join(tmp, "mesh_ff.nc")
+        _write_mesh_with_varying_u_metrics(path)
+        ds = netcdf4.Dataset(path, "a")
+        shape = ds.variables["gphit"].shape
+        for name in ("ff_t", "ff_f"):
+            v = ds.createVariable(name, "f8", ("y", "x"))
+            v[:] = np.full(shape, ff_t_value, dtype=np.float64)
+        ds.close()
+        return path
+
+    def test_default_keeps_the_analytic_coriolis(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            grid = create_tripole_grid(path)
+            f_T = np.asarray(grid.f_T, dtype=np.float64)
+            assert not np.allclose(f_T, 1.2345e-4)
+            np.testing.assert_allclose(
+                f_T,
+                2.0 * float(grid.omega) * np.sin(
+                    np.asarray(grid.lat_T, dtype=np.float64)),
+                rtol=1e-6)      # stored float32; the mesh value is 1e-4 away
+
+    def test_opt_in_reads_the_mesh_field(self):
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            grid = create_tripole_grid(path, use_mesh_coriolis=True)
+            np.testing.assert_allclose(
+                np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4, rtol=1e-6)
+
+    def test_ff_f_is_carried_either_way(self):
+        """The F-point field is a pure addition: only literal arms read it."""
+        from legoesm.grids.tripole import create_tripole_grid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mesh(tmp, 1.2345e-4)
+            assert create_tripole_grid(path).ff_f is not None
+            assert create_tripole_grid(
+                path, use_mesh_coriolis=True).ff_f is not None
+
+    def test_a_lone_mesh_field_supplies_neither(self):
+        """NEMO takes the mesh Coriolis only when BOTH ff_t and ff_f exist.
+
+        ``domhgr.F90:222-227`` guards the pair with one ``.AND.``; with only
+        one present it sets ``kff=0`` and computes both itself.  A file with
+        ff_t alone must therefore not produce a mesh-T / analytic-F mixture.
+        """
+        from legoesm.grids.tripole import create_tripole_grid
+
+        for lone in ("ff_t", "ff_f"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "mesh_lone.nc")
+                _write_mesh_with_varying_u_metrics(path)
+                ds = netcdf4.Dataset(path, "a")
+                v = ds.createVariable(lone, "f8", ("y", "x"))
+                v[:] = np.full(ds.variables["gphit"].shape, 1.2345e-4)
+                ds.close()
+                grid = create_tripole_grid(path, use_mesh_coriolis=True)
+                assert grid.ff_f is None
+                assert not np.allclose(
+                    np.asarray(grid.f_T, dtype=np.float64), 1.2345e-4)

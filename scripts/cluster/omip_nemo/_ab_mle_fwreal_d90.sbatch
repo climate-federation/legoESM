@@ -59,7 +59,7 @@ WT=/burg-archive/glab/users/pg2328/_fw_fix_wt
 cd $WT || { echo "FATAL: pinned worktree $WT missing"; exit 1; }
 echo "=== git SHA (pinned worktree): $(git rev-parse HEAD) ==="
 git status --porcelain | head -5
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nemolev_trp_mle_d90
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository

@@ -195,7 +195,7 @@ class TestPoststep:
     def test_cold_condensate_routes_to_ice_and_conserves_water(self):
         T, q_v, q_c, q_i, p_s, sigma = self._cold_inputs()
         T2, qv2, qc2, qi2, dq = _mpas_hard_saturation_poststep(
-            T, q_v, q_c, p_s, sigma, DT, 1.1, 5.0,
+            T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0,
             ice_curve=True, q_i=q_i)
         assert float(jnp.max(dq)) > 0.0
         # All-cold: everything to q_i, nothing to q_c.
@@ -209,7 +209,7 @@ class TestPoststep:
     def test_enthalpy_conserved_with_blended_latent_heat(self):
         T, q_v, q_c, q_i, p_s, sigma = self._cold_inputs()
         T2, qv2, _, _, dq = _mpas_hard_saturation_poststep(
-            T, q_v, q_c, p_s, sigma, DT, 1.1, 5.0,
+            T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0,
             ice_curve=True, q_i=q_i)
         l_cp = mixed_phase_l_over_cp(T)
         h0 = T + l_cp * q_v
@@ -232,9 +232,9 @@ class TestPoststep:
         q_v = 1.3 * saturation_mixing_ratio(T, p_full)
         q_c = jnp.zeros((ncol, nlev))
         ice = _mpas_hard_saturation_poststep(
-            T, q_v, q_c, p_s, sigma, DT, 1.1, 5.0, ice_curve=True, q_i=None)
+            T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0, ice_curve=True, q_i=None)
         liq = _mpas_hard_saturation_poststep(
-            T, q_v, q_c, p_s, sigma, DT, 1.1, 5.0, ice_curve=False, q_i=None)
+            T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0, ice_curve=False, q_i=None)
         assert ice[3] is None  # q_i_new
         # T, q_v, q_c, dq all identical to the liquid path (skip the None q_i).
         for a, b in zip(ice[:3] + ice[4:], liq[:3] + liq[4:]):
@@ -248,7 +248,7 @@ class TestPoststep:
         # supercooled-liquid deposition.
         Tc, qvc, qcc, _, psc, sigc = self._cold_inputs(with_qi=False)
         _, _, _, _, dqc = _mpas_hard_saturation_poststep(
-            Tc, qvc, qcc, psc, sigc, DT, 1.1, 5.0, ice_curve=True, q_i=None)
+            Tc, qvc, qcc, psc[:, None] * sigc[None, :], DT, 1.1, 5.0, ice_curve=True, q_i=None)
         np.testing.assert_allclose(np.asarray(dqc), 0.0, atol=1e-18)
 
     def test_legacy_mode_unchanged_arity_and_values(self):
@@ -258,7 +258,7 @@ class TestPoststep:
         q_v = 1.3 * saturation_mixing_ratio(
             T, p_s[:, None] * jnp.asarray(sigma)[None, :])
         T2, qv2, qc2, qi2, dq = _mpas_hard_saturation_poststep(
-            T, q_v, q_c, p_s, sigma, DT, 1.1, 5.0)
+            T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0)
         assert qi2 is None
         np.testing.assert_allclose(
             np.asarray(T2), np.asarray(

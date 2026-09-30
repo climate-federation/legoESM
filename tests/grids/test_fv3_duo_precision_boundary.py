@@ -59,12 +59,26 @@ def test_step_rejects_a_silent_f32_bundle_under_fp64(grid):
         m.step(bad, 120.0)
 
 
-def test_construct_refuses_fp32_until_runtime_wired(grid):
-    """fp32/mixed storage is accepted by the config + factory (foundation
-    plumbing) but the RUNTIME is not wired -- refused loudly at
-    construction, not deep in a phase."""
-    with pytest.raises(NotImplementedError, match="not yet wired|storage_dtype"):
-        FV3DuoDynamicsModel(grid, FV3DuoConfig(km=5, storage_dtype="float32"))
+def test_fp32_constructs_and_steps(grid):
+    """Increment 2: fp32 now RUNS end-to-end. Construct an fp32 model,
+    build the (f32) IC, step once, and assert the carry stays float32 and
+    finite. (Compiles fv_dynamics once -- the heaviest test here.)"""
+    m = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=5, storage_dtype="float32"))
+    assert m._storage_dtype == np.float32
+    ic = m.dcmip16_initial_state(do_pert=True)
+    assert ic["state"]["delp"].dtype == jnp.float32
+    out = m.step(ic, 120.0)
+    for k, v in out["state"].items():
+        assert v.dtype == jnp.float32, (k, v.dtype)
+        assert bool(jnp.isfinite(v).all()), (k, "non-finite")
+
+
+def test_mixed_storage_still_refused(grid):
+    """True per-op MIXED (fp64 pressure column / energy fixer, fp32
+    elsewhere) is a later increment -- np.dtype('mixed') is not a real
+    dtype, so it errors; only 'float32'/'float64' are wired."""
+    with pytest.raises((ValueError, TypeError, NotImplementedError)):
+        FV3DuoDynamicsModel(grid, FV3DuoConfig(km=5, storage_dtype="mixed"))
 
 
 def test_bad_dtype_string_is_a_value_error(grid):

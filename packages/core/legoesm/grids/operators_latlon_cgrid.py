@@ -198,9 +198,15 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
-        # Fold: last interior row, i-reversed via perm_T (scalar sign +1).
-        # fold_row handles the n_lon+1 wrap column (vertex / u-face fields).
-        north = fold_row(interior[-1:], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        # Fold: i-reversed ghost (scalar sign +1).  V-face rows (n_lon
+        # columns) use perm_T on BOTH storage layouts (their stored top row
+        # pairs cross-row on the pivot mesh too, matching the legacy
+        # formula); VERTEX/F rows (n_lon+1 columns) use the F-stagger map,
+        # which falls back to perm_T on legacy descriptors (byte-identical).
+        _n_lon = fold.perm_T.shape[0]
+        _perm = (fold.perm_T if interior.shape[1] == _n_lon
+                 else fold_perm_f(fold))
+        north = fold_row(interior[-1:], _perm, 1.0, _n_lon)
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
@@ -213,6 +219,40 @@ def fold_row(last_row, perm, sign, n_lon):
     else:
         core = sign * last_row[:, :n_lon][:, perm]
         return jnp.concatenate([core, core[:, 0:1]], axis=1)
+
+
+def fold_ghost_source_T(interior, fold):
+    """The (1, n_cols, ...) row whose permuted image is the ghost row ABOVE
+    the stored top row, for T/U-row arrays (n_lat rows).
+
+    halo_row_stored (eORCA1.2 class): the stored top row IS the duplicated
+    fold-halo row, so its own permuted image reproduces the interior partner
+    row — source = ``interior[-1:]`` (the legacy behaviour, byte-identical).
+
+    pivot_row_stored (eORCA025 class): the stored top row is the
+    SELF-symmetric pivot row (the halo was stripped), so the ghost above it
+    is the permuted image of the row BELOW the pivot (NEMO T-pivot
+    ``J+k <- J-k``) — source = ``interior[-2:-1]``.  Permuting the stored
+    top row instead reads each wet fold cell's LAND mirror twin (the
+    de-duplicated tmaskutil half), which is what injected T=0/S=0 ghost
+    water and blew up the eORCA025 run within ~23 steps (2026-08-26).
+    """
+    if bool(getattr(fold, "pivot_row_stored", False)):
+        return interior[-2:-1]
+    return interior[-1:]
+
+
+def fold_perm_u(fold):
+    """U-stagger fold permutation (falls back to perm_T for legacy
+    descriptors that predate the per-stagger maps)."""
+    p = getattr(fold, "perm_u", None)
+    return fold.perm_T if p is None else p
+
+
+def fold_perm_f(fold):
+    """F/vertex-stagger fold permutation (falls back to perm_v)."""
+    p = getattr(fold, "perm_f", None)
+    return fold.perm_v if p is None else p
 
 
 def north_fold_mask(grid):
@@ -334,7 +374,9 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return jnp.pad(f, tuple(pad), mode="wrap")
 
 
-def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_uface(
+    f: jnp.ndarray, *, source_round: bool = False,
+) -> jnp.ndarray:
     """Interpolate a cell-center field to u-face (lon interface) positions.
 
     Simple average of the two cells sharing each lon face.
@@ -354,6 +396,11 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     # spans lon partition cuts under a 2-D split.  Output face j = mean of
     # the two cells sharing it; n_lon+1 faces (the last the periodic closure).
     f_pad = pad_lon_cgrid(f, halo=1)
+    if source_round:
+        from legoesm.core.source_rounding import nemo_source_round
+
+        neighbour_sum = nemo_source_round(f_pad[:, :-1] + f_pad[:, 1:])
+        return nemo_source_round(0.5 * neighbour_sum)
     return 0.5 * (f_pad[:, :-1] + f_pad[:, 1:])
 
 
@@ -778,7 +825,14 @@ def gradient_y_cgrid(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        f_partner = f[-1:, fold.perm_T]
+        # Beyond-the-fold neighbour of cell (i, J): halo layout -> the
+        # stored top row's permuted image (legacy); pivot layout -> the row
+        # BELOW the pivot permuted (crossing the fold from (i, J) lands on
+        # (perm_T(i), J-1); permuting the stored pivot row reads the land
+        # mirror twins — codex fold-fix RED 6).
+        _src = (f[-2:-1] if bool(getattr(fold, "pivot_row_stored", False))
+                else f[-1:])
+        f_partner = _src[:, fold.perm_T]
         dy_fold = grid.dy_v[-1:]
         if f.ndim == 3:
             dy_fold = dy_fold[:, :, jnp.newaxis]
@@ -1319,7 +1373,9 @@ def curl_vertex_cgrid(
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         # fold_row handles the n_lon+1 vertex wrap column (scalar sign +1).
-        north = fold_row(zeta[-2:-1], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        # Vertex/F stagger: F map on pivot-layout meshes, perm_T fallback.
+        north = fold_row(zeta[-2:-1], fold_perm_f(fold), 1.0,
+                         fold.perm_T.shape[0])
         zeta = apply_north_fold(zeta, north, grid, north_mask=nmask)
 
     return zeta
@@ -1594,6 +1650,8 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         # fold_row handles the n_lon+1 vertex wrap column (scalar sign +1).
-        north = fold_row(full[-2:-1], fold.perm_T, 1.0, fold.perm_T.shape[0])
+        # Vertex/F stagger: F map on pivot-layout meshes, perm_T fallback.
+        north = fold_row(full[-2:-1], fold_perm_f(fold), 1.0,
+                         fold.perm_T.shape[0])
         full = apply_north_fold(full, north, grid, north_mask=nmask)
     return full

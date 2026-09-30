@@ -29,6 +29,7 @@ from typing import NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 logger = logging.getLogger(__name__)
@@ -764,12 +765,28 @@ def multiprocess_safe_device_put(leaf, sharding):
     ``jax.device_put`` — byte-identical behavior to before.
     Already-global (non-fully-addressable) leaves pass through unchanged.
     """
-    if not isinstance(leaf, (jax.Array, jnp.ndarray)):
+    # NUMPY ARRAYS MUST TAKE THE LOCAL PATH TOO. ``jnp.ndarray`` IS
+    # ``jax.Array``, so the original pair named one type, and a NumPy leaf —
+    # which is what the mesh builders produce — failed the check and fell
+    # straight through to the asserting placement below. That assert gathers
+    # the whole field onto every process, so per-process memory grew with the
+    # process count and an allocation of tens of gigabytes ended
+    # the ten-million-cell ladder at 192 devices. Which buffer exactly, the
+    # gathered result or a temporary of the gather, was not established.
+    if not isinstance(leaf, (jax.Array, np.ndarray)):
         return jax.device_put(leaf, sharding)
     if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
         return leaf  # already a global sharded array; nothing to place
     if jax.process_count() > 1:
-        import numpy as np
+        # Refuse a masked array rather than convert it. Placing one directly
+        # raises, but converting first would strip the mask and place the fill
+        # values as if they were data, so taking the local path here must not
+        # quietly turn a rejection into silently wrong numbers.
+        if isinstance(leaf, np.ma.MaskedArray):
+            raise ValueError(
+                "masked arrays cannot be placed across devices: the mask "
+                "would be dropped and the fill values placed as data. "
+                "Resolve the mask before sharding.")
         host = np.asarray(leaf)
         return jax.make_array_from_callback(
             host.shape, sharding, lambda idx: host[idx])

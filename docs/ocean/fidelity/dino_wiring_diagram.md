@@ -140,7 +140,7 @@ inspection REFUTES it (4th agent over-claim this loop): under `matsuno_split`, `
 EXCLUDES the planetary Coriolis (the stage-7b' planetary-Coriolis add,
 `ocean_pe_latlon_cgrid.py:3627`, is gated on `coriolis_scheme=="explicit_ab2"`), so
 `F_slow` carries NO f, and the substep applies `f×U_bt` exactly once (`_add_bt_cor=True`,
-`ocean_model_latlon_cgrid.py:2544-2546`); the Matsuno rotation applies f to the
+`ocean_model_latlon_cgrid.py:2649-2651`); the Matsuno rotation applies f to the
 perturbation. Under `explicit_ab2`, `du_dt` HAS f → `F_slow` carries it → substep skips
 (`_add_bt_cor=False`). Each mode gets f exactly once in BOTH schemes — matches NEMO's
 zu_frc-subtract-then-live-substep accounting. No jet driver here.
@@ -313,6 +313,18 @@ Two faithful pieces (both traced to NEMO `dynspg_ts.F90`, no ad-hoc damping):
 **THE dt=2700 180-day comparison (controlled, sole variable FE→leap-frog; bridged NEMO mesh,
 from-rest analytic IC, seasonal forcing, NEMO RUN_TRAJ, 5760 steps):**
 
+> **SUPERSEDED 2026-09-10 — every "from-rest analytic IC" number below is
+> stale.** Two things those runs carried have since been fixed and gated:
+> the initial state was the analytic paper profile rather than NEMO's
+> `usr_def_istate` (2.1e-2 K rms / 8.4e-2 K max from NEMO's own `tb`), and on
+> the bridged frame the `nemo_literal` wind was evaluated at a hand-rebuilt
+> latitude ladder whose Mercator spacing was wrong (worst measured 3.63e-2
+> N/m2, 18% of the 0.1999 N/m2 peak; 4.71e-2 on the TKE stress modulus).
+> Both are now bit-exact against NEMO's one-step-from-rest record — see
+> `scripts/validate/ocean_fidelity/dino_1226/nemo_dino_fromrest_gate.py`.
+> Re-run before quoting any figure in this section.
+
+
 | Metric | FE baseline | **MLF leap-frog (faithful)** | NEMO |
 |--------|------------:|-----------------------------:|-----:|
 | SST corr / bias / rms | 0.995 / +0.22 / 0.72 | 0.994 / −0.43 / 0.99 | — |
@@ -366,6 +378,18 @@ legoESM restores surface T/S IMPLICITLY (node 20); O(γ·2dt·Δflux), second-or
 
 **Controlled 180-day comparison (sole variable = filter form; dt=2700, 5760 steps,
 from-rest analytic IC on bridged NEMO mesh, seasonal forcing, NEMO RUN_TRAJ ÷vovvle3t;
+
+> **SUPERSEDED 2026-09-10 — every "from-rest analytic IC" number below is
+> stale.** Two things those runs carried have since been fixed and gated:
+> the initial state was the analytic paper profile rather than NEMO's
+> `usr_def_istate` (2.1e-2 K rms / 8.4e-2 K max from NEMO's own `tb`), and on
+> the bridged frame the `nemo_literal` wind was evaluated at a hand-rebuilt
+> latitude ladder whose Mercator spacing was wrong (worst measured 3.63e-2
+> N/m2, 18% of the 0.1999 N/m2 peak; 4.71e-2 on the TKE stress modulus).
+> Both are now bit-exact against NEMO's one-step-from-rest record — see
+> `scripts/validate/ocean_fidelity/dino_1226/nemo_dino_fromrest_gate.py`.
+> Re-run before quoting any figure in this section.
+
 both leap-frog runs in-session on separate GPUs):**
 
 | Metric | conc-form leap-frog | **TW-form leap-frog (faithful)** | NEMO |
@@ -440,6 +464,18 @@ NEMO tmask `k_bot` EXACTLY; 100% of wet columns carry ≥1 dry bottom cell (wet-
 
 CONTROLLED 180d comparison — sole variable = vertical coordinate (both forward-euler
 `nemo_dino_kamm`, dt=2700, from-rest analytic IC on the bridged NEMO mesh, seasonal forcing,
+
+> **SUPERSEDED 2026-09-10 — every "from-rest analytic IC" number below is
+> stale.** Two things those runs carried have since been fixed and gated:
+> the initial state was the analytic paper profile rather than NEMO's
+> `usr_def_istate` (2.1e-2 K rms / 8.4e-2 K max from NEMO's own `tb`), and on
+> the bridged frame the `nemo_literal` wind was evaluated at a hand-rebuilt
+> latitude ladder whose Mercator spacing was wrong (worst measured 3.63e-2
+> N/m2, 18% of the 0.1999 N/m2 peak; 4.71e-2 on the TKE stress modulus).
+> Both are now bit-exact against NEMO's one-step-from-rest record — see
+> `scripts/validate/ocean_fidelity/dino_1226/nemo_dino_fromrest_gate.py`.
+> Re-run before quoting any figure in this section.
+
 NEMO RUN_TRAJ ÷vovvle3t; baseline RE-RUN in-session at identical protocol):
 
 | metric | z* (baseline) | **full-step-z** | NEMO |

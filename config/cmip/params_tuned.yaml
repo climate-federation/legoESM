@@ -28,7 +28,7 @@
 
 # --- atm cloud optics ---
 # Thinner in-cloud diagnostic condensate fed to radiation -> Earth-like albedo.
-# Spec: atm.clouds.CloudConfig.q_c_diagnostic, units kg/kg, bounds (5.0e-5, 1.0e-3),
+# Spec: atm.clouds.CloudConfig.q_c_diagnostic, units kg/kg, bounds (1.0e-6, 1.0e-3),
 # tunable_tier 1, transform sigmoid (clouds/config.py __param_spec__).
 # Converged: planetary albedo 35.4 -> 31.3%, SST drift -3.2 -> -2.2 K/yr.
 atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4

@@ -15,6 +15,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -106,3 +107,103 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print(f"ok  {name}")
+
+
+# --- #1736: which AD modes this solver supports, pinned rather than prose ----
+# Every bullet below was unpinned before this: grepping tests/, scripts/ and
+# docs/ found ZERO assertions on the solver's forward-mode behaviour, so the
+# docstring's claims could drift (and had -- it asserted that no path
+# forward-differentiates the solver while three operators in da/curvature.py
+# did exactly that, and raised).
+
+
+def _banded_objective(x):
+    """Scalar objective whose tridiagonal BANDS depend on the control.
+
+    The control enters the DIAGONAL, so the solve is nonlinear in ``x`` and the
+    Hessian is not the trivial one a linear-in-RHS objective would give.
+    """
+    n = 6
+    a = jnp.concatenate([jnp.zeros(1), -jnp.ones(n - 1)])
+    c = jnp.concatenate([-jnp.ones(n - 1), jnp.zeros(1)])
+    b = 4.0 + x
+    d = jnp.ones(n) * 2.0
+    return jnp.sum(thomas_solve(a, b, c, d) ** 2)
+
+
+def _dense_objective(x):
+    """The same objective with the band assembled and solved densely."""
+    n = 6
+    A = (jnp.diag(4.0 + x)
+         + jnp.diag(-jnp.ones(n - 1), -1)
+         + jnp.diag(-jnp.ones(n - 1), 1))
+    return jnp.sum(jnp.linalg.solve(A, jnp.ones(n) * 2.0) ** 2)
+
+
+def test_forward_over_reverse_hvp_matches_a_dense_hessian():
+    """FAILS on the pre-#1736 solver with TypeError; passes after.
+
+    This is the cheap stand-in for the land-column integration test, which
+    costs ~5 minutes per evaluation.  The dense reference is an independent
+    implementation, not a rearrangement of the same sweep.
+    """
+    x0 = jnp.linspace(0.5, 1.5, 6)
+    v = jnp.ones_like(x0) / jnp.sqrt(6.0)
+    got = jax.jvp(jax.grad(_banded_objective), (x0,), (v,))[1]
+    want = jax.jvp(jax.grad(_dense_objective), (x0,), (v,))[1]
+    assert jnp.all(jnp.isfinite(got))
+    assert jnp.allclose(got, want, rtol=1e-9, atol=1e-11), (
+        f"forward-over-reverse HVP differs from the dense Hessian by "
+        f"{float(jnp.max(jnp.abs(got - want))):.3e}")
+
+
+def test_first_order_gradient_is_unchanged_by_the_1736_fix():
+    """The #1736 change touches only the bwd rule's internal lambda solve, so
+    the gradient itself must be bit-identical to the dense reference's."""
+    x0 = jnp.linspace(0.5, 1.5, 6)
+    g_band = jax.grad(_banded_objective)(x0)
+    g_dense = jax.grad(_dense_objective)(x0)
+    assert jnp.allclose(g_band, g_dense, rtol=1e-10, atol=1e-12)
+
+
+def test_plain_forward_mode_through_the_solver_still_raises():
+    """The custom_vjp defines no JVP, and that is still true and still by
+    design -- #1736 fixed forward-OVER-REVERSE, not plain forward mode.
+
+    Pins the first docstring bullet so a future 'fix' cannot quietly make
+    jacfwd work by deleting the custom adjoint and its clamp protection.
+    """
+    n = 4
+    a = jnp.concatenate([jnp.zeros(1), -jnp.ones(n - 1)])
+    c = jnp.concatenate([-jnp.ones(n - 1), jnp.zeros(1)])
+    b, d = 4.0 * jnp.ones(n), jnp.ones(n)
+    with pytest.raises(TypeError, match="forward-mode autodiff"):
+        jax.jvp(lambda bb: thomas_solve(a, bb, c, d), (b,), (jnp.ones(n),))
+
+
+def test_second_order_at_a_clamped_pivot_is_the_price_of_1736():
+    """Records the trade #1736 made, so it cannot be discovered by surprise.
+
+    Higher-order reverse no longer recurses through the custom rule, so a
+    second derivative taken where a pivot is CLAMPED differentiates the raw
+    ``1/denom**2``.  In float64 -- what production runs -- this stays finite;
+    the test asserts that, and asserts the first-order adjoint is finite there
+    too, which is the property the custom_vjp exists to provide and which
+    #1736 did NOT trade away.
+    """
+    n = 4
+
+    def near_singular(x):
+        a = jnp.concatenate([jnp.zeros(1), -jnp.ones(n - 1)])
+        c = jnp.concatenate([-jnp.ones(n - 1), jnp.zeros(1)])
+        b = jnp.full(n, 1e-30) * x          # pivots driven towards the clamp
+        return jnp.sum(thomas_solve(a, b, c, jnp.ones(n)) ** 2)
+
+    x0 = jnp.ones(())
+    g = jax.grad(near_singular)(x0)
+    assert jnp.isfinite(g), "first-order adjoint must stay clamp-protected"
+    hv = jax.jvp(jax.grad(near_singular), (x0,), (jnp.ones(()),))[1]
+    assert jnp.isfinite(hv), (
+        "float64 second order must stay finite at a clamped pivot; if this "
+        "goes NaN the #1736 trade is worse than measured and the clamp floor "
+        "needs raising")

@@ -33,7 +33,7 @@ from legoesm.core.conservation import (
     conservative_positive_clip_global,
     is_borrow_eligible_tracer,
 )
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -53,6 +53,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_enstrophy_conserving_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
+    div_damp_del4_3d,
     cell_to_edge_avg_3d,
     apvm_correction_3d,
 )
@@ -70,6 +71,7 @@ from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
 )
@@ -101,6 +103,12 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # Optional (nlev,) per-layer weight restricting the budget ledger's
+    # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
+    # weight the physics rows use. Both sides must carry the same weight or the
+    # rows no longer sum to the column-store change and the table is silently
+    # inconsistent. None = full column, byte-identical.
+    budget_ledger_level_weight: object = None
     # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
     # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
     # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
@@ -155,9 +163,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ½ half→full average).  A 2Δσ mode grows until the silent ``T_min`` floor
     # pins its cold levels and rectifies it into an even/odd checkerboard (#915
     # autopsy: even levels pinned at 50 K, odd exploding to 8e8 K).  Damping
-    # rate is 16·ν interior / 8·ν at the top+bottom boundary (τ = 1/(16ν),
-    # 1/(8ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~17 h boundary — fast vs the
-    # day-20 blowup).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
+    # rate is 16·ν interior / 12·ν next-to-boundary / 4·ν at the top+bottom
+    # level (τ = 1/(16ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~35 h boundary — fast
+    # vs the day-20 blowup); a linear profile is untouched (zero tendency).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
     # resolved vertical structure is essentially untouched, and it conserves
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
@@ -180,18 +188,59 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Measured global max of that pair on the target run (raw interface
     # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
     # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
-    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
-    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
-    # there RAISES rather than running silently inert.
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane's temperature
+    # (theta form, upwind or 'sb') — selecting it there RAISES rather than
+    # running silently inert.  Hybrid-lane TRACERS always take the conservative
+    # limited ``vertical_advection_hybrid_van_leer``, independent of this field.
     # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
     vert_advection_scheme: str = "upwind"
+    # CAM-style top diffusion sponge: the del2 viscosity in the top n layers
+    # is multiplied by factor**((n-k)/n) (k = 0 the model top, so the top
+    # layer gets the full factor), 1 below.  0 / 1.0 = off, byte-identical.
+    sponge_del2_top_layers: int = 0
+    sponge_del2_top_factor: float = 1.0
+    # Divergence-SELECTIVE biharmonic damping [m⁴/s], CAM-FV's ``ldiv4``
+    # (``fv_div24del2flag=4``, the CAM6 physics default at every horizontal
+    # grid).  ``nu_del2``/``nu_del4`` above are VECTOR Laplacians: they damp
+    # the rotational and divergent modes together, so cranking them to quiet
+    # a noisy divergence field also crushes the jets.  This term damps only
+    # the curl-free part.  It matters most on a hybrid table with
+    # pure-pressure (B=0) layers, whose fixed mass leaves continuity no
+    # choice but to convert horizontal divergence into vertical mass flux.
+    # 0.0 = off, byte-identical.  Appended at the tuple END: preserves
+    # POSITIONAL CONSTRUCTION by existing callers.
+    nu_div4: float = 0.0
 
 
 # ============================================================================
 # Tendency computation
 # ============================================================================
+
+class ThermoTerms(NamedTuple):
+    """The three constituents of the dry thermodynamic tendency, as assembled.
+
+    Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
+    called with ``return_thermo_terms=True``, which no production path does.
+    ``horiz_adv + horiz_diff + vert_adv + adiabatic_ps`` is the thermodynamic
+    tendency before the vertical del4 filter and before physics are added, so a
+    budget that splits the dycore's contribution needs no re-derivation from
+    state.  Advection and the horizontal Laplacian diffusion are separate
+    because they answer different questions and the diffusion is large: at the
+    production coefficient it is down-gradient heat transport across the polar
+    front, which looks exactly like resolved advection if the two are summed.
+    """
+
+    horiz_adv: jax.Array      # -v.grad(T) on cell centres, ADVECTION ONLY [K/s]
+    horiz_diff: jax.Array     # K_h * div(grad T), zero when K_h == 0 [K/s]
+    vert_adv: jax.Array       # theta-form vertical term, carries the sigma-dot
+                              # part of the adiabatic heating [K/s]
+    adiabatic_ps: jax.Array   # kappa*T*(omega_ps/p + v.grad ln p_s) [K/s]
+    sigma_dot: jax.Array      # the coordinate vertical velocity the vertical
+                              # term was built from, at interfaces [1/s]; it is
+                              # what turns a tendency into a rate of descent
+
 
 def vertical_del4_T_tendency(
     T_3d: jax.Array, nu_vert4_T: float, layer_mass: jax.Array | None = None,
@@ -206,9 +255,11 @@ def vertical_del4_T_tendency(
     ``nu_del4`` biharmonic hyperdiffusion.
 
     Implemented as del2∘del2 (Laplacian of the Laplacian).  Boundary treatment:
-    the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
-    ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
-    worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
+    the INNER Laplacian uses linearly EXTRAPOLATED ghost levels (a boundary
+    gradient is not a mode: linear profiles give exactly zero; a 2Δσ mode is
+    still damped at 4ν on the boundary level and 12ν on the next — where the
+    #930 checkerboard is worst, at the low-pressure top), while the OUTER
+    Laplacian is ``edge``
     (zero-gradient) padded (a no-flux boundary → the INDEX-space sum
     ``Σ_k tendency_k`` is ZERO to machine precision for ANY profile).
     That is NOT the same as column conservation: the conserved quantity is the
@@ -225,9 +276,9 @@ def vertical_del4_T_tendency(
     On a uniform grid the correction is identically zero to round-off
     (measured ≤1.4e-20 K/s, far below the float32 ULP of the tendency), so the
     uniform and ``dsigma=None`` paths stay bit-identical.  Discrete 2Δσ
-    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
-    (½ the interior rate — a boundary no-flux constraint of any conservative
-    biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
+    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-12·nu`` next to the
+    boundary and ``-4·nu`` on the top/bottom level (the extrapolated ghost
+    sees no gradient; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
     (≈47× weaker than 2Δσ), so the filter is grid-scale-selective.
 
     Parameters
@@ -253,10 +304,16 @@ def vertical_del4_T_tendency(
         Vertical-hyperdiffusion tendency of T, same shape as ``T_3d``.
     """
     pad_axes = ((0, 0),) * (T_3d.ndim - 1)
-    # Inner Laplacian: reflect BC keeps the FULL 2Δσ response at the boundary
-    # levels (a plain edge/no-flux inner BC halves it again and leaves a slowly
-    # decaying top boundary mode).
-    Tp = jnp.pad(T_3d, (*pad_axes, (1, 1)), mode="reflect")
+    # Inner Laplacian: ghost levels by LINEAR EXTRAPOLATION
+    # (ghost_top = 2*T[0] - T[1], ghost_bot = 2*T[-1] - T[-2]), so a boundary
+    # GRADIENT is invisible to the filter: linear profiles give exactly zero,
+    # a quadratic 1·nu at the boundary; 2Δσ damping is 4·nu at the boundary
+    # level, 12·nu at the next, 16·nu interior.  A reflect pad turned any
+    # boundary gradient into a fake 2Δσ mode (measured -2.77/+2.77 K/day on
+    # the top two layers of a linear 8 K/layer profile at nu=2e-6).
+    ghost_top = 2.0 * T_3d[..., 0:1] - T_3d[..., 1:2]
+    ghost_bot = 2.0 * T_3d[..., -1:] - T_3d[..., -2:-1]
+    Tp = jnp.concatenate([ghost_top, T_3d, ghost_bot], axis=-1)
     lap = Tp[..., :-2] - 2.0 * Tp[..., 1:-1] + Tp[..., 2:]      # ∂²/∂σ²
     # Outer Laplacian: edge (zero-gradient / no-flux) BC ⇒ Σ_k tendency = 0
     # exactly (flux form), so the filter conserves column-integrated T.
@@ -283,6 +340,20 @@ def vertical_del4_T_tendency(
                    / _w.sum(axis=-1, keepdims=True))
 
 
+def sponge_del2_profile(nlev: int, n_layers: int, factor) -> jnp.ndarray:
+    """Per-level del2 viscosity multiplier of a CAM-style top diffusion sponge:
+    factor**((n_layers - k)/n_layers) for level k < n_layers (k = 0 is the
+    model top, so the top layer gets the full factor), 1.0 below; all ones when
+    n_layers <= 0 (byte-identical off state).  ``n_layers`` is a static config
+    value (Python int); ``factor`` may be traced."""
+    if n_layers <= 0:
+        return jnp.ones(nlev)
+    fac = jnp.asarray(factor)
+    k = jnp.arange(nlev)
+    exponent = jnp.maximum(n_layers - k, 0) / n_layers     # exactly 0 below the sponge
+    return fac ** exponent
+
+
 def mpas_hydrostatic_tendencies(
     state: MPASHydrostaticState,
     mesh: VoronoiMesh,
@@ -290,7 +361,9 @@ def mpas_hydrostatic_tendencies(
     config: MPASPrimitiveEquationConfig = MPASPrimitiveEquationConfig(),
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
-) -> MPASHydrostaticTendencies:
+    return_thermo_terms: bool = False,
+    fence_pv_flux: bool = False,
+) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
     Parameters
@@ -321,12 +394,20 @@ def mpas_hydrostatic_tendencies(
             f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
             f"{VERTICAL_ADVECTION_SCHEMES}"
         )
-    if _hybrid and _vert_scheme != "upwind":
+    if _hybrid and _vert_scheme not in ("upwind", "sb"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
-            "sigma vertical coordinate only; the hybrid lane advects with "
-            "vertical_advection_hybrid, where it would be silently inert. "
-            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+            "sigma vertical coordinate only; the hybrid lane's temperature "
+            "takes 'upwind' or 'sb' (its tracers always use the conservative "
+            "limited operator), so it would be silently inert. "
+            "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
+        )
+    if not _hybrid and _vert_scheme == "sb":
+        raise ValueError(
+            "vert_advection_scheme='sb' (conservative Simmons-Burridge flux "
+            "form) is wired into the HYBRID lane only; on the sigma lane it "
+            "would be silently inert. Use vertical_coord='cam_l32'/'hybrid', "
+            "or 'upwind'/'van_leer' on sigma."
         )
 
     u_3d = state.u.data        # (nEdges, nlev)
@@ -463,6 +544,11 @@ def mpas_hydrostatic_tendencies(
         pv_flux_3d = pv_flux_energy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
         )
+        # Value-neutral fusion split, set only by the sharded (multi-GPU)
+        # step: there it cuts the A100 step 7-15% (s9 16/32 GPUs, s7 2 GPUs);
+        # on one device it costs 1-3.5%, so the serial path leaves it off.
+        if fence_pv_flux:
+            pv_flux_3d = jax.lax.optimization_barrier(pv_flux_3d)
     elif config.pv_scheme == "enstrophy":
         pv_flux_3d = pv_flux_enstrophy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
@@ -484,14 +570,23 @@ def mpas_hydrostatic_tendencies(
     # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
     # 1 tangential-curl difference) per RHS evaluation.  Same exploit
     # as Loop 135 for the latlon ocean K_h+K_bih sharing.
+    _nu2 = config.nu_del2 * sponge_del2_profile(
+        u_3d.shape[-1], config.sponge_del2_top_layers,
+        config.sponge_del2_top_factor).astype(u_3d.dtype)
     if config.nu_del2 > 0 and config.nu_del4 > 0:
         _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
-        du_dt_3d = du_dt_3d + config.nu_del2 * _del2_u
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
         du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
     elif config.nu_del2 > 0:
-        du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
+
+    # Divergence-selective biharmonic damping (CAM-FV ldiv4).  Same sign
+    # convention as the vector biharmonic above: the del4 term enters with a
+    # minus sign, del2 with a plus.
+    if config.nu_div4 > 0:
+        du_dt_3d = du_dt_3d - config.nu_div4 * div_damp_del4_3d(u_3d, mesh)
 
     # Batched divergences.  ``divergence_cell_3d`` shares the same
     # MPAS edgesOnCell gather + reduce on the leading edge axis (the
@@ -543,8 +638,11 @@ def mpas_hydrostatic_tendencies(
 
     # Scalar diffusion — ``grad_T_3d`` and its divergence were already
     # computed in the batched blocks above; reuse the cached results.
+    _horiz_diff_T = (config.K_h * _div_grad_T if config.K_h > 0
+                     else jnp.zeros_like(horiz_adv_T_3d))
+    _horiz_adv_only = horiz_adv_T_3d
     if config.K_h > 0:
-        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
+        horiz_adv_T_3d = horiz_adv_T_3d + _horiz_diff_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
@@ -570,8 +668,16 @@ def mpas_hydrostatic_tendencies(
         # Advecting θ cancels the two large near-equal terms BEFORE
         # discretization, killing the 2Δz residual the 1/p prefactor
         # amplified at the stretched top levels.  See the σ branch below.
+        # scheme='sb' swaps the upwind advective operator inside the θ
+        # round-trip for the conservative Simmons-Burridge flux form, which
+        # satisfies the discrete product rule the advective one violates.
         vert_thermo_T = vertical_advection_theta_hybrid(
-            T_3d, mass_flux, p_s, sigma_coord)
+            T_3d, mass_flux, p_s, sigma_coord,
+            conservative=(_vert_scheme == "sb"))
+        # Hybrid carries a mass flux, not a coordinate velocity; the
+        # diagnostic reports the equivalent dsigma/dt so the two branches are
+        # comparable (dp/dt per unit layer mass).
+        _sigma_dot_diag = mass_flux / jnp.maximum(p_s[:, None], 1.0)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = B·dp_s/dt + F  ⇒  ω_ps = B·dp_s/dt.  The F (mass-flux) part
         # κ·T·F/p is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -590,6 +696,7 @@ def mpas_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot_from_cumsum(
             _cumsum_dp, _D_total_p, p_s, sigma_coord,
         )
+        _sigma_dot_diag = sigma_dot
 
         # θ-form vertical thermodynamic transport (cancellation-free, #930):
         #   -σ̇·∂T/∂σ + κ·T·σ̇/σ  ==  -exner·σ̇·∂θ/∂σ   (θ = T·(p₀/p)^κ).
@@ -648,6 +755,12 @@ def mpas_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
     dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
+    _thermo_terms = (ThermoTerms(horiz_adv=_horiz_adv_only,
+                                 horiz_diff=_horiz_diff_T,
+                                 vert_adv=vert_thermo_T,
+                                 adiabatic_ps=adiabatic,
+                                 sigma_dot=_sigma_dot_diag)
+                     if return_thermo_terms else None)
 
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
     # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
@@ -676,7 +789,8 @@ def mpas_hydrostatic_tendencies(
     # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
     # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
     # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
-    # operator the dycore uses for T.  Physics (microphysics/convection)
+    # operator the dycore uses for T (on the hybrid lane: the conservative
+    # limited tracer operator, T takes its theta form).  Physics (microphysics/convection)
     # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
     tracer_tends_out = None
     if state.tracers is not None and len(state.tracers) > 0:
@@ -688,7 +802,8 @@ def mpas_hydrostatic_tendencies(
         dq = tracer_horizontal_advection(q, u_3d, mesh)
         if _hybrid:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord),
+                lambda qk: vertical_advection_hybrid_van_leer(
+                    qk, mass_flux, p_s, sigma_coord),
                 in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(
@@ -723,7 +838,7 @@ def mpas_hydrostatic_tendencies(
             for _i, k in enumerate(_tnames)
         }
 
-    return MPASHydrostaticTendencies(
+    _out = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
         dT_dt=Field(data=dT_dt_3d, name="dT_dt",
@@ -734,6 +849,12 @@ def mpas_hydrostatic_tendencies(
                        dims=("nCells",), units="m²/s³"),
         tracer_tendencies=tracer_tends_out,
     )
+    # ``return_thermo_terms`` is a STATIC Python bool, false on every
+    # production path, so the traced graph and the returned pytree are
+    # unchanged when it is not requested.
+    if return_thermo_terms:
+        return _out, _thermo_terms
+    return _out
 
 
 def _vertical_advection_edge(
@@ -830,9 +951,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
 
     def compute_mass(self, state) -> jax.Array:
-        """Compute global ``∫ p_s dA`` in the fp64 budget accumulator."""
+        """Global DRY mass ``∫ (p_s - g*column water) dA`` in the fp64
+        budget accumulator (what the fixer conserves)."""
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_dry = dry_surface_pressure(state.p_s.data, state.tracers,
+                                      self.sigma_coord)
         return jnp.sum(
-            state.p_s.data.astype(jnp.float64)
+            ps_dry.astype(jnp.float64)
             * self.mesh.areaCell.astype(jnp.float64),
         )
 
@@ -1045,23 +1170,25 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):
                 sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
+            _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+            _tr_phys = state_new.tracers
+            if (state_new.tracers is not None
+                    and _pt.tracer_tendencies is not None):
+                # water tendencies carry their MASS (FV3 fv_update_phys
+                # nwat block): precipitation lowers p_s, evaporation
+                # raises it; every tracer re-weighted onto the new
+                # layer masses (column totals exact, dry mass exact)
+                from legoesm.core.conservation import apply_physics_water_mass
+                _tr_phys, _ps_phys = apply_physics_water_mass(
+                    state_new.tracers, _pt.tracer_tendencies, _ps_phys,
+                    self.sigma_coord, dt)
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
-                p_s=state_new.p_s.replace(
-                    data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                p_s=state_new.p_s.replace(data=_ps_phys),
                 phis=state_new.phis,
-                tracers=state_new.tracers,
+                tracers=_tr_phys,
             )
-            if (state_new.tracers is not None
-                    and _pt.tracer_tendencies is not None):
-                state_new = state_new._replace(tracers={
-                    k: (state_new.tracers[k].replace(
-                            data=state_new.tracers[k].data
-                            + dt * _pt.tracer_tendencies[k].data)
-                        if k in _pt.tracer_tendencies else state_new.tracers[k])
-                    for k in state_new.tracers
-                })
             # Per-process ledger rows from the combined physics (per-column,
             # (nCells, N_LEDGER, 2)).  Structural (trace-time) check: None
             # unless the physics was built with budget_ledger=True.
@@ -1084,6 +1211,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 state_new, state, self.mesh,
                 total_area=self._total_area,
                 target_mass=target_mass,
+                sigma_coord=self.sigma_coord,
             )
         _state_postfix = state_new        # ledger: after the dry-mass fixer
 
@@ -1138,7 +1266,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.mesh.areaCell)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
@@ -1166,11 +1295,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 column_store_snapshot_column,
             )
 
+            _led_w = self.config.budget_ledger_level_weight
+
             def _snap(s):
                 water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
                          if s.tracers is not None and k in s.tracers]
                 return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
+                    level_weight=_led_w)
 
             _s_pre = _snap(state)
             _s_dyn = _snap(_state_postdyn)
@@ -1194,7 +1326,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 (_s_phy - _s_dyn) / dt
                 - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
 
-        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")), phys_state_out,
                 sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
@@ -1207,8 +1345,15 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
 def _fix_mass_mpas_hydro(
     state_new, state_old, mesh, total_area=None, target_mass=None,
+    sigma_coord=None,
 ):
-    """Fix mass conservation: uniform additive correction to p_s.
+    """Fix DRY-mass conservation: uniform additive correction to p_s.
+
+    The conserved integral is ``∫ (p_s - g*column water) dA`` (user
+    decision 2026-09-28): water enters and leaves the column through the
+    physics (``apply_physics_water_mass``) and the fixer must not refill
+    it.  ``sigma_coord=None`` keeps the legacy TOTAL-mass fixer for
+    callers without a coordinate (none in the lanes).
 
     iter-11: cast both p_s fields to the fp64 budget accumulator before
     the area-weighted sum.  Plain fp32 reductions over ~10^4–10^5
@@ -1233,8 +1378,14 @@ def _fix_mass_mpas_hydro(
         total_area = jnp.sum(area)
     acc = jnp.float64
     area_acc = area.astype(acc)
+    if sigma_coord is not None:
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_old = dry_surface_pressure(state_old.p_s.data, state_old.tracers, sigma_coord)
+        ps_new = dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma_coord)
+    else:
+        ps_old, ps_new = state_old.p_s.data, state_new.p_s.data
     if target_mass is not None:
-        mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
+        mass_new = jnp.sum(ps_new.astype(acc) * area_acc)
         # is_multi_process(), NOT jax.process_count() > 1: the mpi4jax
         # allreduce is correct only when each rank holds a LOCAL partition
         # (route-A MPI).  Under multi-controller SPMD (route-B, federated
@@ -1248,8 +1399,8 @@ def _fix_mass_mpas_hydro(
     else:
         _ps_stack = jnp.stack(
             [
-                state_old.p_s.data.astype(acc),
-                state_new.p_s.data.astype(acc),
+                ps_old.astype(acc),
+                ps_new.astype(acc),
             ],
             axis=-1,
         ) * area_acc[..., None]
@@ -1260,5 +1411,13 @@ def _fix_mass_mpas_hydro(
     correction = (mass_old - mass_new) / total_area
     # iter-11: drop ``.astype(p_s.data.dtype)`` — fp64 correction
     # promotes the add, matches ``fix_ps_mass`` cubed-sphere convention.
+    if sigma_coord is not None:
+        # the added/removed mass is DRY air: tracers re-weighted so
+        # their column masses are untouched (exact dry correction)
+        from legoesm.core.conservation import shift_ps_keep_tracer_mass
+        ps_new, tr_new = shift_ps_keep_tracer_mass(
+            state_new.p_s.data, state_new.tracers, sigma_coord, correction)
+        return state_new._replace(p_s=state_new.p_s.replace(data=ps_new),
+                                  tracers=tr_new)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)

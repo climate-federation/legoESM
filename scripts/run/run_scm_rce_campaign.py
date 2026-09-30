@@ -1043,7 +1043,11 @@ def make_physics_config(
         )
     return cfg._replace(
         radiation=radiation_cfg,
-        convection=cfg.convection._replace(scheme=convection),
+        # RCE is an ocean column: record the aquaplanet land choice for ZM.
+        convection=cfg.convection._replace(
+            scheme=convection,
+            zhang_mcfarlane=cfg.convection.zhang_mcfarlane._replace(
+                land_fraction="none")),
         turbulence=cfg.turbulence._replace(scheme=turbulence),
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
@@ -3062,7 +3066,8 @@ def tune_focused_params(
     best_cfg = base_cfg
     best_run = default_run
     best_values = dict(defaults)
-    best_score = objective_value(default_run, objective)
+    default_score = objective_value(default_run, objective)
+    best_score = default_score
 
     for i, values in enumerate(
             _candidate_values(defaults, constraints, tune_evals, seed)):

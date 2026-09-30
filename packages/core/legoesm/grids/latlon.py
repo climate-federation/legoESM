@@ -1147,6 +1147,27 @@ class FoldDescriptor(NamedTuple):
         Sign flip for u-component across the fold (typically -1.0).
     vector_sign_v : float
         Sign flip for v-component across the fold (typically -1.0).
+    pivot_row_stored : bool
+        Storage layout of the mesh's top row (measured, not assumed — see
+        ``check_tripole_fold_pairing.py``).  ``False`` (eORCA1.2-style,
+        "halo row stored"): the stored top row IS the duplicated fold-halo
+        row (top = permuted copy of the row below), so a ghost built from
+        the stored top row is consistent.  ``True`` (eORCA025-style,
+        "de-haloed"): the stored top row is the SELF-SYMMETRIC T-pivot row
+        (cell ``(i, j_max)`` and ``(perm_T[i], j_max)`` are the SAME
+        physical cell), the halo row was stripped, and the fold BC must
+        (a) build ghost rows from the rows BELOW the pivot
+        (``J+k <- J-k``) and (b) enforce the pivot row's half-mirror
+        self-duplication every step — otherwise the two mirror copies of
+        each wet fold cell evolve independently and the run blows up
+        (the eORCA025 step-23 NaN, 2026-08-26).
+    perm_u : jax.Array | None
+        (n_lon,) int32 — i-permutation for U stagger points (NEMO T-pivot:
+        ``(-i-1) % n_lon`` de-haloed, ``n_lon-2-i`` halo-stored).  ``None``
+        (legacy descriptors) falls back to ``perm_T``.
+    perm_f : jax.Array | None
+        (n_lon,) int32 — i-permutation for F/vertex stagger points.
+        ``None`` falls back to ``perm_v``.
     """
     is_active: bool
     fold_j: int
@@ -1155,6 +1176,9 @@ class FoldDescriptor(NamedTuple):
     perm_v: jax.Array
     vector_sign_u: float
     vector_sign_v: float
+    pivot_row_stored: bool = False
+    perm_u: jax.Array | None = None
+    perm_f: jax.Array | None = None
 
 
 def _inactive_fold(n_lon: int) -> FoldDescriptor:
@@ -1218,6 +1242,11 @@ class LatLonCGridGeometry(NamedTuple):
         Coriolis parameter at u-points.
     f_v : jax.Array
         Coriolis parameter at v-points.
+    ff_f : jax.Array, optional
+        Literal NEMO F-point Coriolis on the native ``(n_lat, n_lon)``
+        indexing.  This is deliberately separate from ``f_v``: NEMO's
+        EEN/ENE vorticity arms consume ``ff_f``, while generic face-Coriolis
+        operators retain the v-face field and convention in ``f_v``.
 
     cos_alpha_u, sin_alpha_u : jax.Array
         Rotation from local i-axis to geographic east at u-points.
@@ -1319,6 +1348,17 @@ class LatLonCGridGeometry(NamedTuple):
     # other T-point cell-row fields so it stays aligned with band-local
     # ``n_lat`` (``None`` passes through unchanged).
     seam_wall_rows: jax.Array | None = None
+    #: ``(n_lat+1,)`` v-face (cell-edge) latitudes [rad], when the builder
+    #: knows them.  Consumers that need the MERIDIONAL CELL EDGES -- the MOC
+    #: and barotropic streamfunction, and ``spinup``'s ACC-latitude lookup --
+    #: read ``getattr(grid, "lat_v", None)`` and otherwise fall back to
+    #: ``lat +/- 0.5*dlat`` with the SCALAR ``dlat``.  On a stretched grid that
+    #: fallback is wrong: measured 0.326 deg off NEMO's own ``gphiv`` on the
+    #: DINO Mercator mesh, whose true row spacing runs 0.344-1.000 deg against
+    #: a scalar 0.347 -- i.e. a third of a cell, on the axis the ACC transport
+    #: is located along.  ``None`` on builders that genuinely have no face
+    #: array (tripole), which keeps the fallback for them.
+    lat_v: jax.Array | None = None
 
     # Optional native T-point latitude in degrees.  NEMO evaluates a few
     # source profiles from the mesh's stored ``gphit`` values, before any
@@ -1327,6 +1367,12 @@ class LatLonCGridGeometry(NamedTuple):
     # grids have the same pytree leaves and arithmetic as before.  Appended
     # at the NamedTuple end to preserve positional callers.
     native_lat_T_deg: jax.Array | None = None
+
+    # Optional literal NEMO F-point Coriolis, native (n_lat, n_lon) indexing.
+    # Appended so positional callers retain their field order.  Only the NEMO
+    # EEN/ENE vorticity path may consume this; generic C-grid Coriolis keeps
+    # reading f_v.
+    ff_f: jax.Array | None = None
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -1408,6 +1454,22 @@ class LatLonCGridGeometry(NamedTuple):
         # all columns are identical; on tripolar the representative 1D dy
         # is used only for CFL diagnostics, not operator metrics.
         return 2.0 * self.dy_T[:, 0]
+
+
+def nemo_ff_f_to_vertex(ff_f: jax.Array) -> jax.Array:
+    """Map native NEMO ``ff_f(i,j)`` to redundant C-grid vertices.
+
+    NEMO's native ``(j, i)`` F point maps to legoESM vertex ``[j+1, i+1]``;
+    the added south and west rows are boundary/periodic storage.  This is the
+    one shared mapping used by the NEMO EEN/ENE arms and their fidelity bridge.
+    """
+    native = jnp.asarray(ff_f)
+    if native.ndim != 2:
+        raise ValueError(
+            f"NEMO ff_f must be a 2-D native field, got shape {native.shape}"
+        )
+    with_south = jnp.concatenate([native[:1], native], axis=0)
+    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
 
 
 def _uniform_dlat_tol(lat_like, dlat) -> float:
@@ -1551,11 +1613,10 @@ def create_latlon_geometry(
           tracer rows' ``f``, with the polar rows carried over from the
           nearest tracer row.
         * ``"face_latitude"`` — ``f_v = 2 Omega sin(phi_face)``,
-          evaluated at the v-face latitude itself.  This is what NEMO
-          does (``ff_f = 2 omega sin(gphif)``, ``domain.F90`` /
-          ``usrdef_hgr.F90``), and it is what any C-grid model that
-          defines its Coriolis at the F-point does; select it to match
-          one.
+          evaluated at the v-face latitude itself.  This matches NEMO's
+          analytic F-point value only where V and F share latitude.  A
+          file-backed NEMO card carries literal ``ff_f`` separately; its
+          EEN/ENE arm does not replace generic v-face ``f_v``.
 
         THE TRADE, measured by ``tests/ocean/unit/
         test_coriolis_placement.py`` with the model's own curl operator
@@ -1584,16 +1645,13 @@ def create_latlon_geometry(
         (``scripts/validate/ocean_fidelity/dino_1226/
         coriolis_omega_routing_audit.py``).
 
-        ``f_v`` is the SINGLE array every C-grid Coriolis path reads,
-        through one of two helpers, so this is the only place the
-        convention has to change (verified by grep, not asserted):
-        ``latlon_cgrid_operators.vertex_coriolis`` -> ``grid.f_v``
-        serves the barotropic EEN pre-block and the 3-D EEN/ENE
-        vorticity flux, and ``barotropic_common.coriolis_at_faces``
-        -> ``grid.f_u``/``grid.f_v`` serves the semi-implicit and
-        ``explicit_ab2`` face-f Coriolis.  ``f_u`` is returned
-        unchanged by this flag for the reason given above.  Raises
-        ``ValueError`` on any other value.
+        Generic paths read ``f_v`` through
+        ``latlon_cgrid_operators.vertex_coriolis`` or
+        ``barotropic_common.coriolis_at_faces``.  Literal NEMO EEN/ENE
+        instead reads ``grid.ff_f`` through
+        ``nemo_een_ene_vertex_coriolis`` when that source field is present.
+        ``f_u`` is returned unchanged by this flag for the reason given
+        above.  Raises ``ValueError`` on any other value.
 
     Returns
     -------
@@ -1968,19 +2026,18 @@ def create_latlon_geometry(
     # tripolar builder and create_beta_plane_cgrid_geometry each construct
     # their own f_v and do NOT take this option (on a beta-plane the two
     # conventions coincide exactly, so there is nothing there to select).
-    # Every C-grid Coriolis path in the repo reads THIS array, through one of
-    # two helpers: `latlon_cgrid_operators.vertex_coriolis` (the barotropic EEN
-    # pre-block and the 3-D EEN/ENE vorticity flux) and
-    # `barotropic_common.coriolis_at_faces` (the semi-implicit and
-    # `explicit_ab2` face-f Coriolis).  So the selector belongs here and
-    # nowhere else.
+    # Generic paths read THIS array through `vertex_coriolis` or
+    # `barotropic_common.coriolis_at_faces`.  A file-backed NEMO EEN/ENE arm
+    # reads its separate native `ff_f`; F and V are distinct on curvilinear
+    # grids.
     if coriolis_placement == "cell_average":
         # The arithmetic mean of the two adjacent tracer rows; the polar rows
         # carry over from the nearest tracer row.
         f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
         f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
     else:  # "face_latitude" -- validated at function entry
-        # f evaluated AT the v-face latitude, NEMO's ff_f convention.  Computed
+        # f evaluated AT the v-face latitude, an analytic NEMO F-point
+        # fallback only where V and F share latitude.  Computed
         # in native precision and cast once, exactly as f_T is, so the two
         # arrays are consistent to the storage dtype rather than to whatever
         # order the arithmetic happened to fall in.  The polar rows are the
@@ -1998,6 +2055,7 @@ def create_latlon_geometry(
     fold = _inactive_fold(n_lon)
 
     return LatLonCGridGeometry(
+        lat_v=_c(lat_face),
         n_lat=n_lat,
         n_lon=n_lon,
         radius=float(radius),

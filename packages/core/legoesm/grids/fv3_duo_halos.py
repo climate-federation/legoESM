@@ -247,7 +247,17 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     for name, a in arrays.items():
         if a is None:
             continue
-        dt = jnp.asarray(a).dtype
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
                 f"{fname}: {name} must be float32 or float64 (got {dt})")
@@ -359,6 +369,11 @@ class _FlatLayout:
         return self.bases[k] + (face * m0 + i0) * m1 + j0
 
 
+#: public name of the flat index layout (the tiled split builds padded
+#: twins of the barrier layouts with it; no private cross-module import)
+FlatLayout = _FlatLayout
+
+
 # ---------------------------------------------------------------------------
 # build-time independence checks (the batching licence, machine-enforced)
 # ---------------------------------------------------------------------------
@@ -437,6 +452,11 @@ def _dot_static(w: np.ndarray, v):
     Fortran/NumPy accumulation order -- ``jnp.sum`` would let XLA
     reassociate.
     """
+    # w is an fp64 host weight table; cast to the traced field's dtype so
+    # an f32 exchange stays f32 (fp32/mixed increment 2). fp64 is byte-
+    # identical (v is f64 -> w stays f64). The cast is once, hoisted out
+    # of the unrolled accumulation.
+    w = jnp.asarray(w, jnp.asarray(v).dtype)
     acc = w[..., 0] * v[..., 0]
     for lev in range(1, w.shape[-1]):
         acc = acc + w[..., lev] * v[..., lev]
@@ -461,11 +481,20 @@ def _apply_scatter(flat, sc: _Scatter, sign: float = 1.0):
     # tracer exists and cannot contaminate a gradient (see the module
     # docstring's layout contract, item 6).
     eff = sc.base * np.where(sc.sgn_pow == 1, float(sign), 1.0)
-    return flat.at[sc.dst].set(flat[sc.src] * eff)
+    # eff is the exchange-WEIGHT record (fp64 host constant); cast it to
+    # the field's storage dtype so an f32 halo exchange does not promote
+    # to f64 and scatter-narrow back (fp32/mixed increment 2; codex+GLM
+    # located this as the residual f64->f32 scatter). fp64 is byte-
+    # identical (flat is f64 -> eff stays f64).
+    return flat.at[sc.dst].set(flat[sc.src] * jnp.asarray(eff, flat.dtype))
 
 
 def _apply_blend(flat, bl: _Blend):
-    return flat.at[bl.dst].set(0.5 * (flat[bl.dst] + bl.sign * flat[bl.src]))
+    # bl.sign is an fp64 record constant -> cast to the field dtype (same
+    # reason as _apply_scatter; byte-identical for fp64).
+    return flat.at[bl.dst].set(
+        0.5 * (flat[bl.dst] + jnp.asarray(bl.sign, flat.dtype)
+               * flat[bl.src]))
 
 
 def _apply_stencil(out_flat, src_flat, st: _Stencil):
@@ -1210,6 +1239,8 @@ class DuoHaloTables:
         "amat", "dx", "dy", "vlon4", "vlat4", "ew4", "es4",
         "c2l_s", "c2l_e",
         "ring_comm",   # SPMD ring exchange bundle, or None (certified)
+        "tile_comm",   # SPMD tiled exchange bundle, or None (certified)
+        "window_comm",  # sub-face WINDOW bundle (fv3_duo_windows), or None
     )
 
     def __hash__(self):
@@ -1226,7 +1257,8 @@ class DuoHaloTables:
 
 def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
                               nq: int = 0,
-                              skip_b_endpoints: bool = False
+                              skip_b_endpoints: bool = False,
+                              dtype=None,
                               ) -> DuoHaloTables:
     """Convert the NumPy setup (``build_ext_context``) into JAX tables.
 
@@ -1281,10 +1313,13 @@ def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
     mb = n + 2 * ng + 1           # node axis
     m4 = n + 2 * ngp              # geographic-lattice cell axis
     tab = DuoHaloTables()
-    # certified default: no ring comm -- the public exchange dispatchers
-    # then trace the *_impl bodies verbatim (SPMD callers attach one via
-    # legoesm.grids.fv3_duo_spmd.build_ring_comm)
+    # certified default: no ring/tile comm -- the public exchange
+    # dispatchers then trace the *_impl bodies verbatim (SPMD callers
+    # attach ONE bundle via legoesm.grids.fv3_duo_spmd.build_ring_comm
+    # or build_tile_comm; both set is refused at dispatch)
     tab.ring_comm = None
+    tab.tile_comm = None
+    tab.window_comm = None
     tab.n, tab.ng, tab.ngp, tab.npx, tab.nq = n, ng, ngp, npx, int(nq)
     tab.k2e_nord = int(ectx.get("k2e_nord", 4))
     tab.vector_corner = ectx.get("vector_corner", "lagrange")
@@ -1444,13 +1479,24 @@ def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
         "fill_corners_agrid_pair")
 
     # --- grid metrics (constants; never traced, never differentiated) -----
-    tab.amat = np.stack([np.stack(a, axis=0) for a in ectx["amat6"]], axis=0)
-    tab.dx = np.stack([np.asarray(a) for a in ectx["dx6"]], axis=0)
-    tab.dy = np.stack([np.asarray(a) for a in ectx["dy6"]], axis=0)
-    tab.vlon4 = np.asarray(ectx["vlon4"])
-    tab.vlat4 = np.asarray(ectx["vlat4"])
-    tab.ew4 = np.asarray(ectx["ew4"])
-    tab.es4 = np.asarray(ectx["es4"])
+    # dtype (fp32/mixed increment 2): these projection/metric arrays are
+    # multiplied into the winds by a2d_project / a2c_project / c2l (e.g.
+    # `ug6 * tab.vlon4`), so an fp64 metric promotes an f32 wind back to
+    # f64 and trips the uniformity gates. Cast every INEXACT metric to the
+    # run's storage dtype; None keeps f64 -> byte-identical certified path.
+    # (The exchange-WEIGHT records are cast separately, on demand.)
+    def _m(a):
+        a = np.asarray(a)
+        return (a.astype(dtype)
+                if dtype is not None and np.issubdtype(a.dtype, np.inexact)
+                else a)
+    tab.amat = _m(np.stack([np.stack(a, axis=0) for a in ectx["amat6"]], axis=0))
+    tab.dx = _m(np.stack([np.asarray(a) for a in ectx["dx6"]], axis=0))
+    tab.dy = _m(np.stack([np.asarray(a) for a in ectx["dy6"]], axis=0))
+    tab.vlon4 = _m(ectx["vlon4"])
+    tab.vlat4 = _m(ectx["vlat4"])
+    tab.ew4 = _m(ectx["ew4"])
+    tab.es4 = _m(ectx["es4"])
     # c2l window: Fortran is-1 .. ie+1 in numpy coordinates
     tab.c2l_s = (1 - 1) - (1 - ng)
     tab.c2l_e = (n + 1) - (1 - ng)
@@ -1637,6 +1683,21 @@ def fill_corners_agrid_pair(x6, y6, tab: DuoHaloTables, sign: float = 1.0):
 # ---------------------------------------------------------------------------
 
 def average_shared_edge_cgrid(fx6, fy6, tab: DuoHaloTables):
+    """:func:`average_shared_edge_cgrid_impl`, or the attached window bundle's
+    barrier when one owns them (see ``_barrier_comm``)."""
+    comm = _barrier_comm(tab)
+    if comm is None:
+        if jnp.ndim(fx6) == 4:
+            # trailing level axis (M8-B): the certified 2-D blend per
+            # level, vmapped -- the blend at a cell reads only that level
+            return jax.vmap(
+                lambda a, b: average_shared_edge_cgrid_impl(a, b, tab),
+                in_axes=-1, out_axes=-1)(fx6, fy6)
+        return average_shared_edge_cgrid_impl(fx6, fy6, tab)
+    return comm.average_shared_edge_cgrid(fx6, fy6)
+
+
+def average_shared_edge_cgrid_impl(fx6, fy6, tab: DuoHaloTables):
     """BARRIER 1 -- dyn_core.F90:853-901, ``mpp_get_boundary`` :872 with
     ``gridtype=CGRID_NE`` :874, then the ``0.5*(mine + neighbour)`` blend.
 
@@ -1652,6 +1713,21 @@ def average_shared_edge_cgrid(fx6, fy6, tab: DuoHaloTables):
 
 
 def average_allflux_shared_edges(afx6, afy6, tab: DuoHaloTables):
+    """:func:`average_allflux_shared_edges_impl`, or the attached window bundle's
+    barrier when one owns them (see ``_barrier_comm``)."""
+    comm = _barrier_comm(tab)
+    if comm is None:
+        if jnp.ndim(afx6) == 5:
+            # (6, npx, n, km, slot): the certified per-level blend
+            # vmapped over the level axis (M8-B)
+            return jax.vmap(
+                lambda a, b: average_allflux_shared_edges_impl(a, b, tab),
+                in_axes=3, out_axes=3)(afx6, afy6)
+        return average_allflux_shared_edges_impl(afx6, afy6, tab)
+    return comm.average_allflux_shared_edges(afx6, afy6)
+
+
+def average_allflux_shared_edges_impl(afx6, afy6, tab: DuoHaloTables):
     """BARRIER 1 over the allflux stacks -- dyn_core.F90:855-856.
 
     ``afx6`` ``(6, npx, n, 4+nq)``, ``afy6`` ``(6, n, npx, 4+nq)``.
@@ -1676,7 +1752,8 @@ def average_allflux_shared_edges(afx6, afy6, tab: DuoHaloTables):
     flat = jnp.concatenate([x, y], axis=1)
     bl = tab.avg_c
     flat = flat.at[:, bl.dst].set(
-        0.5 * (flat[:, bl.dst] + bl.sign * flat[:, bl.src]))
+        0.5 * (flat[:, bl.dst]
+               + jnp.asarray(bl.sign, flat.dtype) * flat[:, bl.src]))
     nx = x.shape[1]
     xs = jnp.moveaxis(flat[:, :nx].reshape((sel.size,) + afx6.shape[:-1]),
                       0, -1)
@@ -1686,6 +1763,19 @@ def average_allflux_shared_edges(afx6, afy6, tab: DuoHaloTables):
 
 
 def average_shared_edge_bgrid(xb6, yb6, tab: DuoHaloTables):
+    """:func:`average_shared_edge_bgrid_impl`, or the attached window bundle's
+    barrier when one owns them (see ``_barrier_comm``)."""
+    comm = _barrier_comm(tab)
+    if comm is None:
+        if jnp.ndim(xb6) == 4:
+            return jax.vmap(
+                lambda a, b: average_shared_edge_bgrid_impl(a, b, tab),
+                in_axes=-1, out_axes=-1)(xb6, yb6)
+        return average_shared_edge_bgrid_impl(xb6, yb6, tab)
+    return comm.average_shared_edge_bgrid(xb6, yb6)
+
+
+def average_shared_edge_bgrid_impl(xb6, yb6, tab: DuoHaloTables):
     """BARRIER 2 -- dyn_core.F90:969-1011, ``mpp_get_boundary`` :984 with
     ``gridtype=BGRID_NE`` :986.
 
@@ -1915,43 +2005,72 @@ def ext_vector_cgrid_sixface_impl(uc6, vc6, tab: DuoHaloTables):
 
 
 # ---------------------------------------------------------------------------
-# ring dispatch -- the SPMD seam (M3)
+# comm dispatch -- the SPMD seam (M3)
 # ---------------------------------------------------------------------------
-# The public exchange names are 3-line dispatchers over ``tab.ring_comm``
-# (a ``legoesm.grids.fv3_duo_spmd.build_ring_comm`` object; ``None`` on
-# the certified single-device path).  ``tab`` is a STATIC jit argument,
-# so the ``getattr`` and the branch run at TRACE time only: with
-# ``ring_comm=None`` the traced program is the certified ``*_impl`` body
-# itself -- no jaxpr change, byte-identical numerics.  The ring
-# shard_map bodies call the ``*_impl`` names directly (never these
-# dispatchers), so a set ``ring_comm`` cannot recurse into
+# The public exchange names are 3-line dispatchers over the tables'
+# attached comm bundle: ``tab.ring_comm`` (fv3_duo_spmd.build_ring_comm,
+# whole-face O(halo) ring) or ``tab.tile_comm``
+# (fv3_duo_spmd.build_tile_comm, the (6,kt,kt) tiled port); ``None`` on
+# the certified single-device path.  Both bundles expose the SAME method
+# surface, so every dispatcher gains the tile arm behind the same public
+# name with call sites unmoved.  ``tab`` is a STATIC jit argument, so
+# the ``getattr`` and the branch run at TRACE time only: with no comm
+# attached the traced program is the certified ``*_impl`` body itself --
+# no jaxpr change, byte-identical numerics.  The comm shard_map bodies
+# call the ``*_impl``/table machinery directly (never these
+# dispatchers), so a set comm cannot recurse into
 # shard_map-inside-shard_map.
 
+def _active_comm(tab: DuoHaloTables):
+    """The ONE attached comm bundle, or None (certified).  More than one
+    set is an ambiguous route -- refused loudly at trace time, never
+    resolved by precedence."""
+    attached = [(name, getattr(tab, name, None))
+                for name in ("ring_comm", "tile_comm", "window_comm")]
+    attached = [(n, c) for n, c in attached if c is not None]
+    if len(attached) > 1:
+        raise ValueError(
+            f"DuoHaloTables carries {[n for n, _ in attached]} -- the "
+            f"exchange route is ambiguous. Attach exactly one bundle "
+            f"(build_ring_comm for the face ring, build_tile_comm for "
+            f"the tiled port, attach_window_comm for sub-face windows).")
+    return attached[0][1] if attached else None
+
+
+def _barrier_comm(tab: DuoHaloTables):
+    """The attached bundle IF it owns the edge-blend barriers (the window
+    bundle does: its operands are window stacks the flat blend cannot
+    read).  The ring/tile SPMD bundles leave the barriers to the flat
+    blend under GSPMD, so they are not routed here."""
+    comm = _active_comm(tab)
+    return comm if getattr(comm, "handles_barriers", False) else None
+
+
 def ext_scalar_sixface(f6, tab: DuoHaloTables, stag: str):
-    """:func:`ext_scalar_sixface_impl`, or the O(halo) ring exchange
-    when ``tab.ring_comm`` is set (SPMD face-sharded lane)."""
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    """:func:`ext_scalar_sixface_impl`, or the attached SPMD exchange
+    (ring or tiled) when a comm bundle is set."""
+    comm = _active_comm(tab)
+    if comm is None:
         return ext_scalar_sixface_impl(f6, tab, stag)
-    return ring.ext_scalar(f6, stag)
+    return comm.ext_scalar(f6, stag)
 
 
 def ext_vector_dgrid_sixface(u6, v6, tab: DuoHaloTables):
-    """:func:`ext_vector_dgrid_sixface_impl`, or the ring exchange when
-    ``tab.ring_comm`` is set."""
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    """:func:`ext_vector_dgrid_sixface_impl`, or the attached SPMD
+    exchange (ring or tiled)."""
+    comm = _active_comm(tab)
+    if comm is None:
         return ext_vector_dgrid_sixface_impl(u6, v6, tab)
-    return ring.ext_vector_dgrid(u6, v6)
+    return comm.ext_vector_dgrid(u6, v6)
 
 
 def ext_vector_cgrid_sixface(uc6, vc6, tab: DuoHaloTables):
-    """:func:`ext_vector_cgrid_sixface_impl`, or the ring exchange when
-    ``tab.ring_comm`` is set."""
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    """:func:`ext_vector_cgrid_sixface_impl`, or the attached SPMD
+    exchange (ring or tiled)."""
+    comm = _active_comm(tab)
+    if comm is None:
         return ext_vector_cgrid_sixface_impl(uc6, vc6, tab)
-    return ring.ext_vector_cgrid(uc6, vc6)
+    return comm.ext_vector_cgrid(uc6, vc6)
 
 
 # ---------------------------------------------------------------------------
@@ -1966,11 +2085,14 @@ def ext_vector_cgrid_sixface(uc6, vc6, tab: DuoHaloTables):
 # into it, any trailing size is legal -- and dispatch exactly like the
 # per-level publics above:
 #
-# * ``ring_comm is None`` (certified): the CALLER's own per-level loop,
+# * no comm attached (certified): the CALLER's own per-level loop,
 #   relocated VERBATIM (same `.at[..., k].set(impl(...))` operations in
 #   the same order), so moving the loop inside changes nothing
 #   semantically and the existing bitwise gates keep certifying it.
 # * ring: ONE collective for all K (``DuoRingComm.*_allk``).
+# * tile: ONE tile-arm firing for all K (``DuoTileComm.*_allk``; the
+#   tiled runtime is K-native -- same schedule, trailing K batched
+#   elementwise, no reassociation).
 
 def ext_scalar_sixface_allk(f6k, tab: DuoHaloTables, stag: str):
     """Batched :func:`ext_scalar_sixface` over a ``(6, m0, m1, K)`` stack.
@@ -1981,43 +2103,43 @@ def ext_scalar_sixface_allk(f6k, tab: DuoHaloTables, stag: str):
     ``k`` order, reading/writing only its own slice.  Byte-identical to
     the pre-batching callers by construction.
     """
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    comm = _active_comm(tab)
+    if comm is None:
         for k in range(f6k.shape[-1]):
             f6k = f6k.at[..., k].set(
                 ext_scalar_sixface_impl(f6k[..., k], tab, stag))
         return f6k
-    return ring.ext_scalar_allk(f6k, stag)
+    return comm.ext_scalar_allk(f6k, stag)
 
 
 def ext_vector_dgrid_sixface_allk(u6k, v6k, tab: DuoHaloTables):
     """Batched :func:`ext_vector_dgrid_sixface`; trailing K on both
     components.  Certified path = the relocated per-level loop of
     ``fv3_acoustic_3d._exchange_dgrid_winds_stack``, verbatim."""
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    comm = _active_comm(tab)
+    if comm is None:
         for k in range(u6k.shape[-1]):
             uk, vk = ext_vector_dgrid_sixface_impl(
                 u6k[..., k], v6k[..., k], tab)
             u6k = u6k.at[..., k].set(uk)
             v6k = v6k.at[..., k].set(vk)
         return u6k, v6k
-    return ring.ext_vector_dgrid_allk(u6k, v6k)
+    return comm.ext_vector_dgrid_allk(u6k, v6k)
 
 
 def ext_vector_cgrid_sixface_allk(uc6k, vc6k, tab: DuoHaloTables):
     """Batched :func:`ext_vector_cgrid_sixface`; trailing K on both
     components.  Certified path = the per-level caller loop of
     ``fv3_dsw_phase_3d.exchange_post_pgrad_3d``, relocated verbatim."""
-    ring = getattr(tab, "ring_comm", None)
-    if ring is None:
+    comm = _active_comm(tab)
+    if comm is None:
         for k in range(uc6k.shape[-1]):
             uk, vk = ext_vector_cgrid_sixface_impl(
                 uc6k[..., k], vc6k[..., k], tab)
             uc6k = uc6k.at[..., k].set(uk)
             vc6k = vc6k.at[..., k].set(vk)
         return uc6k, vc6k
-    return ring.ext_vector_cgrid_allk(uc6k, vc6k)
+    return comm.ext_vector_cgrid_allk(uc6k, vc6k)
 
 # ---------------------------------------------------------------------------
 # jit policies -- the ONE place each entry point's staticness is decided

@@ -31,7 +31,10 @@ not part of the ``physics_fn`` signature, so it is bound at build time via
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+
+from legoesm import constants
 
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticTendencies, MPASHydrostaticTendencies
@@ -39,7 +42,8 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     pressure_from_sigma,
 )
-from legoesm.atmosphere.physics._shared import compute_layer_dz, compute_rho
+from legoesm.atmosphere.physics._shared import (compute_layer_dz, compute_rho,
+                                                virtual_temperature)
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
@@ -90,14 +94,34 @@ def kessler_column_tendencies(T, p_s, q_v, q_c, q_r, sigma_coord, *, dt, config)
     (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt) : tuple of jax.Array ``(ncol, nlev)``
         Latent-heating and vapor / cloud / rain mixing-ratio rates.
     """
+    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (ncol, nlev)
+    p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (ncol, nlev+1)
+    return kessler_column_tendencies_pressure(
+        T, p_full, p_half, q_v, q_c, q_r, dt=dt, config=config)
+
+
+def kessler_column_tendencies_pressure(T, p_full, p_half, q_v, q_c, q_r, *,
+                                       dt, config, dz=None):
+    """Pressure-native body of :func:`kessler_column_tendencies`: the
+    tracer floor, the shared rho/dz thermo and the shared Kessler core,
+    for a caller that already holds its layer and interface pressures
+    (a hybrid-eta dycore such as FV3, where sigma*p_s is not the layer
+    pressure).  Same ``(ncol, nlev)`` contract and return tuple; the
+    sigma adapter above is this plus ``pressure_from_sigma``.
+
+    ``dz`` (optional, ``(ncol, nlev)``) overrides the shared
+    ``compute_layer_dz`` (arithmetic mid-layer pressure).  A dycore whose
+    layer mass is ``delp/g`` with ``p_full = delp/dln(p)`` must pass its
+    OWN hypsometric thickness so that ``rho*dz == delp/g`` and the
+    sedimentation mass the core moves is the mass the dycore removes
+    (FV3: 10 % apart on the km=5 deck's thick layers, probe 9963150).
+    """
     q_v = jnp.maximum(q_v, 0.0)
     q_c = jnp.maximum(q_c, 0.0)
     q_r = jnp.maximum(q_r, 0.0)
-
-    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)   # (ncol, nlev)
-    p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)   # (ncol, nlev+1)
     rho = compute_rho(T, p_full, q_v)        # moist ideal-gas density
-    dz = compute_layer_dz(T, p_half, q_v)    # moist hypsometric thickness
+    if dz is None:
+        dz = compute_layer_dz(T, p_half, q_v)  # moist hypsometric thickness
 
     ncol, nlev = T.shape
     hydro = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)._replace(
@@ -519,3 +543,109 @@ def make_kessler_column_physics_fn(sigma_coord, dt,
                 dq_r.reshape(shp))
 
     return fn
+
+
+KESSLER_TRACER_SLOTS = ("q_v", "q_c", "q_r")   # duo tracer list slots 0, 1, 2
+
+
+def kessler_tendencies_sixface_jax(state, press, q, *, dt, n, ng, km,
+                                   config=None):
+    """The Kessler tendencies of the six-face bundle on the compute
+    window: ``(t_dt_c, [dqv, dqc, dqr])`` each ``(6, n, n, km)``, ``t_dt_c``
+    the core's own ``L_v*dq/c_pd`` heating (legoESM ``c_pd``, the
+    convention every legoESM physics returns; the applier rescales it to
+    FV3's ``cp_air``)."""
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
+    n, ng, km = int(n), int(ng), int(km)
+    m = n + 2 * ng
+    ci = slice(ng, ng + n)
+    cfg = config if config is not None else KesslerConfig()
+    if len(q) < len(KESSLER_TRACER_SLOTS):
+        raise ValueError(
+            f"Kessler needs {len(KESSLER_TRACER_SLOTS)} tracers "
+            f"{KESSLER_TRACER_SLOTS} in list slots 0..2; the bundle carries "
+            f"{len(q)}")
+    pt6 = jnp.asarray(state["pt"])
+    delp6 = jnp.asarray(state["delp"])
+    if pt6.shape != (6, m, m, km):
+        raise ValueError(f"pt6 must be (6, m, m, km)={(6, m, m, km)}, got "
+                         f"{pt6.shape}")
+    peln6 = jnp.transpose(jnp.asarray(press["peln"]), (0, 1, 3, 2))
+    pe6 = jnp.transpose(jnp.asarray(press["pe"])[:, 1:n + 1, :, 1:n + 1],
+                        (0, 1, 3, 2))
+    if pe6.shape != (6, n, n, km + 1) or peln6.shape != (6, n, n, km + 1):
+        raise ValueError(f"pe/peln must reach (6, n, n, km+1)="
+                         f"{(6, n, n, km + 1)}, got {pe6.shape}/{peln6.shape}")
+    T_c = pt6[:, ci, ci]                                  # (6, n, n, km)
+    dlnp = peln6[..., 1:] - peln6[..., :-1]
+    p_full = delp6[:, ci, ci] / dlnp
+    qv_c, qc_c, qr_c = (jnp.asarray(q[i])[:, ci, ci] for i in range(3))
+    # FV3's own hypsometric thickness (init_hydro.F90:178-184, delz =
+    # -rdgas/grav * T_v * dpeln), with the shared moist rho (same R_d,
+    # cancels) this makes rho*dz == delp/FV3_GRAV exactly -- the
+    # dycore's column mass -- so the rain the core sediments out is the
+    # mass fv_update_phys removes below.  The shared compute_layer_dz
+    # (arithmetic mid-layer pressure) is 10 % off on this deck's thick
+    # layers (probe 9963150); legoESM's g is 5e-5 off FV3's (codex).
+    dz_c = (constants.R_d * virtual_temperature(T_c, jnp.maximum(qv_c, 0.0))
+            / FV3_GRAV) * dlnp
+    ncol = 6 * n * n
+
+    dT, dqv, dqc, dqr = kessler_column_tendencies_pressure(
+        T_c.reshape(ncol, km), p_full.reshape(ncol, km),
+        pe6.reshape(ncol, km + 1),
+        qv_c.reshape(ncol, km), qc_c.reshape(ncol, km), qr_c.reshape(ncol, km),
+        dt=dt, config=cfg, dz=dz_c.reshape(ncol, km))
+    blk = (6, n, n, km)
+    return dT.reshape(blk), [d.reshape(blk) for d in (dqv, dqc, dqr)]
+
+
+def apply_kessler_step_sixface_jax(state, press, q, *, dt, n, ng, km,
+                                   ptop, akap, config=None):
+    """One operator-split Kessler warm-rain step on the six-face duo bundle.
+
+    The FV3 duo adapter of the shared column core above
+    (``kessler_column_tendencies_pressure``: the same tracer floor, the
+    same rho/dz thermo, the same ``kessler_microphysics``) -- a layout
+    bridge, not a scheme, living with the other grid adapters because
+    ``legoesm.core`` may not import upward.  Column-local, so it needs no halo
+    exchange on any lane; the window SPMD lane scatters the owned block
+    in and gathers it out exactly as the Held-Suarez twin does.
+
+    Bridge (each read off the code, not assumed):
+      * ``state["pt"]`` is TEMPERATURE [K] between steps on BOTH the
+        dry and the moist deck: the remap's closing step divides
+        ``pt*pkz`` by ``(1 + r_vir*q_sphum)`` (fv_mapz.F90:975,
+        ``close_out_pt``), so a moist run hands physics ``T``, not
+        ``T_v``.
+      * ``p_half`` = ``press["pe"]`` (6, n, n, km+1), sliced and
+        transposed as the HS twin does; ``p_full`` = ``delp / d(peln)``,
+        FV3's own layer-mean pressure for physics.
+      * the tendencies are applied by FV3's OWN moist physics update
+        (``fv_update_phys_moist_duo_jax``, fv_update_phys.F90:318-372):
+        ``q += dq*dt``; the layer mass follows the net water change
+        (``delp *= 1 + dt*sum(dq)``) and the tracers are renormalised to
+        it; ``pt += dT*dt*cp_air/cvm`` with the moist heat capacity.  So
+        rain that sediments out of the column bottom REMOVES its mass
+        (2026-09-24; before this the dry air gained it, GLM HIGH).
+        Winds untouched.  The pressures are then rebuilt from the new
+        ``delp`` with ``p_var_hydrostatic`` -- the producer that built
+        them at the IC -- as the Fortran does at :662-686.
+      * tracer list slots ``KESSLER_TRACER_SLOTS`` = q_v, q_c, q_r.
+
+    Returns ``(state_new, press_new, q_new)`` with the inputs' layouts;
+    tracers beyond the three Kessler slots come back renormalised to the
+    new layer mass (their mass is conserved), never untouched.
+    """
+    from legoesm.core.fv3_native_physics_coupling import (
+        apply_column_increments_sixface_jax)
+    n, ng, km = int(n), int(ng), int(km)
+    t_dt_c, q_dt_c = kessler_tendencies_sixface_jax(
+        state, press, q, dt=dt, n=n, ng=ng, km=km, config=config)
+    # winds untouched (u_dt_c=None): the moist block (c_pd -> cp_air
+    # rescale inside) + pressure rebuild only
+    st, press2, q2 = apply_column_increments_sixface_jax(
+        state, press, q, None, None, None, None, None, t_dt_c,
+        dict(enumerate(q_dt_c)), dt=dt, n=n, ng=ng, km=km, ptop=ptop,
+        akap=akap)
+    return st, press2, q2

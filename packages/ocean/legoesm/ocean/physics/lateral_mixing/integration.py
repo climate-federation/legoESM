@@ -31,7 +31,8 @@ def make_lateral_mixing_physics(
 
     Returns
     -------
-    Callable : physics_fn(state, grid, z_coord) -> OceanTendencies
+    Callable : physics_fn(state, grid, z_coord, surface_forcing=None, dt=None)
+        -> OceanTendencies
     """
     scheme = config.scheme
 
@@ -52,7 +53,7 @@ def _make_harmonic(config: LateralMixingConfig) -> Callable:
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         out = harmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
@@ -66,10 +67,10 @@ def _make_biharmonic(config: LateralMixingConfig) -> Callable:
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         out = biharmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
-            state.land_mask.data, grid, cfg,
+            state.land_mask.data, grid, cfg, dt=dt,
         )
         return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
@@ -95,7 +96,7 @@ def _make_gm_redi(config: LateralMixingConfig,
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         if not isinstance(grid, CubedSphereGrid):
             raise TypeError(
                 "Factory GM/Redi only supports CubedSphereGrid. "

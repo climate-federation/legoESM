@@ -84,6 +84,7 @@ def iterate_eos_and_pressure_anomaly(
     trapezoid_t_depth_1d: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
     eos_geometric_depth_1d: jnp.ndarray | None = None,
+    density_anomaly_ratio_fn: Callable | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -167,6 +168,11 @@ def iterate_eos_and_pressure_anomaly(
     eos_geometric_depth_1d : array or None
         Geometric T-depth ladder (positive down, shape ``(nlev,)``; NEMO
         ``gdept_1d``).  Required when ``eos_depth="geometric"``.
+    density_anomaly_ratio_fn : callable or None
+        Optional source-associated ``(T,S,p,**kwargs) -> (rho/rho0-1)`` used
+        to form ``rho_prime`` without the cancellation in ``rho-rho0``.
+        NEMO's polynomial EOS stores this ratio directly in ``rhd``
+        (``eosbn2.F90:288``). ``None`` preserves every legacy caller.
 
     Returns
     -------
@@ -263,6 +269,12 @@ def iterate_eos_and_pressure_anomaly(
         rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
         # Broadcast back across horizontal axes.
         rho_prime = rho - rho_ref_z
+    elif density_anomaly_ratio_fn is not None:
+        if eos_depth != "geometric":
+            raise ValueError(
+                "density_anomaly_ratio_fn currently requires geometric EOS depth")
+        ratio = density_anomaly_ratio_fn(T_filled, S_filled, p_eos, **eos_kw)
+        rho_prime = ratio * rho_0
     else:
         rho_prime = rho - rho_0
 
@@ -702,6 +714,7 @@ def apply_freshwater_virtual_salt_top(
     *,
     area: jnp.ndarray | None = None,
     normalize: bool = False,
+    owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Add the surface virtual-salt tendency to the top tracer level.
 
@@ -742,7 +755,7 @@ def apply_freshwater_virtual_salt_top(
             raise ValueError(
                 "apply_freshwater_virtual_salt_top: normalize=True requires `area`")
         dS_top = normalized_virtual_salt_flux(
-            freshwater, S_ref, h_top, rho_0, area, mask)
+            freshwater, S_ref, h_top, rho_0, area, mask, owned_mask=owned_mask)
     else:
         dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
     # Cast the freshwater contribution to dS_dt's dtype so the scatter
@@ -1095,7 +1108,12 @@ def nemo_drag_r_from_speed_sq(
             f"got scheme={scheme!r} (the 'legacy' path stays in the grid "
             "adapters)."
         )
-    return cd * jnp.sqrt(speed_sq + ke0)
+    # Zero-safe square root: with ke0 = 0 (FESOM2's C_d|u| law) a column at
+    # rest sits at sqrt(0), whose derivative is infinite and would poison the
+    # reverse-mode gradient through the drag; the value stays exactly zero.
+    arg = speed_sq + ke0
+    positive = arg > 0.0
+    return cd * jnp.where(positive, jnp.sqrt(jnp.where(positive, arg, 1.0)), 0.0)
 
 
 def masked_background_vmix_coefficient(

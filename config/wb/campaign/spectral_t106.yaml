@@ -31,6 +31,16 @@ spectral:
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 cache_dir: ".cache/wb_campaign_era5_t106"
 train_years: [2015, 2016, 2017, 2018, 2019]
+
+# --- ERA5 surface fluxes as the lower boundary condition ----------------
+# When true, every sample carries ERA5's surface stress (x, y), sensible and
+# latent heat flux and upwelling SW/LW (ARCO-ERA5 mean rates at the sample
+# start), HELD FIXED over the 6 h window.  The classical arm uses them as its
+# turbulent and radiative surface boundary condition (bulk formula, surface
+# emission and reflection replaced; its surface leaves are then frozen), the
+# learned arms receive the six planes as extra inputs.  Off = the historical
+# interactive surface.
+era5_surface_fluxes: false
 train_windows:  # 60 windows = 12 month-start 1-day windows x 5 train-years (~240 6-hourly pairs);
                 # all-season + low-autocorrelation so the NN arms avoid the #1047 60-sample null
                 # result; day_offset = leap-aware month-start day-of-year, fits the eager loader (#1160).
@@ -134,6 +144,12 @@ loss:
   ps_scale: 1000.0
 
 neural_gcm:
+  # NeuralGCM-style spatial embedding: sin/cos lat, land fraction, orography
+  # and a learned 8-channel per-column embedding (Kochkov et al. 2024).
+  # OFF by default (owner, 2026-09-17): the campaign's learned arms train
+  # without it so their numbers stay comparable to the earlier WB arms.  Set
+  # true to select it.
+  spatial_embedding: false
   # #1464: the learned column has NO momentum head, so without this it runs
   # with no physical surface stress at all, while the classical arm it is
   # scored against carries `classical.turbulence` below. The scheme here MUST
@@ -149,6 +165,10 @@ neural_gcm:
   nn_hidden: 384
   nn_layers: 4
 sfno:
+  # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
+  # orography is already a state channel).  OFF by default (owner,
+  # 2026-09-17); set true to select it.
+  spatial_embedding: false
   sfno_embed_dim: 384
   sfno_n_blocks: 10
 

@@ -212,12 +212,14 @@ def test_the_progress_signature_is_the_trainer_s_own_answer(tmp_path):
     pathlib.Path(fp).write_text('{"schema": 1')          # truncated
     assert sig() == "", "a truncated manifest is not progress"
 
-    pathlib.Path(fp).write_text('{"schema": 1, "frozen": [], "fingerprint": {}}')
+    pathlib.Path(fp).write_text(json.dumps({"schema": mod._MANIFEST_SCHEMA, "frozen": [],
+                    "fingerprint": {}}))
     assert "epoch_0003" in sig(), "a complete epoch must register"
 
     # Whitespace/formatting must not matter — a grep-based check missed this.
-    pathlib.Path(fp).write_text('{\n\t"schema" : 1,\n"frozen": [],\n'
-                                '"fingerprint": {}\n}')
+    pathlib.Path(fp).write_text(
+        '{\n\t"schema" : %d,\n"frozen": [],\n"fingerprint": {}\n}'
+        % mod._MANIFEST_SCHEMA)
     assert "epoch_0003" in sig(), "formatting must not decide completeness"
 
 
@@ -261,7 +263,8 @@ def _touch(d, epoch, *, params=True, opt=True, frozen=True):
         # A REAL manifest: a complete epoch is now defined by one the trainer
         # would accept, not by the file merely existing.
         _pl.Path(fp).write_text(
-            json.dumps({"schema": 1, "frozen": [], "fingerprint": {}}))
+            json.dumps({"schema": mod._MANIFEST_SCHEMA, "frozen": [],
+                       "fingerprint": {}}))
 
 
 def test_an_incomplete_newest_epoch_falls_back_instead_of_refusing(tmp_path):
@@ -383,7 +386,7 @@ def test_dropping_the_optimizer_state_breaks_that_equivalence():
 
 @pytest.mark.parametrize("manifest", [
     {"schema": True, "frozen": [], "fingerprint": None},      # True == 1
-    {"schema": 1.0, "frozen": [], "fingerprint": None},       # 1.0 == 1
+    {"schema": 2.0, "frozen": [], "fingerprint": None},       # 2.0 == 2
     {"schema": 1, "frozen": "", "fingerprint": None},         # set("") is empty
     {"schema": 1, "frozen": [3], "fingerprint": None},        # not names
     {"schema": 2, "frozen": [], "fingerprint": None},         # future format

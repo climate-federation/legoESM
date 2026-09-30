@@ -7,10 +7,15 @@
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/results/dycore_1354/en1354_%j.out
+# REPOINTED 2026-09-23: config/amip/amip_production.yaml became the CAM6
+# suite on that date.  This script exists to reproduce a SPECIFIC recorded
+# analysis, so it now names config/amip/amip_sundqvist_l36.yaml -- the same
+# deck under its new name, byte-unchanged -- rather than silently running a
+# different model.
 #
 # #1354 / #1515 -- column energy-budget closure test, GINSBURG twin of
 # energy_budget_15d.sbatch (which pins Levante paths).  Physics/grid/dycore
-# come from config/amip/amip_production.yaml -- NOT forked here.
+# come from config/amip/amip_sundqvist_l36.yaml -- NOT forked here.
 #
 # PRE-REGISTERED READING (unchanged from the Levante card):
 #   SIGN CONVENTION, everything INTO the atmospheric column, positive:
@@ -59,7 +64,7 @@ cd "$ROOT" || exit 2
 # Resolution in the directory name: the run-manifest guard refuses to mix two
 # configurations' provenance in one directory (correctly), and a res6 attempt
 # already wrote one here.
-OUT="${OUT:-$ROOT/results/dycore_1354/energy_12d_res5}"
+OUT="${OUT:-$ROOT/results/dycore_1354/energy_12d_res5_intervalmean}"
 mkdir -p "$OUT"
 
 # The two surfdata files are staged in THIS tree, not in the default repo the
@@ -87,7 +92,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader || true
 
 echo "=== run_amip 12 d, MPAS production recipe, --diag-days 1 ==="
 JAX_ENABLE_X64=1 "$PY" -u scripts/run/run_amip.py \
-    --config config/amip/amip_production.yaml \
+    --config config/amip/amip_sundqvist_l36.yaml \
     "${AMIP_PATH_FLAGS[@]}" \
     --resolution 5 \
     --days 12 --diag-days 1 --output "$OUT"

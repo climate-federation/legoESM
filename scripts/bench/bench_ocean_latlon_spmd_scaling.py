@@ -95,7 +95,8 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
                           tripole=False, baro_solver="implicit_cn",
                           force_pcg=False, pcg_variant="standard",
-                          pcg_fixed_iters=0):
+                          pcg_fixed_iters=0, pcg_precond="jacobi",
+                          cheb_degree=0):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -161,6 +162,18 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                 "--pcg-variant only affects the implicit_cn fixed-M PCG; "
                 "drop it for explicit_substep arms.")
         flat["barotropic_implicit_pcg_variant"] = pcg_variant
+    if pcg_precond != "jacobi":
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-precond only affects the implicit_cn fixed-M PCG; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_preconditioner"] = pcg_precond
+    if cheb_degree:
+        if pcg_precond != "chebyshev":
+            raise SystemExit("--cheb-degree needs --pcg-precond chebyshev.")
+        if int(cheb_degree) < 1:
+            raise SystemExit("--cheb-degree must be >= 1 (0 = scheme default).")
+        flat["barotropic_chebyshev_degree"] = int(cheb_degree)
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -225,6 +238,11 @@ def main() -> int:
                         "separates compile/probe/blocks explicitly).")
     p.add_argument("--blocks", type=int, default=2,
                    help="Timed fused blocks (per-block times expose drift).")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Trace the timed fused blocks from ranks 0-3 into "
+                        "<dir>/rank<k>/ (timed_scan_blocks' trace_dir); "
+                        "analyze_jax_trace_gaps.py --top-ops / "
+                        "--time-by-family read it. Keep --steps small.")
     p.add_argument("--probe-steps", type=int, default=3,
                    help="Individually-synced steps for the SEPARATE "
                         "dispatch-latency probe (step_latency_ms).")
@@ -257,6 +275,18 @@ def main() -> int:
                         "it trades solver convergence for sync points — "
                         "check zero_forcing_probe_residual in the output "
                         "before believing any speedup.")
+    p.add_argument("--pcg-precond",
+                   choices=["jacobi", "zonal_line", "chebyshev", "multigrid"],
+                   default="jacobi",
+                   help="Preconditioner of the implicit_cn fixed-M PCG "
+                        "(barotropic_implicit_preconditioner; jacobi = "
+                        "scheme default). chebyshev is reduction-free per "
+                        "iteration and composes with --pcg-variant "
+                        "single_reduce.")
+    p.add_argument("--cheb-degree", type=int, default=0,
+                   help="Chebyshev polynomial degree for --pcg-precond "
+                        "chebyshev (0 = scheme default, "
+                        "barotropic_chebyshev_degree).")
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
                    default="standard",
                    help="Fixed-M PCG recurrence for the implicit_cn "
@@ -392,16 +422,36 @@ def main() -> int:
     # Preflight has passed -> JAX may now be imported (deferred for #1361).
     _import_jax()
 
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     # Single source of truth = the LIVE jax x64 flag (an in-process caller
     # may have enabled it without the env var; keying on the env would
     # build fp32 states while every gate/metadata site keys on
     # jax.config — the exact mislabel this block exists to kill; codex).
-    if jax.config.jax_enable_x64:
+    _ocean_mixed = os.environ.get("LEGOESM_OCEAN_MIXED", "") == "1"
+    if _ocean_mixed and not jax.config.jax_enable_x64:
+        raise SystemExit(
+            "LEGOESM_OCEAN_MIXED=1 requires JAX x64 enabled (the mixed policy "
+            "accumulates in float64), but jax_enable_x64 is off. Re-run with "
+            "x64 on (JAX_ENABLE_X64=1) or unset LEGOESM_OCEAN_MIXED.")
+    if _ocean_mixed and (args.parity_gate or args.check_conservation):
+        raise SystemExit(
+            "mixed precision has no validated parity/conservation-gate "
+            "tolerances here (SPMD_PARITY_TOLS/CONS_RTOL_DEFAULTS key on "
+            "float32/float64); run f32/f64 for gated correctness checks and "
+            "drop --parity-gate/--check-conservation for a mixed timing arm.")
+    if _ocean_mixed:
+        set_policy(PrecisionPolicy.mixed())
+    elif jax.config.jax_enable_x64:
         set_policy(PrecisionPolicy.fp64())
     else:
         set_policy(PrecisionPolicy.fp32())
+    # Single source of truth for precision-derived reporting, from the arm +
+    # the active policy -- NOT jax_enable_x64, which would mislabel mixed as
+    # float64/8B (mixed stores + ships float32 halos).
+    _prec_label = "mixed" if _ocean_mixed else (
+        "float64" if jax.config.jax_enable_x64 else "float32")
+    _storage_bytes = np.dtype(get_policy().storage).itemsize
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -482,7 +532,8 @@ def main() -> int:
             wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
             tripole=args.tripole, baro_solver=args.baro_solver,
             force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
-            pcg_fixed_iters=args.pcg_fixed_iters)
+            pcg_fixed_iters=args.pcg_fixed_iters,
+            pcg_precond=args.pcg_precond, cheb_degree=args.cheb_degree)
         # Prime the build-once vertex-mask cache from the CONCRETE state so
         # the wrapper can build the per-band vertex masks host-side (global
         # 2-D — stays on the host under the nd>1 context).
@@ -549,12 +600,17 @@ def main() -> int:
     # an ARGUMENT (outer-trace constants of non-addressable arrays are
     # unfetchable — see make_sharded_ocean_step's aux note).
     _aux = getattr(step, "aux", None)
+    # Ranks 0-3 only (one node, shared clock), same layout as the MPAS
+    # ocean bench so analyze_jax_trace_gaps.py reads both.
+    _trace_dir = None
+    if args.profile_dir is not None and jax.process_index() < 4:
+        _trace_dir = f"{args.profile_dir}/rank{jax.process_index()}"
     s, timing = timed_scan_blocks(
         (lambda st, aux: step(st, args.dt, aux=aux)) if _aux is not None
         else (lambda st: step(st, args.dt)),
         s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
-        sync_label="ocean_latlon_spmd_bench", aux=_aux)
+        sync_label="ocean_latlon_spmd_bench", trace_dir=_trace_dir, aux=_aux)
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller
@@ -572,7 +628,7 @@ def main() -> int:
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
-        prec = "float64" if jax.config.jax_enable_x64 else "float32"
+        prec = _prec_label
         rank0 = jax.process_index() == 0
         if args.check_conservation:
             from bench_ocean_mpi_scaling import (
@@ -622,9 +678,9 @@ def main() -> int:
                             or bool(_baro_cfg.barotropic_implicit_force_pcg)))
     if _pcg_fixed_path:
         solver_iters = int(_baro_cfg.barotropic_implicit_pcg_fixed_iters)
+        _pc = str(_baro_cfg.barotropic_implicit_preconditioner)
         solver_iters_mode = (
-            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},"
-            f"{_baro_cfg.barotropic_implicit_preconditioner}]")
+            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},{_pc}]")
     elif args.baro_solver == "implicit_cn":
         solver_iters = None
         solver_iters_mode = (
@@ -704,7 +760,7 @@ def main() -> int:
             model.config, model.config.barotropic.n_barotropic_substeps)
     else:
         _halo_est = None
-    _dtype_bytes = 8 if jax.config.jax_enable_x64 else 4
+    _dtype_bytes = _storage_bytes
     _n_reductions = None
     if nd <= 1:
         _msgs, _n_reductions = 0, 0
@@ -789,7 +845,7 @@ def main() -> int:
         grid_type="tripole" if args.tripole else "latlon",
         resolution=n_lat,
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         physics_level="none",
         backend=jax.default_backend(),
         **tidy_throughput_fields(
@@ -801,6 +857,11 @@ def main() -> int:
     rec.update(
         solver_iters=solver_iters,
         solver_iters_mode=solver_iters_mode,
+        # Resolved from the CONFIG (default 4 when --cheb-degree is 0/unset),
+        # so the receipt names the degree the solver actually ran.
+        chebyshev_degree=(int(model.config.barotropic.barotropic_chebyshev_degree)
+                          if str(model.config.barotropic.barotropic_implicit_preconditioner) == "chebyshev"
+                          else None),
         # Canonical residual of the TIMED solve: never captured (the fixed-
         # iteration PCG hot path exposes none) — honest null, never the
         # zero-forcing probe in disguise (codex batch4).
@@ -819,7 +880,7 @@ def main() -> int:
         component="ocean",
         resolution=f"{n_lat}x{args.n_lon}",
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
         decomposition="band" if nd > 1 else "none",

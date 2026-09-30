@@ -217,10 +217,6 @@ class CanopyConfig(NamedTuple):
     # value 0.01 — see DifferBESS aa6e8b9.  Paired with kB^-1 = 0 in MOST.
     cv: float = 0.0135
 
-    # Soil moisture stress thresholds (when no Richards state available)
-    wilting_point: float = 0.15   # theta_wp [m3/m3]
-    field_capacity: float = 0.30  # theta_fc [m3/m3]
-
     # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
     # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
     # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
@@ -289,20 +285,6 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "aerodynamics",
                 "reference": "leaf boundary-layer forced-convection coefficient "
                              "(Campbell & Norman 1998 / CLM5)",
-                "shape": None,
-            },
-            "wilting_point": {
-                "units": "m^3/m^3", "bounds": (0.05, 0.25), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress wilting point theta_wp "
-                             "(CLM5 / DifferBESS fallback)",
-                "shape": None,
-            },
-            "field_capacity": {
-                "units": "m^3/m^3", "bounds": (0.20, 0.50), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress field capacity theta_fc "
-                             "(CLM5 / DifferBESS fallback)",
                 "shape": None,
             },
         },
@@ -500,6 +482,17 @@ class CanopyLandParams(NamedTuple):
     root_depth: jax.Array | None = None      # [m]
     theta_wp: jax.Array | None = None        # [m3/m3]
     theta_fc: jax.Array | None = None        # [m3/m3]
+
+    # ---- Soil-colour albedo bounds (per-column; optional) ----
+    # Dry / saturated background soil albedo per band (CLM soil-colour table;
+    # glacier columns carry dry == sat == the ice albedo).  When set, the land
+    # step recomputes ``ALB_VIS``/``ALB_NIR`` from the live top-layer soil water
+    # (``soil_albedo.rewet_soil_bands``), as CTSM does; ``ALB_VIS``/``ALB_NIR``
+    # then hold only the value at build time.  ``None`` = prescribed albedo.
+    ALB_VIS_DRY: jax.Array | None = None
+    ALB_VIS_SAT: jax.Array | None = None
+    ALB_NIR_DRY: jax.Array | None = None
+    ALB_NIR_SAT: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface

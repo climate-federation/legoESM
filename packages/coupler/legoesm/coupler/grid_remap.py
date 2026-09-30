@@ -41,9 +41,23 @@ from legoesm.grids.conservative_regrid import (
 
 
 def _is_regular_latlon(grid) -> bool:
-    """True if ``grid`` exposes the regular lat-lon geometry the remap needs."""
+    """True if ``grid`` exposes the regular lat-lon geometry the remap needs.
+
+    "Regular lat-lon" here means the raw 1-D :class:`LatLonGrid`, NOT a C-grid
+    geometry.  ``lat_v`` used to separate the two on its own, and stopped when
+    ``LatLonCGridGeometry`` gained an optional ``lat_v`` of its own: every
+    geometry then answered ``hasattr`` True, including a TRIPOLE built by
+    folding a regular one (``create_synthetic_tripole``), which silently broke
+    the mutual exclusion with :func:`_is_tripole` documented below and sent a
+    tripolar ocean through the separable remap -- measured, 1300 weight pairs
+    against the curvilinear generator's 1216.  ``lat_T`` is the discriminator
+    that does not rot the same way: it is the 2-D centre array EVERY C-grid
+    geometry carries and the raw grid never does, so this restores the exact
+    prior answer for all three cases (raw grid True, regular geometry False,
+    tripole False) instead of merely patching the tripole one."""
     return (
-        hasattr(grid, "lat_v")
+        getattr(grid, "lat_v", None) is not None
+        and not hasattr(grid, "lat_T")
         and hasattr(grid, "lon")
         and hasattr(grid, "n_lat")
         and hasattr(grid, "n_lon")
@@ -77,9 +91,10 @@ def _is_tripole(grid) -> bool:
     """True if ``grid`` is a curvilinear tripole C-grid with an ACTIVE bipolar
     fold (duck-typed: a :class:`LatLonCGridGeometry` whose ``fold.is_active``).
 
-    A tripole grid carries 2-D centres (``lat_T``/``lon_T``) but NOT the 1-D
-    ``lat_v`` of a regular grid, so ``_is_regular_latlon`` is False for it; the
-    two detectors are mutually exclusive.  The active-fold gate means a regular
+    A tripole grid carries 2-D centres (``lat_T``/``lon_T``) but no 1-D
+    ``lat_v`` ARRAY (the optional field stays ``None``), so
+    ``_is_regular_latlon`` is False for it; the two detectors are mutually
+    exclusive.  The active-fold gate means a regular
     lat-lon C-grid geometry (``fold.is_active = False``) is NOT treated as
     tripole — it stays on the separable regular-lat-lon remap path."""
     fold = getattr(grid, "fold", None)

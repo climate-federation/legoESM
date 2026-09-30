@@ -1,0 +1,1093 @@
+{
+  "format": "nemo-testcase-l2-gyre-round130-registry-v1",
+  "baseline_commit": "28e13da8c3b50812b3edec556cb70d36a46b634c",
+  "evidence_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130",
+  "candidate_order": "frozen identifier order; ranking is computed by day-240 improvement",
+  "candidates": [
+    {
+      "id": "r62_coeff",
+      "commit": "3f7ec35145b0410285583141e692529300f40a5c",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r62_coeff/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r62_coeff/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r62_coeff/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r62_jit.json",
+            "commit": "377a3832a034ed0af89cdc3f02b3382c2e8f05ed",
+            "sha256": "0e0a9e5e73b5d630e50fba30b18f9ea8709654141c6090b8396802ef237574cc"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r62_eager.json",
+            "commit": "377a3832a034ed0af89cdc3f02b3382c2e8f05ed",
+            "sha256": "2cb6dab988c4c139b2835b8af02a58a571643f3a3b9eebd40b76f5013033a53d"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r62_plant_fixed.json",
+            "sha256": "97c5ec583468c9d0b23c4e482c0aeb427f581d5f2f2046b7a481f01a23ebddef"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/assembly/zwd/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/assembly/zwi/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/assembly/zws/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/rhs_content/T/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/rhs_content/S/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/sweep/T/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/direct_given_nemo_inputs/sweep/S/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/assembly/zwd/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/assembly/zwi/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/assembly/zws/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/rhs_content/T/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/rhs_content/S/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/sweep/T/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/direct_given_nemo_inputs/sweep/S/cells_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/operator_plant_detection/cells_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/plant",
+          "accepted": [
+            "operand-ulp"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r88_kaa",
+      "commit": "56772e18db135537d6b4f5df03ba5f17ead46935",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r88_kaa/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r88_kaa/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r88_kaa/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt2.before.u",
+        "GYRE-zco.kt2.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r88_jit.json",
+            "sha256": "0446d593d79d9d444ea9110b1dc1520f56f17a3aa147efe5c4c47b9f8d71e993"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r88_production_eager.json",
+            "sha256": "7889e958c9138714ca9da1afe75bae0ea265b59079be3ea1b55042ce8b5514c2"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r88_production_jit_plant.json",
+            "sha256": "d1ad8f962787392912a0f07ae5832553ac73a89b029cf5d686c4e3ac88cd32c9"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/rows/captured_stage1_w/bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/rows/carried_kaa_ssh/bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/rows/direct_shared_w/bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/rows/zad_u/bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/rows/zad_v/bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage_twin/stage1_w_walk/source_rounded_candidate_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage_twin/stage1_w_walk/direct_recurrence_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/stage1_w_walk/direct_r3_ulp_control/n_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r89_assign",
+      "commit": "68214ddd53d15e35db2724a7313abc54243e9852",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r89_assign/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r89_assign/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r89_assign/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt2.before.u",
+        "GYRE-zco.kt2.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r89_jit.json",
+            "sha256": "a73912b7026e8672a6779b479f8045847f71df566b4898ce97e24d5097fdf8cd"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r89_discriminator_plant.json",
+            "sha256": "9550a2159504412fa0c338daa834f24ad2eccbd7fd6d781082fed924eb24e132"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/rows",
+            "kind": "filtered-all-field",
+            "where": {
+              "execution": "production helper on recorded NEMO inputs; NEMO output post_update"
+            },
+            "field": "bit_exact",
+            "equals": true
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/2/clean_n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/6/clean_n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/rows/2/n_unequal",
+            "equals": 1
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/assignment_execution_discriminator/production_fusion_discriminator_fired",
+            "equals": true
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r97_rhs",
+      "commit": "5363ee83567e3fcf0475e594c4730ed62048b4e6",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r97_rhs/year_gap_admitted.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r97_rhs/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r97_rhs/ladder_trajectory_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt2.before.u",
+        "GYRE-zco.kt2.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r97_handoff_jit.json",
+            "sha256": "e5043dccdcd13ae1dacd641beb2dd6466d298cb009fef46a9ea5e891fff9da2b"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r97_handoff_eager.json",
+            "sha256": "aafd09ecc33a193890431016835a4d6efde741a4e7ad008ca4f3b0d2c42fba65"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r97_handoff_plant.json",
+            "sha256": "2d119905d5fb4da7a3c86cbc14f60c953421ae244bff907a640e5c03e9428507"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/stage1_handoff_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage1_handoff_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage1_handoff_walk/rows/0/clean_n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage1_handoff_walk/rows/0/n_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r99_wclock",
+      "commit": "a731e4ef3100c4128bf09e9ff0eaeb7274f9dcb8",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r99_wclock/year_gap_admitted.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r99_wclock/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r99_wclock/ladder_trajectory_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt2.before.u",
+        "GYRE-zco.kt2.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r99_stage_jit.json",
+            "sha256": "de884794b53cb36446f1f73800246158dfb45f8e76e856e67221d3a093e7a3f8"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r99_w_eager.json",
+            "sha256": "646fbecc541ae3d203e3ea4a2cf28890ef174497cf230520ecd8278f351f20c5"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r99_w_plant.json",
+            "sha256": "52d4db97f43953c49b6010e39138c2f1204855009b72040f4443a1354542ca33"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/stage_twin/given_nemo_entry",
+            "kind": "filtered-all-field",
+            "where": {
+              "kt": 1,
+              "stage": 1
+            },
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/stage_twin/stage1_operator_walk/post_operator_rhs_walk",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage_twin/stage1_w_walk/source_rounded_candidate_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage_twin/stage1_w_walk/direct_recurrence_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage_twin/stage1_w_walk/direct_r3_ulp_control/n_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r105_shear",
+      "commit": "5b97aa584e9d46a816b0f748c998438e2cbf022d",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r105_shear/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r105_shear/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r105_shear/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r105_jit.json",
+            "sha256": "0a30ae9f9e147e402d83dcbaadd2415b96993fcfbc1881aba7a7227dcf44b3fa"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r105_eager.json",
+            "sha256": "03f2517e6bb3dc3697e3e38d06fc053514ff61fdaf2a199606686734659548a9"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r105_plant.json",
+            "sha256": "bb038145062d7b50c7fb68916a8f5a3aaab9db5cf7409bd3fbeb2d3e4ec04b17"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/operand_identity_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "jit",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/captured_face_metric_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/operand_identity_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/captured_face_metric_rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/tke_statement_walk/given_nemo_entry_shear_walk/time_level_discriminator/rows/0/n_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    },
+    {
+      "id": "r109_handoff",
+      "commit": "0fa63d7608e26fae41b03d13f31410fcb342c728",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r109_handoff/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r109_handoff/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r109_handoff/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt2.before.u",
+        "GYRE-zco.kt2.before.v",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "jit": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r109_jit.json",
+            "sha256": "3451af8e302e66b888d5517f26a03b4a3875b91c3735fc9d873bc56397774918"
+          },
+          "eager": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r109_eager.json",
+            "sha256": "8c24c27e78aff2a4ee317ac09654aa687baac12ae8255d0411e54663c85e4ea7"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r109_plant.json",
+            "sha256": "9fa6c8b4b5b7b7999e5b95c056e169f2ba97185cf485addf89cb8978c20d69e0"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "jit",
+            "pointer": "/stage1_handoff_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "eager",
+            "pointer": "/stage1_handoff_walk/rows",
+            "kind": "all-field",
+            "field": "n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage1_handoff_walk/rows/0/clean_n_unequal",
+            "equals": 0
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/stage1_handoff_walk/rows/0/n_unequal",
+            "equals": 1
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      },
+      "execution_route": "rk3_ws_vector_stage1_handoff",
+      "executing_cards": [
+        "GYRE-zco",
+        "NEMO-GYRE-recipe"
+      ],
+      "measured_cards": [
+        "NEMO-GYRE-recipe"
+      ],
+      "card_measurements": {
+        "NEMO-GYRE-recipe": {
+          "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/generic_card/comparison_exact.json",
+          "sha256": "993b3b18f4ea7ae2a0f675dcb6eff0bde99ea1594eed0aee197397f7205d2ea2"
+        }
+      }
+    },
+    {
+      "id": "r112_fct",
+      "commit": "fb01c1728733d202d1ca68779ccacbedc93d2afb",
+      "year_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r112_fct/year_gap.json",
+      "month_gap": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r112_fct/month_gap.json",
+      "comparison": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/arms/r112_fct/ladder_comparison.json",
+      "moved_rows": [
+        "GYRE-zco.kt10.after.uu_b",
+        "GYRE-zco.kt10.after.vv_b",
+        "GYRE-zco.kt10.before.S",
+        "GYRE-zco.kt10.before.T",
+        "GYRE-zco.kt10.before.ssh",
+        "GYRE-zco.kt10.before.u",
+        "GYRE-zco.kt10.before.v",
+        "GYRE-zco.kt2.after.uu_b",
+        "GYRE-zco.kt2.after.vv_b",
+        "GYRE-zco.kt2.before.S",
+        "GYRE-zco.kt2.before.T",
+        "GYRE-zco.kt3.after.uu_b",
+        "GYRE-zco.kt3.after.vv_b",
+        "GYRE-zco.kt3.before.S",
+        "GYRE-zco.kt3.before.T",
+        "GYRE-zco.kt3.before.ssh",
+        "GYRE-zco.kt3.before.u",
+        "GYRE-zco.kt3.before.v",
+        "GYRE-zco.kt4.after.uu_b",
+        "GYRE-zco.kt4.after.vv_b",
+        "GYRE-zco.kt4.before.S",
+        "GYRE-zco.kt4.before.T",
+        "GYRE-zco.kt4.before.ssh",
+        "GYRE-zco.kt4.before.u",
+        "GYRE-zco.kt4.before.v",
+        "GYRE-zco.kt5.after.uu_b",
+        "GYRE-zco.kt5.after.vv_b",
+        "GYRE-zco.kt5.before.S",
+        "GYRE-zco.kt5.before.T",
+        "GYRE-zco.kt5.before.ssh",
+        "GYRE-zco.kt5.before.u",
+        "GYRE-zco.kt5.before.v",
+        "GYRE-zco.kt6.after.uu_b",
+        "GYRE-zco.kt6.after.vv_b",
+        "GYRE-zco.kt6.before.S",
+        "GYRE-zco.kt6.before.T",
+        "GYRE-zco.kt6.before.ssh",
+        "GYRE-zco.kt6.before.u",
+        "GYRE-zco.kt6.before.v",
+        "GYRE-zco.kt7.after.uu_b",
+        "GYRE-zco.kt7.after.vv_b",
+        "GYRE-zco.kt7.before.S",
+        "GYRE-zco.kt7.before.T",
+        "GYRE-zco.kt7.before.ssh",
+        "GYRE-zco.kt7.before.u",
+        "GYRE-zco.kt7.before.v",
+        "GYRE-zco.kt8.after.uu_b",
+        "GYRE-zco.kt8.after.vv_b",
+        "GYRE-zco.kt8.before.S",
+        "GYRE-zco.kt8.before.T",
+        "GYRE-zco.kt8.before.ssh",
+        "GYRE-zco.kt8.before.u",
+        "GYRE-zco.kt8.before.v",
+        "GYRE-zco.kt9.after.uu_b",
+        "GYRE-zco.kt9.after.vv_b",
+        "GYRE-zco.kt9.before.S",
+        "GYRE-zco.kt9.before.T",
+        "GYRE-zco.kt9.before.ssh",
+        "GYRE-zco.kt9.before.u",
+        "GYRE-zco.kt9.before.v"
+      ],
+      "local_proof": {
+        "artifacts": {
+          "proof": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r112.json",
+            "sha256": "c0f25727fb3824c20392659bd57e0dcce689789893811ab7848f9e58d4e59875"
+          },
+          "plant": {
+            "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round130/local_r112_plant.json",
+            "sha256": "1a8aa4d43df51fb74cdc119cde2f178280008cb62a737c1c1114993b273cbd2f"
+          }
+        },
+        "checks": [
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/isolated_closure_jit/T",
+            "equals": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/isolated_closure_jit/S",
+            "equals": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_eager/T",
+            "equals": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_eager/S",
+            "equals": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_step_jit/T",
+            "equals": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_step_jit/S",
+            "equals": true
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_step_jit/T",
+            "equals": false
+          },
+          {
+            "artifact": "plant",
+            "pointer": "/round112_fct_walk/criteria/source_literal_all_bit/production_step_jit/S",
+            "equals": false
+          }
+        ],
+        "plant": {
+          "artifact": "plant",
+          "pointer": "/status",
+          "accepted": [
+            "PLANT-FIRED"
+          ]
+        }
+      }
+    }
+  ]
+}

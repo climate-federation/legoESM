@@ -36,6 +36,7 @@ physics:
   # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
   # land cells over 10 yr).  Bit-identical to sensible-only heat when disabled.
   enable_freeze_thaw: true
+  soil_ice_impedance_exponent: 6.0  # frozen soil impedes water flow, CLM5 e_ice (user 2026-09-28)
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)

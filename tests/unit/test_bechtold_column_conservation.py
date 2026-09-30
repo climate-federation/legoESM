@@ -140,3 +140,67 @@ def test_legacy_flagset_budgets_close():
     assert float(np.max(heat)) > 20.0, "fixture must drive O(100 W/m²)"
     np.testing.assert_allclose(water * 86400.0, 0.0, atol=2e-2)
     np.testing.assert_allclose(enthalpy, 0.0, atol=3.0)
+
+
+# ---------------------------------------------------------------------------
+# Penetrative-downdraft transport: the per-level CFL cap binds AND conserves
+# ---------------------------------------------------------------------------
+
+def _thin_layer_column(ncol=2, nlev=16):
+    """A column with one 2 hPa layer just above the boundary layer, the shape
+    that blew the uncapped transport up on a restart."""
+    T, q, p_full, p_half, _u, _v = _column(ncol=ncol, nlev=nlev)
+    p_half = np.array(p_half, dtype=np.float64)
+    # squeeze level nlev-4 to 200 Pa by moving its upper interface down
+    k = nlev - 4
+    p_half[:, k] = p_half[:, k + 1] - 200.0
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    dp_full = p_half[:, 1:] - p_half[:, :-1]
+    z = -8500.0 * np.log(p_full / p_half[:, -1:])
+    return (jnp.asarray(T), jnp.asarray(q), jnp.asarray(z),
+            jnp.asarray(dp_full))
+
+
+def _dd_transport(M_d_mag, dt=112.5, nlev=16):
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _DD_CFL_FRAC, _penetrative_downdraft_transport)
+    T, q, z, dp = _thin_layer_column(nlev=nlev)
+    ncol = T.shape[0]
+    k_lcl = jnp.full((ncol,), nlev - 3.0)          # LCL just above the surface
+    levels = jnp.arange(nlev, dtype=z.dtype)
+    dT, dq = _penetrative_downdraft_transport(
+        T, q, z, dp, k_lcl, levels, jnp.full((ncol,), M_d_mag),
+        entrain_rate=3.0e-4, detrain_scale_m=700.0, dt=dt)
+    return dT, dq, q, dp, dt, _DD_CFL_FRAC
+
+
+def test_downdraft_cfl_cap_is_the_neighbour_minimum():
+    from legoesm.atmosphere.physics.convection import bechtold as b
+    dp = jnp.asarray([[6000.0, 6000.0, 200.0, 6000.0, 6000.0]])
+    cap = np.asarray(b._downdraft_cfl_cap(dp, 100.0))[0]
+    want = b._DD_CFL_FRAC * np.array([6000.0, 200.0, 200.0, 200.0, 6000.0]) / (constants.g * 100.0)
+    np.testing.assert_allclose(cap, want, rtol=1e-12)
+
+
+def test_downdraft_transport_cap_is_on_the_path_and_conserves(monkeypatch):
+    from legoesm.atmosphere.physics.convection import bechtold as b
+    dT_cap, dq_cap, q, dp, dt, frac = _dd_transport(1.0)
+    monkeypatch.setattr(b, "_downdraft_cfl_cap",
+                        lambda dp_full, dt: jnp.full_like(dp_full, 1.0e30))
+    dT_off, dq_off, *_ = _dd_transport(1.0)
+    for a in (dT_cap, dq_cap, dT_off, dq_off):
+        assert bool(jnp.all(jnp.isfinite(a)))
+    # The cap binds at the 2 hPa layer: removing it changes the transport.
+    k = 16 - 4
+    assert float(jnp.max(jnp.abs(dq_off[:, k] - dq_cap[:, k]))) > 1e-3 * float(
+        jnp.max(jnp.abs(dq_cap)))
+    assert float(jnp.max(jnp.abs(dq_cap))) > 0.0
+    # Conservation survives the level-varying cap: the dp-weighted column
+    # integrals of the vapour and dry-static-energy tendencies vanish.
+    col_q = jnp.sum(dq_cap * dp, axis=1) / jnp.sum(jnp.abs(dq_cap) * dp, axis=1)
+    col_s = jnp.sum(dT_cap * dp, axis=1) / jnp.sum(jnp.abs(dT_cap) * dp, axis=1)
+    assert float(jnp.max(jnp.abs(col_q))) < 1e-10
+    assert float(jnp.max(jnp.abs(col_s))) < 1e-10
+    # The column limiter still holds: no level loses more than _DD_CFL_FRAC
+    # of its vapour in one step, with no per-level clamp.
+    assert bool(jnp.all(dq_cap * dt >= -frac * q * (1.0 + 1e-6)))

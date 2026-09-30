@@ -1,0 +1,739 @@
+{
+  "all_differing_streams": [
+    {
+      "bytes_orca1ice": 21489220,
+      "bytes_v2": 21489220,
+      "file": "oracle_bbl_diffusive_kt00000001.bin",
+      "first_diff_offset": 7089580,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 74984772,
+      "bytes_v2": 74984772,
+      "file": "oracle_bt_advmean_operands_kt00000001.bin",
+      "first_diff_offset": 917676,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 89386028,
+      "bytes_v2": 89386028,
+      "file": "oracle_bt_drag_operands_kt00000001.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 852524,
+      "bytes_v2": 852524,
+      "file": "oracle_bt_ene_coeff_kt00000001.bin",
+      "first_diff_offset": 1156,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000001.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000002.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000003.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000004.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000005.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000006.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000007.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000008.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000009.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 457256,
+      "bytes_v2": 457256,
+      "file": "oracle_bt_frames_kt00000010.bin",
+      "first_diff_offset": 2704,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 11504296,
+      "bytes_v2": 11504296,
+      "file": "oracle_bt_ordered_operands_kt00000001.bin",
+      "first_diff_offset": 688596,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 147588780,
+      "bytes_v2": 147588780,
+      "file": "oracle_bt_substeps_kt00000001.bin",
+      "first_diff_offset": 2708,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 3543480,
+      "bytes_v2": 3543480,
+      "file": "oracle_een_e3f0vor_kt00000001.bin",
+      "first_diff_offset": null,
+      "identical": true
+    },
+    {
+      "bytes_orca1ice": 3543480,
+      "bytes_v2": 3543480,
+      "file": "oracle_een_e3fvor_kt00000001.bin",
+      "first_diff_offset": 2720,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 3543480,
+      "bytes_v2": 3543480,
+      "file": "oracle_een_q_kt00000001.bin",
+      "first_diff_offset": 2720,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 28347448,
+      "bytes_v2": 28347448,
+      "file": "oracle_een_zpvo_kt00000001.bin",
+      "first_diff_offset": 2720,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 4101508,
+      "bytes_v2": 4101508,
+      "file": "oracle_ocean_surface_input_kt00000001.bin",
+      "first_diff_offset": 2732,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 3650036,
+      "bytes_v2": 3650036,
+      "file": "oracle_qsr_stage3_kt00000001.bin",
+      "first_diff_offset": 16516,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 335464,
+      "bytes_v2": 335464,
+      "file": "oracle_rgb_chl_kt00000001.bin",
+      "first_diff_offset": 130816,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 7086892,
+      "bytes_v2": 7086892,
+      "file": "oracle_rhs_kt00000001.bin",
+      "first_diff_offset": 2708,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 29490480,
+      "bytes_v2": 29490480,
+      "file": "oracle_rkstage1_transport_operands_kt00000001.bin",
+      "first_diff_offset": 117016,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 46065036,
+      "bytes_v2": 46065036,
+      "file": "oracle_rkstage2_eos_operands_kt00000001.bin",
+      "first_diff_offset": 3188,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 21489200,
+      "bytes_v2": 21489200,
+      "file": "oracle_rkstage2_hpg_literal_kt00000001.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630316,
+      "bytes_v2": 10630316,
+      "file": "oracle_rkstage2_hpg_operands_kt00000001.bin",
+      "first_diff_offset": 2709,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 35876028,
+      "bytes_v2": 35876028,
+      "file": "oracle_rkstage2_operands_kt00000001.bin",
+      "first_diff_offset": 7089572,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 7086908,
+      "bytes_v2": 7086908,
+      "file": "oracle_rkstage2_preupdate_kt00000001.bin",
+      "first_diff_offset": 2724,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 28347444,
+      "bytes_v2": 28347444,
+      "file": "oracle_rkstage2_terms_kt00000001.bin",
+      "first_diff_offset": 7089564,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630320,
+      "bytes_v2": 10630320,
+      "file": "oracle_rkstage3_wzv_kt00000001.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 53494332,
+      "bytes_v2": 53494332,
+      "file": "oracle_rktracer_operands_kt00000001_s1.bin",
+      "first_diff_offset": 7089572,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 53494332,
+      "bytes_v2": 53494332,
+      "file": "oracle_rktracer_operands_kt00000001_s2.bin",
+      "first_diff_offset": 7089572,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 57037756,
+      "bytes_v2": 57037756,
+      "file": "oracle_rktracer_stage3_kt00000001.bin",
+      "first_diff_offset": 7089572,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 3090336,
+      "bytes_v2": 3090336,
+      "file": "oracle_sbcblk_o1_kt00000001.bin",
+      "first_diff_offset": null,
+      "identical": true
+    },
+    {
+      "bytes_orca1ice": 4780,
+      "bytes_v2": 4780,
+      "file": "oracle_si3_bulk_operands.bin",
+      "first_diff_offset": 860,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 39097360,
+      "bytes_v2": 94508560,
+      "file": "oracle_si3_exchange_frames.bin",
+      "first_diff_offset": 32,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000001_s0.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000001_s1.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000003_s0.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000003_s1.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000005_s0.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000005_s1.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000007_s0.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000007_s1.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000009_s0.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 6286780,
+      "bytes_v2": 94300860,
+      "file": "oracle_si3_prather_kt00000009_s1.bin",
+      "first_diff_offset": 36,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 267024,
+      "bytes_v2": 3156440,
+      "file": "oracle_si3_reassoc_operands.bin",
+      "first_diff_offset": 28,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 35715040,
+      "bytes_v2": 345283240,
+      "file": "oracle_si3_thd_frames.bin",
+      "first_diff_offset": 40,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 1194184,
+      "bytes_v2": 6679576,
+      "file": "oracle_si3_zdf_inputs.bin",
+      "first_diff_offset": 28,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 22814420,
+      "bytes_v2": 22814420,
+      "file": "oracle_slow_forcing_kt00000001.bin",
+      "first_diff_offset": 3546164,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 24899672,
+      "bytes_v2": 24899672,
+      "file": "oracle_stage1_wzv_operands_kt00000001.bin",
+      "first_diff_offset": 1928,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000001_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000001_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000001_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000002_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000002_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000002_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000003_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000003_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000003_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000004_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000004_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000004_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000005_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000005_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000005_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000006_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000006_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000006_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000007_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000007_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000007_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000008_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000008_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000008_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000009_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000009_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000009_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000010_s1.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000010_s2.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288052,
+      "bytes_v2": 14288052,
+      "file": "oracle_stage_kt00000010_s3.bin",
+      "first_diff_offset": 2716,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000001.bin",
+      "first_diff_offset": 14176408,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000002.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000003.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000004.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000005.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000006.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000007.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000008.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000009.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 14288048,
+      "bytes_v2": 14288048,
+      "file": "oracle_step_entry_kt00000010.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 61038700,
+      "bytes_v2": 61038700,
+      "file": "oracle_tke_walk_kt00000002.bin",
+      "first_diff_offset": 3028,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630332,
+      "bytes_v2": 10630332,
+      "file": "oracle_tracer_transport_kt00000001_s3.bin",
+      "first_diff_offset": 2724,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630320,
+      "bytes_v2": 10630320,
+      "file": "oracle_transport_kt00000001_s1.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630320,
+      "bytes_v2": 10630320,
+      "file": "oracle_transport_kt00000001_s2.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 10630320,
+      "bytes_v2": 10630320,
+      "file": "oracle_transport_kt00000001_s3.bin",
+      "first_diff_offset": 2712,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 13453548,
+      "bytes_v2": 13453548,
+      "file": "oracle_zdf_entry_kt00000001.bin",
+      "first_diff_offset": 117012,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 74141552,
+      "bytes_v2": 74141552,
+      "file": "oracle_zdf_sh2_operands_kt00000001.bin",
+      "first_diff_offset": 13570840,
+      "identical": false
+    },
+    {
+      "bytes_orca1ice": 74141552,
+      "bytes_v2": 74141552,
+      "file": "oracle_zdf_sh2_operands_kt00000002.bin",
+      "first_diff_offset": 108040,
+      "identical": false
+    }
+  ],
+  "common_stream_count": 101,
+  "differing_count": 99,
+  "first_chronological_record": "oracle_step_entry_kt00000001.bin",
+  "first_chronological_record_first_differing_field": "ssh",
+  "first_chronological_record_identical": false,
+  "first_chronological_record_ssh_sanity": {
+    "comparable": true,
+    "jpi": 94,
+    "jpj": 152,
+    "jpk": 31,
+    "jpts": 2,
+    "ssh_cells_differing": 8794,
+    "ssh_cells_total": 14288,
+    "ssh_max_abs_diff_m": 0.015479333813968585,
+    "ssh_mean_abs_diff_over_differing_m": 0.015479333813968583,
+    "ts_bit_identical": true,
+    "uu_bit_identical": true,
+    "vv_bit_identical": true
+  },
+  "identical_count": 2,
+  "identical_streams": [
+    "oracle_een_e3f0vor_kt00000001.bin",
+    "oracle_sbcblk_o1_kt00000001.bin"
+  ],
+  "missing_in_orca1ice": [],
+  "missing_in_v2": [],
+  "orca1ice_root": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2x_a_10step_np2",
+  "v2_root": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2"
+}

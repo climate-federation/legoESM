@@ -489,10 +489,26 @@ class CubedSphereToLatLonWeights(NamedTuple):
     lat_cent: np.ndarray
 
 
+def _target_lat(n_lat: int, lat_cent) -> np.ndarray:
+    """Target latitudes [deg]: pole-to-pole ``linspace(-90, 90, n_lat)`` by
+    default, or the caller's own row centres (e.g. the CMIP writer's
+    cell-centred labels) so samples and labels come from ONE definition."""
+    if lat_cent is None:
+        return np.linspace(-90.0, 90.0, n_lat)
+    lat = np.asarray(lat_cent, dtype=np.float64)
+    if (lat.shape != (n_lat,) or n_lat == 0 or not np.all(np.isfinite(lat))
+            or np.any(np.diff(lat) <= 0.0) or lat[0] < -90.0 or lat[-1] > 90.0):
+        raise ValueError(
+            f"lat_cent must be {n_lat} finite, strictly increasing latitudes "
+            f"in [-90, 90]; got shape {lat.shape}")
+    return lat
+
+
 def compute_cubedsphere_to_latlon_weights(
     n: int,
     n_lon: int = 360,
     n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Precompute face-aware bilinear weights for CS → lat-lon.
 
@@ -511,6 +527,8 @@ def compute_cubedsphere_to_latlon_weights(
         Cubed-sphere tile size (cells per face edge).
     n_lon, n_lat : int
         Output regular lat-lon grid dimensions.
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
 
     Returns
     -------
@@ -518,7 +536,7 @@ def compute_cubedsphere_to_latlon_weights(
     """
     # Target grid
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     lon_r = np.deg2rad(lon2d.ravel())
@@ -590,17 +608,19 @@ def compute_cubedsphere_to_latlon_weights(
     )
 
 
-_cs_weights_cache: dict[tuple[int, int, int], CubedSphereToLatLonWeights] = {}
+_cs_weights_cache: dict[tuple, CubedSphereToLatLonWeights] = {}
 
 
 def get_cubedsphere_to_latlon_weights(
     n: int, n_lon: int = 360, n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Cached version of :func:`compute_cubedsphere_to_latlon_weights`."""
-    key = (n, n_lat, n_lon)
+    key = (n, n_lat, n_lon, None if lat_cent is None
+           else tuple(np.asarray(lat_cent, dtype=np.float64).tolist()))
     if key not in _cs_weights_cache:
         _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
+            n, n_lon=n_lon, n_lat=n_lat, lat_cent=lat_cent)
     return _cs_weights_cache[key]
 
 
@@ -770,6 +790,7 @@ def compute_voronoi_to_latlon_weights(
     n_lon: int = 360,
     n_lat: int = 181,
     k: int = 3,
+    lat_cent: np.ndarray | None = None,
 ) -> VoronoiToLatLonWeights:
     """Precompute IDW k-nearest weights from Voronoi cell centres to lat-lon.
 
@@ -782,11 +803,13 @@ def compute_voronoi_to_latlon_weights(
         Output regular lat-lon grid dimensions.
     k : int
         Number of nearest source cells per target point (clamped to nCells).
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
     """
     from scipy.spatial import cKDTree
 
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
@@ -964,6 +987,79 @@ def regrid_scalar_nan_aware(
         return res.reshape(regrid_weights.target_shape + extra_dims)
 
 
+def fill_missing_nearest_valid(
+    data: np.ndarray,
+    coords: np.ndarray,
+) -> np.ndarray:
+    """Fill ``NaN`` entries from the nearest valid point, slice by slice.
+
+    Each row of ``data`` is filled INDEPENDENTLY: a missing entry takes the
+    value of the nearest point that is valid *in that same row*.  Two uses in
+    the model share this: an AMIP forcing frame filled from the nearest
+    unmasked cell at that same time, and an observed T/S level filled from the
+    nearest source column that has an observation at that same depth.  Filling
+    per row is what makes the second one correct -- a column-wise fill would
+    carry a shallow value down into levels it was never observed at.
+
+    Distances are Euclidean in the supplied coordinates.  Passing unit-sphere
+    Cartesian coordinates (``x, y, z``) makes the ordering exact on the globe
+    with no dateline or pole seam, which is why callers convert lat/lon rather
+    than differencing degrees.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Shape ``(n_slices, n_points)``.  ``NaN`` marks a missing value.
+    coords : np.ndarray
+        Point coordinates, shape ``(n_points, n_dim)``; unit-sphere Cartesian
+        (``n_dim = 3``) for geographic data.
+
+    Returns
+    -------
+    np.ndarray
+        ``data`` with every ``NaN`` replaced, same shape.
+
+    Raises
+    ------
+    ValueError
+        If a slice is entirely ``NaN``.  There is no donor for it, and
+        returning it unchanged would leak ``NaN`` into whatever consumes the
+        field with no message at all.
+    """
+    data = np.asarray(data)
+    coords = np.asarray(coords)
+    if data.ndim != 2:
+        raise ValueError(
+            f"data must be 2-D (n_slices, n_points); got shape {data.shape}."
+        )
+    if coords.shape[0] != data.shape[1]:
+        raise ValueError(
+            f"coords has {coords.shape[0]} points but data has "
+            f"{data.shape[1]} per slice."
+        )
+    if not np.any(np.isnan(data)):
+        return data
+
+    from scipy.interpolate import NearestNDInterpolator
+
+    filled = data.copy()
+    for i in range(data.shape[0]):
+        frame = data[i]
+        mask_valid = ~np.isnan(frame)
+        if not mask_valid.any():
+            raise ValueError(
+                f"nearest-valid fill: slice {i} of {data.shape[0]} is "
+                "entirely NaN/missing, so there is no valid point to fill it "
+                "from. Check the source field for an all-masked time record "
+                "or depth level."
+            )
+        if mask_valid.all():
+            continue
+        interp = NearestNDInterpolator(coords[mask_valid], frame[mask_valid])
+        filled[i] = interp(coords)
+
+    return filled
+
 
 def _cell_edges(centers):
     """Cell edges (n+1) from 1-D cell centres (works for ascending or descending)."""
@@ -1017,8 +1113,12 @@ def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
     v = field if has_layers else field[:, :, None]            # (ns_lat, ns_lon, L)
 
     # Latitude weight uses sin(lat) (true cell-area measure); longitude is periodic.
-    w_lat = _overlap_matrix(np.sin(np.deg2rad(_cell_edges(src_lat))),
-                            np.sin(np.deg2rad(_cell_edges(tgt_lat))))   # (n_tgt_lat, n_src_lat)
+    # Edges clipped to the poles: a pole-centred row extrapolates to +/-90.5,
+    # where sin folds back and the cap would get zero width.
+    def _sin_lat_edges(lat):
+        return np.sin(np.deg2rad(np.clip(_cell_edges(lat), -90.0, 90.0)))
+    w_lat = _overlap_matrix(_sin_lat_edges(src_lat),
+                            _sin_lat_edges(tgt_lat))   # (n_tgt_lat, n_src_lat)
     w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon),
                             periodic_span=360.0)                        # (n_tgt_lon, n_src_lon)
 

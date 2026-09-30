@@ -1,0 +1,49 @@
+--- stprk3_stg.F90.r46
++++ stprk3_stg.F90
+@@ -20,6 +20,8 @@
+    USE step_oce       ! time stepping used modules
+    USE l2_r46_stage, ONLY : r46_begin, r46_rhs, r46_ww, r46_state, r46_finish
+                        ! round-46 WRITE-only kt1/kt2 stage recorder
++   USE l2_r63_krhs, ONLY : r63_begin, r63_snapshot
++                       ! round-63 WRITE-only kt2 tracer accumulator recorder
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
+    USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+@@ -870,6 +872,7 @@
+       DO jn = 1, jpts
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
++      CALL r63_begin( kstp, kstg, Kbb, Kmm, Krhs, rDt, ts )
+       IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+          l1_filename = 'oracle_rktracer_stage3_kt00000001.bin'
+          OPEN( NEWUNIT=l2_tracer_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+@@ -900,11 +903,13 @@
+          !
+          CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection
++         CALL r63_snapshot( 'after_adv', ts, Krhs )
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
++         CALL r63_snapshot( 'after_sbc', ts, Krhs )
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+@@ -987,6 +992,7 @@
+                   l2_qsr_before(:,:,:) = ts(:,:,:,jp_tem,Krhs)
+                ENDIF
+                CALL tra_qsr( kstp, Kmm, ts, Krhs )                    ! penetrative solar radiation qsr
++               CALL r63_snapshot( 'after_qsr', ts, Krhs )
+                IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                   l1_filename = 'oracle_qsr_stage3_kt00000001.bin'
+                   l1_magic = 'NEMO_L2_QSR___1'
+@@ -1002,6 +1008,7 @@
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
++            CALL r63_snapshot( 'after_ldf', ts, Krhs )
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux

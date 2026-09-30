@@ -40,14 +40,22 @@ def grad_norm_vs_horizon(
     """Adjoint norm of ``loss_for_horizon(n, x)`` w.r.t. ``x`` for each ``n`` in ``horizons``.
 
     ``loss_for_horizon(n_steps, x) -> scalar`` runs an ``n_steps`` rollout and
-    returns a scalar loss.  Returns ``{n: ||d loss / d x||_2}`` — sweep it to
+    returns a scalar loss.  Returns ``{n: max |d loss / d x|}`` — sweep it to
     characterise where the adjoint blows up (the usable training horizon).
+
+    The MAX-norm, not the L2 norm, for the reason given in :func:`grad_max_norm`:
+    squaring overflows fp32 above ~1.8e19, so an L2 sweep reports a blow-up at
+    exactly the magnitudes it exists to measure.  A real sweep of this repo's
+    epoch-0 neural lane reached 6.1e21 at 144 steps, where an L2 norm would have
+    manufactured an ``inf``.  The two norms differ by a factor bounded by
+    sqrt(#elements), which is constant across horizons and cancels out of a
+    growth rate.
     """
     out: dict[int, float] = {}
     for n in horizons:
         n = int(n)
         g = jax.grad(lambda z, _n=n: loss_for_horizon(_n, z))(x)
-        out[n] = float(global_grad_norm(g))
+        out[n] = grad_max_norm(leaf_grad_report(g))
     return out
 
 

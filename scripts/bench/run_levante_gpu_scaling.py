@@ -63,6 +63,7 @@ _BENCH_DIR = Path(__file__).resolve().parent
 if str(_BENCH_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCH_DIR))
 from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from hyperdiff import hyperdiff_coeff  # noqa: E402
 
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
@@ -121,7 +122,10 @@ def _configure_jax(precision: str) -> None:
     JAX pick its default backend; respect any value the user / SLURM
     wrapper has already set.
     """
-    if precision == "float64":
+    # float64 and mixed both need x64 (mixed = fp32 storage/compute + fp64
+    # accumulate; the fp64 accumulator requires x64).  The ocean precision
+    # POLICY (storage dtype) is set per-arm by the ocean bench, not here.
+    if precision in ("float64", "mixed"):
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
@@ -881,32 +885,6 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
 # Hyperdiffusion scaling
 # ===========================================================================
 
-def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
-    """Scale \\nabla^4 hyperdiffusion coefficient with resolution."""
-    if grid_type == "spectral":
-        ref_n = 42
-        ref_coeff = 2.5e16
-    elif grid_type == "icosahedral":
-        # For icosahedral, n_grid is a subdivision level.  Scale the
-        # coefficient with dx^4 relative to level 5 (~120 km).
-        from legoesm import constants  # lazy: see top-of-file note on JAX init order
-
-        R = constants.R_earth
-        ref_cells = 10 * 4 ** 5 + 2
-        cur_cells = 10 * 4 ** n_grid + 2
-        dx_ref = R * math.sqrt(4.0 * math.pi / ref_cells)
-        dx_cur = R * math.sqrt(4.0 * math.pi / cur_cells)
-        ref_coeff = 5e16
-        return ref_coeff * (dx_cur / dx_ref) ** 4
-    elif grid_type == "latlon":
-        ref_n = 64
-        ref_coeff = 5e16
-    else:
-        ref_n = 48
-        ref_coeff = 5e16
-    return ref_coeff * (ref_n / n_grid) ** 4
-
-
 # ===========================================================================
 # Physics helpers
 # ===========================================================================
@@ -1492,7 +1470,7 @@ def run_benchmark(
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         config = SpectralPEConfig(
             hyperdiff_coeff=hd,
             hyperdiff_order=4,
@@ -1518,7 +1496,7 @@ def run_benchmark(
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
         total_cells = grid.nCells * n_levels
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
             nu_del4_ps=hd,
@@ -1652,7 +1630,7 @@ def run_benchmark(
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        hd = _hyperdiff_coeff(n_grid, grid_type)
+        hd = hyperdiff_coeff(n_grid, grid_type)
         # When mass anchoring (``fix_mass_hydrostatic_target``) is active
         # we already get exact mass conservation via a single post-step
         # allreduce.  The per-stage ``zero_mean_ps_tendency`` correction

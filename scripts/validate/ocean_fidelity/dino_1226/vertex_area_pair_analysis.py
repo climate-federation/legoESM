@@ -64,6 +64,8 @@ from pathlib import Path
 
 import numpy as np
 
+from legoesm import constants
+
 _DIR = Path(__file__).resolve().parent
 REPO_ROOT = _DIR.parents[3]
 
@@ -74,7 +76,7 @@ RESTART = os.environ.get("DINO_NEMO_RESTART", "DINO_00005760_restart.nc")
 
 # NEMO's own constants for this mesh: phycst.F90 :26 (ra) and :37 (rad);
 # rn_e1_deg from usrdef_nam.F90:30 and DINO's namelist_cfg.
-_RA, _RAD, _RN_E1_DEG = 6371229.0, np.pi / 180.0, 1.0
+_RA, _RAD, _RN_E1_DEG = constants.R_earth, np.pi / 180.0, 1.0
 
 # The pre-registered bar for part 2.  Stated here, above the measurement.
 PAIR_BAR = 0.1

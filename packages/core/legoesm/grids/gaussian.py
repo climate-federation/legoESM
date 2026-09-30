@@ -254,6 +254,7 @@ class GaussianGrid(NamedTuple):
     lap: jax.Array          # Spectral Laplacian = -n(n+1)/a^2, (n_sh,)
     ilap: jax.Array         # Inverse Laplacian (0 for n=0), (n_sh,)
     subgrid_topo_stddev: object = None  # jax.Array (n_lat, n_lon) [m] | None — oro-GWD launch h_topo
+    land_frac: jax.Array | None = None  # (n_lat * n_lon,) [0-1], optional physics mask
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -1573,6 +1574,18 @@ def vordiv_from_uv_exact_3d(
     vor_hat = zeros.at[safe_idx].add(vp)
     div_hat = zeros.at[safe_idx].add(dp)
     return vor_hat, div_hat
+
+
+def hyperdiff_coeff_for_efold(grid: GaussianGrid, tau_s: float,
+                              order: int = 2) -> float:
+    """Hyperdiffusion coefficient whose truncation wavenumber e-folds in ``tau_s``.
+
+    ``nu * eig_max**order == 1/tau_s`` with ``eig_max = n_max(n_max+1)/a^2``
+    (the rate ``spectral_hyperdiffusion_3d`` applies at ``n = n_max``).
+    Units: m^(2*order)/s.
+    """
+    eig_max = grid.n_max * (grid.n_max + 1) / (grid.radius * grid.radius)
+    return 1.0 / (tau_s * eig_max ** order)
 
 
 def spectral_hyperdiffusion_3d(

@@ -29,6 +29,8 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -44,7 +46,14 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    liquid_water_content, moisture_fusion_heat_source, solve_soil_thermal)
+
+# Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
+# 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
+# curtain in a thin top layer; six 300 s sub-steps keep it on the curtain
+# (user decision 2026-09-28).  A loop count, never config or trainable.
+FINAL_THERMAL_SUBSTEPS = 6
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -56,6 +65,8 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
+from legoesm.land.canopy.radiative_transfer import broadband_albedo
+from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
@@ -73,6 +84,9 @@ from legoesm.land.snow_bands import (
     band_precip_snow,
     step_snow_bands,
 )
+
+# ln 10: CLM5 writes the ice impedance as a power of ten.
+_LN10 = math.log(10.0)
 
 
 def _get(lp, name: str, fallback):
@@ -542,9 +556,12 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    _alpha_applied = None    # set by the two-leaf branch: one albedo, absorbed + exported
+    _lp_soil = None          # two-leaf: params with soil bands at start-of-step water
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
-        # advances soil thermal tentatively between passes.
+        # advances soil thermal tentatively between passes.  These run before
+        # Richards on unchanged theta, so they carry no moisture fusion source.
         def _soil_thermal_cb(G, dt_):
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
@@ -593,6 +610,36 @@ def _step_multilayer_land_impl(
             _fwet_pre = interception_wetted_fraction(
                 state.W_canopy, _pai_i, config.interception)
 
+        # Soil-colour bands follow the START-of-step top-layer water (CTSM
+        # evaluates the soil albedo from the current h2osoi_vol); parameter
+        # sets without soil-colour bounds carry a prescribed albedo and pass
+        # through unchanged.
+        lp = rewet_soil_bands(lp, theta[:, 0])
+        _lp_soil = lp
+        # ONE surface albedo for absorption and for export.  The canopy RT's
+        # band albedos are the snow-free soil-colour background, so without
+        # this the land absorbed sunlight through ~0.15 while the atmosphere
+        # reflected the exported snow-aged 0.52 on the same cell -- nothing
+        # reconciled them (energy created on snow-covered tundra, lost on
+        # glacier).  Snow is layered on each band's own base, so snow-free
+        # columns absorb exactly as before and the calibrated glacier bands
+        # survive; the prognostic dry-soil brightening the old export added
+        # is NOT applied here because the bands carry the CTSM soil-colour
+        # moisture dependence (rewet above) and both reviewers flagged the
+        # double count.  Absorption this step is exactly (1 - broadband of
+        # these bands) * sw_down in daylight (the RT's own low-light fallback,
+        # sw_down < 1 W/m2, is the only exception).  With snow feedback on, the
+        # EXPORT (post-step block below) is the same construction on the
+        # post-step snow and soil water, i.e. what the NEXT step absorbs with,
+        # so the hand-off to the next radiation call is exact; within one step
+        # they differ by that step's snow and top-layer water change.
+        if (config.snow_albedo_feedback and lat is not None
+                and lp is not None and hasattr(lp, "ALB_VIS")):
+            _band = lambda a: compute_land_albedo(
+                lat, snow, snow_age, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface.shape))
+            lp = lp._replace(ALB_VIS=_band(lp.ALB_VIS), ALB_NIR=_band(lp.ALB_NIR))
+            _alpha_applied = broadband_albedo(lp.ALB_VIS, lp.ALB_NIR)
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -802,6 +849,7 @@ def _step_multilayer_land_impl(
             snowfall_bands, dt,
             Q_net=band_rad.Rn_bands - shflx[:, None] - lhflx[:, None],
             cfg=bands, T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
             precip_rain_bands=_precip_rain_bands, wind=wind_speed)
         snow_bands_new = band_step.swe_bands
         ice_bands_new = band_step.ice_bands
@@ -820,6 +868,7 @@ def _step_multilayer_land_impl(
             Q_net=G_surface,
             snow_melt_rate=config.snow_melt_rate,
             T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
         )
         snow_bands_new = state.snow_bands
         snow_age_bands_new = state.snow_age_bands
@@ -970,15 +1019,6 @@ def _step_multilayer_land_impl(
         extractable_water / dt + infil_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
-    # --- Combine the two phase streams ---
-    # Total vapour mass leaving the surface = pack sublimation + soil / plant
-    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
-    # unmet by a reservoir cap or the bare-soil resistance returns to the ground
-    # heat flux as ``evap_excess_energy`` so the surface energy budget still
-    # closes (in - out - dStorage = 0).
-    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
-    evap_excess_energy = lhflx - lhflx_actual
-
     # --- Root water uptake partition ---
     # ``soil_flux`` is the L_v soil / plant-water stream ONLY: the snowpack
     # already swallowed the sublimation / frost stream (``sublim_actual``)
@@ -1013,6 +1053,7 @@ def _step_multilayer_land_impl(
     # the total soil+canopy water budget closes against precip - ET - runoff and
     # the reported LE is unchanged.
     W_canopy_new = state.W_canopy
+    _wet_evap = jnp.zeros_like(evap_transp)
     if _do_intercept:
         _wet_evap_demand = jnp.maximum(
             surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
@@ -1036,18 +1077,49 @@ def _step_multilayer_land_impl(
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
+    # --- Frozen-soil ice impedance (CLM5 IceImpedance), freeze/thaw lanes only ---
+    # At start-of-step T and water, held for the step.  Off -> original Richards path.
+    _log_imped = (soil_ice_log_impedance(T_soil, theta, config)
+                  if config.thermal.enable_freeze_thaw else None)
+
     # --- Richards equation (+ coupled surface ponding cell, #671) ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
         surface_water=state.surface_water,
+        log_impedance=_log_imped,
     )
     # NB (#671): the former "evaporation water budget closure" — a clip of
     # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
     # band-aid for the old infiltration/evap mismatch; theta_from_psi is now
     # bounded below at theta_r by construction, the coupled surface cell carries
     # the ponded excess, and the mixed-form solve closes the water budget.
+
+    # --- Realised soil / plant-water evaporation (what the soil actually gave) ---
+    # A draw the dry column cannot supply (bare-soil top flux or root sink) ends
+    # at the Richards psi dry floor, which REFILLS it: the soil loses less than
+    # the demand (measured: 0.51 of a 0.8 mm/d desert demand was refilled).  The
+    # evaporation handed to the atmosphere is therefore the demand minus that
+    # refill (``richards_out.refill``, bounded by the solver's draw, so a negative
+    # or non-draw residual is never turned into evaporation or dew; the solver
+    # takes non-draw created water back out of the soil).  Draws are NOT pre-capped by
+    # start-of-step layer water: that would also cut legitimate capillary supply
+    # from moister layers below (-3.7% of a moist-subsoil day's ET, measured).
+    # Transpiration is rebuilt from the sink the solve received, so a column with
+    # zero root weight reports none.  Units: kg m-2 s-1, positive = upward.
+    evap_transp = rho_w * jnp.sum(sink * dz[None, :], axis=-1)
+    soil_evap = evap_bare + evap_transp + _wet_evap - richards_out.refill * rho_w / dt
+
+    # --- Combine the two phase streams ---
+    # Total vapour mass leaving the surface = pack sublimation + soil / plant
+    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
+    # unmet by a reservoir cap, the bare-soil resistance or the soil supply limit
+    # returns to the ground heat flux as ``evap_excess_energy`` (below) so the
+    # surface energy budget still closes (in - out - dStorage = 0); the skin
+    # temperature is not re-solved this step.
+    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
+    evap_excess_energy = lhflx - lhflx_actual
 
     # --- Soil thermal diffusion (final, with converged G) ---
     # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
@@ -1056,11 +1128,21 @@ def _step_multilayer_land_impl(
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
     G_surface = G_surface + evap_excess_energy
+    # Fusion heat of the ice change Richards made at fixed T (evaluated at the
+    # start-of-step T the apparent heat capacity uses).
+    _fusion_source = (
+        moisture_fusion_heat_source(
+            T_soil, theta, richards_out.theta_new, dz,
+            config.thermal, dt)
+        if config.thermal.enable_freeze_thaw else None)
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
         G_surface, dt,
         surface_conductance=surface_out.surface_conductance,
+        layer_source=_fusion_source,
+        n_substeps=(FINAL_THERMAL_SUBSTEPS
+                    if config.thermal.enable_freeze_thaw else 1),
     )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---
@@ -1155,7 +1237,25 @@ def _step_multilayer_land_impl(
         alpha_new = band_rad_new.alpha_eff
         lw_up_new = band_rad_new.lw_up_agg
     else:
-        if config.snow_albedo_feedback and lat is not None:
+        if _alpha_applied is not None:
+            # Same bands, same snow layering, POST-step snow and soil water:
+            # the export feeds the NEXT radiation call, whose canopy will
+            # absorb with the post-step state (codex).  Absorption this step
+            # used the pre-step bands (``_alpha_applied``); the two differ only
+            # by one step's snow and top-layer water change.
+            _lp_new = rewet_soil_bands(_lp_soil, richards_out.theta_new[:, 0])
+            _band_new = lambda a: compute_land_albedo(
+                lat, snow_new, snow_age_new, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface_new.shape))
+            alpha_new = broadband_albedo(_band_new(_lp_new.ALB_VIS),
+                                         _band_new(_lp_new.ALB_NIR))
+        elif getattr(_lp_soil, "ALB_VIS_DRY", None) is not None:
+            # Two-leaf without snow layering: the soil bands at the post-step
+            # water, i.e. what the next step absorbs with (same hand-off as
+            # above, minus snow).
+            _lp_new = rewet_soil_bands(_lp_soil, richards_out.theta_new[:, 0])
+            alpha_new = broadband_albedo(_lp_new.ALB_VIS, _lp_new.ALB_NIR)
+        elif config.snow_albedo_feedback and lat is not None:
             # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
@@ -1472,6 +1572,27 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
             held_carbon = carbon_new
 
     return held_state, held_response, held_carbon, bad, n_held
+
+
+def soil_ice_log_impedance(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    config: MultiLayerLandConfig,
+) -> jnp.ndarray:
+    """ln of the CLM5 frozen-soil conductivity multiplier, per layer.
+
+    ``10**(-e * icefrac)`` with ``icefrac = min(1, vol_ice / theta_sat)`` and
+    ``vol_ice`` the ice (``theta - theta_liq(T)``, the thermal solve's own split)
+    at ice density, as CLM5 SoilHydrologyMod / IceImpedance.  ``e`` =
+    ``config.richards.ice_impedance_exponent``.  Zero-porosity cells get no ice.
+    """
+    liq, _ = liquid_water_content(T_soil, theta, config.thermal)
+    theta_sat = jnp.broadcast_to(config.hydraulics.theta_sat, theta.shape)
+    ice_vol = (theta - liq) * (constants.rho_water / constants.rho_ice)
+    icefrac = jnp.where(
+        theta_sat > 0.0,
+        jnp.clip(ice_vol / jnp.maximum(theta_sat, 1e-6), 0.0, 1.0), 0.0)
+    return -config.richards.ice_impedance_exponent * _LN10 * icefrac
 
 
 def init_multilayer_land_state(

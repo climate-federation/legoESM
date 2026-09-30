@@ -348,6 +348,18 @@ def _build_latlon_interpolator(
     from scipy.interpolate import RegularGridInterpolator
 
     lat_src = np.asarray(lat_src)
+    lon_src = np.asarray(lon_src)
+    # A file carrying both periodic ends (-180 and 180, or 0 and 360) maps
+    # them to one longitude after the callers' % 360; scipy refuses repeated
+    # points.  Keep the first occurrence: the callers' stable sort puts the
+    # file's first column ahead of its end column.
+    keep = np.concatenate([[True], np.diff(lon_src) != 0.0])
+    if not keep.all():
+        logger.info("Dropping %d duplicated periodic longitude column(s) at "
+                    "%s deg (file's end column)", int((~keep).sum()),
+                    lon_src[~keep])
+        lon_src = lon_src[keep]
+        data = np.asarray(data)[:, keep]
     # Longitudinal wrap (unchanged behavior).
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
@@ -539,7 +551,7 @@ def _load_land_fraction_file(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     mask_data = mask_data[:, lon_order]
 
@@ -977,7 +989,7 @@ def load_land_albedo(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     alb_data = alb_data[:, lon_order]
 
@@ -1000,10 +1012,168 @@ def load_land_albedo(
     return jnp.asarray(alb_grid)
 
 
+# The effective resolution of a finite-volume dynamical core: the shortest
+# wave it actually represents rather than damps, ~3-4 grid spacings (GLM
+# review on #1712; the standard spectral-fidelity result for this class of
+# core).  Orographic variance ABOVE this scale is in the model's own
+# topography, so launching gravity-wave drag from it a second time
+# double-counts.
+_EFFECTIVE_RESOLUTION_DX = 3.5
+
+
+def _sso_file_construction(ds) -> dict:
+    """Machine-readable record of how a subgrid-orography file was built.
+
+    Prefers real attributes; falls back to parsing the ``history`` string for
+    files written before those attributes existed.  Returns ``{}`` when the
+    file says nothing -- an unstamped file is a file whose scale decomposition
+    is unknown, which is itself worth reporting (#1712).
+    """
+    out = {}
+    attrs = dict(getattr(ds, "attrs", {}) or {})
+    for key in ("block_deg", "fine_res_deg", "resolved_cutoff_deg"):
+        if key in attrs:
+            try:
+                out[key] = float(attrs[key])
+            except (TypeError, ValueError):
+                pass
+    # PER-FIELD precedence, not wholesale: a file that stamps only
+    # ``fine_res_deg`` used to suppress the history fallback entirely, and the
+    # guard then had no scale to check and passed in silence (codex review).
+    history = str(attrs.get("history", ""))
+    for key, flag in (("block_deg", "--block-deg"),
+                      ("fine_res_deg", "--fine-res-deg"),
+                      ("resolved_cutoff_deg", "--resolved-cutoff-deg")):
+        if key in out or flag not in history:
+            continue
+        tail = history.split(flag, 1)[1].lstrip()
+        # accept both `--block-deg 2.0` and `--block-deg=2.0`
+        if tail.startswith("="):
+            tail = tail[1:]
+        token = tail.split()[0] if tail.split() else ""
+        try:
+            out[key] = float(token)
+        except ValueError:
+            pass
+    return out
+
+
+# One report per (file, grid) pair per process.  A guard that fires on every
+# load of every run is alarm fatigue rather than a guard (GLM review), and the
+# condition is a property of the PAIR, not of the call.
+_SSO_SCALE_REPORTED: set = set()
+
+# Relative orographic drag against block size, measured on one fixed 0.25 deg
+# source, area-weighted 40-60S, normalised to the 2 deg block (#1712, job
+# 9633446).  Quoted in the guard message so the reader sees the SIZE of the
+# mismatch rather than only its existence.
+_SSO_BLOCK_DRAG_SWEEP = ((0.5, 0.06), (1.0, 0.31), (2.0, 1.00), (4.0, 1.99))
+
+
+def _sso_drag_hint(block_deg: float, cell_deg: float) -> str:
+    """Plain statement of what the block/grid mismatch is worth."""
+    lo = min(_SSO_BLOCK_DRAG_SWEEP, key=lambda r: abs(r[0] - block_deg))
+    hi = min(_SSO_BLOCK_DRAG_SWEEP, key=lambda r: abs(r[0] - cell_deg))
+    if lo[1] <= 0.0 or hi[1] <= 0.0 or lo[0] == hi[0]:
+        return ""
+    return (f" For scale: the measured block sweep puts {lo[0]:g} deg at "
+            f"{lo[1]:.2f}x and {hi[0]:g} deg at {hi[1]:.2f}x the Southern-Ocean "
+            f"drag, i.e. this mismatch is worth roughly "
+            f"{lo[1] / hi[1]:.1f}x in launch stress, not a rounding detail.")
+
+
+def _check_sso_scale_decomposition(built: dict, grid_spacing_deg: float,
+                                   path: str, mode: str) -> str | None:
+    """Compare a subgrid-orography file's scale cutoff with the model grid.
+
+    ``sgh`` is meant to be the stddev of orography the model does NOT resolve,
+    so the file's upper cutoff has to sit at or below the model's effective
+    resolution.  Nothing used to check that: the loader interpolated and
+    clipped, and the same 2 deg file was read at every resolution (#1712,
+    defects 2 and 3).  Returns the message (also emitted per ``mode``), or
+    ``None`` when the file and the grid agree.
+    """
+    if mode not in ("warn", "error", "off"):
+        raise ValueError(
+            f"scale_check must be 'warn', 'error' or 'off'; got {mode!r}.")
+    if mode == "off" or not np.isfinite(grid_spacing_deg) or grid_spacing_deg <= 0:
+        return None
+    cell = float(grid_spacing_deg)
+    effective = _EFFECTIVE_RESOLUTION_DX * cell
+
+    if not built:
+        msg = (
+            f"subgrid orography {path}: the file records no scale "
+            f"decomposition (no block_deg / resolved_cutoff_deg attribute and "
+            f"nothing parseable in its history), so whether it double-counts "
+            f"orography this {cell:.3f} deg grid already resolves cannot be "
+            f"checked (#1712).")
+    else:
+        # WHERE the cutoff belongs is not settled, and this guard does not
+        # settle it -- it reports the band and names both readings (#1712):
+        #   * the model's TOPOGRAPHY carries features down to one cell, so
+        #     variance above ``cell`` is already in the resolved field and the
+        #     drag launched from it is counted twice;
+        #   * the model cannot PROPAGATE waves shorter than ~3.5 cells, so a
+        #     stricter reading puts the cutoff there and calls everything below
+        #     it subgrid.
+        # The trigger is the first (conservative) reading, because that is the
+        # one #1712 measured; the message carries the second so nobody has to
+        # rediscover the ambiguity.
+        band = (f"this grid: cells {cell:.3f} deg, effective resolution "
+                f"~{effective:.3f} deg ({_EFFECTIVE_RESOLUTION_DX:g} cells)")
+        cutoff = built.get("resolved_cutoff_deg")
+        if cutoff is not None:
+            # A file built with an EXPLICIT cutoff has already made the
+            # decomposition on purpose, so it is judged against the LOOSER of
+            # the two readings -- the effective resolution.  Judging it against
+            # the cell size would reject the very construction this guard's own
+            # message recommends (codex review).
+            if cutoff <= effective * 1.05:
+                return None
+            msg = (
+                f"subgrid orography {path}: built with an explicit resolved "
+                f"cutoff of {cutoff:.3f} deg, coarser than anything this grid "
+                f"could call subgrid ({band}). Variance above the effective "
+                f"resolution is in the model's own topography, so the "
+                f"gravity-wave drag launches from it a SECOND time (#1712). "
+                f"Rebuild with --resolved-cutoff-deg between {cell:.2f} and "
+                f"{effective:.2f}, or pass scale_check='off' to accept it.")
+        else:
+            block = built.get("block_deg")
+            if block is None or block <= cell:
+                return None
+            msg = (
+                f"subgrid orography {path}: built with block_deg="
+                f"{block:.3f} deg and NO explicit resolved cutoff, so its "
+                f"variance runs up to {block:.3f} deg, coarser than one cell "
+                f"of the grid it is being read on ({band}). The model carries "
+                f"orography between {cell:.3f} and {block:.3f} deg in its own "
+                f"topography, so SOME of this variance is resolved and the "
+                f"drag launched from it is counted a SECOND time. How much "
+                f"depends on where the cutoff belongs -- at one cell, or at "
+                f"the effective resolution -- and #1712 does not settle that, "
+                f"which is why this is a mismatch report and not a verdict. "
+                f"Rebuild with `prep_subgrid_orography.py "
+                f"--resolved-cutoff-deg` between {cell:.2f} and "
+                f"{effective:.2f} to make the decomposition explicit, or pass "
+                f"scale_check='off' to accept the file as built."
+                + _sso_drag_hint(block, cell))
+    if mode == "error":
+        raise ValueError(msg)
+    key = (str(path), round(float(grid_spacing_deg), 6))
+    if key not in _SSO_SCALE_REPORTED:
+        _SSO_SCALE_REPORTED.add(key)
+        logger.warning(msg)
+    return msg
+
+
 def load_subgrid_orography(
     grid,
     path: str,
     var_name: str = "SSO_STDH",
+    *,
+    scale_check: str = "warn",
 ) -> jnp.ndarray:
     """Load the subgrid orographic standard deviation, regridded to the grid.
 
@@ -1025,6 +1195,18 @@ def load_subgrid_orography(
         NetCDF file containing the subgrid orographic stddev [m].
     var_name : str, optional
         Variable name (default ``SSO_STDH``; ICON-extpar convention).
+    scale_check : {"warn", "error", "off"}, optional
+        What to do when the file's scale decomposition does not match this
+        grid (#1712).  ``sgh`` is by definition the variance the model does
+        NOT resolve, so a file whose variance runs up to 2 deg read on a
+        ~1.1 deg mesh hands the drag scheme orography the model already has in
+        its own topography, and the wave is launched from it twice.  Nothing
+        checked this before: the loader interpolated and clipped, ignoring the
+        file's construction and the grid entirely.  Default ``"warn"`` reports
+        it with both numbers and continues (every run today is in this state,
+        so refusing by default would stop production without a decision);
+        ``"error"`` refuses; ``"off"`` states that the double count is
+        accepted.
 
     Returns
     -------
@@ -1068,14 +1250,20 @@ def load_subgrid_orography(
         lat_src = ds[lat_var].values.astype(np.float64)
         lon_src = ds[lon_var].values.astype(np.float64)
         sso_data = ds[sso_var].values.astype(np.float64)
+        built = _sso_file_construction(ds)
     finally:
         ds.close()
+
+    # #1712: does this file's scale decomposition belong to THIS grid?
+    _, _, _, _grid_spacing_deg = _target_grid_degrees(grid)
+    _check_sso_scale_decomposition(
+        built, float(_grid_spacing_deg), path, scale_check)
 
     while sso_data.ndim > 2:
         sso_data = sso_data[0]
 
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     sso_data = sso_data[:, lon_order]
 
@@ -1160,7 +1348,7 @@ def load_real_topography(
 
     # Ensure longitude in [0, 360)
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
 

@@ -57,9 +57,17 @@ from legoesm.ocean.vertical import create_ocean_z_star
 
 @pytest.fixture(autouse=True)
 def _x64():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
     orig = jax.config.jax_enable_x64
+    orig_policy = get_policy()
     jax.config.update("jax_enable_x64", True)
+    # JAX_ENABLE_X64 only enables the dtype; it does not select legoESM's
+    # precision policy.  These reference tests (and, specifically, the outer
+    # scan-carry test) promise a uniform-f64 policy in their contract.
+    set_policy(PrecisionPolicy.fp64())
     yield
+    set_policy(orig_policy)
     jax.config.update("jax_enable_x64", orig)
 
 
@@ -369,7 +377,9 @@ class TestNemoSurfaceTermsOnMPAS:
             pf(state, mesh, z_coord, None)
 
     def test_unknown_eice_raises(self, mesh, z_coord, state):
-        pf = make_tke_profiles_mpas(self._card(eice=2))
+        # NEMO modes 0--3 are all admitted: mode 2 is the raw ice-fraction
+        # attenuation added by the ORCA2 assembly.
+        pf = make_tke_profiles_mpas(self._card(eice=4))
         with pytest.raises(ValueError, match="eice"):
             pf(state, mesh, z_coord, self._ice_wind_forcing(state))
 
@@ -420,23 +430,102 @@ class TestNemoSurfaceTermsOnMPAS:
         if bool(jnp.any(land)):
             assert bool(jnp.all(jac[land] == 1.0))
 
+    def test_kernel_prefers_partial_cell_surface_mask(
+            self, mesh, z_coord, monkeypatch):
+        """A partial-cell card owns NEMO's surface tmask on ``z_coord``.
+
+        Plant one surface-inactive cell whose 2-D state mask remains wet so
+        comparing either mask to itself cannot satisfy this bridge test.
+        """
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean as _rest
+        from legoesm.ocean.physics.vertical_mixing import (
+            mpas_integration as mi,
+        )
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+        n = mesh.latCell.shape[0]
+        H = jnp.full((n,), 4000.0)
+        pc = create_partial_cell_coordinate(z_coord, H)
+        st = _rest(
+            mesh,
+            pc,
+            T_water_init_C=20.0,
+            T_deep=2.0,
+            S_uniform=35.0,
+            H_max=4000.0,
+            land_lat_threshold=85.0,
+            bathymetry=H,
+        )
+        wet_index = int(jnp.argmax(st.land_mask.data))
+        planted_active = pc.is_active.at[wet_index, 0].set(False)
+        pc = pc._replace(is_active=planted_active)
+        assert bool(st.land_mask.data[wet_index])
+        assert not bool(pc.is_active[wet_index, 0])
+
+        captured = {}
+        real_kernel = mi.tke_vertical_mixing
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_kernel(*args, **kwargs)
+
+        monkeypatch.setattr(mi, "tke_vertical_mixing", spy)
+        profiles = mi.make_tke_profiles_mpas(self._card())
+        profiles(st, mesh, pc, self._ice_wind_forcing(st, ice=0.0))
+
+        assert bool(jnp.array_equal(
+            captured["surface_tmask"], pc.is_active[..., 0]))
+        assert not bool(jnp.array_equal(
+            captured["surface_tmask"], st.land_mask.data))
+
     def test_eice3_quarter_ice_maps_to_full_attenuation(
-            self, mesh, z_coord, state):
-        """NEMO nn_eice=3 maps fi -> min(4*fi, 1): QUARTER ice must attenuate
-        exactly like mode-1 FULL ice (effective fraction 1.0), and differ
-        from mode-1 quarter ice (raw 0.25). Full-ice-only tests cannot see a
-        broken mapping — fi=1 is a fixed point of min(4*fi,1) (codex MED
-        2026-07-27)."""
+            self, mesh, z_coord, state, monkeypatch):
+        """The bridge hands the kernel NEMO's ``zice_fra`` for the chosen mode.
+
+        ``zdftke.f90:260,262``: mode 1 is ``TANH(10*fr_i)`` and mode 3 is
+        ``MIN(4*fr_i, 1)``, so a QUARTER ice cover attenuates completely under
+        mode 3 and 98.7% under mode 1.  Reading the raw fraction as mode 1 --
+        which is NEMO's mode 2 -- is what this catches.
+
+        Pinned on what the bridge PASSES rather than on the coefficients it
+        returns, because the two modes are no longer separable there: the card
+        holds the surface turbulent energy at the z=0 water surface (NEMO's
+        ``en(1)``), so the shallowest coefficient this bridge returns belongs
+        to the first interior w-level, and NEMO's own background clamp
+        ``MAX(zav, avmb)`` / ``MAX(zav, avtb)`` (``zdftke.f90:684-685``) pins
+        both arms to the same background value there.  Measured on this
+        fixture, every cell and level of both arms is the background floor,
+        so a returned-profile assertion either way is vacuous.  The law
+        itself is pinned in
+        ``test_tke_nemo_terms.py::test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction``.
+        """
+        import math
+
+        from legoesm.ocean.physics.vertical_mixing import (
+            mpas_integration as mi,
+        )
+
         f_q = self._ice_wind_forcing(state, ice=0.25)
-        f_full = self._ice_wind_forcing(state, ice=1.0)
-        _, K3q = make_tke_profiles_mpas(self._card(eice=3))(
-            state, mesh, z_coord, f_q)
-        _, K1f = make_tke_profiles_mpas(self._card(eice=1))(
-            state, mesh, z_coord, f_full)
-        _, K1q = make_tke_profiles_mpas(self._card(eice=1))(
-            state, mesh, z_coord, f_q)
-        assert bool(jnp.allclose(K3q, K1f, rtol=1e-12, atol=0.0))
-        assert not bool(jnp.allclose(K3q, K1q))
+        seen = {}
+        real_kernel = mi.tke_vertical_mixing
+
+        def capture(tag):
+            def spy(*args, **kwargs):
+                seen[tag] = kwargs["ice_frac"]
+                return real_kernel(*args, **kwargs)
+            return spy
+
+        for mode in (1, 3):
+            monkeypatch.setattr(mi, "tke_vertical_mixing", capture(mode))
+            mi.make_tke_profiles_mpas(self._card(eice=mode))(
+                state, mesh, z_coord, f_q)
+
+        # mode 3: MIN(4*0.25, 1) == 1 exactly -- complete attenuation.
+        assert bool(jnp.all(seen[3] == 1.0))
+        # mode 1: TANH(10*0.25), NOT the raw 0.25, and strictly below one.
+        assert bool(jnp.allclose(seen[1], math.tanh(2.5), rtol=1e-12,
+                                 atol=0.0))
+        assert float(jnp.max(seen[1])) < 1.0
 
     def test_partial_cell_zeroes_subseafloor_interfaces(self, mesh, z_coord):
         """Partial-cell geometry: profiles at interfaces below each column's

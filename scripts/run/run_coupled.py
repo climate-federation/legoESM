@@ -592,9 +592,10 @@ def build_parser():
     # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
     # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
     # every one of which resolves through the shared convection factory.
-    # tiedtke is run_amip's default and bechtold is the scheme pinned by
-    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
-    # the two the atmosphere is actually run with.  Derived from the canonical
+    # tiedtke is run_amip's default and the production deck pins one of these
+    # explicitly -- zhang_mcfarlane since it became the CAM6 suite on
+    # 2026-09-23, bechtold before that -- so a coupled run could select NEITHER
+    # of the two the atmosphere is actually run with.  Derived from the canonical
     # set so it cannot drift again.  (The default stays sbm: the comment above
     # documents the empirically coupled-stable suite, which is a statement about
     # the DEFAULT, not a reason to block the others.)
@@ -718,7 +719,7 @@ def build_parser():
                         help="Cloud-fraction scheme (default: sundqvist)")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action="store_true", default=False,
-                        help="Add a bounded Slingo(1987) convective cumulus "
+                        help="Add a bounded Slingo-1987-inspired surrogate convective cumulus "
                              "cloud-fraction source driven by the (lagged) "
                              "convective precip — restores the tropical "
                              "cloud-radiative effect the adjustment convection "
@@ -751,7 +752,7 @@ def build_parser():
                              "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
-                        help="Override convective (Slingo) cloud-cover cap "
+                        help="Override convective (Slingo-1987-inspired surrogate) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--conv-cloud-condensate",
@@ -832,6 +833,14 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    parser.add_argument("--couple-surface-fluxes",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Feed the coupler's tile-blended sensible/latent "
+                             "heat flux to the atmosphere surface tendency "
+                             "(CoupledConfig.couple_surface_fluxes). Default "
+                             "off. Closes the air-sea budget only with the "
+                             "prognostic 3D ocean; the slab/two-layer ocean "
+                             "computes its own fluxes.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -1391,7 +1400,7 @@ def main():
     # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
     # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
     # voronoi(MPAS) support the dynamic ocean too.
-    overrides = {}
+    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
     # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the

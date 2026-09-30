@@ -14,8 +14,9 @@ Mechanism (three layers, so no single loose heuristic carries the guarantee):
     field a bogus value is fed through ``validate_strict`` and must raise
     ``ValueError``. This is immune to AST-matching subtleties.
   * **Structural regression** — each ``EXPECTED_VALIDATED`` field must carry a
-    real *membership* check (``not in``/``in``) in ``validate_strict`` source;
-    ``carbon_cycle`` is the one equality-rejection (``!= "none"``). A plain
+    real *membership* check (``not in``/``in``) in ``validate_strict`` source,
+    or an equality-rejection (``!= "none"``) if listed in
+    ``EQUALITY_VALIDATED`` (empty today). A plain
     cross-field compatibility ``==`` does NOT count (it would otherwise mask a
     deleted membership guard).
   * **Completeness** — scheme-like fields are detected two ways (an inline
@@ -49,12 +50,17 @@ _CONFIG_REL = "packages/coupler/legoesm/driver/config.py"
 EXPECTED_VALIDATED: frozenset[str] = frozenset(
     {
         "radiation",
+        # grid.vertical_coord: 'sigma' | 'hybrid' | 'cam_l32' (the CAM6 L32
+        # table); membership-checked in validate_strict since the cam_l32 lane.
+        "vertical_coord",
         "cloud_scheme",
         "cloud_diagnostic_condensate_scheme",
         # Cloud-fraction RH saturation curve ("liquid" | "mixed_phase"), the
         # #1521 ice-saturation fix; membership-checked in validate_strict.
         "cloud_saturation_scheme",
         "microphysics",
+        # Morrison warm-rain law (kk2000 | seifert_beheng | seifert_beheng_sb2001).
+        "morrison_warm_rain_scheme",
         "convection",
         "turbulence",
         "surface_bulk_scheme",
@@ -62,6 +68,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "surface_stability_scheme",  # already guarded (config.py); ratchet entry
         "land_surface_scheme",
         "gravity_wave_drag",
+        "e3sm_cam_source",  # membership check in validate_strict (background source)
         "physics_parameterization",
         "ic",
         "precision",
@@ -85,9 +92,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "experiment",
     }
 )
-# Validated by equality-rejection rather than a set membership: ``carbon_cycle``
-# is rejected unless ``== "none"`` (coupled mode unsupported in this driver).
-EQUALITY_VALIDATED: frozenset[str] = frozenset({"carbon_cycle"})
+# Validated by equality-rejection rather than a set membership.  Empty since
+# the unimplemented ``carbon_cycle`` stub was deleted (2026-09-26).
+EQUALITY_VALIDATED: frozenset[str] = frozenset()
 
 # Scheme/dispatch fields NOT membership-validated in validate_strict today.
 # Validated at their forcing loader / builder / factory (cf. grid_type at
@@ -108,12 +115,11 @@ KNOWN_UNVALIDATED: frozenset[str] = frozenset(
         # _has_membership below only counts a membership test that HEADS an
         # if/elif.
         "grid_type",        # grids.factory.create_grid (C3)
-        "vertical_coord",   # consumed by the vertical-coordinate builder
         "time_integrator",  # timestepping.dispatch.dispatch_integrator (C3)
     }
 )
 
-# Bogus values for behavioural teeth. ``carbon_cycle`` rejects any non-"none".
+# Bogus value for behavioural teeth.
 _BOGUS = "__nonexistent_scheme__"
 
 # Config classes whose scheme-like str fields the completeness scan covers
@@ -322,8 +328,8 @@ def test_default_config_is_valid() -> None:
     "field",
     sorted(
         EXPECTED_VALIDATED
-        # nested DycoreConfig fields; tested separately below
-        - {"model_type", "discretization", "mpas_vert_advection_scheme"}
+        # nested DycoreConfig / GridConfig fields; tested separately below
+        - {"model_type", "discretization", "mpas_vert_advection_scheme", "vertical_coord"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -339,6 +345,23 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(model_type=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(discretization=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
+
+
+def test_ocean_validate_strict_rejects_bogus_shortwave_selector() -> None:
+    """The nested ocean qsr selector must fail before build/JIT."""
+    from legoesm.ocean.config import OceanExperimentConfig
+
+    config = OceanExperimentConfig.from_dict({"ocean": {"physics": {
+        "shortwave_penetration": {"scheme": _BOGUS},
+    }}})
+    with pytest.raises(ValueError, match="shortwave_penetration.scheme"):
+        config.validate_strict()
+
+
+def test_validate_strict_rejects_bogus_nested_grid() -> None:
+    from legoesm.driver.config import GridConfig
+
+    assert _bogus_raises(grid=GridConfig(vertical_coord=_BOGUS))
 
 
 # ---------------------------------------------------------------------------

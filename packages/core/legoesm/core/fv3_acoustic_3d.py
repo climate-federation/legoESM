@@ -83,6 +83,7 @@ from legoesm.core.fv3_native_state_3d import (
     require_no_remap_needed,
 )
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
     require_f64_jax,  # dtype-uniformity entry gate, reads only static dtypes
     require_km,
     validate_stacked,
@@ -256,19 +257,27 @@ def build_nh_carry(ctx, km: int, hs6) -> dict:
                     {f"hs6[{t}]": h for t, h in enumerate(hs6)})
     n, ng = ctx.n, ctx.ng
     m_a = n + 2 * ng
-    hs6 = jnp.asarray(hs6, dtype=jnp.float64)   # list of faces OR stacked
+    nb = batch_size(ctx)
+    # The NH carry follows the run's STORAGE dtype (fp32/mixed increment
+    # 2): it seeds from hs6 (the topography, already cast to storage dtype
+    # by the context builder) and threads through the f32/f64 step, so its
+    # workspace zeros take hs6's dtype -- NOT a hardcoded float64 that
+    # would mix with an f32 carry. For the certified fp64 run hs6 is f64,
+    # so this is byte-identical (was jnp.asarray(hs6, dtype=jnp.float64)).
+    hs6 = jnp.asarray(hs6)   # list of faces OR stacked; keep incoming dtype
+    _cdt = hs6.dtype
     return {
         "zs": hs6 / FV3_GRAV,
-        "gz": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
-        "zh": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
-        "ws3": jnp.zeros((6, m_a, m_a), dtype=jnp.float64),
-        "ws": jnp.zeros((6, n, n), dtype=jnp.float64),
-        "pk3": jnp.zeros((6, m_a, m_a, km + 1), dtype=jnp.float64),
-        "pe": jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)),
-                        dtype=jnp.float64),
-        "pk": jnp.zeros((6, n, n, km + 1), dtype=jnp.float64),
-        "peln": jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)),
-                          dtype=jnp.float64),
+        "gz": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "zh": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "ws3": jnp.zeros((nb, m_a, m_a), dtype=_cdt),
+        "ws": jnp.zeros((nb, n, n), dtype=_cdt),
+        "pk3": jnp.zeros((nb, m_a, m_a, km + 1), dtype=_cdt),
+        "pe": jnp.zeros((nb,) + tuple(field_shape("pe", n, ng, km)),
+                        dtype=_cdt),
+        "pk": jnp.zeros((nb, n, n, km + 1), dtype=_cdt),
+        "peln": jnp.zeros((nb,) + tuple(field_shape("peln", n, ng, km)),
+                          dtype=_cdt),
     }
 
 
@@ -346,6 +355,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     if a2b_ord not in (2, 4):
         raise ValueError(
             f"acoustic_substep_3d: unknown a2b_ord {a2b_ord!r}")
+    # The timestep enters jit as a traced float64 (x64 default), so every
+    # dt-derived scalar (dt2, rdt, the sim1/riem multipliers) would be f64
+    # and promote the f32 carry (fp32/mixed increment 2). Cast dt to the
+    # run's STORAGE dtype once, here, so all derived quantities follow. For
+    # the certified fp64 run the carry is f64 -> byte-identical.
+    dt = jnp.asarray(dt, dtype=state["delp"].dtype)
     dt2 = 0.5 * dt
     if not hydrostatic and (nh is None or dp0 is None):
         raise ValueError(
@@ -355,6 +370,47 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         require_f64_jax("acoustic_substep_3d[nh]", nh)
 
     tab = _duo_tables(ctx)
+    # Sub-face WINDOW lane (fv3_duo_windows): every horizontal array's seam
+    # pad is rebuilt from its owner ONCE here, at sub-step entry, and never
+    # again inside the sub-step -- the intra-face reach of one sub-step is
+    # 8 cells (static bound, job 9631177) and the window pad exceeds it.
+    # The cross-face firings below then move only their write-sets.
+    # Static branch: with no window bundle the traced program is unchanged.
+    wcomm = getattr(tab, "window_comm", None)
+    if wcomm is not None:
+        # The three entry bundles are refreshed in ONE firing (codex
+        # 2026-09-11): the substep-entry refresh measured 21 ms/step of a
+        # 0.219 s step at 54 ranks, three separate shard_map boundaries.
+        # The refresh is a pure copy of neighbour rows into pad rows, so
+        # merging the dicts changes the packed message layout, never a
+        # value.  ATTRIBUTION: comm.fuse_entry_refresh = False restores
+        # the three calls, for an interleaved A/B in one allocation (both
+        # arms bitwise; selects no physics).
+        bundles = {"state": state}
+        if nh is not None:
+            bundles["nh"] = nh
+        if flux_cap is not None:
+            bundles["flux_cap"] = flux_cap
+        if getattr(wcomm, "fuse_entry_refresh", True):
+            refreshed = wcomm.refresh({
+                (namespace, name): value
+                for namespace, bundle in bundles.items()
+                for name, value in bundle.items()
+            })
+            bundles = {
+                namespace: {
+                    name: refreshed[namespace, name] for name in bundle
+                }
+                for namespace, bundle in bundles.items()
+            }
+        else:
+            bundles = {namespace: wcomm.refresh(bundle)
+                       for namespace, bundle in bundles.items()}
+        state = bundles["state"]
+        if nh is not None:
+            nh = bundles["nh"]
+        if flux_cap is not None:
+            flux_cap = bundles["flux_cap"]
     bd = ctx.bd
     i0 = bd.is_ - bd.isd
     j0 = bd.js - bd.jsd
@@ -408,12 +464,19 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # threaded from this function's own `check_state` flag, so the
         # eager entry can still ask for it and the traced lane cannot
         # accidentally get it.
+        # batched threaded (2026-09-05): without it this phase ran its
+        # per-face LOOP inside every batched step -- on a window-sharded
+        # state GSPMD then gathers every window to one device per
+        # iteration and all-reduces the stack back (the 4 x 117 ms
+        # all-reduces and 276 whole-window permutes per step of job
+        # 9648613, ~60% of the 54-rank step time).
         csw_press = cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2,
                                             ptop=ptop, akap=akap,
                                             cp_air=cp_air,
                                             a2b_ord=a2b_ord,
                                             remap_follows=remap_follows,
-                                            check_delpc=check_state)
+                                            check_delpc=check_state,
+                                            batched=batched)
     else:
         if first_substep:
             # :535-557 -- duo-exchange gz, then save zh = gz (padded).
@@ -430,7 +493,8 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         csw_press = cgrid_nh_pressure_phase_3d(
             ctx, csw, nh["gz"], nh["ws3"], km, dt2=dt2, ptop=ptop,
             akap=akap, cp_air=cp_air, p_fac=p_fac, a_imp=a_imp,
-            dp0=dp0, zs6=nh["zs"], remap_follows=remap_follows)
+            dp0=dp0, zs6=nh["zs"], remap_follows=remap_follows,
+            batched=batched)
         # C4: the C stage comes back with the REBUILT geopotential gz
         # and the refilled ws3 -- thread both into the carry (the
         # in-place twin of the spec's mutation).
@@ -652,7 +716,7 @@ def _check_substep_state(state, ctx, km, it, n_split, hydrostatic,
     ni, nj = bd.ie - bd.is_ + 1, bd.je - bd.js + 1
     fields = (("delp", "pt", "u", "v") if hydrostatic
               else ("delp", "pt", "u", "v", "w"))
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         for name in fields:
             # Compute window only (C1: state[name] is (6, i, j, km)); the
             # corner-diagonal halo carries `sentinel` by construction, so

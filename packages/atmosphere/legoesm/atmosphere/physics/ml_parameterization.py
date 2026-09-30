@@ -22,6 +22,7 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
@@ -150,7 +151,12 @@ def _apply_predicted_diffusivity_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    # Through the shared helper: the pipeline runs this lane INSTEAD of
+    # ordinary turbulence and consumes its tendencies, so a direct call here
+    # left the learned lane on the uncorrected surface law while the slab it
+    # is coupled to used the corrected one -- two different laws across one
+    # interface (codex).
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1],
         v[:, -1],
         T[:, -1],
@@ -159,6 +165,7 @@ def _apply_predicted_diffusivity_turbulence(
         q_sfc,
         rho[:, -1],
         surface_config,
+        z_full[:, -1] - z_half[:, -1],
     )
 
     sflx_u = tau_x

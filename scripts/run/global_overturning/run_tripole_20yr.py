@@ -81,7 +81,9 @@ def main():
             enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0)),
         shortwave_penetration=None)
     oc = LatLonCGridOceanConfig.from_flat(
-        A_h=1e5, C_smag_lap=0.33, A_h_floor=1000.0, A_v=1e-4, K_v=1e-5,
+        # A_h=None = derive from this mesh's narrowest wet cell, anchored so a
+        # ~1 degree mesh keeps 1e5 (resolved below, where the mask exists).
+        A_h=None, C_smag_lap=0.33, A_h_floor=1000.0, A_v=1e-4, K_v=1e-5,
         bottom_drag_r=1e-3, bottom_drag_bbl_thickness=100.0, bottom_drag_bg_velocity=0.1,
         barotropic_solver="implicit_cn", pgf_scheme="adcroft",
         ke_gradient_scheme="hollingsworth",
@@ -90,6 +92,20 @@ def main():
         gm_redi=GMRediConfig(kappa_GM=2400.0, kappa_Redi=2400.0, S_max=0.01,
             visbeck=VisbeckConfig(enabled=False), slope_scheme="centered"),
         physics=physics)
+    if oc.lateral_viscosity.A_h is None:
+        from legoesm.grids.tripole import DEFAULT_MIN_DX_M
+        from legoesm.ocean.state import (
+            resolution_scaled_lateral_viscosity, wet_min_spacing,
+        )
+        _lv = oc.lateral_viscosity
+        _dx_min = wet_min_spacing(geom, mask, clamp_floor_m=DEFAULT_MIN_DX_M)
+        oc = oc._replace(lateral_viscosity=_lv._replace(
+            A_h=resolution_scaled_lateral_viscosity(_dx_min, _lv),
+            A_h_dx_m=_dx_min))
+        print(f"  lateral viscosity from the mesh: "
+              f"A_h={oc.lateral_viscosity.A_h:.6g} m2/s "
+              f"(narrowest wet cell {_dx_min:.1f} m); note A_h_floor="
+              f"{_lv.A_h_floor:g} m2/s still applies to the scaled field")
     model = LatLonCGridOceanModel(geom, z_coord, oc)
     state = rest_state_latlon_cgrid_ocean(geom, z_base, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=5500.0, land_mask_override=mask, H_bathy_override=H_snap)

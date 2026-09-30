@@ -58,6 +58,14 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature 
                                 # to avoid division by near-zero T in clear-sky columns.
                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+# Saturation specific humidity over sea water, as a fraction of the value over
+# fresh water at the same temperature: the water activity of salt water at the
+# ocean's typical salinity (S ~ 35 psu) lowers the saturation vapour pressure
+# by ~2%.  Standard in every bulk air-sea flux algorithm (COARE 3.0, Fairall
+# et al. 2003; Liu-Katsaros-Businger 1979).  Regional salinity of 33-37 psu
+# moves this in the third decimal, which is why it is a constant and not a
+# function of a salinity field.
+q_sat_saline_fraction = 0.98
 T_hom_freeze = 233.15           # Homogeneous freezing threshold [K] (~-40 C): all
                                 # condensate is ice below; standard mixed-phase
                                 # partition ramp spans [T_hom_freeze, T_freeze]
@@ -167,6 +175,55 @@ c_p_seawater_isomip = 3974.0     # [J/(kg*K)] Jenkins 1991 / ISOMIP+
 # CORE-II/OMIP faithful flux path, not legoESM's atmospheric thermodynamics.
 c_p_dry_air_nemo = 1005.0       # [J/(kg*K)] NEMO sbc_phy rCp_dry
 c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
+
+# NEMO 5.0.2 SI3 air--ice bulk-flux constants.  These are deliberately
+# separate from the atmosphere-wide constants above: sbc_phy.F90:37-62 uses
+# this historical set in blk_ice_1/2, and the selectable ``nemo_si3_constant``
+# path must not silently mix it with modern CODATA values.
+c_p_air_ice_nemo = 1000.5       # [J/(kg*K)] sbc_phy.F90:37 rCp_air
+albedo_ocean_nemo = 0.066       # [-] sbc_phy.F90:38 albo
+emissivity_ice_nemo = 0.996     # [-] sbc_phy.F90:56 emiss_i
+wind_floor_ice_nemo = 0.2       # [m/s] sbc_phy.F90:58
+T_triple_nemo = 273.16          # [K] sbc_phy.F90:62 rtt0
+sigma_sb_nemo = 5.67e-8         # [W/(m2*K4)] phycst.F90 stefan
+L_sub_nemo = 2.8344e6           # [J/kg] phycst.F90 rLsub
+
+# Goff saturation over ice, sbc_phy.F90:74-79,665-711.
+goff_ice_A_nemo = -9.09718
+goff_ice_B_nemo = -3.56654
+goff_ice_C_nemo = 0.876793
+goff_ice_D_pressure_hpa_nemo = 6.1071
+T_goff_floor_nemo = 180.0       # [K]
+
+# ORCA1-resolved SI3 surface/bulk selections used by C1D_OMIP_L3.
+bulk_transfer_ice_default = 1.5e-3
+bulk_transfer_ice_orca1 = 1.0e-3
+ice_ocean_drag_orca1 = 5.0e-3
+snow_cover_depth_nemo = 0.02    # [m] icevar.F90:1583
+snow_blow_exponent_orca1 = 0.66
+ice_sw_clear_nemo = 0.18
+ice_sw_cloudy_nemo = 0.35
+ice_sw_thin_threshold_nemo = 0.1  # [m]
+ice_sw_thin_inverse_nemo = 10.0   # [m-1]
+ice_ocean_heat_transfer_nemo = 0.0057
+ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
+ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
+ice_full_cover_margin_nemo = 1.0e-3
+ice_growth_thickness_stop_nemo = 3.0  # [m]
+
+# Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
+albedo_snow_dry_orca1 = 0.85
+albedo_snow_melt_orca1 = 0.75
+albedo_ice_dry_orca1 = 0.64
+albedo_ice_melt_orca1 = 0.53
+albedo_ice_thin_nemo = 0.18
+albedo_ice_pivot_orca1 = 1.0    # [m]
+albedo_ice_thin_break_nemo = 0.05  # [m]
+albedo_snow_decay_dry_nemo = 0.02  # [m]
+albedo_snow_decay_melt_nemo = 0.03  # [m]
+albedo_cloud_quad_nemo = -0.1010
+albedo_cloud_linear_nemo = 0.1933
+albedo_cloud_offset_nemo = -0.0148
 
 # Remaining NEMO-parity constants of the CORE-II/OMIP faithful flux path
 # (values verbatim from NEMO 5.0.1 phycst.F90 / sbc_phy.F90).  They differ

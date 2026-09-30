@@ -227,3 +227,75 @@ def test_loader_depoorter_layout(tmp_path):
         src = float((fwf[m] * np.cos(np.deg2rad(lat2d))).sum())
         tgt = float((g.fwf[m] * np.cos(np.deg2rad(lat2d_t))).sum())
         np.testing.assert_allclose(tgt, src, rtol=1e-10)
+
+
+def test_loader_paired_cells_mpas(tmp_path):
+    """paired_cells=True: 1-D lat/lon are (nCells,) centres, not axes.
+
+    Guards the MPAS wiring: no outer-product meshgrid, and the melt-total
+    renorm uses true target areas against an estimated source area (both
+    m^2) so the absolute total is preserved, not a cos-lat proxy.
+    """
+    netCDF4 = pytest.importorskip("netCDF4")
+    from legoesm import constants
+    from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
+
+    ny, nx = 10, 16
+    lat1 = np.linspace(-78.0, -40.0, ny)
+    lon1 = np.linspace(-180.0 + 11.25, 180.0 - 11.25, nx)
+    lat2d, lon2d = np.meshgrid(lat1, lon1, indexing="ij")
+    rng = np.random.default_rng(7)
+    fwf = np.zeros((12, ny, nx))
+    fwf[:, :3, :] = rng.uniform(1e-5, 1e-3, (12, 3, nx))
+    zmin = np.where(fwf > 0, rng.uniform(-50.0, 200.0, fwf.shape), 0.0)
+    zmax = zmin + rng.uniform(100.0, 500.0, fwf.shape)
+    p = tmp_path / "isf.nc"
+    with netCDF4.Dataset(p, "w") as ds:
+        ds.createDimension("time", 12)
+        ds.createDimension("y", ny)
+        ds.createDimension("x", nx)
+        for n, a in (("nav_lon", lon2d), ("nav_lat", lat2d)):
+            v = ds.createVariable(n, "f8", ("y", "x")); v[:] = a
+        for n, a in (("sornfisf", fwf), ("sodepmin_isf", zmin),
+                     ("sodepmax_isf", zmax)):
+            v = ds.createVariable(n, "f8", ("time", "y", "x")); v[:] = a
+
+    n_cells = 500
+    cell_lat = rng.uniform(-80.0, -30.0, n_cells)
+    cell_lon = rng.uniform(-180.0, 180.0, n_cells)
+    cell_area = np.full(n_cells, 1.2e10)  # quasi-uniform Voronoi cells [m^2]
+
+    g = load_isf_spe_forcing(str(p), cell_lat, cell_lon,
+                             paired_cells=True, target_area=cell_area)
+    # paired: (12, nCells), never the (12, nCells, nCells) meshgrid cross
+    assert g.fwf.shape == (12, n_cells)
+    assert g.zmin.shape == (12, n_cells)
+    # melt-total preserved in m^2 units: sum(out*A_tgt) == sum(src*A_src_est)
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    src_area = estimate_curvilinear_cell_area(lat2d, lon2d)
+    for m in [0, 6, 11]:
+        src = float((fwf[m] * src_area).sum())
+        tgt = float((g.fwf[m] * cell_area).sum())
+        np.testing.assert_allclose(tgt, src, rtol=1e-10)
+    # no melt smeared equatorward of the source shelf band (+2 deg)
+    far = cell_lat > (lat1[2] + 2.0)
+    assert np.all(g.fwf[:, far] == 0.0)
+
+
+def test_curvilinear_cell_area_mid_row_seam():
+    """A dateline jump INSIDE a row (eORCA nav_lon) must not inflate areas."""
+    from legoesm import constants
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    lat1 = np.arange(-89.5, 90.0, 1.0)
+    lon1 = np.roll(np.arange(0.5, 360.0, 1.0), -100)   # seam mid-row
+    lon1 = np.where(lon1 > 180.0, lon1 - 360.0, lon1)
+    lon2d, lat2d = np.meshgrid(lon1, lat1)
+    area = estimate_curvilinear_cell_area(lat2d, lon2d)
+    row = area[90]
+    assert row.max() / row.min() < 1.0 + 1e-9
+    sphere = 4.0 * np.pi * constants.R_earth ** 2
+    np.testing.assert_allclose(area.sum(), sphere, rtol=1e-3)

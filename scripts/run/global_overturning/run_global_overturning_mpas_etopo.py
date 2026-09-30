@@ -268,7 +268,10 @@ def main():
         bottom_drag_r=1e-3,
         bottom_drag_bbl_thickness=100.0,
         bottom_drag_bg_velocity=0.1,    # H1: quadratic-with-floor
-        K_zeta_bih=1e14,                # Voronoi checkerboard damping
+        K_zeta_bih=None,                # Voronoi checkerboard damping: DERIVED
+                                        # from this mesh's spacing (dx^3,
+                                        # anchored on the ico6 mesh where 1e14
+                                        # was tuned)
         equatorial_visc_boost=0.0,
         pgf_scheme="centered",
         implicit_vertical_mixing=True,

@@ -98,34 +98,6 @@ def test_a_live_scheme_has_at_least_one_nonzero_gradient():
         "scheme, is broken")
 
 
-@pytest.mark.slow
-def test_a_flag_gated_parameter_is_detected_dead():
-    """The other direction.  ``EmanuelConfig.downdraft_efficiency`` is read
-    ONLY inside ``if config.enable_unsaturated_downdraft:``, which defaults to
-    False, so it can move nothing — both by gradient and by sweep."""
-    states = build_states(_NLEV)
-    grads, note = scheme_gradients(
-        "convection", "emanuel", "atm.conv.EmanuelConfig",
-        nlev=_NLEV, dt=_DT, states=states)
-    assert note == ""
-    name = "atm.conv.EmanuelConfig.downdraft_efficiency"
-    assert name in grads, "the parameter left the registry; update this test"
-    assert grads[name] == 0.0
-
-    from legoesm.training.param_collector import build_trainable_params
-
-    params = build_trainable_params(
-        active_scheme_keys={"atm.conv.EmanuelConfig"}, tier="aggressive",
-        dtype=jnp.float64)
-    constraint = next(c for c in params.constraints if c.name == name)
-    default = float(params.as_dict()[name])
-    fd = finite_difference_response(
-        "convection", "emanuel", constraint, default, dt=_DT, states=states)
-    assert fd == 0.0, (
-        "the sweep moved the tendency, so the parameter is BLOCKED (read, "
-        "derivative severed) rather than DEAD — the two need different fixes")
-
-
 def test_tunable_object_unwraps_clubb_but_passes_others_through():
     conv = _subconfig_of(_single_scheme_config("convection", "emanuel"),
                          "convection")

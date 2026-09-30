@@ -575,6 +575,166 @@ def nemo_literal_after_level_reconcile(
     return b(corrected * face_mask3)
 
 
+def nemo_reference_depth_reciprocal(
+    depth_ref: jnp.ndarray,
+    face_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO's ``r1_hu_0``/``r1_hv_0``, built the one way NEMO builds them::
+
+        r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp - ssumask(:,:) )
+
+    (``domain.f90:213-214`` of the round-35 GYRE build's compiled ppsrc.)
+
+    This is NOT ``1/hu_0``: NEMO adds one and subtracts the mask before
+    dividing, so on a wet column it computes ``1 / ((hu_0 + 1) - 1)`` and the
+    two roundings of that round trip do not cancel.  Every consumer must use
+    the SAME reciprocal NEMO stored, because ``x * r1_hu_0`` and ``x / hu_0``
+    differ even when ``r1_hu_0`` is the correctly rounded reciprocal.
+
+    On a dry column ``ssumask`` is zero, so the reciprocal is EXACTLY zero
+    and carries the dry-column zero that NEMO's ``SUM`` has no mask for.
+
+    ``face_mask`` is NEMO's surface mask ``ssumask``/``ssvmask``: 2-D, 0 or 1,
+    and the SAME shape as ``depth_ref``.  That equality is checked, because it
+    used to be checked one level up: ``rk3_stage_barotropic_correction``
+    refused a ``face_mask`` whose shape was not the column shape, and round 36
+    removed that argument.  Without the check here a shorter mask BROADCASTS,
+    the operator accepts the result, and the correction leaks onto land --
+    measured at 15 of 15 dry cells wrong by 0.227 on a deliberately mis-shaped
+    mask.
+
+    Two other sites materialise this same expression with their own rounding
+    barriers -- ``vertical.py:243-244`` (live QCO face geometry) and
+    ``vertical.py:308`` (the f-point form, which brackets the denominator
+    separately).  They are NOT routed here: their associations differ from
+    this one and from each other, and this campaign's bar is the last ULP.
+    """
+    depth_ref = jnp.asarray(depth_ref)
+    face_mask = jnp.asarray(face_mask)
+    if face_mask.shape != depth_ref.shape:
+        raise ValueError(
+            f"face_mask {face_mask.shape} must match depth_ref "
+            f"{depth_ref.shape}; a broadcastable but shorter mask silently "
+            "lets the column correction reach dry columns")
+    one = jnp.asarray(1.0, dtype=depth_ref.dtype)
+    return face_mask / (depth_ref + one - face_mask)
+
+
+def _ascending_level_sum(values: jnp.ndarray) -> jnp.ndarray:
+    """Fortran's ``SUM`` over the level axis, accumulated in ascending ``k``.
+
+    ``jnp.sum`` lets XLA choose the reduction shape, and on CPU it picks a
+    tree; gfortran emits an ascending-``k`` accumulation for ``SUM`` over a
+    rank-1 section.  The two agree for short columns and diverge for long
+    ones: measured in round 36, they differ on 5 of OVERFLOW's 606 columns
+    (101 levels) by 4.441e-16, on none of LOCK_EXCHANGE's 390 (21 levels),
+    and on none of GYRE's.
+
+    The scan makes the order explicit rather than left to the backend.  Cost
+    is one add per level, the same arithmetic a tree does, in a fixed order.
+    """
+    total, _ = jax.lax.scan(
+        lambda running, level: (running + level, None),
+        jnp.zeros(values.shape[:-1], dtype=values.dtype),
+        jnp.moveaxis(values, -1, 0))
+    return total
+
+
+def rk3_stage_barotropic_correction(
+    field: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    h_face_ref: jnp.ndarray,
+    r1_depth_ref: jnp.ndarray,
+    stage_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO ``stprk3_stg.f90:522-523,541-542``, the RK3 stage correction::
+
+        zub(ji,jj) = uu_b(ji,jj,Kaa)
+           &       - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+        uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+
+    ROUND 36: this MULTIPLIES by NEMO's stored ``r1_hu_0``.  It used to
+    DIVIDE by ``hu_0`` and then multiply by a separate wet-column mask, which
+    is algebraically the same and is NOT the same rounding.  MEASURED, per
+    card, rather than claimed for all of them: GYRE's u and v faces and
+    LOCK_EXCHANGE's u face go from ``exact=False`` to bit-identical
+    (0 cells, 0.0); OVERFLOW does NOT -- its row is byte-identical before and
+    after, because its residual is owned by the reduction of a 101-level
+    column sum and not by this divisor.  That row is registered OPEN in the
+    tanks gate with its boundary.  The dry-column zero now lives where NEMO
+    keeps it, inside the reciprocal (``domain.f90:213``), which is why there
+    is no longer a separate ``face_mask`` argument: NEMO has no mask inside
+    the ``SUM``.
+    Build the reciprocal with :func:`nemo_reference_depth_reciprocal`, or
+    pass NEMO's own array when a record carries it.
+
+    WHY THIS IS A THIRD SIBLING and not a call to
+    :func:`after_level_column_mean_reconcile`.  The three functions compute the
+    same weighted-mean replacement and differ ONLY in floating-point
+    association, which is the whole point of having more than one: NEMO forms
+    the DIFFERENCE ``zub`` first and adds it, where ``mlf_baro_corr`` subtracts
+    and adds in two separate statements.  Those are not the same rounding, and
+    this campaign's bar is 1e-15.  The file already carries that distinction
+    once (``nemo_literal_after_level_reconcile`` beside the generic kernel) and
+    this is the RK3 member of the same family.
+
+    It is module-level rather than a closure so the fidelity gates can drive it
+    with NEMO's OWN operands and score the result against NEMO's own output --
+    a closure cannot be handed a record.
+
+    Parameters
+    ----------
+    field
+        3-D face velocity at the after level, ``(..., nlev)``.
+    target_mean
+        2-D depth-uniform mean to install: NEMO ``uu_b(:,:,Kaa)``.
+    h_face_ref
+        REFERENCE face thicknesses, NEMO ``e3u_0``, already face-masked.
+    r1_depth_ref
+        2-D reciprocal reference depth, NEMO ``r1_hu_0``/``r1_hv_0``, EXACTLY
+        zero on a dry column.  NEMO has no ``umask`` inside the ``SUM`` at
+        ``stprk3_stg.f90:522`` -- read the statement -- so the dry-column zero
+        has to be here and nowhere else.
+    stage_mask
+        Mask applied to the corrected field, NEMO's ``umask(ji,jj,jk)``.
+
+    Sign/geometry convention: ``h_face_ref > 0``, thicknesses sum downward, and
+    no term changes sign with the z-axis direction -- a weighted-mean
+    replacement, not a flux.
+    """
+    # Both siblings above refuse a shape mismatch and so does this one: it is
+    # exported for gates to drive with oracle arrays, and a ``(..., 1)``
+    # target would broadcast into a spurious extra axis instead of failing.
+    if target_mean.shape != field.shape[:-1]:
+        raise ValueError(
+            f"target_mean {target_mean.shape} must be the column shape "
+            f"{field.shape[:-1]} of field {field.shape}")
+    if h_face_ref.shape != field.shape:
+        raise ValueError(
+            f"h_face_ref {h_face_ref.shape} must match field {field.shape}")
+    if r1_depth_ref.shape != field.shape[:-1]:
+        raise ValueError(
+            f"r1_depth_ref {r1_depth_ref.shape} must be the column shape "
+            f"{field.shape[:-1]}")
+    # The stage mask was exempt from this check until round 33.  Measured,
+    # not assumed, before the check was written: a level axis on ``face_mask``
+    # already raised, and a short ``stage_mask`` raised a TypeError from
+    # inside ``lax.mul`` naming neither operand.  So what this buys is a
+    # NAMED refusal at the boundary of a function that gates drive with oracle
+    # arrays, not the closing of a silent hole.  BLIND SPOT, stated because a
+    # shape check cannot see it: on a square tile a TRANSPOSED mask has the
+    # right shape, passes here, and silently changes the answer -- that
+    # mutation is caught by the tests' transposed-layout arm, not by this.
+    # The level-BROADCAST stage mask is ALLOWED and named, because the model's
+    # own ``legacy_2d_stage_face_mask`` arm passes exactly that.
+    if stage_mask.shape not in (field.shape, field.shape[:-1] + (1,)):
+        raise ValueError(
+            f"stage_mask {stage_mask.shape} must match field {field.shape} "
+            f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
+    own_mean = _ascending_level_sum(field * h_face_ref) * r1_depth_ref
+    return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
+
+
 def bebt_blend(
     eta_new: jnp.ndarray,
     eta_old: jnp.ndarray,
@@ -762,33 +922,16 @@ def _global_dot_batch(
     # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
     # branch is inert for the serial and MPI paths.  ``psum`` is
     # self-transposing => AD-safe, same as ``allreduce(SUM)``.
-    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-    if get_halo_backend() == "spmd":
-        mesh = get_spmd_mesh()
-        if mesh is None:
-            # backend armed "spmd" but no mesh set: an invalid state
-            # reachable only via the public set_halo_backend("spmd")
-            # without a matching set_spmd_mesh.  FAIL FAST rather than
-            # silently return unreduced partial sums inside a sharded
-            # solve (codex LOW) — the supported activators
-            # (activate_latlon_spmd_halo / the cube equivalent) always set
-            # the mesh together with the backend.
-            raise RuntimeError(
-                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
-                "is set; arm it via activate_latlon_spmd_halo(mesh).")
-        # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
-        # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
-        # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
-        # ``("face", ...)`` mesh; in a coupled run that mesh could be armed
-        # while this ocean barotropic PCG runs, and psum'ing over a
-        # non-lat (or replicated) axis would multiply the dots by the
-        # device count or crash (codex HIGH).  When the armed SPMD mesh is
-        # not the lat-band one, fall through to the MPI/local logic below
-        # (ocean fields are never cube-sharded, so the local/allreduce sum
-        # is the correct reduction there).
-        if "lat" in tuple(mesh.axis_names):
-            from legoesm.parallel.reductions import batch_psum_spmd
-            return batch_psum_spmd(local, "lat")
+    # Ocean SPMD lanes (lat-lon "lat" bands / Voronoi "device" blocks): the
+    # canonical gate ``spmd_reduce_axis`` names the axis or returns None so the
+    # cube-atm SPMD mesh (no ocean axis) falls through to the MPI/local logic
+    # below (ocean fields are never cube-sharded); it raises on a backend
+    # armed "spmd" without a mesh rather than silently returning partial sums.
+    from legoesm.parallel.reductions import spmd_reduce_axis
+    _ax = spmd_reduce_axis()
+    if _ax is not None:
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local, _ax)
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (

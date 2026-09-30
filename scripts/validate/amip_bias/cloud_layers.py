@@ -165,7 +165,13 @@ def resolved_cloud_config(exp):
         cloud_fsd=exp["cloud_fsd"],
         cloud_partial_coverage_optics=exp["cloud_partial_coverage_optics"],
         clubb_cf_override_strength=exp["cloud_clubb_cf_override_strength"],
-        clubb_cf_override_floor=exp["cloud_clubb_cf_override_floor"])
+        clubb_cf_override_floor=exp["cloud_clubb_cf_override_floor"],
+        # runs older than the lever have no key: None => scheme default (off)
+        cover_condensate_q_ref=exp.get("cloud_cover_condensate_q_ref"),
+        # FV-pipeline-only knobs (no ExperimentConfig field records them yet):
+        # None => scheme default, same as every run so far
+        conv_cloud_coeff=exp.get("cloud_conv_cloud_coeff"),
+        Nc_default=exp.get("cloud_Nc_default"))
 
 
 def cell_order(z, ncell):
@@ -190,8 +196,8 @@ def cell_order(z, ncell):
 def analyse_checkpoint(path, cloud_cfg, ncell):
     """Per-cell cover, radiation-visible vs prognostic paths, and the layer
     fields needed for profiles, from one checkpoint (in global mesh order)."""
-    from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
-    from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties, cover_saturation_mixing_ratio)
     from legoesm import constants
 
     z = np.load(path)
@@ -232,14 +238,8 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
     cf = np.asarray(props.cloud_fraction)
     lwp_rad, iwp_rad = radiation_paths(props, cloud_cfg)
     g = constants.g
-    if cloud_cfg.saturation_scheme == "liquid":
-        q_sat = np.asarray(saturation_mixing_ratio(T, p_full))
-    else:
-        # profile RH is reported against liquid saturation below 0 C and ice
-        # above the cold threshold, i.e. the curve the scheme itself used
-        q_sat = np.asarray(saturation_mixing_ratio(T, p_full))
-        cold = T < cloud_cfg.T_cold
-        q_sat = np.where(cold, np.asarray(saturation_mixing_ratio_ice(T, p_full)), q_sat)
+    # the curve the cover scheme itself measured RH against (shared dispatch)
+    q_sat = np.asarray(cover_saturation_mixing_ratio(T, p_full, cloud_cfg))
     out = layer_cover(cf, p_full)
     out.update({
         "iwp_prog": (q_i * dp / g).sum(1), "lwp_prog": (q_c * dp / g).sum(1),
@@ -248,6 +248,18 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
         "iwp_clear": np.where(cf <= 0.0, q_i * dp / g, 0.0).sum(1),
         "lwp_clear": np.where(cf <= 0.0, q_c * dp / g, 0.0).sum(1),
         "cf": cf, "rh": q_v / np.maximum(q_sat, 1e-10), "q_c": q_c,
+        # The SATURATED-BUT-DRY census (GLM review).  Xu-Randall multiplies an
+        # RH term by a condensate term, so a layer at or above saturation with
+        # no condensate gets cover 0 where Sundqvist gives 1.  WRF's
+        # cal_cldfra1 carries an explicit RH>=1 -> 1 cutoff that this
+        # differentiable core omits.  How much real cloud that deletes is a
+        # COUNT, not an argument: layers at RH >= 1 whose total condensate is
+        # below the 5e-6 kg/kg radiative floor, weighted by their mass.
+        "sat_dry_frac": (((q_v / np.maximum(q_sat, 1e-10)) >= 1.0)
+                         & ((q_c + q_i) < 5.0e-6)).mean(),
+        "sat_frac": ((q_v / np.maximum(q_sat, 1e-10)) >= 1.0).mean(),
+        "q_cond_high": np.where(p_full < 44000.0, q_c + q_i, np.nan),
+        "cf_high_layers": np.where(p_full < 44000.0, cf, np.nan),
         "sigma_full": 0.5 * (vg[1][1:] + vg[1][:-1]),
         "T_lowest": T[:, -1],
     })
@@ -284,6 +296,16 @@ def main(argv=None):
     ap.add_argument("--days", default=None,
                     help="comma-separated checkpoint days (default: all)")
     ap.add_argument("--profile-levels", type=int, default=12)
+    ap.add_argument("--override-scheme", default=None,
+                    choices=("sundqvist", "xu_randall"),
+                    help="replay the SAME checkpoint under a different cover "
+                         "closure, every other resolved field held fixed. The "
+                         "output then describes a counterfactual, not the run.")
+    ap.add_argument("--override-saturation", default=None,
+                    choices=("liquid", "mixed_phase"),
+                    help="likewise for the saturation curve the cover is "
+                         "diagnosed against, so a pair can be scored on the "
+                         "curve a LATER deck uses rather than the run's own.")
     args = ap.parse_args(argv)
 
     import jax
@@ -292,8 +314,16 @@ def main(argv=None):
     rundir = f"{rb.ROOT}/{args.run}"
     exp = json.load(open(f"{rundir}/experiment_config.json"))
     cloud_cfg = resolved_cloud_config(exp)
+    for _fld, _new in (("scheme", args.override_scheme),
+                       ("saturation_scheme", args.override_saturation)):
+        if _new and _new != getattr(cloud_cfg, _fld):
+            print(f"!!! COUNTERFACTUAL: {_fld} overridden "
+                  f"{getattr(cloud_cfg, _fld)!r} -> {_new!r}; the run itself "
+                  f"used {getattr(cloud_cfg, _fld)!r}. Every other field is "
+                  f"the run's.")
+            cloud_cfg = cloud_cfg._replace(**{_fld: _new})
     print(f"=== {args.run}: cloud config RESOLVED from experiment_config.json ===")
-    for k in ("scheme", "rh_crit", "saturation_scheme", "q_c_diagnostic",
+    for k in ("scheme", "rh_crit", "saturation_scheme", "cover_condensate_q_ref", "q_c_diagnostic",
               "cloud_vertical_overlap_optics", "cloud_n_subcolumns", "convective_cloud"):
         print(f"  {k} = {getattr(cloud_cfg, k)!r}")
 
@@ -340,6 +370,32 @@ def main(argv=None):
         pub = f"{cmor[name]:10.1f}" if cmor else f"{'--':>10s}"
         print(f"{name:18s}" + "".join(f"{v:8.1f}" for v in row)
               + pub + f"{ice_un:11.2f}{liq_un:11.2f}")
+
+    # GLM review, two counts the cover table cannot answer.
+    print(f"\n  saturated layers: {100 * float(mean['sat_frac']):.2f} % of all "
+          f"(column, level) points are at RH >= 1 against the cover curve; "
+          f"{100 * float(mean['sat_dry_frac']):.2f} % are saturated AND carry "
+          f"less condensate than the 5e-6 kg/kg radiative floor.")
+    print("    The second number is the cloud a condensate-reading closure "
+          "deletes and a pure-RH closure keeps; it is an UPPER bound on the "
+          "loss, since the floor would give those layers only minimal water.")
+    _qh = np.asarray(mean["q_cond_high"])
+    _cfh = np.asarray(mean["cf_high_layers"])
+    _ok = np.isfinite(_qh) & np.isfinite(_cfh)
+    _q, _cff = _qh[_ok], _cfh[_ok]
+    print("  high-cloud cover (above 440 hPa) by how much condensate the layer "
+          "carries -- cover riding on the floor is the closure's doing, cover "
+          "riding on real ice is the curve's or the model's:")
+    _edges = [0.0, 1e-7, 1e-6, 5e-6, 2e-5, 1e-4, np.inf]
+    for _lo, _hi in zip(_edges[:-1], _edges[1:]):
+        _m = (_q >= _lo) & (_q < _hi)
+        if not _m.any():
+            continue
+        _share = float((_cff[_m]).sum() / max(_cff.sum(), 1e-30))
+        print(f"    q_cond {_lo:9.1e} - {_hi:9.1e} kg/kg : "
+              f"{100 * float(_m.mean()):6.2f} % of high layers, "
+              f"mean cover {float(_cff[_m].mean()):.3f}, "
+              f"{100 * _share:6.2f} % of all high cover")
 
     print(f"\n=== {args.run}: column condensate path [g/m2] at the three stages ===")
     print("  prog = tracers; opt = after the radiative floor and in-cloud "

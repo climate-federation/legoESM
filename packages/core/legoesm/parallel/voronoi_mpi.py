@@ -39,7 +39,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.state import (
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPAS_SFC_DIAG_MPI_UNPUBLISHED,
@@ -73,6 +73,7 @@ from legoesm.parallel.halo_exchange_voronoi import (
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
+    broadcast_allreduce_sum,
     global_min_mpi,
     global_max_mpi,
     global_sum_mpi,
@@ -469,6 +470,16 @@ class MPASOceanHaloRefresh(NamedTuple):
     cells: Callable
     both: Callable
     vertices: Callable
+    # Distributed-reduction context carried WITH the refresh so the step's
+    # reduction sites (barotropic PCG dots / mass projection, eta-floor
+    # redistribution, conservation fixer) need no transport-specific global
+    # accessor: ``owned_mask_*`` weight the local partial sums (halo rows
+    # excluded), ``global_sum(list) -> list`` is the cross-rank SUM
+    # (allreduce on the MPI lane, ``psum`` on the SPMD lane).  ``None`` keeps
+    # the historical layout-accessor / ``is_multi_process`` paths.
+    owned_mask_cells: jnp.ndarray | None = None
+    owned_mask_edges: jnp.ndarray | None = None
+    global_sum: Callable | None = None
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -504,8 +515,15 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
             return tuple(fields)
         return tuple(_vx.exchange_vertex_field(f) for f in fields)
 
+    def _global_sum(vals):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        return batch_allreduce_mpi(list(vals), op="sum")
+
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
-                                vertices=_vertices)
+                                vertices=_vertices,
+                                owned_mask_cells=layout.owned_mask_cells,
+                                owned_mask_edges=layout.owned_mask_edges,
+                                global_sum=_global_sum)
 
 
 def gather_voronoi_field(
@@ -634,8 +652,13 @@ def _fix_mass_mpi(
     state_old: MPASHydrostaticState,
     owned_area: jnp.ndarray,
     total_area: float,
+    sigma_coord=None,
 ) -> MPASHydrostaticState:
-    """Global mass fixer: sum only owned cells, allreduce across ranks.
+    """Global DRY-mass fixer: sum only owned cells, allreduce across ranks.
+
+    Conserves ``∫ (p_s - g*column water) dA`` when ``sigma_coord`` is
+    given (the serial ``_fix_mass_mpas_hydro`` convention, user decision
+    2026-09-28); ``None`` keeps the legacy total-mass sum.
 
     Parameters
     ----------
@@ -657,8 +680,14 @@ def _fix_mass_mpi(
     # JAX_ENABLE_X64 off, ``float64`` falls back to float32 — same as serial.)
     acc = jnp.float64
     area_acc = owned_area.astype(acc)
-    local_mass_old = jnp.sum(state_old.p_s.data.astype(acc) * area_acc)
-    local_mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
+    if sigma_coord is not None:
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_old = dry_surface_pressure(state_old.p_s.data, state_old.tracers, sigma_coord)
+        ps_new = dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma_coord)
+    else:
+        ps_old, ps_new = state_old.p_s.data, state_new.p_s.data
+    local_mass_old = jnp.sum(ps_old.astype(acc) * area_acc)
+    local_mass_new = jnp.sum(ps_new.astype(acc) * area_acc)
     mass_old, mass_new = batch_allreduce_mpi(
         [local_mass_old, local_mass_new], op="sum",
     )
@@ -666,6 +695,12 @@ def _fix_mass_mpi(
     # fp64 correction; the storage-precision cast at the end of ``_step``
     # returns p_s to its carry dtype (mirrors serial cast_pytree(..., "storage")).
     correction = (mass_old - mass_new) / total_area
+    if sigma_coord is not None:
+        from legoesm.core.conservation import shift_ps_keep_tracer_mass
+        ps_new, tr_new = shift_ps_keep_tracer_mass(
+            state_new.p_s.data, state_new.tracers, sigma_coord, correction)
+        return state_new._replace(p_s=state_new.p_s.replace(data=ps_new),
+                                  tracers=tr_new)
     p_s_fixed = state_new.p_s.replace(
         data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
@@ -1153,27 +1188,26 @@ def make_voronoi_mpi_step(
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):
                 sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
+            _ps_phys = state_phys_in.p_s.data + dt * _pt.dp_s_dt.data
+            _tr_phys = state_phys_in.tracers
+            if (state_phys_in.tracers is not None
+                    and _pt.tracer_tendencies is not None):
+                # water tendencies carry their mass (mirrors the serial
+                # _step_jit; shared helper)
+                from legoesm.core.conservation import apply_physics_water_mass
+                _tr_phys, _ps_phys = apply_physics_water_mass(
+                    state_phys_in.tracers, _pt.tracer_tendencies, _ps_phys,
+                    sigma_coord, dt)
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
                 T=state_phys_in.T.replace(
                     data=state_phys_in.T.data + dt * _pt.dT_dt.data),
-                p_s=state_phys_in.p_s.replace(
-                    data=state_phys_in.p_s.data + dt * _pt.dp_s_dt.data),
+                p_s=state_phys_in.p_s.replace(data=_ps_phys),
                 phis=state_new.phis,
                 v=state_new.v,
-                tracers=state_phys_in.tracers,
+                tracers=_tr_phys,
             )
-            if (state_new.tracers is not None
-                    and _pt.tracer_tendencies is not None):
-                state_new = state_new._replace(tracers={
-                    k: (state_new.tracers[k].replace(
-                            data=state_new.tracers[k].data
-                            + dt * _pt.tracer_tendencies[k].data)
-                        if k in _pt.tracer_tendencies
-                        else state_new.tracers[k])
-                    for k in state_new.tracers
-                })
 
         # Global mass fixer BEFORE the floors, mirroring the serial ordering
         # (codex 2026-07-26 round 2, finding 5): the fixer touches ONLY p_s
@@ -1186,6 +1220,7 @@ def make_voronoi_mpi_step(
         if config.fix_mass:
             state_new = _fix_mass_mpi(
                 state_new, state, _owned_area, _total_area_global,
+                sigma_coord=sigma_coord,
             )
 
         # Floors: temperature and tracer non-negativity (advection is not
@@ -1206,9 +1241,7 @@ def make_voronoi_mpi_step(
             # decomposition-independent; owned-mask weighting keeps halo cells
             # out of the budget exactly like the mass fixer.  dp = TRUE layer
             # mass (post-mass-fix p_s; non-positive dp zero-weighted).
-            from legoesm.core.conservation import (
-                apply_water_positivity, broadcast_allreduce_sum,
-            )
+            from legoesm.core.conservation import apply_water_positivity
             _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
             _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
             _owned = layout.owned_mask_cells[:, None]
@@ -1229,13 +1262,21 @@ def make_voronoi_mpi_step(
                     config, "conservative_tracer_clamp", False),
                 energy_consistent=getattr(
                     config, "energy_consistent_moisture_clip", False),
+                area=_owned_area,
                 sum_fn=_mpi_owned_sum)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         # (mass fixer moved above the floors — codex round-2 finding 5.)
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")),
+                phys_state_out, sfc_diag)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",

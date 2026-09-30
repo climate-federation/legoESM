@@ -416,15 +416,6 @@ class TestPpermuteTilingGuard:
 class TestCoupledConfigValidation:
     """ModelDriver must reject unsupported coupled modes with actionable errors."""
 
-    def test_carbon_cycle_rejected(self):
-        ec = ExperimentConfig(carbon_cycle="interactive")
-        with pytest.raises(ValueError, match="carbon_cycle.*not implemented"):
-            ec.validate_strict()
-
-    def test_carbon_cycle_none_passes(self):
-        ec = ExperimentConfig(carbon_cycle="none")
-        ec.validate_strict()  # Should not raise
-
     def test_default_config_passes_strict(self):
         ec = ExperimentConfig()
         ec.validate_strict()  # Defaults should always be valid
@@ -479,7 +470,7 @@ class TestMixedPrecisionSemantics:
             assert policy.accumulate == jnp.float64
             assert policy.control == jnp.float64
 
-    @pytest.mark.parametrize("mode", ["fp32", "fp64"])  # #1665: mixed refused
+    @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_apply_precision_activates_policy(self, mode):
         """apply_precision must set global policy and enable x64 when needed."""
         from legoesm.runtime.precision import apply_precision
@@ -533,7 +524,7 @@ class TestMixedPrecisionSemantics:
         policy = get_runtime_precision_policy()
         assert policy["ml"] == jnp.bfloat16
 
-    @pytest.mark.parametrize("mode", ["fp32", "fp64"])  # #1665: mixed refused
+    @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_precision_policy_matches_mode(self, mode):
         """PrecisionPolicy must match the requested mode.
 

@@ -117,6 +117,11 @@ def _stable_dry_column(ncol: int = 2, nlev: int = 24):
     )
 
 
+# Schemes whose parcel needs a level of neutral buoyancy inside the column
+# (KF: cloud-top search; CAM6 ZM: buoyan_dilute tentative-top search).
+_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane")
+
+
 def _capped_column(
     ncol: int = 2,
     nlev: int = 24,
@@ -198,7 +203,8 @@ def _run_zm(T, q, pf, ph, u, v, **kw):
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     out, _ = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, v, cpp, DT, ZhangMcFarlaneConfig(**kw),
+        T, q, pf, ph, u, v, cpp, DT,
+        ZhangMcFarlaneConfig(**{"land_fraction": "none", **kw}),  # ocean columns
     )
     return out
 
@@ -314,10 +320,11 @@ def test_tier2_cloud_water_source_non_negative(name):
 def test_tier2_destabilized_column_net_heats(name):
     """A CAPE-positive (or moisture-convergent, for Kuo) column should
     produce net column heating: ∫ c_p dT/dt dp/g > 0."""
-    # KF needs a finite LNB (tropopause); the bare _column has none — see
-    # _capped_column. All other schemes are unchanged on the shared column.
+    # KF and CAM6 ZM need a finite LNB (tropopause); the bare _column has
+    # none — see _capped_column (ZM's buoyan_dilute finds no tentative cloud
+    # top on a column buoyant up to the model top, so CAPE = 0 there).
     T, q, pf, ph, u, v = (
-        _capped_column() if name == "kain_fritsch" else _column()
+        _capped_column() if name in _LNB_SCHEMES else _column()
     )
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
@@ -341,10 +348,11 @@ def test_tier2_destabilized_column_net_heats(name):
 def test_tier2_mass_flux_schemes_net_dry(name):
     """Mass-flux / buoyancy schemes remove vapor (it becomes cloud water):
     ∫ dq_v/dt dp/g <= 0 on a convecting column."""
-    # KF needs a finite LNB (tropopause); the bare _column has none — see
-    # _capped_column. All other schemes are unchanged on the shared column.
+    # KF and CAM6 ZM need a finite LNB (tropopause); the bare _column has
+    # none — see _capped_column (ZM's buoyan_dilute finds no tentative cloud
+    # top on a column buoyant up to the model top, so CAPE = 0 there).
     T, q, pf, ph, u, v = (
-        _capped_column() if name == "kain_fritsch" else _column()
+        _capped_column() if name in _LNB_SCHEMES else _column()
     )
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
@@ -411,42 +419,20 @@ def test_tier3_column_mse_conserved(name):
         f"{name}: MSE residual rel={rel}, abs={mse_tend} W/m²"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DESIGN GAP (codex review-1 #4): the bulk mass-flux schemes "
-        "ZM / Bechtold do NOT close column total water "
-        "∫(dq_v + dq_c) dp/g in-scheme. Measured net water (vapor removed in "
-        "excess of emitted cloud water) on the unstable validator column: "
-        "ZM ~ -0.68 mm/day-equiv, Bechtold ~ -6.4. The shared "
-        "apply_mass_flux_kernel compensating-subsidence term is vertical "
-        "TRANSPORT whose column integral need not vanish, and the emitted "
-        "dq_c is only the DETRAINED condensate — so for ZM/Bechtold the "
-        "column budget is intended to close only once the orchestrator + "
-        "microphysics own the precip sink.  ZM is asserted FIRST in the loop "
-        "below, so it carries this strict-xfail.  KF is NO LONGER a member of "
-        "this leak set — its coupled condensation water+energy budget now closes "
-        "∫(dq_v+dq_c) to MACHINE PRECISION in-scheme (gated by "
-        "test_tier3_kf_precip_efficiency_leak_removed), so it is excluded from "
-        "the leaking loop here.  BECHTOLD graduated 2026-07-22 (implicit_flux "
-        "default + released detrained-condensate latent — the KF remedy; gated "
-        "by test_bechtold_column_conservation), leaving ZM as the sole member."
-    ),
-)
-def test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN():
-    """# BUG (contract): ZM leaks column total water in-scheme.
-
-    KF (2026-07-13) and Bechtold (2026-07-22) used to leak here too but now
-    close in-scheme (see test_tier3_kf_precip_efficiency_leak_removed and
-    tests/unit/test_bechtold_column_conservation.py) and are excluded.
+def test_tier3_zm_total_water_closed_in_scheme():
+    """The CAM6 ZM port closes column total water in-scheme (vapour + cloud +
+    explicit rain), like KF (2026-07-13) and Bechtold (2026-07-22); the former
+    strict-xfail ("ZM leaks in-scheme") is retired with the surrogate scheme.
     """
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
     dp = _dp(ph)
     for name in ("zhang_mcfarlane",):
         out = _all_schemes(T, q, pf, ph, u, v, None, mc)[name]()
-        net = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
+        # CAM6 ZM emits its rain explicitly (dq_r_conv_dt): vapour + cloud +
+        # rain closes the column water budget.
+        net = _col_int(out.dq_v_dt + out.dq_c_conv_dt + out.dq_r_conv_dt, dp)
         scale = _col_int(jnp.abs(out.dq_v_dt), dp) + 1e-15
         assert jnp.all(jnp.abs(net) / scale < 1e-3), \
             f"{name}: total water not closed: {net}"
@@ -481,15 +467,17 @@ def test_tier3_kf_precip_efficiency_leak_removed():
     dp = _dp(ph)
     sch = _all_schemes(T, q, pf, ph, u, v, None, mc)
     out_kf = sch["kain_fritsch"]()
-    out_zm = sch["zhang_mcfarlane"]()
+    Tc, qc, pfc, phc, uc, vc = _capped_column()
+    out_zm = _all_schemes(Tc, qc, pfc, phc, uc, vc, None, mc)["zhang_mcfarlane"]()
+    dp_zm = _dp(phc)
     net_kf = _col_int(out_kf.dq_v_dt + out_kf.dq_c_conv_dt, dp)
-    net_zm = _col_int(out_zm.dq_v_dt + out_zm.dq_c_conv_dt, dp)
-    # (1) Column TOTAL WATER closes to machine precision (was +3.16e-4 leak),
-    #     now far below ZM's own compensating-subsidence transport residual.
+    net_zm = _col_int(out_zm.dq_v_dt + out_zm.dq_c_conv_dt + out_zm.dq_r_conv_dt, dp_zm)
+    # (1) Column TOTAL WATER closes to machine precision (was +3.16e-4 leak);
+    #     the CAM6 ZM port closes its own budget (vapour + cloud + rain) too.
     assert jnp.all(jnp.abs(net_kf) < 1.0e-8), \
         f"KF column-water residual {net_kf} not machine-zero — budget leak"
-    assert jnp.all(jnp.abs(net_kf) <= jnp.abs(net_zm) + 1e-12), \
-        f"KF residual {net_kf} > ZM transport residual {net_zm}: leak suspected"
+    assert jnp.all(jnp.abs(net_zm) < 1.0e-8), \
+        f"ZM column-water residual {net_zm} not machine-zero — budget leak"
     # (2) Column MSE closes to machine precision (was -728 W/m^2 sink): the
     #     +L_v condensation warming offsets the -L_v vapor sink; the -L_v re-evap
     #     cooling offsets the +L_v re-evap moistening.  This is the ENERGY half
@@ -629,7 +617,7 @@ _GRAD_CASES = {
     "dca_ahmed_neelin": (0.6, lambda T, q, pf, ph, u, v, w, mc, x:
                          _scalar_loss(_run_dca_ahmed(T, q, pf, ph, a_mm_per_hr=x))),  # slope a
     "zhang_mcfarlane": (3600.0, lambda T, q, pf, ph, u, v, w, mc, x:
-                        _scalar_loss(_run_zm(T, q, pf, ph, u, v, tau_cape=x))),  # tau_cape [s]
+                        _scalar_loss(_run_zm(T, q, pf, ph, u, v, tau=x))),  # tau [s]
     "emanuel": (1.0, lambda T, q, pf, ph, u, v, w, mc, x:
                 _scalar_loss(_run_emanuel(T, q, pf, ph, alpha_closure=x))),   # CBMF closure slope
     "kain_fritsch": (1800.0, lambda T, q, pf, ph, u, v, w, mc, x:
@@ -650,14 +638,17 @@ _GRAD_CASES = {
 _GRAD_SUBCAP = {"kain_fritsch", "bechtold"}
 
 
+def _grad_column(name):
+    if name in _GRAD_SUBCAP:
+        return _column(T_sfc=295.0, q_sfc=11.0e-3, lapse_rate=6.2, rh_scale_m=2500.0)
+    if name in _LNB_SCHEMES:
+        return _capped_column()
+    return _column()
+
+
 @pytest.mark.parametrize("name", list(_GRAD_CASES))
 def test_tier4_grad_through_tunable_finite_nonzero(name):
-    if name in _GRAD_SUBCAP:
-        T, q, pf, ph, u, v = _column(
-            T_sfc=295.0, q_sfc=11.0e-3, lapse_rate=6.2, rh_scale_m=2500.0,
-        )
-    else:
-        T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _grad_column(name)
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)
@@ -829,7 +820,7 @@ def test_tier5_ahmed_neelin_below_critical_quiescent():
 def test_tier5_destabilized_response_nonzero(name):
     """The flip side of quiescence: the destabilized / convergent column
     must produce a clearly non-zero response."""
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.1)
     mc = jnp.full((ncol, nlev), 5.0e-6)

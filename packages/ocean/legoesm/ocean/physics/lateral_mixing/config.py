@@ -33,7 +33,6 @@ __param_spec__ = {
         "excluded": {
             "B_h_momentum": "default 0 = disabled/off (enable via config, not training)",
             "B_h_tracer": "default 0 = disabled/off (enable via config, not training)",
-            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
@@ -67,6 +66,7 @@ __param_spec__ = {
             "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
             "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
+            "redi_aht0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO 5.0.1 ldftra.F90:415-441 nn_aht_ijk_t=21 (Treguier 1997 scaling); aht0 = 1/2*rn_Ud*rn_Ld; ORCA1 = 900 (0.5*0.018 m/s*100 km); bounds as the eddy-induced aei0", "shape": None},
         },
     },
 }
@@ -109,8 +109,7 @@ class BiharmonicConfig(NamedTuple):
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
-    enforce_cfl: bool = False
-    cfl_dt_estimate: float = 3600.0
+    enforce_cfl: bool = True    # Cap B at the explicit limit for the run's dt
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
     compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 
@@ -275,6 +274,13 @@ class GMRediConfig(NamedTuple):
     # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
     # mutually exclusive with visbeck.enabled (dispatch raises on both).
     treguier: TreguierConfig = TreguierConfig()
+    # Opt-in NEMO 5.0.1 ldftra.F90:415-441 (nn_aht_ijk_t=21).
+    # Requires unfloored Treguier and the native rotated-Laplacian path.
+    redi_coefficient: str = "constant"  # constant (existing overrides) | nemo21
+    redi_aht0: float = 900.0  # ORCA1: 0.5 * rn_Ud(0.018) * rn_Ld(100 km)
+    # Exact NEMO ff_f at the NE corner of each T cell, same shape as T[:,:,0].
+    # Supplied from mesh gphif for nemo21; no averaged-f fallback.
+    redi_f_f: object = None
     slope_scheme: str = "triads"     # "triads" (default), "centered", or "nemo_iso_lap"
     # GM eddy-induced (bolus) advection FORM for slope_scheme="nemo_iso_lap"
     # (NEMO ldf_eiv_trp): "centred" (default, BYTE-IDENTICAL) applies the bolus
@@ -368,7 +374,7 @@ class GMRediConfig(NamedTuple):
     # of mld_rho_c from the ~10 m reference; "n2_integral" = NEMO's EXACT
     # zdfmxl.F90:91-105 criterion integral(MAX(N^2,0) dz) >= g*mld_rho_c/rho0
     # (in-situ adiabatic N^2 = rn2b, plus the MAX(N^2,0) clamp).  Set on the
-    # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
+    # NEMO-identity DINO and GYRE cards; other recipes keep "rho_c".  Dispatch raises on
     # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
     mld_criterion: str = "rho_c"
     # N^2 fed to the NEMO-native isopycnal slopes (ldf_slp).  NEMO's ldfslp
@@ -399,12 +405,12 @@ class GMRediConfig(NamedTuple):
     # Arithmetic form of ldfslp's horizontal metric application. ``division``
     # is the historical path. ``nemo_reciprocal`` evaluates and carries the
     # reciprocal as a separate fp64 value before multiplying, matching
-    # domhgr.F90:140 + ldfslp.F90:242-243. The DINO NEMO cards opt in.
+    # domhgr.F90:140 + ldfslp.F90:225-226. NEMO-identity DINO and GYRE cards opt in.
     slope_metric_evaluation: str = "division"
     # Vertical face thickness used by ldfslp's 7 km stability limiter.
     # ``static_face`` is the historical partial-cell min construction.
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
-    # full-step face thickness before the limiter. The DINO NEMO cards opt in.
+    # full-step face thickness before the limiter. NEMO-identity DINO and GYRE cards opt in.
     slope_face_thickness_evaluation: str = "static_face"
     # Horizontal face thickness used by traldf_iso's diagonal zA11/zA22
     # flux coefficients. ``tpoint_jacobian`` preserves the historical e3t
@@ -453,7 +459,7 @@ class GMRediConfig(NamedTuple):
     # Arithmetic topology of traldf_iso's A33 slope-square coefficient.
     # ``normalized_square`` preserves the historical exponent form;
     # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
-    # expression. Only the two DINO NEMO cards opt in.
+    # expression. NEMO-identity DINO and GYRE cards opt in.
     redi_a33_evaluation: str = "normalized_square"
     # Stage of the W-position native slopes consumed by the Redi vertical
     # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
