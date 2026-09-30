@@ -65,13 +65,22 @@ ladder never reads. **The construction is verified rather than asserted**: at
 round 77's merge commit `ff08f47a9`, and differ from the lane tip only by the
 13 lines of the stated after-SSH field.
 
-| point | GYRE commit | kt10 stage-3 `T` max | `S` max | `T` rms | `S` rms | rows unchanged / toward / away | verdict |
+| point | GYRE commit | kt10 stage-3 `T` max | `S` max | `T` rms | `S` rms | rows on `max_abs`: unchanged / toward / away | verdict |
 |---:|---|---|---|---|---|---|---|
 | 0 | (pre-merge `1142d4182`) | `0.9838385161101275` | `0.22099092586135072` | `0.010433315642886491` | `0.003029909179584292` | 200 / 0 / 0 | good |
 | 20 | `381c4e396` shortwave source association | `0.9838385161101275` | `0.22099092586135072` | `0.010433315642886491` | `0.003029909179584292` | **200 / 0 / 0** | **good** |
 | 21 | `0ebdb6d83` rmxl_min arms + TKE card opt-in | — | — | — | — | — | **DOES NOT BUILD** |
 | 22 | `702fb95db` carried external mode + mesh Coriolis | `1.1141520089561965` | `0.2550649479550131` | `0.01074163857968142` | `0.0029203697463684375` | 24 / 79 / 97 | **bad** |
 | 43 | (tip `629d5f4c5`) | `1.114220520669864` | `0.25508044621046366` | `0.010613818039912676` | `0.002919141602961423` | 24 / 77 / 99 | bad |
+
+**The census columns count `max_abs`, which is not the same as an unchanged
+row.** Against the pre-merge tree, both point 22 and the tip have 24 rows whose
+`max_abs` is equal but only **17** whose every recorded field is equal — seven
+rows keep their maximum while their rms moves. Where this receipt claims a whole
+ladder is unchanged, the whole-row count is quoted and it is the one that is
+200: **point 20 and the point-22 arm are equal to the pre-merge ladder on 200 of
+200 rows on BOTH counts**, and so are the two endpoint reproductions of round
+77's records.
 
 **Point 21 is not a bisect point, and that is a fact about the commits, not a
 limitation of the method.** `0ebdb6d83` writes `use_mesh_coriolis=True` and
@@ -96,7 +105,8 @@ moves it".
 
 **Limit 2: the commits AFTER the pair are NOT inert on the ladder as a whole —
 only on the flagged rows.** Point 22 to the tip moves 175 of 200 rows (25
-unchanged, 60 toward NEMO, 115 away), the largest being kt 7 stage-3 `v`,
+unchanged on `max_abs`, and on every field, 60 toward NEMO, 115 away), the
+largest being kt 7 stage-3 `v`,
 `0.604874 -> 0.363905` (−39.8%). What they leave almost exactly alone are the
 four kt 10 end-of-step maxima this round scores. So "the pair owns the move" is
 a statement about the rows round 77 flagged, and §4's tip arm is what makes it
@@ -151,8 +161,8 @@ carries — with the same single field flipped (`r78-mxlfloor-arm-tip`, commit
 | `T` rms | `0.010433315642886491` | `0.010613818039912676` | `0.010319467633720783` |
 | `S` rms | `0.003029909179584292` | `0.002919141602961423` | `0.0030291931706825964` |
 
-Against the pre-merge tree the tip arm's whole-ladder census is 25 unchanged,
-88 toward NEMO, 87 away — balanced, which is the other 41 commits' own
+Against the pre-merge tree the tip arm's whole-ladder census is 25 unchanged
+(on `max_abs` and on every field alike), 88 toward NEMO, 87 away — balanced, which is the other 41 commits' own
 contribution and not a direction. Against the TIP it is 24 unchanged, 90 toward,
 86 away.
 
@@ -334,7 +344,7 @@ never to the lane.
 | GYRE, tanks, DINO | **not run, and not required** — nothing shared changed. Round 77 measured them on this tip and they were byte-identical/PASS |
 | citation gate, this receipt | **PASS**, 1 citation, 0 unmapped, 0 failures, 0 map entries failing audit |
 | the same with a planted two-line shift on that citation | **FAIL**, `SYMBOL-NOT-AT-LINE` — the gate is not vacuous on this receipt |
-| citation gate, default cumulative receipt | **PASS**, 274 citations, 0 unmapped, 0 failures, nine self-test plants all fired |
+| citation gate, default cumulative receipt | **PASS**, 274 citations, 0 unmapped, 0 failures; all nine of the gate's own self-tests behaved — the seven planted defects each produced the failure status they are meant to (`AMBIGUOUS-ANCHOR`, `BAD-CITATION` twice, `SYMBOL-NOT-AT-LINE` four times) and the two unplanted baselines stayed `OK` |
 | `test_nemo_testcase_receipt_citation_gate.py`, `test_nemo_vortex_card.py`, `test_nemo_card_opt_in_defaults.py` | **`87 passed`** |
 | the ORCA2 lane's other four push-gate files | **`111 passed`** |
 | card battery | not run — no card changed |
@@ -355,12 +365,16 @@ closed above, one of them by a new measurement rather than by a rewording.
 |---|---|---|
 | 1 | "the arm was applied at point 22, not the tip: point 22 and the tip differ on 175 of 200 rows, largest 39.84%" — so the arm proved ownership of the point-20-to-22 step, not of the fold-in | **A NEW ARM WAS RUN**, the same one variable at the lane tip (§4). It brings the two flagged rows from `+13.25%`/`+15.43%` to `−0.11%`/`−0.13%`. The later commits' own 175-row movement is now reported (§3, limit 2) instead of being summarised as "+0.006% on this row" |
 | 2 | "a thousand times NEMO's background vertical mixing" is false for this deck: ORCA2 sets `rn_avm0 = 1.2e-4`, `rn_avt0 = 1.2e-5 m2/s`, above the values the floor implies | **RETRACTED in §7**, with the namelist and log lines that refute it quoted. The change is a factor of 1000 on the mixing LENGTH; what it buys in mixing is unmeasured and now says so |
-| 3 | "byte-identical" exceeds the evidence: the records are comparison summaries, not hashes of the candidate state | wording fixed throughout to "all 200 comparison rows, every recorded field", and §2 says explicitly what the records do and do not contain |
+| 3 | "byte-identical" exceeds the evidence: the records are comparison summaries, not hashes of the candidate state | wording fixed throughout to "all 200 comparison rows, every recorded field", and §2 says explicitly what the records do and do not contain. **Reopened by the follow-up review and closed again**: the census columns count `max_abs`, where 24 rows match but only 17 match on every field; §3 now says so, and the claims that matter are quoted on the whole-row count, where they are 200 of 200 |
+| 4b | "nine self-test plants fired" miscounts: seven are planted defects, two are unplanted baselines | §9 now names the seven statuses and the two baselines |
 | 4 | the gates table pointed at a section that does not exist, and the citation gate audits only the compiled-source citation, not the namelist and run-log premises | §9 rewritten with the actual gate results, and the un-audited premises named |
 
-The reviewer confirmed the rest: the arm is a valid one-variable control on the
-floor, the retraction of round 77 is correct, and the three ORCA2/NEMO facts in
-§6 are at the lines claimed.
+A second pass was run after these fixes. It confirmed findings 1 and 2 closed
+and returned two further precision defects, both about counting rather than
+about the result; they are rows 3 and 4b above and are closed in the same way.
+Across both passes the reviewer confirmed: the arm is a valid one-variable
+control on the floor, the retraction of round 77 is correct, and the three
+ORCA2/NEMO facts in §6 are at the lines claimed.
 
 ## 10. Choices made this round
 
