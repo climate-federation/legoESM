@@ -229,8 +229,8 @@ size. Preflight is green on all three variants.
 | **VORTEX flux ladder kt=1..10** | `DEBT`, first over bar kt 2; kt=2 `u 1.1355e-07 ssh 3.7088e-08`, kt=10 `u 2.4640e-06 ssh 5.3364e-06` — **every row equals round 3's published ladder** |
 | **VORTEX vector ladder kt=1..10** | `DEBT`, first over bar kt 2; kt=2 `u 1.4325e-05 ssh 2.2685e-05`, kt=10 `u 1.4621e-05 ssh 5.3334e-06` — **every row equals round 3's published ladder** |
 | LOCK_EXCHANGE-zco kt=1..3 | `AT-BAR`, no row over the bar |
-| OVERFLOW-zps kt=1..3 | STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/ladder_OVERFLOW-zps.log` |
-| GYRE certified ladder, trajectory only, kt=1..10 | STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/gyre_ladder.log` |
+| OVERFLOW-zps kt=1..3 | `DEBT`, first over bar `{T,u}` at kt 2 — unchanged from the value the merge receipt published |
+| GYRE certified ladder, trajectory only, kt=1..10 | the first attempt was REFUSED by its own argument parser (this gate takes no `--allow-dirty`), re-queued without it; STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/gyre_ladder.log` |
 | DINO month gate (note BI; this round changes `packages/`), private work dir | STILL RUNNING at hand-off, log `phase3/vortex/round4/dino_month.log` |
 | kt=2 walk, vector card | section 6 |
 | kt=2 walk, flux card | arms 0-4 identical to round 3's published rows |
