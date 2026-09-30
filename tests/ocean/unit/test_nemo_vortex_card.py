@@ -579,10 +579,27 @@ _CERTIFIED_CARD_DIGESTS_ROUND2 = {          # 5bbac73f6, superseded by round 4
 # value it already resolved to before the field existed, so the digest moved
 # and its numbers did not: the certified kt=1..10 rows are re-measured in the
 # round-5 receipt.
-_CERTIFIED_CARD_DIGESTS = {                 # 85607c118588 + rounds 4 and 5
+_CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
     "GYRE-zco": "da52bd90a40f71fd",
     "LOCK_EXCHANGE-zco": "d794c4c5cb3dd880",
     "OVERFLOW-zps": "2bb9d9be75fd924d",
+}
+# The ORCA2 lane's 2026-09-30 fold-in moves all three again, for ONE reason,
+# measured field by field on the resolved configuration of every card rather
+# than assumed: the ORCA2 lane adds exactly one field to the shared model
+# configuration, ``lateral_viscosity_coefficient_source``, because ORCA2
+# resolves nn_ahm_ijk_t = -30 and reads its lateral momentum viscosity whole
+# from a file.  Every other card resolves that field to the shared
+# ``nemo_ldf_c2d``, which is the metric formula they already ran, so nothing
+# they execute changed -- and the digest prints every field, so a purely
+# additive one moves it.  A card-by-card diff of the resolved configurations
+# against the GYRE lane tip reports added=1 removed=0 changed=0 on GYRE, both
+# tanks and both VORTEX cards, and the companion test below asserts the added
+# field's value on each certified card.
+_CERTIFIED_CARD_DIGESTS = {                 # ORCA2 fold-in, 2026-09-30
+    "GYRE-zco": "db95b2a4d1989f93",
+    "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
+    "OVERFLOW-zps": "7f1ec89b3e6578f5",
 }
 
 
@@ -598,6 +615,10 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     cfg = build_nemo_testcase_card(case).recipe.model_config
     assert "eos_nemo_seos" in cfg._fields
     assert cfg.eos_nemo_seos is None
+    # ... and the one field the 2026-09-30 ORCA2 fold-in adds.  ORCA2 is the
+    # only card that reads its lateral momentum viscosity from a file; every
+    # certified card must keep the metric formula it already ran.
+    assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
 
 

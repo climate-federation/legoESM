@@ -310,6 +310,19 @@ def _model_config(
         return base._replace(
             eos="nemo_eos80",
             physics=physics,
+            # Round 77 (Decision 76): STATED on this card, never inherited
+            # from the shared GYRE identity above and never inferred from the
+            # time integrator.  ORCA2's OWN build runs the RK3 vector-invariant
+            # program -- stp2d.f90:145-147 takes the "Vector Inv. Form"
+            # Coriolis arm and :149 the "only KEG + ZAD in Vector Inv. Form"
+            # advection -- and that program leaves the PREVIOUS step's linear
+            # extrapolation ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
+            # in the after slot (stprk3.f90:239-241).  stp2d.f90:152 turns
+            # that slot into ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0``
+            # immediately before ``CALL wzv( ..., np_velocity )`` at
+            # stp2d.f90:156, so the first wzv call's scale-factor term is
+            # built from the extrapolation, not from a continuity prediction.
+            nemo_first_wzv_after_ssh="rk3_extrapolated",
             # Round 23 (Decision 58): ORCA2-zps resolves the SAME
             # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does and
             # now takes NEMO's separately evaluated momentum continuity solve
