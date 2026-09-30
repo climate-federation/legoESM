@@ -3846,6 +3846,8 @@ def dino_lat_lon_model_config(
             EnhancedDiffusionConfig, OceanConvectionConfig,
         )
         from legoesm.ocean.physics.lateral_mixing.config import (
+            BiharmonicConfig,
+            HarmonicConfig,
             LateralMixingConfig,
         )
         from legoesm.ocean.physics.shortwave_penetration import (
@@ -3863,6 +3865,12 @@ def dino_lat_lon_model_config(
             # scheme="none" means this copy remains behaviorally inert.
             lateral_mixing=LateralMixingConfig(
                 scheme="none",
+                # DECISION 75 (operator note BL addendum): stated, not
+                # defaulted.  Both values are the ones main resolves to today and
+                # both are inert on this card; a card's resolved configuration
+                # must not depend on a library default.
+                harmonic=HarmonicConfig(enforce_cfl=False),
+                biharmonic=BiharmonicConfig(enforce_cfl=True),
                 gm_redi=GMRediConfig(
                     slope_face_thickness_evaluation=(
                         cfg.gm_redi_slope_face_thickness_evaluation),
@@ -4233,7 +4241,8 @@ def dino_mpas_model_config(
         EnhancedDiffusionConfig, OceanConvectionConfig,
     )
     from legoesm.ocean.physics.lateral_mixing.config import (
-        GMRediConfig, LateralMixingConfig, VisbeckConfig,
+        BiharmonicConfig, GMRediConfig, HarmonicConfig, LateralMixingConfig,
+        VisbeckConfig,
     )
     from legoesm.ocean.physics.shortwave_penetration import (
         ShortwavePenetrationConfig,
@@ -4258,6 +4267,12 @@ def dino_mpas_model_config(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
+            # DECISION 75 (operator note BL addendum): stated, not
+            # defaulted.  Both values are the ones main resolves to today and
+            # both are inert on this card; a card's resolved configuration
+            # must not depend on a library default.
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
             gm_redi=GMRediConfig(
                 # Placeholders; ignored at runtime because Visbeck is enabled.
                 # Anchored to visbeck_kappa_min so the static value is non-

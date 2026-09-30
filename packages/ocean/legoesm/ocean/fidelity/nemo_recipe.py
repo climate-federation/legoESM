@@ -28,7 +28,9 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.lateral_mixing.config import (
+    BiharmonicConfig,
     GMRediConfig,
+    HarmonicConfig,
     LateralMixingConfig,
     VisbeckConfig,
 )
@@ -317,7 +319,18 @@ def _nemo_physics_config(cfg: NEMOModelRecipeConfig) -> OceanPhysicsConfig:
             scheme="tke",
             tke=_nemo_tke_config(),
         ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
+        # DECISION 75 (operator note BL addendum): the card STATES the
+        # explicit-CFL cap for both lateral-mixing blocks that carry a field
+        # of that name, so its resolved value is the card's own and not
+        # whatever the library happens to default to.  Both values below are
+        # the ones main resolves to today; both are inert here because this
+        # card selects no lateral mixing at all.  A card's resolved
+        # configuration must not depend on a library default.
+        lateral_mixing=LateralMixingConfig(
+            scheme="none",
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
+        ),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
         # convection: default off on the shared card; build_nemo_gyre_recipe turns

@@ -12,6 +12,7 @@ Two layers, the same split the DINO and tank cards use:
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import math
 import struct
@@ -546,8 +547,29 @@ _CERTIFIED_CARD_DIGESTS_TIP = {             # 5301122fe2ef, round-2 edits STASHE
     "LOCK_EXCHANGE-zco": "af88a6e54a70263f",
     "OVERFLOW-zps": "375ec3040cc4ce53",
 }
-_CERTIFIED_CARD_DIGESTS = {                 # 5301122fe2ef + this round
+_CERTIFIED_CARD_DIGESTS_ROUND2 = {          # 5bbac73f6, superseded by round 4
     "GYRE-zco": "eaef11b4c2e37a31",
+    "LOCK_EXCHANGE-zco": "159ca3d07db0a3f5",
+    "OVERFLOW-zps": "73174751388503aa",
+}
+# Round 4 (DECISION 75).  GYRE's digest moved between `5bbac73f6` and this
+# round, and the move was measured field by field on the resolved config
+# rather than assumed: FIVE rows, and nothing else on any card.
+#
+#   value changed   physics.lateral_mixing.biharmonic.enforce_cfl  False -> True
+#   field removed   physics.lateral_mixing.biharmonic.cfl_dt_estimate  (was 3600.0)
+#   field removed   physics.bottom_drag.linear.r                       (was 0.0011)
+#   field removed   physics.bottom_drag.quadratic.C_d                  (was 0.0025)
+#   field removed   physics.vertical_mixing.kpp.c_b                    (was 0.599)
+#
+# All five sit on blocks this card does not select (no lateral mixing, no
+# bottom drag, TKE rather than KPP), so nothing executed changed.  The ONE
+# value is now stated by the card itself (see the default-independence test
+# below); the four removals are fields that no longer exist, which no card
+# can state, so they are recorded here and the pin moves.  LOCK_EXCHANGE and
+# OVERFLOW carry no physics block at all and their pins are unchanged.
+_CERTIFIED_CARD_DIGESTS = {                 # 85607c118588 + round 4
+    "GYRE-zco": "337651dbd9f1b49c",
     "LOCK_EXCHANGE-zco": "159ca3d07db0a3f5",
     "OVERFLOW-zps": "73174751388503aa",
 }
@@ -673,3 +695,114 @@ def test_the_vector_deck_differs_from_the_flux_deck_only_in_the_momentum_set(
                if line.strip().startswith(("ln_dynadv_vec", "ln_dynadv_cen2",
                                            "ln_dynadv_up3"))
                and ".true." in line) == 1
+
+
+# --------------------------------------------------------------------------
+# DECISION 75 (operator note BL addendum): a card's resolved configuration
+# must not depend on a library default.  The GYRE digest moved in the first
+# place because main flipped one, and the fix is for the card to state the
+# field -- never to re-pin the digest alone.  This is the gate for that.
+_ALL_NEMO_TESTCASE_CARDS = ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps",
+                            "VORTEX-zco", "VORTEX_VEC-zco")
+_DINO_NEMO_RECIPES = ("nemo_dino_kamm", "nemo_dino_kamm_mlf")
+
+
+@contextlib.contextmanager
+def _lateral_mixing_defaults_flipped():
+    """Flip every ``enforce_cfl`` a card could inherit, then put them back.
+
+    Two layers have to move, because a NamedTuple's default sub-config is a
+    frozen INSTANCE built when its class was defined: flipping
+    ``BiharmonicConfig``'s own default does not reach the instance sitting in
+    ``LateralMixingConfig``'s defaults, which is the one the cards inherit.
+    """
+    from legoesm.ocean.physics.lateral_mixing import config as lmc
+
+    def _flip(cls, **replacements):
+        before = cls.__new__.__defaults__
+        offset = len(cls._fields) - len(before)
+        values = list(before)
+        for name, value in replacements.items():
+            values[cls._fields.index(name) - offset] = value
+        cls.__new__.__defaults__ = tuple(values)
+        return before
+
+    restore = [
+        (lmc.HarmonicConfig, _flip(
+            lmc.HarmonicConfig,
+            enforce_cfl=not lmc.HarmonicConfig().enforce_cfl)),
+        (lmc.BiharmonicConfig, _flip(
+            lmc.BiharmonicConfig,
+            enforce_cfl=not lmc.BiharmonicConfig().enforce_cfl)),
+    ]
+    restore.append((lmc.LateralMixingConfig, _flip(
+        lmc.LateralMixingConfig,
+        harmonic=lmc.HarmonicConfig(),
+        biharmonic=lmc.BiharmonicConfig())))
+    try:
+        yield
+    finally:
+        for cls, before in restore:
+            cls.__new__.__defaults__ = before
+
+
+def test_the_flip_is_a_real_flip():
+    """The instrument moves something, or the tests below prove nothing.
+
+    This is the non-vacuity plant for the whole section: it builds the
+    lateral-mixing block the way the NEMO cards used to build it -- naming the
+    scheme and inheriting the rest -- and shows that the flip DOES move it.
+    """
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+
+    before = LateralMixingConfig(scheme="none")
+    with _lateral_mixing_defaults_flipped():
+        during = LateralMixingConfig(scheme="none")
+        assert during.biharmonic.enforce_cfl is not before.biharmonic.enforce_cfl
+        assert during.harmonic.enforce_cfl is not before.harmonic.enforce_cfl
+    assert LateralMixingConfig(scheme="none") == before
+
+
+@pytest.mark.parametrize("case", _ALL_NEMO_TESTCASE_CARDS)
+def test_no_nemo_card_inherits_the_explicit_cfl_cap_from_the_library(case):
+    """Build the card twice, with the library default flipped in between."""
+    clean = _card_digest(build_nemo_testcase_card(case))
+    with _lateral_mixing_defaults_flipped():
+        flipped = _card_digest(build_nemo_testcase_card(case))
+    assert flipped == clean, (
+        f"{case}'s resolved configuration follows a lateral-mixing library "
+        "default; state the field on the card instead of re-pinning")
+
+
+@pytest.mark.parametrize("case", _ALL_NEMO_TESTCASE_CARDS)
+def test_every_nemo_card_states_the_explicit_cfl_cap_or_carries_no_block(case):
+    """And say WHICH value each card states, so the digest is attributable."""
+    physics = build_nemo_testcase_card(case).recipe.model_config.physics
+    if physics is None:            # the tanks and both VORTEX cards
+        return
+    mixing = physics.lateral_mixing
+    assert mixing.scheme == "none"
+    assert mixing.harmonic.enforce_cfl is False
+    assert mixing.biharmonic.enforce_cfl is True
+
+
+@pytest.mark.parametrize("recipe_name", _DINO_NEMO_RECIPES)
+def test_no_dino_nemo_card_inherits_the_explicit_cfl_cap(recipe_name):
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe, dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+
+    def resolved():
+        cfg = dino_config_for_recipe(recipe_name)
+        # n_lon is a pure setup knob; the card is the scheme selection.
+        grid = dino_lat_lon_grid(cfg, n_lon=12)
+        _model, physics = dino_lat_lon_model_config(grid, cfg)
+        return physics.lateral_mixing
+
+    clean = resolved()
+    with _lateral_mixing_defaults_flipped():
+        flipped = resolved()
+    assert flipped.harmonic == clean.harmonic
+    assert flipped.biharmonic == clean.biharmonic
+    assert clean.harmonic.enforce_cfl is False
+    assert clean.biharmonic.enforce_cfl is True
