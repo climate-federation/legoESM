@@ -49,8 +49,54 @@ import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["measure_leaf_reachability", "trainable_filter_spec",
+__all__ = ["assert_no_inert", "assert_no_inert_over", "measure_leaf_reachability",
+           "trainable_filter_spec",
            "mpi_max_reduce", "probe_indices", "freeze_unreachable"]
+
+
+def assert_no_inert(g: dict) -> None:
+    """STRICT RULE (user directive 2026-08-17): no inert parameters, ever.
+
+    Every leaf in the trainable pytree must carry loss gradient; a parameter the
+    forward never consumes silently pretends to be calibrated.  Called on the
+    FULL-data init gradient of every training run (never a mini-batch — a
+    seasonally/spatially gated param absent from one batch is not inert).
+
+    Raises on (a) an identically-zero leaf (inert) and (b) an all-non-finite
+    leaf — the reviewers' case: an all-NaN gradient would be zeroed by the
+    downstream sanitiser every step, i.e. silently inert while looking live.
+    A PARTIALLY zero per-PFT vector (some components live) passes with a printed
+    warning: components for PFTs absent from the sample are legitimately zero
+    and stay pinned at their prior."""
+    dead = [k for k, v in g.items() if bool(jnp.all(v == 0.0))]
+    poisoned = [k for k, v in g.items() if not bool(jnp.any(jnp.isfinite(v)))]
+    if dead or poisoned:
+        raise ValueError(
+            "no-inert-parameters gate: "
+            + (f"identically-zero gradient: {sorted(dead)}; " if dead else "")
+            + (f"all-non-finite gradient (sanitiser would zero it every step): "
+               f"{sorted(poisoned)}; " if poisoned else "")
+            + "remove the key from the trainable set, enable the physics path "
+              "that consumes it, or fix the init state (run the pre-filter)")
+    for k, v in g.items():
+        nz = int(jnp.sum(v == 0.0)); tot = int(jnp.asarray(v).size)
+        if 0 < nz and tot > 1 and nz > tot // 2:
+            logger.warning("no-inert gate: %s has %d/%d zero-gradient components "
+                           "(PFTs absent from the sample stay at the prior)",
+                           k, nz, tot)
+
+
+def assert_no_inert_over(grads) -> None:
+    """:func:`assert_no_inert` on the elementwise max |grad| over per-sample
+    gradient dicts: a leaf gated off on one sample is not inert.  ``fmax``
+    ignores a NaN sample, so one bad sample cannot poison a leaf."""
+    absmax = None
+    for g in grads:
+        g = jax.tree.map(jnp.abs, g)
+        absmax = g if absmax is None else jax.tree.map(jnp.fmax, absmax, g)
+    if absmax is None:
+        raise ValueError("no-inert-parameters gate: no samples to judge")
+    assert_no_inert(absmax)
 
 
 def _leaf_names(tree):

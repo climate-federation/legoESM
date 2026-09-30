@@ -434,8 +434,7 @@ def ocean_tile_response(
         # tau_x/tau_y) — back-reaction is the ice tile's job.
         ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
         ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
-        # Ocean evaporation: lhflx already used L_v, so evap_rate
-        # is the correct mass flux.
+        # Ocean evaporation: evap_rate is the mass flux of lhflx.
         surface_mass_flux=evap_rate,
         # Ocean tile is the salt-budget sink, not a source of salt
         # back to itself — zero flux on this channel.

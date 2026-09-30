@@ -1,0 +1,38 @@
+# legoESM experiment template — idealized 1-year hydrostatic run (NOT AMIP;
+# formerly coupled/amip.yaml).  For AMIP use config/amip/amip_production.yaml.
+experiment:
+  tier: tier3
+  complexity: hydrostatic
+  extent: global
+  maturity: init_only
+  description: >
+    Idealized 1-year hydrostatic atmosphere on C48/L26: analytical forcing,
+    gray radiation, default column physics, no hyperdiffusion.  It does NOT
+    read observed SST/sea-ice: the listed amip_sst_sic dataset is staged by
+    fetch_data.py but not consumed by the resolved run.
+  data: [amip_sst_sic]       # staged by fetch_data.py; NOT read by this run
+  conservation_gates: [mass, energy, moisture]
+model:
+  name: "hydrostatic_gray_1yr"
+  type: atmosphere_only
+grid:
+  type: cubed_sphere
+  resolution: 48
+  n_levels: 26
+  vertical_coord: hybrid
+atmosphere:
+  dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
+  time_integrator: ssp_rk3
+  dt_seconds: 450
+  hyperdiff_scale: 0.0
+conservation:
+  fix_mass: true
+time:
+  duration_hours: 8760         # 1 year
+  output_interval_hours: 24
+output:
+  path: output/amip/
+hardware:
+  precision:
+    dynamics: float32
+  devices: auto

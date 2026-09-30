@@ -205,14 +205,36 @@ def _mixing_length_floor(cfg: "TKEConfig"):
             / (rn_ediff * jnp.sqrt(rn_emin)))
 
 
+def _mxl0_anchor_floor(cfg: "TKEConfig"):
+    """Return the lower bound of the ``ln_mxl0`` surface anchor.
+
+    ``tke_avn`` evaluates ``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``
+    (GYRE ppsrc ``zdftke.f90:610``), so on a CALM column the anchor IS this
+    value.  ``zdf_tke_init`` OVERWRITES the namelist ``rn_mxl0`` with the
+    active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
+    (shipped ``zdftke.F90:859-862``; GYRE ppsrc ``zdftke.f90:828-831``).
+
+    ``nemo_mxl0_rmxl_min_overwrite`` selects that overwrite.  It is False by
+    default, which is main's behaviour: the floor is the card's own
+    ``mxl0_min_m`` (NEMO's namelist ``rn_mxl0``).  DECISION 72 (user,
+    2026-09-28) keeps the ORCA1 OMIP card on the default arm and leaves
+    NEMO's overwrite to the NEMO-literal cards.
+    """
+    if cfg.nemo_mxl0_rmxl_min_overwrite:
+        return _mixing_length_floor(cfg)
+    return cfg.mxl0_min_m
+
+
 def _mxl0_surface_anchor(
     cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
 ):
-    """ln_mxl0 surface anchor (shipped zdftke.F90:575,598-603,640-642).
+    """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
 
-    zdf_tke_init first overwrites rn_mxl0 with the derived rmxl_min when
-    ln_mxl0 is true (shipped zdftke.F90:859-862; GYRE ppsrc:829-832), then
-    tke_avn evaluates
+    zdf_tke_init overwrites rn_mxl0 with the derived rmxl_min when ln_mxl0
+    is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) -- that
+    overwrite is what nemo_mxl0_rmxl_min_overwrite selects
+    (:func:`_mxl0_anchor_floor`); the default arm keeps the card's own
+    rn_mxl0 (mxl0_min_m), which is main's behaviour.  tke_avn then evaluates
     l_sfc=max(rn_mxl0,vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
     NEMO nn_mxl scheme (3 = nn_mxl=3, 4 = nn_mxl=2); ORCA1 sets ln_mxl0=.true.
     independently of nn_mxl, so BOTH need the anchor."""
@@ -229,7 +251,7 @@ def _mxl0_surface_anchor(
             raise ValueError(
                 "TKEConfig.nemo_mxl0_surface_tmask=True requires "
                 "surface_tmask for the compiled `taum*tmask(:,:,1)` ln_mxl0 "
-                "statement (zdftke.F90:640-642).")
+                "statement (zdftke.F90:602).")
         surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
         if surface_tmask.shape != taum.shape:
             raise ValueError(
@@ -237,7 +259,7 @@ def _mxl0_surface_anchor(
                 f"{surface_tmask.shape} vs {taum.shape}.")
         masked_taum = jnp.maximum(taum, 0.0) * surface_tmask
     return jnp.maximum(
-        jnp.asarray(_mixing_length_floor(cfg), dtype=taum.dtype),
+        jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype),
         _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
         * masked_taum)
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
@@ -832,14 +854,14 @@ def compute_mixing_lengths(
         raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
         l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-        # (shipped zdftke.F90:575,598-603,640-642), computed by the CALLER
+        # (shipped zdftke.F90:575,602,640-642), computed by the CALLER
         # (which owns taum/rho_0/g and the surface tmask)
         # and passed via l_surface_anchor. The no-anchor fallback used to claim
         # NEMO's ln_mxl0=F branch, but that branch uses raw rn_mxl0
         # (GYRE ppsrc zdftke.f90:614-615), not rmxl_min; fail closed because
         # legoESM exposes only the ln_mxl0=T NEMO path.
         # With ln_mxl0, NEMO overwrites the namelist rn_mxl0 with rmxl_min at
-        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:829-832).
+        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:828-831).
         if l_surface_anchor is not None:
             l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
         else:

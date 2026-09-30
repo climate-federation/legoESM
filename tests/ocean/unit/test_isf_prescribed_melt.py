@@ -282,3 +282,20 @@ def test_loader_paired_cells_mpas(tmp_path):
     # no melt smeared equatorward of the source shelf band (+2 deg)
     far = cell_lat > (lat1[2] + 2.0)
     assert np.all(g.fwf[:, far] == 0.0)
+
+
+def test_curvilinear_cell_area_mid_row_seam():
+    """A dateline jump INSIDE a row (eORCA nav_lon) must not inflate areas."""
+    from legoesm import constants
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    lat1 = np.arange(-89.5, 90.0, 1.0)
+    lon1 = np.roll(np.arange(0.5, 360.0, 1.0), -100)   # seam mid-row
+    lon1 = np.where(lon1 > 180.0, lon1 - 360.0, lon1)
+    lon2d, lat2d = np.meshgrid(lon1, lat1)
+    area = estimate_curvilinear_cell_area(lat2d, lon2d)
+    row = area[90]
+    assert row.max() / row.min() < 1.0 + 1e-9
+    sphere = 4.0 * np.pi * constants.R_earth ** 2
+    np.testing.assert_allclose(area.sum(), sphere, rtol=1e-3)

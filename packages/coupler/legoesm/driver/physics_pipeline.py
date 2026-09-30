@@ -47,7 +47,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
-from legoesm.core.grid_adapters import make_adapter
+from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
 
@@ -217,6 +217,10 @@ class PhysicsPipeline:
         self.land_ml_cfg = None        # MultiLayerLandConfig
         self.land_ml_params = None     # LandSurfaceParams (per land column)
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
+        # (theta_top, doy, year) -> (land_params, lai) per-step rebuild of the
+        # two-leaf canopy params (MPAS lane); None = params fixed at setup.
+        self.land_ml_params_update = None
+        self.land_ml_params_update_factory = None   # () -> the above, lazily
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
         # CONCRETE dynamics timestep [s] for the CLM-ML canopy's static sub-step
@@ -344,6 +348,8 @@ class PhysicsPipeline:
         # False (default) every ledger code path is a byte-identical no-op
         # (feature-gating exception: Python ``if``, never jnp.where).
         self.budget_ledger = False  # set by build_physics_pipeline
+        # Cell areas weighting the ledger's global means (None = one column).
+        self._ledger_area = None
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -1736,7 +1742,7 @@ class PhysicsPipeline:
             _bl_micro = ledger_entry(
                 dq_v_dt_micro + dq_c_dt + dq_r_dt
                 + dq_i_dt + dq_s_dt + dq_g_dt,
-                dT_dt_micro, p_s, _bl_dsigma)
+                dT_dt_micro, p_s, _bl_dsigma, area=self._ledger_area)
             # Convection's column store contribution: vapour tendency plus —
             # for detraining (mass-flux) schemes only — the anvil condensate
             # routed into q_c below.  The in-updraft rain (dq_r_conv_dt) and
@@ -1746,7 +1752,8 @@ class PhysicsPipeline:
             _bl_conv_q = dq_v_dt_conv + (
                 dq_c_dt_conv if _ctr.detrains_to_cloud
                 else jnp.zeros_like(dq_v_dt_conv))
-            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma)
+            _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
+                                    area=self._ledger_area)
 
         # Convection→microphysics coupling: TRUE detrainment (plume / mass-flux
         # schemes, ``detrains_to_cloud``) adds convective condensate to the
@@ -2137,9 +2144,10 @@ class PhysicsPipeline:
                 _bl_turb = ledger_entry(
                     ad.unflatten_3d(turb_out.dq_v_dt),
                     ad.unflatten_3d(turb_out.dT_dt),
-                    p_s, _bl_dsigma)
+                    p_s, _bl_dsigma, area=self._ledger_area)
             else:
-                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma)
+                _bl_turb = ledger_entry(None, None, p_s, _bl_dsigma,
+                                        area=self._ledger_area)
 
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
@@ -2301,6 +2309,7 @@ class PhysicsPipeline:
             snow_new, _, _ = update_snow(
                 snow, jnp.zeros_like(snow), T_land, precip_snow_diag, dt,
                 Q_net=None,
+                snow_age_activation_K=0.0,  # age output discarded below
             )
         else:
             snow_new = snow
@@ -2317,10 +2326,11 @@ class PhysicsPipeline:
                 N_LEDGER, ROW_CONVECTION, ROW_MICROPHYSICS, ROW_OTHER,
                 ROW_RADIATION, ROW_TURBULENCE, ledger_entry,
             )
-            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma)
+            _bl_rad = ledger_entry(None, dT_dt_rad, p_s, _bl_dsigma,
+                                   area=self._ledger_area)
             _bl_total = ledger_entry(
                 dq_v_dt + dq_c_dt + dq_r_dt + dq_i_dt + dq_s_dt + dq_g_dt,
-                dT_dt, p_s, _bl_dsigma)
+                dT_dt, p_s, _bl_dsigma, area=self._ledger_area)
             _bl_other = _bl_total - (_bl_turb + _bl_conv + _bl_micro + _bl_rad)
             _bl_out = jnp.zeros((N_LEDGER, 2), dtype=_bl_total.dtype)
             _bl_out = _bl_out.at[ROW_TURBULENCE].set(_bl_turb)
@@ -3682,6 +3692,7 @@ def convection_config_for(config, grid_dx_m=None):
 
     scheme = config.convection
     cc = ConvectionConfig(scheme=scheme)
+    _zm_overrides(config)  # refuse zm_* before the "none" early return
     if scheme == "none":
         return cc
     cc = cc._replace(rain_to_surface=bool(
@@ -3703,6 +3714,19 @@ def convection_config_for(config, grid_dx_m=None):
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
+
+
+def _zm_overrides(config):
+    """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
+    does not select zhang_mcfarlane (they would be silently inert)."""
+    from legoesm.driver.config import ZM_SCALAR_FIELDS
+
+    given = [f for f in ZM_SCALAR_FIELDS if getattr(config, f, None) is not None]
+    if given and config.convection != "zhang_mcfarlane":
+        raise ValueError(
+            f"{given} are Zhang-McFarlane parameters; got "
+            f"convection={config.convection!r}, which does not read them.")
+    return {ZM_SCALAR_FIELDS[f]: float(getattr(config, f)) for f in given}
 
 
 def _resolve_convection(config):
@@ -3733,6 +3757,7 @@ def _resolve_convection(config):
     )
 
     scheme = config.convection
+    _zm_set = _zm_overrides(config)
     if scheme == "none":
         return _noop_convection, None
 
@@ -3848,7 +3873,14 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(precip_efficiency=_pe)
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
-                land_fraction=config.zm_land_fraction)
+                land_fraction=config.zm_land_fraction, **_zm_set)
+
+        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
+        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
+        if scheme == "tiedtke":
+            conv_config = conv_config._replace(
+                buoyancy_death_memory=bool(getattr(
+                    config, "convective_buoyancy_death_memory", False)))
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
@@ -4027,6 +4059,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_ice_snow_d_auto", None)),
         ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
          getattr(config, "morrison_hom_ice_nuc_N", None)),
+        ("morrison_autocon_fact", "autocon_fact",
+         getattr(config, "morrison_autocon_fact", None)),
+        ("morrison_accre_enhan_fact", "accre_enhan_fact",
+         getattr(config, "morrison_accre_enhan_fact", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4038,6 +4074,9 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _flavor = getattr(config, "morrison_flavor", None)
     if _flavor in (None, "mg"):
         _flavor = None
+    _wrs = getattr(config, "morrison_warm_rain_scheme", None)
+    if _wrs == _ExpCfg._field_defaults["morrison_warm_rain_scheme"]:
+        _wrs = None
     _sed_sub = getattr(config, "morrison_sed_cfl_substeps",
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps"])
     _sed_strict = getattr(config, "morrison_sed_cfl_substeps_strict",
@@ -4046,9 +4085,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
     _graupel = getattr(config, "morrison_do_graupel",
                        _ExpCfg._field_defaults["morrison_do_graupel"])
+    _incloud = getattr(config, "morrison_warm_rain_incloud",
+                       _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
-                    ("morrison_do_graupel", _graupel)):
+                    ("morrison_do_graupel", _graupel),
+                    ("morrison_warm_rain_incloud", _incloud)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4067,8 +4109,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
                 else _sed_max)
     _graupel = (None if _graupel
                 is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
+    _incloud = (None if _incloud
+                is _ExpCfg._field_defaults["morrison_warm_rain_incloud"]
+                else _incloud)
     if (not _touched and _flavor is None and _sed_sub is None
-            and _sed_strict is None and _sed_max is None and _graupel is None):
+            and _sed_strict is None and _sed_max is None and _graupel is None
+            and _wrs is None and _incloud is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4078,7 +4124,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict,
-        morrison_do_graupel=_graupel)
+        morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
+        morrison_warm_rain_incloud=_incloud)
 
 
 def _resolve_microphysics(config):
@@ -4407,9 +4454,6 @@ def turbulence_config_for(config):
         # changed nothing while reporting success.  Thread any NON-DEFAULT
         # value into the active louis sub-config; an all-defaults config
         # takes no _replace, preserving the byte-identity contract above.
-        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
-        # LouisConfig field and are NOT threaded here — still inert, see the
-        # upstream note in the calibration repo.)
         # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
         # scheme's nested config here, for the same reason the marine-Sc flag
         # above is threaded here -- this function is the single source every
@@ -4498,6 +4542,32 @@ def turbulence_config_for(config):
             tc = tc._replace(clubb=tc.clubb._replace(
                 q_flux_scale=float(_qfs), q_flux_scale_sigma_lo=float(_lo),
                 q_flux_scale_sigma_hi=float(_hi)))
+        # CAM6-namelist CLUBB tunables (CLUBB_SCALAR_FIELDS): same threading
+        # and refusal.  None (default) => the scheme's own CLUBBParams value.
+        from legoesm.driver.config import (
+            CLUBB_PROGNOSTIC_ONLY,
+            CLUBB_SCALAR_FIELDS,
+        )
+        _cp_given = [f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None]
+        _cp = {CLUBB_SCALAR_FIELDS[f]: float(getattr(config, f))
+               for f in _cp_given}
+        if _cp:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"{_cp_given} are CLUBB parameters; got "
+                    f"turbulence={tc.scheme!r}.")
+            _diag_inert = sorted(set(_cp_given) & CLUBB_PROGNOSTIC_ONLY)
+            if _diag_inert and not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    f"{_diag_inert} are read only by prognostic CLUBB; "
+                    "set clubb_prognostic=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                params=tc.clubb.params._replace(**_cp)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -4575,6 +4645,13 @@ def turbulence_config_for(config):
             "clubb_q_flux_scale is set but an explicit turbulence_override is "
             "in force; set CLUBBConfig(q_flux_scale=..., q_flux_scale_sigma_lo/hi=...) "
             "inside the override instead of the experiment-level probe.")
+    from legoesm.driver.config import CLUBB_SCALAR_FIELDS
+    _cp_set = sorted(f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None)
+    if _cp_set:
+        raise ValueError(
+            f"{_cp_set} are set but an explicit turbulence_override is in "
+            "force; set them in the override's CLUBBParams instead.")
     return apply_surface_flux_config(tc, config)
 
 
@@ -4636,9 +4713,7 @@ def gwd_config_for(config):
     gc = GravityWaveDragConfig(scheme=scheme)
     if scheme == "none":
         return gc
-    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
-    # NOT wired: no McFarlaneConfig field of that name exists (dangling
-    # ExperimentConfig scalar, tracked separately).
+    # McFarlane (orographic) tunables.
     mc = gc.mcfarlane._replace(
         k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
         directional_spread=float(getattr(
@@ -5037,6 +5112,8 @@ def build_physics_pipeline(grid, sigma, config):
     # Per-process budget ledger (same OutputConfig flow as clear_sky_diag).
     pipeline.budget_ledger = bool(
         getattr(getattr(config, 'output', None), 'budget_ledger', False))
+    if pipeline.budget_ledger and not isinstance(grid, SingleColumnGrid):
+        pipeline._ledger_area = grid.grid_area
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

@@ -38,6 +38,7 @@ in directly; the smoke path adds only the turbulent components).
 
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
 import jax.numpy as jnp
@@ -790,7 +791,19 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     spectral-space path; tracked as a follow-up in OMIP_faithful.md).
 
     Returns a new ``state`` with updated top-layer u, v, T fields.
+
+    KNOWN-DEFECTIVE legacy path (kept for run_omip2 / run_centennial_spinup /
+    run_bryan_thc until they move to compute_omip2_surface_forcing): no
+    shortwave albedo is applied, downward longwave is not emissivity-weighted,
+    and on the cubed sphere the geographic stress is added to cube-local u/v
+    without rotation.
     """
+    warnings.warn(
+        "apply_omip2_surface_fluxes is a deprecated, known-defective legacy "
+        "path: it applies no shortwave albedo (open water absorbs all SW) and "
+        "adds geographic wind stress to cube-local u/v unrotated on the cubed "
+        "sphere. Use compute_omip2_surface_forcing (run_omip) instead.",
+        FutureWarning, stacklevel=2)
     if rho_0 is None:
         rho_0 = float(constants.rho_ocean)
     if c_p is None:

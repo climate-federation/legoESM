@@ -18,14 +18,6 @@ single-owner invariant.
 and it is what the deprecation guard inspects to reject anything else loudly.
 """
 
-from legoesm.ocean.physics.bottom_drag.config import (
-    BottomDragConfig,
-    LinearDragConfig,
-    QuadraticDragConfig,
-)
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
-__all__ = [
-    "BottomDragConfig",
-    "LinearDragConfig",
-    "QuadraticDragConfig",
-]
+__all__ = ["BottomDragConfig"]

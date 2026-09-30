@@ -10,20 +10,19 @@ year:
 * Tracer budget (volume / heat / salt / SSH integral).
 * AMOC @ 26.5 deg N (Cunningham 2007).
 * ACC transport @ Drake (Donohue 2016).
-* SST climatology bias vs WOA (loaded separately).
 * Restart written at end of each model year.
 
 Acceptance bars after 30 years:
 
 * AMOC @ 26.5 deg N -- 15 +/- 3 Sv.
 * ACC @ Drake -- 130 +/- 15 Sv.
-* SST bias -- < 1.5 deg C globally vs WOA.
+* (SST bias vs WOA retired until real WOA SST is regridded to the model grid.)
 * RPE drift -- < 0.5 mW/m^2 (Petersen 2015 reference).
 
 Usage::
 
     # Smoke (1 day, synthetic forcing) -- exercises every code path.
-    python scripts/run/ocean_long_runs/run_omip2.py --smoke --output results/ocean_long_runs/omip2_smoke
+    python scripts/run/ocean_long_runs/run_omip2.py --smoke --allow-synthetic --output results/ocean_long_runs/omip2_smoke
 
     # Production (30 years, real JRA55-do; cluster only):
     python scripts/run/ocean_long_runs/run_omip2.py \\
@@ -112,8 +111,12 @@ def main() -> int:
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--restart-from", type=Path, default=None)
     p.add_argument("--jra55-cache", type=Path, default=None,
-                   help="Path to JRA55-do zarr cache; falls back to "
-                        "synthetic forcing if missing.")
+                   help="JRA55-do cache: the prepare_omip_forcing.py store or "
+                        "its directory. Missing -> error unless "
+                        "--allow-synthetic.")
+    p.add_argument("--allow-synthetic", action="store_true",
+                   help="Smoke/CI only: allow analytic stand-ins when a forcing "
+                        "or observation cache is missing (default: fail).")
     p.add_argument("--dt", type=float, default=1800.0)
     args = p.parse_args()
 
@@ -157,6 +160,8 @@ def main() -> int:
         forcing = load_jra55_do(
             year=(2000 + y) if not args.smoke else 0,
             cache_dir=args.jra55_cache,
+            allow_synthetic=args.allow_synthetic,
+            cycle_years=not args.smoke,   # OMIP-2 repeats the cache's year window
         )
         n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):

@@ -164,3 +164,38 @@ class TestCGDescentSafeguards:
             h = np.asarray(r.history)
             h = h[np.isfinite(h)]
             assert np.all(np.diff(h) <= 1e-12), (seed, h)
+
+
+class TestLineSearchScaling:
+    def test_lbfgs_small_gradient_not_enlarged(self):
+        """f = x^2 from x0 = 1e-8: a unit-length first step overshoots every
+        acceptable point even at 2^-20; the first step must not be enlarged
+        beyond -g (a half-step of -g reaches the minimum)."""
+        r = minimize_lbfgs(lambda x: (jnp.sum(x ** 2), 2.0 * x),
+                           jnp.array([1e-8]), gtol=1e-12)
+        assert not bool(r.line_search_failed)
+        assert float(r.fun) < 1e-20
+
+    def test_cg_recurrence_uses_the_retried_direction(self, monkeypatch):
+        """f = 0.5e8 x^2 from x0 = 0.75: the first search fails and the
+        capped retry lands at x = -0.25. Every direction CG searches must be
+        a descent direction (g . d < 0); building the next direction from
+        the unscaled pre-retry d made it point uphill."""
+        import legoesm.da.minimizer as mz
+
+        slopes = []
+        real = mz._backtracking_line_search
+
+        def spy(fn, x, f, g, d, *a, **k):
+            jax.debug.callback(lambda v: slopes.append(float(v)), jnp.sum(g * d))
+            return real(fn, x, f, g, d, *a, **k)
+
+        monkeypatch.setattr(mz, "_backtracking_line_search", spy)
+
+        def vg(x):
+            return 0.5e8 * jnp.sum(x ** 2), 1e8 * x
+
+        mz.minimize_cg(vg, jnp.array([0.75]), max_iter=4, gtol=1e-12)
+        jax.effects_barrier()  # debug callbacks are asynchronous
+        assert len(slopes) >= 3, slopes
+        assert all(v < 0.0 for v in slopes), slopes

@@ -2049,3 +2049,30 @@ def test_coupled_multicategory_itd_ice_state_and_aggregation():
     s1 = init_surface_state(sh, ice_config=SeaIceConfig(dynamics="free_drift"))
     assert isinstance(s1.ice, DynamicSeaIceState)
     assert _total_ice_sic(s1.ice).shape == sh
+
+
+def test_ocean_evaporation_uses_flux_latent_heat_aerobulk():
+    """Evap mass flux must be lhflx divided by the latent heat the flux used.
+
+    The MOST law charges the Kirchhoff L_v(SST) under BOTH thermo conventions
+    (the convention now selects only the heat capacity), so the ocean
+    freshwater/atmosphere moisture flux must use that same L (not constant L_v).
+    """
+    from legoesm.thermo import latent_heat_vaporization
+
+    forcing = _make_forcing()
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+    for conv, L_expected in (
+        ("aerobulk", latent_heat_vaporization(ocean_sst)),
+        ("legoesm", latent_heat_vaporization(ocean_sst)),
+    ):
+        resp = ocean_tile_response(
+            forcing, ocean_sst, zu, zu,
+            CouplerConfig(bulk_scheme="coare3", thermo_convention=conv),
+        )
+        npt.assert_allclose(resp.surface_mass_flux * L_expected, resp.lhflx,
+                            rtol=1e-6)
+        npt.assert_allclose(resp.freshwater_flux,
+                            forcing.precip_total - resp.surface_mass_flux,
+                            rtol=1e-6)

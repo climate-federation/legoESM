@@ -211,10 +211,16 @@ condition turned into an abort without being asked.
 
 `TKEConfig.nemo_mxl0_surface_tmask: bool = False`. False (default, main's
 behaviour) = the unmasked stress, mask ignored, nothing raises. True = the
-compiled `taum(:,:)*tmask(:,:,1)` statement (`zdftke.F90:640-642`) with a
+compiled `taum(:,:)*tmask(:,:,1)` statement (`zdftke.F90:601-603`) with a
 missing mask a hard error. The NEMO cards (`_nemo_tke_config`, DINO
 `nemo_dino_kamm`) set True. The lat-lon C-grid driver supplies the mask for
 every choice-3/4 card, so no NEMO card loses it.
+
+**Corrected citation.**  This originally cited `zdftke.F90` lines `640-642`, a
+different `DO_1Di`/`END_1D` block (the `rn_mxl0` floor clamp). The gate's
+citation-mapping pass found the actual `taum(ji,jj) * tmask(ji,jj,1)`
+statement at `zdftke.F90:601-603` and the line above was corrected to it; no
+anchor was invented for the wrong line.
 
 **Fails when reverted: YES.**
 `::test_anchor_without_a_surface_mask_is_accepted_by_default` fails against the
