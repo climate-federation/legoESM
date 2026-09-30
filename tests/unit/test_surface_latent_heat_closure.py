@@ -145,3 +145,33 @@ def test_coupled_hook_hands_the_tiles_water_flux():
     assert "return r.shflx, r.lhflx, r.surface_mass_flux" in hook
     assert "carries no " in hook and "surface_mass_flux;" in hook
     assert "* constants.L_v" not in hook and "/ constants.L_v" not in hook
+
+
+def test_cesm_ocean_law_water_inverts_with_the_constant_it_charges():
+    """The CESM shr_flux_atmOcn port (``large_yeager_cesm``) charges its
+    oracle's CONSTANT L_v (compute_sam_oceflx_fluxes), so the atmosphere's
+    water from it -- single-surface kernel BC and the mosaic blend -- is
+    lhflx / L_v, not lhflx / L_v(T_sfc) (2.7 % more water at 301 K)."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        SurfaceTileSpec, compute_surface_fluxes, compute_tiled_surface_fluxes)
+    n = 3
+    T_sfc = jnp.array([301.0, 295.0, 285.0])
+    u, v = jnp.full((n,), 6.0), jnp.full((n,), 1.0)
+    T_air, q_v, q_sfc, rho = T_sfc - 1.5, jnp.full((n,), 0.008), jnp.full((n,), 0.02), jnp.full((n,), 1.15)
+    cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm", z_ref=10.0)
+    _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg)
+    assert float(jnp.min(jnp.abs(lhflx))) > 1.0
+    E_ref = lhflx / constants.L_v
+    np.testing.assert_allclose(np.asarray(surface_moisture_flux(cfg, lhflx, T_sfc)),
+                               np.asarray(E_ref), rtol=1e-12)
+    # Non-vacuous: the Kirchhoff inverse is a different number here.
+    assert float(jnp.abs(lhflx[0] / latent_heat_vaporization(T_sfc[0]) / E_ref[0] - 1.0)) > 0.02
+    # Mosaic: a pure-ocean CESM tile's water is its lhflx / L_v too.
+    one, zero = jnp.ones(n), jnp.zeros(n)
+    tiles = SurfaceTileSpec(frac_ocean=one, frac_ice=zero, frac_land=zero,
+                            T_ocean=T_sfc, T_ice=T_sfc, T_land=T_sfc,
+                            q_sfc_ocean=q_sfc, q_sfc_ice=q_sfc, q_sfc_land=q_sfc)
+    other = SurfaceLayerConfig(bulk_scheme="constant")
+    (_, _, _, lh_t, _), water = compute_tiled_surface_fluxes(
+        u, v, T_air, q_v, rho, tiles, cfg, other, other, return_water=True)
+    np.testing.assert_allclose(np.asarray(water), np.asarray(lh_t / constants.L_v), rtol=1e-12)

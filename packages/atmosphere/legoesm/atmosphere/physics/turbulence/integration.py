@@ -1041,15 +1041,18 @@ def _make_mpas_turbulence(
                     "the land latent heat with the ocean's L_v(T_sfc) loses the "
                     "snow-sublimation and canopy shares of the water.")
             # The land model's own water flux, blended with the ocean half's bulk
-            # water (lhflx / L_v(T_sfc): the exact inverse of the bulk charge,
+            # water (lhflx over the latent heat its law charged: the exact inverse
+            # of the bulk charge,
             # taken BEFORE the heat blend), handed to the kernel as mass.  Land
             # values over pure-ocean cells may be NaN/undefined: masked out.
-            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                charged_latent_heat)
             _ev_land = jnp.asarray(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
-            _ev_blend = ((1.0 - _fl) * _lh / _lv_T(T_sfc) + _fl * _ev_land)
+            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(step_config.surface, T_sfc)
+                         + _fl * _ev_land)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
             _sh_land = jnp.where(
