@@ -121,6 +121,10 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
                             # scheme's updraft mass flux + in-cloud condensate
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
+cloud_cam6_rhmini: 0.80     # CAM6 aist ramp (cldfrc2m.F90:846-856), namelist
+cloud_cam6_rhmaxi: 1.0      # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis under
+cloud_cam6_rhminis: 1.0     # clubb_sgs (namelist_defaults_cam.xml:1521-1533);
+cloud_cam6_rhmaxis: 1.0     # = the code defaults, now recorded (user 2026-09-30)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
 morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # measured behaviour.  CAM6's MG2 has NO graupel
