@@ -194,10 +194,13 @@ def test_moist_subsoil_keeps_capillary_supply():
     below, nothing is refilled, and the day's ET is unchanged (the correction must
     not cut legitimate upward supply).  Regression guard."""
     res, et, _ = _day(TwoLeafCanopyConfig(), top=2.0e-4, deep=0.12)
-    # Pinned to the pre-fix model (origin/main aade0a444), which created no water
-    # in this regime: the fix must leave it unchanged.  A start-of-step cap on
-    # the top layer (rejected design) cut it by ~4%.
-    assert abs(et - 0.9565067983140837) < 1e-6 * et, et
+    # Pinned to the pre-fix model, which created no water in this regime: the
+    # fix must leave it unchanged.  A start-of-step cap on the top layer
+    # (rejected design) cut it by ~4%.  Value: the latent-heat PR's parent
+    # (aa8d25696, Kirchhoff L_v(T) land demands, no supply limit) gives
+    # 0.9571873768205811 vs 0.9571873768205792 with the fix; the constant-L_v
+    # model (origin/main aade0a444) gave 0.9565067983140837.
+    assert abs(et - 0.9571873768205811) < 1e-6 * et, et
     assert np.abs(res).max() < 1e-10
 
 
