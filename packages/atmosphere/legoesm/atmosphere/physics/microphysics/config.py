@@ -987,6 +987,16 @@ class MorrisonConfig(NamedTuple):
     # not CLUBB (clubb_intr.F90:2416-2421), the value it falls back to where
     # CLUBB's qc variance is unavailable; CAM6 clips to [0.001, relvarmax].
     kk2000_cam6_relvar: float = 10.0
+    # CAM6 MG2 in-cloud warm rain: autoconversion + accretion on q_c/lcldm,
+    # q_r/precip_frac (N_c/lcldm when prognostic), tendencies times lcldm,
+    # with lcldm = max(CLUBB cloud fraction, 1e-4) (micro_mg2_0.F90:878,
+    # :1224-1322).  Needs the closure's cloud fraction at the call
+    # (``cloud_fraction=``); raises without it.  False = rates on the
+    # grid-mean state (the pre-existing behaviour).  Departure: CAM6 uses
+    # ast = max(liquid, ice) cloud fraction; here CLUBB's LIQUID fraction
+    # only, so where ice cloud is wider the in-cloud water, and the rate
+    # (~lcldm^-1.47 at fixed grid water), is larger than CAM6's.
+    warm_rain_incloud: bool = False
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1277,6 +1287,7 @@ def apply_microphysics_experiment_flags(
     morrison_sed_cfl_substeps_strict: bool | None = None,
     morrison_do_graupel: bool | None = None,
     morrison_warm_rain_scheme: str | None = None,
+    morrison_warm_rain_incloud: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1448,6 +1459,16 @@ def apply_microphysics_experiment_flags(
                 "morrison_do_graupel is only supported by the morrison "
                 f"microphysics scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(do_graupel=morrison_do_graupel)
+    if morrison_warm_rain_incloud is not None:
+        if not isinstance(morrison_warm_rain_incloud, bool):
+            raise TypeError("morrison_warm_rain_incloud must be a bool, got "
+                            f"{morrison_warm_rain_incloud!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_warm_rain_incloud is only read by the morrison "
+                f"scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            warm_rain_incloud=morrison_warm_rain_incloud)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

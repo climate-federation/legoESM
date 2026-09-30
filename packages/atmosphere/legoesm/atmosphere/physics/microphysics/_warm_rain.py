@@ -783,6 +783,43 @@ KK2000_CAM6_QC_MAX = 5.0e-3     # in-cloud cap [kg/kg] (shared with morrison.py)
 _KK2000_CAM6_RELVAR_MIN = 1.0e-3   # relvar clip (clubb_intr.F90:2425)
 _KK2000_CAM6_RELVAR_MAX = 10.0     # relvarmax, non-CLUBB deep scheme (:2418)
 
+# --- CAM6 MG2 in-cloud warm-rain inputs (micro_mg2_0.F90, CESM2.1) ---
+# lcldm = max(liqcldf, mincld) (:878), micro_mg_utils.F90:123 mincld = 1e-4;
+# qcic = min(qc/lcldm, 5e-3), ncic = max(nc/lcldm, 0), both 0 where qc < qsmall
+# (:1224-1236); qric = min(qr/precip_frac, 0.01), 0 where qric < qsmall
+# (:1312-1322).  precip_frac = cldm, "in_cloud" method under CLUBB
+# (namelist_defaults_cam.xml micro_mg_precip_frac_method, :1260-1266): only a
+# level with qc < qsmall AND qi < qsmall inherits the level above's value, and
+# there qcic = 0, so every warm-rain rate is zero whatever qric is.  For the
+# warm-rain consumers here precip_frac therefore equals lcldm (cldm = lcldm
+# with CLUBB's fraction as both).
+_MG2_MINCLD = 1.0e-4       # micro_mg_utils.F90:123 mincld [-]
+_MG2_QSMALL = 1.0e-18      # micro_mg_utils.F90 qsmall [kg/kg]
+_MG2_QRIC_MAX = 0.01       # micro_mg2_0.F90:1316 in-precip rain cap [kg/kg]
+
+
+def mg2_incloud_warm_rain_inputs(q_c, q_r, N_c, cloud_fraction, rescale_nc):
+    """CAM6 MG2 in-cloud warm-rain inputs ``(q_c_ic, q_r_ic, N_c_ic, lcldm)``.
+
+    ``cloud_fraction`` is MG2's ``liqcldf`` (= ``cldn``), shape ``(ncol, nlev)``.
+    Rates evaluated on these inputs are multiplied back by ``lcldm`` to give
+    grid-mean tendencies (micro_mg2_0.F90:1666, :1890, :1949, :1966).
+    ``rescale_nc`` divides ``N_c`` by ``lcldm`` (a grid-mean prognostic
+    number); a SPECIFIED droplet number is already the in-cloud value (MG2
+    ``nccons``: ``ncic = ncnst/rho``), so it passes through.  ``q_r_ic`` is
+    valid only where ``q_c_ic > 0`` (see the precip_frac note above).
+    """
+    lcldm = jnp.maximum(cloud_fraction, _MG2_MINCLD)
+    has_qc = q_c >= _MG2_QSMALL
+    q_c_ic = jnp.where(has_qc, jnp.minimum(q_c / lcldm, KK2000_CAM6_QC_MAX),
+                       0.0)
+    N_c_ic = N_c
+    if rescale_nc:
+        N_c_ic = jnp.where(has_qc, jnp.maximum(N_c / lcldm, 0.0), 0.0)
+    q_r_ic = jnp.minimum(q_r / lcldm, _MG2_QRIC_MAX)
+    q_r_ic = jnp.where(q_r_ic < _MG2_QSMALL, 0.0, q_r_ic)
+    return q_c_ic, q_r_ic, N_c_ic, lcldm
+
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
 # (module_mp_graupel.f90:1835-1844 autoconversion, :1960-1962 accretion).

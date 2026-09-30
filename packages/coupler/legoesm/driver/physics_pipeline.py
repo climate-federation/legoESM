@@ -4038,9 +4038,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_sed_cfl_substeps_max"])
     _graupel = getattr(config, "morrison_do_graupel",
                        _ExpCfg._field_defaults["morrison_do_graupel"])
+    _incloud = getattr(config, "morrison_warm_rain_incloud",
+                       _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
-                    ("morrison_do_graupel", _graupel)):
+                    ("morrison_do_graupel", _graupel),
+                    ("morrison_warm_rain_incloud", _incloud)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4059,9 +4062,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
                 else _sed_max)
     _graupel = (None if _graupel
                 is _ExpCfg._field_defaults["morrison_do_graupel"] else _graupel)
+    _incloud = (None if _incloud
+                is _ExpCfg._field_defaults["morrison_warm_rain_incloud"]
+                else _incloud)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None):
+            and _wrs is None and _incloud is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4071,7 +4077,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_flavor=_flavor, morrison_sed_cfl_substeps=_sed_sub,
         morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict,
-        morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs)
+        morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
+        morrison_warm_rain_incloud=_incloud)
 
 
 def _resolve_microphysics(config):
