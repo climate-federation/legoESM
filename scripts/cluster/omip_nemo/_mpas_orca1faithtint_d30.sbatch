@@ -132,7 +132,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   $([ "$LEG" -gt 1 ] && echo "--restart-from $OUT/restart_leg$((LEG-1)).npz") \
   --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
-  --ice-ocean-heat-coeff 70 \
+  --ice-ocean-heat-scheme nemo_ustar \
   --woa-init \
   --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
     $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
