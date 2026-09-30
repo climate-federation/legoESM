@@ -115,3 +115,18 @@ def test_production_deck_records_the_code_defaults_zero_physics_change():
                                      allow_convective_cloud=True)
     assert with_deck == unset
     assert np.isclose(with_deck.cam6_rhmini, 0.80)
+
+
+def test_all_four_reach_the_built_config_and_legal_bounds_pass():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _standalone_cloud_config
+    cc = _standalone_cloud_config(_args([
+        "--cloud-cam6-rhmini", "0.7", "--cloud-cam6-rhmaxi", "1.1",
+        "--cloud-cam6-rhminis", "0.85", "--cloud-cam6-rhmaxis", "1.05"]),
+        "cam6_clubb", allow_convective_cloud=True)
+    assert (cc.cam6_rhmini, cc.cam6_rhmaxi, cc.cam6_rhminis,
+            cc.cam6_rhmaxis) == (0.7, 1.1, 0.85, 1.05)
+    # inclusive bounds: CAM6 non-CLUBB namelist values must be legal
+    for name, v in (("rhmini", 0.5), ("rhmini", 0.99), ("rhmaxi", 1.1),
+                    ("rhminis", 0.85), ("rhmaxis", 1.1)):
+        ExperimentConfig(**{f"cloud_cam6_{name}": v}).validate_strict()
