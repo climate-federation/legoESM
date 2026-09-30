@@ -262,7 +262,7 @@ size. Preflight is green on all three variants.
 | **VORTEX vector ladder kt=1..10** | `DEBT`, first over bar kt 2; kt=2 `u 1.4325e-05 ssh 2.2685e-05`, kt=10 `u 1.4621e-05 ssh 5.3334e-06` — **every row equals round 3's published ladder** |
 | LOCK_EXCHANGE-zco kt=1..3 | `AT-BAR`, no row over the bar |
 | OVERFLOW-zps kt=1..3 | `DEBT`, first over bar `{T,u}` at kt 2 — unchanged from the value the merge receipt published |
-| GYRE certified ladder, trajectory only, kt=1..10 | the first attempt was REFUSED by its own argument parser (this gate takes no `--allow-dirty`), re-queued without it; STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/gyre_ladder.log` |
+| GYRE certified ladder, trajectory only, kt=1..10 | `DEBT`, **first over bar `{T,S,u,v,ssh}` at kt 3 — the certified value, unchanged**; kt=2 velocities `8.326673e-17` / `9.714451e-17`, the digits the certification receipt publishes. Two false starts first, both the harness and not the card: it takes no dirty-tree flag, and then it refused a tree with one uncommitted test file |
 | DINO month gate (note BI; this round changes `packages/`), private work dir | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`, exit 0. Identical to round 3's value, i.e. `1.9e-10 K` from the certified one, which is the harness's own run-to-run floor: this round is INERT on DINO, which is what an additive round should give |
 | kt=2 walk, vector card | section 6 |
 | kt=2 walk, flux card | arms 0-4 identical to round 3's published rows |
@@ -274,8 +274,9 @@ size. Preflight is green on all three variants.
 | clean re-run of every walk and plant at the committed tree | done: both walks exit 0 and all six plants VISIBLE, exit 1, every JSON stamped with a CLEAN commit |
 | the same battery after the fixes, second run | `7 failed, 219 passed` — the citation-gate and card failures are GONE; the seven were the per-term reader tests, which the run predated the header fix for and which now read `24 passed` on their own |
 
-**Two rows are still incomplete and the round is HELD on them.** The
-GYRE year rows (day 30 / 240 / 360) were NOT run at all: the resolved
+**Every gate above has now run.** The round is still HELD, but on the fix
+rather than on the gates: part B names the boundary and narrows the term to
+two of five, and lands no model code. The GYRE year rows (day 30 / 240 / 360) were NOT run: the resolved
 configuration of every card is byte-identical before and after (section 4,
 zero changed keys on nine cards) and part B changes no model code, so a
 360-day repeat would be byte-identical by construction — but that is an
