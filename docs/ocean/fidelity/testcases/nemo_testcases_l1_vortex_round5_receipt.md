@@ -403,3 +403,59 @@ is verbatim-correct** — which this campaign has not always managed.
 **Single reviewer, stated plainly.** The campaign's default is two. This
 round had one, per the brief's instruction at the quota line. That is a
 weaker review than the default and is recorded as such.
+
+## 13. The after-SSH form is a STATED field, and the numbers did not move
+
+The first version of this fix read the form from `momentum_time_integrator`.
+That is the hidden coupling decision 75 bans and round 163 already rejected
+once for an EOS-keyed default, and it was also **wrong on a card**: DINO's
+NEMO recipes do not set the field the inference keyed on, so both of them
+silently took the leapfrog arm whatever their program is. The round-4 census
+row that called DINO's non-MLF card an executor of the change was wrong for
+that reason, and section 7 is corrected.
+
+The form is now `nemo_first_wzv_after_ssh` on the model configuration, with
+**no default that guesses**: a card whose resolved configuration reaches
+NEMO's own first `wzv` call and leaves it unset RAISES, the same contract
+`nemo_stage_momentum_wzv_split` already has, and the guard stays in the
+grow-only dispatch ratchet. Every card states it or states nothing:
+
+| card / recipe | states |
+|---|---|
+| `VORTEX_VEC-zco`, `GYRE-zco`, `ORCA2-zps` | `rk3_extrapolated` |
+| DINO `nemo_dino_kamm`, `nemo_dino_kamm_mlf` | `leapfrog_continuity` |
+| `VORTEX-zco`, `LOCK_EXCHANGE-zco`, `OVERFLOW-zps`, DINO `legoesm_default`, `nemo_paper` | nothing, and the test refuses a value |
+
+**The plant for the whole idea:** the two cards that state DIFFERENT forms
+must not be separable by the integrator field — if the old inference could
+still reproduce every card, nothing was fixed. It cannot: DINO's card does
+not even set the value the inference keyed on.
+
+### Fingerprint — every physics number is unchanged
+
+| quantity | keyed version | stated version |
+|---|---|---|
+| completed pre-stage right-hand side | `2.710505e-20` | `2.710505e-20` |
+| vector ladder `kt=2` | `u 3.3693e-06`, `ssh 3.7090e-08` | identical |
+| vector ladder, all ten steps | — | identical, every row |
+| flux ladder, all ten steps | — | identical, every row |
+| `LOCK_EXCHANGE-zco` | `AT-BAR` | identical |
+| `OVERFLOW-zps` | `DEBT`, `kt=2` | identical |
+| DINO month gate | `2.040288957e-03 K -- PASS` | `2.040288957e-03 K -- PASS` |
+
+All four ladders re-ran on a clean tree with zero provenance refusals.
+
+**The three certified card digests move**, because the configuration gained
+a field and the digest prints every field: GYRE `337651dbd9f1b49c` ->
+`da52bd90a40f71fd`, LOCK_EXCHANGE `159ca3d07db0a3f5` -> `d794c4c5cb3dd880`,
+OVERFLOW `73174751388503aa` -> `2bb9d9be75fd924d`. Nothing those cards
+execute changed — GYRE states the value it already resolved to, the tanks
+never reach the branch, and their ladders above are byte-equal.
+
+### Gates re-run after the change
+
+| gate | line |
+|---|---|
+| card tests, zad tests, dispatch ratchet, recipe tests | `135 passed` |
+| citation gate, after re-anchoring for the new lines | `16 passed`, `map entries failing: 0` |
+| push-gate file set | re-run after the re-anchor; the only failures were the citation gate, now green |
