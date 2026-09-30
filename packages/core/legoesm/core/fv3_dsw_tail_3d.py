@@ -85,7 +85,6 @@ from legoesm.core.fv3_phase3d_common import (
     require_nord,
     stack_faces,
     stack_levels,
-    stack_levels_batched,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
@@ -371,7 +370,8 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
 
     Entry gates already ran in the caller.  The ``d_sw3`` and
     ``d_sw4/5/6`` FACE loops become one ``jax.vmap`` per level over
-    ``build_batched_gs``'s stacked view; the LEVEL loops stay Python;
+    ``build_batched_gs``'s stacked view, nested in an outer ``jax.vmap``
+    over the LEVEL axis (independent, identical bodies: R1a);
     and BARRIER 2 sits exactly where the loop path puts it -- between
     d_sw3 and the KE assembly, one level at a time, on the full
     six-face stack (dyn_core.F90:984).  It is a cross-face collective
@@ -414,9 +414,17 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
                          dt=dt, hord_mt=deck.hord_mt)
 
     vf3 = jax.vmap(one_face_sw3, in_axes=(0,) * 7)
-    s3 = [vf3(state["u"][..., k], state["v"][..., k],
-              csw_outs["uc"][..., k], csw_outs["vc"][..., k],
-              bview["gs"], da6, dac6) for k in range(km)]
+    # LEVELS (2026-09-29, the km=32 compile): the per-level bodies are
+    # independent and identical (R1a: only data varies with k; deck
+    # statics and dt are shared), so the former Python level loops --
+    # which traced d_sw3 and the d_sw4/5/6 tail km times each -- are an
+    # outer vmap over the trailing level axis, levels outside faces.
+    # Level axis 3 in and out: the (6, i, j, km) layout the loop path
+    # and the former stack_levels_batched produced.
+    vfk3 = jax.vmap(vf3, in_axes=(3, 3, 3, 3, None, None, None),
+                    out_axes=3)
+    s3 = vfk3(state["u"], state["v"], csw_outs["uc"], csw_outs["vc"],
+              bview["gs"], da6, dac6)
 
     # --- BARRIER 2, verbatim blend, ALL LEVELS IN ONE CALL (M8-B) -----
     # (dyn_core.F90:984, BGRID_NE; extent owned by
@@ -425,12 +433,8 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
     # the certified 2-D blend over it and the window arm fires ONE
     # exchange instead of km (the exchange rounds were the measured
     # overhead, 2026-09-06).
-    xb6, yb6 = average_shared_edge_bgrid(
-        jnp.stack([s3[k]["ubb"] for k in range(km)], axis=-1),
-        jnp.stack([s3[k]["vbbtemp"] for k in range(km)], axis=-1),
-        ctx.tab)
-    ubb_bld = [xb6[..., k] for k in range(km)]
-    vbbtemp_bld = [yb6[..., k] for k in range(km)]
+    xb6, yb6 = average_shared_edge_bgrid(s3["ubb"], s3["vbbtemp"],
+                                         ctx.tab)
 
     # --- KE assembly + d_sw4/5/6, faces vmapped -----------------------
     def one_face_tail(u_k, v_k, ut_k, vt_k, delp_k, uc_k, vc_k, ua_k,
@@ -465,36 +469,40 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
         return face
 
     vft = jax.vmap(one_face_tail, in_axes=(0,) * 25)
-    per_level = []
-    for k in range(km):
-        per_level.append(vft(
-            state["u"][..., k], state["v"][..., k],
-            dsw_outs["ut"][..., k], dsw_outs["vt"][..., k],
-            dsw_outs["delp"][..., k],
-            csw_outs["uc"][..., k], csw_outs["vc"][..., k],
-            csw_outs["ua"][..., k], csw_outs["va"][..., k],
-            csw_outs["divg_d"][..., k],
-            dsw_outs["crx_adv"][..., k], dsw_outs["cry_adv"][..., k],
-            dsw_outs["xfx_adv"][..., k], dsw_outs["yfx_adv"][..., k],
-            dsw_outs["ra_x"][..., k], dsw_outs["ra_y"][..., k],
-            s3[k]["ubbtemp"], s3[k]["vbb"], ubb_bld[k], vbbtemp_bld[k],
-            None if hydrostatic else dsw_outs["w"][..., k],
-            None if hydrostatic else dsw_outs["dw"][..., k],
-            bview["gs"], da6, dac6))
+    # w/dw are None in the hydrostatic arm: a None operand has no
+    # leaves, so its in_axes entry is irrelevant (same as on the face
+    # vmap above); every array operand carries its level axis at 3.
+    w_ax = None if hydrostatic else 3
+    vfkt = jax.vmap(vft, in_axes=(3,) * 20 + (w_ax, w_ax, None, None, None),
+                    out_axes=3)
+    per = vfkt(
+        state["u"], state["v"],
+        dsw_outs["ut"], dsw_outs["vt"], dsw_outs["delp"],
+        csw_outs["uc"], csw_outs["vc"], csw_outs["ua"], csw_outs["va"],
+        csw_outs["divg_d"],
+        dsw_outs["crx_adv"], dsw_outs["cry_adv"],
+        dsw_outs["xfx_adv"], dsw_outs["yfx_adv"],
+        dsw_outs["ra_x"], dsw_outs["ra_y"],
+        s3["ubbtemp"], s3["vbb"], xb6, yb6,
+        None if hydrostatic else dsw_outs["w"],
+        None if hydrostatic else dsw_outs["dw"],
+        bview["gs"], da6, dac6)
 
     # --- assembly: identical keys and layouts to the loop path --------
     names = ("u", "v", "ke_corner", "ke", "wk", "divg_d",
              "delpc") + (() if hydrostatic else ("w",))
-    outs = {nm: stack_levels_batched(
-        fname, nm, [per_level[k][nm] for k in range(km)])
-        for nm in names}
+    outs = {}
+    for nm in names:
+        if nm not in per or per[nm].shape[3] != km:
+            raise KeyError(
+                f"{fname}: tail returned no level-batched {nm!r} (keys "
+                f"{sorted(per)}); the 3-D assembler must not silently "
+                f"drop a stage output")
+        outs[nm] = per[nm]
     for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp"):
-        outs[nm + "_prebarrier"] = stack_levels_batched(
-            fname, nm, [s3[k][nm] for k in range(km)])
-    outs["ubb_postbarrier"] = stack_levels_batched(
-        fname, "ubb", ubb_bld)
-    outs["vbbtemp_postbarrier"] = stack_levels_batched(
-        fname, "vbbtemp", vbbtemp_bld)
+        outs[nm + "_prebarrier"] = s3[nm]
+    outs["ubb_postbarrier"] = xb6
+    outs["vbbtemp_postbarrier"] = yb6
     return outs
 
 
