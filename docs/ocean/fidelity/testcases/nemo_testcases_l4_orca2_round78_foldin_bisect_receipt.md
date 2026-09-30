@@ -1,21 +1,25 @@
 # ORCA2 round 78 — bisecting the GYRE fold-in, and what the ladder move really is
 
-Status: **the owner is NAMED and PROVED by a byte-identical one-variable arm;
-NOTHING is landed, because the statement that moved ORCA2 is NEMO's own value
-for this deck, read out of the record's own run log.** Round 77's refutation of
-the mixing length is **RETRACTED**: its arm perturbed the floor to `1e-8 m`,
-which is not the value the pre-merge tree ran.
+Status: **the owner of the rows round 77 flagged is NAMED and PROVED by a
+one-variable arm, run both at the bisect point and at the lane tip; NOTHING is
+landed, because the statement that moved ORCA2 is NEMO's own value for this
+deck, read out of the record's own run log.** Round 77's refutation of the
+mixing length is **RETRACTED**: its arm perturbed the floor to `1e-8 m`, which
+is not the value the pre-merge tree ran. One claim of this round's own first
+draft is retracted before it ships as well — see §7.
 
 ## 0. Answer, in one paragraph
 
-ORCA2's ten-step ladder moved at the fold-in because ORCA2's turbulence
-**mixing-length floor** went from an effective **1.0 m** to NEMO's **1.0e-3 m**.
-The 1.0 m was not on the card — it was derived by code that ignored the card's
-own field — and 1.0e-3 m is what NEMO prints for this very run. Putting the
-floor back on the old derivation, one variable, reproduces the pre-merge ladder
-on **all 200 rows, every digit**. So the fold-in did not break ORCA2; it removed
-a thousand-fold excess of background vertical mixing that was damping the
-ladder's errors, and the ladder now shows what was underneath.
+The rows round 77 flagged — kt 10, end of step, `T` and `S` maxima, `+13.3%`
+and `+15.4%` away from NEMO — moved because ORCA2's turbulence **mixing-length
+floor** went from an effective **1.0 m** to NEMO's **1.0e-3 m**. The 1.0 m was
+not on the card: it was derived by code that ignored the card's own field, which
+printed `1e-8`. Putting the floor back on the old derivation, ONE variable,
+reproduces the pre-merge ladder **on all 200 comparison rows with every recorded
+field equal** at the bisect point, and at the LANE TIP brings those two headline
+rows back to within `0.11%` and `0.13%` of the pre-merge values. `1.0e-3 m` is
+what NEMO prints for this very run, so nothing is reverted: the fold-in removed
+a legoESM defect, and the ladder now shows what that defect was covering.
 
 ## 1. Preregistration, and one correction to the order
 
@@ -33,12 +37,16 @@ beside it at every point.
 
 | endpoint | tree | kt10 stage-3 `T` max | vs round 77's committed ladder |
 |---|---|---|---|
-| good | pre-merge ORCA2 `1142d4182` | `0.9838385161101275` | **200 of 200 rows identical** |
-| bad | this lane's tip `629d5f4c5` | `1.114220520669864` | **200 of 200 rows identical** |
+| good | pre-merge ORCA2 `1142d4182` | `0.9838385161101275` | **200 of 200 comparison rows identical** |
+| bad | this lane's tip `629d5f4c5` | `1.114220520669864` | **200 of 200 comparison rows identical** |
 
 Prediction **Q3 CONFIRMED**: the ladder is deterministic across clones, so the
 round-77 magnitudes stand as a BEFORE and this round's numbers are comparable to
-them. It also confirms round 77's other claim in passing — the tip carries the
+them. **What "identical" means here, precisely**: the ladder records are
+comparison summaries — per row, the unequal-cell count, the count, the maximum
+absolute difference, the rms and the at-bar flag — and every one of those fields
+is equal on every one of the 200 rows. It is NOT a hash of the candidate state
+arrays, and this receipt never claims one. It also confirms round 77's other claim in passing — the tip carries the
 stated after-SSH field and reproduces the merge tree's ladder to the last digit,
 so that field is inert as round 77 said.
 
@@ -74,11 +82,25 @@ alone it raises
 (2 s, log `ladder_p21_0ebdb6d8.log`). The two commits are ONE landing — the
 PR-1802 review-fix batch — and the bisect brackets them together.
 
-**Q1 CONFIRMED, and it is a step, not a gradient.** Everything before the pair
-leaves the ladder byte-identical (point 20: 200 of 200 rows unchanged), and
-everything after it moves the headline row by `+0.006%` (point 22 to the tip).
-The other 41 commits — 455 GYRE-lane commits' worth of merged work — are
-together worth six parts in a hundred thousand on this row.
+**Q1 CONFIRMED for the flagged rows, with two limits stated.** Everything before
+the pair leaves the ladder unchanged on all 200 comparison rows (point 20), and
+everything after it moves the kt 10 `T` maximum by `+0.006%` and the `S` maximum
+by `+0.006%` (point 22 to the tip).
+
+**Limit 1: commits 1-20 are shown COLLECTIVELY inert, not individually.** Only
+point 20 was run, so a move at some commit below 20 that a later one exactly
+cancelled is not excluded by measurement. It would have to restore all 200
+summary rows to every recorded digit, which is implausible, but implausible is
+not measured, and the receipt says so rather than writing "no earlier commit
+moves it".
+
+**Limit 2: the commits AFTER the pair are NOT inert on the ladder as a whole —
+only on the flagged rows.** Point 22 to the tip moves 175 of 200 rows (25
+unchanged, 60 toward NEMO, 115 away), the largest being kt 7 stage-3 `v`,
+`0.604874 -> 0.363905` (−39.8%). What they leave almost exactly alone are the
+four kt 10 end-of-step maxima this round scores. So "the pair owns the move" is
+a statement about the rows round 77 flagged, and §4's tip arm is what makes it
+one about the tip rather than about the bisect point.
 
 ## 4. Which statement inside the pair, by one variable
 
@@ -111,13 +133,39 @@ other arm and the floor is its own `1.0e-3 m`.
 
 **The arm.** Point 22 with ONE line changed — `nemo_derived_mxl_min=True`, so
 the floor goes back to the pre-merge derivation of 1.0 m, everything else the
-point-22 tree — reproduces the pre-merge ladder **on all 200 rows, with every
-field of every row equal**: kt 10 stage-3 `T` max `0.9838385161101275`, `S` max
+point-22 tree — reproduces the pre-merge ladder **on all 200 comparison rows,
+with every recorded field of every row equal**: kt 10 stage-3 `T` max `0.9838385161101275`, `S` max
 `0.22099092586135072`, `T` rms `0.010433315642886491`, `S` rms
 `0.003029909179584292`. Branch `r78-mxlfloor-arm`, commit `ba42e7b05`, record
 `ladder_arm_mxlfloor.json`.
 
-That is the whole move, owned by one number, with nothing left over.
+**The same arm at the LANE TIP.** Because the commits after the pair move 175
+rows of their own, the arm was repeated on the tip — the tree the lane actually
+carries — with the same single field flipped (`r78-mxlfloor-arm-tip`, commit
+`66ccb8f2f`, record `ladder_arm_tip.json`):
+
+| kt 10, stage 3 | pre-merge | tip | tip with the floor put back |
+|---|---|---|---|
+| `T` max | `0.9838385161101275` | `1.114220520669864` (+13.25%) | `0.9827840325928534` (**−0.11%**) |
+| `S` max | `0.22099092586135072` | `0.25508044621046366` (+15.43%) | `0.22071335585861362` (**−0.13%**) |
+| `T` rms | `0.010433315642886491` | `0.010613818039912676` | `0.010319467633720783` |
+| `S` rms | `0.003029909179584292` | `0.002919141602961423` | `0.0030291931706825964` |
+
+Against the pre-merge tree the tip arm's whole-ladder census is 25 unchanged,
+88 toward NEMO, 87 away — balanced, which is the other 41 commits' own
+contribution and not a direction. Against the TIP it is 24 unchanged, 90 toward,
+86 away.
+
+So: **the mixing-length floor owns the entire flagged move, at the tip and not
+only at the bisect point** — `+13.25%` becomes `−0.11%` and `+15.43%` becomes
+`−0.13%` from one field. It does not own the rest of the ladder's movement,
+and this receipt does not claim it does.
+
+One honest note on the tip arm's reach: at the tip the card also carries
+`nemo_mxl0_rmxl_min_overwrite`, which sets the surface anchor from the same
+floor, so flipping the one field moves the anchor too. That is one config field
+and one physical quantity, but its downstream reach at the tip is wider than at
+point 22 — which is why both arms are reported rather than only the tip one.
 
 ## 5. RETRACTION — round 77's mixing-length refutation was wrong
 
@@ -195,16 +243,28 @@ GYRE receipt is the document that would have prevented this round.
 
 ## 7. So the worsening is a compensating error being uncovered
 
-**The mechanism, from NEMO's own comments at the two arms.** The floor is on the
-turbulence mixing length, which sets the MINIMUM vertical diffusivity the scheme
-can produce: with `c_k = 0.1` and the floor on the square root of the minimum
-turbulent energy, a 1.0 m floor gives about `1e-6 m2/s` and a `1e-3 m` floor
-about `1e-9 m2/s` — which is precisely what the compiled source calls them
+**RETRACTED, in this round, before it shipped: "a thousand times NEMO's
+background vertical mixing".** The first draft of this section read the floor as
+a floor on the vertical diffusivity, using the compiled source's own comments
 (line 837, "associated avt minimum = molecular salt diffusivity (10^-9 m2/s)";
 line 839, "standard case : associated avt minimum = molecular viscosity
-(10^-6 m2/s)", both inside the span cited above). **Every ORCA2 run on this lane before the fold-in carried a
-background vertical mixing a thousand times NEMO's**, on both tracers and
-momentum.
+(10^-6 m2/s)", both inside the span cited above). **That reading does not hold
+for this deck, and the record says so.** ORCA2 sets its own background
+coefficients well ABOVE both of those values — `rn_avm0 = 1.2e-4 m2/s` and
+`rn_avt0 = 1.2e-5 m2/s`, in the scored run's `namelist_cfg` lines 399-400 and
+echoed back in its `ocean.output` lines 990-991 — so in a quiescent column the
+background dominates whatever the floored mixing length produces, at 1.0 m as
+much as at 1.0e-3 m. The adversarial review caught this; the claim is withdrawn
+rather than softened.
+
+**What IS established about the change.** It is a factor of 1000 on the MIXING
+LENGTH itself, which the scheme reads twice: the length multiplies the
+turbulent-energy term that makes the diffusivity, and it divides the dissipation
+term. Where the physical mixing length is small — strong stratification — a 1.0 m
+floor therefore both raises the coefficient and lowers the dissipation, and where
+it is large the floor is invisible. **By how much, on this card, is UNMEASURED**:
+no `avt`, `avm` or `zmxlm` record exists for this run (see below), so this round
+states the two ends of the range and does not put a number between them.
 
 **What that damped, measured on the ladder.** The move is not one row. Against
 the pre-merge ladder, 176 of 200 rows move, 77 toward NEMO and 99 away, in every
@@ -227,8 +287,9 @@ and the headline row grows with the step rather than jumping:
 kt 1 does not move at all, which is the expected signature of a background
 mixing floor: it needs steps to act.
 
-**CONFIRMED**: the floor owns the whole move, and the extra mixing was damping a
-developed-state error that lives in every prognostic field, not in one row.
+**CONFIRMED**: the floor owns the whole of the flagged kt 10 move, at the tip as
+well as at the bisect point, and what the old floor was covering lives in every
+prognostic field rather than in one row.
 **PLAUSIBLE, NOT MEASURED HERE**: that the largest part of what it damped is the
 stage advective transport error rounds 73-74 localised — NEMO's `un_adv` is the
 first non-bit primitive on all 8,568 active U faces with maximum 13.24 m3/s
@@ -238,7 +299,8 @@ does not measure that link and does not claim it.
 **The discriminator, and why it is round 79's first item.** The substitution the
 order asks for — NEMO's own recorded operand at this statement's CONSUMER — is
 the recorded vertical diffusivity/viscosity (or the recorded mixing length
-`zmxlm`) per step. **The records on disk do not carry it.** The admitted ORCA2
+`zmxlm`) per step. It is also what would replace the withdrawn claim above with
+a number. **The records on disk do not carry it.** The admitted ORCA2
 streams are step-entry `T`, `S`, `u`, `v`, `ssh` and the ocean surface inputs,
 kt 1..10, full-rank; there is no `avt`/`avm`/`zmxlm` stream. Round 79 therefore
 needs a new acquisition under a new target name, writing `avt`, `avm` and
@@ -248,7 +310,10 @@ measurement instead of by argument.
 ## 8. What this round does NOT license
 
 **Every ORCA2 magnitude on this lane measured before the fold-in was measured
-under a background vertical mixing a thousand times NEMO's.** That includes
+with the turbulence mixing length floored a thousand times higher than NEMO's
+value for this deck** (and, at the tip, with the surface anchor that follows it).
+How much vertical mixing that actually bought is unmeasured, per §7; that it
+moved the flagged rows by 13% and 15% is measured. That includes
 round 71's independent month ranking (terminal `T` max `21.637832697714707` K,
 rms `0.17564842520962015` K at 240 steps) and the magnitude parts of the
 rounds 72-76 walks. Bit-level statements — which row is at the bar, which
@@ -267,8 +332,35 @@ never to the lane.
 | gate | result |
 |---|---|
 | GYRE, tanks, DINO | **not run, and not required** — nothing shared changed. Round 77 measured them on this tip and they were byte-identical/PASS |
-| citation gate | run on this receipt, see §11 |
+| citation gate, this receipt | **PASS**, 1 citation, 0 unmapped, 0 failures, 0 map entries failing audit |
+| the same with a planted two-line shift on that citation | **FAIL**, `SYMBOL-NOT-AT-LINE` — the gate is not vacuous on this receipt |
+| citation gate, default cumulative receipt | **PASS**, 274 citations, 0 unmapped, 0 failures, nine self-test plants all fired |
+| `test_nemo_testcase_receipt_citation_gate.py`, `test_nemo_vortex_card.py`, `test_nemo_card_opt_in_defaults.py` | **`87 passed`** |
+| the ORCA2 lane's other four push-gate files | **`111 passed`** |
 | card battery | not run — no card changed |
+
+The two premises that are NOT citations — the deck's `ln_zdfiwm` namelist line
+and the run log line that says which arm the run took — are read from the run
+directory and named in §6 as prose, because the citation map keys compiled
+sources only. They are the load-bearing half of §6, and no gate audits them.
+
+## 9b. Review
+
+`codex exec --sandbox read-only` on the whole round (preregistration, receipt,
+the one map entry, and the ladder JSONs, which it read and recomputed from).
+Verdict, quoted: **HOLD**, with four findings. All four were real; all four are
+closed above, one of them by a new measurement rather than by a rewording.
+
+| # | finding | what it changed |
+|---|---|---|
+| 1 | "the arm was applied at point 22, not the tip: point 22 and the tip differ on 175 of 200 rows, largest 39.84%" — so the arm proved ownership of the point-20-to-22 step, not of the fold-in | **A NEW ARM WAS RUN**, the same one variable at the lane tip (§4). It brings the two flagged rows from `+13.25%`/`+15.43%` to `−0.11%`/`−0.13%`. The later commits' own 175-row movement is now reported (§3, limit 2) instead of being summarised as "+0.006% on this row" |
+| 2 | "a thousand times NEMO's background vertical mixing" is false for this deck: ORCA2 sets `rn_avm0 = 1.2e-4`, `rn_avt0 = 1.2e-5 m2/s`, above the values the floor implies | **RETRACTED in §7**, with the namelist and log lines that refute it quoted. The change is a factor of 1000 on the mixing LENGTH; what it buys in mixing is unmeasured and now says so |
+| 3 | "byte-identical" exceeds the evidence: the records are comparison summaries, not hashes of the candidate state | wording fixed throughout to "all 200 comparison rows, every recorded field", and §2 says explicitly what the records do and do not contain |
+| 4 | the gates table pointed at a section that does not exist, and the citation gate audits only the compiled-source citation, not the namelist and run-log premises | §9 rewritten with the actual gate results, and the un-audited premises named |
+
+The reviewer confirmed the rest: the arm is a valid one-variable control on the
+floor, the retraction of round 77 is correct, and the three ORCA2/NEMO facts in
+§6 are at the lines claimed.
 
 ## 10. Choices made this round
 
@@ -278,6 +370,7 @@ never to the lane.
 | treat commits 21 and 22 as one atomic point | NOT A CHOICE — commit 21 alone raises a `TypeError`; the evidence is in the receipt |
 | resolve the four merge conflicts from the ORCA2 side at every bisect point | NOT A CHOICE about physics — none is under `packages/` or `src/`, and the construction is verified against round 77's merge tree |
 | land nothing | ASKED — the order says a statement that is NEMO's for ORCA2 is not scoped |
+| run a second arm at the lane tip after the review | NOT A CHOICE about physics — it is the measurement the reviewer's first finding asked for, same one variable |
 
 UNASKED: none.
 
