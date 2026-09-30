@@ -441,3 +441,29 @@ def test_real_state_probe_runs_and_passes_on_a_synthetic_checkpoint(tmp_path, ca
     out = capsys.readouterr().out
     import re
     assert "ORACLE PASS" in out and re.search(r"BITWISE on [1-9]\d* of", out)
+
+
+def test_production_deck_selects_incloud_and_threads_it():
+    """RULE 3: the production deck names the switch, satisfies the lane guard,
+    and the value reaches the Morrison leaf the MPAS lane builds."""
+    import pathlib
+
+    from scripts.run.run_amip import build_arg_parser
+
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = (pathlib.Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_production.yaml")
+    keys = load_yaml_config(deck, build_arg_parser())
+    assert keys["morrison_warm_rain_incloud"] is True
+    sub = {k: keys[k] for k in ("microphysics", "turbulence",
+                                "cld_macmic_num_steps",
+                                "morrison_warm_rain_incloud")}
+    assert not keys.get("subgrid_autoconversion", False)
+    cfg = ExperimentConfig(grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+                           **sub)
+    cfg.validate_strict()
+    assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
+                                   ).warm_rain_incloud is True
