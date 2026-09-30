@@ -1834,11 +1834,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "morrison_warm_rain_incloud"],
                         dest="morrison_warm_rain_incloud",
                         help="CAM6 MG2 in-cloud warm rain: autoconversion "
-                             "and accretion on cloud water divided by CLUBB's "
-                             "(liquid) cloud fraction, tendencies scaled "
-                             "back by it (CAM6 MG2; CAM6 uses max(liquid, "
-                             "ice) fraction). "
-                             "Needs --turbulence clubb and "
+                             "and accretion on cloud water divided by CAM6's "
+                             "ast = max(CLUBB liquid, aist ice) cloud "
+                             "fraction, tendencies scaled back by it. "
+                             "Needs --turbulence clubb, cloud scheme "
+                             "cam6_clubb and "
                              "cld_macmic_num_steps>=2.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
