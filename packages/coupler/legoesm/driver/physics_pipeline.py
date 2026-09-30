@@ -3648,6 +3648,7 @@ def convection_config_for(config, grid_dx_m=None):
 
     scheme = config.convection
     cc = ConvectionConfig(scheme=scheme)
+    _zm_overrides(config)  # refuse zm_* before the "none" early return
     if scheme == "none":
         return cc
     cc = cc._replace(rain_to_surface=bool(
@@ -3669,6 +3670,19 @@ def convection_config_for(config, grid_dx_m=None):
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
+
+
+def _zm_overrides(config):
+    """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
+    does not select zhang_mcfarlane (they would be silently inert)."""
+    from legoesm.driver.config import ZM_SCALAR_FIELDS
+
+    given = [f for f in ZM_SCALAR_FIELDS if getattr(config, f, None) is not None]
+    if given and config.convection != "zhang_mcfarlane":
+        raise ValueError(
+            f"{given} are Zhang-McFarlane parameters; got "
+            f"convection={config.convection!r}, which does not read them.")
+    return {ZM_SCALAR_FIELDS[f]: float(getattr(config, f)) for f in given}
 
 
 def _resolve_convection(config):
@@ -3699,6 +3713,7 @@ def _resolve_convection(config):
     )
 
     scheme = config.convection
+    _zm_set = _zm_overrides(config)
     if scheme == "none":
         return _noop_convection, None
 
@@ -3814,7 +3829,7 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(precip_efficiency=_pe)
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
-                land_fraction=config.zm_land_fraction)
+                land_fraction=config.zm_land_fraction, **_zm_set)
 
         # Tiedtke plume buoyancy-death memory (ExperimentConfig /
         # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
@@ -4483,6 +4498,32 @@ def turbulence_config_for(config):
             tc = tc._replace(clubb=tc.clubb._replace(
                 q_flux_scale=float(_qfs), q_flux_scale_sigma_lo=float(_lo),
                 q_flux_scale_sigma_hi=float(_hi)))
+        # CAM6-namelist CLUBB tunables (CLUBB_SCALAR_FIELDS): same threading
+        # and refusal.  None (default) => the scheme's own CLUBBParams value.
+        from legoesm.driver.config import (
+            CLUBB_PROGNOSTIC_ONLY,
+            CLUBB_SCALAR_FIELDS,
+        )
+        _cp_given = [f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None]
+        _cp = {CLUBB_SCALAR_FIELDS[f]: float(getattr(config, f))
+               for f in _cp_given}
+        if _cp:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"{_cp_given} are CLUBB parameters; got "
+                    f"turbulence={tc.scheme!r}.")
+            _diag_inert = sorted(set(_cp_given) & CLUBB_PROGNOSTIC_ONLY)
+            if _diag_inert and not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    f"{_diag_inert} are read only by prognostic CLUBB; "
+                    "set clubb_prognostic=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                params=tc.clubb.params._replace(**_cp)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -4560,6 +4601,13 @@ def turbulence_config_for(config):
             "clubb_q_flux_scale is set but an explicit turbulence_override is "
             "in force; set CLUBBConfig(q_flux_scale=..., q_flux_scale_sigma_lo/hi=...) "
             "inside the override instead of the experiment-level probe.")
+    from legoesm.driver.config import CLUBB_SCALAR_FIELDS
+    _cp_set = sorted(f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None)
+    if _cp_set:
+        raise ValueError(
+            f"{_cp_set} are set but an explicit turbulence_override is in "
+            "force; set them in the override's CLUBBParams instead.")
     return apply_surface_flux_config(tc, config)
 
 

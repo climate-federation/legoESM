@@ -218,6 +218,14 @@ convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelis
 convective_precip_efficiency: 0.8
 convective_rain_to_surface: true
 convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+# ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
+# namelist above), so a campaign arm's change is one visible row.
+zm_c0_lnd: 0.0075           # rain conversion over land [1/m]
+zm_c0_ocn: 0.03             # rain conversion over ocean [1/m]
+zm_ke: 5.0e-6               # rain evaporation efficiency
+zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
+zm_tau: 3600.0              # CAPE consumption timescale [s]
+zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
 
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb
@@ -236,6 +244,16 @@ clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
 cloud_q_c_diagnostic: 0.0
 conv_cloud_condensate: 0.0
 clubb_trop_cloud_top_press: 15000.0
+# CLUBB tunables written explicitly (values = the port's CLUBBParams defaults,
+# the CAM6 clubb namelist).  clubb_c_K10h has no consumer in this port.
+clubb_c14: 2.2
+clubb_c8: 4.2
+clubb_c11: 0.7
+clubb_c11b: 0.35
+clubb_gamma_coef: 0.308
+clubb_gamma_coefb: 0.32
+clubb_beta: 2.4
+clubb_c_k10: 0.5
 
 # ---- gravity-wave drag ---------------------------------------------------------
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
