@@ -480,6 +480,9 @@ class MPASOceanHaloRefresh(NamedTuple):
     owned_mask_cells: jnp.ndarray | None = None
     owned_mask_edges: jnp.ndarray | None = None
     global_sum: Callable | None = None
+    # Cell rings each refresh fills (SPMD lane); ``None`` = not declared.
+    # The global-polynomial PCG preconditioner needs >= its sweep count.
+    halo_depth: int | None = None
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:

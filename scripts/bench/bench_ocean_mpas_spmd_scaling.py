@@ -79,9 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     # on the retired preconditioner (RULE 3: a flag default that keeps the
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
-                   choices=["jacobi", "poly"],
+                   choices=["jacobi", "poly", "gpoly"],
                    help="distributed PCG preconditioner (config default poly); "
-                        "'poly' is the communication-free local Neumann polynomial")
+                        "'poly' is the communication-free local Neumann polynomial, "
+                        "'gpoly' the same polynomial on the GLOBAL operator "
+                        "(evaluated on a K-ring halo, one exchange per iteration)")
+    p.add_argument("--halo-depth", type=int, default=None,
+                   help="cell-halo rings of the SPMD layout (default: what the "
+                        "config needs -- 2, or K for gpoly); set it to price a "
+                        "deeper halo on its own")
     p.add_argument("--pcg-poly-sweeps", type=int, default=None,
                    help="sweeps K of the local polynomial preconditioner "
                         "(config default 4)")
@@ -159,6 +165,7 @@ def main() -> int:
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         disarm_mpas_ocean_spmd,
+        halo_depth_for_config,
         make_sharded_mpas_ocean_step,
         n_real_cells,
         shard_state_mpas_ocean_spmd,
@@ -187,7 +194,9 @@ def main() -> int:
     if nd > 1:
         layout = build_mpas_ocean_spmd_layout(
             mesh, nd, n_cells_real=n_real,
-            tracer_advection=str(config.tracer_advection), nlev=args.nlev)
+            tracer_advection=str(config.tracer_advection), nlev=args.nlev,
+            halo_depth=(halo_depth_for_config(config) if args.halo_depth is None
+                        else int(args.halo_depth)))
         spmd_step = make_sharded_mpas_ocean_step(model, layout)
         state = shard_state_mpas_ocean_spmd(state, layout)
         rounds = len(layout.ppermute_perms)
@@ -305,6 +314,7 @@ def main() -> int:
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
                "pcg_precond": str(config.barotropic_implicit_pcg_precond),
                "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
+               "halo_depth": (int(layout.halo_depth) if nd > 1 else None),
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (

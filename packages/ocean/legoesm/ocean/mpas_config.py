@@ -365,6 +365,12 @@ class MPASOceanConfig(NamedTuple):
     # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
     # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
     # residual.
+    # "gpoly" (opt-in): the same polynomial on the GLOBAL operator, evaluated
+    # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
+    # historical 2 satisfies at 4 sweeps); one exchange per iteration as
+    # before, and the answer no longer depends on the device count. Same
+    # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
+    # iters 10 / 15 / 20. The single-device path runs the same fixed-M PCG.
     barotropic_implicit_pcg_precond: str = "poly"
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
