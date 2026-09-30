@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:334,573,2021`).
+(`nemo_testcase_recipe.py:340,585,2033`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -5919,7 +5919,7 @@ cells on `u` and `2220` signed-zero flips on `v` (IEEE `-0.0 + 0.0 = +0.0`).
 legoESM was adding `8.256e-10` there because it evaluated the same operator on
 the STAGE velocity.  The shared seam for the BEFORE-level operand already
 existed and the leap-frog path already used it
-(`ocean_pe_latlon_cgrid.py:5425-5426`); the WS-RK3 stage RHS simply did not
+(`ocean_pe_latlon_cgrid.py:5427-5428`); the WS-RK3 stage RHS simply did not
 pass it.  Landed at `7521513a54c3` in that one shared place, no card switch,
 no new knob.  Stage 1 hands the helper the step-entry velocity already, so only
 the stage-3 call moves, and stage 2 never calls the operator.
@@ -6091,7 +6091,7 @@ thicknesses — `e3t`/`e3u`/`e3v` at `Kbb` inside the divergence
 (`dynldf_lev_rot_scheme.h90:28-29`), `e3f` carrying no time index at all
 (`dynldf_lev_rot_scheme.h90:24-25`), and `e3u`/`e3v` at `Kmm` in the final
 division.  legoESM's lateral operator receives ONE thickness: a single `h_k`
-argument at `ocean_pe_latlon_cgrid.py:5448`, built from the stage's own live
+argument at `ocean_pe_latlon_cgrid.py:5450`, built from the stage's own live
 `eta`, which at stage 3 is the `Kmm` sea level.  So after this round the
 velocity operand is NEMO's and the thickness operand is not.  **CONFIRMED by
 reading, UNMEASURED in size**: at kt=1 the whole term is exactly zero, so no
@@ -6512,7 +6512,7 @@ it moot.
 
 **legoESM cannot evaluate the changed operator on ORCA2 at all.**  The card
 selects `nemo_div_curl` with `A_h = 1e5`, and that branch refuses a tripolar
-grid: `ocean_pe_latlon_cgrid.py:3388-3391` raises unless the grid carries a
+grid: `ocean_pe_latlon_cgrid.py:3389-3392` raises unless the grid carries a
 positive scalar `dlon`, and ORCA2's is `0.0`.  That is why the existing ORCA2
 phase-2 gate zeroes `A_h` in its discarded tendency.  A second gap sits behind
 it: ORCA2 resolves `nn_ahm_ijk_t = -30`, i.e. `ahmt_3d`/`ahmf_3d` read from
@@ -9560,16 +9560,16 @@ question.  **The premise is FALSE and is retracted here.**  The grep:
 ```
 packages/ocean/legoesm/ocean/state.py:2156       tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1004    tracer_combine: str = "concentration"
-packages/ocean/legoesm/ocean/experiments/dino.py:1738    "tracer_combine": "thickness_weighted",
-packages/ocean/legoesm/ocean/experiments/dino.py:3953        tracer_combine=cfg.tracer_combine,
+packages/ocean/legoesm/ocean/experiments/dino.py:1751    "tracer_combine": "thickness_weighted",
+packages/ocean/legoesm/ocean/experiments/dino.py:3967        tracer_combine=cfg.tracer_combine,
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12151  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12537  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
 test-case cards run the WS-RK3 stage ladder, which reads neither — that is why
-it is inert on them.  But `dino.py:1738` is inside `DINO_RECIPES`, and it
-SELECTS `"thickness_weighted"`; `dino.py:3953` routes it into the config those
+it is inert on them.  But `dino.py:1751` is inside `DINO_RECIPES`, and it
+SELECTS `"thickness_weighted"`; `dino.py:3967` routes it into the config those
 steps read.  So something does select it, on another card family, and neither
 "delete" nor "wire" is the right disposition.  The correct row is: the field is
 LIVE on the leapfrog and modified-leapfrog paths and simply not on the path
@@ -10955,8 +10955,8 @@ files must be committed before the operator runs it.  No NEMO executable,
 | statement | NEMO's compiled GYRE program | legoESM statement | finding before measurement |
 |---|---|---|---|
 | dispatch and time level | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138` calls KEG then ZAD with `Kmm`; the stage diagnoses `ww` from `uu/vv(Kmm)` immediately beforehand at `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332` | stage-3 vector-invariant C2 KE plus NEMO-advective ZAD, on the stage-2 state | branch/time level ALIGNED |
-| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:1955-1989` now materializes the four products and source-ordered pair sums; round 41's pre-measurement one-expression observation is RETRACTED | exact association landed in round 42 |
-| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3151-3177` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
+| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:1956-1990` now materializes the four products and source-ordered pair sums; round 41's pre-measurement one-expression observation is RETRACTED | exact association landed in round 42 |
+| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3152-3178` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
 | `ww` / `wsd` | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90:271-298` builds `ww` bottom-up from Kmm velocity and the Kaa-Kbb QCO stretch.  Resolved `ln_wave=F` takes `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:408-423`, which returns before allocating `wsd` at `:469-477`; ZAD therefore takes its `ww`-only arm | the coupled QCO seam provides stage-consistent `ww`; no Stokes vertical velocity is added | branch ALIGNED; numerical identity UNMEASURED |
 
 **PREREGISTERED PREDICTION.**  KEG carries the first non-bit statement and the

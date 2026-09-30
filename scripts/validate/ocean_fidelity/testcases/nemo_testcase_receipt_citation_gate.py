@@ -972,7 +972,7 @@ CITATION_MAP = {
         ('CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div )', 1),
     'ocean_pe_latlon_cgrid.py:1587':
         ('return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask', 1),
-    'ocean_pe_latlon_cgrid.py:1758-1759': [
+    'ocean_pe_latlon_cgrid.py:1759-1760': [
         ('r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)', 1),
         ('r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)', 1), 2],
     # --- round 161: the stage face ratio, its producer and its composition ---
@@ -2144,7 +2144,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:8544-8552': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:545-632': [
+    'nemo_testcase_recipe.py:557-644': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 88],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -2393,7 +2393,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:401-403': [
+    'nemo_testcase_recipe.py:407-409': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:10113-10130': [
@@ -2718,14 +2718,14 @@ CITATION_MAP = {
         'IF( .NOT. ln_wave ) THEN', 'RETURN', 16],
     'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:469-477': [
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
-    'ocean_pe_latlon_cgrid.py:1955-1989': [
+    'ocean_pe_latlon_cgrid.py:1956-1990': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3151-3177': [
+    'ocean_pe_latlon_cgrid.py:3152-3178': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:5021-5054': [
+    'ocean_pe_latlon_cgrid.py:5022-5056': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
-        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 34],
+        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 35],
     'ocean_model_latlon_cgrid.py:6780-6790': [
         '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
         ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],
@@ -3026,8 +3026,8 @@ CITATION_MAP = {
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1738': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3953': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1751': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3967': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
@@ -3402,7 +3402,7 @@ CITATION_MAP = {
         3],
     'ocean_model_latlon_cgrid.py:11520': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
     'ocean_model_latlon_cgrid.py:11637': ('u_solve_in = u_solve_in - (', 1),
-    'ocean_pe_latlon_cgrid.py:3388-3391': [
+    'ocean_pe_latlon_cgrid.py:3389-3392': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -3440,7 +3440,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:613': [
+    'nemo_testcase_recipe.py:625': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -3469,13 +3469,13 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5448': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5425-5426': [
+    'ocean_pe_latlon_cgrid.py:5450': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5427-5428': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
-    'ocean_pe_latlon_cgrid.py:2080-2081': [('z_coord,', 26), ('eta_safe,', 7), 2],
-    'ocean_pe_latlon_cgrid.py:2120-2121': ['requires the raw NEMO',
+    'ocean_pe_latlon_cgrid.py:2081-2082': [('z_coord,', 26), ('eta_safe,', 7), 2],
+    'ocean_pe_latlon_cgrid.py:2121-2122': ['requires the raw NEMO',
          'nemo_e3w_0 mesh field; midpoint reconstruction on',
          2],
     # ROUND 34: decision 19 added seventeen lines above the last of these
@@ -3484,7 +3484,7 @@ CITATION_MAP = {
     # added eighteen lines above the SECOND and THIRD anchors, then decision
     # 36 added fifteen more, so the current lines are 314 and 971.  The first
     # (92) is above both edits and remains unmoved.
-    'nemo_testcase_recipe.py:334,573,2021': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:340,585,2033': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

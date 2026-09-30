@@ -452,7 +452,7 @@ same four the previous round recorded.
 tests in `test_nemo_testcase_receipt_citation_gate.py` failed because the
 comment added beside the DINO recipe line pushed two mapped symbols thirty-two
 lines down: the tracer-combine selection moved from line `1706` to
-`dino.py:1738` and its config routing from line `3913` to `dino.py:3953`.  The
+`dino.py:1751` and its config routing from line `3913` to `dino.py:3967`.  The
 map entry and the
 round-8 receipt prose that cites it were moved together, which is what the
 gate requires, and the gate then passed on the cumulative receipt with all
