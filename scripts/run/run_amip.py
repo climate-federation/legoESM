@@ -1828,6 +1828,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Multiplier on kk2000 accretion of cloud by "
                              "rain (MG2 accre_enhan; 1.0 = unscaled). "
                              "kk2000 only.")
+    parser.add_argument("--morrison-warm-rain-incloud",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_incloud"],
+                        dest="morrison_warm_rain_incloud",
+                        help="CAM6 MG2 in-cloud warm rain: autoconversion "
+                             "and accretion on cloud water divided by CLUBB's "
+                             "cloud fraction, tendencies scaled back by it. "
+                             "Needs --turbulence clubb and "
+                             "cld_macmic_num_steps>=2.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -2543,6 +2553,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
+        morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

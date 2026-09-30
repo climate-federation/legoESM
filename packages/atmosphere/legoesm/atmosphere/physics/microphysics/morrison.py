@@ -65,6 +65,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     autoconversion_kk2000,
     autoconversion_kk2000_cam6,
     KK2000_CAM6_QC_MAX,
+    mg2_incloud_warm_rain_inputs,
     accretion,
     accretion_sb2001,
     accretion_kk2000,
@@ -230,6 +231,7 @@ def morrison_microphysics(
     dz: jax.Array,
     dt: float,
     config: MorrisonConfig = MorrisonConfig(),
+    cloud_fraction: jax.Array | None = None,
 ) -> MicrophysicsOutput:
     """Compute Morrison double-moment microphysics tendencies.
 
@@ -237,6 +239,9 @@ def morrison_microphysics(
     ----------
     T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, config
         Same interface as all microphysics backends.
+    cloud_fraction
+        Stratiform cloud fraction ``(ncol, nlev)`` (CLUBB's, MG2 ``liqcldf``);
+        required by, and read only under, ``config.warm_rain_incloud``.
 
     Returns
     -------
@@ -308,21 +313,39 @@ def morrison_microphysics(
     # non-linear KK2000/SB rates see the (higher) in-cloud concentration rather
     # than the grid-mean.  cf is the Sundqvist √-form from the local RH, floored
     # for AD/numeric safety.  When disabled, cf_eff=1 ⇒ identity (grid-mean).
-    if getattr(config, "subgrid_autoconversion", False):
+    N_c_ic = N_c_eff
+    if config.warm_rain_incloud:
+        # CAM6 MG2: warm-rain rates on the IN-CLOUD state from the closure's
+        # cloud fraction, scaled back by lcldm (mg2_incloud_warm_rain_inputs).
+        if cloud_fraction is None:
+            raise ValueError(
+                "MorrisonConfig.warm_rain_incloud=True needs the stratiform "
+                "cloud fraction (CLUBB's) passed as cloud_fraction; this call "
+                "path supplies none.")
+        if config.subgrid_autoconversion:
+            raise ValueError(
+                "warm_rain_incloud and subgrid_autoconversion are two cloud-"
+                "fraction sources for the same in-cloud closure; enable one.")
+        q_c_ic, q_r_ic, N_c_ic, cf_eff = mg2_incloud_warm_rain_inputs(
+            q_c, q_r, q_i, N_c_eff, cloud_fraction,
+            rescale_nc=getattr(config, "predict_Nc", False))
+    elif getattr(config, "subgrid_autoconversion", False):
         RH = q_v / jnp.maximum(q_sat, 1.0e-10)
         arg = (1.0 - RH) / max(1.0 - config.subgrid_rh_crit, 1.0e-6)
         arg_safe = jnp.where(arg > 0.0, arg, 1.0)
         cf_sg = jnp.where(arg > 0.0, 1.0 - jnp.sqrt(arg_safe), 1.0)
         cf_eff = jnp.clip(cf_sg, config.subgrid_cf_min, 1.0)
+        q_c_ic = q_c / cf_eff
+        q_r_ic = q_r / cf_eff
     else:
         cf_eff = jnp.ones_like(q_c)
-    q_c_ic = q_c / cf_eff
-    q_r_ic = q_r / cf_eff
+        q_c_ic = q_c / cf_eff
+        q_r_ic = q_r / cf_eff
     # Warm-rain autoconversion + accretion. KK2000 (default) is the SAM
     # M2005 oracle scheme; Seifert-Beheng retained for back-compat.
     if config.warm_rain_scheme == "kk2000":
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000(
-            q_c_ic, N_c_eff, rho, dt, fact=config.autocon_fact)
+            q_c_ic, N_c_ic, rho, dt, fact=config.autocon_fact)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion_kk2000(
@@ -333,7 +356,7 @@ def morrison_microphysics(
         # (micro_mg2_0.F90:1226); CAM6's var_coef(relvar, 1.15) accretion
         # factor (~1.01 at relvar=10) is dropped.
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
-            q_c_ic, N_c_eff, rho, config.kk2000_cam6_relvar,
+            q_c_ic, N_c_ic, rho, config.kk2000_cam6_relvar,
             fact=config.autocon_fact)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
@@ -342,7 +365,7 @@ def morrison_microphysics(
             fact=config.accre_enhan_fact) * cf_eff
     elif config.warm_rain_scheme == "seifert_beheng":
         dq_c_au, dN_r_au, x_c = autoconversion_sb(
-            q_c_ic, N_c_eff, rho, config.k_au, config.x_star,
+            q_c_ic, N_c_ic, rho, config.k_au, config.x_star,
             config.autoconversion_sharpness,
         )
         dq_c_au = dq_c_au * cf_eff
@@ -354,7 +377,7 @@ def morrison_microphysics(
         # as opposed to the simplified "seifert_beheng" proxy above. tau is a
         # scale-invariant ratio so the in-cloud (q/cf) rescaling leaves it
         # unchanged. NOTE the subgrid enhancement is NOT the same across the
-        # laws: with N_c_eff held at the grid-mean (not rescaled by cf), the
+        # laws: with the droplet number held at the grid-mean (not rescaled by cf), the
         # q_c^4 autoconversion gets a cf^-3 enhancement vs cf^-1 for accretion —
         # STRONGER than the kk2000 path. This (and the un-rescaled in-cloud N_c)
         # is a known subgrid-closure limitation, moot at the default
@@ -363,7 +386,7 @@ def morrison_microphysics(
         # generic ``-dq_c_au·rho/x_c`` sink below (predict_Nc=True) is used
         # instead; see ``autoconversion_sb2001``.
         dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
-            q_c_ic, q_r_ic, N_c_eff, rho,
+            q_c_ic, q_r_ic, N_c_ic, rho,
         )
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
