@@ -16,19 +16,23 @@ legoESM adds nothing.
 
 Evidence, all read out of the pinned record and the compiled source:
 
-* The deck selects it.  `namelist_cfg:397` sets `ln_zdfiwm = .true.`, and the
-  run's own log confirms the resolved value and that the parameterisation
-  initialised and read its six input fields (`ocean.output:1003`, `:1045-1093`).
-  The same log line `:1039` is the two-arm choice round 78 named: with the wave
-  arm on, NEMO forces the turbulent-energy minimum to 1e-10 and the
-  mixing-length floor to 1.0e-3 m.
+* The deck selects it.  The pinned run's own `namelist_cfg`, line 397, sets
+  `ln_zdfiwm = .true.`, and its `ocean.output` confirms the resolved value on
+  line 1003 and shows the parameterisation initialising and reading its six
+  input fields on lines 1045 to 1093.  Line 1039 of that log is the two-arm
+  choice round 78 named: with the wave arm on, NEMO forces the turbulent-energy
+  minimum to 1e-10 and the mixing-length floor to 1.0e-3 m.
 * NEMO applies it last in the vertical-physics chain.  In the compiled
-  `zdfphy.f90`, the closure's coefficients are copied into the working arrays
-  (`:349-350`), the river mouths add to them (`:355`), the convection arm runs
-  (`:359`), the salt/heat split runs (`:363`), and then the wave arm adds to all
-  three coefficients (`:372`).  The addition itself is
-  `zdfiwm.f90:314-316`, with the added diffusivity clamped into
-  `[1.4e-7, 1e-2]` m2/s and masked at `:294`.
+  compiled vertical-physics module, the closure's coefficients are copied into
+  the working arrays (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350`),
+  the river mouths add to them (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:355`),
+  the convection arm runs (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359`),
+  the salt/heat split runs (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363`),
+  and then the wave arm adds to all three coefficients
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372`).  The addition itself is
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:314-316`, with the added
+  diffusivity clamped into `[1.4e-7, 1e-2]` m2/s and masked at
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:294`.
 * legoESM's ORCA2 card resolves the arm OFF, and says so.  The card's
   `unmeasured_features` tuple has carried `internal_wave_mixing` from the
   beginning and is machine-pinned by the round-1 ladder gate's
@@ -52,10 +56,10 @@ and the consumers, and both are reported, not acted on.
 
 | NEMO arm | deck | legoESM ORCA2 card | statement |
 |---|---|---|---|
-| internal-wave mixing | `ln_zdfiwm = .true.` | OFF, declared unmeasured | `zdfiwm.f90:314-316` |
-| double-diffusive salt/heat split | `ln_zdfddm = .true.`, and the log says "use double diffusive mixing: avs /= avt" (`ocean.output:1012`) | OFF, though its two parameters are transcribed at the deck's values | `zdfphy.f90:363` |
-| river-mouth diffusivity | `ln_rnf_mouth = .true.`, `rn_avt_rnf = 1e-3` (`ocean.output:648-649`) | no such statement anywhere in the package | `zdfphy.f90:355` |
-| enhanced-diffusion convection | `ln_zdfevd = .true.`, `rn_evd = 100`, `nn_evdm = 0` | transcribed and matching | `zdfphy.f90:359` |
+| internal-wave mixing | `ln_zdfiwm = .true.` | OFF, declared unmeasured | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:314-316` |
+| double-diffusive salt/heat split | `ln_zdfddm = .true.`, and line 1012 of the log says "use double diffusive mixing: avs /= avt" | OFF, though its two parameters are transcribed at the deck's values | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363` |
+| river-mouth diffusivity | `ln_rnf_mouth = .true.`, `rn_avt_rnf = 1e-3`, on lines 648 and 649 of the log | no such statement anywhere in the package | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:355` |
+| enhanced-diffusion convection | `ln_zdfevd = .true.`, `rn_evd = 100`, `nn_evdm = 0` | transcribed and matching | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359` |
 
 The salt/heat split is the one that bears on round 79a's headline: it is the
 only arm in the chain that gives salt a different diffusivity from heat, and
