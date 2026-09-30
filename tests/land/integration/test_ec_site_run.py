@@ -226,6 +226,19 @@ def test_build_land_config_threads_z_ref():
     assert float(cfg.z_ref) == 46.0
 
 
+def test_bottom_bc_flag_changes_only_the_bottom_boundary():
+    """``--bottom-bc zero_flux`` must change the Richards bottom boundary and
+    nothing else: the rest of the Richards config (incl. the field-capacity
+    drainage limiter) must equal the free-drainage run's."""
+    mod = _load_driver_module()
+    free, zero = (mod._build_land_config(
+        mod.TwoLeafCanopyConfig(), soil="default", bottom_bc=bc, depth_m=0.0)
+        for bc in ("free_drainage", "zero_flux"))
+    assert zero.richards.bottom_bc == "zero_flux"
+    assert zero.richards._replace(bottom_bc="free_drainage") == free.richards
+    assert zero._replace(richards=free.richards) == free
+
+
 def test_stress_b0_flag_reaches_canopy_config():
     """The ``stress_b0`` selector threads onto the canopy config: the offline
     default (False) leaves the Ball-Berry cuticular intercept unstressed, and

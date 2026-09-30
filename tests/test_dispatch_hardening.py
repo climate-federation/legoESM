@@ -163,6 +163,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
+        # ZM land-fraction policy ("required" | "none"): a typo must raise, not
+        # silently run every column with ocean coefficients.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/zhang_mcfarlane.py", "zhang_mcfarlane_convection"),
         # Renamed _get_gwd_fn -> get_gwd_fn (private-import promotion,
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
@@ -339,6 +342,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
         # shortwave_scheme guard of the external (JRA55 bulk) surface forcing
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_external_surface_forcing"),
+        # VORTEX round 5: after_ssh_form dispatch of the FIRST wzv call.  The
+        # RK3 and modified-leapfrog programs leave different things in NEMO's
+        # after-SSH slot when wzv reads it (stprk3.F90:225 against ssh_nxt),
+        # so an unknown form must raise rather than silently run one of them.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "nemo_qco_wzv_operands"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)

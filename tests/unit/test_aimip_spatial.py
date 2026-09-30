@@ -16,10 +16,7 @@ Covers:
 4. :class:`AIMIPSpatialSurfaceParams.from_defaults` initializes
    every expected field at the baseline value.
 
-5. ``land_mask_from_phis`` is bounded in [0, 1] and produces a near-
-   step transition through ``phis = 0``.
-
-6. ``AIMIPClassicalParams.from_defaults(spatial_surface=True)``
+5.``AIMIPClassicalParams.from_defaults(spatial_surface=True)``
    builds, ``make_aimip_classical_spectral_physics`` accepts the
    resulting params + a land mask, and the synthetic gradient
    through ``as_dict`` and through the spatial coefficients are both
@@ -202,22 +199,6 @@ def test_aimip_classical_params_spatial_seed_reproducibility():
 
 
 # ----------------------------------------------------------------------
-# land_mask_from_phis
-# ----------------------------------------------------------------------
-
-def test_land_mask_from_phis_bounded_and_sigmoid():
-    from legoesm.training.aimip_spatial import land_mask_from_phis
-    phis = jnp.array([-1.0e4, -100.0, 0.0, 100.0, 1.0e4])
-    mask = land_mask_from_phis(phis, smooth=True, sharpness=1.0e-2)
-    assert jnp.all(mask >= 0.0)
-    assert jnp.all(mask <= 1.0)
-    # Monotonic in phis.
-    assert jnp.all(jnp.diff(mask) > 0.0)
-    # Centered at phis=0 -> mask=0.5.
-    assert math.isclose(float(mask[2]), 0.5, abs_tol=1e-12)
-
-
-# ----------------------------------------------------------------------
 # Integration with AIMIPClassicalParams
 # ----------------------------------------------------------------------
 
@@ -226,19 +207,14 @@ def test_aimip_classical_params_with_spatial_surface_builds():
         AIMIPClassicalParams,
         make_aimip_classical_spectral_physics,
     )
-    from legoesm.training.aimip_spatial import land_mask_from_phis
     grid = _grid_t11()
 
     params = AIMIPClassicalParams.from_defaults(spatial_surface=True)
     assert params.spatial_surface is not None
     assert params.spatial_surface.n_trainable() == 65
 
-    # Synthetic phis: positive over half the grid (Northern hemisphere).
-    phis = jnp.where(
-        grid.lat2d > 0.0, jnp.full(grid.lat2d.shape, 5.0e4),
-        jnp.zeros_like(grid.lat2d),
-    )
-    land_mask = land_mask_from_phis(phis, smooth=True)
+    # Synthetic mask: land over the Northern hemisphere.
+    land_mask = jnp.where(grid.lat2d > 0.0, 1.0, 0.0)
 
     fn = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0,
@@ -621,3 +597,187 @@ def test_spatial_baselines_from_params_maps_trained_scalars():
     assert b_gray["sfc_albedo"] == GrayRadiationConfig().sfc_albedo
     assert b_gray["sfc_emissivity"] == GrayRadiationConfig().sfc_emissivity
     assert "gray_sfc_albedo" not in d
+
+
+def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
+        monkeypatch):
+    """ZM on the AIMIP classical lane gets the ERA5 land-sea mask; without it ZM raises."""
+    import types
+
+    import numpy as np
+
+    import legoesm.training.era5_to_state as e2s
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+
+    # ERA5-like slice: land in ONE quadrant (north, lon < pi), so a lat flip,
+    # lon roll or transpose of the mask lands it on the wrong columns.
+    lat = np.linspace(-np.pi / 2, np.pi / 2, 19)
+    lon = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+    lsm = ((lat[:, None] > 0) & (lon[None, :] < np.pi)).astype(np.float32)
+    calls = []
+
+    def fake_slice(config, time_idx, **kw):
+        calls.append(config.load_land_frac)
+        return types.SimpleNamespace(lat=lat, lon=lon, land_frac=lsm, sfc_shf=None)
+
+    monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
+    grid = create_gaussian_grid(8, dealiasing="quadratic")
+    sig = create_sigma_coordinate(6)
+    assert grid_with_zm_land_fraction(grid, "tiedtke") is grid
+    assert calls == []
+    g_land = grid_with_zm_land_fraction(grid, "zhang_mcfarlane")
+    assert calls == [True]
+    assert g_land.land_frac.shape == (grid.n_lat * grid.n_lon,)
+    lf = np.asarray(g_land.land_frac).reshape(grid.n_lat, grid.n_lon)
+    glat = np.asarray(grid.lat)[:, None] * np.ones((1, grid.n_lon))
+    glon = np.ones((grid.n_lat, 1)) * np.asarray(grid.lon)[None, :]
+    inside = (glat > 0.3) & (glon > 0.3) & (glon < np.pi - 0.3)
+    outside = (glat < -0.3) | ((glon > np.pi + 0.3) & (glon < 2 * np.pi - 0.3))
+    assert inside.any() and outside.any()
+    assert np.all(lf[inside] == 1.0) and np.all(lf[outside] == 0.0)
+
+    shp = (grid.n_lat, grid.n_lon, 6)
+    state = isothermal_rest_state_spectral(
+        grid, sig, T_init=290.0, p_s_init=1.0e5,
+        tracers={"q_v": jnp.full(shp, 1.2e-2), "q_c": jnp.full(shp, 1e-5),
+                 "q_i": jnp.full(shp, 1e-6)})
+    fn = make_aimip_classical_spectral_physics(
+        AIMIPClassicalParams.from_defaults(), grid, 1800.0,
+        radiation="gray", convection_scheme="zhang_mcfarlane",
+        turbulence_scheme="louis", gwd_scheme="mcfarlane",
+        microphysics_scheme="sundqvist", cloud_scheme="xu_randall")
+    out = fn(state, g_land, sig)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(out))
+    with pytest.raises(ValueError, match="land_frac is required"):
+        fn(state, grid, sig)
+
+
+def test_era5_land_fraction_reads_the_callers_store_and_dataset(monkeypatch):
+    """The mask comes from the store (and open dataset) the caller names, not
+    silently from the default WB2 store."""
+    import types
+
+    import numpy as np
+
+    import legoesm.training.era5_to_state as e2s
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_spatial import era5_land_fraction
+
+    seen = []
+    lat = np.linspace(-np.pi / 2, np.pi / 2, 19)
+    lon = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+
+    def fake_slice(config, time_idx, *, ds=None, **kw):
+        seen.append((config.zarr_store, config.load_land_frac, ds))
+        return types.SimpleNamespace(lat=lat, lon=lon, sfc_shf=None,
+                                     land_frac=np.zeros((19, 72), np.float32))
+
+    monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
+    ds = object()
+    cfg = e2s.TrainingERA5Config()._replace(zarr_store="local.zarr")
+    era5_land_fraction(create_gaussian_grid(8, dealiasing="quadratic"), cfg, ds=ds)
+    assert seen == [("local.zarr", True, ds)]
+
+
+@pytest.mark.slow
+@pytest.mark.tier3
+def test_era5_land_fraction_on_the_aimip_t21_grid_is_earths():
+    """The real ERA5 land-sea mask on the T21 AIMIP grid (needs the WB2 store):
+    about a third of the columns, and 0.29 of the area, are land."""
+    import numpy as np
+
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_spatial import (
+        era5_land_fraction, grid_with_zm_land_fraction,
+    )
+
+    grid = create_gaussian_grid(21, dealiasing="quadratic")
+    land = np.asarray(era5_land_fraction(grid))
+    assert land.shape == (grid.n_lat, grid.n_lon)
+    assert land.min() >= 0.0 and land.max() <= 1.0
+    w = np.cos(np.asarray(grid.lat))[:, None] * np.ones((1, grid.n_lon))
+    print(f"ERA5 land fraction T21: column mean {land.mean():.4f}, "
+          f"area mean {(land * w).sum() / w.sum():.4f}")
+    assert land.mean() == pytest.approx(0.33, abs=0.03)
+    assert (land * w).sum() / w.sum() == pytest.approx(0.29, abs=0.03)
+    # ZM and the surface-parameter mask see the same field.
+    zm = grid_with_zm_land_fraction(grid, "zhang_mcfarlane", land).land_frac
+    assert np.array_equal(np.asarray(zm), land.reshape(-1))
+
+
+def test_run_aimip_training_and_eval_use_the_era5_land_mask(monkeypatch):
+    """run_aimip's classical training AND its in-script eval take the spatial
+    surface mask from the ERA5 land-sea mask (the one AMIP inference and ZM
+    use), not from orography."""
+    import importlib.util
+    import types
+    from pathlib import Path
+
+    import numpy as np
+
+    import legoesm.training.aimip_params as ap
+    import legoesm.training.aimip_spatial as sp
+    import legoesm.training.neural_gcm_spectral as ngs
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "run_aimip_land_mask_probe", root / "scripts" / "run" / "run_aimip.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cfg = mod._merge(mod._load_yaml(root / "config" / "aimip" / "aimip_era5.yaml"), {
+        "n_max": 8, "aimip_variant": "classical", "aimip_spatial_surface": True,
+        "aimip_radiation": "gray", "aimip_rad_update_interval": 1,
+        "aimip_convection": "zhang_mcfarlane"})
+    spec_cfg = mod._build_spectral_config(cfg)
+
+    masks = []
+
+    def fake_era5(grid):
+        m = jnp.asarray(np.random.default_rng(len(masks)).random(
+            (grid.n_lat, grid.n_lon)))
+        masks.append(m)
+        return m
+
+    # High orography everywhere: an orography-derived mask would be ~1.
+    def fake_data(spec_cfg_, grid, sigma, cache_dir, **kw):
+        carry = types.SimpleNamespace(
+            phis=jnp.full((grid.n_lat, grid.n_lon), 5.0e4))
+        return [carry], [carry], [0]
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_build(p, grid_, dt, **kw):
+        seen.append((kw["land_mask"], grid_.land_frac))
+        if len(seen) > 1:           # the eval build: nothing past it is needed
+            raise _Stop
+        return lambda *a, **k: None
+
+    def fake_loop(params, make_physics_fn, grid, *a, **k):
+        make_physics_fn(params, grid)
+        return params
+
+    monkeypatch.setattr(sp, "era5_land_fraction", fake_era5)
+    monkeypatch.setattr(ngs, "load_training_data", fake_data)
+    monkeypatch.setattr(ngs, "_train_spectral_loop", fake_loop)
+    monkeypatch.setattr(ap, "make_aimip_classical_spectral_physics", fake_build)
+
+    mod._train_aimip_classical(spec_cfg, "unused", cfg=cfg)
+    assert len(masks) == 1          # one ERA5 load feeds both ZM and the mask
+    land_mask, zm_land = seen[0]
+    np.testing.assert_array_equal(np.asarray(land_mask), np.asarray(masks[0]))
+    np.testing.assert_array_equal(np.asarray(zm_land),
+                                  np.asarray(masks[0]).reshape(-1))
+
+    with pytest.raises(_Stop):
+        mod._evaluate_variant("classical", None, cfg, "unused")
+    np.testing.assert_array_equal(np.asarray(seen[1][0]), np.asarray(masks[-1]))

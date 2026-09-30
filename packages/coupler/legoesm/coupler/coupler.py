@@ -15,6 +15,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.precision import get_policy
+from legoesm.thermo import latent_heat_vaporization_sst
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
     apply_gustiness,
@@ -403,10 +404,15 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
-    # Ocean tile freshwater: P − E, where evap is back-derived from
-    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
-    # freshwater INTO ocean.
-    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    # Ocean tile freshwater: P − E, where evap is back-derived from lhflx
+    # with the SAME latent heat the flux used (ocean is liquid, never
+    # sublimes): SST-dependent L_vap on the aerobulk MOST branch, L_v
+    # otherwise.  Positive = freshwater INTO ocean.
+    if _is_most and _thermo_conv == "aerobulk":
+        _L_evap = latent_heat_vaporization_sst(ocean_sst)
+    else:
+        _L_evap = constants.L_v
+    evap_rate = lhflx / _L_evap   # kg/m²/s, positive = up (ocean → atm)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,
@@ -432,8 +438,7 @@ def ocean_tile_response(
         # tau_x/tau_y) — back-reaction is the ice tile's job.
         ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
         ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
-        # Ocean evaporation: lhflx already used L_v, so evap_rate
-        # is the correct mass flux.
+        # Ocean evaporation: evap_rate is the mass flux of lhflx.
         surface_mass_flux=evap_rate,
         # Ocean tile is the salt-budget sink, not a source of salt
         # back to itself — zero flux on this channel.

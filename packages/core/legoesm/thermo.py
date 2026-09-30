@@ -357,6 +357,39 @@ def saturation_mixing_ratio_ice(
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
 
 
+def nemo_si3_saturation_over_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
+
+    This is the literal operation order of ``sbc_phy.F90:665-711,727-790``.
+    It intentionally does not use the smooth generic mixing-ratio conversion:
+    that would be a different formula at an oracle boundary.  Returns
+    ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
+    """
+    zta = jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo)
+    ztmp = constants.T_triple_nemo / zta
+    zle = (
+        constants.goff_ice_A_nemo * (ztmp - 1.0)
+        + constants.goff_ice_B_nemo * jnp.log10(ztmp)
+        + constants.goff_ice_C_nemo * (1.0 - zta / constants.T_triple_nemo)
+        + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
+    )
+    e_sat = 100.0 * 10.0 ** zle
+    eps = constants.R_d / constants.R_v_nemo
+    denom = (eps - 1.0) * e_sat + p
+    q_sat = eps * e_sat / denom
+    zde = (
+        -(constants.goff_ice_A_nemo * constants.T_triple_nemo) / (zta * zta)
+        - constants.goff_ice_B_nemo / (zta * jnp.log(10.0))
+        - constants.goff_ice_C_nemo / constants.T_triple_nemo
+    )
+    de_sat_dT = jnp.log(10.0) * zde * e_sat
+    dq_sat_dT = eps * p * de_sat_dT / (denom * denom)
+    return q_sat, dq_sat_dT
+
+
 def homogeneous_freezing_rh_factor(
     T: jax.Array,
     q_ice: jax.Array | None = None,

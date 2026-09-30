@@ -1024,6 +1024,29 @@ def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
     return owned
 
 
+# Spec parameters of an ACTIVE class that the selected scheme never reads.
+# The cloud-fraction family routes the whole CloudConfig spec, but cam6_clubb
+# takes its liquid fraction from CLUBB and requires explicit condensate, so the
+# RH threshold and the diagnostic in-cloud condensate floor (both Sundqvist /
+# Xu-Randall only) have no gradient path there.
+_INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
+    "cam6_clubb": frozenset({
+        "atm.clouds.CloudConfig.rh_crit",
+        "atm.clouds.CloudConfig.q_c_diagnostic",
+    }),
+}
+
+
+def aimip_inactive_fields(*, cloud_scheme: str) -> frozenset:
+    """Qualified ``scheme_key.field`` names with no gradient path under this
+    cloud scheme, frozen OUT of the trainable set by name (no-inert-parameters
+    rule, the ``_inactive_keys`` pattern) rather than left to a measured
+    freeze.  Pass to ``build_trainable_params(exclude=...)`` together with
+    :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
+    checkpoint and its evaluation skeleton share one tree."""
+    return _INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
+
+
 class AIMIPTrainableBundle(eqx.Module):
     """The classical arm's trained model when generic scheme params are on.
 

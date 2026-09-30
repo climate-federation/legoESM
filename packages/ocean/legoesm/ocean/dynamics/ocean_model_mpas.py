@@ -250,7 +250,10 @@ class MPASOceanModel:
                     f"dcEdge (limit {K_ZETA_BIH_MAX_SPACING_RATIO}). Pin the "
                     "coefficient explicitly (MPASOceanConfig(K_zeta_bih=...) / "
                     "--mpas-k-zeta-bih) for a variable-resolution mesh.")
-            _dx = float(_dc.mean())
+            # Mesh arrays are commonly stored as float32.  Accumulating their
+            # mean in float32 made the configured ico6 anchor differ from the
+            # model's own mean by 7.8 mm, defeating the promised exact anchor.
+            _dx = float(_dc.mean(dtype=np.float64))
             self.config = self.config._replace(
                 K_zeta_bih=resolution_scaled_k_zeta_bih(_dx, self.config),
                 K_zeta_bih_dx_m=_dx)

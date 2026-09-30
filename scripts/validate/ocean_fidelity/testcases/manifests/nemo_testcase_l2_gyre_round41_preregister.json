@@ -1,0 +1,76 @@
+{
+  "round": 41,
+  "date": "2026-09-10",
+  "starting_commit": "c9feb3205c9f",
+  "bar": 1e-15,
+  "status_vocabulary": ["CONFIRMED", "PLAUSIBLE", "UNMEASURED", "REFUTED"],
+  "scope": "Split GYRE kt=1 stage-3 vector-form dyn_adv into dyn_keg and dyn_zad, score each through legoESM's own implementation given NEMO's operands, then stop at the operator-run acquisition boundary.",
+  "rule0_sources": {
+    "dispatch": "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138 selects np_VEC_c2 and calls dyn_keg(nn_dynkeg,Kmm) before dyn_zad(Kmm); round40_oracle_stage3_terms/ocean.output:798-799 resolves ln_dynadv_vec=T and nn_dynkeg=0.",
+    "keg": "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130 forms zu as the two U squares, zv as the two V squares, zhke=0.25*(zv+zu), then subtracts the face difference times the stored r1_e1u/r1_e2v.",
+    "zad": "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137 reads ww at jk+1 and Kmm velocities, forms the two area-weighted W sums, and divides by the live Kmm e3u/e3v thickness; its bottom row consumes only the carried upper-interface term.",
+    "ww_time_level": "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332 diagnoses ww immediately before the stage operators with wzv(Kbb,Kmm,Kaa,uu(Kmm),vv(Kmm),np_velocity). sshwzv.f90:271-298 sets the bottom to zero, builds div_hor from those Kmm velocities, and in key_qco integrates bottom-up with the Kaa-Kbb stretch.",
+    "wsd_dead_arm": "round40_oracle_stage3_terms/ocean.output:518 resolves ln_wave=F. The compiled sbcwave.f90:408-423 consequently forces ln_vortex_force=F and returns before wsd is allocated at :469-477. Therefore the executed dynzad.f90:111-114 arm reads ww alone; reading the unallocated wsd merely to dump it is forbidden. The record carries ln_vortex_force=0 and a writer-defined all-zero wsd_effective field, explicitly not the unallocated module object.",
+    "legoesm_keg": "packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py:327-336 maps vector_invariant_ene to ke_gradient_scheme='c2'. ocean_pe_latlon_cgrid.py:1884-1914 currently forms one four-square expression before the shared C-grid gradients, unlike NEMO's separately rounded zu, zv, then zv+zu statement order.",
+    "legoesm_zad": "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:3028-3054 area-weights ww, interpolates it to U/V faces, and calls the shared nemo_advective_vertical_momentum_advection with the Kmm face thickness and nemo_faithful mask mode. packages/ocean/legoesm/ocean/vertical.py:2054-2200 is the shared statement path the gate must execute."
+  },
+  "alignment": [
+    {
+      "operator": "dispatch/time level",
+      "nemo": "stage 3: dyn_keg then dyn_zad; both consume uu/vv(Kmm=N+1/2)",
+      "legoesm": "stage-3 model RHS, vector_invariant C2 KE plus nemo_advective vertical term, consumes the stage-2 state",
+      "finding": "CORRECTED AFTER REVIEW: the decoded acquisition header is kt=1,kstg=3,Kbb=2,Kmm=2,Krhs=3,Kaa=3. The earlier Kbb=1 expectation is RETRACTED: compiled stprk3_stg.f90:469 passes Kmm in both dyn_adv index positions, and dynadv.f90:184 records those local arguments."
+    },
+    {
+      "operator": "KEG C2",
+      "nemo": "zu=(uW*uW)+(uE*uE); zv=(vS*vS)+(vN*vN); zhke=.25*(zv+zu); Krhs=Krhs-(east-west zhke)*stored reciprocal metric",
+      "legoesm": "KE=.25*(uW**2+uE**2+vS**2+vN**2), then gradient_x/y_cgrid",
+      "finding": "ALGEBRA ALIGNED; FLOATING-POINT ASSOCIATION NOT ALIGNED at the KE statement and must be measured, not fixed before the record"
+    },
+    {
+      "operator": "ZAD vertical transport",
+      "nemo": "e1e2t*ww at adjacent T points is summed, multiplied by the Kmm velocity difference, then accumulated with .25*r1_e1e2u/e3u(Kmm) (V analogous)",
+      "legoesm": "interp(area_T*ww) is doubled, multiplied by the same velocity difference, then scaled by -.25/(face_area*h_Kmm)",
+      "finding": "ALGEBRA ALIGNED; reciprocal/division association and accumulation remain UNMEASURED"
+    },
+    {
+      "operator": "ZAD ww/wsd",
+      "nemo": "ww freshly diagnosed from Kmm velocity plus the Kaa-Kbb key_qco stretch; wsd arm does not execute",
+      "legoesm": "nemo_qco_wzv_operands supplies stage-consistent ww; no Stokes-drift vertical velocity is added",
+      "finding": "BRANCH ALIGNED; ww numerical identity and the ZAD statement remain UNMEASURED"
+    },
+    {
+      "operator": "thickness and masks",
+      "nemo": "live e3u/e3v(Kmm) divisor; no mask inside dyn_zad, final cell mask is applied by the later velocity update",
+      "legoesm": "Kmm thickness; nemo_faithful leaves interface flux unmasked and applies the cell face mask to the returned tendency",
+      "finding": "ALIGNED BY SOURCE; bit identity remains UNMEASURED"
+    }
+  ],
+  "prediction": {
+    "claim": "KEG carries the first non-bit-exact statement and the round-40 dyn_adv debt: at least one KEG face row is DEBT relative to KEG's own magnitude, while both ZAD face rows are AT-BAR relative to ZAD's own magnitude. The predicted first statement is the C2 zhke association, before either face gradient.",
+    "basis": "NEMO rounds the two same-component square sums independently and adds zv+zu; legoESM's current expression exposes a different four-add association. ZAD's active branch has already been transcribed statement-for-statement and its wsd alternative is dead on this deck.",
+    "falsifier": "REFUTED if every KEG row is AT-BAR, or if any ZAD row is DEBT relative to its own magnitude. If both are DEBT, the exclusive 'KEG carries it' prediction is REFUTED and both first unequal statements must be named independently; no residual is assigned by subtraction or visual magnitude."
+  },
+  "instrument": {
+    "record": "oracle_dynadv_split_kt00000001_s3.bin",
+    "magic": "NEMO_L2_ADVSP_1",
+    "placement": "WRITE-only additions around the live dyn_keg and dyn_zad calls, armed explicitly by stprk3_stg at kt=nit000,kstg=3; STATUS=REPLACE; rank/name/extents precede every payload.",
+    "fields": ["before_keg_u", "before_keg_v", "after_keg_u", "after_keg_v", "after_zad_u", "after_zad_v", "uu_Kmm", "vv_Kmm", "ww", "wsd_effective", "ln_vortex_force", "e3t_Kmm", "e3u_Kmm", "e3v_Kmm", "e3w_Kmm", "e3t_0", "e3u_0", "e3v_0", "e3w_0", "e1e2t", "e1e2u", "e1e2v", "r1_e1u", "r1_e2v", "r1_e1e2u", "r1_e1e2v", "tmask", "umask", "vmask", "wmask"],
+    "closure": "after_zad must equal round40 oracle_rkstage3_terms after_adv bit-for-bit on every stored value; every pre-existing consumed field must pass the round-40 admission against both the direct parent and the canonical tracer source run.",
+    "calibration": "A literal independent replay updates before_keg with NEMO's source order and must equal after_keg at 0 unequal cells, then updates after_keg with NEMO's source order and must equal after_zad at 0 unequal cells. Any unequal calibration cell invalidates every scientific score.",
+    "model_score": "The gate then executes legoESM's own KEG and ZAD implementation paths given the same NEMO operands. Each operator is scored on its post-statement accumulator and on its derived isolated contribution, with exactness and the 1e-15 relative bar both explicit.",
+    "plants": "Separate KEG, ZAD, header, closure, calibration and commit-stamp plants must move their own named row and exit nonzero."
+  },
+  "rule12_after_record": {
+    "GYRE": "Required given-inputs bit identity plus kt=1..10 before/after if a shared transcription changes.",
+    "LOCK_EXCHANGE": "Resolve its namelist first. If vector dyn_keg/dyn_zad executes, acquire/measure given-inputs on that card; otherwise record NOT APPLICABLE, then run kt=1..10 before/after because a shared helper may still execute through another arm.",
+    "OVERFLOW": "Resolve its namelist first. Same execute/not-applicable test and kt=1..10 requirement; ln_zad_Aimp is known live, so no assumption that GYRE's explicit ZAD arm executes is allowed.",
+    "ORCA2": "UNMEASURED WITH SPEC: resolve the ORCA2 vector/flux arm and acquire the same pre/post operator frames plus all live operands on its native topology; run a native card trajectory gate. No local ORCA2 card exists on this branch."
+  },
+  "asked_unasked": {
+    "ASKED": ["write the acquisition and stop for the operator", "after the record, land only a bit-exact transcription and discharge Rule 12 per executing card"],
+    "UNASKED": [],
+    "OPEN_NOT_AUTHORISED": ["decision 23: GYRE mixed-layer criterion", "decision 22: XLA FMA/ISA flag"]
+  },
+  "forbidden": ["running makenemo, mpirun, or NEMO", "reading unallocated wsd", "changing any model arithmetic before the record", "adding a stabiliser NEMO lacks", "calling AT-BAR-NOT-EXACT DISCHARGED", "relaxing the 1e-15 bar", "making a configuration choice"]
+}

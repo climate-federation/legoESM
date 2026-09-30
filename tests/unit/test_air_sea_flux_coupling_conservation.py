@@ -398,15 +398,72 @@ class TestCoupledDriverWiring:
             _atm=atm, _last_sfc_response=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
+
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a blended response exists, its SH/LH flow through.
+        # Once a blended response exists, its LH is the tile MASS flux times
+        # the atmosphere's L_v, and its SH carries the (L_vap - L_v)*E
+        # remainder so energy closes (see the tests below).
+        from legoesm import constants
         sh = jnp.full((6, 4, 4), 22.0)
-        lh = jnp.full((6, 4, 4), 77.0)
-        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
+        mf = jnp.full((6, 4, 4), 77.0 / constants.L_v)
+        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=mf * 2.44e6,
+                                                 surface_mass_flux=mf)
         got_sh, got_lh = atm.get_sfc_flux_override(0.0)
-        assert jnp.array_equal(got_sh, sh)
-        assert jnp.array_equal(got_lh, lh)
+        np.testing.assert_allclose(got_sh, sh + mf * (2.44e6 - constants.L_v),
+                                   rtol=1e-12)
+        np.testing.assert_allclose(got_lh, 77.0, rtol=1e-12)
+
+    def test_hook_hands_the_tile_mass_flux_scaled_by_the_atmosphere_L_v(self):
+        """Water conservation across the coupler: the atmosphere derives its
+        moisture source as lhflx / L_v, so the hook must hand it
+        surface_mass_flux * L_v, not the tile's lhflx (which used L_vap(SST)
+        under the aerobulk convention, ~2 % smaller)."""
+        from types import SimpleNamespace
+        from legoesm import constants
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        shflx, lhflx = atm.get_sfc_flux_override(0.0)
+        # sensible carries the (L_vap - L_v)*E remainder (energy closure)
+        np.testing.assert_allclose(
+            shflx, resp.shflx + evap * (2.44e6 - constants.L_v), rtol=1e-12)
+        np.testing.assert_allclose(lhflx / constants.L_v, evap, rtol=1e-12)
+        assert not np.allclose(lhflx, resp.lhflx)
+        drv._last_sfc_response = SimpleNamespace(shflx=resp.shflx, lhflx=resp.lhflx,
+                                                 surface_mass_flux=None)
+        with pytest.raises(ValueError, match="surface_mass_flux"):
+            atm.get_sfc_flux_override(0.0)
+
+    def test_hook_closes_water_and_energy_together(self):
+        """The atmosphere's turbulent energy input (sensible + latent it is
+        handed) must equal the ocean tile's turbulent heat loss
+        (shflx + lhflx), while its moisture source stays the tile mass flux."""
+        from types import SimpleNamespace
+        from legoesm import constants
+        from legoesm.driver.coupled_config import CoupledConfig
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = SimpleNamespace(get_sfc_flux_override=None)
+        evap = jnp.array([1.0e-5, 2.0e-5])
+        resp = SimpleNamespace(shflx=jnp.array([10.0, 20.0]),
+                               lhflx=evap * 2.44e6,           # L_vap(SST) < L_v
+                               surface_mass_flux=evap)
+        drv = SimpleNamespace(
+            coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
+            _atm=atm, _last_sfc_response=resp)
+        CoupledESMDriver._override_sfc_fluxes(drv)
+        sh_atm, lh_atm = atm.get_sfc_flux_override(0.0)
+        np.testing.assert_allclose(lh_atm / constants.L_v, evap, rtol=1e-12)
+        np.testing.assert_allclose(sh_atm + lh_atm, resp.shflx + resp.lhflx,
+                                   rtol=1e-12)
 
     def test_assemble_ocean_forcing_sw_down_is_net(self):
         """OceanSurfaceForcing.sw_down carries the NET (post-albedo) surface SW,
@@ -420,6 +477,7 @@ class TestCoupledDriverWiring:
         tile = types.SimpleNamespace(
             albedo=jnp.full(shape, 0.06), lw_up=jnp.full(shape, 400.0),
             shflx=jnp.full(shape, 12.0), lhflx=jnp.full(shape, 60.0),
+            surface_mass_flux=jnp.full(shape, 60.0) / constants.L_v,
             tau_x=z, tau_y=z,
         )
         sst = jnp.full(shape, 290.0)

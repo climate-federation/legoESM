@@ -53,7 +53,6 @@ __param_spec__ = {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
-            "cape_sink_heating_ratio": "inert: the quasi-equilibrium heating ceiling it scales has no consumer in bechtold.py, so the leaf carries no loss gradient; re-tier to 2 in the same PR that implements the sink",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
@@ -154,12 +153,10 @@ __param_spec__ = {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
-            "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
-            "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
@@ -176,7 +173,6 @@ __param_spec__ = {
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
-            "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
             "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
             "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
             "downdraft_omtrain_pa_s": {"units": "Pa/s", "bounds": (10.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTRAIN, rain fall speed (convect43c.f:194)", "shape": None},
@@ -753,6 +749,12 @@ class ZhangMcFarlaneConfig(NamedTuple):
     pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
+    # Column land fraction policy (static, closure-time).  "required": the host
+    # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
+    # one raises instead of silently treating every column as ocean.  "none":
+    # an aquaplanet run with no land, recorded as a choice -- ocean
+    # coefficients everywhere, and passing a land fraction is an error.
+    land_fraction: str = "required"
 
 
 class KainFritschConfig(NamedTuple):
@@ -1003,10 +1005,7 @@ class EmanuelConfig(NamedTuple):
         Sub-cloud parcel humidity perturbation [kg/kg] (default 1e-3).
     enable_unsaturated_downdraft : bool
         Whether to include the unsaturated downdraft branch (rain
-        evaporation cooling) (default ``True``).
-    downdraft_efficiency : float
-        Fraction of precipitation that re-evaporates below cloud base
-        in the downdraft (default 0.2).
+        evaporation cooling) (default ``False``).
     smooth_trigger_sharpness : float
         Sigmoid sharpness on the buoyancy-sort weighting [1/K]
         (default 0.5).
@@ -1043,16 +1042,6 @@ class EmanuelConfig(NamedTuple):
     # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
     # transition, matching the shared LCL crossing sharpness.
     lcl_pressure_sharpness: float = 1.0e-3
-    # Sharpness [1/level] of the below-LCL smooth index indicator used by the
-    # optional unsaturated-downdraft re-evaporation (surface-last: level index
-    # > k_lcl_smooth ⇒ below LCL).  Default 2.0 gives an ~1-level transition,
-    # matching the historical inline value.  Numerics (not a tunable closure).
-    below_lcl_index_sharpness: float = 2.0
-    # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
-    # relaxed CBMF so it is ~0 when the relaxation target goes negative
-    # (stable column) without a hard ``max`` that would kill the gradient.
-    # Large because CBMF magnitudes are O(0.01-0.1) kg/m²/s.
-    cbmf_positive_sharpness: float = 1.0e3
     # Upper bound [kg/m²/s] on the *carried* prognostic CBMF — looser than
     # the per-step transport cap ``M_b_max`` so the closure's memory can
     # ramp to the oracle's deep-tropical CBMF (~0.12 kg/m²/s) instead of
@@ -1069,7 +1058,6 @@ class EmanuelConfig(NamedTuple):
     # Production runs with a full microphysics chain that owns q_r
     # should override this to ``True``.
     enable_unsaturated_downdraft: bool = False
-    downdraft_efficiency: float = 0.2
     # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
     # Read ONLY when ``enable_unsaturated_downdraft`` is set, which selects
     # the ported shaft (``_emanuel_downdraft``) rather than the legacy
@@ -1518,30 +1506,6 @@ class BechtoldConfig(NamedTuple):
     use_pbl_cape: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
-    # CAPE quasi-equilibrium heating ceiling (the C12/RCE warm-runaway
-    # harden).  Bechtold's M_b closure is a CAPE-relaxation SURROGATE with
-    # no quasi-equilibrium constraint on the APPLIED heating: at pinned
-    # M_b_max the scheme sustains large column heating for months while the
-    # PBL-parcel CAPE never drains (measured: the scheme's own tendencies
-    # GENERATE CAPE on a convecting fixture — downdraft below-LCL moistening
-    # feeds the parcel), so nothing bounds the warming (C12 pilot: mean T
-    # 267->312 K over days 90-170; SCM-RCE moist-adiabat bias ~50 K).  The
-    # sink caps the column-integrated positive convective heating by the
-    # quasi-equilibrium energy flux (Arakawa & Schubert 1974 lineage):
-    #     H = (c_p/g)·∫ max(dT_dt,0) dp  ≤  ratio · M_b · CAPE   [W/m²]
-    # scaling ALL tendencies (and the M_u carry) by
-    #     f = clip(ratio·M_b·CAPE / H, 0, 1).
-    # M_b·CAPE is the closure's own available-energy flux; `heating_ratio` absorbs the
-    # heating-to-KE-generation ratio (tunable, SCM-RCE-calibrated).  A
-    # vigorous tower (large CAPE) keeps its full heating; the runaway mode
-    # (heating at pinned M_b with modest CAPE) is throttled.  False =
-    # bit-exact legacy path.
-    # DEFAULT OFF since the 2026-07-17 merge: use_ifs_cape_closure (default
-    # True, IFS cumastrn ZMFUB1 closure) consumes CAPE at the SOURCE, fixing
-    # the same runaway faithfully; stacking the surrogate ceiling on top
-    # double-throttles.  Opt-in lever for legacy/no-IFS-closure configs.
-    cape_relaxation_sink: bool = False
-    cape_sink_heating_ratio: float = 5.0
     # IFS convective-turnover CAPE-closure timescale (audit F1).  When True
     # (default) the deep closure divides PBL-CAPE by the state-dependent
     # tau_conv = cloud_depth/(2+w_mean), clamped [720,10800] s (cumastrn.F90:773),

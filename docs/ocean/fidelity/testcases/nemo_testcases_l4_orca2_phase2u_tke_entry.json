@@ -1,0 +1,118 @@
+{
+  "bottom_tke_bc": {
+    "count": 8794,
+    "disposition": "CONFIRMED",
+    "kt1_Kbb_nonzero": {
+      "u_Kbb": 0,
+      "v_Kbb": 0
+    },
+    "source": "zdftke.F90:279-288,841-844",
+    "status": "AT_BAR",
+    "unequal": 0
+  },
+  "card": {
+    "bottom_tke_bc": true,
+    "eice": 1,
+    "etau_mode": "none",
+    "matrix": "nemo_literal",
+    "mxl": 3,
+    "solver": "nemo_literal"
+  },
+  "downstream": {
+    "buoyancy_dissipation_matrix_solve": "UNMEASURED_NEEDS_INTERNAL_FRAME",
+    "ice_fraction": "CONFIRMED 0/8794 (zdftke.F90:255)",
+    "nn_etau_1": "UNMEASURED_AFTER_SOLVE",
+    "nn_mxl_3_avm_avt": "UNMEASURED_NO_POST_CLOSURE_TARGET",
+    "shear": "CONFIRMED 0/218024 record-complete kt=2 cells",
+    "surface": "CONFIRMED previously 0/8794 (zdftke.F90:264-269)"
+  },
+  "execution": {
+    "backend": "cpu",
+    "dtype": "float64",
+    "jit": "production",
+    "transcendentals": "libm"
+  },
+  "first_unmeasured_boundary": {
+    "owner": "GYRE_OWNER_SHARED_TKE",
+    "reason": "the admitted kt=2 frame contains the statement inputs but no zWlc2/Langmuir, matrix, solve, or post-closure oracle outputs",
+    "required_fields": [
+      "zWlc2",
+      "zpelc",
+      "imlc",
+      "zhlc",
+      "zus3",
+      "en_post_lc",
+      "zdiag_pre_solve",
+      "zd_lw_pre_solve",
+      "zd_up_pre_solve",
+      "en_rhs_pre_solve",
+      "en_post_solve",
+      "p_pdlr",
+      "mxlm",
+      "mxld",
+      "avm_k_post",
+      "avt_k_post"
+    ],
+    "statement": "zdftke.F90:332 zWlc2=zcsd*taum",
+    "status": "UNMEASURED_NEEDS_WRITE_ONLY_INTERNAL_FRAME"
+  },
+  "ice_fraction_attenuation": {
+    "boundary": "nn_eice=1 ice-fraction attenuation operand",
+    "count": 8794,
+    "disposition": "CONFIRMED_AT_BAR",
+    "first_consumption": "zdftke.F90:359 zus3=MAX(0,1-zice_fra)*...",
+    "owner": "LANE4_ORCA2_FORCING_SELECTOR",
+    "statement": "zdftke.F90:255 zice_fra=TANH(fr_i*10._wp)",
+    "status": "AT_BAR",
+    "unequal": 0
+  },
+  "plants": {},
+  "records": {
+    "oracle_zdf_sh2_operands_kt00000001.bin": {
+      "header": [
+        2,
+        1,
+        1,
+        1,
+        3,
+        94,
+        152,
+        31,
+        64,
+        21,
+        4,
+        9267648,
+        1
+      ],
+      "sha256": "0c0a1c3e89267c834f06c378a79ae39349d14c334abb9c79b692d14eba6d62ff"
+    },
+    "oracle_zdf_sh2_operands_kt00000002.bin": {
+      "header": [
+        2,
+        2,
+        3,
+        3,
+        1,
+        94,
+        152,
+        31,
+        64,
+        21,
+        4,
+        9267648,
+        1
+      ],
+      "sha256": "9642aa7a674d240fba64251bc27318b8207aaeabd50fb492c229fef644df6c27"
+    }
+  },
+  "resolved_nemo": {
+    "ln_drg_OFF": false,
+    "nn_bc_bot": 1,
+    "nn_bc_bot_semantics": "read but unused by zdftke tke_tke; documented only for wave coupling",
+    "nn_eice": 1,
+    "nn_etau": 1,
+    "nn_mxl": 3,
+    "rn_emin": 1e-10
+  },
+  "status": "STOP_TKE_INTERNAL_FRAME_REQUIRED"
+}

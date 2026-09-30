@@ -84,7 +84,8 @@ def _staircase(bottom_level_2d):
     """Full-step staircase coordinate (NEMO ln_zco masked z-levels)."""
     dz = np.full((NZ,), H_MAX / NZ, dtype=np.float64)
     gdept = (np.arange(NZ, dtype=np.float64) + 0.5) * dz[0]
-    z_ref = create_z_star_from_thicknesses(dz, t_depth_ref_m=gdept)
+    z_ref = create_z_star_from_thicknesses(
+        dz, t_depth_ref_m=gdept, nemo_e3w_0_m=dz)
     return create_full_step_coordinate(z_ref, jnp.asarray(bottom_level_2d))
 
 
@@ -251,6 +252,7 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     rho_p = rho - RHO_0
     active = np.asarray(coord.is_active)
     rho_m = np.where(active, rho_p, 0.0)                 # NEMO masked rhd*rho0
+    rhd = rho_m / RHO_0                                  # dynhpg's rhd
     # gdept ladder: cast the (policy-f32) coordinate values to f64 BEFORE
     # differencing — the model's quadrature does exactly that (hi_precision
     # t_q = asarray(ladder, float64)); an f32-native subtraction re-rounds
@@ -258,15 +260,16 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     t = np.abs(np.asarray(coord.z_full_ref)).astype(np.float64)
     ht0 = np.asarray(jnp.sum(coord.h_partial, axis=-1))
     r3t = np.where(ht0 > 0.0, eta / np.maximum(ht0, 1.0), 0.0)
-    # per-column hydrostatic recurrence P(k) [Pa]: surface e3w(1)=2*gdept(1),
-    # interior e3w(k)=gdept(k)-gdept(k-1), pair (rhd(k)+rhd(k-1)); the qco
-    # (1+r3t) e3w factor is column-constant -> applied as one stretch.
-    P = np.zeros_like(rho_m)
-    P[..., 0] = 0.5 * g * (2.0 * t[0]) * rho_m[..., 0]
+    # Literal dimensionless-rhd recurrence selected by 0da38492e.  W-grid
+    # thickness comes from the raw mesh field (7f729c488), never reconstructed
+    # from rounded domain geometry.
+    e3w0 = np.asarray(coord.nemo_e3w_0, dtype=np.float64)
+    P = np.zeros_like(rhd)
+    P[..., 0] = 0.5 * g * e3w0[0] * rhd[..., 0]
     for k in range(1, NZ):
         P[..., k] = (P[..., k - 1]
-                     + 0.5 * g * (t[k] - t[k - 1])
-                     * (rho_m[..., k] + rho_m[..., k - 1]))
+                     + 0.5 * g * e3w0[k]
+                     * (rhd[..., k] + rhd[..., k - 1]))
     P = P * (1.0 + r3t)[..., None]                       # qco e3w stretch
     Z = t[None, None, :] * (1.0 + r3t)[..., None] - eta[..., None]  # gdept_z0
 
@@ -278,15 +281,15 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     # formula only re-tests the grid's dx representation, at ~1e-5).
     P_j = jnp.asarray(P)
     Z_j = jnp.asarray(Z)
-    R_j = jnp.asarray(rho_m)
+    R_j = jnp.asarray(rhd)
     expected_u = np.asarray(
         -(gradient_x_cgrid(P_j, grid_)
           - constants.g * interp_cell_to_uface(R_j)
-          * gradient_x_cgrid(Z_j, grid_)) / RHO_0)
+          * gradient_x_cgrid(Z_j, grid_)))
     expected_v = np.asarray(
         -(gradient_y_cgrid(P_j, grid_)
           - constants.g * interp_cell_to_vface(R_j, grid_)
-          * gradient_y_cgrid(Z_j, grid_)) / RHO_0)
+          * gradient_y_cgrid(Z_j, grid_)))
     u_mask, v_mask = compute_face_masks_3d(coord.is_active, grid_)
     u_mask = np.asarray(u_mask) > 0.5
     v_mask = np.asarray(v_mask) > 0.5

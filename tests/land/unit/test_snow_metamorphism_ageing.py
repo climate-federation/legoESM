@@ -42,12 +42,9 @@ def test_activation_zero_is_the_calendar_clock():
     swe = jnp.full((4,), 100.0)
     age = jnp.full((4,), 10 * DAY)
     fresh = jnp.zeros((4,))
-    a = update_snow_age(swe, age, fresh, DAY)
+    a = update_snow_age(swe, age, fresh, DAY, age_activation_K=0.0)
     b = update_snow_age(swe, age, fresh, DAY, T_snow=T, age_activation_K=0.0)
     np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-    # and the temperature argument alone, without the activation, changes nothing
-    np.testing.assert_array_equal(np.asarray(a), np.asarray(
-        update_snow_age(swe, age, fresh, DAY, T_snow=T)))
 
 
 def test_cold_snow_ages_slower_than_melting_snow():
@@ -88,7 +85,7 @@ def test_two_months_of_cold_snow_stays_bright():
     # and with the feature OFF the cold column is dark, i.e. the test is not vacuous
     age = jnp.zeros((1,))
     for _ in range(55):
-        age = update_snow_age(swe, age, fresh, DAY)
+        age = update_snow_age(swe, age, fresh, DAY, age_activation_K=0.0)
     assert float(np.asarray(snow_albedo(age, cfg))[0]) < 0.53
 
 
@@ -100,3 +97,40 @@ def test_fresh_snow_still_dilutes_the_effective_age():
                                            T_snow=jnp.full((1,), 230.0),
                                            age_activation_K=5000.0))[0])
     assert out < 10 * DAY                   # mass dilution still dominates
+
+
+@pytest.mark.parametrize("activation_K", [None, 3000.0])
+def test_slab_land_ages_snow_with_the_configured_activation(activation_K):
+    """The slab land must read LandConfig.land_albedo.snow_age_activation_K;
+    with the calendar clock (0.0) one cold hour ages the pack a full hour."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.core.field import Field
+    from legoesm.land.config import LandConfig
+    from legoesm.land.slab_land import step_land
+    from legoesm.land.state import LandState
+
+    ncol, dt, T0, age0 = 2, 3600.0, 250.0, 10 * DAY
+    ones = jnp.ones(ncol)
+    forcing = AtmToSurface(**{k: v * ones for k, v in dict(
+        sw_down=50.0, lw_down=220.0, precip_total=0.0, precip_snow=0.0,
+        T_lowest=265.0, q_lowest=5e-4, u_lowest=3.0, v_lowest=0.0,
+        p_lowest=1e5, p_surface=1.013e5, rho_lowest=1.3, cos_zenith=0.3,
+        co2_ppmv=400.0, has_radiation=1.0, has_precipitation=1.0).items()})
+    state = LandState(
+        T_soil=Field(jnp.full(ncol, T0), name="T_soil"),
+        W_bucket=Field(jnp.full(ncol, 50.0), name="W_bucket"),
+        snow_depth=Field(jnp.full(ncol, 100.0), name="snow_depth"),
+        snow_age=Field(jnp.full(ncol, age0), name="snow_age"),
+    )
+    cfg = LandConfig()
+    if activation_K is None:                 # the config default
+        activation_K = 5000.0
+        assert cfg.land_albedo.snow_age_activation_K == activation_K
+    else:
+        cfg = cfg._replace(land_albedo=cfg.land_albedo._replace(
+            snow_age_activation_K=activation_K))
+    new, _, _ = step_land(state, forcing, cfg, U_min=1.0, dt=dt)
+    grown = np.asarray(new.snow_age.data) - age0
+    expected = dt * float(metamorphism_rate(jnp.asarray(T0), activation_K))
+    np.testing.assert_allclose(grown, expected, rtol=1e-9)
+    assert (grown < 0.5 * dt).all()          # not the calendar clock's full hour
