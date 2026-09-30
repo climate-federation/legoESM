@@ -317,6 +317,12 @@ mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # offline calibration runs the tables (user
                                 # 2026-09-29; before, January LAI all year)
 land_soil_init: aridity
+# Land starting state: the res-6 spun-up soil water/snow (soil_ic_mpas6.npz) with
+# soil TEMPERATURE replaced by ERA5 1979-01-01 00 UTC stl1-4 on non-glacier land
+# (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
+# --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
+# stage the file in the launch directory.
+land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0

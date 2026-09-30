@@ -15,6 +15,8 @@ def fill_land_cells_mpas(
     mask_cell: jnp.ndarray,
     c1: jnp.ndarray,
     c2: jnp.ndarray,
+    edges_on_cell: jnp.ndarray,
+    n_edges_on_cell: jnp.ndarray,
     n_iter: int = 3,
 ) -> jnp.ndarray:
     """Replace land-cell values with ocean-neighbor average (Neumann BC).
@@ -33,6 +35,13 @@ def fill_land_cells_mpas(
     ``ocean_model_mpas.py`` to produce cold/fresh fronts that
     propagated one cell per step along coastlines.  See issue #164.
 
+    Each cell GATHERS over its own edges (``edges_on_cell`` rows below
+    ``n_edges_on_cell``), taking the far-end cell of each edge from
+    ``c1``/``c2``, so the neighbour set is exactly the set of edges the
+    former per-edge scatter-add visited.  The gather is ~3x faster on CPU
+    (serial scatter; measured 38 -> 13 ms, s6 x 40 levels, 8 cores); only
+    the summation order changes (last-bit differences on filled cells).
+
     Parameters
     ----------
     field_cell : (nCells,) or (nCells, nlev)
@@ -41,6 +50,10 @@ def fill_land_cells_mpas(
         1 on ocean, 0 on land.  Only a local copy is mutated.
     c1, c2 : (nEdges,)
         ``cellsOnEdge`` connectivity.
+    edges_on_cell : (maxEdges, nCells)
+        ``edgesOnCell`` connectivity.
+    n_edges_on_cell : (nCells,)
+        Number of valid ``edges_on_cell`` rows per cell.
     n_iter : int
         Number of Neumann-fill iterations (default 3).  Each iteration
         propagates ocean values one edge further into land.
@@ -49,28 +62,44 @@ def fill_land_cells_mpas(
     -------
     filled : same shape as ``field_cell``
     """
+    n_cells = field_cell.shape[0]
+    # A sharded local mesh marks edges the rank does not hold with -1
+    # (voronoi_partition remap); those slots are not neighbours here, just as
+    # the edge scatter never visited them. Index them safely, then mask.
+    # Invariant relied on: an edge is -1 only when the rank does not hold it,
+    # so it was absent from the local cellsOnEdge the scatter summed over.
+    # Checked 2026-09-26 on 4-device s4 partitions: -1 slots occur, and the
+    # old scatter and this gather agree to <= 4e-16 on every sharded call.
+    held = edges_on_cell >= 0
+    eoc = jnp.where(held, edges_on_cell, 0)
+    e1 = c1[eoc]                                      # (maxEdges, nCells)
+    e2 = c2[eoc]
+    here = jnp.arange(n_cells)[jnp.newaxis, :]
+    nbr = jnp.where(e1 == here, e2, e1)               # far-end cell per edge
+    valid = held & (jnp.arange(edges_on_cell.shape[0])[:, jnp.newaxis]
+                    < n_edges_on_cell[jnp.newaxis, :])
+
     filled = field_cell
     m = mask_cell
 
     for _ in range(n_iter):
-        # Topology-only neighbor count (1D, level-independent).
+        # Accumulate one edge slot at a time, so no (maxEdges, nCells, nlev)
+        # temporary is ever materialized.
         cnt = jnp.zeros_like(m)
-        cnt = cnt.at[c1].add(m[c2])
-        cnt = cnt.at[c2].add(m[c1])
-        has_nbr = cnt > 0.0
-
-        # Weighted value accumulation (matches filled rank).
         vsum = jnp.zeros_like(filled)
+        for k in range(edges_on_cell.shape[0]):
+            j, ok = nbr[k], valid[k]
+            cnt = cnt + jnp.where(ok, m[j], 0.0)
+            if filled.ndim == 1:
+                vsum = vsum + jnp.where(ok, filled[j] * m[j], 0.0)
+            else:
+                vsum = vsum + jnp.where(ok[:, jnp.newaxis],
+                                        filled[j] * m[j][:, jnp.newaxis], 0.0)
+        has_nbr = cnt > 0.0
         if filled.ndim == 1:
-            vsum = vsum.at[c1].add(filled[c2] * m[c2])
-            vsum = vsum.at[c2].add(filled[c1] * m[c1])
             nbr_avg = vsum / jnp.maximum(cnt, 1.0)
             can_fill = (m < 0.5) & has_nbr
         else:
-            m2 = m[c2, jnp.newaxis]
-            m1 = m[c1, jnp.newaxis]
-            vsum = vsum.at[c1].add(filled[c2] * m2)
-            vsum = vsum.at[c2].add(filled[c1] * m1)
             nbr_avg = vsum / jnp.maximum(cnt[:, jnp.newaxis], 1.0)
             can_fill = ((m < 0.5) & has_nbr)[:, jnp.newaxis]
 

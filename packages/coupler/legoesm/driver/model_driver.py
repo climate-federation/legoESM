@@ -661,6 +661,27 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
                                       owned_mask=owned_mask)
 
 
+def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
+                           owned_mask=None):
+    """Build the per-step MPAS q_v smoother as ONE compiled call.
+
+    Halo refresh (MPI lane: boundary-owned stencils read owner values, #1321)
+    then :func:`_mpas_qv_smooth_step`.  Built once, before the time loop.
+    Called eagerly instead, every mpi4jax halo/allreduce inside was re-lowered
+    and recompiled on each call -- mpi4jax wraps the comm in a fresh object
+    with no ``__eq__``, so JAX's eager dispatch cache misses every time
+    (~45% of the 4-GPU AMIP step, 2026-09-27 profile).
+    """
+    @jax.jit
+    def smooth(q):
+        if halo_refresh is not None:
+            q = halo_refresh(q)
+        return _mpas_qv_smooth_step(q, mesh, nu, dt, nu4=nu4,
+                                    mid_refresh=halo_refresh,
+                                    owned_mask=owned_mask)
+    return smooth
+
+
 def _spectral_micro_config(cfg):
     """MicrophysicsConfig for the spectral standalone lane, with the flat
     ``morrison_*`` ExperimentConfig scalars threaded exactly as the FV and MPAS
@@ -11812,7 +11833,45 @@ class ModelDriver:
         # flushed after the loop so a partial window is not lost).
         _sed_req_window = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
+        _qv_smooth_jit = make_mpas_qv_smooth_fn(
+            self.grid, _qv_smooth_nu, DT, nu4=_qv_smooth_nu4,
+            halo_refresh=_qv_halo_refresh,
+            owned_mask=(None if self._voronoi_layout is None
+                        else self._voronoi_layout.owned_mask_cells))
+
+        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
+        # state at both ends so the trace holds exactly those steps; a window
+        # running past the end is stopped after the loop.
+        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
+        _trace_win = None
+        _trace_on = False
+        if _trace_spec:
+            try:
+                _t0, _tn, _tdir = _trace_spec.split(":", 2)
+                _t0, _tn = int(_t0), int(_tn)
+            except ValueError:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
+                    "'first:count:dir' with integer first and count") from None
+            if _t0 < 0 or _tn < 1:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
+                    "count >= 1")
+            _trace_rank = (os.environ.get("SLURM_PROCID")
+                           or os.environ.get("OMPI_COMM_WORLD_RANK")
+                           or os.environ.get("PMI_RANK", "0"))
+            _trace_win = (_t0, _t0 + _tn,
+                          os.path.join(_tdir, "rank" + _trace_rank))
         for step in range(n_steps_total):
+            if _trace_win is not None and step in _trace_win[:2]:
+                jax.block_until_ready(self.state)
+                if step == _trace_win[0]:
+                    jax.profiler.start_trace(_trace_win[2])
+                    _trace_on = True
+                else:
+                    jax.profiler.stop_trace()
+                    _trace_on = False
             # Enter the daily-boundary block also when a coupler segment_callback
             # is present, so the ocean/land still steps even on a coupled run with
             # radiation=none (where _sst_forcing is False) — else coupling would
@@ -12270,19 +12329,10 @@ class ModelDriver:
             # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
-            # Eager like the drain below (outside jit).
+            # Compiled once before the loop (_qv_smooth_jit).
             if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
-                _qv_sm_in = _trc_sm["q_v"].data
-                if _qv_halo_refresh is not None:
-                    # MPI lane: fresh cell halo so boundary-owned stencils
-                    # read owner values (see the setup note, #1321).
-                    _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
-                _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
-                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
-                    owned_mask=(None if self._voronoi_layout is None
-                                else self._voronoi_layout.owned_mask_cells))
+                _qv_new_sm = _qv_smooth_jit(_trc_sm["q_v"].data)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
@@ -12819,6 +12869,9 @@ class ModelDriver:
         # periodic checkpoint (exact-checkpoint-cadence completion).  Gated on
         # the feed being active (serial / 1-rank with CMIP output); a no-op
         # otherwise.
+        if _trace_on:
+            jax.block_until_ready(self.state)
+            jax.profiler.stop_trace()
         # Flush the partial sedimentation window: an overflow in the last
         # steps before the run ends must still be reported.
         if _sed_req_window is not None:
