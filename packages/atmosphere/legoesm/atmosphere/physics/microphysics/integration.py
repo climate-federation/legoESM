@@ -249,11 +249,14 @@ def _make_hydrostatic_microphysics(
         and not getattr(scheme_config, "predict_Nc", False)
     )
 
+    _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
+
     def physics_fn(
         state: HydrostaticState,
         grid,
         sigma_coord: SigmaCoordinate,
         forcing=None,
+        phys_state=None,
     ) -> HydrostaticTendencies:
         T = state.T.data
         p_s = state.p_s.data
@@ -399,9 +402,21 @@ def _make_hydrostatic_microphysics(
                 scheme_config, _ml_model_cache[0],
             )
         else:
+            _kw = {}
+            if _incloud:
+                # CLUBB's PDF cloud fraction, written into the carry by the
+                # turbulence sub-step that precedes this one in the macmic
+                # loop (CAM6: clubb_tend_cam, then MG2 on ast).
+                _cf = (None if phys_state is None
+                       else getattr(phys_state, "cloud_fraction", None))
+                if _cf is None:
+                    raise ValueError(
+                        "warm_rain_incloud=True but no cloud_fraction carry "
+                        "reached the microphysics (needs CLUBB turbulence).")
+                _kw["cloud_fraction"] = _cf.reshape(ncol, nlev)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
-                p_full_col, p_half_col, rho, dz, dt, scheme_config,
+                p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -482,6 +497,8 @@ def _make_hydrostatic_microphysics(
     # with the legacy 3-arg signature).
     if _nc_from_aerosol:
         physics_fn._wants_forcing = True
+    if _incloud:
+        physics_fn._wants_phys_state_ro = True
     return physics_fn
 
 

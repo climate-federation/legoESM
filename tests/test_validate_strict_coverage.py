@@ -59,6 +59,8 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         # #1521 ice-saturation fix; membership-checked in validate_strict.
         "cloud_saturation_scheme",
         "microphysics",
+        # Morrison warm-rain law (kk2000 | seifert_beheng | seifert_beheng_sb2001).
+        "morrison_warm_rain_scheme",
         "convection",
         "turbulence",
         "surface_bulk_scheme",
