@@ -4,6 +4,15 @@ Date 2026-09-30. Lane tip at the start `5add31a068ad`. Preregistration
 `PREREG_nemo_testcases_l1_vortex_round5.md`, frozen before any measurement.
 Evidence `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round5`.
 
+Status: **HELD for the operator's landing decision on ONE row.** Everything
+is measured and committed on the lane; every gate has run. The fix takes the
+vector card's second step from `1.4325e-05` to `3.3693e-06` in velocity and
+from `2.2685e-05` to `3.7090e-08` in height, improves 40 of GYRE's 50
+certified ladder rows with none worsened, and improves GYRE's day-360
+temperature by a factor of **49**. It also moves GYRE's **day 30 up by 0.7%**
+(`2.327677e-06` to `2.344e-06` K), which is outside every automatic landing
+rule this lane has, so the round does not land itself.
+
 ---
 
 ## 1. Retraction first
@@ -216,6 +225,53 @@ first-`wzv` operands AND runs NEMO's RK3 stepper.
 GYRE executes the changed statement, so Decision 43/55/59 binds: the year
 rows are re-run and registered, and the direction is reported, not the
 magnitude alone.
+
+### GYRE, the from-rest year
+
+`nemo_testcase_l2_gyre_year_fromrest.py --member 0 --days 360 --snap-steps 6
+--tag round5`, scored by `nemo_testcase_l2_gyre_year_owners.py --day-gap
+--days 30,240,360`. The harness's own run-to-run floor is `~2e-10 K`.
+
+| day | certified, T rms [K] | this round | direction |
+|---|---|---|---|
+| 30 | `2.3276772050683987e-06` | `2.3440e-06` | **AWAY, +0.7% relative** |
+| 240 | `6.586171881479517e-05` | `6.5826e-05` | toward, −0.05% |
+| 360 | `0.002670992385329469` | `5.4085e-05` | **toward, 49× better** |
+
+**This is the one row that holds the round.** Two of three move toward NEMO,
+one of them by a factor of fifty; the day-30 row moves away by seven parts in
+a thousand, which is `80 000` floor units and above the `1e-3` relative
+allowance note AT gives a statement that takes a certified row to the bar —
+and no certified row went from debt to bar here. So the automatic rules do
+not cover it and the operator decides. The round does NOT claim it.
+
+### DINO, the month gate
+
+`2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03
+K) -- PASS`, exit 0, private work directory. Identical to rounds 3 and 4,
+i.e. `1.9e-10 K` from the certified value, which is the harness's own
+run-to-run floor: **this round is INERT on DINO's from-rest month**, which
+the card census predicts — that gate's card runs NEMO's leapfrog, and the
+leapfrog form of the after-SSH is unchanged.
+
+### The battery
+
+`254 passed` with three failures, all three in the citation gate and all
+three the same cause: this round's inserted lines moved the symbols the
+citation map pins by text, so 56 map entries had drifted. Re-anchored by the
+lane's own method — each entry to the line its own first anchor identifies,
+each span's end from its own last anchor, the pinned extent recomputed from
+the two, and the receipts' prose moved with the map in the same change. The
+gate is green: `16 passed`, `map entries failing: 0`.
+
+### Provenance of the year arm
+
+The year ran at `34da4f2af`. Two commits landed after it: the dispatch
+guard's message and its ratchet entry, and the freshwater scoping. Neither
+is asserted to be inert — it is **measured**: the per-term discriminator and
+BOTH VORTEX ladders were re-run at the final tip on a clean tree and are
+identical to the digit (`2.710505e-20`; `kt=2` `u 3.3693e-06`, `ssh
+3.7090e-08`; every other step equal).
 
 ## 9b. How far the transcription actually reaches, stated rather than implied
 
