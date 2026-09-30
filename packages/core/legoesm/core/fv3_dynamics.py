@@ -1170,4 +1170,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
     def _call(*a, **kw):
         return {**_compiled(*a, **kw), **_meta}
 
+    # the lowering of the compiled body, for instruments that measure
+    # the traced program (arm-selection and program-size gates)
+    _call.lower = _compiled.lower
     return _call

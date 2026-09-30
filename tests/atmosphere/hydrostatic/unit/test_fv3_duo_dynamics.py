@@ -159,6 +159,44 @@ class TestGridFactoryEntry:
 
 class TestFV3DuoDynamicsModel:
 
+    def test_default_arm_is_batched(self, bundle):
+        """RULE 3 pin (user decision 2026-09-30): the DEFAULT step arm
+        is the face+level-batched one, because the loop arm cannot be
+        compiled at km=32 on CPU (75 GB abort) while the batched arm
+        compiles in 125 s / 3.1 GB (eb4ca7c06).  The loop arm stays
+        reachable for parity work.  The signature default and the
+        resolved attribute are both pinned so a silent revert in either
+        place goes red."""
+        import inspect
+
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        sig = inspect.signature(FV3DuoDynamicsModel.__init__)
+        assert sig.parameters["step_face_batched"].default is True
+        m_def = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+        m_loop = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2),
+                                     step_face_batched=False)
+        assert m_def.step_face_batched is True
+        assert m_loop.step_face_batched is False
+        # and the flag SELECTS the arm (not merely stored): the default
+        # model's traced step is far smaller than the loop arm's, which
+        # unrolls 6 faces x KM levels in Python (GLM 2026-09-30: a flag
+        # that is recorded but ignored in the step would pass the two
+        # asserts above).
+
+        def n_instr(m):
+            ic = m.dcmip16_initial_state()
+            text = m._step_fn.lower(
+                ic["state"], ic["press"], ic["q"], BDT, ic["omga"],
+                ic["nh"]).compiler_ir("hlo").as_hlo_text()
+            return sum(1 for ln in text.splitlines()
+                       if "=" in ln and not ln.lstrip().startswith(
+                           ("HloModule", "ENTRY", "}", "ROOT %")))
+
+        assert n_instr(m_def) < 0.5 * n_instr(m_loop)
+
     def test_bad_km_raises(self, bundle):
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
@@ -376,7 +414,8 @@ class TestFV3DuoDynamicsModel:
             wet._ctx_jax, KM, k_split=1, n_split=2, ptop=wet._ptop,
             ak=wet._ak, bk=wet._bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
             kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
-            w_limiter=None, out_shardings=None, batched=False,
+            w_limiter=None, out_shardings=None,
+            batched=wet.step_face_batched,   # same arm as the model
             zvir=wet.zvir, sphum_index=0)
         ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
                    ic_w["omga"], ic_w["nh"])

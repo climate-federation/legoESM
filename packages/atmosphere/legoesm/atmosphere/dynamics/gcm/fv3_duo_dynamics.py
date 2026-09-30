@@ -161,7 +161,7 @@ class FV3DuoDynamicsModel:
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
                  step_out_shardings=None, step_spmd_mesh=None,
-                 step_face_batched: bool = False,
+                 step_face_batched: bool = True,
                  step_windows=None):
         # step_windows: ENGINEERING knob (M6, the tiled port) -- (kt, pad)
         # runs the step on 6*kt*kt sub-face WINDOWS (fv3_duo_windows,
@@ -175,10 +175,14 @@ class FV3DuoDynamicsModel:
         # against the face-sharded flat step (jobs 9632470-3).  None keeps
         # the certified six-face path byte-identical.
         # step_face_batched: ENGINEERING knob (face-batching ladder) --
-        # routes the 3-D phases' per-face loops through their vmapped
-        # arms (batched==loop gated at rtol 1e-13 per phase). Selects no
-        # scientific configuration; default False = the certified loop
-        # trace, byte-identical.
+        # routes the 3-D phases' per-face AND per-level loops through
+        # their vmapped arms (batched==loop gated at rtol 1e-13 per
+        # phase). Selects no scientific configuration.  Default True
+        # (user decision 2026-09-30): the loop arm traces every kernel
+        # 6*km times and cannot be compiled at km=32 on CPU ("LLVM
+        # ERROR: Unable to allocate section memory!", 75 GB), while the
+        # batched arm compiles in 125 s / 3.1 GB (eb4ca7c06).  False
+        # keeps the certified loop trace for parity work.
         # step_out_shardings: ENGINEERING knob -- ONE jax.sharding.Sharding
         # applied to each face-stacked output leaf (state/press/q/omga/nh;
         # NOT a jit out_shardings pytree prefix).  It selects no scientific
@@ -354,6 +358,7 @@ class FV3DuoDynamicsModel:
             batched=step_face_batched,
             zvir=self.zvir, sphum_index=(0 if config.moist else None),
         )
+        self.step_face_batched = bool(step_face_batched)
 
     @property
     def ak(self) -> np.ndarray:

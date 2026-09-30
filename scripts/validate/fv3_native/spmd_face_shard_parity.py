@@ -132,7 +132,10 @@ def main(argv=None):
     from legoesm.grids.factory import create_fv3_duo_grid
 
     bundle_grid = create_fv3_duo_grid(args.resolution)
-    model = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km))
+    # arm A reference: the certified loop trace (pinned: the model
+    # default is the batched arm since 2026-09-30)
+    model = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
+                                step_face_batched=False)
     ic = model.dcmip16_initial_state(do_pert=True)
 
     # ---- arm A: single device (the certified configuration) ----

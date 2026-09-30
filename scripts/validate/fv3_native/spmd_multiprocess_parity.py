@@ -90,7 +90,9 @@ def main(argv=None):
                                    step_spmd_mesh=mesh,
                                    step_face_batched=True)
     # reference lane: the certified loop trace, local single device
-    model_ref = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=args.km))
+    # (pinned: the model default is the batched arm since 2026-09-30)
+    model_ref = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=args.km),
+                                    step_face_batched=False)
 
     ic = model_ref.dcmip16_initial_state(do_pert=True)
 
