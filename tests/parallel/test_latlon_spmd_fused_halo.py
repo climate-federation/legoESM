@@ -261,7 +261,11 @@ def test_vface_multi_reconstruct_cuts_collective_count():
 # scalars through batch_psum_spmd — ONE packed psum, bit-identical values.
 # ---------------------------------------------------------------------------
 
-def test_global_sum_pair_spmd_batched_bit_identical_single_collective():
+def test_global_sum_pair_spmd_batched_bit_identical_single_collective(monkeypatch):
+    # The psum path: on CPU the default is the butterfly sum
+    # (LEGOESM_SPMD_TREE_PSUM, tests/parallel/test_spmd_tree_psum.py), which
+    # is not bit-identical to psum and uses no all-reduce by design.
+    monkeypatch.setenv("LEGOESM_SPMD_TREE_PSUM", "0")
     from legoesm.ocean.dynamics.eta_floor import _global_sum_pair
     from legoesm.parallel.latlon_spmd import (
         activate_latlon_spmd_halo,
