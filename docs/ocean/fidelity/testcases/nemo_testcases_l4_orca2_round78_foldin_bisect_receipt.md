@@ -148,15 +148,16 @@ not the candidate, it was the arm.
 Not inferred from the GYRE receipt — read from ORCA2's own build and from the
 record the ladder scores against.
 
-* The deck sets it: `namelist_cfg:397` of the scored run
+* The deck sets it: the scored run
   (`nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2`)
-  carries `ln_zdfiwm = .true.`.
+  carries `ln_zdfiwm = .true.` in its own `namelist_cfg`, line 397.
 * ORCA2's compiled source branches on it:
-  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-842` is the two-arm choice —
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-841` is the two-arm choice —
   `IF( ln_zdfiwm ) THEN` forces `rn_emin = 1.e-10_wp` and
-  `rmxl_min = 1.e-03_wp` (`:836-837`) and never evaluates the `ELSE` derivation
-  `rmxl_min = 1.e-6_wp / ( rn_ediff * SQRT( rn_emin ) )` (`:840`).
-* **The run says which arm it took**: `ocean.output:1024` of that run prints
+  `rmxl_min = 1.e-03_wp` on lines 836-837 and never evaluates the `ELSE`
+  derivation `rmxl_min = 1.e-6_wp / ( rn_ediff * SQRT( rn_emin ) )` on line 840.
+* **The run says which arm it took**: that run's own `ocean.output`, line 1024,
+  prints
   `==>>>   Internal wave-driven mixing case:   force   rn_emin = 1.e-10 and rmxl_min = 1.e-3`.
 
 So `1.0e-3 m` is NEMO's floor for this run, and the pre-merge `1.0 m` was a
@@ -199,9 +200,9 @@ turbulence mixing length, which sets the MINIMUM vertical diffusivity the scheme
 can produce: with `c_k = 0.1` and the floor on the square root of the minimum
 turbulent energy, a 1.0 m floor gives about `1e-6 m2/s` and a `1e-3 m` floor
 about `1e-9 m2/s` — which is precisely what the compiled source calls them
-(`:837` "associated avt minimum = molecular salt diffusivity (10^-9 m2/s)";
-`:839` "standard case : associated avt minimum = molecular viscosity
-(10^-6 m2/s)"). **Every ORCA2 run on this lane before the fold-in carried a
+(line 837, "associated avt minimum = molecular salt diffusivity (10^-9 m2/s)";
+line 839, "standard case : associated avt minimum = molecular viscosity
+(10^-6 m2/s)", both inside the span cited above). **Every ORCA2 run on this lane before the fold-in carried a
 background vertical mixing a thousand times NEMO's**, on both tracers and
 momentum.
 

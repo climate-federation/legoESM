@@ -82,6 +82,10 @@ FILES = {
     # that executes the category-summed initial snow/ice load adjustment.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
         _ORCA2_COMPILED / "iceistate.f90"),
+    # ORCA2 round 78 binds the turbulence mixing-length floor to the compiled
+    # two-arm rmxl_min choice this deck's ln_zdfiwm selects.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (
+        _ORCA2_COMPILED / "zdftke.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -1427,6 +1431,12 @@ CITATION_MAP = {
          'DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 1),
         'zvb(ji,jj) = vn_adv(ji,jj)*(r1_hv_0(ji,jj) '
         '/(1._wp+r3v(ji,jj,Kmm))) - vv_b(ji,jj,Kmm)', 8],
+    # --- ORCA2 card round 78: the two rmxl_min arms, and which one this deck
+    # takes.  The whole IF/ELSE/ENDIF is pinned as one span because the round's
+    # claim is that the forced arm EXISTS and the derivation is not evaluated.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-841': [
+        'IF( ln_zdfiwm ) THEN',
+        "minimum mixing length with your parameters rmxl_min = ", 7],
     # --- ORCA2 card round 1: initial category-load SSH adjustment ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
