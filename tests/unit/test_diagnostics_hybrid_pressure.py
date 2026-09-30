@@ -371,3 +371,21 @@ def test_tas_2m_zero_land_fraction_collapses_to_the_ocean_branch():
     zero_land = _tas_land_for(T_land=jnp.full((2,), 240.0),
                               land_fraction=jnp.zeros((2,)))
     np.testing.assert_allclose(zero_land, legacy, rtol=0.0, atol=0.0)
+
+
+def test_shared_plev_weights_match_per_field_interpolation():
+    """The CMOR feed builds plev19 weights once and applies them to every
+    field; that must equal the one-call interpolation bit for bit, and the
+    weights must depend on p_s (so reuse across different p_s would show)."""
+    dc = _collector(make_hybrid_levels(NLEV))
+    rng = np.random.default_rng(7)
+    p_s = rng.uniform(5.0e4, 1.04e5, 200)
+    w = dc._plev19_weights(p_s)
+    for _ in range(3):
+        f = rng.uniform(-1.0, 1.0, (200, NLEV))
+        np.testing.assert_array_equal(
+            dc._apply_plev19(f, w).view(np.uint64),
+            np.asarray(dc._interp_to_plev19(f, p_s)).view(np.uint64))
+    other = dc._plev19_weights(p_s * 0.8)
+    assert not np.array_equal(w[2], other[2])
+    assert not np.array_equal(w[0], other[0])
