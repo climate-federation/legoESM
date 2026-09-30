@@ -309,6 +309,10 @@ land_surface_scheme: two_leaf
 land_canopy_stress_b0: true
 land_canopy_interception: false
 mpas_land_beta_soil: true
+mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
+                                # albedo rebuilt every land step, as the
+                                # offline calibration runs the tables (user
+                                # 2026-09-29; before, January LAI all year)
 land_soil_init: aridity
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------

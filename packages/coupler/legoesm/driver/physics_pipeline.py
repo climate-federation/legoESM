@@ -217,6 +217,10 @@ class PhysicsPipeline:
         self.land_ml_cfg = None        # MultiLayerLandConfig
         self.land_ml_params = None     # LandSurfaceParams (per land column)
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
+        # (theta_top, doy, year) -> (land_params, lai) per-step rebuild of the
+        # two-leaf canopy params (MPAS lane); None = params fixed at setup.
+        self.land_ml_params_update = None
+        self.land_ml_params_update_factory = None   # () -> the above, lazily
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
         # CONCRETE dynamics timestep [s] for the CLM-ML canopy's static sub-step

@@ -1705,6 +1705,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-params-refresh",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="mpas_land_params_refresh",
+                        help="MPAS lane, multilayer two-leaf land: rebuild "
+                             "LAI, canopy height and soil albedo from the "
+                             "surfdata climatology every land step, as the "
+                             "offline calibration does (default on). "
+                             "--no-mpas-land-params-refresh keeps the start "
+                             "day's parameters for the whole run. Acts only "
+                             "with --use-multilayer-land.")
     parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
                         dest="mpas_qv_smooth_del2_m2s",
                         help="MPAS lane only: horizontal q_v del2 (unweighted "
@@ -2567,6 +2577,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None

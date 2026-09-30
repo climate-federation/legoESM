@@ -4702,3 +4702,23 @@ def test_production_deck_pins_the_zm_land_fraction_policy():
         build_arg_parser())
     assert keys["convection"] == "zhang_mcfarlane"
     assert keys["zm_land_fraction"] == "required"
+
+
+def test_mpas_land_params_refresh_flag_flows_to_config():
+    """--mpas-land-params-refresh round-trip: default ON (user 2026-09-29),
+    --no- form reaches the config, and a YAML false pin is honoured."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_params_refresh is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-mpas-land-params-refresh",
+    ]), parser))
+    assert cfg_off.mpas_land_params_refresh is False
+
+    parser2 = build_arg_parser()
+    parser2.set_defaults(mpas_land_params_refresh=False)   # simulates a YAML pin
+    cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical"]), parser2))
+    assert cfg_pin.mpas_land_params_refresh is False
