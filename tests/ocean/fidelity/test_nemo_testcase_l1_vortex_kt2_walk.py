@@ -132,7 +132,7 @@ def _rhsterm_bytes(tmp_path, *, magic=b"NEMO_L1_RHSTRM1 ", groups=None,
     # committed writer emits.
     header = struct.pack(
         "=15i", 1, 1, 2, 3, 4, 5, _NX, _NY, _NZ,
-        len(names) if declared is None else declared, 0, 0, 0, 64)
+        len(names) if declared is None else declared, 0, 0, 0, 0, 64)
     raw = magic + header + body + trailing
     if short:                      # truncate the LAST group's payload
         raw = raw[:-16]
@@ -154,7 +154,9 @@ def test_a_well_formed_per_term_record_parses_every_group(tmp_path):
     ({"magic": b"NEMO_L1_RHS___1 "}, "is not"),
     ({"groups": ("uu_rhs", "vv_rhs", "ww")}, "missing group"),
     ({"declared": 9}, "declares 9 groups"),
-    ({"trailing": b"\x00" * 8}, "does not end on a group boundary"),
+    ({"trailing": b"\x00" * 8}, "a group header is truncated"),
+    ({"trailing": _group("spare", 3, 2, 2, 2)},
+     "missing group|declares|truncated|remain"),
     ({"short": True}, "only"),
     ({"rank": 7}, "has rank 7"),
 ])
