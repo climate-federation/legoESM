@@ -515,8 +515,8 @@ def test_exported_humidity_agrees_with_latent_flux_sign(scheme, q_air):
 
 
 def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
-    """Thin pack on a soil at its dry floor (two-leaf, no Robin term): the latent
-    demand the soil cannot supply is only known after hydrology (the Richards
+    """Trace pack (0.05 kg/m2) on a hot soil at its dry floor (two-leaf, no
+    Robin term): the latent demand the soil cannot supply is only known after hydrology (the Richards
     refill).  Every step, the energy the column receives equals the scheme's
     ground flux plus the latent demand minus the latent flux REPORTED to the
     atmosphere, and pack + soil energy closes against it.  Merge of main's
@@ -530,14 +530,14 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
     hc, tc = cfg.hydraulics, cfg.thermal
     n = 1
     tfl = float(jnp.max(theta_from_psi(psi_dry_floor(hc), hc)))
-    s = init_multilayer_land_state(n, cfg, T_init=272.0, theta_init=tfl + 5.0e-3)
+    s = init_multilayer_land_state(n, cfg, T_init=300.0, theta_init=tfl + 5.0e-3)
     s = s._replace(psi_soil=psi_from_theta(s.theta_soil, hc),
-                   snow_depth=jnp.full(n, 1.0))
+                   snow_depth=jnp.full(n, 0.05))
     s = seed_snow_layers(s, cfg)
     lp = bare_canopy_params(n)._replace(LAI=jnp.asarray([0.3]))
     grid = make_soil_grid(cfg.soil_grid)
     dt = 1800.0
-    _, out = _run(cfg, s, _forcing(n, T_air=280.0, sw=500.0, lw=300.0, q=0.0005),
+    _, out = _run(cfg, s, _forcing(n, T_air=305.0, sw=600.0, lw=380.0, q=0.002),
                   24, dt, lp=lp)
     unmet = 0.0
     for s_new, resp, sfc in out:
@@ -551,4 +551,6 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
         np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
         unmet = max(unmet, float(jnp.max(sfc.lhflx - resp.lhflx)))
         s = s_new
-    assert unmet > 1.0, unmet            # the soil really fell short of the demand
+    # the soil really fell short of the demand (measured ~26 W/m2; dropping the
+    # post-hydrology remainder then breaks the first identity by ~26 W/m2)
+    assert unmet > 5.0, unmet
