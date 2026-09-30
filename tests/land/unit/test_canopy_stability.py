@@ -180,3 +180,13 @@ def test_zeta_cap_width_is_validated_and_reaches_the_solve():
     with pytest.raises(ValueError, match="zeta_cap_smoothing_width"):
         solve_canopy_closure(jnp.asarray(_ZCAP_X0), b,
                              CanopyConfig(zeta_cap_smoothing_width=0.0))
+
+
+def test_most_refuses_zero_iterations():
+    import pytest
+    one = jnp.array([1.0])
+    with pytest.raises(ValueError, match="n_iters"):
+        monin_obukhov_stability(
+            ur=3.0 * one, Ta=300.0 * one, Tv_atm=300.5 * one, Tc=301.0 * one,
+            q_atm=0.010 * one, q_c=0.011 * one, zldis=10.0 * one, z0m=0.5 * one,
+            n_iters=0, zeta_cap_width=CanopyConfig().zeta_cap_smoothing_width)

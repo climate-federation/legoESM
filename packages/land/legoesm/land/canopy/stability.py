@@ -416,12 +416,25 @@ def monin_obukhov_stability(
     step_fn = partial(_stability_step, forcing=forcing,
                       zeta_cap_width=zeta_cap_width)
 
-    final_carry, outputs = jax.lax.scan(step_fn, init, xs=None, length=n_iters)
+    # Only the LAST iterate's outputs are used, so carry them instead of
+    # stacking all n_iters: the stacked (n_iters, ...) buffer was rewritten
+    # every iteration, ~half the cost of this function under the canopy
+    # solve's jacfwd + vmap on CPU (production res6, bit-identical).
+    if n_iters < 1:
+        raise ValueError(f"monin_obukhov_stability needs n_iters >= 1, got {n_iters!r}")
 
-    ustar, _tstar, _qstar, _thvstar, ch, zeta = (
-        outputs[-1, 0], outputs[-1, 1], outputs[-1, 2],
-        outputs[-1, 3], outputs[-1, 4], outputs[-1, 5],
-    )
+    def _step_keep_last(c, _xs):
+        carry, _ = c
+        return step_fn(carry, None), None
+
+    # Placeholder output with the step's own shape/dtype (scalar or batched
+    # inputs alike); it is overwritten by the first iterate.
+    _out = jax.eval_shape(step_fn, init, None)[1]
+    (final_carry, last), _ = jax.lax.scan(
+        _step_keep_last, (init, jnp.zeros(_out.shape, _out.dtype)), xs=None,
+        length=n_iters)
+
+    ustar, ch, zeta = last[0], last[4], last[5]
 
     rah = 1.0 / jnp.maximum(ch * ustar, 1e-9)
     raw = rah  # same for sensible heat and water vapour (neutral Prandtl)
