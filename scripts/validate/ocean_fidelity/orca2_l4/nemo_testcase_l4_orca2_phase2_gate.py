@@ -22,7 +22,6 @@ EXPECTED_INPUT_SHA256 = {
 EXPECTED_UNMEASURED = {
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
-    "internal_wave_mixing",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",

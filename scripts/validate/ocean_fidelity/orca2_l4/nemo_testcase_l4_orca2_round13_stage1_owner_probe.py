@@ -98,6 +98,7 @@ def run(deck_root: Path, root: Path, json_out: Path | None, kt: int = 1):
         card, deck_root, surface_fields, kt)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True),
     )

@@ -84,7 +84,7 @@ def validate(deck: Path, root: Path, mesh: Path, plant: str | None) -> dict:
     require(cfg.bottom_tke_bc is True,
             "ORCA2 card did not restore executed bottom TKE boundary")
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config, iwm_forcing=card.recipe.iwm_forcing)
     state = model._seed_tke_preclosure_carry(card.recipe.initial_state)
 
     mbkt = owned2(kt1, "mbkt_real").astype(np.int32)

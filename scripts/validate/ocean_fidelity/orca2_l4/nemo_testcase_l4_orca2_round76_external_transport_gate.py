@@ -283,12 +283,14 @@ def run_walk(
         card, deck_root, surface_fields, 1)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True))
     trace = jax.device_get(model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True))
     ordinary = jax.device_get(ordinary_model.step(

@@ -156,6 +156,7 @@ def _stage_sources(deck_root: Path, root: Path, kt: int, *, with_runoff: bool,
             runoff=jnp.zeros_like(jnp.asarray(surface_fields["rnf"])))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True),
     )

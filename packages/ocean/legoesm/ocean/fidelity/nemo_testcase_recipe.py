@@ -1444,6 +1444,47 @@ def build_orca2_initial_ts(
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
 
 
+# --- ORCA2 internal-wave mixing (NEMO zdfiwm; de Lavergne et al. 2020) ---
+# zdf_iwm_init replaces the namelist backgrounds once the wave arm is on:
+# the momentum background becomes the molecular viscosity and the tracer
+# background a very small diffusive minimum, because the wave field is now
+# what sets the interior background.
+_ORCA2_IWM_AVMB = 1.4e-6   # NEMO rnu [m2/s]
+_ORCA2_IWM_AVTB = 1.0e-10  # [m2/s]
+
+
+def _orca2_iwm_forcing(path, surface_tmask: np.ndarray):
+    """The six wave-power / decay-scale maps, exactly as zdf_iwm_init reads them.
+
+    The four power maps are multiplied by the surface tracer mask (NEMO's
+    ``smask0``) and the critical-slope decay scale is stored as its RECIPROCAL,
+    which is what the scheme consumes.  The ORCA2 product is already on this
+    card's own grid, so no regridding is involved.
+    """
+    from legoesm.ocean.iwm_forcing import read_iwm_file
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMForcing,
+    )
+
+    data = read_iwm_file(str(path))
+    mask = np.asarray(surface_tmask, dtype=np.float64)
+    for name in ("power_bot", "power_cri", "power_nsq", "power_sho",
+                 "scale_bot", "scale_cri"):
+        if data[name].shape != mask.shape:
+            raise ValueError(
+                f"ORCA2 internal-wave forcing {name} has shape "
+                f"{data[name].shape}, expected the card's {mask.shape}; this "
+                "card reads the product on its own grid and never regrids it")
+    return IWMForcing(
+        ebot=jnp.asarray(data["power_bot"] * mask, dtype=jnp.float64),
+        ecri=jnp.asarray(data["power_cri"] * mask, dtype=jnp.float64),
+        ensq=jnp.asarray(data["power_nsq"] * mask, dtype=jnp.float64),
+        esho=jnp.asarray(data["power_sho"] * mask, dtype=jnp.float64),
+        hbot=jnp.asarray(data["scale_bot"], dtype=jnp.float64),
+        hcri_inv=jnp.asarray(1.0 / data["scale_cri"], dtype=jnp.float64),
+    )
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -1467,7 +1508,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # record's directory symlinks it to the deck, so the deck root is where it
     # is read from here.
     viscosity_path = root / "eddy_viscosity_3D.nc"
-    required = (domain_path, temperature_path, salinity_path, viscosity_path)
+    # namelist_cfg's namzdf_iwm names this root for all six wave-power and
+    # decay-scale fields, and the run log shows it opened six times.
+    iwm_path = root / "zdfiwm_forcing_orca2.nc"
+    required = (domain_path, temperature_path, salinity_path, viscosity_path,
+                iwm_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing ORCA2 deck files: {missing}")
@@ -1685,11 +1730,30 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # (zdftke.F90:279-288).  nn_bc_bot is read for wave coupling but does
         # not guard this executed branch (declared/read only at :85/:762).
         bottom_tke_bc=True,
+        # zdfiwm.F90's initialisation runs AFTER zdf_tke_init and REPLACES the
+        # namelist backgrounds, because the wave field now supplies the
+        # interior background: avmb becomes the molecular viscosity, avtb a
+        # very small diffusive minimum, and the equatorial 2-D shape becomes
+        # uniform.  The carried avt_k/avm_k seeds above are set BEFORE that
+        # reset (zdfphy.f90:227-228) and keep the namelist values; these two
+        # floors are read AFTER it, every step, inside tke_avn's
+        # MAX(zav, avmb) / MAX(zav, avtb_2d*avtb) (zdftke.f90:709-710).
+        kappaM_min=_ORCA2_IWM_AVMB,
+        kappaH_min=_ORCA2_IWM_AVTB,
+    )
+    # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
+    # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
+    # Both stated here rather than left to a default.
+    iwm_config = model_config.physics.vertical_mixing.iwm._replace(
+        enabled=True,
+        mevar=False,
+        tsdiff=True,
+        require_forcing_maps=True,
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config)))
+                tke=tke_config, iwm=iwm_config)))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -1697,6 +1761,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         z_coord=z_coord,
         land_mask=jnp.asarray(tmask[..., 0], dtype=jnp.float64),
         initial_state=state,
+        iwm_forcing=_orca2_iwm_forcing(iwm_path, tmask[..., 0]),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",
@@ -1713,7 +1778,6 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         unmeasured_features=(
             "staged_gm_eiv",
             "linear_implicit_bottom_drag",
-            "internal_wave_mixing",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",

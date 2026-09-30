@@ -120,6 +120,7 @@ def _step_operand(card, freshwater, surface, operand: str):
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_stage1_transport_operand=operand),
     )
@@ -136,6 +137,7 @@ def _step_transport(card, freshwater, surface):
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_tracer_transport_stage=1),
     )

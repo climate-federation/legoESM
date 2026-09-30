@@ -165,6 +165,7 @@ def _stage2_vorticity(deck_root: Path, record_root: Path):
         card, deck_root, surface_fields, 1)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_momentum_operator="vorticity",
             expose_momentum_operator_stage=2))

@@ -136,6 +136,7 @@ def _run(card, state, freshwater, surface, *, endpoint, exposure: str,
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**kwargs),
     )
     return model.step(

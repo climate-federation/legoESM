@@ -1350,6 +1350,13 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     )
 
     if iwm_fields is None:
+        if getattr(iwm_cfg, "require_forcing_maps", False):
+            raise ValueError(
+                "IWMConfig.require_forcing_maps=True but no IWMForcing maps "
+                "reached iwm_K_profile.  This configuration reads real "
+                "internal-wave power maps; the uniform constant-power "
+                "fallback is different physics, so it is refused.  Thread "
+                "the maps through the model's iwm_forcing argument.")
         iwm_fields = uniform_iwm_forcing(iwm_cfg, H_col.shape, dtype=dtype)
 
     K_iwm, _ratio = compute_iwm_diffusivity(

@@ -17,7 +17,6 @@ CHECKPOINT_ORDER = ("entry", "stage1", "stage2", "stage3")
 EXPECTED_UNMEASURED = (
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
-    "internal_wave_mixing",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",

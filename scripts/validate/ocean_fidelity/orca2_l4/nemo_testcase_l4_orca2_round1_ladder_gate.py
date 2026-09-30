@@ -41,7 +41,6 @@ FIELD_ORDER = ("T", "S", "u", "v", "ssh")
 EXPECTED_UNMEASURED = (
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
-    "internal_wave_mixing",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",
@@ -982,6 +981,7 @@ def candidate_trajectory(
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
+        iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True),
     )
     checkpoints: list[dict[str, object]] = []

@@ -385,7 +385,7 @@ def run_month(
         initial == reference_initial,
         "independent initial state differs from the round-66 reference",
     )
-    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, card.recipe.model_config, iwm_forcing=card.recipe.iwm_forcing)
 
     started = time.time()
     ten_step_actual = None
