@@ -779,7 +779,9 @@ _KK2000_ACCRETION_EXPONENT = 1.15
 _KK2000_CAM6_PREFACTOR = 0.01 * 1350.0
 _KK2000_CAM6_NC_EXPONENT = -1.1
 _KK2000_CAM6_QC_MIN = 1.0e-8    # icsmall [kg/kg]
-_KK2000_CAM6_QC_MAX = 5.0e-3    # in-cloud cap [kg/kg]
+KK2000_CAM6_QC_MAX = 5.0e-3     # in-cloud cap [kg/kg] (shared with morrison.py)
+_KK2000_CAM6_RELVAR_MIN = 1.0e-3   # relvar clip (clubb_intr.F90:2425)
+_KK2000_CAM6_RELVAR_MAX = 10.0     # relvarmax, non-CLUBB deep scheme (:2418)
 
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
@@ -902,14 +904,22 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0):
     sub-grid cloud-water variance enhancement.  Ported guards: ``q_c >= 1e-8``
     gate (``icsmall``) and the 5e-3 kg/kg in-cloud cap.  Rain-number source =
     ``PRC·rho / m(25 µm)`` (CAM6 ``nprc``, per-volume here); the cloud-number
-    sink is the caller's ``-PRC·rho/x_c`` = CAM6 ``nprc1``.  ``fact`` =
+    sink is the caller's ``-PRC·rho/x_c`` = CAM6 ``nprc1`` (``x_c`` from the
+    capped water).  ``N_c_eff`` must be the IN-CLOUD number, as CAM6's
+    ``ncic``: true for the specified-Nc mode (production,
+    ``predict_Nc=False``); with prognostic Nc it is the grid mean, the same
+    known limitation as the other laws here.  ``relvar`` is clipped to
+    [0.001, 10] as CAM6 does.  N_c is floored at 1 m^-3 (CAM6 has no floor;
+    it would give inf at ncic=0).  ``fact`` =
     ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
     :func:`autoconversion_kk2000`.
     """
     q_c_pos = jnp.clip(q_c, 0.0)
-    q_c_ic = jnp.minimum(q_c_pos, _KK2000_CAM6_QC_MAX)
+    q_c_ic = jnp.minimum(q_c_pos, KK2000_CAM6_QC_MAX)
     n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
-    r = jnp.asarray(relvar, dtype=q_c_pos.dtype)
+    # CAM6 clips relvar to [0.001, relvarmax=10] (clubb_intr.F90:2425).
+    r = jnp.clip(jnp.asarray(relvar, dtype=q_c_pos.dtype),
+                 _KK2000_CAM6_RELVAR_MIN, _KK2000_CAM6_RELVAR_MAX)
     a = _KK2000_AUTOCONV_QC_EXPONENT
     var_coef = jnp.exp(jax.scipy.special.gammaln(r + a)
                        - jax.scipy.special.gammaln(r)) / r ** a
@@ -919,7 +929,10 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0):
         * safe_pow(q_c_ic, a) * safe_pow(n_c_cm3, _KK2000_CAM6_NC_EXPONENT),
         0.0,
     )
-    x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
+    # Mean droplet mass from the CAPPED in-cloud water, so the caller's
+    # -PRC*rho/x_c equals CAM6 nprc1 = prc*ncic/qcic (Morrison then limits
+    # the cloud-number sink to N_c/dt, as CAM6 does at micro_mg2_0:1630).
+    x_c = q_c_ic * rho / jnp.clip(N_c_eff, 1.0)
     return prc, prc * rho / _KK2000_CONS29, x_c
 
 
