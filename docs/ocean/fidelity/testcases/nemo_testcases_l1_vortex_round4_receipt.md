@@ -168,13 +168,46 @@ each stage's residual by its own clock gives `5.12e-05 : 3.34e-06 : 3.37e-06`,
 so its FIRST stage's right-hand side is **15 times** worse than its second and
 third, and those two agree with each other to `1%`.
 
-### 8. What is left, and why it stops here
+### 8. The acquisition ran, and it takes the five candidates to two
 
-The boundary is named. The TERM inside it is not, and cannot be from this
-record, which carries only the completed total. Ranking the five contributing
-routines by magnitude is precisely the mistake round 3 paid for, so it is not
-done here. The acquisition that splits them is committed and preflighted; see
-section 10.
+The operator ran `run.sh --variant vecrhs --run` mid-round. Both builds
+reached STOP 0 and the record is **ADMITTED**: the instrumented run's NEMO
+restart is byte-identical to the un-instrumented reference, every record
+parses from its own header, and the admission's plant still turns it red.
+Its own admission caught a real defect first, recorded in section 14.
+
+Each routine's contribution is the difference between consecutive dumps.
+NEMO's step is `rn_Dt = 2880 s` and the first stage advances by a third of
+it, so the measured stage-1 velocity error of `1.7074e-05` requires a
+right-hand-side difference of **at least `1.7785e-08 m/s²`** — at least,
+because that stage then replaces the depth mean, which throws part of any
+difference away. legoESM's completed pre-stage right-hand side differs from
+NEMO's by `2.8783e-08 m/s²`, which sits just above that floor, as it must.
+
+| routine | its own increment | verdict |
+|---|---|---|
+| pressure gradient | `1.3095e-03` | big enough — see the flux-card exclusion below |
+| lateral viscosity | **exactly `0`** | **EXCLUDED.** This deck runs no lateral viscosity, so the routine contributes nothing and can be wrong by nothing |
+| vorticity (Coriolis + relative) | `6.6267e-05` | **SURVIVES** |
+| the vertical-velocity call | `0`, bit-identical | the ORDERED CONTROL, not a term: it computes `ww` and must not touch the momentum trend. It does not, so the dumps are in the order the differencing assumes |
+| kinetic-energy gradient | `6.7112e-06` | **SURVIVES** |
+| vertical advection of momentum | `1.6928e-08` | **EXCLUDED**: the whole of the term is smaller than the difference the measured error requires. Even a completely wrong vertical advection cannot produce it |
+
+**The pressure gradient is excluded by the flux card.** Both cards enter
+step 1 with byte-identical state and `stp_2D` calls the equation of state,
+the pressure gradient and the lateral viscosity identically on both before it
+branches on the advection form. The flux card's first stage is wrong by
+`4.359e-08`, i.e. its whole pre-stage right-hand side is wrong by at most
+`4.5e-11` — six hundred times too little to be the vector card's
+`2.88e-08`. The same argument excludes the Coriolis half of the vorticity
+term, which is all the flux card's vorticity routine is handed.
+
+**So two candidates remain of five: the RELATIVE-vorticity half of the
+energy-and-enstrophy vorticity, and the kinetic-energy gradient.** Which of
+the two is NOT decided here. Separating them needs legoESM's own per-term
+decomposition at the same boundary — the mirror of the record just acquired —
+and inventing a ranking from the two magnitudes is exactly the mistake round
+3 paid for.
 
 ### 9. The plants — one per substituted arm
 
@@ -221,7 +254,6 @@ size. Preflight is green on all three variants.
 | gate | its own success line |
 |---|---|
 | the card test file plus the push gate and the walk readers, FIRST run | `9 failed, 208 passed in 994.97s` — the red the review found; both causes are section 14's 1a and 1b |
-| the same battery after the fixes | STILL RUNNING at hand-off, log `phase3/vortex/round4/gates/battery2.log`; the two causes were each verified independently, see the next two rows |
 | the citation-map audit, after re-anchoring | `map entries failing: 0` (it was 2) |
 | the citation gate on THIS receipt | `PASS`, 3 citations found, 0 unmapped, 0 map entries failing; its own 9 planted controls all flagged |
 | the default-independence gate, all five testcase cards and all four DINO recipes | green in the first battery, and green again with the statement reverted only on the GYRE arm (`1 failed`), which is the non-vacuity plant |
@@ -235,9 +267,12 @@ size. Preflight is green on all three variants.
 | kt=2 walk, vector card | section 6 |
 | kt=2 walk, flux card | arms 0-4 identical to round 3's published rows |
 | walk plants, six of them | all VISIBLE, all exit non-zero |
-| walk readers and the per-term parser, planted malformations | in the re-run battery above |
 | acquisition preflight, all three variants | `PREFLIGHT_OK` on flux, vec and vecrhs; unknown variant exit 64 |
-| clean re-run of every walk and plant at the committed tree | STILL RUNNING at hand-off, same log |
+| the per-term acquisition's admission | `ADMITTED`, restart byte-identical to the un-instrumented reference, all six boundaries parsed from their own headers; its plant exits 1 |
+| the per-term probe | section 8; its ordered control holds and its own plant (`rhs-agrees`) COLLAPSES the difference, exit 1 |
+| walk readers and the per-term parser, planted malformations | `24 passed` |
+| clean re-run of every walk and plant at the committed tree | done: both walks exit 0 and all six plants VISIBLE, exit 1, every JSON stamped with a CLEAN commit |
+| the same battery after the fixes, second run | `7 failed, 219 passed` — the citation-gate and card failures are GONE; the seven were the per-term reader tests, which the run predated the header fix for and which now read `24 passed` on their own |
 
 **Two rows are still incomplete and the round is HELD on them.** The
 GYRE year rows (day 30 / 240 / 360) were NOT run at all: the resolved
