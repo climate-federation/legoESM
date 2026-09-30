@@ -85,13 +85,17 @@ class _Driver:
         self._mpas_sfc_accum = _Accum() if accum is None else accum
 
 
-def _kw(ncol, *, precip_mm_day, hfls_w_m2, evspsbl=None):
+def _kw(ncol, *, precip_mm_day, hfls_w_m2, evspsbl):
     # The closure reads the WATER (evspsbl); hfls rides along as the CMOR
-    # output does.  Tests set the water to the same E the heat implies.
+    # output does.  The water is always spelled out by the test -- no default
+    # rebuilt from the heat.
     return {"precip": jnp.full((ncol,), precip_mm_day / 86400.0),
             "hfls": jnp.full((ncol,), hfls_w_m2),
-            "evspsbl": (jnp.full((ncol,), hfls_w_m2 / constants.L_v)
-                        if evspsbl is None else evspsbl)}
+            "evspsbl": evspsbl}
+
+
+def _water_of(ncol, hfls_w_m2):
+    return jnp.full((ncol,), hfls_w_m2 / constants.L_v)
 
 
 def test_a_known_imbalance_reaches_the_tracker_with_the_right_size():
@@ -103,9 +107,9 @@ def test_a_known_imbalance_reaches_the_tracker_with_the_right_size():
     # Two feeds: the tracker needs a previous sample to form dW/dt, and with a
     # STEADY column that tendency is zero, so the residual is exactly E - P.
     d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
-                                                hfls_w_m2=hfls))
+                                                hfls_w_m2=hfls, evspsbl=_water_of(16, hfls)))
     d._feed_mpas_moisture_budget(1.0, diag, _kw(16, precip_mm_day=2.0,
-                                                hfls_w_m2=hfls))
+                                                hfls_w_m2=hfls, evspsbl=_water_of(16, hfls)))
     res = diag.moisture_tracker.residual
     assert len(res) == 2, "the tracker was not fed"
     assert np.isnan(res[0]), (
@@ -123,7 +127,7 @@ def test_a_closed_budget_reads_zero():
     for day in (0.0, 1.0):
         d._feed_mpas_moisture_budget(day, diag,
                                      _kw(16, precip_mm_day=2.0,
-                                         hfls_w_m2=hfls))
+                                         hfls_w_m2=hfls, evspsbl=_water_of(16, hfls)))
     assert diag.moisture_tracker.residual[-1] == pytest.approx(0.0, abs=0.05)
 
 
@@ -133,7 +137,7 @@ def test_the_partitioned_lane_publishes_nothing_rather_than_a_local_number():
     d = _Driver(voronoi_layout=object())
     diag = _Diag()
     d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
-                                                hfls_w_m2=100.0))
+                                                hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert diag.moisture_tracker.residual == []
 
 
@@ -142,7 +146,7 @@ def test_a_dry_run_is_skipped_not_crashed():
     d.state.tracers = None
     diag = _Diag()
     d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
-                                                hfls_w_m2=100.0))
+                                                hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert diag.moisture_tracker.residual == []
 
 
@@ -162,7 +166,7 @@ def test_heat_without_water_warns_and_skips():
     warns and records nothing."""
     d = _Driver()
     diag = _Diag()
-    kw = _kw(16, precip_mm_day=2.0, hfls_w_m2=100.0)
+    kw = _kw(16, precip_mm_day=2.0, hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0))
     kw["evspsbl"] = None
     with pytest.warns(UserWarning, match="refuses to derive water"):
         d._feed_mpas_moisture_budget(0.0, diag, kw)
@@ -202,7 +206,7 @@ def test_an_incomplete_window_is_not_closed_against():
     d = _Driver(accum=_Accum(samples=True, complete=False))
     diag = _Diag()
     d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
-                                                hfls_w_m2=100.0))
+                                                hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert diag.moisture_tracker.residual == []
 
 
@@ -217,5 +221,5 @@ def test_the_first_sample_after_a_restart_reports_nothing():
     diag = _Diag()
     diag.moisture_tracker = fresh
     d._feed_mpas_moisture_budget(10.0, diag, _kw(16, precip_mm_day=2.0,
-                                                 hfls_w_m2=100.0))
+                                                 hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert np.isnan(diag.moisture_tracker.residual[-1])

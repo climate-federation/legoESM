@@ -232,6 +232,16 @@ def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
     return None
 
 
+
+def _refuse_heat_without_water(where: str, lhflx, evspsbl) -> None:
+    """Heat without water is refused before any series grows: deriving E as
+    lhflx / L_v was the hidden 2-3 % fallback the water channel removes."""
+    if evspsbl is None and lhflx is not None:
+        raise ValueError(
+            f"DiagnosticCollector.{where}: lhflx was fed without evspsbl; "
+            "the moisture closure and CMOR evspsbl need the water the column "
+            "actually received (PhysicsOutput.evap_sfc), never lhflx / L_v.")
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -997,6 +1007,7 @@ class DiagnosticCollector:
         # GPU pipeline at every diagnostic interval.  The model step
         # following ``collect()`` cannot launch until all 12 have
         # round-tripped — fusing them collapses the stall to one.
+        _refuse_heat_without_water("collect", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1118,14 +1129,7 @@ class DiagnosticCollector:
         # evspsbl (positive-up evaporation source, PhysicsOutput.evap_sfc) so
         # the E − P − dW/dt closure shares one definition with the output; a
         # fluxless config (no surface exchange at all) closes against E = 0.
-        # Heat without water is refused: deriving E as lhflx / L_v here was
-        # the hidden 2-3 % fallback the water channel removes.
-        if evspsbl is None and lhflx is not None:
-            raise ValueError(
-                "DiagnosticCollector.collect: lhflx was fed without evspsbl; "
-                "the moisture closure and CMOR evspsbl need the water the "
-                "column actually received (PhysicsOutput.evap_sfc), never "
-                "lhflx / L_v.")
+        # Heat without water was refused at entry (before any series grew).
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total,
@@ -1500,6 +1504,7 @@ class DiagnosticCollector:
         # overhead, but the previous per-scalar ``float(...)`` chain
         # serialised 12 GPU stalls per diagnostic step — exactly the
         # sin the long ``collect`` path was already corrected for.
+        _refuse_heat_without_water("collect_lightweight", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:

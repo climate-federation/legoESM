@@ -474,7 +474,7 @@ class TestFeedUsesIntervalMeans:
                 output=types.SimpleNamespace(diag_days=1.0)),
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None,
+                phis=_field(f["phis"]), tracers=None, v=None,
             ),
             # Instantaneous end-of-interval snapshot deliberately DIFFERENT
             # from the accumulated mean.
@@ -511,7 +511,7 @@ class TestFeedUsesIntervalMeans:
             grid=mesh,
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None,
+                phis=_field(f["phis"]), tracers=None, v=None,
             ),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
@@ -987,7 +987,7 @@ class TestPartialWindowGate:
                 dycore=types.SimpleNamespace(dt=21600.0)),   # 4 steps = 1 d
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None),
+                phis=_field(f["phis"]), tracers=None, v=None),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
@@ -1022,7 +1022,7 @@ class TestPartialWindowGate:
                 dycore=types.SimpleNamespace(dt=43200.0)),   # 2 steps = 1 d
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None),
+                phis=_field(f["phis"]), tracers=None, v=None),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
@@ -1435,7 +1435,7 @@ class TestClearSkyDriverFeed:
                 output=types.SimpleNamespace(clear_sky_diag=clear_sky_on)),
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]),
+                phis=_field(f["phis"]), v=None,
                 tracers={"q_v": _field(q_v), "q_c": _field(q_c),
                          "q_i": _field(q_i)},
             ),

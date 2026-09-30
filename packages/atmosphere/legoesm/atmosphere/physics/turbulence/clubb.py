@@ -6753,7 +6753,12 @@ def clubb_turbulence_prognostic(
             / config.trop_cloud_taper_lnp_width)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
-        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
+        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx,
+        # The water beside the heat (T_sfc is fixed over the sub-cycle, so
+        # the mean flux inverts exactly); a consumer must never rebuild it
+        # as lhflx / L_v.
+        evap_sfc=surface_moisture_flux(config.surface, lhflx, T_sfc),
+        ustar=ustar,
         h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt)
     return output, pack_clubb_moments(new_moments)
 

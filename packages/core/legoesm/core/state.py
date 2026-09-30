@@ -137,13 +137,9 @@ class HydrostaticTendencies(NamedTuple):
     # the CMOR hfss/hfls convention, matching the surface-layer helpers'
     # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
     # feed.  None when turbulence is off or a scheme computes no surface
-    # fluxes.  ``evap_sfc`` [kg/m2/s, positive up] is the water the column
-    # actually received (the kernel's moisture BC: tiled / prescribed water,
-    # else the bulk L_v(T_sfc) inverse); CMOR evspsbl and the moisture closure
-    # read it -- never lhflx / L_v.
+    # fluxes.
     shflx_sfc: Field | None = None
     lhflx_sfc: Field | None = None
-    evap_sfc: Field | None = None
     # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
     # radiation tendency for the lean MPAS/spectral loops: an interactive land
     # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
@@ -185,6 +181,11 @@ class HydrostaticTendencies(NamedTuple):
     # scheme's static cap means that column's fall was clamped.  None when the
     # sub-stepping is off.  Diagnostic only; appended with a None default.
     sed_substeps_required: Field | None = None
+    # Surface water flux [kg/m2/s, positive up]: the water the column actually
+    # received (the kernel's moisture BC: tiled / prescribed water, else the
+    # bulk L_v(T_sfc) inverse).  CMOR evspsbl and the moisture closure read
+    # it -- never lhflx / L_v.  Appended LAST so no field index moves.
+    evap_sfc: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH

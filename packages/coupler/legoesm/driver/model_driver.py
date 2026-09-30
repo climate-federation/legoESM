@@ -11494,7 +11494,7 @@ class ModelDriver:
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
             "evspsbl": [],
-            # 1.0 = the seven energy channels above are diagnostic-INTERVAL
+            # 1.0 = the seven energy channels above (and evspsbl) are diagnostic-INTERVAL
             # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
             # cycle of the land-dominated turbulent fluxes (#1354/#1353).
             "energy_flux_interval_mean": [],
@@ -13734,7 +13734,7 @@ class ModelDriver:
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
             evspsbl=_arr("evspsbl") if "evspsbl" in ts else nan,
-            # Flux-timing provenance for the seven channels above. WITHOUT
+            # Flux-timing provenance for the seven channels above and evspsbl. WITHOUT
             # this the closure probe refuses every real series as "timing
             # unknown" -- which is the correct refusal, and exactly what
             # happens when a collected channel is never persisted.
