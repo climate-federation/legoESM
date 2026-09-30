@@ -172,7 +172,8 @@ def compute_simple_seb_fluxes(
         q_sat_sfc, forcing.q_lowest, jnp.ones_like(q_sat_sfc), beta_effective)
 
     # Phase-appropriate latent heat (consistent with iter-68 gate above).
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_surface, has_snow)
 
     # --- Bulk fluxes ---
     # Dispatch hardening (restores the guard lost when this dispatch moved

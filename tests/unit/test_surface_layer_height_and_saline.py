@@ -77,7 +77,8 @@ def test_mpas_bridge_applies_both_switches():
         phis=Field(jnp.zeros((ncol,))), tracers={"q_v": Field(q)})
     sst = jnp.full((ncol,), 301.0)
     f_land = np.zeros(ncol); f_land[:3] = 1.0     # three land cells
-    forcing = {"T_sfc": sst, "lhflx_land": jnp.zeros((ncol,)), "shflx_land": jnp.zeros((ncol,))}
+    forcing = {"T_sfc": sst, "lhflx_land": jnp.zeros((ncol,)), "shflx_land": jnp.zeros((ncol,)),
+               "evap_land": jnp.zeros((ncol,))}
     seen = {}
     real = sl.compute_surface_fluxes   # the bridge imports it at call time
 

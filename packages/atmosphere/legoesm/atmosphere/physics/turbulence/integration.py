@@ -325,7 +325,7 @@ def _resolve_T_sfc(T_col, phys_state):
 
 def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
                                    lhflx_w_m2=None, tau_x_pa=None,
-                                   tau_y_pa=None):
+                                   tau_y_pa=None, evap_kg_m2_s=None):
     """Fold prescribed energetic/stress surface fluxes into a scheme config.
 
     Writes the given ALREADY-energetic / ALREADY-stress (ncol,) arrays into
@@ -359,9 +359,18 @@ def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
         flux; the input object unchanged (identity) when all are None.
     """
     if (shflx_w_m2 is None and lhflx_w_m2 is None
-            and tau_x_pa is None and tau_y_pa is None):
+            and tau_x_pa is None and tau_y_pa is None and evap_kg_m2_s is None):
         return scheme_config
+    if evap_kg_m2_s is not None and lhflx_w_m2 is None:
+        raise ValueError(
+            "fold_prescribed_surface_fluxes: a prescribed surface water flux "
+            "(evap_kg_m2_s) must come with its latent heat flux (lhflx_w_m2); "
+            "the heat consumers (buoyancy, closures, diagnostics) need the "
+            "physical flux the tile charged for that water.")
     surface = scheme_config.surface
+    if evap_kg_m2_s is not None:
+        # Already kg/m2/s (positive up): the tiles' water flux, not re-derived.
+        surface = surface._replace(prescribed_evap_kg_m2_s=evap_kg_m2_s)
     if shflx_w_m2 is not None:
         # Already W/m^2 (positive up): no rho conversion.
         surface = surface._replace(prescribed_shflx_w_m2=shflx_w_m2)
@@ -427,9 +436,10 @@ def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
     wqv = getattr(phys_state, "surface_wqv_override", None)
     shf = getattr(phys_state, "surface_shflx_override_w_m2", None)
     lhf = getattr(phys_state, "surface_lhflx_override_w_m2", None)
+    evp = getattr(phys_state, "surface_evap_override_kg_m2_s", None)
     tux = getattr(phys_state, "surface_tau_x_override_pa", None)
     tuy = getattr(phys_state, "surface_tau_y_override_pa", None)
-    if (wth is None and wqv is None and shf is None and lhf is None
+    if (wth is None and wqv is None and shf is None and lhf is None and evp is None
             and tux is None and tuy is None):
         return scheme_config
     rho_sfc = rho[:, -1]
@@ -453,11 +463,16 @@ def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
                 "prescribe exactly one form (caller bug).")
         # Kinematic [kg/kg m/s] -> energetic [W/m^2] with the lowest-level
         # density.
-        lhf = rho_sfc * constants.L_v * wqv
+        # The kinematic override IS a water flux: hand it over as such.  Its
+        # latent heat for the heat consumers is charged at the constant
+        # (surface temperature and phase are not in scope on this training
+        # path; the training lane prescribes ERA5 kinematic fluxes).
+        evp = rho_sfc * wqv
+        lhf = rho_sfc * constants.L_v * wqv  # latent-ok: kinematic training override, no surface phase in scope
     # Energetic fluxes / stresses pass through unchanged (no rho conversion)
     # into the shared fold.
     return fold_prescribed_surface_fluxes(
-        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf,
+        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf, evap_kg_m2_s=evp,
         tau_x_pa=tux, tau_y_pa=tuy)
 
 
@@ -1019,7 +1034,26 @@ def _make_mpas_turbulence(
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
-            _sh_land = jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells)
+            if forcing.get("evap_land") is None:
+                raise ValueError(
+                    "MPAS land coupling: forcing['lhflx_land'] must come with "
+                    "forcing['evap_land'] (the land's own water flux); inverting "
+                    "the land latent heat with the ocean's L_v(T_sfc) loses the "
+                    "snow-sublimation and canopy shares of the water.")
+            # The land model's own water flux, blended with the ocean half's bulk
+            # water (lhflx / L_v(T_sfc): the exact inverse of the bulk charge,
+            # taken BEFORE the heat blend), handed to the kernel as mass.  Land
+            # values over pure-ocean cells may be NaN/undefined: masked out.
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _ev_land = jnp.asarray(
+                forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
+            _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
+            _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
+            _ev_blend = ((1.0 - _fl) * _lh / _lv_T(T_sfc) + _fl * _ev_land)
+            step_config = step_config._replace(surface=step_config.surface._replace(
+                prescribed_evap_kg_m2_s=_ev_blend))
+            _sh_land = jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,

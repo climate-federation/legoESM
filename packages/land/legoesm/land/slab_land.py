@@ -153,7 +153,8 @@ def step_land(
     has_snow = has_existing_snow | has_surviving_fresh_snow
 
     # Phase-appropriate latent heat: sublimation (L_s) over snow, vaporisation (L_v) over bare soil
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_soil, has_snow)
 
     # --- Snow budget (energy-limited melt) ---
     # Q_net drives the melt rate: M = max(0, Q_net * dt / L_f)
@@ -168,7 +169,7 @@ def step_land(
     # The melt consumes latent heat of fusion, reducing the energy
     # available for warming the soil slab.
     heat_cap = C_soil * d_soil
-    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
+    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
     dT_dt = (Q_net - melt_energy) / heat_cap
     T_soil_new = T_soil + dt * dT_dt
 
@@ -501,7 +502,7 @@ def _step_land_canopy(
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
     )
-    melt_energy = snow_melt * constants.L_f / dt
+    melt_energy = snow_melt * constants.L_f / dt  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
 
     # Slab energy balance: net energy into soil = G - melt_energy.
     # NOTE: the canopy already accounts for SW/LW/SH/LE in G; melt is the
@@ -510,7 +511,8 @@ def _step_land_canopy(
     T_soil_new = T_soil_flat + dt * Q_net_slab / heat_cap_total
 
     # --- Latent mass partition ---
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_soil_flat, has_snow)   # the L the surface solve charged
     evap_rate_demand = surface_out.lhflx / L_eff
 
     snow_after_melt = snow_new

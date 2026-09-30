@@ -406,7 +406,9 @@ def ocean_tile_response(
     # Ocean tile freshwater: P − E, where evap is back-derived from
     # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
     # freshwater INTO ocean.
-    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    # Inverse of the SAME L_v(SST) the bulk law charged (core.bulk_flux).
+    from legoesm.thermo import latent_heat_vaporization
+    evap_rate = lhflx / latent_heat_vaporization(ocean_sst)   # kg/m²/s, positive = up (ocean → atm)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,

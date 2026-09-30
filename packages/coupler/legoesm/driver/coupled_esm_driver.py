@@ -1579,8 +1579,15 @@ class CoupledESMDriver:
             # conservation tests).
             r = self._last_sfc_response
             if r is None or getattr(r, "shflx", None) is None:
-                return None, None
-            return r.shflx, r.lhflx
+                return None, None, None
+            if getattr(r, "surface_mass_flux", None) is None:
+                raise ValueError(
+                    "couple_surface_fluxes: the surface response carries no "
+                    "surface_mass_flux; the atmosphere's moisture source must be "
+                    "the tiles' water flux, never lhflx re-divided by a latent heat.")
+            # Physical latent heat (each tile's own L(T, phase)) for the heat
+            # consumers, and the tiles' WATER flux for the moisture source.
+            return r.shflx, r.lhflx, r.surface_mass_flux
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(
@@ -2107,7 +2114,9 @@ class CoupledESMDriver:
         sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
         tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
         tau_y = f_ocean * tile.tau_y
-        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # The tile's own water flux (charged at L_v(SST) with its lhflx): the
+        # SAME mass the atmosphere receives through the water channel.
+        evap = f_ocean * tile.surface_mass_flux       # [kg/m²/s], +up (open water)
         # Precip over the ice fraction: WHERE it is counted depends on whether
         # the active ice model owns a snow reservoir.  Sign: +into ocean.  The
         # LAND and LAKE fractions are ALWAYS excluded here -- their precip is the
