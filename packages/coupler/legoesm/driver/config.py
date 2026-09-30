@@ -780,6 +780,14 @@ class ExperimentConfig(NamedTuple):
     # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
     # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
     cloud_cover_condensate_q_ref: float | None = None
+    # CAM6 ice-stratus fraction aist ramp (cldfrc2m.F90:846-856; namelist
+    # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis, CLUBB defaults 0.80/1.0/1.0/1.0)
+    # for cloud_scheme='cam6_clubb': radiation cloud cover and the in-cloud
+    # warm-rain ast.  None => CloudConfig default (the CAM6 CLUBB values).
+    cloud_cam6_rhmini: float | None = None
+    cloud_cam6_rhmaxi: float | None = None
+    cloud_cam6_rhminis: float | None = None
+    cloud_cam6_rhmaxis: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -3639,6 +3647,14 @@ class ExperimentConfig(NamedTuple):
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            # rhmini: CloudConfig __param_spec__ bounds (one range).  The
+            # other three have no spec (fixed, excluded); their range spans
+            # the CAM6 namelist values (namelist_defaults_cam.xml:1521-1533:
+            # rhminis 0.85/1.0, rhmaxi and rhmaxis 1.0/1.1).
+            ("cloud_cam6_rhmini", 0.5, 0.99),
+            ("cloud_cam6_rhmaxi", 1.0, 1.1),
+            ("cloud_cam6_rhminis", 0.85, 1.0),
+            ("cloud_cam6_rhmaxis", 1.0, 1.1),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
