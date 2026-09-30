@@ -164,7 +164,7 @@ def test_validate_strict_accepts_a_nonexistent_land_mask_path():
 
     This is a contract test, and its whole purpose is to be the thing that
     breaks first if anyone hardens validation to stat the path. Many CLI
-    fixtures name a land-mask file that does not exist (``LAND_MASK_STUB`` in
+    fixtures name a land-mask file that does not exist (e.g. ``lsm.nc`` in
     tests/unit/test_run_amip_cli.py) purely to give a land tile a land source,
     because the alternative -- an idealized ``flat`` topography with no mask --
     has f_land == 0 everywhere and makes every land flag under test inert.

@@ -1,22 +1,4 @@
-"""CLI coverage for the real AMIP entrypoint.
-
-WHY SO MANY FIXTURES PASS ``--land-mask-file lsm.nc``, and why removing it is
-not a simplification. A land tile (``--slab-land-active`` /
-``--use-multilayer-land``) gets its land fraction from the topography when no
-mask is named, and the IDEALIZED topographies derive none: ``flat`` is zero
-elevation everywhere, and ``gaussian`` is a dynamical forcing that the driver
-deliberately leaves all-ocean. So a land-tile fixture on the default ``flat``
-topography with no mask has ``f_land == 0`` in every cell -- the flags under
-test are inert in their own fixture, and the test asserts the plumbing of a
-no-op.
-
-``validate_strict`` refuses that combination (#1765), which is how it surfaced:
-nine tests here went red. They were not broken BY the guard -- they were
-vacuous before it existed, and the guard is what made that visible. The mask
-path is never opened by ``validate_strict`` (it is a truthiness check), so
-naming one costs no data file; what it buys is a fixture where the land flags
-are actually reachable.
-"""
+"""CLI coverage for the real AMIP entrypoint."""
 
 from __future__ import annotations
 
@@ -35,17 +17,6 @@ from scripts.run.run_amip import (
     build_arg_parser,
     build_config_from_args,
 )
-
-
-#: The land-mask path these fixtures name to give a land tile a land source.
-#: The FILE DOES NOT EXIST and does not need to: ``validate_strict`` checks
-#: ``land_mask_path`` for truthiness only, never opens it. That contract is
-#: pinned by ``test_validate_strict_accepts_a_nonexistent_land_mask_path`` in
-#: tests/unit/test_config_validation.py -- deliberately over THERE, so whoever
-#: hardens validation to stat the path trips a test whose NAME explains the
-#: convention, in the file they are already editing, instead of a wall of
-#: FileNotFoundErrors here with an idiom to reverse-engineer.
-LAND_MASK_STUB = "lsm.nc"
 
 
 def test_spectral_scheme_fallback():
@@ -80,7 +51,7 @@ def test_multilayer_land_flags_flow_to_config():
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
-        "--land-mask-file", LAND_MASK_STUB,
+        "--land-mask-file", "lsm.nc",
         "--use-multilayer-land",
         "--multilayer-n-layers", "8",
         "--multilayer-soil-depth", "4.5",
@@ -98,7 +69,7 @@ def test_land_update_seconds_flows_to_config_and_validates():
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
-        "--land-mask-file", LAND_MASK_STUB,
+        "--land-mask-file", "lsm.nc",
         "--use-multilayer-land",
         "--land-update-seconds", "300",
     ]), parser))
@@ -336,10 +307,9 @@ def test_multilayer_land_accepted_on_mpas():
     (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--grid-type", "mpas", "--discretization", "mpas",
         "--use-multilayer-land",
-        "--land-mask-file", LAND_MASK_STUB,
     ]), parser)
     cfg = build_config_from_args(args)
     assert cfg.use_multilayer_land is True
@@ -410,7 +380,7 @@ def test_transient_land_cover_flags_flow_to_config():
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
-        "--land-mask-file", LAND_MASK_STUB, "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
     ]), parser))
@@ -424,7 +394,7 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
-        "--land-mask-file", LAND_MASK_STUB, "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
     ]), parser))
@@ -631,7 +601,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     assert cfg_default.land_surface_scheme == "two_leaf"
     cfg_ml_default = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--use-multilayer-land",
-        "--land-mask-file", LAND_MASK_STUB,
+        "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_ml_default.land_surface_scheme == "two_leaf"
 
@@ -640,7 +610,6 @@ def test_land_surface_scheme_flag_flows_to_config():
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
         "--use-multilayer-land",
-        "--land-mask-file", LAND_MASK_STUB,
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
 
@@ -649,8 +618,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
-        "--use-multilayer-land",
-        "--land-mask-file", LAND_MASK_STUB,
+        "--use-multilayer-land", "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
     cfg_clm.validate_strict()  # must not raise
@@ -1291,13 +1259,12 @@ def test_surface_tiled_flags_flow_to_config():
     and validate together with --slab-land-active + --turbulence louis."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
         "--surface-tiled",
         "--surface-z0-land", "0.15",
-        "--land-mask-file", LAND_MASK_STUB,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1341,12 +1308,11 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", scheme,
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
         "--surface-tiled",
-        "--land-mask-file", LAND_MASK_STUB,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1359,7 +1325,7 @@ def test_soil_bucket_flags_flow_to_config():
     and validate together with an active land tile."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1369,7 +1335,6 @@ def test_soil_bucket_flags_flow_to_config():
         "--land-k-infiltration", "3.3e-6",
         "--land-infil-suction-boost", "1.5",
         "--no-land-infiltration-excess",
-        "--land-mask-file", LAND_MASK_STUB,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
@@ -1389,8 +1354,7 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--slab-land-active", "--land-soil-bucket",
-         "--land-mask-file", LAND_MASK_STUB]),
+        ["--dataset", "analytical", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1428,12 +1392,11 @@ def test_land_stomatal_beta_flag_flows_to_config():
     """--land-stomatal-beta round-trips and validates with the bucket on."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
         "--land-stomatal-beta",
-        "--land-mask-file", LAND_MASK_STUB,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
