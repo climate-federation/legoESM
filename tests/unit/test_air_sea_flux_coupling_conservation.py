@@ -401,15 +401,17 @@ class TestCoupledDriverWiring:
 
         # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
         assert atm.get_sfc_flux_override(0.0) == (None, None)
-        # Once a blended response exists, its SH flows through and its LH is
-        # the tile MASS flux times the atmosphere's L_v (see the test below).
+        # Once a blended response exists, its LH is the tile MASS flux times
+        # the atmosphere's L_v, and its SH carries the (L_vap - L_v)*E
+        # remainder so energy closes (see the tests below).
         from legoesm import constants
         sh = jnp.full((6, 4, 4), 22.0)
         mf = jnp.full((6, 4, 4), 77.0 / constants.L_v)
         drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=mf * 2.44e6,
                                                  surface_mass_flux=mf)
         got_sh, got_lh = atm.get_sfc_flux_override(0.0)
-        assert jnp.array_equal(got_sh, sh)
+        np.testing.assert_allclose(got_sh, sh + mf * (2.44e6 - constants.L_v),
+                                   rtol=1e-12)
         np.testing.assert_allclose(got_lh, 77.0, rtol=1e-12)
 
     def test_hook_hands_the_tile_mass_flux_scaled_by_the_atmosphere_L_v(self):
