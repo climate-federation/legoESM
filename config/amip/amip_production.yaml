@@ -141,7 +141,10 @@ morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
                                    # 2026-09-30): rates on qc/lcldm, qr/lcldm,
                                    # lcldm = max(CLUBB liquid cloud fraction,
                                    # 1e-4), times lcldm (micro_mg2_0.F90:878,
-                                   # :1224-1322).  Grid-mean arm:
+                                   # :1224-1322).  DEPARTURE: CAM6 passes
+                                   # ast = max(liquid, ice) fraction
+                                   # (clubb_intr.F90:2575); here liquid only.
+                                   # Grid-mean arm:
                                    # --no-morrison-warm-rain-incloud.
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
