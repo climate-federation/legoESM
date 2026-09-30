@@ -1807,7 +1807,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "cause of the supersaturation pile-up rather "
                              "than draining it after the fact.")
     parser.add_argument("--morrison-warm-rain-scheme",
-                        choices=["kk2000", "seifert_beheng",
+                        choices=["kk2000", "kk2000_cam6", "seifert_beheng",
                                  "seifert_beheng_sb2001"],
                         default=ExperimentConfig._field_defaults[
                             "morrison_warm_rain_scheme"],

@@ -3526,7 +3526,8 @@ class ExperimentConfig(NamedTuple):
                 "morrison_hom_ice_nuc_N override requires "
                 "homogeneous_ice_nucleation=True — the leaf is consumed only "
                 "by the hom-nucleation branch and would be silently inert.")
-        _wrs = ("kk2000", "seifert_beheng", "seifert_beheng_sb2001")
+        _wrs = ("kk2000", "kk2000_cam6", "seifert_beheng",
+                "seifert_beheng_sb2001")
         if self.morrison_warm_rain_scheme not in _wrs:
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
@@ -3540,9 +3541,11 @@ class ExperimentConfig(NamedTuple):
         _kk_only = [f for f in ("morrison_autocon_fact",
                                 "morrison_accre_enhan_fact")
                     if f in _morrison_touched]
-        if _kk_only and self.morrison_warm_rain_scheme != "kk2000":
+        if _kk_only and self.morrison_warm_rain_scheme not in (
+                "kk2000", "kk2000_cam6"):
             raise ValueError(
-                f"{_kk_only} require morrison_warm_rain_scheme='kk2000' "
+                f"{_kk_only} require morrison_warm_rain_scheme='kk2000' or "
+                "'kk2000_cam6' "
                 f"(got {self.morrison_warm_rain_scheme!r}); they would be "
                 "silently inert.")
         if self.morrison_flavor not in ("mg", "sam"):

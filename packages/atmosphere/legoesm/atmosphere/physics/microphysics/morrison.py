@@ -63,6 +63,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     autoconversion_sb,
     autoconversion_sb2001,
     autoconversion_kk2000,
+    autoconversion_kk2000_cam6,
     accretion,
     accretion_sb2001,
     accretion_kk2000,
@@ -325,6 +326,16 @@ def morrison_microphysics(
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion_kk2000(
             q_c_ic, q_r_ic, fact=config.accre_enhan_fact) * cf_eff
+    elif config.warm_rain_scheme == "kk2000_cam6":
+        # CAM6 MG2 autoconversion law; accretion stays KK2000 (CAM6 also
+        # multiplies it by var_coef(relvar, 1.15) ~ 1.01 at relvar=10: dropped).
+        dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
+            q_c_ic, N_c_eff, rho, config.kk2000_cam6_relvar,
+            fact=config.autocon_fact)
+        dq_c_au = dq_c_au * cf_eff
+        dN_r_au = dN_r_au * cf_eff
+        dq_c_ac = accretion_kk2000(
+            q_c_ic, q_r_ic, fact=config.accre_enhan_fact) * cf_eff
     elif config.warm_rain_scheme == "seifert_beheng":
         dq_c_au, dN_r_au, x_c = autoconversion_sb(
             q_c_ic, N_c_eff, rho, config.k_au, config.x_star,
@@ -356,7 +367,7 @@ def morrison_microphysics(
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
-            f"'kk2000' (SAM M2005 default), 'seifert_beheng' (simplified "
+            f"'kk2000' (SAM M2005 default), 'kk2000_cam6' (CAM6 MG2), 'seifert_beheng' (simplified "
             f"proxy) or 'seifert_beheng_sb2001' (published SB2001 universal "
             f"functions)."
         )

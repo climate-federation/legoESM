@@ -768,6 +768,19 @@ _KK2000_AUTOCONV_NC_EXPONENT = -1.79
 _KK2000_ACCRETION_PREFACTOR = 67.0
 _KK2000_ACCRETION_EXPONENT = 1.15
 
+# CAM6 MG2 KK2000 autoconversion (micro_mg_utils.F90:689-736,
+# kk2000_liq_autoconversion), published CAM6 constants:
+#   prc = var_coef(relvar, 2.47) * 0.01 * 1350 * qcic^2.47
+#         * (ncic[#/kg] * 1e-6 * rho)^-1.1          [kg/kg/s]
+#   nprc  = prc / droplet_mass_25um   (rain number source, per kg)
+#   nprc1 = prc * ncic / qcic         (cloud number sink, per kg)
+# gated on qcic >= icsmall (1e-8, micro_mg_utils.F90:160); qcic capped at
+# 5e-3 kg/kg by micro_mg2_0.F90:1226 before the call.
+_KK2000_CAM6_PREFACTOR = 0.01 * 1350.0
+_KK2000_CAM6_NC_EXPONENT = -1.1
+_KK2000_CAM6_QC_MIN = 1.0e-8    # icsmall [kg/kg]
+_KK2000_CAM6_QC_MAX = 5.0e-3    # in-cloud cap [kg/kg]
+
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
 # (module_mp_graupel.f90:1835-1844 autoconversion, :1960-1962 accretion).
@@ -876,6 +889,38 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
     )
     dN_r_au = jnp.minimum(prc * rho / _KK2000_CONS29, nprc)
     return prc, dN_r_au, x_c
+
+
+def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0):
+    """CAM6 MG2 KK2000 autoconversion (``kk2000_liq_autoconversion``,
+    micro_mg_utils.F90:689-736, CAM6 default ``microp_uniform=.false.``)::
+
+        PRC = var_coef(relvar, 2.47) · 13.5 · q_c^2.47 · (N_c[#/cm³])^−1.1
+
+    ``N_c[#/cm³]`` = ``N_c_eff``[#/m³]·1e-6, identical to CAM6's
+    ``ncic[#/kg]·1e-6·rho``.  ``var_coef(r, a) = Γ(r+a)/(Γ(r)·r^a)`` is the
+    sub-grid cloud-water variance enhancement.  Ported guards: ``q_c >= 1e-8``
+    gate (``icsmall``) and the 5e-3 kg/kg in-cloud cap.  Rain-number source =
+    ``PRC·rho / m(25 µm)`` (CAM6 ``nprc``, per-volume here); the cloud-number
+    sink is the caller's ``-PRC·rho/x_c`` = CAM6 ``nprc1``.  ``fact`` =
+    ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
+    :func:`autoconversion_kk2000`.
+    """
+    q_c_pos = jnp.clip(q_c, 0.0)
+    q_c_ic = jnp.minimum(q_c_pos, _KK2000_CAM6_QC_MAX)
+    n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
+    r = jnp.asarray(relvar, dtype=q_c_pos.dtype)
+    a = _KK2000_AUTOCONV_QC_EXPONENT
+    var_coef = jnp.exp(jax.scipy.special.gammaln(r + a)
+                       - jax.scipy.special.gammaln(r)) / r ** a
+    prc = jnp.where(
+        q_c_ic >= _KK2000_CAM6_QC_MIN,
+        (fact * _KK2000_CAM6_PREFACTOR) * var_coef
+        * safe_pow(q_c_ic, a) * safe_pow(n_c_cm3, _KK2000_CAM6_NC_EXPONENT),
+        0.0,
+    )
+    x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
+    return prc, prc * rho / _KK2000_CONS29, x_c
 
 
 def accretion_kk2000(q_c, q_r, fact=1.0):
