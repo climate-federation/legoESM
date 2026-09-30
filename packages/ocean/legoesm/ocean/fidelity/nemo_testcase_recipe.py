@@ -1743,11 +1743,17 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     )
     # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
     # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
-    # Both stated here rather than left to a default.
+    # The efficiency option is taken; the salt/heat differential is NOT, and it
+    # is not silently dropped either: legoESM's implicit tracer solve carries
+    # ONE diffusivity for both tracers, so a separate salt coefficient has
+    # nowhere to go, and the gap is declared in the card's unmeasured features
+    # below rather than hidden behind a False.  The heat and momentum halves of
+    # the arm, which are what the retired mixing-length floor was standing in
+    # for, are unaffected by that gap.
     iwm_config = model_config.physics.vertical_mixing.iwm._replace(
         enabled=True,
         mevar=False,
-        tsdiff=True,
+        tsdiff=False,
         require_forcing_maps=True,
     )
     model_config = model_config._replace(
@@ -1778,6 +1784,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         unmeasured_features=(
             "staged_gm_eiv",
             "linear_implicit_bottom_drag",
+            # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
+            # diffusivity from heat, and the shared-K implicit tracer solve
+            # cannot carry two.  The deck's second salt/heat differential,
+            # ln_zdfddm, is unbuilt for the same reason.
+            "internal_wave_salt_heat_differential",
+            "double_diffusive_salt_heat_split",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",

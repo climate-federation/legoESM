@@ -17,6 +17,8 @@ CHECKPOINT_ORDER = ("entry", "stage1", "stage2", "stage3")
 EXPECTED_UNMEASURED = (
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
+    "internal_wave_salt_heat_differential",
+    "double_diffusive_salt_heat_split",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",
