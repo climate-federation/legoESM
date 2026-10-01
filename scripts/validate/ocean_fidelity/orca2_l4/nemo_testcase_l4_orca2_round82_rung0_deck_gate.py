@@ -48,7 +48,14 @@ ADDED = {
     "namsbc.ln_abl": ".false.",
     "namsbc.ln_cpl": ".false.",
     "namsbc.ln_mixcpl": ".false.",
+    "namsbc.ln_dm2dc": ".false.",
     "namzdf.ln_zdfcst": ".true.",
+    "namzdf.ln_zdfric": ".false.",
+    "namzdf.ln_zdfgls": ".false.",
+    "namzdf.ln_zdfosm": ".false.",
+    "namzdf.ln_zdfnpc": ".false.",
+    "namzdf.ln_zdfmfc": ".false.",
+    "namzdf.ln_zdfswm": ".false.",
 }
 
 EXPECTED = {
