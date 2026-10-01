@@ -65,9 +65,17 @@ repair.
 ## Gates, review, and tests
 
 The continuation passes `bash -n` and its full clean-tree preflight.  The two
-parser plants execute inside that preflight.  The focused frame and citation
-tests, campaign citation gate, planted citation shift, and prescribed ocean
-fidelity battery are recorded in the final round commit.
+parser plants execute inside that preflight.  Focused frame-gate and citation
+tests pass **19/19**.  The campaign citation gate passes its 274-citation
+default receipt and this receipt's two citations with zero failures and zero
+unmapped citations; shifting the stage-0 citation exits 1 with
+`SYMBOL-NOT-AT-LINE`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,209 tests and
+reached 99%, then repeated the established no-summary stall.  The three
+visible failures were the known worktree-stamp ratchet, missing case-board row,
+and SI3 scalar-math provenance red.  No round-86 test failed.  The run was
+stopped after repeated silent waits at 99% and was not rerun.
 
 The required `codex exec --sandbox read-only` review failed before reading the
 diff: `failed to initialize in-process app-server client: Read-only file
