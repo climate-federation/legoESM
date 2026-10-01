@@ -2041,9 +2041,20 @@ class ModelDriver:
                 smoothing_passes=self.config.topo_smoothing,
                 edge_blend_strength=self.config.topo_edge_blend,
             )
+            # Under MPAS cell-partition MPI the topography smoothing is a
+            # neighbour stencil, and the rank's local mesh has no off-rank
+            # neighbours at its outer halo, so smoothing it locally gave a
+            # different surface near every partition boundary (up to 35 m at
+            # 16 ranks).  Build on the global mesh, then take this rank's cells.
+            _vl_topo = getattr(self, "_voronoi_layout", None)
             self._phis_data, self._f_land = load_real_topography(
-                self.grid, config=topo_config
+                self._grid_global if _vl_topo is not None else self.grid,
+                config=topo_config
             )
+            if _vl_topo is not None:
+                _lc = jnp.asarray(_vl_topo.partition.local_cells)
+                self._phis_data = self._phis_data[_lc]
+                self._f_land = self._f_land[_lc]
 
         # Real land-sea mask overrides the elevation-derived land fraction
         # (works with any ``topography`` setting, including "flat").
@@ -2745,10 +2756,23 @@ class ModelDriver:
                 # MPAS carries the wind as the edge-normal component on mesh
                 # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
                 # to cells/edges and projects the winds via angleEdge.
+                # Global mesh under cell-partition MPI, then this rank's cells
+                # and edges: the IC smooths phis with a neighbour stencil and
+                # adjusts p_s by the smoothing, which on the local mesh is
+                # wrong near partition boundaries (see the topography load).
+                _vl_ic0 = getattr(self, "_voronoi_layout", None)
                 carry = era5_to_mpas_carry(
-                    era5_slice, self.grid, self.sigma,
+                    era5_slice,
+                    self._grid_global if _vl_ic0 is not None else self.grid,
+                    self.sigma,
                     smoothing_passes=cfg.topo_smoothing,
                 )
+                if _vl_ic0 is not None:
+                    _lc = jnp.asarray(_vl_ic0.partition.local_cells)
+                    _le = jnp.asarray(_vl_ic0.partition.local_edges)
+                    carry = carry._replace(
+                        u=carry.u[_le], T=carry.T[_lc], p_s=carry.p_s[_lc],
+                        phis=carry.phis[_lc], q_v=carry.q_v[_lc])
             else:
                 raise NotImplementedError(
                     f"ERA5 IC not yet supported for "
