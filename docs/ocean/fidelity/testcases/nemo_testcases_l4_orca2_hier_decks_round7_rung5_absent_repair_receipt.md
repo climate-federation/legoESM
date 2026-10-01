@@ -104,6 +104,20 @@ HD7-P6 is **CONFIRMED**: neither fresh run target existed at handoff.  No
 ## Validation, review, and scope
 
 - Direct gate/parser/runner controls: **9 passed**.
+- Focused hierarchy round-1 through round-7 and citation controls: **82
+  passed**.
+- The receipt citation gate passes with 3 mapped citations, 0 failures, and 0
+  unmapped citations; its exact compiled-source plant refuses.  The cumulative
+  default-receipt gate also passes with 274 mapped citations and 0 failures or
+  unmapped citations.
+- The one allowed `tests/ocean/fidelity -n 12` battery selected 2,242 tests and
+  reached 99% before the known late-suite stall; it was interrupted rather
+  than allowed to block the shared machine.  Four visible failures were rerun
+  together and reproduced.  None names a round-7 file: six older report
+  emitters lack worktree stamps; `hires_lane_surface` lacks a case-board row;
+  the GYRE round-51 trace-field assertion is stale after
+  `stage_tracer_sources`; and the known SI3 scalar-math provenance gate reports
+  `A MY_SRC is not verbatim`.
 - Ruff passes the new gate and test; the launcher passes `bash -n`; the patch
   passes Fortran syntax compilation against the pinned record build.
 - The separate read-only `codex exec` review failed before reading the diff
