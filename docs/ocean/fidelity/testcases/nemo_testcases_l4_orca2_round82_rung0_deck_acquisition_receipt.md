@@ -120,10 +120,20 @@ No post-hoc physical prediction is added.
 ## Gates, review, and tests
 
 The focused deck/record tests pass **8/8**; all four currently executable deck
-plants fire.  The citation gate is run on this receipt and the campaign
-default after this receipt is committed, with a real shifted-line plant.  No
-package file changed, so the GYRE trajectory, DINO, tanks, shipped ORCA2 card,
-and all sea-ice behavior are byte-identical by construction.
+plants fire.  The citation gate passes on this receipt (9 citations, zero
+failures/unmapped) and the campaign default (274 citations, zero
+failures/unmapped); the shifted `sbcmod` citation exits 1 and reports
+`SYMBOL-NOT-AT-LINE`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery reached 98% with six
+failures and six skips, then repeated the standing no-summary stall and was
+stopped.  The six established failures were rerun in isolation: round-129
+record certification, round-35 stamp scope, the worktree-stamp emitter,
+missing case-board row, SI3 scalar-math provenance, and round-51 private trace
+registry.  They reproduce as **6 failed / 40 passed** across those isolated
+files; every round-82 test is green.  No package file changed, so the GYRE
+trajectory, DINO, tanks, shipped ORCA2 card, and all sea-ice behavior are
+byte-identical by construction.
 
 The required read-only Codex review failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system`.
