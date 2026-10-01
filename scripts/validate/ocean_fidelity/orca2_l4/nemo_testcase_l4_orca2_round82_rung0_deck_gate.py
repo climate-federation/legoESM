@@ -39,6 +39,7 @@ CHANGES = {
     "namzdf.ln_zdftke": ".false.",
     "namzdf.ln_zdfddm": ".false.",
     "namzdf.ln_zdfiwm": ".false.",
+    "namzdf.nn_havtb": "0",
     "namzdf_iwm.ln_tsdiff": ".false.",
 }
 
