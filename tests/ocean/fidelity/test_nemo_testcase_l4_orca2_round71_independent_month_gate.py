@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 
 import numpy as np
 import pytest
@@ -144,3 +145,9 @@ def test_surface_schema_calibration_refuses_changed_consumed_operand() -> None:
 
     with pytest.raises(gate.GateError):
         gate.validate_surface_schema_calibration(fields, old_fields, kt=1)
+
+
+def test_month_progress_interval_is_diagnostic_only_and_defaults_to_40() -> None:
+    parameter = inspect.signature(gate.run_month).parameters["progress_interval"]
+    assert parameter.default == 40
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

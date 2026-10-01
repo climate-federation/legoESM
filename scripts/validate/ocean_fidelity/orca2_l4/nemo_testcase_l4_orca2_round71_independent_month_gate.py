@@ -357,6 +357,7 @@ def run_month(
     ten_step_reference: Path,
     *,
     temperature_observer=None,
+    progress_interval: int = 40,
 ) -> dict[str, object]:
     """Advance the production ORCA2 card and return terminal score evidence."""
     import jax
@@ -364,6 +365,7 @@ def run_month(
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     _, card = ladder.card_fields(deck_root)
+    require(progress_interval >= 1, "progress interval must be positive")
     require(
         get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
         "precision policy is not fp64/libm",
@@ -394,6 +396,8 @@ def run_month(
     old_only_surface_fields: list[str] | None = None
     consumed = 0
     for kt in range(1, STEPS + 1):
+        if progress_interval == 1:
+            print(f"MONTH_STEP_START step={kt}/{STEPS}", flush=True)
         fields = assemble_surface(surface_root, kt)
         consumed += 2
         freshwater, surface = ladder._surface_forcings(card, deck_root, fields, kt)
@@ -441,7 +445,7 @@ def run_month(
                     oracle_stage3,
                 ),
             }
-        if kt % 40 == 0:
+        if kt % progress_interval == 0:
             print(
                 f"MONTH_PROGRESS step={kt}/{STEPS} wall_s={time.time() - started:.1f}", flush=True
             )
@@ -534,6 +538,7 @@ def main() -> int:
     parser.add_argument("--classify-json", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--progress-interval", type=int, default=40)
     args = parser.parse_args()
     try:
         if args.classify_json:
@@ -575,6 +580,7 @@ def main() -> int:
                 args.restart_ledger,
                 args.ten_step_root,
                 args.ten_step_reference,
+                progress_interval=args.progress_interval,
             )
         report = classify(raw, plant=args.plant)
     except (
