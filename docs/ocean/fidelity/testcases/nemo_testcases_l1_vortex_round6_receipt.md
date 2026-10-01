@@ -268,7 +268,7 @@ census.
 | GYRE certified ladder, card arm | first over bar `kt=3`, `kt=2` velocities `8.326673e-17` / `9.714451e-17` — the certified values |
 | the three certified card digests | **unchanged** (`GYRE da52bd90a40f71fd`, `LOCK_EXCHANGE d794c4c5cb3dd880`, `OVERFLOW 2bb9d9be75fd924d`) — this round adds a VALUE to an existing field, not a field, which is the preregistered P8 |
 | DINO from-rest month gate | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`, exit 0, private work directory. **Identical to rounds 3, 4 and 5** — `1.9e-10 K` from the certified value, which is that harness's own run-to-run floor, so this round is INERT on DINO's from-rest month, as its card census predicts |
-| focused battery | <!--BATTERYFINAL--> |
+| focused battery | `348 passed in 1116.34s`, exit 0, for twelve of the thirteen files in one process, and `8 passed in 61.32s`, exit 0, for the thirteenth in its own (section 13 says why it is split) |
 
 **Provenance of the year arm.** It ran at `24cc0674b`, the implementation
 commit; three commits landed after it. They are the citation map plus the
@@ -335,6 +335,17 @@ read from its own build (round 5's open item 3, unchanged).
 
 **OPEN ITEM 5 — the resolution ladder** (decision 74, note BK), still owed.
 
+**OPEN ITEM 6 — if a card is switched, the drivers that RESUME it must pass
+the new loader flag.** `load_run_restart` refuses a pre-format-5 archive only
+when told the run reads the slot (`carries_rk3_after_ssh=True`), and no driver
+passes it today because no card reads the slot. The PR that switches a card
+must wire that flag in the same change, or a resume from an old archive on a
+switched card is silently one step's extrapolation wrong. Named here so the
+switch cannot be made without it.
+
+**OPEN ITEM 7 — the thirteen-file battery aborts in one process** (section 13).
+A harness limit, not a failure; it needs a split or a per-file process.
+
 ## 12. Review
 
 The codex quota guard reads `84.0% used`. Above the 80% line this lane puts
@@ -363,11 +374,19 @@ against the pre-fix run — **280 rows, 0 differ**.
 one, at the quota line. That is a weaker review than the default and is
 recorded as such.
 
-## 13. One red in the battery that was NOT this round's
+## 13. Why the battery is split, stated rather than hidden
 
-The first full battery run reported `1 failed, 352 passed`; the failure was
-`test_nemo_identity_kt5_restart_matches_unbroken_kt6_to_10` with a JAX
-`Failed to materialize symbols` error, which is this machine's known
-concurrent-test artifact — a second test process was running at the time. Run
-alone at the same head it is `8 passed in 60.03s`. The artifact is reported
-rather than hidden, and the isolated re-run is the evidence.
+Running all thirteen files in ONE process ABORTS — a hard
+`Failed to materialize symbols` / core dump inside XLA, not a failed
+assertion — partway through the thirteenth file, every time. It did so three
+times: once with a second test process running, and twice with none. The first
+explanation offered here was concurrency, and **that explanation is retracted**:
+it reproduced with the machine to itself.
+
+What it is NOT is this round's code. The twelve other files pass in one process
+(`348 passed`, exit 0) and the thirteenth passes in its own
+(`8 passed`, exit 0), both at this round's final head; and the abort is an
+out-of-resource abort in the compiler, which is the shape this repository's own
+GYRE gate documents when many whole compiled programs stay resident in one
+process. It is reported as an open batch-size limit of the harness, with the
+two green runs as the evidence, rather than written off.
