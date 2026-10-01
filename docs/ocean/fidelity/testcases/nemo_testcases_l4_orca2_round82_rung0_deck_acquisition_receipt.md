@@ -15,6 +15,16 @@ ten-step runs with a self-describing restart at every step, plus the two-rank
 the rung-0 card, ladders, month scores, and first non-bit statement remain
 unmeasured and nothing in `packages/` lands this round.
 
+## Post-round correction (round 83)
+
+The operator ran this launcher and NEMO refused during initialization: the
+ten-step deck requested periodic `nn_stock=1` while the unchanged shipped
+surface cadence is `nn_fsbc=2`.  Therefore this receipt's claim that the
+launcher would retain every per-step restart is **RETRACTED**.  Only the
+step-1 initialization restart exists; no rung-0 trajectory was measured.
+Round 83 repairs output scheduling through NEMO's compiled explicit restart
+list and uses fresh targets; it does not change `nn_fsbc` or rung-0 physics.
+
 ## Exact rung-0 deck
 
 The canonical generated namelist has SHA-256

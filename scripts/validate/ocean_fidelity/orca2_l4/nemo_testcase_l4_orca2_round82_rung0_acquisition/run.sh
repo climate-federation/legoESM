@@ -5,8 +5,8 @@ set -Eeuo pipefail
 
 refuse_unexpected() {
   local status=$?
-  printf 'REFUSE: round-82 rung-0 acquisition failed at line %s (exit %s)\n' \
-    "${BASH_LINENO[0]:-unknown}" "$status" >&2
+  printf 'REFUSE: round-%s rung-0 acquisition failed at line %s (exit %s)\n' \
+    "${ORCA2_RUNG0_ROUND:-82}" "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
 trap refuse_unexpected ERR
@@ -25,10 +25,11 @@ readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly CPP=$NEMO_ROOT/cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm
 readonly BASE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round69/acquisition/orca1ice_surface_only_240step_np2
 readonly BINARY_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l4/runs/uninstrumented_30day_np2/nemo
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round82/acquisition
-readonly TWIN_A=$EVIDENCE/orca2_rung0_10step_a_np2
-readonly TWIN_B=$EVIDENCE/orca2_rung0_10step_b_np2
-readonly MONTH=$EVIDENCE/orca2_rung0_240step_np2
+readonly ROUND=${ORCA2_RUNG0_ROUND:-82}
+readonly EVIDENCE=${ORCA2_RUNG0_EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round82/acquisition}
+readonly TWIN_A=$EVIDENCE/${ORCA2_RUNG0_TWIN_A:-orca2_rung0_10step_a_np2}
+readonly TWIN_B=$EVIDENCE/${ORCA2_RUNG0_TWIN_B:-orca2_rung0_10step_b_np2}
+readonly MONTH=$EVIDENCE/${ORCA2_RUNG0_MONTH:-orca2_rung0_240step_np2}
 readonly CANONICAL=$EVIDENCE/rung0_namelist_cfg
 readonly SOURCE_NAMELIST_SHA=036f3cec148b2e89cede910d13189db4cc8e2e74a9b9ecdede7a87a5c14a98ec
 readonly CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
@@ -40,7 +41,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly DECK_GATE=$here/../nemo_testcase_l4_orca2_round82_rung0_deck_gate.py
 readonly RECORD_GATE=$here/../nemo_testcase_l4_orca2_round82_rung0_record_gate.py
-readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round82.md
+readonly PREREG=${ORCA2_RUNG0_PREREG:-$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round82.md}
 
 cd "$REPO"
 if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -91,7 +92,7 @@ for plant in extra-delta mixing-value live-module cpp; do
 done
 
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND82_RUNG0_PREFLIGHT_READY %s\n' "$TWIN_A"
+  printf 'ORCA2_ROUND%s_RUNG0_PREFLIGHT_READY %s\n' "$ROUND" "$TWIN_A"
   exit 0
 fi
 
@@ -113,8 +114,8 @@ admit() {
   (cd "$EVIDENCE" && sha256sum rung0_*json deck_*_plant.log record_*_plant.log \
     "$TWIN_A"/ORCA2_00000010_restart_*.nc \
     "$TWIN_B"/ORCA2_00000010_restart_*.nc \
-    "$MONTH"/ORCA2_00000240_restart_*.nc >round82_outputs.sha256)
-  printf 'ORCA2_ROUND82_RUNG0_ACQUISITION_PASS %s\n' "$MONTH"
+    "$MONTH"/ORCA2_00000240_restart_*.nc >"round${ROUND}_outputs.sha256")
+  printf 'ORCA2_ROUND%s_RUNG0_ACQUISITION_PASS %s\n' "$ROUND" "$MONTH"
 }
 
 if [[ "$MODE" == --admit-existing ]]; then
@@ -136,27 +137,20 @@ for mount in "$EVIDENCE" /tmp; do
 done
 
 stage() {
-  local target=$1 steps=$2 stock=$3
+  local target=$1 steps=$2 stock=$3 restart_list=$4
   mkdir "$target"
   while read -r digest name; do cp -a "$BASE/$name" "$target/$name"; done <"$BASE/deck_files.sha256"
   while read -r digest name; do cp -a "$BASE/$name" "$target/$name"; done <"$BASE/input_files.sha256"
   cp "$CANONICAL" "$target/namelist_cfg"
   cp "$BINARY_SOURCE" "$target/nemo"
   printf '%s\n' "$COMMIT" >"$target/producer_commit.txt"
-  "$PY" - "$target/namelist_cfg" "$steps" "$stock" <<'PYRUNDECK'
-import re
-import sys
-path, steps, stock = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-text = open(path, encoding="utf-8").read()
-for key, value in (("nn_itend", steps), ("nn_stock", stock)):
-    text, count = re.subn(
-        rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", text,
-        count=1, flags=re.MULTILINE,
-    )
-    if count != 1:
-        raise SystemExit(f"REFUSE: {key} not found exactly once")
-open(path, "w", encoding="utf-8").write(text)
-PYRUNDECK
+  run_deck_args=(
+    "$PY" "$RECORD_GATE" --render-run-deck
+    --run-deck-source "$CANONICAL" --run-deck-output "$target/namelist_cfg"
+    --steps "$steps" --stock "$stock"
+  )
+  if [[ "$restart_list" == true ]]; then run_deck_args+=(--restart-list); fi
+  "${run_deck_args[@]}"
   "$PY" - "$target/chlorophyll.nc" "$target/rung0_zero_flux.nc" <<'PYZERO'
 import sys
 import numpy as np
@@ -206,10 +200,10 @@ run_target() {
   }
 }
 
-stage "$TWIN_A" 10 1
+stage "$TWIN_A" 10 1 true
 run_target "$TWIN_A"
-stage "$TWIN_B" 10 1
+stage "$TWIN_B" 10 1 true
 run_target "$TWIN_B"
-stage "$MONTH" 240 240
+stage "$MONTH" 240 240 false
 run_target "$MONTH"
 admit

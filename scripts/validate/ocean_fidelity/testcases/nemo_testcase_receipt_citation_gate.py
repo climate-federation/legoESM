@@ -98,6 +98,8 @@ FILES = {
         _ORCA2_COMPILED / "zdfddm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2_COMPILED / "sbcmod.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
         _ORCA2_COMPILED / "sbcflx.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1128,6 +1130,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 83: rung-0 explicit restart-list repair ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-350': [
+        'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
+        ('ENDIF', 14), 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119': [
+        'IF( kt == nit000 ) THEN   ! default definitions',
+        'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 26],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
+        ('IF( kt == nitrst ) THEN', 1),
+        ('ENDIF', 14), 15],
     # --- ORCA2 round 82: hierarchy rung-0 deck semantics ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306': [
         'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',

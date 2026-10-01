@@ -71,6 +71,78 @@ def _integer(value: str, label: str) -> int:
     return int(match.group(1))
 
 
+def _logical(value: str, label: str) -> bool:
+    token = value.strip().replace(".", "").upper()
+    require(token in {"T", "TRUE", "F", "FALSE"},
+            f"{label}: invalid logical {value!r}")
+    return token in {"T", "TRUE"}
+
+
+def _integer_list(value: str, label: str) -> tuple[int, ...]:
+    tokens = [token.strip() for token in value.split(",")]
+    require(tokens and all(re.fullmatch(r"-?\d+", token) for token in tokens),
+            f"{label}: invalid integer list {value!r}")
+    return tuple(int(token) for token in tokens)
+
+
+def render_run_deck(
+    text: str, steps: int, stock: int, restart_list: bool,
+) -> str:
+    require(steps > 0 and stock > 0, "run controls must be positive")
+    for key, value in (("nn_itend", steps), ("nn_stock", stock)):
+        text, count = re.subn(
+            rf"^(\s*{key}\s*=\s*)(\S+)",
+            rf"\g<1>{value}",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        require(count == 1, f"{key} not found exactly once")
+    if restart_list:
+        lines = "   ln_rst_list = .true.\n   nn_stocklist = " + ", ".join(
+            str(step) for step in range(1, steps + 1)
+        ) + "\n"
+        text, count = re.subn(
+            r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
+            lambda match: match.group(1) + lines,
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        require(count == 1, "nn_stock insertion point not found exactly once")
+    return text
+
+
+def _validate_run_controls(
+    values: dict[str, str],
+    canonical: dict[str, str],
+    steps: int,
+    stock: int,
+    restart_steps: tuple[int, ...] | None,
+) -> dict:
+    list_keys = {"namrun.ln_rst_list", "namrun.nn_stocklist"}
+    expected_keys = set(canonical) | (list_keys if restart_steps else set())
+    require(set(values) == expected_keys, "run deck assignment inventory changed")
+    ignored = {"namrun.nn_itend", "namrun.nn_stock"}
+    changed = sorted(
+        key for key in canonical if key not in ignored
+        and deck_gate._normalise(values[key]) != deck_gate._normalise(canonical[key])
+    )
+    require(not changed, f"hidden run-deck delta: {changed}")
+    require(_integer(values["namrun.nn_itend"], "nn_itend") == steps,
+            f"nn_itend is not {steps}")
+    require(_integer(values["namrun.nn_stock"], "nn_stock") == stock,
+            f"nn_stock is not {stock}")
+    if restart_steps:
+        require(_logical(values["namrun.ln_rst_list"], "ln_rst_list"),
+                "ten-step run does not select restart-list mode")
+        actual = _integer_list(values["namrun.nn_stocklist"], "nn_stocklist")
+        require(actual == restart_steps,
+                f"restart list is {actual}, expected {restart_steps}")
+        return {"restart_mode": "list", "restart_steps": list(actual)}
+    return {"restart_mode": "periodic", "restart_steps": [steps]}
+
+
 def _validate_zero_flux(root: Path) -> dict:
     path = root / f"{deck_gate.ZERO_FILE}.nc"
     require(path.is_file(), f"missing exact-zero flux file: {path}")
@@ -89,7 +161,14 @@ def _validate_zero_flux(root: Path) -> dict:
     return {"sha256": sha256(path), "fields": fields}
 
 
-def _validate_run_deck(source: Path, cpp: Path, root: Path, steps: int, stock: int) -> dict:
+def _validate_run_deck(
+    source: Path,
+    cpp: Path,
+    root: Path,
+    steps: int,
+    stock: int,
+    restart_steps: tuple[int, ...] | None,
+) -> dict:
     deck = _manifest(root, "deck_files.sha256")
     inputs = _manifest(root, "input_files.sha256")
     require(f"{deck_gate.ZERO_FILE}.nc" in inputs, "zero-flux file is absent from input manifest")
@@ -101,25 +180,18 @@ def _validate_run_deck(source: Path, cpp: Path, root: Path, steps: int, stock: i
         canonical_path = Path(temporary) / "namelist_cfg"
         canonical_path.write_text(deck_gate.render_rung0(source.read_text()))
         canonical_values = namelist_values(canonical_path)
-    ignored = {"namrun.nn_itend", "namrun.nn_stock"}
-    require(set(values) == set(canonical_values), "run deck assignment inventory changed")
-    changed = sorted(
-        key for key in values if key not in ignored
-        and deck_gate._normalise(values[key]) != deck_gate._normalise(canonical_values[key])
+    controls = _validate_run_controls(
+        values, canonical_values, steps, stock, restart_steps,
     )
-    require(not changed, f"hidden run-deck delta: {changed}")
-    require(_integer(values["namrun.nn_itend"], "nn_itend") == steps,
-            f"nn_itend is not {steps}")
-    require(_integer(values["namrun.nn_stock"], "nn_stock") == stock,
-            f"nn_stock is not {stock}")
     for key, wanted in deck_gate.EXPECTED.items():
         require(deck_gate._normalise(values[key]) == wanted,
                 f"{key}: run deck departed from rung 0")
     require(sha256(cpp) == deck_gate.CPP_SHA256, "CPP card changed")
     require(expected["namsbc.nn_ice"].strip().startswith("2"),
             "source deck is not the admitted shipped deck")
-    return {"steps": steps, "stock": stock, "deck_files": len(deck),
-            "input_files": len(inputs), "zero_flux": _validate_zero_flux(root)}
+    return {"steps": steps, "stock": stock, **controls,
+            "deck_files": len(deck), "input_files": len(inputs),
+            "zero_flux": _validate_zero_flux(root)}
 
 
 def _payload(path: Path, wanted_step: int, *, make_nonfinite: bool = False) -> dict[str, np.ndarray]:
@@ -143,7 +215,9 @@ def _payload(path: Path, wanted_step: int, *, make_nonfinite: bool = False) -> d
     return result
 
 
-def _run_provenance(root: Path, steps: int) -> None:
+def _run_provenance(
+    root: Path, steps: int, restart_steps: tuple[int, ...] | None,
+) -> None:
     require(sha256(root / "nemo") == BINARY_SHA256, f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
@@ -157,18 +231,31 @@ def _run_provenance(root: Path, steps: int) -> None:
             f"{root}: constant mixing is not selected")
     require(re.search(r"Turbulent Kinetic Energy closure.*ln_zdftke\s+=\s+F\b", ocean),
             f"{root}: TKE is still selected")
+    if restart_steps:
+        require("list of restart dump times" in ocean,
+                f"{root}: resolved restart-list mode is absent")
+        for step in restart_steps:
+            require(f"open ocean restart NetCDF file: ./ORCA2_{step:08d}_restart" in ocean,
+                    f"{root}: resolved log omitted restart step {step}")
 
 
 def validate_record(source: Path, cpp: Path, twin_a: Path, twin_b: Path,
                     month: Path, expect_commit: str, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
-    roots = ((twin_a, 10, 1), (twin_b, 10, 1), (month, 240, 240))
+    ten_steps = tuple(range(1, 11))
+    roots = (
+        (twin_a, 10, 1, ten_steps),
+        (twin_b, 10, 1, ten_steps),
+        (month, 240, 240, None),
+    )
     decks = []
-    for root, steps, stock in roots:
+    for root, steps, stock, restart_steps in roots:
         require((root / "producer_commit.txt").read_text().strip() == expect_commit,
                 f"{root}: producer commit changed")
-        _run_provenance(root, steps)
-        decks.append(_validate_run_deck(source, cpp, root, steps, stock))
+        _run_provenance(root, steps, restart_steps)
+        decks.append(_validate_run_deck(
+            source, cpp, root, steps, stock, restart_steps,
+        ))
     if plant == "hidden-month-delta":
         decks[-1]["stock"] = 239
     require(decks[0]["stock"] == decks[1]["stock"] == 1 and decks[2]["stock"] == 240,
@@ -222,6 +309,9 @@ def preflight() -> dict:
         "month_restart_names": [
             f"ORCA2_00000240_restart_{rank:04d}.nc" for rank in (0, 1)
         ],
+        "ten_step_restart_mode": "explicit-list",
+        "ten_step_restart_steps": list(range(1, 11)),
+        "month_restart_mode": "periodic-terminal",
         "fields": list(FIELDS),
         "plants": list(PLANTS[1:]),
     }
@@ -230,6 +320,12 @@ def preflight() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--render-run-deck", action="store_true")
+    parser.add_argument("--run-deck-source", type=Path)
+    parser.add_argument("--run-deck-output", type=Path)
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--stock", type=int)
+    parser.add_argument("--restart-list", action="store_true")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--cpp", type=Path)
     parser.add_argument("--twin-a", type=Path)
@@ -240,6 +336,17 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
+        if args.render_run_deck:
+            require(not args.preflight_only and args.run_deck_source
+                    and args.run_deck_output and args.steps and args.stock,
+                    "run-deck rendering requires source, output, steps, and stock")
+            rendered = render_run_deck(
+                args.run_deck_source.read_text(), args.steps, args.stock,
+                args.restart_list,
+            )
+            args.run_deck_output.write_text(rendered)
+            print(f"STATUS RENDERED_RUNG0_RUN_DECK {args.run_deck_output}")
+            return 0
         if args.preflight_only:
             require(args.plant == "none", "preflight does not accept plants")
             report = preflight()
