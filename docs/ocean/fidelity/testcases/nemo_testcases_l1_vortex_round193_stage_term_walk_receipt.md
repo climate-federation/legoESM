@@ -18,7 +18,7 @@ exited 1 with status `REFUSED`.
 
 The record's own compiled build establishes the order. Stages 2/3 call HPG,
 VOR, then vector advection in
-`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-341`.
+`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-338`.
 The vector call executes KEG before ZAD at
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:135-141`.
 On this z-coordinate build HPG overwrites `Krhs`, rather than adding to it, at

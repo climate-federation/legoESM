@@ -3902,9 +3902,9 @@ CITATION_MAP = {
         ('END DO   ;   END DO   ;   END DO', 6), 12],
     # --- round 193: exact lines in the acquired R8 build after its additive
     # writer shifted stprk3_stg; HPG is a write, then VOR and KEG/ZAD follow.
-    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-341': [
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-338': [
         'CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!',
-        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 19],
+        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 16],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:135-141': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         "CALL vortex_r8_stage_rhs( 'zad', Krhs, puu, pvv )", 7],
