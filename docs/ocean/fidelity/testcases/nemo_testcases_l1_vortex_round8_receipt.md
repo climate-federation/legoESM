@@ -37,14 +37,14 @@ first non-bit *statement* is therefore unmeasured, not inferred.
 The record follows the vector card's own compiled program.
 
 - Stages 2 and 3 first form their cross-level vertical velocity at
-  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:287-294`.
+  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:287-293`.
 - The stage accumulator then receives HPG, VOR/EEN, and vector advection, in
   that order, at
-  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:318-335`.
+  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:318-332`.
 - The vector-advection call is itself KEG followed by ZAD at
-  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-139`.
+  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138`.
 - Stage 2 applies its explicit velocity update at
-  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:361-380`.
+  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:363-370`.
 - Stage 3 alone adds LDF and then applies the implicit ZDF solve at
   `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:387-405`.
 - Both stages then apply the common barotropic/SPG correction at
@@ -155,4 +155,3 @@ configuration change is landed.
    non-bit statement and its u/v magnitude.
 4. If one statement is a candidate, land it only under Decisions
    43/45/55/59 with VORTEX, GYRE, generic-card, DINO-month, and tank coverage.
-
