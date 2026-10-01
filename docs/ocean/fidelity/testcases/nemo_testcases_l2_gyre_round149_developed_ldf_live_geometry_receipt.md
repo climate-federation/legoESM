@@ -62,8 +62,8 @@ it with distinct Kbb/Kmm at
 `GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90:704-739`.
 
 The landed transcription routes the step-entry Kbb tuple at
-`ocean_model_latlon_cgrid.py:5327-5362` and the stage Kmm F/U/V tuple at
-`ocean_model_latlon_cgrid.py:5862-5921`.  It adds no selector, configuration,
+`ocean_model_latlon_cgrid.py:5328-5363` and the stage Kmm F/U/V tuple at
+`ocean_model_latlon_cgrid.py:5863-5922`.  It adds no selector, configuration,
 state, stabiliser, or alternate formula.
 
 ## Local production proof

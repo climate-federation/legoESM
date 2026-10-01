@@ -295,7 +295,7 @@ removed.  **One citation is registered rather than moved.**  It is fenced
 because it is a report of a stale citation, not a citation this receipt makes:
 
 ```
-ocean_model_latlon_cgrid.py:1273-1325   (round-8 receipt, NOT re-anchored)
+ocean_model_latlon_cgrid.py:1274-1326   (round-8 receipt, NOT re-anchored)
 ```
 
 That range straddles this round's insertion point, so the block it names

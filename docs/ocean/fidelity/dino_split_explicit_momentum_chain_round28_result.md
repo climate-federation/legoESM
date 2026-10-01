@@ -17,7 +17,7 @@ coefficients in the executed NEMO association: triads
 `barotropic_latlon_cgrid.py:905-980`; both the pre-loop and live substep paths
 share it. The selector is faithful by default only on `nemo_dino_kamm` and
 `nemo_dino_kamm_mlf` (`dino.py:1470`); all other cards retain the generic byte
-pin (`state.py:1132`). Missing operands and unknown selectors fail closed.
+pin (`state.py:1147`). Missing operands and unknown selectors fail closed.
 
 Artifact
 `/tmp/dino_split_explicit_momentum_chain_round28_literal_builder.json`,
@@ -149,7 +149,7 @@ their executable scorers now refuse to print a verdict. NEMO's dumped stage-8
 `naa_B` is already barotropic-free. Round 33 injected that field at the public
 `_apply_implicit_vertical_mixing` entry, where production
 `zdf_baroclinic_only` subtracts the mean again
-(`ocean_model_latlon_cgrid.py:7415-7436`) and later re-splices the saved mean
+(`ocean_model_latlon_cgrid.py:7416-7437`) and later re-splices the saved mean
 (`:7550-7557`). It therefore double-stripped the fed field and compared a
 post-splice result with NEMO's pre-splice `dyn_zdf` output. Round 34 captured
 that same invalid arm, so its apparent RHS owner was a harness artifact.
@@ -187,7 +187,7 @@ The coefficient rows are not owners merely because they are red: the ordered
 walk stops at the RHS. NEMO forms the baroclinic RHS and bottom correction at
 `dynzdf.F90:137-178`, then deposits the surface stress at `:353-363` after
 the barotropic removal. Production currently lets the explicit wind enter the
-state before its baroclinic strip (`ocean_model_latlon_cgrid.py:7300-7320,
+state before its baroclinic strip (`ocean_model_latlon_cgrid.py:7301-7321,
 7275-7296`). Round 36 preregisters the additive placement decomposition before
 changing that ordering.
 

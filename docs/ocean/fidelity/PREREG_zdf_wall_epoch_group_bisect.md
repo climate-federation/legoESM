@@ -44,7 +44,7 @@ The selector-to-selector guards are:
 | TKE literal matrix | step-entry N2 evaluation | `tke.py:2725-2726` |
 | TKE literal solver | literal matrix | `tke.py:1197-1199` |
 | TKE literal Langmuir | literal matrix and step-entry N2 | `tke.py:2964-2981` |
-| carried slope N2 | step-entry N2 bundle | `ocean_model_latlon_cgrid.py:4872-4877` |
+| carried slope N2 | step-entry N2 bundle | `ocean_model_latlon_cgrid.py:4873-4878` |
 
 The same grep found fixed-input guards, not additional selector edges:
 carried coefficients require prognostic TKE, one iteration, and carried
@@ -54,15 +54,15 @@ W mask/surface `avm`, NEMO surface row, and the NEMO dissipation split
 surface row, W mask, and floor positivity (`tke.py:1253-1262`); literal
 Langmuir requires its bottom/W operands and one iteration
 (`tke.py:2000-2004,2967-2981`); step-entry N2 requires `nemo_bn2` and raw NEMO
-mesh ladders (`ocean_model_latlon_cgrid.py:6014-6021,5934-5941`); step-entry
+mesh ladders (`ocean_model_latlon_cgrid.py:6015-6022,5934-5941`); step-entry
 shear and its live face metric require carried velocity/`avm`, QCO geometry,
-and raw face metrics (`ocean_model_latlon_cgrid.py:6114-6205`); literal htau
-requires native T-point latitude (`ocean_model_latlon_cgrid.py:7048-7033`);
+and raw face metrics (`ocean_model_latlon_cgrid.py:6115-6206`); literal htau
+requires native T-point latitude (`ocean_model_latlon_cgrid.py:7049-7034`);
 carried slope N2 and literal PRD require the fixed `nemo_bn2`/S-EOS settings
 (`dino.py:3206-3226`). The etau exponential, raw MXL association, final ZDF
 recurrence, and remaining three slope arithmetic selectors add no
 selector-to-selector `requires` edge. Literal final ZDF also refuses distinct
-DDM heat/salt matrices (`ocean_model_latlon_cgrid.py:7588-7596`), which is off
+DDM heat/salt matrices (`ocean_model_latlon_cgrid.py:7589-7597`), which is off
 in every frozen arm.
 
 Let `R(x)` mean selector `x` is reverted. The legal reversion ideals are

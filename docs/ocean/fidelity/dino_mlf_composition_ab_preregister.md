@@ -48,9 +48,9 @@ OTHER term in the SAME traversal (`dyn_adv`, `dyn_vor`, `dyn_hpg`, `dyn_spg`,
 
 ## Which legoESM composition matches
 
-* **`_nemo_mlf_step`** (`ocean_model_latlon_cgrid.py:10593`) — ONE
+* **`_nemo_mlf_step`** (`ocean_model_latlon_cgrid.py:10594`) — ONE
   `_step_impl` call; `_ldf_state=(T_before,S_before,u_before,v_before)` is
-  read ONLY by the tra_ldf operand (`ocean_pe_latlon_cgrid.py:4570-4577`,
+  read ONLY by the tra_ldf operand (`ocean_pe_latlon_cgrid.py:4620-4627`,
   `_T_ldf_local`/`_S_ldf_local`) and the dyn_ldf operand (`:4612-4626`,
   `_u_ldf_local`/`_v_ldf_local`); every other tendency in the SAME call reads
   the pass's own (Nnn) `T`/`S`/`u`/`v`. A per-term substitution inside one

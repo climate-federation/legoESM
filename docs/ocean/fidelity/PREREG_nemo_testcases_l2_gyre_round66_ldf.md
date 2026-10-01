@@ -20,7 +20,7 @@ Resolved configuration selects standard iso-neutral Laplacian at
 Kmm-metric face fluxes; and `:287-305` adds their divergence to `pt(Krhs)`.
 
 legoESM computes the corresponding shared GM/Redi tendency from Kbb tracers at
-`ocean_model_latlon_cgrid.py:7048-7067,7127-7365`. It currently adds that
+`ocean_model_latlon_cgrid.py:7049-7068,7127-7365`. It currently adds that
 tendency to `T_mid/S_mid` at `:7474-7477`, while the later WS stage-3 call
 restarts from `state.T/S` and consumes `_stage_source_rates` at `:7639-7677`.
 

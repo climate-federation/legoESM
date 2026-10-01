@@ -33,7 +33,7 @@ the physical QSR bucket.
 The existing legoESM observer re-runs the combined physics callable, names that
 output `_process_qsr_kbb`, subtracts it from the complete Kbb tendency to form
 the surface row, and assigns the remainder to QSR at
-`ocean_model_latlon_cgrid.py:6917-6965`.  The Round-190 extension returns the
+`ocean_model_latlon_cgrid.py:6918-6966`.  The Round-190 extension returns the
 already-materialized operands and outputs through the same production-JIT
 step; the scorer does not recreate them before comparison.
 

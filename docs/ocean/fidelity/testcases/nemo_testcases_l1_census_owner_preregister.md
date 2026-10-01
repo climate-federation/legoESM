@@ -108,7 +108,7 @@ cells (`tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:157-180`).
 The current legoESM BBL geometry instead signs the continuous cumulative
 partial-cell centroid, uses the minimum of adjacent bottom **T-cell**
 thicknesses, and supplies a cumulative live bottom centroid to `eos_rab`
-(`bbl_adv.py:117-165,176-229`; `ocean_model_latlon_cgrid.py:1343-1360`).
+(`bbl_adv.py:117-165,176-229`; `ocean_model_latlon_cgrid.py:1344-1361`).
 The static census-domain count is decisive and computed without a model arm:
 NEMO has 29 wet interior nonzero i-slope faces; legoESM has 141, including 112
 same-bottom-level faces on which NEMO's `mgrhu` is exactly zero.  On shared
@@ -147,7 +147,7 @@ their induced one-step T tendency.  This is the scaling check.
 number (`:776-799,816-827`).  OVERFLOW's zps definition keeps `e3w_0=20 m` at
 every level (`usrdef_zgr.F90:157-168`).  The current WS stage code instead
 passes `0.5*(e3t_k+e3t_{k+1})`, padded with T thickness at top/bottom
-(`ocean_model_latlon_cgrid.py:1215-1223`); at a partial bottom cell that is
+(`ocean_model_latlon_cgrid.py:1216-1224`); at a partial bottom cell that is
 not NEMO's W metric and can inflate the Courant number by up to `2x`.
 
 Arm 2 supplies the card's reference W ladder times the stage Kmm qco stretch

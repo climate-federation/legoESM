@@ -165,7 +165,7 @@ Tests:
 
 In `ocean_model_mpas.py:step`, after physics tendencies and before
 tracer advection, mirror the lat-lon block at
-`ocean_model_latlon_cgrid.py:589`:
+`ocean_model_latlon_cgrid.py:590`:
 
 ```python
 if self.config.gm_redi is not None:

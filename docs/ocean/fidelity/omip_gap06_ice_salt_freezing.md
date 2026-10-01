@@ -196,7 +196,7 @@ The basal ledger independently reconstructs implicit skin conduction and
 heat-driven volume change. Salt storage is reconstructed from post-step ice
 state, not from the reported salt flux. It closes against the actual main
 blend's salt channel and the production ocean real-salt tendency helper
-(`ocean_pe_latlon_cgrid.py:4080-4089` consumes this helper with actual cell
+(`ocean_pe_latlon_cgrid.py:4130-4139` consumes this helper with actual cell
 thickness). The heat balance tests the actual main blend's q_net. These are
 column-local checks on a synthetic tripole grid with one/five categories;
 no advective transport, distorted native ORCA geometry, full ocean timestep,

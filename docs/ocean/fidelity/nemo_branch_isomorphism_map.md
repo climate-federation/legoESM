@@ -439,12 +439,12 @@ reach MIN" finding this doc and the registry both carried was a misreading:
 function, `ocean_pe_latlon_cgrid.py:1472 nemo_qco_wzv_operands` (S-19's own
 routine). `min_cell_to_uface`'s only competing role for THIS quantity is
 `_NEMOWSRK3TestHooks.legacy_stage_min_face_thickness`
-(`ocean_model_latlon_cgrid.py:1049`), set `True` only inside
+(`ocean_model_latlon_cgrid.py:1050`), set `True` only inside
 `scripts/validate/ocean_fidelity/testcases/nemo_testcase_phase3_stage_sweep_gate.py`,
 never by a production card. `min_cell_to_uface`'s real role (MOM6/MITgcm
 hFacW=min, `latlon_cgrid_operators.py:277-284`) is the PE-lane
 depth-average/slow-forcing (`ocean_pe_latlon_cgrid.py:1364`,
-`ocean_model_latlon_cgrid.py:4230`), reached by DINO/LOCK/OVERFLOW/ORCA1 *and*
+`ocean_model_latlon_cgrid.py:4231`), reached by DINO/LOCK/OVERFLOW/ORCA1 *and*
 by `veros_faithful_v1`/`mitgcm_v1`/`oceananigans_v1` (confirmed real catalog
 names via `legoesm.ocean.recipes.list_recipes()`), none of which can ever
 reach the NEMO arm (it needs `z_coord.nemo_hu_0`/`nemo_e1e2*`, only present on
@@ -460,9 +460,9 @@ quantity at all).
    diagnose_w_from_flux_div` (generic) vs `ocean_pe_latlon_cgrid.py:1472
    nemo_qco_wzv_operands` (literal), both reachable — confirmed by direct
    `grep`, both symbols AST-resolve and both have live callers
-   (`ocean_model_latlon_cgrid.py:456,1154,5340` for the generic diagnostic;
-   `ocean_model_latlon_cgrid.py:5438` for the literal path). Gated by
-   `state.py:2221 zad_qco_evaluation` / `:2225 wzv_call2_evaluation`, both
+   (`ocean_model_latlon_cgrid.py:457,1154,5340` for the generic diagnostic;
+   `ocean_model_latlon_cgrid.py:5439` for the literal path). Gated by
+   `state.py:2236 zad_qco_evaluation` / `:2225 wzv_call2_evaluation`, both
    default `"generic"`.
 2. **What do the certified cards run?** DINO's certified card
    (`dino.py:1418-1419`, inside `dino_r1_exact_config`) explicitly sets both to
@@ -506,7 +506,7 @@ own grid when `z_coord.nemo_*` is absent) before attempting the collapse.
    gated by 5 selectors (`barotropic_continuity_evaluation`,
    `_transport_accumulation_evaluation`, `_pgf_evaluation`, `_seed_evaluation`,
    `_seed_face_depth`), all defaulting to `"generic"`/`"min_rule"`
-   (`state.py:1130`).
+   (`state.py:1145`).
 2. **Certified cards?** `nemo_testcase_recipe.py:80-84` (LOCK/OVERFLOW) sets
    ALL FIVE to their NEMO-literal values. DINO (`dino.py:1516` + siblings, same
    `dino_r1_exact_config` override block as S-19) also sets the NEMO arm. GYRE
@@ -554,7 +554,7 @@ a card that never EXECUTES the code that field gates.
   mandate cannot authorise this collapse because ORCA1 is not what it changes.
 * **The generic arm's real consumers are non-NEMO recipes and test-matrix
   cases.** `barotropic_solver` defaults to `"explicit_substep"`
-  (`state.py:1403`) and three catalog recipes select it: `default_wright_v1`,
+  (`state.py:1418`) and three catalog recipes select it: `default_wright_v1`,
   `legoesm_linear_v1`, `legoesm_nemo_like_v1` (renamed from `nemo_v1`
   2026-09-02). MEASURED (fp64, call counters on the
   module's own symbols, 3 substeps on an 8x16 basin): all three call
@@ -642,7 +642,7 @@ routine this row is about.
    `:6382,6465` but gated: `_impose_mean = getattr(_cfg_b.barotropic,
    "nemo_stage_mean_imposition", False) and _apply_implicit_vmix` (`:6378-6380`).
 2. **Certified cards?** `nemo_stage_mean_imposition` defaults `False`
-   (`state.py:1265`). Only `fidelity/nemo_recipe.py:978` (GYRE) sets it `True`.
+   (`state.py:1280`). Only `fidelity/nemo_recipe.py:978` (GYRE) sets it `True`.
    `nemo_testcase_recipe.py` (LOCK/OVERFLOW) never sets it (`grep` — zero
    hits) → both stay on site (a) only, i.e. the WRONG side of `dyn_zdf` per
    NEMO (`stprk3_stg.F90:430,433-446`) — a live gap on the certified L1 cards.
@@ -663,8 +663,8 @@ routine this row is about.
 
 1. **Duplicate present at HEAD?** Yes. `physics/bbl_adv.py:232
    apply_bbl_adv_tendency` (in-stage), called from
-   `ocean_model_latlon_cgrid.py:1278` — gated by `bbl_adv_option` (default `0`,
-   `state.py:2082`). `physics/bbl_adv.py:312 apply_bbl_adv_step` (driver
+   `ocean_model_latlon_cgrid.py:1279` — gated by `bbl_adv_option` (default `0`,
+   `state.py:2097`). `physics/bbl_adv.py:312 apply_bbl_adv_step` (driver
    post-step Euler with an extra transport cap), called ONLY from
    `scripts/run/run_omip_core2.py:8421` — its sole caller in the whole tree.
 2. **Certified cards?** `nemo_testcase_recipe.py:215` (LOCK) sets
@@ -691,7 +691,7 @@ routine this row is about.
 
 ### M-01 (`stp_MLF`: `_leapfrog_step` vs `_nemo_mlf_step`)
 
-1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9994
+1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9995
    _leapfrog_step` vs `:10379 _nemo_mlf_step`, dispatched at `:8938`/`:8949` on
    `outer_integrator in ("leapfrog", "nemo_mlf")` — both are real, wired
    dispatch values (multiple `raise` guards elsewhere reference both, e.g.
@@ -1105,7 +1105,7 @@ list.
 `tra_bbl_adv`. `physics/bbl_adv.py:312 apply_bbl_adv_step` CALLS
 `bbl_transports` (`:176`) and `apply_bbl_adv_tendency` (`:232`) — the same two
 functions the in-stage site calls from
-`ocean_model_latlon_cgrid.py:1286-1305`. The arithmetic of
+`ocean_model_latlon_cgrid.py:1287-1306`. The arithmetic of
 `trabbl.F90:243-284` is written ONCE. This corrects the row's earlier
 "two independent NEMO-trabbl transcriptions" framing (its own baseline reason
 string already said "shared transport/tendency arithmetic").
@@ -1127,7 +1127,7 @@ a test. Restoring the cap turns
 
 **REFUSED as a config flip: routing ORCA1 through the in-stage site.** The
 in-model BBL hook is built only inside the WS-RK3 tracer lane
-(`ocean_model_latlon_cgrid.py:6113`, under `elif _tti == "rk3_ws":`) and is
+(`ocean_model_latlon_cgrid.py:6114`, under `elif _tti == "rk3_ws":`) and is
 passed only to `_nemo_ws_rk3_tracer_pair_step`. ORCA1 resolves
 `tracer_time_integrator="euler"` (`run_omip_core2.py:7463`), whose branch has
 no BBL hook at all. So setting `bbl_adv_option=2` on ORCA1 — the "config-only
@@ -1152,7 +1152,7 @@ answers and is not a default to move silently.
 **2026-09-02 follow-up (this pass): the silent-drop hazard is now a hard
 error.** `bbl_adv_option=2` paired with any `tracer_time_integrator` other
 than `rk3_ws` now raises `ValueError` at `LatLonCGridOceanModel._validate_config`
-(`ocean_model_latlon_cgrid.py:3447-3466`), naming the mismatched lane and
+(`ocean_model_latlon_cgrid.py:3448-3467`), naming the mismatched lane and
 pointing at the driver-side `apply_bbl_adv_step` (`run_omip_core2.py`'s
 `--bbl-adv`) as the alternative. Verified inert on ORCA1 (never sets
 `bbl_adv_option`, stays at the default 0). This closes the "SILENTLY run NO
@@ -1217,7 +1217,7 @@ owner. Left UNVERIFIED — neither explanation is measured here.
 
 **Also blocked structurally, independent of the numbers.** `outer_integrator=
 "nemo_mlf"` hard-requires `implicit_vmix_e3t_now_divisor=True`
-(`ocean_model_latlon_cgrid.py:3124`), which DINO's certified card sets False
+(`ocean_model_latlon_cgrid.py:3125`), which DINO's certified card sets False
 (S-34). So the collapse could not be a one-variable config move even if the
 states agreed: it would flip S-34's divisor at the same time. The A/B above
 sidesteps that by calling the two methods directly at DINO's own config, which
@@ -1275,11 +1275,11 @@ REFUSED and nothing was landed for this row.
 generic vertical-velocity diagnostic for three other lanes —
 `ocean_pe_mpas.py:312` and `ocean_model_mpas.py:980` (MPAS),
 `ocean_pe_cdgrid.py:361` (C-D grid), `ocean_pe_latlon_cgrid.py:1369` and
-`ocean_model_latlon_cgrid.py:457` (the lat-lon PE lane), plus
+`ocean_model_latlon_cgrid.py:458` (the lat-lon PE lane), plus
 `fidelity/box_heat_budget.py:310`. So the row cannot become OTHER_RECIPE
 either: LOCK/OVERFLOW/ORCA1 are NEMO cards and they resolve
 `wzv_call2_evaluation="generic"`, so a NEMO card still reaches the generic arm
-at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5472`).
+at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5473`).
 
 **4. The second site is NEMO's own split, restated.** `wzv_call2_evaluation=
 "nemo_literal"` requires `zad_qco_evaluation="nemo_literal"`, which requires
@@ -1476,7 +1476,7 @@ hu_0(:,:)  = hu_0(:,:) + e3u_0(:,:,jk) * umask(:,:,jk)                          
 
 legoESM removes a LIVE-weighted one: `_replace_stage_mean` uses
 `sum(u*h_u_pre)/H_u_pre` with `h_u_pre = min_cell_to_uface(h_k_pre)`
-(`ocean_model_latlon_cgrid.py:4369`), `h_k_pre` being the ssh-stretched
+(`ocean_model_latlon_cgrid.py:4370`), `h_k_pre` being the ssh-stretched
 thickness.  This was the phantom round's open item 3, recorded UNMEASURED.
 
 **RETRACTED before it was believed.**  A first pass claimed the two weightings

@@ -30,7 +30,7 @@ not merely a current default.
 `ocean_pe_latlon_cgrid.py:1240` constructs density and pressure on actual
 partial-cell thicknesses. `ocean_tendency_common.py:315` computes
 `p_k = g sum(l<k, rho'_l h_l) + g rho'_k h_k/2`.
-The call at `ocean_pe_latlon_cgrid.py:4502` reaches the Adcroft branch in
+The call at `ocean_pe_latlon_cgrid.py:4552` reaches the Adcroft branch in
 `_bc_ke_and_pressure_gradients`; the resulting pressure gradient enters
 momentum with sign `-grad(p')/rho_0` at line 4519.
 
@@ -45,7 +45,7 @@ shift, not a vertical reconstruction of density through the shifted interval.
 It has **no division by partial-cell thickness**. For the supplied pair of
 bottom thicknesses the centroid separation is half their difference, not
 the entire bathymetric cliff. Faces beneath the shallower column are closed
-by the 3-D active-cell masks (`ocean_pe_latlon_cgrid.py:4427`).
+by the 3-D active-cell masks (`ocean_pe_latlon_cgrid.py:4477`).
 
 Analytically, consider a common cell-top depth, shallower thickness `h`, deeper
 thickness `H`, and horizontally uniform linear density `rho'=a+s*z`.
@@ -90,7 +90,7 @@ switching to it is not generally bitwise neutral for healthy runs.
   the fold and inside band 10 in the log; this does not certify all halo code.
 
 The existing public `LatLonCGridOceanModel.tendencies_with_diagnostics`
-(`ocean_model_latlon_cgrid.py:3961`) supplies the component momentum budget.
+(`ocean_model_latlon_cgrid.py:3962`) supplies the component momentum budget.
 The next necessary input is an initial or pre-runaway state with the velocity
 maximum's level. Evaluate that budget at the growing faces, separate PGF from
 KE (the current diagnostic combines them), and compare otherwise identical

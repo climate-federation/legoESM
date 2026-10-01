@@ -185,7 +185,7 @@ terminal line is quoted verbatim:
 
 The cumulative citation gate passes after rigidly shifting all 36 map entries
 and all 10 cited occurrences displaced by this landing.  Its planted shift of
-`ocean_model_latlon_cgrid.py:8956-8958` exits 1.  The Round-183 direct receipt
+`ocean_model_latlon_cgrid.py:8957-8959` exits 1.  The Round-183 direct receipt
 citation gate and its compiled-source shift plant also pass/fire respectively.
 
 Focused results: DINO **128 passed, 9 warnings**; generic recipe **25 passed**;

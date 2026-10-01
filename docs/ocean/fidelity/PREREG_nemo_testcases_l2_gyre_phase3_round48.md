@@ -41,7 +41,7 @@ The compiled RK3 card seeds `sshn_e/un_e/vn_e` from Kmm
 substep (`:749-761`), and restart-writes all six (`:970-980`). The compiled
 card contains no `ub2_b/vb2_b` read or write; those dead non-RK3 fields are not
 admitted as inputs. legoESM already carries the six live histories as the
-deviation-form `bt_hist` state (`state.py:648-666`) and reconstructs their raw
+deviation-form `bt_hist` state (`state.py:648-681`) and reconstructs their raw
 values at the next window (`barotropic_latlon_cgrid.py:2053-2084`). No new
 state is preregistered.
 

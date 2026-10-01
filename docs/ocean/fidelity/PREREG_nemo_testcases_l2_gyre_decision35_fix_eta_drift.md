@@ -9,7 +9,7 @@ detached worktree.
 
 Question put: the certified GYRE NEMO-identity card applies a global sea-level
 correction every step (`fix_eta_drift=True`, a uniform eta shift sized by an
-area-weighted volume residual, `ocean_model_latlon_cgrid.py:6602-6667`) that
+area-weighted volume residual, `ocean_model_latlon_cgrid.py:6603-6668`) that
 NEMO does not have. Options: (1) turn it off on the GYRE card; (2) leave it on.
 User: **(1)** — "no hidden extras; seems like a fixer that could hide model
 errors."

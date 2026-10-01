@@ -77,7 +77,7 @@ zFu_t(ji+1,jj) = (  zFu(ji,jj) + zFu(ji+1,jj)  ) * ( zui - gamma1 * zl_u )      
 ```
 
 **(i) the operator that writes a nonzero `u` into a masked cell**:
-`ocean_model_latlon_cgrid.py:4998-5011` (`_replace_stage_mean`, the ONE stage
+`ocean_model_latlon_cgrid.py:4999-5012` (`_replace_stage_mean`, the ONE stage
 ladder, called at `:5103,:5120,:5139`) applied `u_mask_3d =
 state.u_mask.data[..., jnp.newaxis]` (`:4066`) -- the 2-D face mask broadcast
 over levels -- to `u_in + (target_u - mean_u)[..., jnp.newaxis]`; and
@@ -95,7 +95,7 @@ the vertically-cumulated `pUe` branch (`:193-199`) does.  The preregistration
 called both "halves of NEMO's rule"; that phrasing is RETRACTED.
 
 **(ii) the stencil that reads a masked neighbour**:
-`ocean_pe_latlon_cgrid.py:4205-4208` feeds `u_core = u[:, :-1, :]` UNMASKED
+`ocean_pe_latlon_cgrid.py:4255-4258` feeds `u_core = u[:, :-1, :]` UNMASKED
 into `_up3_reconstruct` (`:4078-4097`, consumed at `:4170`).  With (i) present
 that reads the phantom.  Separately, `_up3_reconstruct` is algebraically
 `0.5*(adv_pos + adv_neg) - (1/6)*curvature`, i.e. NEMO's `zlu_uu` with
@@ -168,7 +168,7 @@ EXACTLY `0.0`.  Landed (`52e7ea9f9`).
 
 **But its numerical leverage on these cards is EXACTLY ZERO, measured.**  The
 transport velocity enters the operator ONLY through
-`Q_u = h_u * transport_u * ...` (`ocean_pe_latlon_cgrid.py:4194`); the
+`Q_u = h_u * transport_u * ...` (`ocean_pe_latlon_cgrid.py:4244`); the
 advected value is `u`, not `transport_u`.  And `h_u` -- the stage
 `e3u(Kmm)` -- is EXACTLY `0.0` below the live seabed at every stage, in BOTH
 arms (measured directly), so `h_u * transport_u` is `0.0` in both.  The

@@ -54,7 +54,7 @@ sets `sfx`/`utau`/`taum`/`qtot`/`qsr`/`qns` → `dyn_zdf` :267 applies `utau` to
 `apply_dino_lat_lon_surface_forcing` (seasonal T\*/Q_sr → restoring → −Q_sr/(ρc_p dz₀) →
 Jerlov column → forward-Euler write to `state.T`/`state.S`; wind no-op) →
 `model.step(..., surface_forcing=sf)` where `sf` carries ONLY `tau_x`/`tau_y`/`taum` →
-`_bc_external_surface_forcing` (`ocean_pe_latlon_cgrid.py:3356-3361`) adds stress to
+`_bc_external_surface_forcing` (`ocean_pe_latlon_cgrid.py:3406-3411`) adds stress to
 `du_dt[...,0]` using `dz_ref[0]·J` with the LIVE Jacobian.
 
 Note the internal asymmetry on the lego side: the **momentum** deposit uses the live
