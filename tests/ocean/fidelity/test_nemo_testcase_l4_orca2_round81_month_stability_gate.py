@@ -39,3 +39,15 @@ def test_complete_requires_step_240_and_terminal():
     report["steps_completed"] = 240
     report["terminal"] = {"comparison": {}}
     assert gate.classify(report)["status"] == "PASS_ROUND81_ARM_COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "plant", ["arm-label", "protocol", "failure-step", "failure-cell", "early-complete"])
+def test_plants_fire_on_complete_report(plant):
+    report = _failure_report()
+    report["arm"] = "old-backgrounds"
+    report["failure"] = None
+    report["steps_completed"] = 240
+    report["terminal"] = {"comparison": {}}
+    with pytest.raises(gate.GateError):
+        gate.classify(report, plant)

@@ -281,10 +281,22 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["arm"] = "unknown"
     elif plant == "protocol":
         report["protocol"]["dt_s"] = 1.0
-    elif plant == "failure-step" and report["failure"] is not None:
-        report["failure"]["step"] += 1
-    elif plant == "failure-cell" and report["failure"] is not None:
-        report["failure"]["index"] = [-1, -1, -1]
+    elif plant == "failure-step":
+        if report["failure"] is None:
+            report["steps_completed"] = month.STEPS - 1
+        else:
+            report["failure"]["step"] += 1
+    elif plant == "failure-cell":
+        if report["failure"] is None:
+            report["failure"] = {
+                "step": month.STEPS,
+                "field": "raw_mesh_e3w_int",
+                "index": [-1, -1, -1],
+                "value": float("-inf"),
+            }
+            report["steps_completed"] = month.STEPS - 1
+        else:
+            report["failure"]["index"] = [-1, -1, -1]
     elif plant == "early-complete":
         report["failure"] = None
         report["steps_completed"] = month.STEPS - 1
