@@ -51,6 +51,8 @@ _OCE = NEMO / "src/OCE"
 _DYN = _OCE / "DYN"
 _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
+_ORCA2_R79BZDF_COMPILED = (
+    NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -94,6 +96,14 @@ FILES = {
         _ORCA2_COMPILED / "zdfiwm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
         _ORCA2_COMPILED / "zdfddm.f90"),
+    # Round 80 uses the compiled, instrumented branch that produced the
+    # admitted per-step avt/avm record, rather than a nearby pristine deck.
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R79BZDF_COMPILED / "zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2_R79BZDF_COMPILED / "trazdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_R79BZDF_COMPILED / "dynzdf.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -1108,6 +1118,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 80: admitted end-of-chain coefficients and consumers ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381': [
+        '!                          !==  ocean Kz  ==!   (avt, avs, avm)',
+        'CALL r79_write( kt, Kbb, Kmm )', 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90:178-215': [
+        '! vertical mixing coef.: avt for temperature, avs for salinity and passive tracers',
+        ('ENDIF', 10), 38],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
+        'DO jk =    2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)            ! inner values',
+        'zwd(ji,1) = 1._wp - zzws', 15],
     # --- ORCA2 round 61: which card selects which momentum advection ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:346': 'ln_dynadv_vec = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:352': 'ln_dynvor_een = .true.',

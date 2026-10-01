@@ -150,7 +150,10 @@ def _location(index: tuple[int, int, int], card, fields: dict[str, np.ndarray]) 
 def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
             landed_reference: Path) -> dict[str, object]:
     import jax.numpy as jnp
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
 
     admission = vmix.run_gate(vmix_root)
     require(admission["status"] == "PASS", "vertical-mixing record was not admitted")
@@ -165,7 +168,9 @@ def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
     states = {name: initial for name in ARMS}
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        iwm_forcing=card.recipe.iwm_forcing)
+        iwm_forcing=card.recipe.iwm_forcing,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True))
     last_fields = None
     for kt in range(1, 11):
         surface_fields = ladder.assemble_surface_fields(ten_step_root, kt)
@@ -183,10 +188,12 @@ def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
             kwargs = {} if selectors is None else {
                 "_vertical_K_test_override": _override(recorded, selectors)
             }
-            next_states[name] = model.step(
+            trace = model.step(
                 states[name], dt=card.dt_s, freshwater=freshwater,
                 surface_forcing=surface, **kwargs)
+            next_states[name] = trace.state_after
         states = next_states
+        print(f"EXTREMES_PROGRESS step={kt}/10", flush=True)
     require(last_fields is not None, "no mixing record was consumed")
     oracle = ladder.read_state_frame(
         ten_step_root / "oracle_stage_kt00000010_s3.bin", kt=10, stage=3)
@@ -228,8 +235,8 @@ def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
         "extremes": extremes,
         "compiled_citations": {
             "process_order": "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381",
-            "tracer_consumer": "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90:173-235",
-            "momentum_consumer": "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:183-206",
+            "tracer_consumer": "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90:178-215",
+            "momentum_consumer": "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205",
         },
     }
 
