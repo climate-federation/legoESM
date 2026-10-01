@@ -1,0 +1,30 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 10,
+  "label": "shipped one-category ORCA2 ocean-ice deck",
+  "module_added_from_lower_rung": "one-category SI3 (nn_ice=2, jpl=1)",
+  "source_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round69/acquisition/orca1ice_surface_only_240step_np2",
+  "source_admission_sha256": "9138ce62aca56408884e1e2b74e783ab3622a8e9ad1b12ddb7ec96ce4a700294",
+  "deck_manifest_sha256": "09a350860ff6eaef17d1f0e18aa8e16c4d929e994d9d6804d0976f531b06f66e",
+  "input_manifest_sha256": "3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "build": {
+    "configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "450410b5c9b1960c4cc8d05d690decca3308f888e70987b444682315bb846572",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "b116511cbefb6d2b6f1d911a77079a4268f343ea3aa1b861d08ac0c8d2bc4bcf"
+  },
+  "namelists": {
+    "namelist_cfg": "036f3cec148b2e89cede910d13189db4cc8e2e74a9b9ecdede7a87a5c14a98ec",
+    "namelist_ice_cfg": "6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}

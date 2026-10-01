@@ -53,6 +53,8 @@ _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
 _ORCA2_R79BZDF_COMPILED = (
     NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo")
+_ORCA2_R69SURFACE = NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE"
+_ORCA2_R69SURFACE_COMPILED = _ORCA2_R69SURFACE / "BLD/ppsrc/nemo"
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -104,6 +106,23 @@ FILES = {
         _ORCA2_R79BZDF_COMPILED / "trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2_R79BZDF_COMPILED / "dynzdf.f90"),
+    # ORCA2 hierarchy deck rung 10 reuses this admitted instrumented build
+    # without rebuilding; bind its call order, ice dispatch, and start mode to
+    # the exact compiled branch that produced the source record.
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/l4_r69_surface.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "l4_r69_surface.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "sbcmod.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "istate.f90"),
+    "cpp_ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE.fcm": (
+        _ORCA2_R69SURFACE / "cpp_ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE.fcm"),
+    "rung10_namelist_cfg": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+        "/nemo_testcase_l4_orca2_hier_decks_round1_acquisition"
+        "/rung10_namelist_cfg"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -1118,6 +1137,26 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 hierarchy decks round 1: unchanged rung-10 producer/deck ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3.f90:129-130': [
+        'CALL sbc        ( kstp, Nbb, Nbb )',
+        'CALL l4_r69_dump( kstp, Nbb )', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/l4_r69_surface.f90:65-88': [
+        "IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round69: surface record requires fp64')",
+        'CLOSE(unit)', 24],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:247-252': [
+        ('SELECT CASE( nn_ice )', 1),
+        "CALL ctl_stop( 'sbc_init : SI3 sea-ice model requires ln_blk or ln_cpl or ln_abl or ln_usr = T' )", 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
+        ('SELECT CASE( nn_ice )', 2),
+        ('END SELECT', 5), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90:105-140': [
+        'IF( ln_rstart ) THEN',
+        'vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 36],
+    'cpp_ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE.fcm:1':
+        'bld::tool::fppkeys   key_si3   key_qco key_vco_1d3d key_RK3',
+    'rung10_namelist_cfg:234':
+        'ln_spc_dyn    = .true.',
     # --- ORCA2 round 80: admitted end-of-chain coefficients and consumers ---
     'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381': [
         '!                          !==  ocean Kz  ==!   (avt, avs, avm)',
