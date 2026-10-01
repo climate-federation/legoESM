@@ -52,9 +52,10 @@ def _configured_model(card, arm: str):
         raise GateError(f"unknown arm {arm!r}")
     config = config._replace(
         physics=config.physics._replace(vertical_mixing=vmix))
+    forcing = None if arm == "iwm-off" else card.recipe.iwm_forcing
     return config, LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, config,
-        iwm_forcing=card.recipe.iwm_forcing)
+        iwm_forcing=forcing)
 
 
 def _first_bad(values: np.ndarray) -> tuple[list[int], float] | None:
