@@ -105,7 +105,7 @@ namelist (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:140-149`)
 It maps `ln_zdfcst` directly to `np_CST`, calls `zdf_tke_init` only when
 `ln_zdftke` is true, requires exactly one closure, and disables the
 shear-production calculation for constant closure
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:262-278`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:262-277`).
 At each step, only the `np_TKE` arm calls `zdf_tke`; the `np_CST` arm makes no
 closure call and retains the initialization-time arrays
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:330-343`).
@@ -115,7 +115,7 @@ the last selector applies the inherited equatorial tracer shape before the
 masked `avt_k`/`avm_k` initialization
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:205-228`).
 The main restart writer calls `tke_rst` only under `ln_zdftke`
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:378-385`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:380-385`).
 
 The complete compiled selector census is closed.  `ln_zdfcst` occurs only in
 `zdf_oce.f90` and `zdfphy.f90`; their declarations are adjacent
@@ -124,11 +124,11 @@ The complete compiled selector census is closed.  `ln_zdfcst` occurs only in
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/asmbkg.f90:100-118`)
 and every 25-hour TKE allocation, accumulation, normalization, output, and
 reset site
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:142-174`,
-`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-248`,
-`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-290`,
-`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-344`,
-`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-373`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:142-172`,
+`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-246`,
+`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288`,
+`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-343`,
+`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-371`).
 These diagnostic/assimilation effects remain behind their own outer runtime
 triggers; the hierarchy gate pins the guards rather than claiming those outer
 paths execute in this deck.

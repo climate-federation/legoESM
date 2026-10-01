@@ -1204,15 +1204,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
         '!==  Background eddy viscosity and diffusivity  ==!',
         'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk) =', 24],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:262-278': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:262-277': [
         '!==  type of vertical turbulent closure  ==!',
-        'ELSE                                                 ;   l_zdfsh2 = .TRUE.', 17],
+        'ELSE                                                 ;   l_zdfsh2 = .TRUE.', 16],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:330-343': [
         'CALL zdf_mxl( kt, Kmm )',
         'END SELECT', 14],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:378-385': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:380-385': [
         "CALL lbc_lnk( 'zdfphy', avm, 'W', 1.0_wp )",
-        'IF( ln_zdfric )   CALL ric_rst', 8],
+        'IF( ln_zdfric )   CALL ric_rst', 6],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:257-258': [
         "IF( ln_zdfddm ) THEN   ;   WRITE(numout,*) '   ==>>>   use double diffusive mixing: avs /= avt'",
         "ELSE                   ;   WRITE(numout,*) '   ==>>>   No  double diffusive mixing: avs = avt'", 2],
@@ -1246,21 +1246,21 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/asmbkg.f90:100-118': [
         'IF( nitbkg_r == nit000 - 1 ) THEN',
         "IF( ln_zdftke )   CALL iom_rstput", 19],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:142-174': [
-        'IF( ln_zdftke ) THEN             ! TKE physics',
-        'ENDIF', 33],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-248': [
-        'IF( ln_zdftke ) THEN',
-        'ENDIF', 5],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-290': [
-        'IF( ln_zdftke ) THEN',
-        'ENDIF', 5],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-344': [
-        'IF( ln_zdftke ) THEN',
-        'ENDIF', 6],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-373': [
-        'IF( ln_zdftke ) THEN',
-        'ENDIF', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:142-172': [
+        ('IF( ln_zdftke ) THEN', 1),
+        ('en_25h(ji,jj,jk) = en(ji,jj,jk)', 1), 31],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-246': [
+        ('IF( ln_zdftke ) THEN', 3),
+        'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) + en(ji,jj,jk)', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288': [
+        ('IF( ln_zdftke ) THEN', 4),
+        'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-343': [
+        ('IF( ln_zdftke ) THEN', 5),
+        'CALL iom_put("tke25h", zw3d)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-371': [
+        ('IF( ln_zdftke ) THEN', 6),
+        ('en_25h(ji,jj,jk) = en(ji,jj,jk)', 2), 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trazdf.f90:175-180': [
         'IF(  ( cdtype == \'TRA\'',
         'IF( cdtype == \'TRA\' .AND. jn == jp_tem ) THEN', 6],
