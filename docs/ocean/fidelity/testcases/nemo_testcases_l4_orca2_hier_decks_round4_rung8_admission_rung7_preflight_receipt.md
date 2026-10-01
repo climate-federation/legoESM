@@ -135,8 +135,8 @@ gate pin.
 
 The default citation audit passes with 274 citations, zero failures, zero
 unmapped citations, and zero map-audit failures; all nine built-in plants fire.
-This receipt's own citation gate is run after this receipt is committed, with
-a two-line shift plant required to refuse.
+This receipt's own citation gate passes all seven citations with zero
+failures/unmapped entries; its two-line `zdfphy` shift plant fires and exits 1.
 
 The required separate `codex exec --sandbox read-only` review failed before it
 could read the diff with `failed to initialize in-process app-server client:
