@@ -37,6 +37,7 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics._shared import grid_lat_lon
 from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
 from legoesm.atmosphere.physics.radiation.config import (
     OzoneProfileConfig,
@@ -568,34 +569,6 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
             n_ice_col = jnp.maximum(_ni_data.reshape(ncol, nlev), 0.0)
 
     return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
-
-
-def _get_grid_lat_lon(grid_or_mesh, shape_2d):
-    """Get latitude/longitude arrays from any grid type.
-
-    Handles cubed-sphere, lat-lon, and MPAS Voronoi grids uniformly.
-    Returns (lat, lon) broadcast to shape_2d.
-    """
-    if hasattr(grid_or_mesh, 'latCell'):
-        # MPAS Voronoi mesh: lat/lon already (nCells,) = shape_2d
-        return jnp.asarray(grid_or_mesh.latCell), jnp.asarray(grid_or_mesh.lonCell)
-
-    lat = jnp.asarray(grid_or_mesh.grid_lat)
-    lon = jnp.asarray(grid_or_mesh.grid_lon)
-    if lat.ndim < len(shape_2d):
-        lat = jnp.broadcast_to(
-            lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim)))),
-            shape_2d,
-        )
-    if lon.ndim < len(shape_2d):
-        if lon.ndim == 1 and len(shape_2d) == 2:
-            lon = jnp.broadcast_to(lon[None, :], shape_2d)
-        else:
-            lon = jnp.broadcast_to(
-                lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)),
-                shape_2d,
-            )
-    return lat, lon
 
 
 def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
@@ -1266,7 +1239,7 @@ def _make_hydrostatic_radiation(
     """Create radiation physics_fn for any hydrostatic model.
 
     Handles cubed-sphere, lat-lon FV, and MPAS Voronoi grids via the
-    shared ``_get_grid_lat_lon`` / ``_extract_tracer_columns`` /
+    shared ``grid_lat_lon`` / ``_extract_tracer_columns`` /
     ``_pack_hydrostatic_tendencies`` helpers.
 
     Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
@@ -1349,7 +1322,7 @@ def _make_hydrostatic_radiation(
         shape_2d = p_s.shape
         ncol = int(math.prod(int(s) for s in shape_2d))
 
-        lat, lon = _get_grid_lat_lon(grid_or_mesh, shape_2d)
+        lat, lon = grid_lat_lon(grid_or_mesh, shape_2d)
 
         # Pressure at full and half levels
         p_full = sigma_coord.pressure_at_full(p_s)
@@ -2175,7 +2148,7 @@ def _make_plane_radiation(
 
         # Plane lat/lon: PlaneGrid.grid_lat returns constant lat0 over
         # (ny, nx), already in radians (deg2rad applied in property).
-        lat, lon = _get_grid_lat_lon(grid, shape_2d)
+        lat, lon = grid_lat_lon(grid, shape_2d)
         insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
             day_of_year=_time["day_of_year"],
@@ -2360,9 +2333,9 @@ def _make_mpas_nh_radiation(
         )
         T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
-        # MPAS lat/lon at cells handled by `_get_grid_lat_lon` via the
+        # MPAS lat/lon at cells handled by `grid_lat_lon` via the
         # `hasattr(grid_or_mesh, 'latCell')` branch.
-        lat, lon = _get_grid_lat_lon(mesh, shape_2d)
+        lat, lon = grid_lat_lon(mesh, shape_2d)
         insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
             day_of_year=_time["day_of_year"],

@@ -503,3 +503,35 @@ def test_production_deck_selects_incloud_and_threads_it():
     cfg.validate_strict()
     assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
                                    ).warm_rain_incloud is True
+
+
+def test_hydrostatic_lane_feeds_cell_latitudes_to_the_ice_fraction(monkeypatch):
+    """The hydrostatic (cubed-sphere) lane has grid_lat, not MPAS latCell: the
+    in-cloud warm rain must hand aist those latitudes [rad], column order."""
+    from types import SimpleNamespace
+
+    from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics import integration as mi
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid, sigma = create_cubed_sphere(4), create_sigma_coordinate(6)
+    state = held_suarez_init(grid, sigma)
+
+    class _Seen(Exception):
+        pass
+
+    def spy(q_v, T, p, q_i, lat, *a, **k):
+        raise _Seen(np.asarray(lat))
+    monkeypatch.setattr(mi, "cam6_ice_stratus_fraction", spy)
+    fn = mi.make_microphysics_physics(
+        MicrophysicsConfig(scheme="morrison", morrison=_cfg(warm_rain_incloud=True)),
+        "hydrostatic", 60.0, cloud_config=CloudConfig(scheme="cam6_clubb"))
+    ps = SimpleNamespace(cloud_fraction=jnp.full(state.T.data.shape, 0.5))
+    with pytest.raises(_Seen) as got:
+        fn(state, grid, sigma, phys_state=ps)
+    lat = got.value.args[0]
+    np.testing.assert_array_equal(lat, np.asarray(grid.grid_lat).reshape(-1))
+    assert np.abs(lat).max() <= np.pi / 2 + 1e-12

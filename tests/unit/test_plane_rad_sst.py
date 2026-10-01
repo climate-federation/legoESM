@@ -123,9 +123,8 @@ def test_gate_config_resolves_insolation_and_no_coriolis():
     RESOLVE the TOA insolation to the 8.5°N daily-mean (~428.5), NOT the
     RCEMIP-effective ~409.5 — and lat0=8.5 must NOT enable Coriolis
     (coriolis_mode='none' ⇒ f=0; lat0 feeds ONLY the radiation)."""
-    from legoesm.atmosphere.physics.radiation.integration import (
-        _compute_insolation, _get_grid_lat_lon,
-    )
+    from legoesm.atmosphere.physics._shared import grid_lat_lon
+    from legoesm.atmosphere.physics.radiation.integration import _compute_insolation
     from legoesm.grids.plane import create_plane_grid
     grid = create_plane_grid(nx=8, ny=8, nlev=24, dx=1_000.0, dy=1_000.0,
                              coriolis_mode="none", lat0=8.5, dtype=jnp.float64)
@@ -133,7 +132,7 @@ def test_gate_config_resolves_insolation_and_no_coriolis():
     assert float(grid.f0) == 0.0
     assert float(jnp.max(jnp.abs(jnp.asarray(grid.grid_coriolis)))) == 0.0
     # G: the resolved insolation = 8.5°N daily-mean (same path for gray/rrtmgp)
-    lat, lon = _get_grid_lat_lon(grid, (8, 8))
+    lat, lon = grid_lat_lon(grid, (8, 8))
     cfg = rcp._build_radiation_config(
         "gray", update_interval_steps=1, clouds=True,
         insolation="off", t_sfc=300.0)

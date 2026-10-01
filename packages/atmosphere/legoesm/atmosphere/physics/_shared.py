@@ -882,3 +882,31 @@ def diagnose_grid_w_from_omega(
         T_v = T * (1.0 + (1.0 / eps - 1.0) * q_v)
     rho = p_full / (R_d * jnp.clip(T_v, 1.0, None))
     return -omega / jnp.clip(rho * g, 1e-3, None)  # coeff-ok: rho*g floor for w-from-omega
+
+
+def grid_lat_lon(grid_or_mesh, shape_2d):
+    """Get latitude/longitude arrays from any grid type.
+
+    Handles cubed-sphere, lat-lon, and MPAS Voronoi grids uniformly.
+    Returns (lat, lon) broadcast to shape_2d.
+    """
+    if hasattr(grid_or_mesh, 'latCell'):
+        # MPAS Voronoi mesh: lat/lon already (nCells,) = shape_2d
+        return jnp.asarray(grid_or_mesh.latCell), jnp.asarray(grid_or_mesh.lonCell)
+
+    lat = jnp.asarray(grid_or_mesh.grid_lat)
+    lon = jnp.asarray(grid_or_mesh.grid_lon)
+    if lat.ndim < len(shape_2d):
+        lat = jnp.broadcast_to(
+            lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim)))),
+            shape_2d,
+        )
+    if lon.ndim < len(shape_2d):
+        if lon.ndim == 1 and len(shape_2d) == 2:
+            lon = jnp.broadcast_to(lon[None, :], shape_2d)
+        else:
+            lon = jnp.broadcast_to(
+                lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)),
+                shape_2d,
+            )
+    return lat, lon

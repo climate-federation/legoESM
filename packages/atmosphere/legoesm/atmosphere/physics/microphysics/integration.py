@@ -42,7 +42,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     spectral_pe_to_grid,
 )
 from legoesm.atmosphere.dynamics.shared.tracer_positivity import clip_positive
-from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.atmosphere.physics._shared import grid_lat_lon, zero_like_tracers
 from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
@@ -425,17 +425,13 @@ def _make_hydrostatic_microphysics(
                     raise ValueError(
                         "warm_rain_incloud=True but no cloud_fraction carry "
                         "reached the microphysics (needs CLUBB turbulence).")
-                if not hasattr(grid, "latCell"):
-                    raise ValueError(
-                        "warm_rain_incloud=True: the aist tropopause switch "
-                        "needs cell latitudes (MPAS mesh latCell).")
                 # CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with
                 # clubb_intr.F90:2575 ast = max(alst, aist); aist is
                 # cldfrc2m aist_vector on the post-CLUBB state (:2556),
                 # which is this sub-step's input state.
                 _aist = cam6_ice_stratus_fraction(
                     q_v_col, T_col, p_full_col, hydrometeors.q_i,
-                    jnp.asarray(grid.latCell).reshape(ncol), cloud_config,
+                    grid_lat_lon(grid, shape_2d)[0].reshape(ncol), cloud_config,
                     p_half_col[:, :-1])
                 _kw["cloud_fraction"] = jnp.maximum(
                     jnp.clip(_cf.reshape(ncol, nlev), 0.0, 1.0), _aist)
