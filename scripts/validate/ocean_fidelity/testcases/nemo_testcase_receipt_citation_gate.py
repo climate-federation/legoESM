@@ -1198,7 +1198,7 @@ CITATION_MAP = {
         'IF     ( nn_mxlice > 0 .AND. nn_ice == 0 ) THEN',
         'nn_mxlice = 0', 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90:796-798': [
-        'IF(lwp) THEN',
+        ('IF(lwp) THEN', 2),
         'type of scaling under sea-ice               nn_mxlice', 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfdrg.f90:371-380': [
         'NAMELIST/namdrg/ ln_drg_OFF',
@@ -1234,9 +1234,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:308-320': [
         'NAMELIST/namsbc_rnf/ cn_dir',
         'IF(lwm) WRITE ( numond, namsbc_rnf )', 13],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:182-207': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:183-207': [
         'Namelist namsbc (partly overwritten with CPP key setting)',
-        'runoff / runoff mouths                     ln_rnf', 26],
+        'nb of iterations if land-sea-mask applied  nn_lsm', 25],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:359-374': [
         'associated modules : initialization',
         'IF( ln_apr_dyn )    CALL sbc_apr_init', 16],
@@ -1246,15 +1246,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:322-330': [
         'IF( .NOT. ln_rnf ) THEN',
         "CALL ctl_stop( 'STOP', 'sbc_rnf_alloc : unable to allocate arrays' )", 9],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:314-328': [
-        'River Runoff effects',
-        'ENDIF', 15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:318-325': [
+        ('IF( ln_rnf ) THEN', 2),
+        'rnf_tsc(ji,jj,jp_sal) * zdep', 8],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/divhor.f90:142': [
-        'IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )',
-        'IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )'],
+        ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 1),
+        ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 1)],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/divhor.f90:199': [
-        'IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )',
-        'IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )'],
+        ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 2),
+        ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 2)],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stp2d.f90:241-245': [
         'Net water flux forcing',
         'sshe_rhs(:,:) = r1_rho0 * sshe_rhs(:,:)', 5],

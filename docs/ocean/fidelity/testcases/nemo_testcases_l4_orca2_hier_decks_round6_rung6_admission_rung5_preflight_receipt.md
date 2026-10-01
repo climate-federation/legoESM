@@ -89,7 +89,7 @@ length, output cadence, and every other ocean assignment are unchanged.
 
 The surface manager reads `ln_rnf` in `namsbc` and prints its resolved value
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:159-165` and
-`:182-207`).  It then calls the runoff initializer unconditionally
+`:183-207`).  It then calls the runoff initializer unconditionally
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:359-374`).
 The initializer reads and echoes the complete `namsbc_rnf` group before
 testing the selector
@@ -107,7 +107,7 @@ write before the return; deleting that echo makes the resolved gate refuse.
 The active per-step runoff call is guarded by the selector
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:517`).  So are
 the RK3 tracer heat/salt source
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:314-328`), both
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:318-325`), both
 continuity runoff-divergence sites
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/divhor.f90:142` and
 `:199`), and the external-mode surface-height source
