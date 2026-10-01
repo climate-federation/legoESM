@@ -12,7 +12,7 @@ The round-82 first twin stopped during initialization with exit 123.  Both
 rank logs identify one error: `nn_stock=1` is not a multiple of the shipped
 `nn_fsbc=2`.  The compiled guard applies that restriction only to periodic
 restart output; it explicitly bypasses it when the restart-list mode is used
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-350`).  The compiled restart
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346`).  The compiled restart
 writer initializes its next output from `nn_stocklist`, opens/writes the named
 step, then advances to the next list entry
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119,188-202`).

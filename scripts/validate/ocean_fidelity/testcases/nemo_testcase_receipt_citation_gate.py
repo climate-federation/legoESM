@@ -1131,9 +1131,9 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 83: rung-0 explicit restart-list repair ---
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-350': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346': [
         'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
-        ('ENDIF', 14), 10],
+        'IF( .NOT. ln_rst_list .AND. MOD( nn_stock, nn_fsbc) /= 0 ) THEN', 6],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119': [
         'IF( kt == nit000 ) THEN   ! default definitions',
         'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 26],
