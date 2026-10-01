@@ -194,7 +194,12 @@ def measure(args) -> dict[str, object]:
     admission = extremes.vmix.run_gate(args.vmix_root)
     require(admission["status"] == "PASS", "vertical-mixing record is not admitted")
     failure_trace: list[dict[str, object]] = []
-    _install_e3w_failure_trace(failure_trace)
+    # The old-background arm is preregistered to complete and therefore takes
+    # the uninstrumented production path. The two expected failure arms use a
+    # scalar-only observer which neither replaces nor clips the failing value.
+    trace_failure = args.arm != "old-backgrounds"
+    if trace_failure:
+        _install_e3w_failure_trace(failure_trace)
     config, model = _configured_model(card, args.arm)
     vmix = config.physics.vertical_mixing
     state = card.recipe.initial_state
@@ -203,7 +208,8 @@ def measure(args) -> dict[str, object]:
     failure = None
     for kt in range(1, month.STEPS + 1):
         print(f"ROUND81_ARM_START arm={args.arm} step={kt}/{month.STEPS}", flush=True)
-        failure = _prestep_failure(card, state, args.vmix_root, kt)
+        failure = (_prestep_failure(card, state, args.vmix_root, kt)
+                   if trace_failure else None)
         if failure is not None:
             break
         fields = month.assemble_surface(args.surface_root, kt)
