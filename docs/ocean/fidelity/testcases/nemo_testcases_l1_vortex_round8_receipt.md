@@ -143,7 +143,10 @@ The complete terminal output is `round192/codex_review.log`. There is no
 
 STOPPED_FOR_RECORD. The additive acquisition is ready and locally proven, but
 the stage-2/stage-3 term values do not exist until NEMO is run. No physics or
-configuration change is landed.
+configuration change is landed. The operator entry point is
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex_round8_stage_terms/run.sh`;
+it binds `--variant stage23 --run` and delegates to the one shared VORTEX
+harness.
 
 ## 9. OPEN — round 193
 
