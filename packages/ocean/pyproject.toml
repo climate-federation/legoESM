@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-ocean"
-version = "0.1.0"
+version = "1.0.0"
 description = "legoESM ocean component: MPAS/Voronoi + lat-lon C-grid primitive-equation and barotropic dynamics, EOS, vertical mixing, GM/Redi, biogeochemistry."
 readme = "README.md"
 license = { text = "MIT" }
@@ -23,7 +23,7 @@ classifiers = [
 # independent of each other" + "Components must not import the coupler, driver,
 # or training"), which is what lets `pip install legoesm-ocean` run standalone.
 dependencies = [
-    "legoesm-core~=0.1.0",
+    "legoesm-core~=1.0.0",
     "jax>=0.5.3",
     "jaxlib>=0.5.3",
     "numpy>=1.26",
@@ -40,8 +40,8 @@ dependencies = [
 #             (ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics, deferred).
 # These component->higher edges are baselined in import-linter contract #3.
 [project.optional-dependencies]
-ml = ["legoesm-ml~=0.1.0"]
-tools = ["legoesm-tools~=0.1.0"]
+ml = ["legoesm-ml~=1.0.0"]
+tools = ["legoesm-tools~=1.0.0"]
 
 [tool.uv.sources]
 legoesm-core = { workspace = true }

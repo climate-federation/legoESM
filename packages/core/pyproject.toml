@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-core"
-version = "0.1.0"
+version = "1.0.0"
 description = "legoESM core substrate: grids, operators, state, runtime, parallel, io, time integration, and component scaffolding (the shared base every Earth-system component depends on)."
 readme = "README.md"
 license = { text = "MIT" }
