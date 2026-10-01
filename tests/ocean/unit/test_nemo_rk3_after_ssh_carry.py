@@ -216,3 +216,24 @@ def test_the_measurement_arm_refuses_a_card_that_never_reaches_the_branch():
     with pytest.raises(ValueError, match="not one of"):
         with_first_wzv_after_ssh(vec, "rk3_guess")
     assert with_first_wzv_after_ssh(vec, None) is vec
+
+
+def test_the_scan_carry_is_seeded_with_nemo_s_own_nit000_value(arms):
+    """A ``None -> Field`` transition mid-scan crashes ``lax.scan``, so the
+    slot is seeded before the loop -- with NEMO's own pre-first-step value,
+    ``ssh(:,:,Kaa) = ssh(:,:,Kbb)`` (restart.F90:370), which is why seeding
+    moves no number."""
+    arm = arms["carried"]
+    seeded = arm["model"].seed_scan_carry(arm["s0"], arms["dt"])
+    assert seeded.eta_rk3_after is not None
+    np.testing.assert_array_equal(np.asarray(seeded.eta_rk3_after.data),
+                                  _eta(arm["s0"]))
+    stepped = arm["model"].step(seeded, dt=arms["dt"])
+    for field in ("eta", "u", "v", "T", "S"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(stepped, field).data),
+            np.asarray(getattr(arm["s1"], field).data),
+            err_msg=f"seeding the scan carry moved {field}")
+    # and the uncarried arm is left alone by the seeder.
+    assert arms["card"]["model"].seed_scan_carry(
+        arms["card"]["s0"], arms["dt"]).eta_rk3_after is None

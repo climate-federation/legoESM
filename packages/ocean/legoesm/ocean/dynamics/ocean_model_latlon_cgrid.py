@@ -14535,6 +14535,14 @@ class LatLonCGridOceanModel:
         # Prime build-once caches from the CONCRETE input state before
         # the scan traces step() with tracers (codex round-2 MINOR).
         self.prime_step_caches(state)
+        # NEMO's carried after-SSH slot: the step writes it every iteration,
+        # so an unseeded None->Field transition would crash the scan on the
+        # first one.  The seed is NEMO's OWN value before any step has run --
+        # ssh(:,:,Kaa) = ssh(:,:,Kbb) (restart.F90:370) -- so seeding changes
+        # no number: the wzv branch reads the step-entry height either way.
+        if (nemo_rk3_after_ssh_is_carried(self.config)
+                and state.eta_rk3_after is None):
+            state = state._replace(eta_rk3_after=state.eta)
         # Pre-initialize AB2 carry fields so the pytree structure
         # is stable across scan iterations (None → Field transition
         # would crash jax.lax.scan).
