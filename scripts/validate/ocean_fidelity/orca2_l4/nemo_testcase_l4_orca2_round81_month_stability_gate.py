@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -81,14 +82,18 @@ def _location(card, vmix_root: Path, index: tuple[int, int, int], e3w_value: flo
     lat = float(np.rad2deg(np.asarray(card.recipe.grid.lat_T))[j, i])
     lon = float(np.rad2deg(np.asarray(card.recipe.grid.lon_T))[j, i])
     depth = float(H[j, i])
+    raw_e3w = float(np.asarray(z_coord.nemo_e3w_0)[j, i, k + 1])
+    implied_stretch = e3w_value / raw_e3w
     return {
         "index_jik": [j, i, k],
         "raw_e3w_m": e3w_value,
         "eta_m": float(eta[j, i]),
         "bathymetry_m": depth,
-        "stretch_1_plus_eta_over_H": float(1.0 + eta[j, i] / depth),
+        "step_entry_stretch_1_plus_eta_over_H": float(1.0 + eta[j, i] / depth),
+        "failing_stage_stretch_from_e3w_ratio": implied_stretch,
+        "failing_stage_eta_implied_m": float((implied_stretch - 1.0) * depth),
         # Interior bn2 row k is NEMO jk=k+2, i.e. raw Python slot k+1.
-        "raw_mesh_e3w0_m": float(np.asarray(z_coord.nemo_e3w_0)[j, i, k + 1]),
+        "raw_mesh_e3w0_m": raw_e3w,
         "latitude_deg": lat,
         "longitude_deg": lon,
         "fold_row": j == 147,
@@ -98,6 +103,46 @@ def _location(card, vmix_root: Path, index: tuple[int, int, int], e3w_value: flo
         "convection_site": "UNMEASURED_INVALID_GEOMETRY",
         "column_wet_levels": int(np.count_nonzero(h_partial[j, i] > 0.0)),
     }
+
+
+def _install_e3w_failure_trace(trace: list[dict[str, object]]) -> None:
+    """Wrap every loaded bn2 consumer with a scalar-only bad-e3w callback."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean import eos
+
+    original = eos.compute_buoyancy_frequency_nemo_bn2
+
+    def traced(*args, **kwargs):
+        e3w = kwargs.get("e3w_int")
+        if e3w is not None:
+            values = jnp.asarray(e3w)
+            valid = jnp.isfinite(values) & (values > 0.0)
+            score = jnp.where(jnp.isfinite(values), values, -jnp.inf)
+            minimum = jnp.min(score)
+            flat_index = jnp.argmin(score)
+            invalid_count = jnp.count_nonzero(~valid)
+
+            def capture(bad, observed_minimum, observed_index, observed_count):
+                if bool(bad) and not trace:
+                    trace.append({
+                        "value": float(observed_minimum),
+                        "flat_index": int(observed_index),
+                        "invalid_count": int(observed_count),
+                        "shape": list(values.shape),
+                    })
+
+            jax.debug.callback(
+                capture, ~jnp.all(valid), minimum, flat_index, invalid_count,
+                ordered=True)
+        return original(*args, **kwargs)
+
+    # Several consumers bind the function at import time. Replace only exact
+    # references to the original; no model arithmetic or return value changes.
+    for module in tuple(sys.modules.values()):
+        if module is not None and getattr(
+                module, "compute_buoyancy_frequency_nemo_bn2", None) is original:
+            setattr(module, "compute_buoyancy_frequency_nemo_bn2", traced)
 
 
 def _prestep_failure(card, state, vmix_root: Path, step: int) -> dict[str, object] | None:
@@ -147,6 +192,8 @@ def measure(args) -> dict[str, object]:
             "execution is not production CPU JIT fp64")
     admission = extremes.vmix.run_gate(args.vmix_root)
     require(admission["status"] == "PASS", "vertical-mixing record is not admitted")
+    failure_trace: list[dict[str, object]] = []
+    _install_e3w_failure_trace(failure_trace)
     config, model = _configured_model(card, args.arm)
     vmix = config.physics.vertical_mixing
     state = card.recipe.initial_state
@@ -161,8 +208,26 @@ def measure(args) -> dict[str, object]:
         fields = month.assemble_surface(args.surface_root, kt)
         consumed += 2
         freshwater, surface = ladder._surface_forcings(card, args.deck_root, fields, kt)
-        state = model.step(
-            state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
+        try:
+            state = model.step(
+                state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
+        except Exception:
+            if not failure_trace:
+                raise
+            observed = failure_trace[0]
+            index = tuple(int(x) for x in np.unravel_index(
+                int(observed["flat_index"]), tuple(observed["shape"])))
+            failure = {
+                "step": kt,
+                "field": "raw_mesh_e3w_int",
+                "kind": "nonpositive_or_nonfinite_rk_stage_geometry",
+                "index": list(index),
+                "value": float(observed["value"]),
+                "invalid_count": int(observed["invalid_count"]),
+                "location": _location(
+                    card, args.vmix_root, index, float(observed["value"]), state),
+            }
+            break
         print(
             f"ROUND81_ARM_PROGRESS arm={args.arm} step={kt}/{month.STEPS} "
             f"wall_s={time.time() - started:.1f}", flush=True)
