@@ -3919,6 +3919,15 @@ CITATION_MAP = {
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:320-334': [
         'puu(ji,jj,1,Krhs) = zhpi(ji,jj)     ! RK3 case: dyn_hpg always called first',
         ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj)', 1), 15],
+    # --- round 195: the barotropic operand the per-stage correction adds ---
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:133-135': [
+        'ssha(:,:) = ssh (:,:,Kaa)     ! save ssh, uu_b, vv_b at N+1  '
+        '(computed in dynspg_ts)',
+        'va_b(:,:) = vv_b(:,:,Kaa)', 3],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:421-429': [
+        'ALLOCATE( zub(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)), '
+        'zvb(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) )',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 9],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:289-300': [
         ('IF( ln_dynadv_vec ) THEN', 1),
         'CALL wzv( kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport )', 12],
