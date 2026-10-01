@@ -6,7 +6,7 @@
     USE sbc_oce, ONLY : ln_icebergs
 +   USE sbc_oce, ONLY : ln_rnf, nn_ice
     USE icb_oce, ONLY : berg_grid, nclasses
- 
+
     IMPLICIT NONE
 @@ -432,6 +433,9 @@
        CHARACTER(LEN=16) :: magic
@@ -136,8 +136,8 @@
 +   END SUBROUTINE l4_r87_dump_surface_input
 +
 +
- 
+
  #include "l4_oracle_canon_subroutines.h90"
- 
+
  
     SUBROUTINE rk3_dia( kswitch )
