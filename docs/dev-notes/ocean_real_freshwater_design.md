@@ -58,7 +58,7 @@ instructive:
    be silently 1000x wrong.
 3. **Double count.** A genuine salt channel ALREADY exists and is already
    applied with the actual top-cell thickness in both cores
-   (`ocean_pe_latlon_cgrid.py:3670-3682`, `ocean_pe_mpas.py:1055-1088`); the
+   (`ocean_pe_latlon_cgrid.py:3674-3686`, `ocean_pe_mpas.py:1055-1088`); the
    coupler already maps `ice_resp.salt_flux` separately from `ice_fw`
    (`coupler/ocean_forcing.py:77-98`).
 

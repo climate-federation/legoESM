@@ -1458,7 +1458,8 @@ def _validate_payload_keys(meta: dict, payload_keys, in_path: Path) -> None:
 
 
 def _validate_run_layout(template, kinds: dict, inventory, saved_class,
-                         what: str, in_path: Path) -> None:
+                         what: str, in_path: Path,
+                         migrate_absent: tuple[str, ...] = ()) -> None:
     """Manifest/inventory/state-class layout checks (no payload array read)."""
     # Diagnostic-persisted check FIRST: it is the most specific diagnosis
     # of a policy-mismatched archive, and the generic inventory
@@ -1497,6 +1498,12 @@ def _validate_run_layout(template, kinds: dict, inventory, saved_class,
             f"{what} inventory ({inventory!r}); without it the exact-layout "
             "checks cannot run and a carry could resume cold-started.")
     declared = set(_iter_state_fields(template))
+    if migrate_absent and declared - set(inventory) == set(migrate_absent):
+        # A slot this build declares that the writing build did not have.  The
+        # loader restores it as absent, which for eta_rk3_after is NEMO's own
+        # documented no-previous-step value (restart.F90:370) and is exactly
+        # what every card does today, so an older archive keeps loading.
+        declared = declared - set(migrate_absent)
     if set(inventory) != declared:
         raise ValueError(
             f"load_run_restart: {in_path} records {what} slots "
@@ -1647,20 +1654,25 @@ def _refuse_v3_deviation_bt_hist(state, in_path: Path):
         "carry no barotropic history load normally.")
 
 
-def _refuse_pre_v5_missing_rk3_after_ssh(meta, template, in_path: Path) -> None:
-    """Refuse a pre-format-5 archive that cannot hold NEMO's ``ssha`` slot.
+def _refuse_pre_v5_missing_rk3_after_ssh(meta, template, in_path: Path, *,
+                                         carries: bool) -> None:
+    """Refuse a pre-format-5 archive for a run that READS NEMO's ``ssha`` slot.
 
-    Format 5 added ``eta_rk3_after``: NEMO's extrapolated after-SSH slot,
-    which its own restart carries as ``ssha`` (restart.F90:184) and reads back
-    at the next ``nit000`` (restart.F90:362-370).  An older archive has no
-    such entry, so a resume would have to invent one.  NEMO's own fallback
-    when a restart carries no ``ssha`` is the step-entry height
-    (restart.F90:370), but applying it HERE would silently make the resumed
-    trajectory differ from the continuous one on an RK3 card that carries the
-    slot -- so the archive is refused by name instead, before the generic
-    layout check turns the same situation into a vaguer message.
+    Format 5 added ``eta_rk3_after``: NEMO's extrapolated after-SSH slot, which
+    its own restart carries as ``ssha`` (restart.F90:184) and reads back at the
+    next ``nit000`` (restart.F90:362-370).  An older archive has no such entry.
+
+    For a run that does NOT carry the slot -- every card today -- the absence
+    is not a loss: the slot is never read, so such an archive still loads and
+    the resume is byte-identical to what it was before this field existed.
+    That is why the layout check migrates the one slot rather than refusing.
+
+    For a run that DOES carry it, the archive cannot supply the value and
+    NEMO's own missing-``ssha`` fallback (the step-entry height,
+    restart.F90:370) would silently make the resumed trajectory differ from a
+    continuous one, so the archive is refused BY NAME instead.
     """
-    if meta.get("format", 0) >= 5:
+    if not carries or meta.get("format", 0) >= 5:
         return
     if "eta_rk3_after" not in set(_iter_state_fields(template)):
         return
@@ -1670,13 +1682,13 @@ def _refuse_pre_v5_missing_rk3_after_ssh(meta, template, in_path: Path) -> None:
     raise ValueError(
         f"load_run_restart: {in_path} is a format-{meta.get('format')} "
         "archive, written before NEMO's extrapolated after-SSH slot "
-        "('eta_rk3_after', NEMO's own 'ssha') became carried state. This "
-        "build's ocean state declares that slot, and there is no value in "
-        "the archive to restore it from; substituting the step-entry height "
-        "(NEMO's own missing-'ssha' fallback, restart.F90:370) would make "
-        "the resumed run a DIFFERENT trajectory from the continuous one on "
-        "any card that carries the slot. Regenerate the restart with the "
-        "current build.")
+        "('eta_rk3_after', NEMO's own 'ssha') became carried state. This run "
+        "READS that slot (its card states "
+        "nemo_first_wzv_after_ssh='rk3_extrapolated_carried') and there is no "
+        "value in the archive to restore it from; substituting the step-entry "
+        "height (NEMO's own missing-'ssha' fallback, restart.F90:370) would "
+        "make the resumed run a DIFFERENT trajectory from the continuous one. "
+        "Regenerate the restart with the current build.")
 
 
 def load_run_restart(path: str | Path, template_state, *,
@@ -1684,7 +1696,8 @@ def load_run_restart(path: str | Path, template_state, *,
                      grid_type: str | None = None,
                      dt_seconds: float | None = None,
                      n_forcing_records: int | None = None,
-                     config_fingerprint: str | None = None) -> tuple:
+                     config_fingerprint: str | None = None,
+                     carries_rk3_after_ssh: bool = False) -> tuple:
     """Resume from a :func:`save_run_restart` archive.
 
     Returns ``(state, ice_state, meta)`` where ``ice_state`` is ``None`` when
@@ -1723,10 +1736,13 @@ def load_run_restart(path: str | Path, template_state, *,
             n_forcing_records=n_forcing_records,
             config_fingerprint=config_fingerprint)
         _validate_payload_keys(meta, payload_keys, in_path)
-        _refuse_pre_v5_missing_rk3_after_ssh(meta, template_state, in_path)
+        _refuse_pre_v5_missing_rk3_after_ssh(
+            meta, template_state, in_path, carries=carries_rk3_after_ssh)
         _validate_run_layout(template_state, meta["slots"],
                              meta.get("inventory"), meta.get("state_class"),
-                             "ocean", in_path)
+                             "ocean", in_path,
+                             migrate_absent=("eta_rk3_after",)
+                             if meta["format"] < 5 else ())
         ice_kinds = meta["ice_slots"]
         if ice_kinds and ice_template is None:
             raise ValueError(

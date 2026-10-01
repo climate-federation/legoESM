@@ -1755,18 +1755,22 @@ def nemo_qco_wzv_operands(
             # continuity before the first wzv call.  It reuses the LINEAR
             # EXTRAPOLATION the previous step left in the after slot,
             # ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
-            # (stprk3.F90:217, commented there "linear extrapolation of
+            # (stprk3.F90:217 of NEMO's RAW SOURCE tree, src/OCE -- not the
+            # preprocessed build, whose line numbers the receipts cite;
+            # commented there "linear extrapolation of
             # ssh to compute ww at the beginning of the next time-step"),
             # which ``stp_2D`` turns into
-            # ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0`` (stp2d.F90:149-153)
-            # immediately before ``CALL wzv`` (stp2d.F90:155).  In this array
+            # ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0`` (stp2d.F90:149-153,
+            # raw source) immediately before ``CALL wzv`` (stp2d.F90:155, raw
+            # source; the compiled build's own lines are in the receipt).  In
+            # this array
             # convention that guess is ``2*eta_now - eta_before``; at the
             # first step the extrapolation has never run, ``eta_before`` is
             # ``eta_now``, and the scale-factor term is exactly zero -- which
             # is what NEMO's own recorded ``ww`` shows on the VORTEX
             # vector-invariant card.
             # NEMO's extrapolation is arithmetic on two heights and carries
-            # NO freshwater term: stprk3.F90:217 is the whole statement.  The
+            # NO freshwater term: stprk3.F90:217 (raw) is the whole one.  The
             # leapfrog branch below folds emp in because ``ssh_nxt`` does.
             eta_after = jax.lax.optimization_barrier(
                 2.0 * eta_now - eta_before)

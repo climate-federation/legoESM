@@ -120,7 +120,7 @@ this round named the stretching term at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298` as a second
 place the ratio at the now level appears.  It does not: that statement reads
 the ratio at the AFTER and BEFORE levels, not the now level, and legoESM's
-answering pair is `ocean_pe_latlon_cgrid.py:1758-1759`.  Round 160 already
+answering pair is `ocean_pe_latlon_cgrid.py:1813-1814`.  Round 160 already
 measured the after-level pair inert, and the before level is the entry state's
 own sea surface height, which this round's entry bridge loads bit-identically
 from NEMO's restart.  So the stretching term is accounted for and Order B is

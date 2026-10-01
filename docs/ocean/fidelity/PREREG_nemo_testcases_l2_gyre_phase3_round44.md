@@ -12,9 +12,9 @@ calls vector-form `dyn_adv(kstp,Kmm,Kmm,...)` at `:466-472`.  Its active
 `ln_vortex_force=.false.` selects `ww` without `wsd` at `:107-115`.
 
 legoESM constructs the literal stage transport/`ww` as `_g2` before the
-stage-3 momentum call (`ocean_model_latlon_cgrid.py:6475-6513`), but the
+stage-3 momentum call (`ocean_model_latlon_cgrid.py:6508-6546`), but the
 momentum call does not pass `_g2[2]`: `tendencies()` reconstructs a separate
-ZAD `ww` at `ocean_pe_latlon_cgrid.py:4779-4807`.  This is the boundary to
+ZAD `ww` at `ocean_pe_latlon_cgrid.py:4783-4811`.  This is the boundary to
 measure, not yet an attribution.
 
 ## Frozen outcomes

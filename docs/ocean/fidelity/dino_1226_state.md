@@ -688,7 +688,7 @@ itself uses (`zu_frc_write_ledger.py` STEP 3, new code this session).
 (negated) convention when built from a raw NEMO-convention stress array
 (`dino.py:3383`: `tau_x=-forcing["tau_u_cell_2d"]`; sibling
 `nemo_recipe.py:768`: `tau_x=-utau`) — `surface_stress_faces` negates AGAIN
-(`ocean_pe_latlon_cgrid.py:3515-3516`) to recover the ocean-reaction stress
+(`ocean_pe_latlon_cgrid.py:3519-3520`) to recover the ocean-reaction stress
 the deposit actually uses. The `barotropic_forcing_centred` average
 (`0.5*(state.tau_x_prev + surface_forcing.tau_x)`,
 `ocean_model_latlon_cgrid.py:2860`) was therefore mixing OPPOSITE-sign

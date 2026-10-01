@@ -461,7 +461,7 @@ quantity at all).
    nemo_qco_wzv_operands` (literal), both reachable — confirmed by direct
    `grep`, both symbols AST-resolve and both have live callers
    (`ocean_model_latlon_cgrid.py:457,1154,5340` for the generic diagnostic;
-   `ocean_model_latlon_cgrid.py:5439` for the literal path). Gated by
+   `ocean_model_latlon_cgrid.py:5472` for the literal path). Gated by
    `state.py:2236 zad_qco_evaluation` / `:2225 wzv_call2_evaluation`, both
    default `"generic"`.
 2. **What do the certified cards run?** DINO's certified card
@@ -691,7 +691,7 @@ routine this row is about.
 
 ### M-01 (`stp_MLF`: `_leapfrog_step` vs `_nemo_mlf_step`)
 
-1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:9995
+1. **Duplicate present at HEAD?** Yes. `ocean_model_latlon_cgrid.py:10037
    _leapfrog_step` vs `:10379 _nemo_mlf_step`, dispatched at `:8938`/`:8949` on
    `outer_integrator in ("leapfrog", "nemo_mlf")` — both are real, wired
    dispatch values (multiple `raise` guards elsewhere reference both, e.g.
@@ -1127,7 +1127,7 @@ a test. Restoring the cap turns
 
 **REFUSED as a config flip: routing ORCA1 through the in-stage site.** The
 in-model BBL hook is built only inside the WS-RK3 tracer lane
-(`ocean_model_latlon_cgrid.py:6114`, under `elif _tti == "rk3_ws":`) and is
+(`ocean_model_latlon_cgrid.py:6147`, under `elif _tti == "rk3_ws":`) and is
 passed only to `_nemo_ws_rk3_tracer_pair_step`. ORCA1 resolves
 `tracer_time_integrator="euler"` (`run_omip_core2.py:7463`), whose branch has
 no BBL hook at all. So setting `bbl_adv_option=2` on ORCA1 — the "config-only
@@ -1279,7 +1279,7 @@ generic vertical-velocity diagnostic for three other lanes —
 `fidelity/box_heat_budget.py:310`. So the row cannot become OTHER_RECIPE
 either: LOCK/OVERFLOW/ORCA1 are NEMO cards and they resolve
 `wzv_call2_evaluation="generic"`, so a NEMO card still reaches the generic arm
-at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5473`).
+at the MLF call-2 site (`ocean_model_latlon_cgrid.py:5506`).
 
 **4. The second site is NEMO's own split, restated.** `wzv_call2_evaluation=
 "nemo_literal"` requires `zad_qco_evaluation="nemo_literal"`, which requires

@@ -10,7 +10,7 @@ NEMO's compiled stage clears `Krhs`, then calls advection/SBC
 `trazdf.f90:416-479` adds isoneutral K33 to the implicit matrix, while
 `:547-565` constructs content from Kbb tracer plus Kmm-weighted Krhs before the
 solve. legoESM constructs SBC/QSR rates at
-`ocean_model_latlon_cgrid.py:6224-6315`, adds GM/Redi to `T_mid/S_mid` at
+`ocean_model_latlon_cgrid.py:6257-6348`, adds GM/Redi to `T_mid/S_mid` at
 `:7474-7480`, but its later WS call restarts at `state.T/state.S` and the saved
 stage-2 result (`:7639-7677`). Only `stage_source_rates[2]` reaches the content
 statement (`:1905-1917`) passed to ZDF (`:8038-8150,10417-10438`). Therefore

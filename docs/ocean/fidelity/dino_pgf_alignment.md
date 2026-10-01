@@ -25,7 +25,7 @@ Config: recipe `nemo_dino_kamm_mlf`; NEMO `cfgs/DINO/RUN_20Y/namelist_cfg`,
 | 6 | horizontal stencil | 2-point difference × `r1_e1u` / `r1_e2v` | `gradient_x_cgrid` / `gradient_y_cgrid`: 2-point difference ÷ `R·dlon·cos(lat)` (`operators_latlon_cgrid.py:608-654`) | **MATCH** |
 | 7 | EOS | `ln_seos=T`, `eos_insitu_New_t` `np_seos` branch (`eosbn2.F90:290-301`) | `eos="nemo_seos"` → `nemo_seos_eos` (`eos.py:454-499`) — identical algebraic form | **MATCH** |
 | 8 | EOS coefficients | `a0=0.165, b0=7.6554e-1, lambda1=0.06, lambda2=0, mu1=1.4970e-4, mu2=0, nu=0` | `NemoSEOSConfig`: all seven identical (verified by instantiation) | **MATCH** |
-| 9 | density time level | `CALL eos(ts, Nnn, rhd, rhop)` at `stpmlf.F90:229`; `dyn_hpg(kstp, Nnn, ...)` at `:252` | `state.T`/`state.S` (now level) at `ocean_pe_latlon_cgrid.py:3773,3760` | **MATCH** |
+| 9 | density time level | `CALL eos(ts, Nnn, rhd, rhop)` at `stpmlf.F90:229`; `dyn_hpg(kstp, Nnn, ...)` at `:252` | `state.T`/`state.S` (now level) at `ocean_pe_latlon_cgrid.py:3777,3760` | **MATCH** |
 | 10 | evaluations per step | once (`stpmlf.F90:229`), used once | recomputed in BOTH `_step_impl` passes, but the Nbb pass's advective result is discarded (only `diss_incr_bb` survives) ⇒ the PGF that reaches the state is the Nnn one | **MATCH** in effect |
 | 11 | partial cells | DINO is **full-step z** (`ln_zco_nam=.true.`, `ln_zps_nam=.false.`, `usrdef_zgr.F90:90-92`); `zps_hde` does not exist in NEMO 5.0.2 at all | `masked_zco` → `OceanPartialCellCoordinate`, correction carried by the row-4 slope term | **MATCH** (no partial-cell correction is required on either side) |
 
@@ -65,7 +65,7 @@ table), **EOS** (coefficients exact), **PGF** (this table).
 The one confirmed defect standing is the **tracer-content leak**: legoESM drifts +8.6e-6
 relative in globally-integrated heat over 200 forcing-free steps where NEMO drifts
 +3.4e-16 — ten orders apart. Mechanism: the outer leapfrog combine adds a bare
-concentration increment (`ocean_model_latlon_cgrid.py:6957-6960`) instead of conserving
+concentration increment (`ocean_model_latlon_cgrid.py:6990-6993`) instead of conserving
 thickness-weighted content as NEMO does (`trazdf.F90:271-278`). Fix commissioned as
 `.claude/ralph_tracer_content_conservation_task.md`. Its expected magnitude (~9 mK over a
 3-yr run vs a ~0.15 K abyssal signal) does NOT obviously account for 12.9 Sv — if the fix

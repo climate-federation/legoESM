@@ -33,7 +33,7 @@ ZAD (`dynadv.F90:97-103`), vorticity/Coriolis
 (`dynvor.F90:143-179`), lateral friction (`dynldf.F90:79-115`), the
 KE-gradient+HPG group (`dynadv.F90:89-96`; `dynhpg.F90:117-133`), and the
 D06 accumulator (`stpmlf.F90:269-270,309-328`). The new coverage row binds
-the twin deposit (`ocean_pe_latlon_cgrid.py:3696-3761`) to NEMO's later
+the twin deposit (`ocean_pe_latlon_cgrid.py:3700-3765`) to NEMO's later
 surface-stress deposit (`dynzdf.F90:353-363`) and cannot own D03--D06.
 
 Every block changes to its own absolute checkout, uses checkout-first

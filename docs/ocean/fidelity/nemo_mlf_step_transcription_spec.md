@@ -96,7 +96,7 @@ Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendenc
 
 ## 4. Config surface
 
-**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6259-6338`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6166-6169`) — dispatch-hardening-compliant pattern to extend, not replace.
+**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6292-6371`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6166-6169`) — dispatch-hardening-compliant pattern to extend, not replace.
 
 **Proposed**: add `"nemo_mlf"` as a fourth literal:
 ```python

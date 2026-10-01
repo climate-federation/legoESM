@@ -36,13 +36,13 @@ Its two source readings were then checked independently:
   into the initial tendency (`ocean_model_latlon_cgrid.py:3938-3953`).  Its
   `_mom_pert_ws` replaces only u/v and reuses that bundle at every stage
   (`:4158-4183`); `tendencies` also reads eta from that unchanged state before
-  accepting the precomputed bundle (`ocean_pe_latlon_cgrid.py:4420-4439`).
+  accepting the precomputed bundle (`ocean_pe_latlon_cgrid.py:4424-4443`).
   This confirms frozen start-of-step T/S/eta in stages 2 and 3.
 * With adaptive-implicit vertical advection active, the canonical tendency
   path deliberately omits explicit vertical momentum advection
-  (`ocean_pe_latlon_cgrid.py:2729-2734,2700-2737`).  The WS path instead adds
+  (`ocean_pe_latlon_cgrid.py:2733-2738,2700-2737`).  The WS path instead adds
   one stage-3 vertical increment after the momentum program
-  (`ocean_model_latlon_cgrid.py:5133-5170`).  NEMO calls the full `dyn_adv`
+  (`ocean_model_latlon_cgrid.py:5166-5203`).  NEMO calls the full `dyn_adv`
   package in every stage at the sites above.  This confirms the second source
   difference.
 

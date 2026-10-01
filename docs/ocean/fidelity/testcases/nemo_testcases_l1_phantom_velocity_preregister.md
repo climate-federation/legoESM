@@ -60,7 +60,7 @@ Both are true; they are separable and were measured separately.
 
 **(i) legoESM lets a masked cell hold a nonzero `u`, and the operator that
 writes it is the WS-RK3 stage velocity update.**
-`ocean_model_latlon_cgrid.py:4999-5012` (`_replace_stage_mean`, the ONE stage
+`ocean_model_latlon_cgrid.py:5032-5045` (`_replace_stage_mean`, the ONE stage
 ladder, called at `:5103,:5120,:5139` for stages 1/2/3) applies
 `u_mask_3d = state.u_mask.data[..., jnp.newaxis]` (`:4066`) -- the **2-D**
 face mask broadcast over every level -- to
@@ -72,7 +72,7 @@ below-seabed column is EXACTLY constant -- 1 unique value over all 75 dry
 levels, `ptp = 0.0` -- i.e. a depth-mean broadcast, not an operator residue.
 
 **(ii) legoESM's UP3 curvature omits NEMO's `* umask` at its own point.**
-`ocean_pe_latlon_cgrid.py:4128-4147` (`_up3_reconstruct`) evaluates
+`ocean_pe_latlon_cgrid.py:4132-4151` (`_up3_reconstruct`) evaluates
 `(-far_pos + 5*adv_pos + 2*adv_neg)/6`, which is algebraically
 `0.5*(adv_pos + adv_neg) - (1/6)*curvature` with NEMO's `zlu_uu` at
 `umask = 1`.  NEMO zeroes that curvature when the upwind straddling face is

@@ -41,7 +41,7 @@ legoESM's one shared WS helper forms its stage-3 complete-FCT content and adds
 the stage-3 source at `ocean_model_latlon_cgrid.py:1992-2004`, returning both
 the content and its advection half at `:1918-1922`. The GYRE path calls that
 helper with the live stage transports and source tuple at
-`ocean_model_latlon_cgrid.py:7776-7819`. Its existing private content override
+`ocean_model_latlon_cgrid.py:7809-7852`. Its existing private content override
 acts later at `:8049-8052`, so it cannot certify the helper's own association.
 
 ## Four-arm JIT-native matrix and frozen falsifiers

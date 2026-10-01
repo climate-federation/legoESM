@@ -4533,6 +4533,39 @@ class LatLonCGridOceanModel:
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
         _mom_ti_for_ws = getattr(config, "momentum_time_integrator", "euler")
+        # NEMO's carried after-SSH slot belongs to the RK3 stage program: it is
+        # written by that program's end-of-step time-level rotation
+        # (stprk3.F90:217, raw source) and the leapfrog fills the same slot from
+        # continuity instead.  This is NOT an inference about which form a card
+        # should take -- the card STATES that -- it is a CONSISTENCY CHECK
+        # between two fields the card states, in the same shape as the rk3_ws
+        # pairing check immediately below, and it raises rather than quietly
+        # running a program that would read the slot without ever writing it.
+        if (getattr(config, "nemo_first_wzv_after_ssh", "")
+                == "rk3_extrapolated_carried"):
+            if _mom_ti_for_ws != "rk3_ws":
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' is "
+                    "NEMO's RK3 end-of-step extrapolation and only the RK3 "
+                    "stage program writes that slot; this card states "
+                    f"momentum_time_integrator={_mom_ti_for_ws!r}. Select "
+                    "rk3_ws, or state the after-SSH form that card's own "
+                    "time-stepping program leaves behind")
+            _post = [name for name, on in (
+                ("polar_filter.use_polar_filter",
+                 config.polar_filter.use_polar_filter),
+                ("freeze_floor", config.freeze_floor),
+                ("ew_cyclic_overlap",
+                 getattr(config, "ew_cyclic_overlap", False)),
+            ) if on]
+            if _post:
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' "
+                    "carries NEMO's own after-SSH slot, built from the sea "
+                    "surface the step produced; "
+                    f"{_post} rewrite that sea surface AFTER the step, so the "
+                    "slot the next step reads would not match the height it "
+                    "enters with. NEMO applies none of these")
         if ((config.tracer_time_integrator == "rk3_ws")
                 != (_mom_ti_for_ws == "rk3_ws")):
             raise ValueError(
@@ -9404,6 +9437,15 @@ class LatLonCGridOceanModel:
             # checks have completed, preserving a WRITE-only diagnostic.
             state_new = _nemo_ws_pre_implicit_state
 
+        # NEMO's after-SSH slot is written HERE, not in the compiled step
+        # wrapper, because the wrapper is not the only way in: the OMIP scan
+        # driver, the SPMD lane and the OMIP2 applicator all call _step_impl
+        # directly, and the READ (in the wzv call below the tendency) fires on
+        # every one of them.  A write that reached fewer callers than the read
+        # would hand those drivers a frozen slot with no error.  Before the
+        # storage cast, so the slot is cast with every other leaf and a scan
+        # carry's dtypes stay stable.
+        state_new = self._carry_nemo_rk3_after_ssh(state, state_new)
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
@@ -12226,7 +12268,7 @@ class LatLonCGridOceanModel:
             new_state = self._apply_freeze_floor(new_state)
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
-        return self._carry_nemo_rk3_after_ssh(state, new_state)
+        return new_state
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
@@ -12368,7 +12410,7 @@ class LatLonCGridOceanModel:
         # post-step projection (static config-bool gate; default off).
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
-        return self._carry_nemo_rk3_after_ssh(state, new_state)
+        return new_state
 
     def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):
         """Leave NEMO's next-step after-SSH guess in the state it hands on.

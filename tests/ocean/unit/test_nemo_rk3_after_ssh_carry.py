@@ -259,3 +259,36 @@ def test_the_scan_seeder_is_unreachable_on_this_card_on_both_arms(arms):
         messages.append(str(caught.value).splitlines()[0])
     assert messages[0] == messages[1], (
         "the two arms fail the seeder differently, so this round changed it")
+
+
+def test_the_carried_form_is_refused_on_a_program_that_cannot_write_the_slot():
+    """The slot is written by NEMO's RK3 end-of-step rotation, and only by it.
+
+    A card that states the carried form with a different time-stepping program
+    would READ the slot on every step and never WRITE one, which is the silent
+    fallback this campaign keeps being bitten by.  It raises instead.  This is
+    a consistency check between two fields the card STATES, not an inference
+    that picks a form for it.
+    """
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
+        momentum_time_integrator="euler")
+    with pytest.raises(ValueError, match="only the RK3 stage program"):
+        LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+
+
+def test_the_carried_form_is_refused_with_a_post_step_sea_surface_rewrite():
+    """The slot is built from the sea surface the step produced.  A projection
+    that rewrites that sea surface AFTER the step would leave the next step
+    reading a slot that does not match the height it enters with.  NEMO
+    applies none of these, so the combination is refused rather than silently
+    producing a slot built on a height nothing ever used."""
+    card = build_nemo_testcase_card(CASE)
+    base = card.recipe.model_config._replace(
+        nemo_first_wzv_after_ssh="rk3_extrapolated_carried")
+    with pytest.raises(ValueError, match="freeze_floor"):
+        LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                              base._replace(freeze_floor=True))
+    # ... and the same card without the projection constructs.
+    LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, base)

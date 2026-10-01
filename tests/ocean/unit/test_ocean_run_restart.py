@@ -1417,22 +1417,49 @@ def test_the_rk3_after_ssh_slot_round_trips(tmp_path):
                                   np.asarray(carried))
 
 
-def test_a_pre_format_5_archive_is_refused_by_name(tmp_path):
-    """Non-vacuity: the refusal must name the slot, not fall through to the
-    generic 'the state layout changed' message."""
+def _format_4_copy(path, tmp_path):
+    """Rewrite an archive as format 4 with the new slot absent from it."""
     import numpy as _np
 
-    from legoesm.ocean.restart import load_run_restart, save_run_restart
-
-    _, _, state = _base_state()
-    path = tmp_path / "old.npz"
-    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
     with _np.load(path, allow_pickle=False) as f:
         payload = {k: f[k] for k in f.files}
     payload["_format"] = _np.asarray(4)
     inventory = json.loads(str(payload["_inventory"]))
     inventory.pop("eta_rk3_after")
     payload["_inventory"] = _np.asarray(json.dumps(inventory))
-    _np.savez(path, **payload)
+    out = tmp_path / "old.npz"
+    _np.savez(out, **payload)
+    return out
+
+
+def test_a_pre_format_5_archive_still_loads_for_a_run_that_never_reads_it(
+        tmp_path):
+    """Every card today: the slot is never read, so the absence loses nothing
+    and the archive must keep loading exactly as it did before the field
+    existed."""
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    old = _format_4_copy(path, tmp_path)
+    got, _, meta = load_run_restart(old, _base_state()[2], grid_type="latlon")
+    assert meta["format"] == 4
+    assert got.eta_rk3_after is None
+    np.testing.assert_array_equal(np.asarray(got.eta.data),
+                                  np.asarray(state.eta.data))
+
+
+def test_a_pre_format_5_archive_is_refused_by_name_for_a_run_that_reads_it(
+        tmp_path):
+    """Non-vacuity: the refusal must name the slot, and it must NOT fire on
+    the run that does not read it (the test above is that half)."""
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    old = _format_4_copy(path, tmp_path)
     with pytest.raises(ValueError, match="eta_rk3_after"):
-        load_run_restart(path, _base_state()[2], grid_type="latlon")
+        load_run_restart(old, _base_state()[2], grid_type="latlon",
+                         carries_rk3_after_ssh=True)
