@@ -303,12 +303,20 @@ def test_uncarried_tracer_tendency_dropped_and_passenger_refused(moist):
     out = col.step(col.from_bundle(ic), DT, physics_fn=ice)
     _assert_bundle_equal(out.native, dyn.step(ic, DT))
 
+    # a tendency on a PASSENGER slot (nwat = 3 here, q_p is slot 3) is
+    # applied and renormalised like FV3's other mass tracers (:324/:352)
+    # and moves no layer mass
     def passenger(state, mesh, coord, phys_state=None, forcing=None):
         t = _zero_physics(state, mesh, coord)
         return t._replace(tracer_tendencies={
-            "q_p": _fld(state.T, jnp.zeros_like(state.T.data), "q_p")})
-    with pytest.raises(ValueError, match="nwat"):
-        col.step(col.from_bundle(ic), DT, physics_fn=passenger)
+            "q_p": _fld(state.T, jnp.full_like(state.T.data, 1e-6), "q_p")})
+    out = col.step(col.from_bundle(ic), DT, physics_fn=passenger)
+    ref = dyn.step(ic, DT)
+    np.testing.assert_array_equal(np.asarray(out.native["state"]["delp"]),
+                                  np.asarray(ref["state"]["delp"]))
+    np.testing.assert_allclose(
+        np.asarray(out.native["q"][3])[:, CI, CI],
+        (np.asarray(ref["q"][3]) + DT * 1e-6)[:, CI, CI], rtol=1e-13, atol=0)
 
 
 def test_refuses_water_tendencies_on_the_dry_deck(dry):
@@ -526,8 +534,8 @@ def test_driver_column_lane_refusals(tmp_path):
                         "MPAS-lane knob|smoothing"),
                        (dict(held_suarez_forcing=True), "hswf"),
                        (dict(topography="gaussian"), "topography"),
-                       (dict(microphysics="morrison"), "nwat=6"),
-                       (dict(convection="zhang_mcfarlane"), "nwat=6")):
+                       (dict(convection="kuo"), "grid operator"),
+                       (dict(convection="kain_fritsch"), "grid operator")):
         drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
         with pytest.raises(ValueError, match=frag):
             drv.setup()
@@ -739,3 +747,120 @@ def test_driver_column_lane_restart_rebuilds_terrain_from_the_file(tmp_path):
     got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
     diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
     assert not diffs, f"terrain restart is NOT bitwise: {diffs}"
+
+
+# ---------------------------------------------------------------------
+# nwat = 6: ice / snow / graupel + number passengers through the contract
+# ---------------------------------------------------------------------
+
+FULL_NAMES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
+
+
+@pytest.mark.parametrize("names,ok", [
+    (FULL_NAMES, True),
+    (("q_v", "q_c", "q_r"), True),
+    (("q_v", "q_c", "q_r", "q_p"), True),              # passenger after 3
+    (("q_v", "q_c", "q_r", "q_i"), False),             # nwat = 4
+    (("q_v", "q_c", "q_r", "N_c", "q_i"), False),      # water after passenger
+    (("q_v", "q_r", "q_c"), False),                    # out of FV3 order
+    (("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "q_i"), False),   # dup
+])
+def test_column_model_tracer_slot_contract(grid, names, ok):
+    """The nwat block reads the leading slots by POSITION: the names must
+    be the FV3 water species in FV3 order (3 or 6 of them), passengers
+    after; anything else would enter the mass sum as the wrong species
+    or fall out of it silently."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, _ = _model(grid, moist=True)
+    if ok:
+        col = FV3DuoColumnModel(dyn, tracer_names=names)
+        assert col.nwat == (6 if "q_g" in names else 3)
+    else:
+        with pytest.raises(ValueError, match="water species"):
+            FV3DuoColumnModel(dyn, tracer_names=names)
+
+
+def _ice_ic(dyn):
+    """Nine slots: the moist IC's vapour, cloud and rain, seeded ice /
+    snow / graupel and number concentrations (positive so the sinks
+    below keep every species non-negative)."""
+    ic = _saturated_rainy(dyn.dcmip16_initial_state(n_tracers=3))
+    q = list(ic["q"][:3])
+    q += [jnp.full_like(q[0], v) for v in (1e-3, 2e-3, 5e-4)]
+    q += [jnp.full_like(q[0], v) for v in (1e8, 1e5, 1e4)]
+    return {**ic, "q": q}
+
+
+def test_ice_tendencies_move_the_layer_mass_through_the_nwat6_block(grid):
+    """A synthetic scheme that sublimates snow into vapour (mass-neutral),
+    sediments graupel out of every layer (a mass SINK) and nucleates ice
+    while adjusting N_i: the column's dry air is invariant, its total
+    water changes by exactly the six-species tendency integral, the
+    passengers take their tendency and the renormalisation, and a
+    warm-rain accounting (the three leading species only) would NOT
+    close -- the defect the nwat=6 block removes."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, _ = _model(grid, moist=True)
+    col = FV3DuoColumnModel(dyn, tracer_names=FULL_NAMES)
+    ic = _ice_ic(dyn)
+    dq = {"q_v": 2e-7, "q_s": -2e-7, "q_g": -3e-7, "q_i": 1e-7, "N_i": 5.0}
+
+    def physics(state, mesh, coord, phys_state=None, forcing=None):
+        z = jnp.zeros_like(state.u.data)
+        return _tend(state, z, z, jnp.zeros_like(state.T.data), tracers={
+            nm: _fld(state.tracers[nm], jnp.full_like(state.T.data, v), nm)
+            for nm, v in dq.items()})
+
+    st0 = col.from_bundle(ic)
+    out = col.step(st0, DT, physics_fn=physics)
+    # the dynamics-only step is the reference the physics increment sits on
+    post = dyn.step(ic, DT)
+    delp0 = np.asarray(post["state"]["delp"])[:, CI, CI]
+    q0 = [np.asarray(a)[:, CI, CI] for a in post["q"]]
+    delp1 = np.asarray(out.native["state"]["delp"])[:, CI, CI]
+    q1 = [np.asarray(a)[:, CI, CI] for a in out.native["q"]]
+    w0, w1 = sum(q0[:6]), sum(q1[:6])
+    np.testing.assert_allclose(delp1 * (1.0 - w1), delp0 * (1.0 - w0),
+                               rtol=1e-12, atol=0)
+    dsum = sum(v for k, v in dq.items() if k in FULL_NAMES[:6])
+    np.testing.assert_allclose(delp1 * w1 - delp0 * w0, delp0 * DT * dsum,
+                               rtol=1e-10, atol=0)
+    assert dsum < 0.0                                   # a net sink
+    assert np.abs(delp1 - delp0).max() > 0.0
+    # warm-rain accounting would see only +2e-7 (vapour): NOT closed
+    d3 = sum(v for k, v in dq.items() if k in FULL_NAMES[:3])
+    assert not np.allclose(delp1 * w1 - delp0 * w0, delp0 * DT * d3,
+                           rtol=1e-6, atol=0)
+    # passengers: updated and renormalised on the new layer mass
+    ps_dt = delp1 / delp0
+    np.testing.assert_allclose(q1[8], (q0[8] + DT * dq["N_i"]) / ps_dt,
+                               rtol=1e-13, atol=0)
+    np.testing.assert_allclose(q1[6], q0[6] / ps_dt, rtol=1e-13, atol=0)
+    # the view carries the nine names, each on its native slot (a jitted
+    # dict comes back with sorted keys, so compare by NAME, not order)
+    assert set(out.tracers) == set(FULL_NAMES)
+    for i, nm in enumerate(FULL_NAMES):
+        np.testing.assert_array_equal(
+            np.asarray(out.tracers[nm].data).reshape(6, N, N, KM),
+            np.asarray(out.native["q"][i])[:, CI, CI], err_msg=nm)
+    assert out.tracers["N_i"].units == "1/kg"
+    assert out.tracers["q_g"].units == "kg/kg"
+    assert all(np.isfinite(np.asarray(a)).all() for a in out.native["q"])
+
+
+def test_driver_column_lane_accepts_ice_microphysics_with_nine_slots(tmp_path):
+    """The factory builds the column model on the driver's own tracer
+    registry: an ice scheme gets the six water species + numbers, and
+    the run starts with one slot per name (no silent 3-slot bundle)."""
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
+                      microphysics="morrison")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    assert drv.model.tracer_names == FULL_NAMES and drv.model.nwat == 6
+    assert drv.run() == "COMPLETED"
+    assert len(drv.state.native["q"]) == 9
+    assert all(np.isfinite(np.asarray(a)).all() for a in drv.state.native["q"])
+    assert set(drv.state.tracers) == set(FULL_NAMES)

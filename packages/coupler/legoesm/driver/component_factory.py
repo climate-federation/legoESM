@@ -532,17 +532,29 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     if config.radiation != "none":
         refused.append(f"radiation={config.radiation!r} (ozone/aerosol/solar "
                        "boundary regrids are M6)")
-    # The column model's mass block is FV3's nwat=3 warm-rain block; a
-    # scheme that moves water into ice / snow / graupel would have that
-    # water DROPPED (codex 2026-09-26: Morrison nucleation takes vapour
-    # and hands ice, which no slot receives).  Until the nwat=6 block is
-    # ported, only warm-rain microphysics and no convection.
-    if config.microphysics not in ("none", "kessler"):
-        refused.append(f"microphysics={config.microphysics!r} (ice species; "
-                       "the nwat=6 mass block is not ported)")
+    # The column model's mass block is FV3's nwat block on the slot list
+    # the driver's tracer registry names (3 warm-rain species, or the six
+    # water species + numbers for an ice scheme): every registered tracer
+    # takes its tendency and moves the layer mass (fv_update_phys
+    # :324/:335/:352, moist_cp case(6)).  A scheme whose tendencies
+    # target a tracer the registry does not carry is refused by the
+    # registry's own slot validation below.
+    # Convection schemes that READ A GRID OPERATOR are refused by trait:
+    # the column mesh carries no edge topology, so the moisture-
+    # convergence operator and the resolved-w diagnostic return None,
+    # which Kuo turns into a zero source (an inert scheme that runs,
+    # codex 2026-09-30) and Kain-Fritsch needs concretely.  Tiedtke /
+    # Bechtold engage their internal saturation-deficit proxy on None
+    # (the unified pipeline's own degrade path) and are admitted.
     if config.convection != "none":
-        refused.append(f"convection={config.convection!r} (detrained ice; "
-                       "the nwat=6 mass block is not ported)")
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits)
+        _tr = convection_scheme_traits(config.convection)
+        if _tr.is_simple_mc_consumer or _tr.is_w_grid_consumer:
+            refused.append(
+                f"convection={config.convection!r} (reads a grid operator "
+                f"-- moisture convergence / resolved w -- the column mesh "
+                f"has no edge topology for; it would run inert)")
     # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
     # duo reads none of them, so a non-default value would be inert
     d_def = type(config.dycore)()
@@ -560,6 +572,12 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
             "fv3_duo column lane cannot honour: " + "; ".join(refused))
     moist = any(getattr(config, k) != "none"
                 for k in ("microphysics", "convection", "turbulence"))
+    from legoesm.driver.physics_pipeline import (
+        moisture_registry_for, validate_microphysics_tracer_slots)
+    registry = moisture_registry_for(config.microphysics)
+    validate_microphysics_tracer_slots(
+        config.microphysics, registry.n_tracers,
+        context="fv3_duo column lane tracer slots")
     bundle = create_fv3_duo_grid(gc.resolution)
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
@@ -567,7 +585,7 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     dyn = FV3DuoDynamicsModel(
         bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
                              storage_dtype="float64", moist=moist, eta=eta))
-    return FV3DuoColumnModel(dyn)
+    return FV3DuoColumnModel(dyn, tracer_names=registry.names)
 
 
 def create_atmosphere_dycore(

@@ -19,8 +19,8 @@ Every constant is IMPORTED from the NumPy twin rather than retyped.
 WHAT IS PORTED, AND WHAT IS NOT
 -------------------------------
 The same scope as the NumPy lane, and no more.  ``ppm_profile`` /
-``ppm_limiters`` / ``steepz`` (``kord <= 7``), ``mapn_tracer``
-(``nq > 5``), ``remap_z`` / ``rst_remap`` / ``mappm``,
+``ppm_limiters`` / ``steepz`` (``kord <= 7``), ``remap_z`` / ``rst_remap``
+/ ``mappm``,
 ``compute_total_energy`` / ``pkez`` are NOT ported here either, and every
 guard that refuses them raises on the SAME condition with the same
 exception type as the NumPy lane: :func:`ppm_profile_is_unported` is
@@ -900,8 +900,14 @@ def _build_q4(q1, pe1, km: int):
     return q4, dp1
 
 
-def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
-    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied.
+def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None, *,
+            mapn: bool = False):
+    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied;
+    ``mapn=True`` is :1795-1836 (``mapn_tracer``): the SAME integration
+    with that routine's product association (``fac1 = 0.5*(pr+pl)``
+    first, then ``(a4+a3-a2)*fac1``), a rounding-level difference from
+    ``map1_q2``'s ``0.5*(...)*(pr+pl)``.  Static: it selects which
+    expression is traced.
 
     THE hardest node of the port.  Structure, stated explicitly because
     every part of it is load-bearing:
@@ -1012,13 +1018,24 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
 
         # :1421-1423 -- entire target cell inside source cell l.
         pr = (pe2kp1 - pe1_l) / dpl_safe
-        q_in = (a2l + 0.5 * (a6l + a3l - a2l) * (pr + pl)
-                - a6l * R3 * (pr * (pr + pl) + pl ** 2))
+        if mapn:                                         # :1808-1813
+            fac1 = pr + pl
+            fac2 = R3 * (pr * fac1 + pl * pl)
+            q_in = a2l + (a6l + a3l - a2l) * (0.5 * fac1) - a6l * fac2
+        else:
+            q_in = (a2l + 0.5 * (a6l + a3l - a2l) * (pr + pl)
+                    - a6l * R3 * (pr * (pr + pl) + pl ** 2))
 
         # :1428-1430 -- the fractional head of a spanning cell.
-        qsum0 = ((pe1_r - pe2k)
-                 * (a2l + 0.5 * (a6l + a3l - a2l) * (1.0 + pl)
-                    - a6l * (R3 * (1.0 + pl * (1.0 + pl)))))
+        if mapn:                                         # :1818-1824
+            fac1 = 1.0 + pl
+            fac2 = R3 * (1.0 + pl * fac1)
+            qsum0 = ((pe1_r - pe2k)
+                     * (a2l + (a6l + a3l - a2l) * (0.5 * fac1) - a6l * fac2))
+        else:
+            qsum0 = ((pe1_r - pe2k)
+                     * (a2l + 0.5 * (a6l + a3l - a2l) * (1.0 + pl)
+                        - a6l * (R3 * (1.0 + pl * (1.0 + pl)))))
 
         # :1431-1444 -- walk m = l+1 .. km, whole layers then the last
         # partial one.  Sequential accumulation, ascending m.
@@ -1142,6 +1159,30 @@ def map1_q2(pe1, q1, pe2, dp2, km: int, kn: int, iv: int, kord: int,
     q4 = scalar_profile(q4, dp1, km, iv, kord, q_min, qs=qs)
     q2, ok = _rezone(q4, dp1, pe1, pe2, km, kn, dp2=dp2)
     return (q2, ok) if return_ok else q2
+
+
+def mapn_tracer(pe1, q1: list, pe2, dp2, km: int, kords: list,
+                q_min: float) -> list:
+    """fv_mapz.F90:1758-1848 -- the nq > 5 tracer remap (:327), the JAX
+    twin of :func:`fv3_native_mapz.mapn_tracer`: per tracer
+    ``scalar_profile`` (always, ``iv=0``, its own ``kord``) then
+    :func:`_rezone` with ``mapn=True``.  The tracers share only the
+    edges, so this is the per-tracer routine applied in turn (a Python
+    loop over nq <= 9; each is one scan chain).  ``fill`` is not ported
+    (the lane refuses it)."""
+    out = []
+    if len(q1) != len(kords):
+        raise ValueError(f"mapn_tracer: {len(q1)} tracers but {len(kords)} "
+                         "kord entries (zip would silently drop tracers)")
+    for qt, kord in zip(q1, kords):
+        pe1_, qt_, pe2_ = _map_common(pe1, qt, pe2, km, km, "mapn_tracer")
+        dp2_ = jnp.asarray(dp2)
+        _require_f64_jax("mapn_tracer", {"dp2": dp2_})
+        q4, dp1 = _build_q4(qt_, pe1_, km)
+        q4 = scalar_profile(q4, dp1, km, 0, kord, q_min)
+        q2, _ok = _rezone(q4, dp1, pe1_, pe2_, km, km, dp2=dp2_, mapn=True)
+        out.append(q2)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1341,10 +1382,6 @@ def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
             "do_sat_adj / do_inline_mp / do_adiabatic_init: the fast "
             "saturation-adjustment and inline-MP blocks (fv_mapz.F90:"
             "584-625, 748-820, 1010-1078) are NOT ported.")
-    if nq > 5:
-        raise NotImplementedError(
-            f"nq={nq} > 5 selects mapn_tracer (fv_mapz.F90:327), which is "
-            f"NOT ported. The reference deck has nr=2 (ncnst=3, dnats=1).")
 
 
 def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
@@ -1617,12 +1654,19 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
     ptw = unpad1(map_scalar(peln1, pad1(ptw), pn2, km, km, 1,
                             abs_kord_tm, T_MIN))
 
-    # :330-343 -- one tracer at a time (nq <= 5 on this lane).
-    q_out = []
-    for iq in range(nq):
-        qw = _ijk_cols(q[iq][ia:ia + n, ia:ia + n, :])
-        q_out.append(unpad1(map1_q2(pe1, pad1(qw), pe2, dp2, km, km, 0,
-                                    kords_tr[iq], 0.0)))     # :335 literal 0.
+    # :327-343 -- nq > 5 through mapn_tracer (:328), else one tracer at
+    # a time (:332); both with the literal 0. q_min
+    if nq > 5:
+        qws = [pad1(_ijk_cols(q[iq][ia:ia + n, ia:ia + n, :]))
+               for iq in range(nq)]
+        q_out = [unpad1(a) for a in mapn_tracer(
+            pe1, qws, pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0)]
+    else:
+        q_out = []
+        for iq in range(nq):
+            qw = _ijk_cols(q[iq][ia:ia + n, ia:ia + n, :])
+            q_out.append(unpad1(map1_q2(pe1, pad1(qw), pe2, dp2, km, km, 0,
+                                        kords_tr[iq], 0.0)))  # :335 literal 0.
 
     ww = None
     if not hydrostatic:

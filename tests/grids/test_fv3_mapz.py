@@ -1413,9 +1413,14 @@ _L2E_FIELDS = ("pe", "peln", "pk", "pkz", "delp", "pt", "u", "v", "ps",
                "omga")
 
 
-def _tracers(face, scales=(1e-3, 4e-4), phases=(1.4, 0.3)):
+def _tracers(face, scales=(1e-3, 4e-4), phases=(1.4, 0.3), ntracer=None):
     n, ng, km = face["n"], face["ng"], face["km"]
     ia, m_a = ng, n + 2 * ng
+    if ntracer is not None and ntracer > len(scales):
+        # distinct amplitude and vertical phase per extra tracer, so a
+        # slot mix-up in the nq > 5 arm cannot hide behind symmetry
+        scales = tuple(scales) + tuple(1e-3 / (2 + i) for i in range(ntracer - len(scales)))
+        phases = tuple(phases) + tuple(0.3 + 0.37 * i for i in range(ntracer - len(phases)))
     out = []
     for scale, phase in zip(scales, phases):
         qq = np.zeros((m_a, m_a, km), dtype=np.float64)
@@ -1436,7 +1441,7 @@ def _run_driver_both(make_face, ntracer=2, **kw):
     for k in _L2E_FIELDS:
         if k in face_n:
             assert np.array_equal(face_n[k], face_j[k]), k
-    q_n = _tracers(face_n)[:ntracer]
+    q_n = _tracers(face_n, ntracer=ntracer)[:ntracer]
     q_j = [np.array(x, copy=True) for x in q_n]
     before = {k: np.array(v, copy=True) for k, v in face_n.items()
               if isinstance(v, np.ndarray)}
@@ -1683,14 +1688,116 @@ def test_driver_jax_refuses_every_unported_lane(override, needle, ntracer):
         l2e_j(**face, q=tr)
 
 
-def test_driver_jax_refuses_more_than_five_tracers():
-    face = _face()[0]
-    m_a = face["n"] + 2 * face["ng"]
-    tr = [np.zeros((m_a, m_a, face["km"]), dtype=np.float64)
-          for _ in range(6)]
-    face["kord_tr"] = [9] * 6            # the fixture already carries one
-    with pytest.raises(NotImplementedError, match="mapn_tracer"):
-        l2e_j(**face, q=tr)
+# ---------------------------------------------------------------------
+# mapn_tracer (nq > 5, fv_mapz.F90:327): the nine-slot ice decks
+# ---------------------------------------------------------------------
+
+def _mapn_args(nq=7):
+    pe1, q1, pe2, dp2, _ = _map_args("map1_q2", km=KMP)
+    qs = [q1 * (1.0 + 0.13 * i) + 3e-4 * i for i in range(nq)]
+    return pe1, qs, pe2, dp2
+
+
+def test_mapn_tracer_jax_matches_numpy_lane():
+    """The JAX twin against the NumPy authority (the literal Fortran
+    transcription), per tracer, at the map1_q2 class.  Mixed kords, so
+    a port reading kords[0] for every tracer is caught."""
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    kords = [9, 10, 9, 11, 9, 12, 9][:len(qs)]
+    ref = mapn_n(pe1, [np.array(a, copy=True) for a in qs], pe2, dp2, KMP,
+                 kords, 0.0)
+    got = mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+                 jnp.asarray(pe2), jnp.asarray(dp2), KMP, kords, 0.0)
+    for iq, (a, b) in enumerate(zip(got, ref)):
+        # same class as map1_q2 (MEASURED 2.2e-16 there; bound x10)
+        gate_scalar(f"mapn_tracer q[{iq}]", _rel(np.asarray(a)[:, 1:],
+                                                 b[:, 1:]), 2.3e-15)
+
+
+def test_mapn_tracer_agrees_with_map1_q2_per_tracer_at_rounding_level():
+    """mapn_tracer is the per-tracer remap with the products associated
+    as :1808-1824 write them (fac1 = 0.5*(pr+pl) first): equal to
+    map1_q2 in exact arithmetic, so a wrong fac1/fac2 in the mapn branch
+    fails this bound.  Well-posed only because kord = 9 > 7: both
+    routines then take scalar_profile (:1708 dispatches ppm_profile
+    below 8, which this lane refuses), so the limiter is shared and only
+    the integration's association differs.  MEASURED on this fixture:
+    the two associations agree BITWISE (0.0), so no positive lower bound
+    is asserted -- that the mapn arm ran is pinned by the dispatch test
+    below, not here."""
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    got = mapn_n(pe1, [np.array(a, copy=True) for a in qs], pe2, dp2, KMP,
+                 [9] * len(qs), 0.0)
+    worst = 0.0
+    for a, q in zip(got, qs):
+        ref = map1_q2_n(pe1, np.array(q, copy=True), pe2, dp2, KMP, KMP, 0, 9,
+                        0.0)
+        worst = max(worst, _rel(a[:, 1:], ref[:, 1:]))
+    assert worst < 1e-14, worst
+
+
+@pytest.mark.parametrize("nq, bound, cut", [
+    (9, "mapn_tracer", "map1_q2"),
+    (2, "map1_q2", "mapn_tracer"),
+])
+def test_l2e_tracer_arm_binds_on_nq_in_both_lanes(monkeypatch, nq, bound, cut):
+    """:327 dispatch: nq > 5 runs mapn_tracer and NOTHING else; nq <= 5
+    runs map1_q2 and NOTHING else -- on EACH lane, counted per lane.
+    Both arms are wrapped by per-lane spies, so a lane calling the wrong
+    arm, both arms, or neither (a pre-bound alias) fails here, and a
+    raise in one lane cannot mask the other."""
+    import legoesm.core.fv3_mapz as mj
+    import legoesm.core.fv3_native_mapz as mn
+    calls = {}
+
+    def spy(mod, name):
+        real = getattr(mod, name)
+
+        def wrapped(*a, **k):
+            calls[(mod.__name__, name)] = calls.get((mod.__name__, name), 0) + 1
+            return real(*a, **k)
+        monkeypatch.setattr(mod, name, wrapped)
+    for mod in (mn, mj):
+        spy(mod, "map1_q2")
+        spy(mod, "mapn_tracer")
+    ref, out, _ = _run_driver_both(
+        lambda: {**_face()[0], "kord_tr": [9] * nq}, ntracer=nq)
+    assert len(out.q) == nq and len(ref["q"]) == nq
+    # the NumPy lane calls per j-row (:300 loop), the JAX lane once per
+    # face -- so "ran" is > 0, not an exact count
+    for mod in (mn, mj):
+        assert calls.get((mod.__name__, bound), 0) > 0, (mod.__name__, calls)
+        assert calls.get((mod.__name__, cut), 0) == 0, (mod.__name__, calls)
+
+
+def test_mapn_tracer_refuses_a_kord_list_of_the_wrong_length():
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    with pytest.raises(ValueError, match="kord entries"):
+        mapn_n(pe1, qs, pe2, dp2, KMP, [9] * (len(qs) - 1), 0.0)
+    with pytest.raises(ValueError, match="kord entries"):
+        mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+               jnp.asarray(pe2), jnp.asarray(dp2), KMP,
+               [9] * (len(qs) - 1), 0.0)
+
+
+def test_driver_jax_matches_numpy_lane_nine_tracers():
+    """nq = 9 (the six water species + three numbers of an ice deck):
+    JAX vs NumPy at the hydrostatic gate's class, every tracer.  Which
+    arm ran is pinned by test_l2e_tracer_arm_binds_on_nq_in_both_lanes,
+    not by this parity (the arms agree at rounding level)."""
+    ref, out, before = _run_driver_both(
+        lambda: {**_face()[0], "kord_tr": [9] * 9}, ntracer=9)
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "hydro nq=9")
+    assert len(out.q) == 9 and len(ref["q"]) == 9
+    for iq, qn in enumerate(ref["q"]):
+        gate_scalar(f"l2e nq=9 q[{iq}]", _rel(np.asarray(out.q[iq]), qn),
+                    5.5e-15)
+        assert not np.array_equal(qn, before["q"][iq]), iq   # remapped
 
 
 def test_driver_jax_guards_do_not_over_refuse_a_non_last_step_call():

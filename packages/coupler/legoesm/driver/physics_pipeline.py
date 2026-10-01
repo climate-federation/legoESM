@@ -3927,6 +3927,21 @@ def required_microphysics_tracer_slots(
         ) from exc
 
 
+def moisture_registry_for(scheme_name: str, scheme_config=None):
+    """The driver's tracer registry for a microphysics scheme: the
+    warm-rain trio unless the scheme needs the ice/number slots, then the
+    full nine.  ONE selector for the MPAS lane's driver and the fv3_duo
+    column model's slot list, so both carry the same names in the same
+    order (the duo's q_<i> is a slot index)."""
+    from legoesm.core.tracers import (
+        make_full_moisture_registry, make_moisture_registry)
+    warm = make_moisture_registry()
+    if required_microphysics_tracer_slots(scheme_name, scheme_config) \
+            > warm.n_tracers:
+        return make_full_moisture_registry()
+    return warm
+
+
 def validate_microphysics_tracer_slots(
     scheme_name: str,
     have_slots: int,

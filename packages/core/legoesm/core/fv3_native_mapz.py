@@ -30,7 +30,8 @@ Not ported, each because it is UNREACHABLE rather than merely unused:
     this lane is 9.  :func:`ppm_profile_is_unported` turns that into a
     raise rather than a silent fall-through to the wrong builder.
 ``mapn_tracer``
-    guarded by ``nq > 5`` (``fv_mapz.F90:327``); this deck has nq = 2.
+    (``nq > 5``, ``fv_mapz.F90:327``) ported 2026-09-30 for the nine-slot
+    ice decks -- without its ``fill`` arm, which the lane refuses.
 ``remap_z``/``rst_remap``/``mappm``
     IC / restart / hybrid-z routines, off the timestep path.
 ``compute_total_energy``/``pkez``
@@ -595,8 +596,13 @@ def _build_q4(q1: np.ndarray, pe1: np.ndarray, km: int):
 
 def _rezone(q4: np.ndarray, dp1: np.ndarray, pe1: np.ndarray,
             pe2: np.ndarray, km: int, kn: int,
-            dp2: np.ndarray | None = None) -> np.ndarray:
-    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied.
+            dp2: np.ndarray | None = None, *,
+            mapn: bool = False) -> np.ndarray:
+    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied;
+    ``mapn=True`` is :1795-1836 (``mapn_tracer``), the SAME integration
+    with the products associated as that routine writes them --
+    ``fac1 = 0.5*(pr+pl)`` FIRST, then ``(a4+a3-a2)*fac1`` -- which is a
+    rounding-level difference from ``map1_q2``'s ``0.5*(...)*(pr+pl)``.
 
     ``k0`` is a monotone search hint carried ACROSS the target k-loop; it
     is NOT reset per k.  The two cases are written differently on purpose:
@@ -626,25 +632,47 @@ def _rezone(q4: np.ndarray, dp1: np.ndarray, pe1: np.ndarray,
                 if pe2[i, k + 1] <= pe1[i, ell + 1]:
                     # entire target cell inside source cell ell
                     pr = (pe2[i, k + 1] - pe1[i, ell]) / dp1[i, ell]
-                    q2[i, k] = (q4[2, i, ell]
-                                + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
-                                         - q4[2, i, ell]) * (pr + pl)
-                                - q4[4, i, ell] * R3
-                                * (pr * (pr + pl) + pl ** 2))
+                    if mapn:                                 # :1808-1813
+                        fac1 = pr + pl
+                        fac2 = R3 * (pr * fac1 + pl * pl)
+                        fac1 = 0.5 * fac1
+                        q2[i, k] = (q4[2, i, ell]
+                                    + (q4[4, i, ell] + q4[3, i, ell]
+                                       - q4[2, i, ell]) * fac1
+                                    - q4[4, i, ell] * fac2)
+                    else:
+                        q2[i, k] = (q4[2, i, ell]
+                                    + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
+                                             - q4[2, i, ell]) * (pr + pl)
+                                    - q4[4, i, ell] * R3
+                                    * (pr * (pr + pl) + pl ** 2))
                     k0 = ell
                     inside = True
                     break
-                qsum = ((pe1[i, ell + 1] - pe2[i, k])
-                        * (q4[2, i, ell]
-                           + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
-                                    - q4[2, i, ell]) * (1.0 + pl)
-                           - q4[4, i, ell] * (R3 * (1.0 + pl * (1.0 + pl)))))
+                if mapn:                                     # :1818-1824
+                    dp = pe1[i, ell + 1] - pe2[i, k]
+                    fac1 = 1.0 + pl
+                    fac2 = R3 * (1.0 + pl * fac1)
+                    fac1 = 0.5 * fac1
+                    qsum = dp * (q4[2, i, ell]
+                                 + (q4[4, i, ell] + q4[3, i, ell]
+                                    - q4[2, i, ell]) * fac1
+                                 - q4[4, i, ell] * fac2)
+                else:
+                    qsum = ((pe1[i, ell + 1] - pe2[i, k])
+                            * (q4[2, i, ell]
+                               + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
+                                        - q4[2, i, ell]) * (1.0 + pl)
+                               - q4[4, i, ell] * (R3 * (1.0 + pl * (1.0 + pl)))))
                 for m in range(ell + 1, km + 1):
                     if pe2[i, k + 1] > pe1[i, m + 1]:
                         qsum = qsum + dp1[i, m] * q4[1, i, m]
                     else:
                         dp = pe2[i, k + 1] - pe1[i, m]
                         esl = dp / dp1[i, m]
+                        # mapn_tracer :1832-1836 writes fac1 = 0.5*esl,
+                        # fac2 = 1 - r23*esl, dp*(a2 + fac1*(a3-a2+a4*fac2))
+                        # -- the same association as this expression
                         qsum = qsum + dp * (
                             q4[2, i, m] + 0.5 * esl
                             * (q4[3, i, m] - q4[2, i, m]
@@ -707,6 +735,31 @@ def map1_q2(pe1: np.ndarray, q1: np.ndarray, pe2: np.ndarray,
     q4, dp1 = _build_q4(q1, pe1, km)
     scalar_profile(q4, dp1, km, iv, kord, q_min, qs=qs)
     return _rezone(q4, dp1, pe1, pe2, km, kn, dp2=dp2)
+
+
+def mapn_tracer(pe1: np.ndarray, q1: list, pe2: np.ndarray,
+                dp2: np.ndarray, km: int, kords: list,
+                q_min: float) -> list:
+    """fv_mapz.F90:1758-1848 -- the nq > 5 tracer remap (:327).
+
+    Per tracer: ``scalar_profile`` (ALWAYS -- unlike ``map1_q2``, which
+    takes ``ppm_profile`` for ``kord <= 7``, :1698-1702) with ``iv=0``
+    and its own ``kord(iq)``, then the integration of ``_rezone`` with
+    ``mapn=True`` (that routine's product association).  The tracers
+    share nothing but ``pe1``/``pe2``/``dp2`` (``k0`` is per column and
+    identical across tracers because the edges are), so this is the
+    per-tracer routine applied in turn.  ``fill`` (fillz on all nq,
+    :1840) is NOT ported: the lane refuses it (``_refuse_unported_lane``).
+    """
+    out = []
+    if len(q1) != len(kords):
+        raise ValueError(f"mapn_tracer: {len(q1)} tracers but {len(kords)} "
+                         "kord entries (zip would silently drop tracers)")
+    for qt, kord in zip(q1, kords):
+        q4, dp1 = _build_q4(qt, pe1, km)
+        scalar_profile(q4, dp1, km, 0, kord, q_min)
+        out.append(_rezone(q4, dp1, pe1, pe2, km, km, dp2=dp2, mapn=True))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -777,10 +830,6 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
             "do_sat_adj / do_inline_mp / do_adiabatic_init: the fast "
             "saturation-adjustment and inline-MP blocks (fv_mapz.F90:"
             "584-625, 748-820, 1010-1078) are NOT ported.")
-    if nq > 5:
-        raise NotImplementedError(
-            f"nq={nq} > 5 selects mapn_tracer (fv_mapz.F90:327), which is "
-            f"NOT ported. The reference deck has nr=2 (ncnst=3, dnats=1).")
 
 
 def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
@@ -1079,11 +1128,19 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 peln1, pad1(pt[ia:ia + n, jd, :]), pn2, km, km,
                 1, abs_kord_tm, T_MIN))
 
-            # :330-343 -- one tracer at a time (nq <= 5 on this lane).
-            for iq in range(nq):
-                q[iq][ia:ia + n, jd, :] = unpad1(map1_q2(
-                    pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km, km,
-                    0, kords_tr[iq], 0.0))   # :335 -- literal 0.
+            # :327-343 -- nq > 5 through mapn_tracer (:328), else one
+            # tracer at a time (:332); both with the literal 0. q_min
+            if nq > 5:
+                qn = mapn_tracer(
+                    pe1, [pad1(q[iq][ia:ia + n, jd, :]) for iq in range(nq)],
+                    pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0)
+                for iq in range(nq):
+                    q[iq][ia:ia + n, jd, :] = unpad1(qn[iq])
+            else:
+                for iq in range(nq):
+                    q[iq][ia:ia + n, jd, :] = unpad1(map1_q2(
+                        pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km,
+                        km, 0, kords_tr[iq], 0.0))   # :335 -- literal 0.
 
             # :345-419 -- NH: remap w and delz, then the w_limiter.
             if not hydrostatic:

@@ -29,8 +29,6 @@ from legoesm.core.conservation import (
 from legoesm.core.tracers import (
     TracerRegistry,
     init_tracers,
-    make_full_moisture_registry,
-    make_moisture_registry,
 )
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
@@ -38,7 +36,7 @@ from legoesm.driver.physics_pipeline import (
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
-    required_microphysics_tracer_slots,
+    moisture_registry_for,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
@@ -1262,12 +1260,8 @@ class ModelDriver:
         # hydrostatic one that opts in).
         self._persistent_dgrid = False
         self.tracers: dict[str, jax.Array] = {}
-        warm_registry = make_moisture_registry()
-        required_slots = required_microphysics_tracer_slots(config.microphysics)
-        if required_slots > warm_registry.n_tracers:
-            self.tracer_registry: TracerRegistry = make_full_moisture_registry()
-        else:
-            self.tracer_registry: TracerRegistry = warm_registry
+        self.tracer_registry: TracerRegistry = moisture_registry_for(
+            config.microphysics)
         validate_microphysics_tracer_slots(
             config.microphysics,
             self.tracer_registry.n_tracers,
@@ -8674,9 +8668,12 @@ class ModelDriver:
             # the duo's own IC through the view (Kessler slots when on)
             dyn = self.model.dyn
             bundle = dyn.dcmip16_initial_state(do_pert=True)
+            # one slot per registered tracer name (the model's list order):
+            # vapour from the IC, every other species / number at zero
             q0 = bundle["q"][0]
             bundle = {**bundle,
-                      "q": [q0, jnp.zeros_like(q0), jnp.zeros_like(q0)]}
+                      "q": [q0] + [jnp.zeros_like(q0)
+                                   for _ in self.model.tracer_names[1:]]}
         if not getattr(self, "_fv3_duo_column_restored", False):
             self.state = self.model.from_bundle(bundle)
         dyn = self.model.dyn

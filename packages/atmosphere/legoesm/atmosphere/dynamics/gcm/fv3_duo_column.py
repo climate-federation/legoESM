@@ -33,8 +33,8 @@ import numpy as np
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.fv3_native_physics_coupling import (
-    apply_column_increments_sixface_jax, column_view_sixface_jax,
-    stack_held_suarez_metrics)
+    FV3_WATER_SPECIES, apply_column_increments_sixface_jax,
+    column_view_sixface_jax, stack_held_suarez_metrics)
 from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
 from legoesm.grids.vertical import create_hybrid_coordinate
 from legoesm.timestepping.integration import (
@@ -42,8 +42,10 @@ from legoesm.timestepping.integration import (
 
 from .fv3_duo_dynamics import FV3DuoDynamicsModel
 
-# the MPAS lane's tracer names for the duo's list slots (Kessler slots 0..2)
-DUO_COLUMN_TRACER_NAMES = ("q_v", "q_c", "q_r")
+# the MPAS lane's tracer names for the duo's list slots: the warm-rain
+# trio (nwat = 3); a deck carrying ice/snow/graupel names the six FV3
+# water species in order (nwat = 6), passengers (N_*) after them
+DUO_COLUMN_TRACER_NAMES = FV3_WATER_SPECIES[:3]
 
 
 class DuoColumnMesh(NamedTuple):
@@ -86,15 +88,26 @@ class FV3DuoColumnModel:
         self.n, self.ng, self.km = dyn.grid.n, dyn.grid.ng, dyn.config.km
         names = tuple(DUO_COLUMN_TRACER_NAMES if tracer_names is None
                       else tracer_names)
-        # the moist block reads list slots 0..2 as sphum/liq_wat/rainwat:
-        # the names must say so, once each
-        if (names[:3] != DUO_COLUMN_TRACER_NAMES
-                or len(set(names)) != len(names)):
+        # nwat = how many leading names are FV3 water species, in FV3's
+        # slot order: exactly 3 (warm rain) or 6 (with ice/snow/graupel);
+        # a water species out of order or after a passenger would enter
+        # the mass block as a passenger and its mass would be dropped
+        nwat = 0
+        for nm, want in zip(names, FV3_WATER_SPECIES):
+            if nm != want:
+                break
+            nwat += 1
+        stray = [nm for nm in names[nwat:] if nm in FV3_WATER_SPECIES]
+        if nwat not in (3, 6) or stray or len(set(names)) != len(names):
             raise ValueError(
-                f"FV3DuoColumnModel: tracer_names must start with "
-                f"{DUO_COLUMN_TRACER_NAMES} (the warm-rain slots the mass "
-                f"block reads) and be unique, got {names}")
+                f"FV3DuoColumnModel: tracer_names must start with the FV3 "
+                f"water species {FV3_WATER_SPECIES[:3]} or "
+                f"{FV3_WATER_SPECIES} in that order (the slots the nwat "
+                f"mass block reads), then passengers, all unique; got "
+                f"{names} (leading water species {nwat}, out-of-place "
+                f"water species {stray})")
         self.tracer_names = names
+        self.nwat = nwat
         self._state_type = FV3DuoColumnState
         self._phys_state = None
         self._sfc_diag = None
@@ -159,7 +172,8 @@ class FV3DuoColumnModel:
             raise ValueError(
                 f"FV3DuoColumnModel: {len(self.tracer_names)} tracer names "
                 f"{self.tracer_names} for a bundle carrying {len(q)}")
-        tracers = {nm: fld(cols(q[i]), nm, "kg/kg")
+        tracers = {nm: fld(cols(q[i]), nm,
+                           "1/kg" if nm.startswith("N_") else "kg/kg")
                    for i, nm in enumerate(self.tracer_names)}
         state = FV3DuoColumnState(
             u=fld(cols(ua6), "u", "m/s"), v=fld(cols(va6), "v", "m/s"),
@@ -302,14 +316,14 @@ class FV3DuoColumnModel:
                 q_dt_c[self._tracer_index(nm)] = self._faces(d(tq))
         if q_dt_c and not self.config.moist:
             raise ValueError(
-                "FV3DuoColumnModel: physics returned water tendencies on "
+                "FV3DuoColumnModel: physics returned tracer tendencies on "
                 "the DRY deck (FV3DuoConfig.moist=False ignores humidity in "
                 "the dycore); run the moist deck")
         st, press, q = apply_column_increments_sixface_jax(
             bundle["state"], bundle["press"], list(bundle["q"]), view,
             self._tab, self._wv6, u_dt_c, v_dt_c, t_dt_c, q_dt_c, dt=dt,
             n=self.n, ng=self.ng, km=self.km, ptop=self.dyn.ptop,
-            akap=FV3_KAPPA, moist_cp=self.config.moist)
+            akap=FV3_KAPPA, moist_cp=self.config.moist, nwat=self.nwat)
         new_bundle = {**bundle, "state": st, "press": press, "q": q}
         sfc = (getattr(tend, "sw_net_sfc", None),
                getattr(tend, "lw_net_sfc", None),
