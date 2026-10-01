@@ -177,3 +177,9 @@ def test_main_forwards_the_flag_to_every_direct_vmix_build():
                     "tke_surface_bc_level"):
         assert kws, ("main builds a vmix config without forwarding "
                      "tke_surface_bc_level; the flag would be discarded")
+
+
+def test_fesom_stage_gate_admits_the_flag():
+    """The FESOM stage-B4 allowlist refuses any dest it does not list, so a
+    card that names the placement died at launch even though main forwards it."""
+    assert "tke_surface_bc_level" in _core2()._FESOM_WIRED_DESTS

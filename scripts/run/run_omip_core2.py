@@ -2844,7 +2844,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
     # vertical-mixing closure + the zdftke card knobs it consumes (same set
     # the MPAS lane threads; _validate_tke_card_grid gates them):
-    "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_mxl_choice",
+    "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_surface_bc_level", "tke_mxl_choice",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
     "tke_shear_production", "tke_lc", "tke_etau",
     "snapshot_every_days", "output", "smoke",
