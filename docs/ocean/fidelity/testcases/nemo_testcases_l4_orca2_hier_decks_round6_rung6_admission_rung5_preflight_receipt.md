@@ -137,9 +137,21 @@ runs rung 5.
 
 Rung-5 preflight reports `PREFLIGHT_PASS_RUNG5`; the extra-deck-delta,
 missing-runoff-selector, changed-retained-selector, and changed-build-pin
-plants all fire.  The focused rung-9/rung-6 repair and rung-5 test battery
-passes **29 tests**.  Ruff passes the new gate and test; the launcher passes
-`bash -n`.
+plants all fire.  The final focused hierarchy-rounds-1-through-6 and citation
+test battery passes **73 tests** (including the 29-test repair/rung-5 subset).
+Ruff passes the new gate and test; the launcher passes `bash -n`.
+
+The round receipt citation gate passes with 13 citations, zero failures, and
+zero unmapped citations.  Its planted bad span exits 1.  The default receipt
+gate also passes with 274 citations, zero failures, and zero unmapped
+citations/map-audit failures.
+
+The one broad `tests/ocean/fidelity -n 12` battery reached 99%, reproduced the
+listed pre-existing SI3 scalar-math provenance failure
+(`test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants`), then
+made no progress for 60 seconds in the known late-suite stall and was
+interrupted.  It therefore has no complete-suite verdict; no second broad
+battery was started.
 
 The required separate `codex exec --sandbox read-only` review failed before it
 could read the diff with `failed to initialize in-process app-server client:
