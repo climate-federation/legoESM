@@ -67,3 +67,11 @@ def test_topography_and_era5_ic_match_serial_on_every_local_cell():
         np.testing.assert_array_equal(
             np.asarray(getattr(d.state, name).data), np.asarray(getattr(ref.state, name).data)[idx],
             err_msg=f"{name} differs from the serial build")
+    np.testing.assert_array_equal(
+        np.asarray(d.tracers["q_v"]), np.asarray(ref.tracers["q_v"])[lc],
+        err_msg="driver q_v differs from the serial build")
+    dyn = getattr(ref.state, "tracers", None) or {}
+    if "q_v" in dyn:
+        np.testing.assert_array_equal(
+            np.asarray(d.state.tracers["q_v"].data), np.asarray(dyn["q_v"].data)[lc],
+            err_msg="dycore q_v differs from the serial build")
