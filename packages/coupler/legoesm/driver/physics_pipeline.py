@@ -4748,9 +4748,7 @@ def gwd_config_for(config):
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
         Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
-        # None (default) = legacy surface launch, byte-identical.
-        launch_p=(None if getattr(config, "hines_launch_p", 0.0) in (0.0, None)
-                  else float(config.hines_launch_p)),
+        launch_p=float(config.hines_launch_p),
     )
     fr = gc.e3sm_cam.frontal._replace(
         taubgnd=float(getattr(config, "e3sm_cam_taubgnd",

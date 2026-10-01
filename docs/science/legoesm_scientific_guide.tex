@@ -162,8 +162,8 @@ sea-ice skin, on the MPAS/Voronoi grid.  The principal scientific changes since 
     (Section~\ref{sec:ice-skin}).
   \item \textbf{Additional schemes}: the IFS/Bechtold convection port
     (Section~\ref{sec:bechtold}), the E3SM/CAM spectral gravity-wave
-    solver with frontal and orographic sources, a raised Hines launch level
-    (Section~\ref{sec:gwd-schemes}), homogeneous cirrus ice nucleation, and a
+    solver with frontal and orographic sources, a Hines launch level above the
+    boundary layer (Section~\ref{sec:gwd-schemes}), homogeneous cirrus ice nucleation, and a
     native FV3 duo-grid dynamical-core lane scored against the GFDL Fortran.
   \item \textbf{Ocean}: a fixed-iteration preconditioned conjugate-gradient
     implicit free surface on the MPAS mesh (Section~\ref{sec:barotropic}),
@@ -2430,7 +2430,7 @@ non-orographic):
   \item \textbf{Rayleigh friction}: Linear damping above a threshold height.
   \item \textbf{Lindzen (1981)}: Orographic GWD with saturation and critical-level absorption \citep{Lindzen1981}.
   \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved wave saturation \citep{McFarlane1987}.
-  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions \citep{Hines1997}.  An optional launch pressure starts the spectrum above the boundary layer; when it is unset the waves are launched at the surface, where the weak stratification of the mixed layer makes them break immediately and deposit much of their momentum near the ground.
+  \item \textbf{Hines-inspired}: a bulk non-orographic GWD closure motivated by \citet{Hines1997}.  A single rms wave amplitude grows as $\rho^{-1/2}$ upward and saturates against the scale $N/m_*$, and the stress decrement is deposited as drag; the Doppler-spread spectrum of the full Hines scheme is not represented.  Waves are launched at 700\,hPa by default (legal range 300--900\,hPa), above the boundary layer: no drag is deposited at or below the launch level, and a column whose launch level would be its lowest model level (for example, terrain whose surface pressure is below the launch pressure) has no source.  There is no surface launch, because there the weak stratification of the mixed layer makes the wave break immediately and deposit most of its momentum near the ground.
   \item \textbf{E3SM/CAM spectral GWD}: a term-by-term port of the
     spectral solver of E3SM version 3.0.1 --- a bottom-up stress
     profile with Lindzen saturation and WKB damping, then a top-down

@@ -5,6 +5,17 @@ All notable changes to legoESM. Format roughly follows
 
 ## Unreleased
 
+### Fixed
+
+- **Hines gravity-wave drag no longer launches at the surface.** The launch
+  level now defaults to 700 hPa and must lie in 300–900 hPa; the surface-launch
+  path is removed (a surface-launched wave broke in the boundary layer and
+  deposited 55% of its momentum below 1 km). Affects every configuration that
+  selects Hines without setting `hines_launch_p`; production (McFarlane) is
+  unchanged. A launch level that would fall in a column's lowest model layer
+  gives that column no source. Configs carrying the old `hines_launch_p: 0.0`
+  (or a Hines override with `launch_p=None`) are now rejected by validation.
+
 ## [1.0.0] - 2026-10-01
 
 First stable release, **legoESM 1.0**. The whole federation (root + eight

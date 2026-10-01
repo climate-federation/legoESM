@@ -1723,11 +1723,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
-    # HinesConfig.launch_p [Pa]; 0.0 = unset = legacy SURFACE launch.
-    # A non-orographic wave launched at the surface is born supersaturated
-    # in the weakly stratified BL and breaks at its own launch level
-    # (measured: 55% of its momentum deposited below 1 km).
-    hines_launch_p: float = 0.0
+    # HinesConfig.launch_p [Pa], legal range HINES_LAUNCH_P_RANGE_PA.  No
+    # surface launch: a non-orographic wave launched there is born
+    # supersaturated in the weakly stratified BL and breaks at its own
+    # launch level (measured: 55% of its momentum deposited below 1 km).
+    hines_launch_p: float = 7.0e4
     e3sm_cam_source: str = "orographic"         # E3SMCAMConfig.source
     e3sm_cam_pgwv: int = 0                      # phase-speed half-width (waves either side of c0)
     e3sm_cam_effgw: float = 0.125               # E3SMCAMConfig.effgw [dimensionless]
@@ -3803,6 +3803,18 @@ class ExperimentConfig(NamedTuple):
                     "refines the same scheme's sub-config, it does not switch "
                     "schemes)"
                 )
+            else:
+                from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                    HINES_LAUNCH_P_RANGE_PA,
+                )
+                _ov_lp = self.gravity_wave_drag_override.hines.launch_p
+                _lo, _hi = HINES_LAUNCH_P_RANGE_PA
+                if not (isinstance(_ov_lp, (int, float))
+                        and math.isfinite(_ov_lp) and _lo <= _ov_lp <= _hi):
+                    errors.append(
+                        f"gravity_wave_drag_override.hines.launch_p must lie in "
+                        f"[{_lo:g}, {_hi:g}] Pa, got {_ov_lp!r}"
+                    )
         # GWD scalars that ``gwd_config_for`` overlays onto the kernel leaves.
         # Every one is a strictly-positive physical quantity (a wavenumber, a
         # spreading factor, a stress/flux cap, an rms launch wind), and none is
@@ -3824,6 +3836,17 @@ class ExperimentConfig(NamedTuple):
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+            HINES_LAUNCH_P_RANGE_PA,
+        )
+        _lo, _hi = HINES_LAUNCH_P_RANGE_PA
+        if not (isinstance(self.hines_launch_p, (int, float))
+                and math.isfinite(self.hines_launch_p)
+                and _lo <= self.hines_launch_p <= _hi):
+            errors.append(
+                f"hines_launch_p must lie in [{_lo:g}, {_hi:g}] Pa (there is "
+                f"no surface launch), got {self.hines_launch_p!r}"
+            )
         _e3sm_parts = str(self.e3sm_cam_source).split("+")
         _e3sm_valid = ("orographic", "frontal", "convective", "background")
         if self.e3sm_cam_source not in _e3sm_valid and (
