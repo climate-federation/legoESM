@@ -268,7 +268,7 @@ census.
 | GYRE certified ladder, card arm | first over bar `kt=3`, `kt=2` velocities `8.326673e-17` / `9.714451e-17` — the certified values |
 | the three certified card digests | **unchanged** (`GYRE da52bd90a40f71fd`, `LOCK_EXCHANGE d794c4c5cb3dd880`, `OVERFLOW 2bb9d9be75fd924d`) — this round adds a VALUE to an existing field, not a field, which is the preregistered P8 |
 | DINO from-rest month gate | `2.040288957e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`, exit 0, private work directory. **Identical to rounds 3, 4 and 5** — `1.9e-10 K` from the certified value, which is that harness's own run-to-run floor, so this round is INERT on DINO's from-rest month, as its card census predicts |
-| focused battery | <!--BATTERYLINE--> |
+| focused battery | <!--BATTERYFINAL--> |
 
 **Provenance of the year arm.** It ran at `24cc0674b`, the implementation
 commit; three commits landed after it. They are the citation map plus the
@@ -337,4 +337,37 @@ read from its own build (round 5's open item 3, unchanged).
 
 ## 12. Review
 
-<!--REVIEW-->
+The codex quota guard reads `84.0% used`. Above the 80% line this lane puts
+the review on a Claude reviewer, so ONE fresh Claude code-reviewer was the
+review, told to refute, told to verify every cited NEMO line verbatim against
+both compiled builds, and told specifically to attack the time-level
+derivation, the reachability of the new branch and the non-vacuity of every
+new test.
+
+**Verdict: DO NOT SHIP, with two real defects. Both are CLOSED, and the fix is
+measured inert on every number this round reports (`e01d70a03`).**
+
+| # | finding | disposition |
+|---|---|---|
+| 1 BLOCKER | adding the slot to the state made EVERY pre-format-5 restart archive unloadable, for every card, including the ones that never read the slot — and the receipt described the cost as scoped when it was not | **CONFIRMED AND FIXED.** An older archive loads again with the slot absent, which for a card that does not read it is byte-identical to the behaviour before the field existed; the named refusal is kept for a run that DOES read it and says so in its message. Both halves have their own test, and the two tests are each other's control |
+| 2 HIGH | the write reached fewer callers than the read: the slot was written in the compiled step wrapper, but the OMIP scan driver, the SPMD lane and the OMIP2 applicator all call the step body directly and the read fires on all of them | **CONFIRMED AND FIXED.** Measured, not argued: five such call sites were found by grep. The write moved into the step body, before the storage cast so a scan carry's dtypes stay stable. Two consistency checks came with it — the carried form is refused on any program other than NEMO's RK3, which is the only one that writes the slot, and refused together with any post-step projection that rewrites the sea surface after the step |
+| 3 MEDIUM | the code comment's NEMO citations name the raw source tree while the receipt cites the preprocessed build, and nothing said so — the reviewer flagged a correct citation as wrong for that reason | **ACCEPTED AND FIXED.** The comment now says which tree it means |
+| — | the new tests' non-vacuity, including the 1e-9 m plant and its inert-on-the-other-arm control | reviewer found no fault; the exact step-entry-height substitution control is the one that carries the claim |
+| — | the time-level derivation | reviewer re-derived it independently from both compiled builds and confirmed it, which is the part everything else rests on |
+
+**The fix changed no number, and that is measured rather than asserted**: all
+seven ladders were re-run at the review-fixed head and compared row by row
+against the pre-fix run — **280 rows, 0 differ**.
+
+**Single reviewer, stated plainly.** This lane's default is two. This round had
+one, at the quota line. That is a weaker review than the default and is
+recorded as such.
+
+## 13. One red in the battery that was NOT this round's
+
+The first full battery run reported `1 failed, 352 passed`; the failure was
+`test_nemo_identity_kt5_restart_matches_unbroken_kt6_to_10` with a JAX
+`Failed to materialize symbols` error, which is this machine's known
+concurrent-test artifact — a second test process was running at the time. Run
+alone at the same head it is `8 passed in 60.03s`. The artifact is reported
+rather than hidden, and the isolated re-run is the evidence.
