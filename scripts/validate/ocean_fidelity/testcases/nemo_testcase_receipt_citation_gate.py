@@ -1181,7 +1181,7 @@ CITATION_MAP = {
         'cloud_fra(:,:) = pp_cldf      !* cloud fraction over sea ice (used in si3)', 7],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:376-383': [
         ('IF( nn_ice == 0 ) THEN', 2),
-        'ENDIF', 8],
+        ('ENDIF', 21), 8],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_ice.f90:91-121': [
         'INTEGER FUNCTION sbc_ice_alloc()',
         '&      emp_ice (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , sstfrz   (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , STAT= ierr(ii) )', 31],
