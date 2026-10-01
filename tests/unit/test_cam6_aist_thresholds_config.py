@@ -130,3 +130,41 @@ def test_all_four_reach_the_built_config_and_legal_bounds_pass():
     for name, v in (("rhmini", 0.5), ("rhmini", 0.99), ("rhmaxi", 1.1),
                     ("rhminis", 0.85), ("rhmaxis", 1.1)):
         ExperimentConfig(**{f"cloud_cam6_{name}": v}).validate_strict()
+
+
+def test_fv_pipeline_threads_the_thresholds_into_its_cloud_config(monkeypatch):
+    """The regular-grid (FV cdgrid) pipeline builds its radiation CloudConfig
+    from the run settings too, not from the code defaults."""
+    from legoesm.atmosphere.physics.clouds import config as cc
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import make_hybrid_levels
+
+    vals = {"rhmini": 0.85, "rhmaxi": 1.05, "rhminis": 0.9, "rhmaxis": 1.1}
+    nlev, grid = 8, create_cubed_sphere(4)
+    config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=nlev),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        convection="none", radiation="gray", microphysics="none",
+        **{f"cloud_cam6_{n}": v for n, v in vals.items()})
+    config.validate_strict()
+    pipe = build_physics_pipeline(grid, make_hybrid_levels(nlev), config)
+
+    class _Built(Exception):
+        pass
+    real = cc.build_cloud_config
+
+    def spy(*a, **k):
+        raise _Built(real(*a, **k))
+    monkeypatch.setattr(cc, "build_cloud_config", spy)
+    s2 = grid.grid_lat.shape
+    T = jnp.full((*s2, nlev), 260.0)
+    with pytest.raises(_Built) as got:
+        pipe.compute_radiation_core(
+            T, jnp.full(s2, 1.0e5), jnp.full((*s2, nlev), 1e-3),
+            jnp.full(s2, 290.0), jnp.zeros(s2), jnp.asarray(grid.grid_lat),
+            jnp.asarray(grid.grid_lon), jnp.asarray(80.0), jnp.asarray(43200.0),
+            None, jnp.asarray(1361.0), None, None, cloud_scheme="sundqvist")
+    built = got.value.args[0]
+    assert {n: getattr(built, f"cam6_{n}") for n in vals} == vals

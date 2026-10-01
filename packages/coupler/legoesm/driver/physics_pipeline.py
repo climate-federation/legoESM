@@ -371,6 +371,10 @@ class PhysicsPipeline:
         self._cloud_adiabatic_lwc_rate = None
         self._cloud_saturation_scheme = None
         self._cloud_cover_condensate_q_ref = None
+        self._cloud_cam6_rhmini = None
+        self._cloud_cam6_rhmaxi = None
+        self._cloud_cam6_rhminis = None
+        self._cloud_cam6_rhmaxis = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -2672,6 +2676,10 @@ class PhysicsPipeline:
                     self, "_cloud_saturation_scheme", None),
                 cover_condensate_q_ref=getattr(
                     self, "_cloud_cover_condensate_q_ref", None),
+                cam6_rhmini=getattr(self, "_cloud_cam6_rhmini", None),
+                cam6_rhmaxi=getattr(self, "_cloud_cam6_rhmaxi", None),
+                cam6_rhminis=getattr(self, "_cloud_cam6_rhminis", None),
+                cam6_rhmaxis=getattr(self, "_cloud_cam6_rhmaxis", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -5049,6 +5057,9 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_saturation_scheme', None)
     pipeline._cloud_cover_condensate_q_ref = getattr(
         config, 'cloud_cover_condensate_q_ref', None)
+    for _n in ("rhmini", "rhmaxi", "rhminis", "rhmaxis"):
+        setattr(pipeline, f"_cloud_cam6_{_n}",
+                getattr(config, f"cloud_cam6_{_n}", None))
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).
