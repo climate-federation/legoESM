@@ -93,9 +93,10 @@ tracer matrix
 T-point `avm`
 (`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205`).  The captured assertion is downstream:
 finite step-entry geometry becomes an infinite RK-stage sea surface before the
-buoyancy-frequency consumer.  Round 82 must checkpoint/replay steps 17-19 and
-walk the stage barotropic sea-surface/momentum boundary to the first non-finite
-producer before revisiting either implicit solve.  The declared double-
+buoyancy-frequency consumer.  The deferred rung-5 diagnostic must
+checkpoint/replay steps 17-19 and walk the stage barotropic sea-surface/
+momentum boundary to the first non-finite producer before revisiting either
+implicit solve.  The declared double-
 diffusive split and river-mouth diffusivity remain unbuilt and unchanged.
 
 ## Prediction ledger
@@ -146,12 +147,15 @@ Verdict: **independent review unavailable in-sandbox**.
 
 ## OPEN
 
-1. Checkpoint/replay the independent landed arm at steps 17-19 and walk the RK
-   stage barotropic sea-surface/momentum boundary to the first non-finite
-   producer at `(1,49)`; the raw-thickness assertion is only the first admitted
-   detector.
-2. After that producer is named, replay the compiled NEMO statement one
+1. Decision 79 redirects the next round to build the ORCA2 hierarchy bottom-up:
+   start at rung 0 (`ORCA2 geometry + GYRE physics`) with its own NEMO deck,
+   card, ten-step record, and month.
+2. When the hierarchy reaches rung 5, checkpoint/replay this independent arm
+   at steps 17-19 and walk the RK-stage barotropic sea-surface/momentum boundary
+   to the first non-finite producer at `(1,49)`; the raw-thickness assertion is
+   only the first admitted detector.
+3. After that producer is named, replay the compiled NEMO statement one
    variable at a time and land only under the ORCA2 and shared-card gates.
-3. The distinct salt/heat double-diffusive coefficient and river-mouth
+4. The distinct salt/heat double-diffusive coefficient and river-mouth
    diffusivity remain declared unbuilt; neither was approximated.
-4. The ordinary kt=1 stage-1 temperature statement remains `UNATTRIBUTED`.
+5. The ordinary kt=1 stage-1 temperature statement remains `UNATTRIBUTED`.
