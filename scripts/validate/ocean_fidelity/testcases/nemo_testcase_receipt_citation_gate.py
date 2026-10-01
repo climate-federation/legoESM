@@ -1246,9 +1246,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:322-330': [
         'IF( .NOT. ln_rnf ) THEN',
         "CALL ctl_stop( 'STOP', 'sbc_rnf_alloc : unable to allocate arrays' )", 9],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:318-325': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:318-324': [
         ('IF( ln_rnf ) THEN', 2),
-        'rnf_tsc(ji,jj,jp_sal) * zdep', 8],
+        'rnf_tsc(ji,jj,jp_sal) * zdep', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/divhor.f90:142': [
         ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 1),
         ('IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )', 1)],
