@@ -115,23 +115,24 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
         archive, entry, grid_type="latlon", dt_seconds=card.dt_s,
         carries_rk3_after_ssh=nemo_rk3_after_ssh_is_carried(config),
     )
-    load_differences = _state_differences(
-        resumed, first, names=sorted(metadata["slots"]))
-    all_load_differences = _state_differences(resumed, first)
-    require(not load_differences,
-            f"{case}: restart load differs by field: {load_differences}")
-
     if plant:
         values = np.asarray(resumed.eta_rk3_after.data).copy()
-        # A single extremum can be a masked/boundary point on these cards.
-        # Use a non-constant full-domain pattern so at least one live
-        # horizontal gradient reaching the first wzv call is necessarily
-        # perturbed; a spatially constant offset would be another vacuous
-        # control for this divergence-driven consumer.
+        # Plant the comparison this gate owns: exact recovery of every
+        # persisted restart slot.  The production ladder separately proves
+        # that selecting the carried arm changes live trajectory rows.
         parity = np.sum(np.indices(values.shape), axis=0) % 2
         values += np.where(parity, 1.0e-3, -1.0e-3)
         resumed = resumed._replace(
             eta_rk3_after=resumed.eta_rk3_after.replace(data=jnp.asarray(values)))
+    load_differences = _state_differences(
+        resumed, first, names=sorted(metadata["slots"]))
+    all_load_differences = _state_differences(resumed, first)
+    if plant:
+        require(load_differences.get("eta_rk3_after", 0) > 0,
+                f"{case}: persisted-slot comparison plant did not fire")
+    else:
+        require(not load_differences,
+                f"{case}: restart load differs by field: {load_differences}")
 
     after_resume = model.step(resumed, dt=card.dt_s)
     step_differences = _state_differences(after_resume, continuous)
@@ -139,10 +140,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
     next_step_differences = _state_differences(
         after_resume_next, continuous_next)
     exact_resume = not step_differences and not next_step_differences
-    if plant:
-        require(not exact_resume,
-                f"{case}: carried-slot plant did not move either resumed step")
-    else:
+    if not plant:
         require(exact_resume,
                 f"{case}: resumed steps differ by field: "
                 f"step2={step_differences}, step3={next_step_differences}")
@@ -185,7 +183,7 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if args.plant:
-        print("STATUS PLANT-FIRED: carried after-SSH restart slot")
+        print("STATUS PLANT-FIRED: persisted after-SSH restart-slot comparison")
         return 1
     print("STATUS PASS: 2 regenerated archives, 2 exact persisted-slot loads, "
           "2 exact two-step resumes")
