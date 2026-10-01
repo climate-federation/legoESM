@@ -96,7 +96,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --dm2dc --sw-rgb-chl \
   --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
-  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 3 \
+  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-scheme nemo_ustar \
   --sss-restore --sss-restore-channel water_flux \
