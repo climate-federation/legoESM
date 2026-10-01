@@ -209,7 +209,8 @@ def make_microphysics_physics(
     # lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi ``(nCells,)``.
     if model_type in ("hydrostatic", "mpas"):
         return _make_hydrostatic_microphysics(microphysics_config, dt,
-                                              cloud_config=cloud_config)
+                                              cloud_config=cloud_config,
+                                              model_type=model_type)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "plane":
@@ -234,6 +235,7 @@ def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
     cloud_config=None,
+    model_type: str = "hydrostatic",
 ) -> Callable:
     """Create microphysics physics_fn for PrimitiveEquationModel.
 
@@ -262,6 +264,12 @@ def _make_hydrostatic_microphysics(
             "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
             "ice-stratus fraction needs the cam6_clubb cloud config, got "
             f"{getattr(cloud_config, 'scheme', None)!r}.")
+    if _incloud and model_type != "mpas":
+        # Checked at build time, not the first step: aist's tropopause
+        # switch needs MPAS cell latitudes (mesh.latCell).
+        raise ValueError(
+            "warm_rain_incloud=True is wired on the MPAS lane only (aist "
+            f"needs mesh.latCell); got model_type={model_type!r}.")
 
     def physics_fn(
         state: HydrostaticState,
