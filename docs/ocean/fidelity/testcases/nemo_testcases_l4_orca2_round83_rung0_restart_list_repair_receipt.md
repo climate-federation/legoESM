@@ -82,8 +82,16 @@ forbidden by the standing PMIx note.
 Focused rung-0 tests pass **13/13**; the new tests bind exact list rendering,
 missing-list-step refusal, and month-mode refusal.  Both shell launchers pass
 `bash -n`.  The campaign-default citation gate passes with zero failures and
-zero unmapped citations; shifting the new `sbcmod` citation exits 2 with
+zero unmapped citations; shifting the new `sbcmod` citation exits 1 with
 `SYMBOL-NOT-AT-LINE`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,207 tests,
+reached 99%, and repeated the standing no-summary stall; it was stopped after
+the visible SI3 scalar-math and round-129 record failures.  The six established
+failure files were rerun together in isolation: **6 failed / 37 passed**,
+exactly the known round-129 certification, round-35 stamp scope, worktree-stamp
+emitter, missing case-board row, SI3 scalar-math provenance, and round-51
+private-trace registry reds.  No round-83 test failed.
 
 The required read-only Codex review failed before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system`.
