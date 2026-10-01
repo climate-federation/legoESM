@@ -112,8 +112,25 @@ seam, inert `avt`, inert `avm`, and a false claim label.  The baseline-location
 gate refuses a changed baseline, false claim label, and invalid location.
 Their runtime refusals above are evidence, not test failures.
 
-Test and review results are recorded in the final commit after the batteries
-and separate read-only review run.
+Validation at the committed scripts/receipt tip:
+
+* focused round-71/79b/80 battery: **31 passed**;
+* round receipt citation gate: **PASS**, 3 citations, zero failures and zero
+  unmapped; campaign-default citation gate: **PASS**, zero failures and zero
+  unmapped; the shifted `zdfphy` citation plant exits 1 with
+  `SYMBOL-NOT-AT-LINE`;
+* wide `tests/ocean/fidelity -n 12`: 2,177 collected; the xdist wrapper was
+  stopped after a repeat of the standing 99% no-summary stall, with **2,154
+  passed, 6 known failures, 7 skipped, and 10 tests not reported**.  The six
+  reds are the standing round-129 record certification, round-35 stamp scope,
+  worktree-stamp emitter, missing case-board row, SI3 scalar-math provenance,
+  and round-51 private trace registry tests.  Every round-80 test passed in the
+  wide run.
+
+The required separate `codex exec --sandbox read-only` review was attempted on
+the committed diff and failed before reading it with `failed to initialize
+in-process app-server client: Read-only file system`.  Verdict:
+**independent review unavailable in-sandbox**.
 
 No `packages/` file changed.  GYRE therefore cannot move from its certified
 day-30 `2.3440e-06` K, day-240 `6.5826e-05` K, and day-360 `5.4085e-05` K
