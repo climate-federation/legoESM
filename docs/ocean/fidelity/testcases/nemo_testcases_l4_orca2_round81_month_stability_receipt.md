@@ -62,7 +62,8 @@ Convection classification is deliberately `UNMEASURED_INVALID_GEOMETRY`.
 
 The one-step direction is discriminating: removing IWM does not stabilize the
 model; it advances the same failure.  This agrees with the compiled statement
-that wave mixing adds to `avs`, `avt`, and `avm` (`zdfiwm.f90:313-316`).  The
+that wave mixing adds to `avs`, `avt`, and `avm`
+(`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:313-316`).  The
 old floors complete, but they are the known compensating configuration and are
 not a NEMO-exact fix.  Its admitted terminal comparison is:
 
@@ -77,17 +78,20 @@ not a NEMO-exact fix.  Its admitted terminal comparison is:
 ## What the split proves—and does not
 
 The compiled ORCA2 branch deliberately resets the IWM backgrounds to molecular
-values (`zdfiwm.f90:438-443`) and adds processes in closure, river-mouth,
+values
+(`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:438-443`) and adds processes in closure, river-mouth,
 enhanced-convection, double-diffusive, then wave order
-(`zdfphy.f90:336-380`).  Decision 77 therefore remains binding.  Since NEMO
+(`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381`).  Decision 77 therefore remains binding.  Since NEMO
 completes with IWM plus these molecular backgrounds, their legoESM failure
 proves a third difference; it does not authorize a floor, stabilizer, or IWM
 revert.
 
 The existing consumer hypotheses remain ordered but unassigned.  NEMO chooses
 `avt` for temperature and `avs` for salinity before constructing the implicit
-tracer matrix (`trazdf.f90:171-235`), while its momentum matrix uses adjacent
-T-point `avm` (`dynzdf.f90:187-205`).  The captured assertion is downstream:
+tracer matrix
+(`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90:178-215`), while its momentum matrix uses adjacent
+T-point `avm`
+(`ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205`).  The captured assertion is downstream:
 finite step-entry geometry becomes an infinite RK-stage sea surface before the
 buoyancy-frequency consumer.  Round 82 must checkpoint/replay steps 17-19 and
 walk the stage barotropic sea-surface/momentum boundary to the first non-finite

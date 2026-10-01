@@ -100,6 +100,8 @@ FILES = {
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
         _ORCA2_R79BZDF_COMPILED / "zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90": (
+        _ORCA2_R79BZDF_COMPILED / "zdfiwm.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90": (
         _ORCA2_R79BZDF_COMPILED / "trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90": (
@@ -1118,6 +1120,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 81: the recorded build's IWM addition and backgrounds ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:313-316': [
+        '!* update momentum & tracer diffusivity with wave-driven mixing',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:438-443': [
+        '! This internal-wave-driven mixing parameterization elevates avt and avm in the interior, and',
+        'avtb_2d(:,:) = 1._wp        ! uniform', 6],
     # --- ORCA2 round 80: admitted end-of-chain coefficients and consumers ---
     'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381': [
         '!                          !==  ocean Kz  ==!   (avt, avs, avm)',
