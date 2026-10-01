@@ -28,8 +28,11 @@ def main(argv=None):
     ap.add_argument("--lai", type=float, default=0.1)
     ap.add_argument("--day", action="store_true")
     a = ap.parse_args(argv)
-    sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                         capture_output=True, text=True).stdout.strip()
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        sha = "?"
     d = np.load(a.checkpoint)
     x = d["land_ml_canopy_x"]
     rows = np.where(np.all(np.isfinite(x), axis=1))[0]

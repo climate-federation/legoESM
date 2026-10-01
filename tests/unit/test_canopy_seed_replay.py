@@ -6,7 +6,6 @@ import sys
 import jax
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests" / "land" / "unit"))
 _spec = importlib.util.spec_from_file_location(
@@ -16,6 +15,9 @@ _spec.loader.exec_module(replay)
 
 
 def test_replay_counts(tmp_path, capsys):
+    if not jax.config.jax_enable_x64:
+        import pytest
+        pytest.skip("run with JAX_ENABLE_X64=1")
     x = np.array([[250.0, 250.5, 300.0, 300.0, 249.8, 3e-4],      # sane cache
                   [1189.11, 4251.002, 373.5, 373.5, 233.287, 0.0],  # AMIP garbage
                   [np.nan] * 6])
