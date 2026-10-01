@@ -44,9 +44,12 @@ than regenerating it.  It requires the resolved debug flags, four frame calls,
 the frame magic, and absence of vector-math symbols before launching two MPI
 ranks.  Debug output goes to a new round-86 directory and remains
 diagnostic-only.  The compiled order still writes the new stage-0 frame before
-surface-boundary work (`stprk3.f90:91-107`) and reaches the inherited surface
-writer before stage 1 (`stprk3.f90:147-154`); the source-resolved failure line,
-not the optimized symbol trace, will choose any repair.
+surface-boundary work
+(`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107`) and reaches the
+inherited surface writer before stage 1
+(`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-154`); the
+source-resolved failure line, not the optimized symbol trace, will choose any
+repair.
 
 ## Prediction ledger
 
