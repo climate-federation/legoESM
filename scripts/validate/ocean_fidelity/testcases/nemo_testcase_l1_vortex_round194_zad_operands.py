@@ -37,11 +37,16 @@ def _row(name, reference, candidate, mask) -> dict:
             f"{name}: shape mismatch {reference.shape} != {candidate.shape}")
     delta = candidate - reference
     unequal = int(np.count_nonzero((candidate != reference)[active]))
+    ref_active = reference[active]
+    candidate_active = candidate[active]
     return {
         "name": name,
         "cells_compared": int(np.count_nonzero(active)),
         "cells_unequal": unequal,
         "max_abs": float(np.max(np.abs(delta[active]))) if np.any(active) else 0.0,
+        "rms": float(np.sqrt(np.mean(np.square(delta[active])))) if np.any(active) else 0.0,
+        "reference_max_abs": float(np.max(np.abs(ref_active))) if np.any(active) else 0.0,
+        "candidate_max_abs": float(np.max(np.abs(candidate_active))) if np.any(active) else 0.0,
         "bit_exact": unequal == 0,
     }
 
@@ -233,6 +238,8 @@ def run(root: Path, expect_commit: str, *, plant: str | None = None) -> dict:
             "bottom_kjpkm1_unequal": int(np.count_nonzero(
                 candidate_operands["w"][..., nlev]
                 != reference["w"][..., nlev])),
+            "max_abs_by_interface": [float(value) for value in np.max(
+                np.abs(candidate_operands["w"] - reference["w"]), axis=(0, 1))],
         }
         stage_reports.append({"stage": stage, "operand_rows": operand_rows,
                               "first_non_bit_operand": first,
