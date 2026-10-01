@@ -70,16 +70,6 @@ def test_dispatch_resolves_the_card_by_name():
         build_nemo_testcase_card("VORTEX")
 
 
-def test_vector_card_states_nemos_two_wzv_calls_explicitly():
-    """stprk3_stg:289-300: vector momentum and tracers use separate solves."""
-    cfg = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
-    assert cfg.wzv_call2_evaluation == "nemo_literal"
-    assert cfg.nemo_stage_momentum_wzv_split is True
-    flux_cfg = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
-    assert flux_cfg.wzv_call2_evaluation == "generic"
-    assert flux_cfg.nemo_stage_momentum_wzv_split is None
-
-
 def test_card_resolves_the_shipped_namelist(card):
     """namelist_cfg:19-24,32,41,204-216,252-260 and usrdef_nam.F90:96-121."""
     grid = card.recipe.grid

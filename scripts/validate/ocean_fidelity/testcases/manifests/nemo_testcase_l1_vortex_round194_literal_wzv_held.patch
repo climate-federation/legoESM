@@ -1,0 +1,46 @@
+Status: HELD — do not apply without a new trajectory measurement.
+Reason: The candidate makes the stage-2/3 ZAD accumulator exact to 2.71e-20,
+but the 50-row VORTEX trajectory comparison FAILS.  kt=2 U/V improve from
+3.3693297863401916e-06 / 3.337024e-06 to 1.2462615108344623e-08 /
+1.0562745593834697e-08, while kt5 S leaves AT-BAR and later debt rows worsen.
+The first-over-bar step remains kt=2.  Round 194 restored production.
+
+Compiled source: VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:
+289-300 calls WZV on raw stage velocity in the vector arm and the transport
+form in the flux arm; traadv.f90:274 performs the vector tracer re-solve.
+
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -1941,10 +1941,10 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
+         n_barotropic_substeps=48,
+         bbl_adv_option=0, bbl_gamma_s=0.0,
+         bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
+-        whole_step_identity=("vortex_flux_up3_een" if momentum == "flux"
+-                             else "vortex_vector_een_c2"),
++        whole_step_identity=("vortex_flux_up3_een" if momentum == "flux" else "vortex_vector_een_c2"),
+         tke_langmuir_evaluation=None,
+-    )
++    )._replace(wzv_call2_evaluation=("nemo_literal" if momentum == "vector" else "generic"),
++               nemo_stage_momentum_wzv_split=(True if momentum == "vector" else None))
+     recipe = NEMORecipe(
+         model_config=model_config,
+         physics_config=model_config.physics,
+diff --git a/tests/ocean/unit/test_nemo_vortex_card.py b/tests/ocean/unit/test_nemo_vortex_card.py
+--- a/tests/ocean/unit/test_nemo_vortex_card.py
++++ b/tests/ocean/unit/test_nemo_vortex_card.py
+@@ -65,6 +65,16 @@ def test_dispatch_resolves_the_card_by_name():
+         build_nemo_testcase_card("VORTEX")
+ 
+ 
++def test_vector_card_states_nemos_two_wzv_calls_explicitly():
++    """stprk3_stg:289-300: vector momentum and tracers use separate solves."""
++    cfg = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
++    assert cfg.wzv_call2_evaluation == "nemo_literal"
++    assert cfg.nemo_stage_momentum_wzv_split is True
++    flux_cfg = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
++    assert flux_cfg.wzv_call2_evaluation == "generic"
++    assert flux_cfg.nemo_stage_momentum_wzv_split is None
++
++
+ def test_card_resolves_the_shipped_namelist(card):
