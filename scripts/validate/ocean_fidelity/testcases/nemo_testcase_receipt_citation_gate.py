@@ -55,6 +55,8 @@ _ORCA2_R79BZDF_COMPILED = (
     NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo")
 _ORCA2_R84FRAMES_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R85FRAMEDEBUG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -100,6 +102,16 @@ FILES = {
         _ORCA2_COMPILED / "zdfddm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2_COMPILED / "sbcmod.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90": (
+        _ORCA2_COMPILED / "sbcrnf.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_ice.f90": (
+        _ORCA2_COMPILED / "sbc_ice.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbini.f90": (
+        _ORCA2_COMPILED / "icbini.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icb_oce.f90": (
+        _ORCA2_COMPILED / "icb_oce.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90": (
         _ORCA2_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
@@ -110,6 +122,8 @@ FILES = {
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R85FRAMEDEBUG_COMPILED / "stprk3.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1139,6 +1153,38 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 87: symbolized crashing debug branch ---
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:149-154': [
+        'IF( ln_tide    )   CALL tide_update( kstp )',
+        'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )', 6],
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:424-438': [
+        "WRITE(iunit) l4_canon_2d(qsr,'T'), l4_canon_2d(qns,'T'), l4_canon_2d(qns_b,'T'), &",
+        "WRITE(iunit) l4_canon_3d(rnf_tsc,'T'), l4_canon_3d(rnf_tsc_b,'T')", 15],
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:443-473': [
+        'FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )',
+        'END FUNCTION l4_canon_2d', 31],
+    # --- ORCA2 round 87: rung-0 disabled-owner surface fields ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
+        'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj) , &',
+        'wndm(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , taum (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(6) )', 22],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:146-152': [
+        'INTEGER FUNCTION sbc_rnf_alloc()',
+        'rnf_tsc_b(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , rnf_tsc (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , STAT=sbc_rnf_alloc )', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbini.f90:133-140': [
+        'CALL icb_nam               ! Read and print namelist parameters',
+        "IF( icb_alloc() /= 0 )   CALL ctl_stop( 'STOP', 'icb_alloc : unable to allocate arrays' )", 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icb_oce.f90:161-174': [
+        'INTEGER FUNCTION icb_alloc()',
+        '&      berg_grid%tmp        (jpi,jpj) , STAT=ill)', 14],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:274-280': [
+        'IF( nn_ice == 0 ) THEN        !* No sea-ice in the domain : ice fraction is always zero',
+        'cloud_fra(:,:) = pp_cldf      !* cloud fraction over sea ice (used in si3)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:376-383': [
+        ('IF( nn_ice == 0 ) THEN', 2),
+        'ENDIF', 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_ice.f90:91-121': [
+        'INTEGER FUNCTION sbc_ice_alloc()',
+        '&      emp_ice (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , sstfrz   (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , STAT= ierr(ii) )', 31],
     # --- ORCA2 round 83: rung-0 explicit restart-list repair ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346': [
         'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
