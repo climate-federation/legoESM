@@ -229,6 +229,14 @@ def run(root: Path, expect_commit: str, *, plant: str | None = None) -> dict:
 
         first = next((row["name"].rsplit(".", 1)[-1] for row in operand_rows
                       if not row["bit_exact"]), None)
+        h_ref_np = np.asarray(h_ref)
+        column = np.sum(h_ref_np, axis=-1)
+        cumulative = np.flip(np.cumsum(np.flip(h_ref_np, axis=-1), axis=-1), axis=-1)
+        stretch = -(entry2["ssh"] - entry1["ssh"])[..., None] / card.dt_s
+        stretch = stretch * cumulative / np.where(
+            column[..., None] > 0.0, column[..., None], 1.0)
+        stretch = np.concatenate([stretch, np.zeros_like(stretch[..., :1])], axis=-1)
+        w_delta = candidate_operands["w"] - reference["w"]
         vertical = {
             "surface_k0_unequal": int(np.count_nonzero(
                 candidate_operands["w"][..., 0] != reference["w"][..., 0])),
@@ -239,7 +247,9 @@ def run(root: Path, expect_commit: str, *, plant: str | None = None) -> dict:
                 candidate_operands["w"][..., nlev]
                 != reference["w"][..., nlev])),
             "max_abs_by_interface": [float(value) for value in np.max(
-                np.abs(candidate_operands["w"] - reference["w"]), axis=(0, 1))],
+                np.abs(w_delta), axis=(0, 1))],
+            "max_abs_delta_minus_stretch": float(np.max(np.abs(w_delta - stretch))),
+            "max_abs_delta_plus_stretch": float(np.max(np.abs(w_delta + stretch))),
         }
         stage_reports.append({"stage": stage, "operand_rows": operand_rows,
                               "first_non_bit_operand": first,
