@@ -9092,6 +9092,7 @@ def main() -> int:
                 "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
                 tke_surface_bc=args.tke_surface_bc,
+                tke_surface_bc_level=args.tke_surface_bc_level,
                 tke_mxl_choice=args.tke_mxl_choice,
                 tke_prognostic=args.tke_prognostic,
                 tke_n2_mode=args.tke_n2_mode,

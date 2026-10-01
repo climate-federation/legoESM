@@ -168,3 +168,12 @@ def test_preconditions_read_the_resolved_card_not_its_defaults():
     cfg = _core2().orca1_zdftke_config(surface_bc_level="nemo_z0",
                                        mxl_choice=4)
     assert cfg.tke_surface_bc_level == "nemo_z0" and cfg.tke_mxl_choice == 4
+
+
+def test_main_forwards_the_flag_to_every_direct_vmix_build():
+    """The FESOM lane builds its TKE card in ``main`` directly; dropping the
+    flag there makes ``--tke-surface-bc-level`` a silent no-op on FESOM."""
+    for kws in _fwd("main", "build_tripole_vmix_config",
+                    "tke_surface_bc_level"):
+        assert kws, ("main builds a vmix config without forwarding "
+                     "tke_surface_bc_level; the flag would be discarded")
