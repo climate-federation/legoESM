@@ -132,9 +132,12 @@ The complete terminal output is `round192/codex_review.log`. There is no
 
 - Shell syntax, Python byte compilation, patch application, and Fortran
   syntax-only preflight: PASS.
-- Focused VORTEX checker/walk suite: pending final recorded rerun.
-- Receipt citation gate and shifted-citation plant: pending final recorded
-  rerun.
+- Focused VORTEX checker/walk plus receipt-citation suite:
+  `46 passed in 2.69s`.
+- Round-specific citation gate: PASS, six citations, zero failures, zero
+  unmapped citations, and zero map-audit failures. Shifting
+  `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:318-332` by two lines
+  exits 1 with `SYMBOL-NOT-AT-LINE`.
 
 ## 8. Verdict
 
