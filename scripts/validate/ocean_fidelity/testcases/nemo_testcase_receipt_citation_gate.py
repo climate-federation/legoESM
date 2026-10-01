@@ -1164,12 +1164,12 @@ CITATION_MAP = {
         '&             ln_wave  , nn_lsm', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:247-259': [
         ('SELECT CASE( nn_ice )', 1),
-        ('END SELECT', 1), 13],
+        ('END SELECT', 2), 13],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:274-280': [
-        'IF( nn_ice == 0 ) THEN',
+        ('IF( nn_ice == 0 ) THEN', 1),
         'cloud_fra(:,:) = pp_cldf', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:376-382': [
-        'IF( nn_ice == 0 ) THEN',
+        ('IF( nn_ice == 0 ) THEN', 2),
         'CALL ice_init( Kbb, Kmm, Kaa )', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/icestp.f90:285-305': [
         'SUBROUTINE ice_init( Kbb, Kmm, Kaa )',
