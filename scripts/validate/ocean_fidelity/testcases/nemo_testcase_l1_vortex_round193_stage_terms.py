@@ -164,6 +164,13 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
                 ref = reference[operator][index][..., :nlev]
                 row = score(f"{CASE}.stage{stage}.{operator}.{face}",
                             ref, candidate, masks[face])
+                active = np.asarray(masks[face], dtype=bool)
+                delta = candidate - ref
+                row["cells_unequal"] = int(np.count_nonzero(
+                    (candidate != ref)[active]))
+                row["max_abs"] = float(np.max(np.abs(delta[active])))
+                ref_peak = float(np.max(np.abs(ref[active])))
+                row["relative_max_abs"] = row["max_abs"] / max(ref_peak, 1.0e-300)
                 row["execution_regime"] = "production_step_jit"
                 row["nemo_boundary"] = (
                     "hpg accumulator (overwrite)" if operator == "hpg"
@@ -171,7 +178,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
                 row["planted"] = planted
                 # Operator-local exactness is bit equality. AT-BAR is retained
                 # as a separate trajectory classification, never as exactness.
-                row["bit_exact"] = row["n_unequal"] == 0
+                row["bit_exact"] = row["cells_unequal"] == 0
                 rows.append(row)
 
     # Existing stage-output calibration, still through the production step.
@@ -211,7 +218,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
     }
     if plant:
         planted_rows = [r for r in rows if r["planted"]]
-        require(len(planted_rows) == 1 and planted_rows[0]["n_unequal"] > 0
+        require(len(planted_rows) == 1 and planted_rows[0]["cells_unequal"] > 0
                 and planted_rows[0]["max_abs"] > 1.0e-12,
                 "planted output violation did not fire its own row")
     return report
@@ -233,7 +240,7 @@ def main(argv=None) -> int:
     if args.output:
         args.output.write_text(text + "\n")
     for row in report["rows"]:
-        print(f"{row['name']:<52} unequal={row['n_unequal']:<7d} "
+        print(f"{row['name']:<52} unequal={row['cells_unequal']:<7d} "
               f"max={row['max_abs']:.17e} exact={row['bit_exact']}")
     print("first_non_bit_operator:", report["first_non_bit_operator"])
     print("STATUS", report["status"])
