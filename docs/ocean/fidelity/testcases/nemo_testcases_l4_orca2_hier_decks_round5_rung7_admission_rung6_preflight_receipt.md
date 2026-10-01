@@ -158,6 +158,21 @@ and changed-build-pin plants all fire.  The focused rung-10 through rung-6
 battery passes **46 tests**.  The repaired rung-7 gate alone passes **9 tests**,
 including the new exact-print control.
 
+The final focused hierarchy plus citation battery passes **63 tests**.  The
+default citation audit passes with 274 citations, zero failures, zero unmapped
+citations, and zero map-audit failures.  This receipt's own audit passes all 13
+citations with zero failures/unmapped entries; its rigid two-line shift of the
+new vertical-closure key fires and exits 1.
+
+The required `tests/ocean/fidelity -n 12` battery ran once, reached 99%, and
+then emitted no output for a bounded 60 seconds at the known late-suite hang,
+so it was interrupted rather than reported as complete.  Four visible
+failures reproduce in one isolation battery and are the branch's recorded
+pre-existing files, unchanged by this round: six legacy report emitters
+missing worktree stamps; case-board omission of `hires_lane_surface`; the SI3
+scalar-math gate's `A MY_SRC is not verbatim` refusal; and the GYRE round-129
+certified stepping-gate pin.  All new hierarchy and citation tests had passed.
+
 The required separate `codex exec --sandbox read-only` review failed before it
 could read the diff with `failed to initialize in-process app-server client:
 Read-only file system`.  Verdict: **independent review unavailable
