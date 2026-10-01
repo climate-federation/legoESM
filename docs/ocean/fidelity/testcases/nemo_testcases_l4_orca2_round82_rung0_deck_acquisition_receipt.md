@@ -56,7 +56,7 @@ silently edited into the committed preregistration.
 NEMO requires exactly one surface-boundary formulation
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306`).  The permitted B20 choice
 is `ln_flx`: the compiled dispatcher calls the flux reader and no bulk routine
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:440-449`), while the flux routine
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:440-448`), while the flux routine
 maps the five file fields directly to stress, total/solar heat, and freshwater
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90:191-204`).  The launcher generates
 those five arrays as fp64 exact zero on the 180x148 ORCA2 grid and the admission
