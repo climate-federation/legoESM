@@ -1257,7 +1257,7 @@ CITATION_MAP = {
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-343': [
         ('IF( ln_zdftke ) THEN', 5),
-        'CALL iom_put("tke25h", zw3d)', 5],
+        ('CALL iom_put("tke25h", zw3d)', 1), 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-371': [
         ('IF( ln_zdftke ) THEN', 6),
         ('en_25h(ji,jj,jk) = en(ji,jj,jk)', 2), 3],
