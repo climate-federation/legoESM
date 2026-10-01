@@ -1127,7 +1127,7 @@ CITATION_MAP = {
         ('ENDIF', 10), 38],
     'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
         ('DO jk =    2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)            ! inner values', 1),
-        'zwd(ji,1) = 1._wp - zzws', 15],
+        ('zwd(ji,1) = 1._wp - zzws', 1), 15],
     # --- ORCA2 round 61: which card selects which momentum advection ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:346': 'ln_dynadv_vec = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:352': 'ln_dynvor_een = .true.',
