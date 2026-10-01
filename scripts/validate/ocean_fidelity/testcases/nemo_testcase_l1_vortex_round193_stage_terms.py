@@ -81,7 +81,7 @@ def _external(root: Path, entry2: dict):
 
 
 def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None,
-        source_order: bool = False) -> dict:
+        source_order: bool = False, baro_override: bool = True) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -177,21 +177,43 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None,
                 rows.append(row)
 
     # Existing stage-output calibration, still through the production step.
+    # ``baro_override`` is round 195's ONE VARIABLE: with it the stage sees
+    # NEMO's own recorded barotropic output (eta, uu_b, vv_b, un_adv, vn_adv)
+    # at stprk3_stg.F90:447-463; without it legoESM's own barotropic solve
+    # produces that quintuple and nothing else changes.  The stage OUTPUT is
+    # NEMO's ``out_u``/``out_v`` group, written after the correction
+    # (vortex_r8_stage_finish at stprk3_stg.F90:463).
     calibration = []
     for stage in (2, 3):
         hooks = _NEMOWSRK3TestHooks(
-            stage_barotropic_output_override=external,
+            stage_barotropic_output_override=external if baro_override else None,
             stage_entry_override=stage_override(stage),
             expose_momentum_stage=stage if stage == 2 else 0,
         )
         fields = lego_fields(model_step(hooks))
+        groups = read_stage_terms(root, stage)
         stage_rows = {}
         for face in ("u", "v"):
             row = score(f"{CASE}.stage{stage}.output.{face}",
                         np.asarray(stages[stage][face])[..., :nlev],
                         np.asarray(fields[face])[..., :nlev], masks[face])
+            # Cross-check: the terms record's own post-correction group must
+            # be the same field the stage record carries.  If it is not, the
+            # walk is scoring across two different writers and says so.
+            recorded_out = np.asarray(groups[f"out_{face}"])[..., :nlev]
+            row["record_out_vs_stage_record_max_abs"] = float(np.max(np.abs(
+                recorded_out - np.asarray(stages[stage][face])[..., :nlev])))
+            candidate = np.asarray(fields[face])[..., :nlev]
+            active = np.asarray(masks[face], dtype=bool)
+            row["cells_unequal"] = int(np.count_nonzero(
+                (candidate != recorded_out)[active]))
+            row["max_abs_vs_record_out"] = float(np.max(
+                np.abs(candidate - recorded_out)[active]))
             stage_rows[face] = row
-        calibration.append({"stage": stage, "rows": stage_rows})
+        calibration.append({"stage": stage, "rows": stage_rows,
+                            "barotropic_output": (
+                                "nemo_recorded" if baro_override
+                                else "legoesm_production_solve")})
 
     first = None
     for stage in (2, 3):
@@ -208,6 +230,8 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
         "execution_regime": "production_step_jit", "bar": BAR,
         "source_order_arm": source_order,
+        "barotropic_output_arm": ("nemo_recorded" if baro_override
+                                  else "legoesm_production_solve"),
         "plant": plant, "rows": rows, "calibration": calibration,
         "first_non_bit_operator": first,
         "status": "PLANT-FIRED" if plant else ("DEBT" if first else "BIT"),
@@ -228,10 +252,17 @@ def main(argv=None) -> int:
     parser.add_argument("--plant")
     parser.add_argument("--source-order", action="store_true",
                         help="enable the existing private NEMO accumulator-order arm")
+    parser.add_argument(
+        "--production-barotropic", action="store_true",
+        help=("round 195 one-variable arm: let legoESM's OWN barotropic "
+              "solve produce the stage eta/uu_b/vv_b/un_adv/vn_adv instead "
+              "of substituting NEMO's recorded quintuple.  NEMO has no such "
+              "switch -- it is the substitution that is the instrument"))
     args = parser.parse_args(argv)
     try:
         report = run(args.oracle_root, allow_dirty=args.allow_dirty,
-                     plant=args.plant, source_order=args.source_order)
+                     plant=args.plant, source_order=args.source_order,
+                     baro_override=not args.production_barotropic)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
@@ -241,6 +272,13 @@ def main(argv=None) -> int:
     for row in report["rows"]:
         print(f"{row['name']:<52} unequal={row['cells_unequal']:<7d} "
               f"max={row['max_abs']:.17e} exact={row['bit_exact']}")
+    for entry in report["calibration"]:
+        for face, row in entry["rows"].items():
+            print(f"{CASE}.stage{entry['stage']}.output.{face:<2s} "
+                  f"[{entry['barotropic_output']}] "
+                  f"normalized={row['normalized_max_abs']:.17e} "
+                  f"status={row['status']} "
+                  f"vs_record_out={row['max_abs_vs_record_out']:.6e}")
     print("first_non_bit_operator:", report["first_non_bit_operator"])
     print("STATUS", report["status"])
     # Plants deliberately exit nonzero; log scrapers must never read PASS.
