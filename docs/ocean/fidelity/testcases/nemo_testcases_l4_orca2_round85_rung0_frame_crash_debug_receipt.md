@@ -20,6 +20,16 @@ Those two valid files do not admit the record.  Seventy-eight of the required
 which to prove that the instrument is observational.  No rung-0 card or model
 physics statement lands in this round.
 
+## Round 86 correction
+
+The operator's real `--run` invocation stopped before `fcm build`; no debug
+binary or trajectory was produced.  The launcher's build-stage check counted
+the `%FCFLAGS` assignment and the `%FFLAGS` reference as two assignments, so
+its `debug build does not have one FCFLAGS assignment` refusal was false.
+Round 86 retires that check, proves an assignment-anchored parser with duplicate
+and reference-only plants, and resumes only the hash-pinned generated target.
+The crash attribution below remains **UNMEASURED**, rather than refuted.
+
 ## Crash localization
 
 The exact compiled optimized branch writes the inherited lane-1 entry stream
