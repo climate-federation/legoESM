@@ -1,10 +1,10 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.9
+## legoESM 1.0 Technical Specification
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-25 (updated from v3.8, 2026-03-23)
+**Version**: legoESM 1.0 (2026-10-01); body last revised 2026-03-25 (spec v3.9, updated from v3.8, 2026-03-23)
 
 ---
 
@@ -2007,7 +2007,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm"
-version = "0.1.0"
+version = "1.0.0"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
