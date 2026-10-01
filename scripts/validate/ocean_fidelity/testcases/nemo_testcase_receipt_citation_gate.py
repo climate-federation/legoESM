@@ -125,6 +125,12 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "sbcfwb.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90": (
         _ORCA2_R69SURFACE_COMPILED / "zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdf_oce.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "zdf_oce.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/asmbkg.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "asmbkg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "dia25h.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90": (
         _ORCA2_R69SURFACE_COMPILED / "sbcrnf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfiwm.f90": (
@@ -1198,6 +1204,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
         '!==  Background eddy viscosity and diffusivity  ==!',
         'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk) =', 24],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:262-278': [
+        '!==  type of vertical turbulent closure  ==!',
+        'ELSE                                                 ;   l_zdfsh2 = .TRUE.', 17],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:330-343': [
+        'CALL zdf_mxl( kt, Kmm )',
+        'END SELECT', 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:378-385': [
+        "CALL lbc_lnk( 'zdfphy', avm, 'W', 1.0_wp )",
+        'IF( ln_zdfric )   CALL ric_rst', 8],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:257-258': [
         "IF( ln_zdfddm ) THEN   ;   WRITE(numout,*) '   ==>>>   use double diffusive mixing: avs /= avt'",
         "ELSE                   ;   WRITE(numout,*) '   ==>>>   No  double diffusive mixing: avs = avt'", 2],
@@ -1225,6 +1240,27 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90:835-841': [
         'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
         'minimum mixing length with your parameters rmxl_min', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdf_oce.f90:35-37': [
+        'LOGICAL , PUBLIC ::   ln_zdfcst',
+        'LOGICAL , PUBLIC ::   ln_zdftke', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/asmbkg.f90:100-118': [
+        'IF( nitbkg_r == nit000 - 1 ) THEN',
+        "IF( ln_zdftke )   CALL iom_rstput", 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:142-174': [
+        'IF( ln_zdftke ) THEN             ! TKE physics',
+        'ENDIF', 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-248': [
+        'IF( ln_zdftke ) THEN',
+        'ENDIF', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-290': [
+        'IF( ln_zdftke ) THEN',
+        'ENDIF', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:339-344': [
+        'IF( ln_zdftke ) THEN',
+        'ENDIF', 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:369-373': [
+        'IF( ln_zdftke ) THEN',
+        'ENDIF', 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trazdf.f90:175-180': [
         'IF(  ( cdtype == \'TRA\'',
         'IF( cdtype == \'TRA\' .AND. jn == jp_tem ) THEN', 6],
