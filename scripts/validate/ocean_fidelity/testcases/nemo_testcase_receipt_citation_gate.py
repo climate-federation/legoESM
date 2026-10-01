@@ -123,6 +123,14 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "zdfdrg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90": (
         _ORCA2_R69SURFACE_COMPILED / "sbcfwb.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "sbcrnf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfiwm.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "zdfiwm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90": (
         _ORCA2_R69SURFACE_COMPILED / "istate.f90"),
     "cpp_ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE.fcm": (
@@ -1183,6 +1191,34 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90:149-156': [
         'NAMELIST/namsbc_fwb/rn_fwb0',
         'IF ( nn_ice/=2 ) nn_fwb_voltype = 2', 8],
+    # --- ORCA2 hierarchy decks round 3: rung-8 mixing selectors ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:140-149': [
+        'NAMELIST/namzdf/ ln_zdfcst',
+        '&             rn_avm0, rn_avt0, nn_avb, nn_havtb', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:255-260': [
+        'IF( ln_zdfddm ) THEN',
+        'ELSE                   ;   WRITE(numout,*)', 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:282-284': [
+        'IF( ln_zdfiwm )   CALL zdf_iwm_init',
+        'IF( ln_zdfswm )   CALL zdf_swm_init', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:345-372': [
+        'IF( ln_rnf_mouth ) THEN',
+        'IF( ln_zdfiwm )   CALL zdf_iwm', 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:308-320': [
+        'NAMELIST/namsbc_rnf/ cn_dir',
+        'IF(lwm) WRITE ( numond, namsbc_rnf )', 13],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:504-535': [
+        'IF( ln_rnf_mouth ) THEN',
+        'nkrnf = 0', 32],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfiwm.f90:301-316': [
+        'IF( ln_tsdiff ) THEN',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 16],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfiwm.f90:421-447': [
+        'NAMELIST/namzdf_iwm/ ln_mevar, ln_tsdiff',
+        "'the viscous molecular value & a very small diffusive value, resp.'", 27],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trazdf.f90:171-180': [
+        'IF(  ( cdtype == \'TRA\'',
+        'IF( cdtype == \'TRA\' .AND. jn == jp_tem ) THEN', 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90:105-140': [
         'IF( ln_rstart ) THEN',
         'vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 36],
