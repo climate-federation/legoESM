@@ -1,0 +1,28 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-recorder-repair-v1",
+  "rung": 5,
+  "claim_label": "independent",
+  "build": {
+    "source_configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "target_configuration": "ORCA2_ORCA1ICE_OMIP_L4_HIER_R7ABSENT",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "source_writer_sha256": "879b84c92c82da16e7c9a233b2f084ed02b4f17677d1e685c85a81e2bb3a22af",
+    "repair_patch_sha256": "e4ce57d6a94053d3ecf3b558d3d7c6843c268ad254627a147796b3336646323e",
+    "binary_sha256": "record-local SHA256SUMS"
+  },
+  "inputs": {
+    "root": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+    "manifest_sha256": "3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5"
+  },
+  "namelists": {
+    "rung6_calibration_sha256": "d2828565a16bd79bd7f89a39297b59d3f9b953583294f2f1769f6a66c8fca331",
+    "rung5_deck_sha256": "f537e3d29a6e2472f89cc9a8d23ec70d18756e3ad112088e7256804698bc1d59",
+    "rung5_execution_sha256": "53b45d1c98af7554e254e25e5b07acbab56cb09ed22896cf090415b371f293b8"
+  },
+  "protocol": {
+    "mpi_ranks": 2,
+    "last_step": 240,
+    "order": ["rung6_active-runoff_calibration", "rung5_runoff-off_record"]
+  }
+}

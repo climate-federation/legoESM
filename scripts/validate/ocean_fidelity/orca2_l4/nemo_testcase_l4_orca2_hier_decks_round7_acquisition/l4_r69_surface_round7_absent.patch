@@ -1,0 +1,79 @@
+--- l4_r69_surface.F90
++++ l4_r69_surface.F90
+@@ -7,6 +7,7 @@
+    !! No value is ever read back into NEMO state.
+    USE dom_oce, ONLY : wp, jpi, jpj, jpts, nn_hls, ssmask
+    USE sbc_oce, ONLY : utau, vtau, taum, qsr, qns, emp, sfx, rnf, fr_i
++   USE sbc_oce, ONLY : ln_rnf
+    USE sbcrnf, ONLY : rnf_tsc
+    USE lib_mpp, ONLY : ctl_stop, mpprank
+    IMPLICIT NONE
+@@ -22,6 +23,17 @@
+ 
+ CONTAINS
+ 
++   SUBROUTINE put_absent(unit, name)
++      !! Self-describing owner-disabled field: name, zero rank, no payload.
++      INTEGER, INTENT(in) :: unit
++      CHARACTER(LEN=*), INTENT(in) :: name
++      CHARACTER(LEN=16) :: field
++      field = name
++      WRITE(unit) field
++      WRITE(unit) 0, 0, 0, 0
++   END SUBROUTINE put_absent
++
++
+    SUBROUTINE put2(unit, name, value, mask)
+       INTEGER, INTENT(in) :: unit
+       CHARACTER(LEN=*), INTENT(in) :: name
+@@ -61,6 +73,10 @@
+       INTEGER, PARAMETER :: nfields = 10
+       CHARACTER(LEN=16) :: magic
+       CHARACTER(LEN=96) :: filename
++      IF(.NOT.ln_rnf) THEN
++         CALL l4_r7_dump_absent(kt, klevel)
++         RETURN
++      ENDIF
+ 
+       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round69: surface record requires fp64')
+       IF(jpts /= 2) CALL ctl_stop('round69: surface record requires T/S')
+@@ -88,4 +104,39 @@
+       CLOSE(unit)
+    END SUBROUTINE l4_r69_dump
+ 
++   SUBROUTINE l4_r7_dump_absent(kt, klevel)
++      !! Version 2 keeps core fields present and marks runoff-owned fields absent.
++      INTEGER, INTENT(in) :: kt, klevel
++      INTEGER :: unit, ios, ib, ie, jb, je
++      INTEGER, PARAMETER :: nfields = 10
++      CHARACTER(LEN=16) :: magic
++      CHARACTER(LEN=96) :: filename
++
++      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round7: surface record requires fp64')
++      IF(jpts /= 2) CALL ctl_stop('round7: surface record requires T/S')
++      ib = 1 + nn_hls
++      ie = jpi - nn_hls
++      jb = 1 + nn_hls
++      je = jpj - nn_hls
++      WRITE(filename,'("oracle_r69_surface_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kt
++      OPEN(NEWUNIT=unit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         & STATUS='NEW', ACTION='WRITE', IOSTAT=ios)
++      IF(ios /= 0) CALL ctl_stop('round7: cannot open surface record')
++      magic = 'NEMO_L4_R69SFC1'
++      WRITE(unit) magic
++      WRITE(unit) 2, kt, klevel, mpprank, nfields, ie-ib+1, je-jb+1, STORAGE_SIZE(1._wp)
++      CALL put2(unit, 'utau', utau(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'vtau', vtau(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'taum', taum(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'qsr', qsr(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'qns', qns(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'emp', emp(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put2(unit, 'sfx', sfx(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put_absent(unit, 'rnf')
++      CALL put2(unit, 'fr_i', fr_i(ib:ie,jb:je), ssmask(ib:ie,jb:je))
++      CALL put_absent(unit, 'rnf_tsc')
++      CLOSE(unit)
++   END SUBROUTINE l4_r7_dump_absent
++
++
+ END MODULE l4_r69_surface
