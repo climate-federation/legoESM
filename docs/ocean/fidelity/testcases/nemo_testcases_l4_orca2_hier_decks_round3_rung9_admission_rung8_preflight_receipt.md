@@ -143,9 +143,9 @@ report emitters missing worktree stamps; case-board omission of
 verbatim` refusal.
 
 The default citation audit passes with 274 citations, zero failures, zero
-unmapped citations, and zero map-audit failures before this receipt is added.
-The round receipt's own citation gate and rigid-shift plant are run after the
-receipt is committed.
+unmapped citations, and zero map-audit failures.  This receipt's own gate
+passes all nine citations with zero failures/unmapped entries; its rigid
+two-line shift of the zdfphy lines 140-149 key fires and exits 1.
 
 The required separate `codex exec --sandbox read-only` review failed before
 reading the diff with `failed to initialize in-process app-server client:
