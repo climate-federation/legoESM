@@ -6149,8 +6149,8 @@ class LatLonCGridOceanModel:
                                          self._nemo_ws_test_hooks
                                          .legacy_hpg_algebraic_association),
                                      nemo_operator_association=(
-                                         self._nemo_ws_test_hooks
-                                         .nemo_stage_rhs_accumulation_order_arm is True),
+                                         _vector_velocity_stage_update or
+                                         self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm is True),
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      return_nemo_operator_components=(
                                          _return_components))
