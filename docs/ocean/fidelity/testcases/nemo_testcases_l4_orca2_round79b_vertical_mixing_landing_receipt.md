@@ -137,3 +137,19 @@ other consumer.
 3. The river-mouth diffusivity is still untranscribed; it contributes nothing
    on rank 0 at step 1 and has not been measured elsewhere.
 4. One more recorded field would make the wave diffusivity bit-gateable.
+
+## Round 81 reproducibility audit — no numerical correction
+
+Round 80 reported that the ordinary current-tip ladder did not reproduce this
+receipt's `ladder_after.json`.  Round 81 reran the unmodified round-1 ladder
+gate on tip `5c47d7340` and compared all 200 checkpoint/field rows
+mechanically: **0 rows differ**.  The kt=10 stage-3 numbers above reproduce to
+their stored precision, and the kt=1 stage-1 temperature remains the same first
+non-bit statement.  Therefore this receipt's ladder values and scientific
+interpretation require no numerical correction.
+
+The discrepancy was in round 80's supposed ordinary control.  Its
+baseline-location gate installed the live-stage operand observer, so it tested
+an observer-aligned execution path and then mislabeled its refusal as an
+ordinary-path difference.  The loud retraction is recorded in the round-80
+receipt; round 81's SHA-pinned reconciliation gate is the replacement control.

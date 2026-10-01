@@ -149,3 +149,30 @@ this round's script/document changes.
    exact passive control and locate the T/S extrema.
 4. The distinct salt/heat double-diffusive coefficient and river-mouth
    diffusivity remain declared unbuilt; neither was approximated here.
+
+## ROUND 81 CORRECTION — STALE-LADDER DIAGNOSIS RETRACTED
+
+The claims above that round 79b's ladder artifact was stale and that the
+current-tip ordinary path differed from it are **RETRACTED**.  The round-80
+baseline-location script unconditionally installed
+`_NEMOWSRK3TestHooks(expose_live_stage_operands=True)`.  Its refusal therefore
+described the observer-aligned path, not the ordinary path it claimed to test.
+This was an instrumentation-classification error; commits `c83c18b25a` and
+`e48530dc02` were not ladder movers.
+
+Round 81 reran the ordinary production ladder at tip `5c47d7340` and compared
+it with round 79b's pinned artifact: **200/200 rows are array-value equal, zero
+rows moved**, the first non-bit statement is unchanged, and kt=10 stage-3 is:
+
+| field | rms | max_abs |
+|---|---:|---:|
+| T | 0.010214846058291116 | 1.2367457128331782 |
+| S | 0.0028092655437671143 | 0.2871061346986039 |
+| u | 0.00612253750027691 | 0.34018984847789213 |
+| v | 0.006027472457627664 | 0.537671796435185 |
+| ssh | 0.03623555945131171 | 0.5883125919751124 |
+
+The independent-month refusal in this receipt remains valid; round 81 names
+its exact first failing step and cell.  Only the stale-ladder diagnosis and the
+downstream claim that its locator/consumer arms were blocked by a changed
+ordinary baseline are withdrawn.
