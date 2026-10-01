@@ -115,6 +115,14 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "l4_r69_surface.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2_R69SURFACE_COMPILED / "sbcmod.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/icestp.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "icestp.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "zdftke.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "zdfdrg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "sbcfwb.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90": (
         _ORCA2_R69SURFACE_COMPILED / "istate.f90"),
     "cpp_ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE.fcm": (
@@ -1150,6 +1158,31 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
         ('SELECT CASE( nn_ice )', 2),
         ('END SELECT', 5), 5],
+    # --- ORCA2 hierarchy decks round 2: rung-9 no-ice branch ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:159-165': [
+        'NAMELIST/namsbc/ nn_fsbc',
+        '&             ln_wave  , nn_lsm', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:247-259': [
+        ('SELECT CASE( nn_ice )', 1),
+        ('END SELECT', 1), 13],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:274-280': [
+        'IF( nn_ice == 0 ) THEN',
+        'cloud_fra(:,:) = pp_cldf', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:376-382': [
+        'IF( nn_ice == 0 ) THEN',
+        'CALL ice_init( Kbb, Kmm, Kaa )', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/icestp.f90:285-305': [
+        'SUBROUTINE ice_init( Kbb, Kmm, Kaa )',
+        "IF(lwm) CALL ctl_opn( numoni , 'output.namelist.ice'", 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90:785-787': [
+        'IF     ( nn_mxlice > 0 .AND. nn_ice == 0 ) THEN',
+        'nn_mxlice = 0', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfdrg.f90:371-380': [
+        'NAMELIST/namdrg/ ln_drg_OFF',
+        'IF ( ln_drgice_imp .AND.   nn_ice /= 2  )   ln_drgice_imp = .FALSE.', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90:149-156': [
+        'NAMELIST/namsbc_fwb/rn_fwb0',
+        'IF ( nn_ice/=2 ) nn_fwb_voltype = 2', 8],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/istate.f90:105-140': [
         'IF( ln_rstart ) THEN',
         'vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 36],
@@ -1157,6 +1190,10 @@ CITATION_MAP = {
         'bld::tool::fppkeys   key_si3   key_qco key_vco_1d3d key_RK3',
     'rung10_namelist_cfg:234':
         'ln_spc_dyn    = .true.',
+    'rung10_namelist_cfg:86':
+        'nn_ice      = 2',
+    'rung10_namelist_cfg:416':
+        'nn_mxlice = 2',
     # --- ORCA2 round 80: admitted end-of-chain coefficients and consumers ---
     'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381': [
         '!                          !==  ocean Kz  ==!   (avt, avs, avm)',
