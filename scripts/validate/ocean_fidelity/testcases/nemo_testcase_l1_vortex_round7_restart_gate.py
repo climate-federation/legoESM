@@ -123,7 +123,13 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
 
     if plant:
         values = np.asarray(resumed.eta_rk3_after.data).copy()
-        values.flat[int(np.argmax(np.abs(values)))] += 1.0e-3
+        # A single extremum can be a masked/boundary point on these cards.
+        # Use a non-constant full-domain pattern so at least one live
+        # horizontal gradient reaching the first wzv call is necessarily
+        # perturbed; a spatially constant offset would be another vacuous
+        # control for this divergence-driven consumer.
+        parity = np.sum(np.indices(values.shape), axis=0) % 2
+        values += np.where(parity, 1.0e-3, -1.0e-3)
         resumed = resumed._replace(
             eta_rk3_after=resumed.eta_rk3_after.replace(data=jnp.asarray(values)))
 
