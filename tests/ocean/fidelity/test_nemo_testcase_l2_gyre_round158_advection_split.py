@@ -49,15 +49,19 @@ def test_an_unknown_operator_name_is_refused(card):
                expose_momentum_operator_stage=2)
 
 
+@pytest.mark.parametrize("stage", (2, 3))
 @pytest.mark.parametrize("bad", [(None, None), (None,), "w", 3,
                                  (None, None, None, None)])
-def test_a_stage2_vertical_operand_override_that_is_not_a_triple_is_refused(
-        card, bad):
+def test_a_stage_vertical_operand_override_that_is_not_a_triple_is_refused(
+        card, stage, bad):
     """A pair or a bare array would substitute the WRONG dyn_zad operand."""
-    with pytest.raises(ValueError, match="stage2_zad_operand_override"):
-        _model(card, stage2_zad_operand_override=bad)
+    name = f"stage{stage}_zad_operand_override"
+    with pytest.raises(ValueError, match=name):
+        _model(card, **{name: bad})
 
 
-def test_the_stage2_vertical_operand_override_accepts_a_live_triple(card):
+@pytest.mark.parametrize("stage", (2, 3))
+def test_the_stage_vertical_operand_override_accepts_a_live_triple(card, stage):
     """All-``None`` is the identity: every operand stays the live one."""
-    assert _model(card, stage2_zad_operand_override=(None, None, None))
+    assert _model(card, **{
+        f"stage{stage}_zad_operand_override": (None, None, None)})

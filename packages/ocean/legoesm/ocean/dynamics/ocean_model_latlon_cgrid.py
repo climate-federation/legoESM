@@ -1300,18 +1300,18 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
-    # Round 5 (VORTEX) WRITE-only companion to the override above: report
-    # the vertical velocity and face thicknesses dyn_zad is handed, so the
-    # operand can be scored against the oracle's own recorded ``ww``
-    # instead of only being replaced by it.  None is the production value.
+    # WRITE-only callbacks report the W/thickness operands handed to dyn_zad.
+    # None is the production value; no card constructs these diagnostics.
     stage1_zad_operand_observer: object = None
-    # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
-    # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
-    # operand, so one operand at a time can be replaced by NEMO's recorded
-    # value while every other stage input stays legoESM's.  It feeds the SAME
-    # ``nemo_stage_zad_operands`` seam stage 1 uses and reaches nothing else;
-    # no card constructs it.
+    stage2_zad_operand_observer: object = None
+    stage3_zad_operand_observer: object = None
+    # Rounds 158/194: per-slot substitution at the STAGE-2/3 dyn_zad calls.
+    # Each ``(w, h_u, h_v)`` triple uses ``None`` to keep the live operand,
+    # so one slot can be replaced by NEMO's recorded stage value while every
+    # other input stays legoESM's.  Both feed the existing tendency seam; no
+    # card constructs either diagnostic control.
     stage2_zad_operand_override: object = None
+    stage3_zad_operand_override: object = None
     # Round 159: private ONE-VARIABLE arm for the stage-2 continuity
     # solve.  NEMO's vector-invariant deck solves it on the RAW stage
     # velocity (``stprk3_stg.f90:360``, velocity indicator) while the
@@ -2711,18 +2711,18 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_momentum_operator_stage must be 2 or 3; stages 1 and "
                 "3-with-lateral-mixing are served by other hooks")
-        # At CONSTRUCTION, not at trace time.  The inner guard raises only
-        # once the stage is reached, so a gate asking for a bucket that does
-        # not exist would compile and score whatever the returned slots held.
-        _zad2 = self._nemo_ws_test_hooks.stage2_zad_operand_override
-        if _zad2 is not None and (
-                not isinstance(_zad2, tuple) or len(_zad2) != 3):
-            # At CONSTRUCTION, like the other momentum seams: a pair or a bare
-            # array would substitute the wrong dyn_zad operand and the step
-            # would score a field under another field's name.
-            raise ValueError(
-                "stage2_zad_operand_override must be a (w, h_u, h_v) tuple; "
-                "a None slot keeps the live stage operand")
+        # At CONSTRUCTION: otherwise a missing stage bucket can compile and
+        # score whatever the returned slots happened to hold.
+        for _zad_stage, _zad_override in enumerate((
+                self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                self._nemo_ws_test_hooks.stage3_zad_operand_override), 2):
+            if _zad_override is not None and (
+                    not isinstance(_zad_override, tuple)
+                    or len(_zad_override) != 3):
+                # A pair or bare array would score under another field's name.
+                raise ValueError(
+                    f"stage{_zad_stage}_zad_operand_override must be a "
+                    "(w, h_u, h_v) tuple; a None slot keeps the live operand")
         _face_r3_stage = self._nemo_ws_test_hooks.expose_stage_face_r3
         if (not isinstance(_face_r3_stage, int)
                 or isinstance(_face_r3_stage, bool)
@@ -6021,17 +6021,12 @@ class LatLonCGridOceanModel:
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
         elif getattr(_cfg_b, "momentum_time_integrator",
                      "euler") == "rk3_ws":
-            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
-            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
-            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
-            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
-            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
-            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
-            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
-            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
-            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
-            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
-            # sqrt(3)) carries over.
+            # NEMO WS-RK3 restarts each stage from u0 with the prior stage RHS
+            # and dt/3, dt/2, dt (not Shu-Osher combinations). Stage 1 carries
+            # the full stp2d RHS, stage 2 hpg+vor+adv, and stage 3 the full RHS
+            # plus its only implicit ZDF solve. Its stability polynomial is
+            # unchanged from the equivalent three-stage polynomial used here:
+            # SSP-RK3's, so the explicit Coriolis bound still applies.
             u0 = state.u.data
             v0 = state.v.data
 
@@ -6082,6 +6077,9 @@ class LatLonCGridOceanModel:
                     and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
                 _return_components = (
                     _expose_operator or _return_live_stage_operands)
+                _zad_observers = (None,
+                    self._nemo_ws_test_hooks.stage2_zad_operand_observer,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_observer)
                 _stage_ldf_thickness = None
                 if (not skip_ldf and _ws_uses_nemo_ldf_e3
                         and stage_face_thickness is not None):
@@ -6152,6 +6150,8 @@ class LatLonCGridOceanModel:
                                          self._nemo_ws_test_hooks
                                          .nemo_stage_rhs_accumulation_order_arm is True),
                                      nemo_stage_zad_operands=stage_zad_operands,
+                                     nemo_stage_zad_operand_observer=(
+                                         _zad_observers[stage_index - 1]),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:
@@ -7255,14 +7255,14 @@ class LatLonCGridOceanModel:
                 return _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
 
-            def _stage2_zad_operands(live):
-                # Round 158.  Replace only the slots the private hook names,
-                # so one dyn_zad operand at a time can come from NEMO's
-                # recorded stage while every other stage input stays
-                # legoESM's.  ``None`` slots keep the live operand, which is
-                # the same contract the stage-1 W substitution already uses.
-                override = (
-                    self._nemo_ws_test_hooks.stage2_zad_operand_override)
+            def _stage_zad_operands(stage, live):
+                # Rounds 158/194.  Replace only the slots the private hook
+                # names, so one dyn_zad operand at a time can come from NEMO's
+                # recorded stage while all other stage inputs stay legoESM's.
+                overrides = (
+                    self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_override)
+                override = overrides[stage - 2]
                 if override is None:
                     return live
                 return tuple(
@@ -7373,7 +7373,7 @@ class LatLonCGridOceanModel:
                     _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
-                stage_zad_operands=_stage2_zad_operands(
+                stage_zad_operands=_stage_zad_operands(2,
                     (_momentum_stage_w(_g1), _g1[4], _g1[5])),
                 stage_index=2)
             _stage2_rhs_production = (p1u_corr, p1v_corr)
@@ -7437,8 +7437,8 @@ class LatLonCGridOceanModel:
                 _stage3_hpg_operands,
                 _stage3_vertical_up3,
                 stage_face_thickness=_stage3_face_thickness,
-                stage_zad_operands=(
-                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
+                stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
                 stage_index=3)
             _expose_stage3_rhs = (
                 self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
@@ -7454,8 +7454,8 @@ class LatLonCGridOceanModel:
                     _stage3_hpg_operands,
                     _stage3_vertical_up3,
                     stage_face_thickness=_stage3_face_thickness,
-                    stage_zad_operands=(
-                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
+                    stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
                     stage_index=3)
             elif _expose_stage3_rhs:
                 raise ValueError(
