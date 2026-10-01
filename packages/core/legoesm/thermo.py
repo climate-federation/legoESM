@@ -758,8 +758,9 @@ def latent_heat_vaporization(
     (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``):
     the NEMO/AeroBulk empirical slope (2370) was retired in its favour, and every
     component-interface site still reading the bare constants (surface fluxes,
-    coupler tiles, land/ice/ocean exchange, budget ledgers, the DifferBESS canopy
-    slope) is tracked by ``tests/test_no_bare_latent_heat.py`` for migration.
+    coupler tiles, land/ice/ocean exchange, budget ledgers) is tracked by
+    ``tests/test_no_bare_latent_heat.py`` for migration; the DifferBESS canopy
+    slope (2361) was retired for this formula too.
     ``c_liquid`` exists for Emanuel's CONVECT port, which carries its own tunable
     liquid heat capacity.  Dtype-preserving.
     """
