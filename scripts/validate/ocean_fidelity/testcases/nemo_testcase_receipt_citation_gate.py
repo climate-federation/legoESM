@@ -1203,7 +1203,7 @@ CITATION_MAP = {
         'IF( ln_zdfswm )   CALL zdf_swm_init', 2],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:353-372': [
         'IF( ln_rnf_mouth ) THEN',
-        'IF( ln_zdfiwm )   CALL zdf_iwm', 20],
+        ('IF( ln_zdfiwm )   CALL zdf_iwm', 2), 20],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:308-320': [
         'NAMELIST/namsbc_rnf/ cn_dir',
         'IF(lwm) WRITE ( numond, namsbc_rnf )', 13],
