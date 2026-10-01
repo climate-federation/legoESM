@@ -160,6 +160,12 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
     require(sha256(COMPILED / "l4_r69_surface.f90") == EXPECTED["writer"], "compiled writer changed")
     cpp_tokens = tuple(CPP.read_text().split("fppkeys", 1)[1].split())
     require(cpp_tokens == CPP_KEYS, f"resolved CPP keys changed: {cpp_tokens}")
+    compiled_spc_sites = [
+        path.name
+        for path in COMPILED.glob("*.f90")
+        if b"ln_spc_dyn" in path.read_bytes()
+    ]
+    require(not compiled_spc_sites, f"ln_spc_dyn unexpectedly compiled: {compiled_spc_sites}")
     stprk3 = (COMPILED / "stprk3.f90").read_text()
     writer = (COMPILED / "l4_r69_surface.f90").read_text()
     require("CALL sbc        ( kstp, Nbb, Nbb )" in stprk3, "compiled SBC call is absent")
@@ -187,6 +193,7 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         "cpp_keys": list(CPP_KEYS),
         "ln_spc_dyn_deck_value": True,
         "ln_spc_dyn_compiled_scope": "INERT_WITHOUT_key_agrif",
+        "ln_spc_dyn_compiled_sites": compiled_spc_sites,
     }
 
 

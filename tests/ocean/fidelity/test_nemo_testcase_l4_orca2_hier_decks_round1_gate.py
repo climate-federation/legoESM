@@ -27,6 +27,7 @@ def test_real_rung10_preflight_is_exact():
     assert report["deck_difference_lines"] == 0
     assert report["cpp_keys"] == list(gate.CPP_KEYS)
     assert report["ln_spc_dyn_compiled_scope"] == "INERT_WITHOUT_key_agrif"
+    assert report["ln_spc_dyn_compiled_sites"] == []
 
 
 @pytest.mark.parametrize("plant", ("deck-byte", "manifest-field"))
