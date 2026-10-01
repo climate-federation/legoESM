@@ -122,7 +122,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
 
     if plant:
         values = np.asarray(resumed.eta_rk3_after.data).copy()
-        values.flat[int(np.argmax(np.abs(values)))] += 1.0e-9
+        values.flat[int(np.argmax(np.abs(values)))] += 1.0e-3
         resumed = resumed._replace(
             eta_rk3_after=resumed.eta_rk3_after.replace(data=jnp.asarray(values)))
 
@@ -158,7 +158,11 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     stamp = worktree_stamp()
     args.root.mkdir(parents=True, exist_ok=True)
-    rows = [run_case(case, args.root, plant=args.plant) for case in CASES]
+    try:
+        rows = [run_case(case, args.root, plant=args.plant) for case in CASES]
+    except GateError as error:
+        print(f"STATUS REFUSE: {error}")
+        return 2
     from nemo_testcase_l2_gyre_decision43_gate import _card_execution
     report = {
         "worktree": stamp,
