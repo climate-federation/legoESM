@@ -116,7 +116,7 @@ rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` ${EXTRA:-} \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the tripole card scores` \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
-  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
+  --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \
   --ew-cyclic-overlap \
