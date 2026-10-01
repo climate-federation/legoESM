@@ -1,0 +1,32 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 7,
+  "label": "ORCA2 ocean deck without sea ice, differential-mixing additions, or internal-wave mixing",
+  "module_removed_from_upper_rung": "internal-wave mixing and its molecular-background reset",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung8/record",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "build": {
+    "configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "450410b5c9b1960c4cc8d05d690decca3308f888e70987b444682315bb846572",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "b116511cbefb6d2b6f1d911a77079a4268f343ea3aa1b861d08ac0c8d2bc4bcf",
+    "compiled_zdfphy_sha256": "903e0d1220a2f9b38cdd55b6eece5dbbfed992f12f497155cca8633702e7451e",
+    "compiled_zdfiwm_sha256": "13ba29ab568a4592ab1a712be93c30ba0322e41c93cd7ac39a6977c00ac76073",
+    "compiled_zdftke_sha256": "0f290190a33e4713bba218047451b35e25327bd589a8a74536a2db506efe81c2"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "2a36188c237b8d1dcfd52f1fb1a009fd0f45634eacc36b42ff28340f64edd27d",
+    "namelist_ice_cfg_sha256": "6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89",
+    "execution_namelist_cfg_sha256": "4804d56f905bfedf124ed3472cfd0589dfceb6c88aeaedc77db9451715f365f8",
+    "execution_namzdf_iwm": "committed gate-generated unread sentinel"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}
