@@ -135,7 +135,7 @@
   "hb_kvf_min": null,
   "held_suarez_forcing": false,
   "hines_Fmax": 0.1,
-  "hines_launch_p": 0.0,
+  "hines_launch_p": 70000.0,
   "hines_total_rms_wind": 2.0,
   "homogeneous_ice_nucleation": false,
   "ic": "default",
