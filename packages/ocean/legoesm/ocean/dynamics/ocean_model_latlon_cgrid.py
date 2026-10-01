@@ -2751,10 +2751,10 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "stage2_wzv_velocity_form must be a bool")
         if self._nemo_ws_test_hooks.expose_momentum_operator not in (
-                "", "hpg", "vorticity", "advection", "keg", "zad"):
+                "", "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
             raise ValueError(
-                "expose_momentum_operator must be empty, hpg, vorticity, "
-                "advection, keg, or zad; got "
+                "expose_momentum_operator must name a component or after_* "
+                "accumulator boundary; got "
                 f"{self._nemo_ws_test_hooks.expose_momentum_operator!r}")
         if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
                 "", "after_advection", "after_sbc"):
@@ -6166,12 +6166,12 @@ class LatLonCGridOceanModel:
                     _operator_name = (
                         self._nemo_ws_test_hooks.expose_momentum_operator)
                     if _operator_name not in (
-                            "hpg", "vorticity", "advection", "keg", "zad"):
+                            "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
                         raise ValueError(
-                            "expose_momentum_operator must be empty, hpg, "
-                            "vorticity, advection, keg, or zad")
-                    _op_u = _operator_components[f"{_operator_name}_u"].data
-                    _op_v = _operator_components[f"{_operator_name}_v"].data
+                            "expose_momentum_operator must name a component "
+                            "or after_* accumulator boundary")
+                    _op_u = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_u"].data
+                    _op_v = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_v"].data
                     if (_operator_name in ("keg", "zad")
                             and extra_rhs is not None):
                         # The two halves are the VECTOR form's routines.  A

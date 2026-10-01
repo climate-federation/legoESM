@@ -72,3 +72,17 @@ def test_every_stage_operator_face_has_a_named_plant():
     names = {f"s{s}.{op}.{face}" for s in (2, 3)
              for op in gate.BOUNDARIES for face in ("u", "v")}
     assert len(names) == 16
+
+
+def test_model_accepts_every_cumulative_boundary_name():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    card = build_nemo_testcase_card("VORTEX_VEC-zco")
+    for boundary in gate.BOUNDARIES:
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_momentum_operator=f"after_{boundary}",
+                expose_momentum_operator_stage=2))

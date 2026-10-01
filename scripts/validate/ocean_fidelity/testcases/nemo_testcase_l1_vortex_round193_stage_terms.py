@@ -142,17 +142,17 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None,
     for stage in (2, 3):
         groups = read_stage_terms(root, stage)
         reference = nemo_components(groups)
-        hooks = _NEMOWSRK3TestHooks(
-            stage_barotropic_output_override=external,
-            stage_entry_override=stage_override(stage),
-            expose_live_stage_operands=True,
-            nemo_stage_rhs_accumulation_order_arm=source_order,
-        )
-        trace = model_step(hooks)
-        components = trace.operator_operands[stage - 2]
         for operator in BOUNDARIES:
+            hooks = _NEMOWSRK3TestHooks(
+                stage_barotropic_output_override=external,
+                stage_entry_override=stage_override(stage),
+                expose_momentum_operator=f"after_{operator}",
+                expose_momentum_operator_stage=stage,
+                nemo_stage_rhs_accumulation_order_arm=source_order,
+            )
+            fields = lego_fields(model_step(hooks))
             for face, index in (("u", 0), ("v", 1)):
-                candidate = owned(components[f"after_{operator}_{face}"], face)
+                candidate = np.asarray(fields[face])[..., :nlev]
                 planted = plant == f"s{stage}.{operator}.{face}"
                 if planted:
                     candidate = candidate.copy()
