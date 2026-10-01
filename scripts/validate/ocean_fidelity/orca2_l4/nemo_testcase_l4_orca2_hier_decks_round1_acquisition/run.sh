@@ -83,7 +83,7 @@ mkdir -p "$EVIDENCE"
 }
 bash -n "$0"
 "$PY" -m py_compile "$GATE"
-"$PY" "$GATE" --preflight-only >"$EVIDENCE/preflight.json"
+"$PY" "$GATE" --preflight-only --output "$EVIDENCE/preflight.json" >/dev/null
 for plant in deck-byte manifest-field; do
   if "$PY" "$GATE" --preflight-only --plant "$plant" >"$EVIDENCE/${plant}_preflight_plant.log" 2>&1; then
     printf 'REFUSE: %s preflight plant stayed green\n' "$plant" >&2

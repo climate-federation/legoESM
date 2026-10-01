@@ -15,6 +15,7 @@ SCRIPT = (
     / "scripts/validate/ocean_fidelity/orca2_l4"
     / "nemo_testcase_l4_orca2_hier_decks_round1_gate.py"
 )
+RUNNER = SCRIPT.parent / "nemo_testcase_l4_orca2_hier_decks_round1_acquisition/run.sh"
 SPEC = importlib.util.spec_from_file_location("orca2_hier_decks_round1_gate", SCRIPT)
 assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
@@ -28,6 +29,12 @@ def test_real_rung10_preflight_is_exact():
     assert report["cpp_keys"] == list(gate.CPP_KEYS)
     assert report["ln_spc_dyn_compiled_scope"] == "INERT_WITHOUT_key_agrif"
     assert report["ln_spc_dyn_compiled_sites"] == []
+
+
+def test_runner_writes_preflight_as_json_only():
+    runner = RUNNER.read_text()
+    assert '--output "$EVIDENCE/preflight.json" >/dev/null' in runner
+    assert '--preflight-only >"$EVIDENCE/preflight.json"' not in runner
 
 
 @pytest.mark.parametrize("plant", ("deck-byte", "manifest-field"))

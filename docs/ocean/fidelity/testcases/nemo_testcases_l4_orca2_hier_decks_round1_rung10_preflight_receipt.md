@@ -148,7 +148,8 @@ pass.  Before the hang it exposed the two declared pre-existing reds
 last red reproduces alone: its legacy expected final six trace fields omit the
 new `stage_tracer_sources` field already present at the branch base.  This
 round changes neither that test nor its model type.  All eight new hierarchy
-tests passed inside the full battery.  Preflight, shell syntax, Python
+tests present at that point passed inside the full battery; a ninth regression
+test now pins pure-JSON preflight evidence.  Preflight, shell syntax, Python
 compilation, the citation gate and both preflight plants pass.
 
 The required separate `codex exec --sandbox read-only` review was attempted
