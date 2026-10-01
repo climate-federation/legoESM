@@ -96,6 +96,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
     entry = card.recipe.initial_state
     first = model.step(entry, dt=card.dt_s)
     continuous = model.step(first, dt=card.dt_s)
+    continuous_next = model.step(continuous, dt=card.dt_s)
     require(first.eta_rk3_after is not None,
             f"{case}: first step did not create eta_rk3_after")
 
@@ -128,13 +129,17 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
 
     after_resume = model.step(resumed, dt=card.dt_s)
     step_differences = _state_differences(after_resume, continuous)
-    exact_step = not step_differences
+    after_resume_next = model.step(after_resume, dt=card.dt_s)
+    next_step_differences = _state_differences(
+        after_resume_next, continuous_next)
+    exact_resume = not step_differences and not next_step_differences
     if plant:
-        require(not exact_step,
-                f"{case}: carried-slot plant did not move the resumed step")
+        require(not exact_resume,
+                f"{case}: carried-slot plant did not move either resumed step")
     else:
-        require(exact_step,
-                f"{case}: resumed step differs by field: {step_differences}")
+        require(exact_resume,
+                f"{case}: resumed steps differ by field: "
+                f"step2={step_differences}, step3={next_step_differences}")
     return {
         "case": case,
         "archive": str(archive),
@@ -144,6 +149,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
         "load_differences": load_differences,
         "all_load_differences": all_load_differences,
         "resumed_step_differences": step_differences,
+        "next_resumed_step_differences": next_step_differences,
         "plant": plant,
     }
 
@@ -176,7 +182,7 @@ def main() -> int:
         print("STATUS PLANT-FIRED: carried after-SSH restart slot")
         return 1
     print("STATUS PASS: 2 regenerated archives, 2 exact persisted-slot loads, "
-          "2 exact resumes")
+          "2 exact two-step resumes")
     return 0
 
 
