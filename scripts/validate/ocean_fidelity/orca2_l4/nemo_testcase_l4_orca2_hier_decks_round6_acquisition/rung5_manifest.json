@@ -1,0 +1,39 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 5,
+  "label": "ORCA2 ocean deck with runoff disabled and no higher hierarchy modules",
+  "module_removed_from_upper_rung": "river runoff heat and water",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6/record",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "build": {
+    "configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "450410b5c9b1960c4cc8d05d690decca3308f888e70987b444682315bb846572",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "b116511cbefb6d2b6f1d911a77079a4268f343ea3aa1b861d08ac0c8d2bc4bcf",
+    "compiled_sbcmod_sha256": "f2ce40cd468c056e3b39ccaa74cdf7b76fd3d477ab6aaa08b0bf6d18e807c52b",
+    "compiled_sbcrnf_sha256": "1604b3054264eab1dd4207b6f882d591ffa48ec7e01ca334d801d4f69d2e0ebe",
+    "compiled_trasbc_sha256": "906d5479e5e3a1dc9dd74a50a58ba395a0d007b31a1c51261ae0dde6acd66441",
+    "compiled_divhor_sha256": "45f670c175119eb1e88df17922e129c77e9d0121cbc6e100a1edefed4044f382",
+    "compiled_stp2d_sha256": "4dcbbb0217d2ef3bcfb643a0a8f649e29249dbaa87f04a7d7f3d8e31a8d5c6bc",
+    "compiled_sbcssr_sha256": "134ac06878e79ff57156cfc73b5d504f60adf569c761278cf1939d2c00eca820",
+    "compiled_sbcfwb_sha256": "c1e200df05ef9092abf9e4b4329fa48f720711f1e755a87bf25ba1a8fce8258e",
+    "compiled_sshwzv_sha256": "9d0225953304ecbd75bdfb4dd8d5556f34c33b4dcae0ddd591ab2634449829da",
+    "compiled_traadv_sha256": "7b82662ce69dc6cdf1fe027fc82a99d7165aae0a0e89e71db3a829adfb3bacfa"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "f537e3d29a6e2472f89cc9a8d23ec70d18756e3ad112088e7256804698bc1d59",
+    "namelist_ice_cfg_sha256": "6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89",
+    "execution_namelist_cfg_sha256": "53b45d1c98af7554e254e25e5b07acbab56cb09ed22896cf090415b371f293b8",
+    "execution_namzdf_tke": "retained unread sentinel inherited from rung 6",
+    "namsbc_rnf": "retained and read; false selector returns before active runoff setup"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}
