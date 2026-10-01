@@ -136,11 +136,20 @@ future user decision says otherwise.
 
 ## Validation and review
 
-Focused hierarchy plus citation-gate battery: **23 passed before the clean-tree
-receipt run**; the two citation tests that stamp the default receipt correctly
-refused the then-uncommitted citation-map edit.  They are rerun after this
-receipt commit.  Preflight, shell syntax, Python compilation, and both preflight
-plants pass.
+Focused hierarchy plus citation-gate battery: **25 passed** on the clean tree.
+The required `tests/ocean/fidelity -n 12` battery ran once and reached 99% of
+2,185 collected tests before the existing
+`test_prediction_plant_is_fail_closed` stage-sweep control stopped producing
+output; it was interrupted after a bounded wait rather than reported as a
+pass.  Before the hang it exposed the two declared pre-existing reds
+(`test_every_report_emitter_stamps_the_worktree` and
+`test_full_v2_gate_and_plants`) plus
+`test_live_trace_and_raw_history_arms_are_private_and_off_by_default`.  The
+last red reproduces alone: its legacy expected final six trace fields omit the
+new `stage_tracer_sources` field already present at the branch base.  This
+round changes neither that test nor its model type.  All eight new hierarchy
+tests passed inside the full battery.  Preflight, shell syntax, Python
+compilation, the citation gate and both preflight plants pass.
 
 The required separate `codex exec --sandbox read-only` review was attempted
 twice and failed before reading the diff with `failed to initialize in-process
