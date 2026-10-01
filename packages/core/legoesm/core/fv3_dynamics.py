@@ -435,7 +435,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      check_state: bool = False,
                      hord_tr: int = 6, tracer_q_split: int = 0,
                      nord_tr: int = 0, trdm2=0.0, lim_fac=1.0,
-                     z_tracer: bool = True, inline_q: bool = False) -> dict:
+                     z_tracer: bool = True, inline_q: bool = False,
+                     fill: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (:451-674), functional.
 
     C4/D4 returns ``{"state", "press", "q", "omga", "nh", "stages",
@@ -880,7 +881,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                     kord_wz=kord_wz, w_limiter=w_limiter,
                     rdgas=(None if hydrostatic else _FV3_RDGAS),
                     grav=(None if hydrostatic else _FV3_GRAV),
-                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    fill=fill, do_sat_adj=False, do_inline_mp=False,
                     do_adiabatic_init=False, defer_close=_defer)
 
             _nh_ops = (() if hydrostatic
@@ -927,7 +928,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                     kord_wz=kord_wz, w_limiter=w_limiter,
                     rdgas=(None if hydrostatic else _FV3_RDGAS),
                     grav=(None if hydrostatic else _FV3_GRAV),
-                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    fill=fill, do_sat_adj=False, do_inline_mp=False,
                     do_adiabatic_init=False,
                     defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
             # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
@@ -1085,6 +1086,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               w_limiter=None, cfg=None, a2b_ord: int = 4,
                               check_state: bool = False, hord_tr: int = 6,
                               tracer_q_split: int = 0, nord_tr: int = 0,
+                              fill: bool = False,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
                               consv_te: float = 0.0, out_shardings=None,
@@ -1110,6 +1112,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             cfg=cfg, a2b_ord=a2b_ord, check_state=check_state,
             hord_tr=hord_tr, tracer_q_split=tracer_q_split,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
+            fill=fill,
             z_tracer=z_tracer, inline_q=inline_q, batched=batched)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and

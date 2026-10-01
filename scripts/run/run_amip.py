@@ -1018,6 +1018,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
               "unchanged. Six faces, fp64, hydrostatic; checkpoints/ERA5 IC "
               "not yet (M4/M5)."))
+    parser.add_argument(
+        "--fv3-duo-fill", action="store_true", default=False,
+        help=("fv3_duo: FV3's own tracer positivity in the vertical remap "
+              "(fv_mapz fill -> fillz column borrow). Default off = the "
+              "certified oracle deck; the CAM6 deck sets it."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -2229,6 +2234,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
         fv3_duo_column_lane=args.fv3_duo_column_lane,
+        fv3_duo_fill=args.fv3_duo_fill,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,

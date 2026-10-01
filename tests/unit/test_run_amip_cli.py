@@ -4087,6 +4087,19 @@ def test_fv3_duo_windows_flags_round_trip_and_validate():
     cfg.validate_strict()
 
 
+def test_fv3_duo_fill_flag_round_trips_and_validates():
+    """--fv3-duo-fill reaches DycoreConfig (default False = the oracle
+    deck) and validate_strict refuses it off the fv3_duo discretization."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_fill is False
+    cfg = _fv3_duo_cfg(["--fv3-duo-fill"])
+    assert cfg.dycore.fv3_duo_fill is True
+    cfg.validate_strict()
+    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
+    with pytest.raises(ValueError, match="fv3_duo_fill"):
+        cfg.validate_strict()
+
+
 def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     """--fv3-duo-column-lane reaches DycoreConfig (default False) and
     validate_strict refuses it with the window layout."""

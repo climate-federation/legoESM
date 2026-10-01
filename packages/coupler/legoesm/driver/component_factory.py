@@ -559,10 +559,12 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
                 f"-- moisture convergence / resolved w -- the column mesh "
                 f"has no edge topology for; it would run inert)")
     # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
-    # duo reads none of them, so a non-default value would be inert
+    # duo reads none of them except the grid-general positivity knob, so a
+    # non-default value would be inert
     d_def = type(config.dycore)()
     inert = [f for f in config.dycore._fields
              if f.startswith("mpas_")
+             and f != "mpas_conservative_tracer_clamp"
              and getattr(config.dycore, f) != getattr(d_def, f)]
     if inert:
         refused.append("dycore." + ", dycore.".join(inert)
@@ -586,8 +588,12 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
                          "(ctx['ectx'] with amat6) for the c2l column winds")
     dyn = FV3DuoDynamicsModel(
         bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
-                             storage_dtype="float64", moist=moist, eta=eta))
-    return FV3DuoColumnModel(dyn, tracer_names=registry.names)
+                             storage_dtype="float64", moist=moist, eta=eta,
+                             fill=config.dycore.fv3_duo_fill))
+    return FV3DuoColumnModel(
+        dyn, tracer_names=registry.names,
+        conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
+        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip)
 
 
 def create_atmosphere_dycore(

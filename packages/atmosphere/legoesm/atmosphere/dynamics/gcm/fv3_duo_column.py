@@ -134,7 +134,9 @@ class FV3DuoColumnState(NamedTuple):
 
 
 class FV3DuoColumnModel:
-    def __init__(self, dyn: FV3DuoDynamicsModel, *, tracer_names=None):
+    def __init__(self, dyn: FV3DuoDynamicsModel, *, tracer_names=None,
+                 conservative_tracer_clamp: bool = True,
+                 energy_consistent_moisture_clip: bool = False):
         if dyn.window_layout is not None:
             raise NotImplementedError(
                 "FV3DuoColumnModel runs on six faces; the window layout is "
@@ -169,6 +171,20 @@ class FV3DuoColumnModel:
                 f"water species {stray})")
         self.tracer_names = names
         self.nwat = nwat
+        # the MPAS lane's end-of-step positivity stage (#1354/#1515): the
+        # SAME shared routine with the SAME two deck knobs -- borrow
+        # (conservative_tracer_clamp=True, T untouched) or the hard floor
+        # (False; with energy_consistent_moisture_clip the floor carries a
+        # latent-heat T correction, which this lane does not plumb into pt:
+        # refused rather than silently dropped)
+        self.conservative_tracer_clamp = bool(conservative_tracer_clamp)
+        self.energy_consistent_moisture_clip = bool(energy_consistent_moisture_clip)
+        if self.energy_consistent_moisture_clip and not self.conservative_tracer_clamp:
+            raise NotImplementedError(
+                "FV3DuoColumnModel: conservative_tracer_clamp=False with "
+                "energy_consistent_moisture_clip=True needs the floor's "
+                "latent-heat T correction written back into pt, which this "
+                "lane does not do; use the borrow (True) or drop the flag")
         self._state_type = FV3DuoColumnState
         self._phys_state = None
         self._sfc_diag = None
@@ -311,7 +327,12 @@ class FV3DuoColumnModel:
             physics_fn, phys_state, where="FV3DuoColumnModel.step()")
         bundle = self.dyn.step(self._native_of(state), dt)
         if physics_fn is None:
-            return self.from_bundle(bundle)
+            fn = self._post_fns.get(None)
+            if fn is None:
+                fn = jax.jit(lambda b: {**b, "q": self._positivity(
+                    b["state"], list(b["q"]))})
+                self._post_fns[None] = fn
+            return self.from_bundle(fn(bundle))
         fn = self._post_fns.get(physics_fn)
         if fn is None:
             fn = jax.jit(lambda b, dt_, fo, ps: self._physics_and_apply(
@@ -334,6 +355,33 @@ class FV3DuoColumnModel:
                 new if new is not None else old
                 for new, old in zip(sfc_diag, prev))
         return state_new
+
+    def _positivity(self, st, q):
+        """The MPAS lane's end-of-step positivity stage, the shared routine
+        verbatim (``apply_water_positivity``: column-conserving BORROW
+        weighted by the layer mass for every borrow-eligible species and a
+        plain floor for the rest, or the hard floor when the borrow is
+        off; T untouched on both arms this lane admits), on the compute
+        window, EVERY step as on MPAS.  Weight = delp * area: the column
+        borrow is per column (a per-column factor cancels) but the global
+        residual redistribution sums over cells, and duo cells differ 1.4x
+        corner to centre -- delp alone would mis-conserve mass.  Applied
+        per tracer only where a negative exists: identity in exact
+        arithmetic otherwise, but the global rescale is 1 ulp off under
+        jit, and the certified bitwise identities with the closed lane
+        (rung 1) must hold on non-negative fields."""
+        from legoesm.core.conservation import apply_water_positivity
+        ci = slice(self.ng, self.ng + self.n)
+        dp_w = st["delp"][:, ci, ci, :] * self._faces(
+            self.mesh.areaCell)[..., None]
+        tr_w = {nm: q[i][:, ci, ci, :]
+                for i, nm in enumerate(self.tracer_names)}
+        fixed, _ = apply_water_positivity(
+            tr_w, None, dp_w, conservative=self.conservative_tracer_clamp,
+            energy_consistent=False)
+        return [q[i].at[:, ci, ci, :].set(jnp.where(
+                    jnp.any(tr_w[nm] < 0.0), fixed[nm], tr_w[nm]))
+                for i, nm in enumerate(self.tracer_names)]
 
     def _physics_and_apply(self, bundle, dt, physics_fn, forcing, phys_state):
         from legoesm.core.state import MPAS_SFC_DIAG_EXTRA_KEYS
@@ -375,6 +423,7 @@ class FV3DuoColumnModel:
             self._tab, self._wv6, u_dt_c, v_dt_c, t_dt_c, q_dt_c, dt=dt,
             n=self.n, ng=self.ng, km=self.km, ptop=self.dyn.ptop,
             akap=FV3_KAPPA, moist_cp=self.config.moist, nwat=self.nwat)
+        q = self._positivity(st, q)
         new_bundle = {**bundle, "state": st, "press": press, "q": q}
         sfc = (getattr(tend, "sw_net_sfc", None),
                getattr(tend, "lw_net_sfc", None),

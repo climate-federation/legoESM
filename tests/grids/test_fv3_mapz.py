@@ -1672,7 +1672,6 @@ def test_driver_jax_rejects_a_float32_tracer():
 
 @pytest.mark.parametrize("override, needle, ntracer", [
     (dict(consv=1.0), "consv", 0),
-    (dict(fill=True), "fillz", 1),
     (dict(kord_tm=9), "kord_tm", 0),
     (dict(do_sat_adj=True), "do_sat_adj", 0),
     (dict(do_inline_mp=True), "do_inline_mp", 0),
@@ -1808,7 +1807,7 @@ def test_driver_jax_guards_do_not_over_refuse_a_non_last_step_call():
     b = _face()[0]
     b["r_vir"] = 1.0
     l2e_j(**b, q=_tracers(b), last_step=False)
-    l2e_j(**_face()[0], q=[], fill=True)          # fillz needs nq > 0
+    l2e_j(**_face()[0], q=[], fill=True)          # fillz needs nq > 0 (no-op)
 
 
 def test_driver_jax_requires_q_and_omga_explicitly():
@@ -2474,3 +2473,86 @@ def test_map_jax_degenerate_source_layer_the_walk_never_visits():
             f"thickness in a layer the NumPy loop never visits")
     # NON-VACUITY: the gradient is real, not an all-zero pass.
     assert np.abs(np.asarray(grads[0])).max() > 0.0
+
+
+# ---------------------------------------------------------------------
+# fillz twin (fv_fill.F90:34-141)
+# ---------------------------------------------------------------------
+
+def test_fillz_jax_matches_numpy_lane():
+    """Random columns with planted negatives in every layer position
+    (top, interior, bottom, net-negative columns): the JAX twin agrees
+    with the NumPy authority at the map1_q2 class, on and off jit."""
+    from legoesm.core.fv3_mapz import fillz as fz_j
+    from legoesm.core.fv3_native_mapz import fillz as fz_n
+    rng = np.random.default_rng(11)
+    im, km = 24, 9
+    q = rng.random((im, km + 1)) * 1e-3
+    q[:, 0] = 0.0
+    neg = rng.random((im, km + 1)) < 0.3
+    neg[:, 0] = False
+    q[neg] = -q[neg] * 0.3               # columns stay net-positive ...
+    q[0, 1] = -1.0                       # ... except this one
+    dp = rng.random((im, km + 1)) * 50.0 + 10.0
+    ref = fz_n(q.copy(), dp, km)
+    for jit in (False, True):
+        f = jax.jit(fz_j, static_argnums=2) if jit else fz_j
+        got = np.asarray(f(jnp.asarray(q), jnp.asarray(dp), km))
+        gate_scalar(f"fillz jit={jit}", _rel(got[:, 1:], ref[:, 1:]), 2.3e-15)
+    # the Fortran leaves a bottom-layer negative whose layer above was
+    # zeroed (zfix not set there), so "every column fixed" is NOT the
+    # algorithm's contract: negatives must only DECREASE
+    assert (ref[:, 1:] < 0.0).sum() < (q[:, 1:] < 0.0).sum()
+    assert ref[0, 1:].min() < 0.0          # nothing to borrow: left alone
+    np.testing.assert_allclose(           # column mass kept, every column
+        (ref[:, 1:] * dp[:, 1:]).sum(axis=1),
+        (q[:, 1:] * dp[:, 1:]).sum(axis=1), rtol=1e-13)
+
+
+def test_driver_jax_fill_true_matches_numpy_lane_and_binds():
+    """fill=True through both L2E lanes on the fixture's POSITIVE
+    tracers: lanes agree at the hydrostatic gate class and fill is a
+    bitwise no-op there (the planted-negative binding is the next test)."""
+    def mk():
+        f = _face()[0]
+        f["kord_tr"] = [9] * 2
+        return f
+    ref, out, before = _run_driver_both(mk, ntracer=2, fill=True)
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "hydro fill")
+    for iq in range(2):
+        gate_scalar(f"l2e fill q[{iq}]", _rel(np.asarray(out.q[iq]), ref["q"][iq]),
+                    5.5e-15)
+    ref0, _, _ = _run_driver_both(mk, ntracer=2, fill=False)
+    # the fixture's tracers are smooth positive fields: fill is a no-op
+    # there (bitwise)
+    assert all(np.array_equal(a, b) for a, b in zip(ref["q"], ref0["q"]))
+
+
+@pytest.mark.parametrize("nq", [2, 9])
+def test_driver_fill_binds_on_both_lanes_and_both_arms(nq):
+    """A planted negative through BOTH L2E lanes, on the per-tracer arm
+    (nq=2) and the mapn_tracer arm (nq=9): fill=True leaves the planted
+    column non-negative on each lane, fill=False leaves the negative,
+    and the two lanes agree at the tracer gate class with fill on."""
+    def mk():
+        f = _face()[0]
+        f["kord_tr"] = [9] * nq
+        return f
+    ia = _face()[0]["ng"]
+    outs = {}
+    for fill in (False, True):
+        face_n, face_j = mk(), mk()
+        q_n = _tracers(face_n, ntracer=nq)[:nq]
+        q_n[0][ia + 2, ia + 2, 1] = -3.0e-3
+        q_j = [np.array(x, copy=True) for x in q_n]
+        l2e_n(**face_n, q=q_n, fill=fill)
+        out = l2e_j(**{k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+                       for k, v in face_j.items()},
+                    q=[jnp.asarray(x) for x in q_j], fill=fill)
+        outs[fill] = (q_n, [np.asarray(a) for a in out.q])
+    for lane in (0, 1):
+        assert outs[False][lane][0][ia + 2, ia + 2, :].min() < 0.0, lane
+        assert outs[True][lane][0][ia + 2, ia + 2, :].min() >= 0.0, lane
+    for iq in range(nq):
+        gate_scalar(f"fill nq={nq} q[{iq}]",
+                    _rel(outs[True][1][iq], outs[True][0][iq]), 5.5e-15)

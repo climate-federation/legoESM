@@ -737,9 +737,61 @@ def map1_q2(pe1: np.ndarray, q1: np.ndarray, pe2: np.ndarray,
     return _rezone(q4, dp1, pe1, pe2, km, kn, dp2=dp2)
 
 
+def fillz(q: np.ndarray, dp: np.ndarray, km: int) -> np.ndarray:
+    """fv_fill.F90:34-141 (the non-``DEV_GFS_PHYS`` branch the GFDL build
+    compiles), ONE tracer, in place on the 1-based ``(im, km+1)`` layout
+    (``k = 1..km``; column 0 unused): top layer pushes its deficit down,
+    the interior borrows from above then below (sequential in k -- the
+    layer above was just modified), the bottom borrows from above, then
+    any column that was touched gets the non-local rescale of layers
+    2..km (layer 1 EXCLUDED, as the Fortran's ``k=2,km``) when their mass
+    sum is positive.  Called per tracer after ``map1_q2`` (:336) and on
+    every tracer at the end of ``mapn_tracer`` (:1840)."""
+    im = q.shape[0]
+    zfix = np.zeros(im, dtype=bool)
+    # top layer (:68-73)
+    neg = q[:, 1] < 0.0
+    q[neg, 2] = q[neg, 2] + q[neg, 1] * dp[neg, 1] / dp[neg, 2]
+    q[neg, 1] = 0.0
+    # interior (:76-95): the i-loop is independent per i, the k-loop is not
+    for k in range(2, km):
+        neg = q[:, k] < 0.0
+        zfix |= neg
+        up = neg & (q[:, k - 1] > 0.0)
+        dq = np.minimum(q[up, k - 1] * dp[up, k - 1], -q[up, k] * dp[up, k])
+        q[up, k - 1] = q[up, k - 1] - dq / dp[up, k - 1]
+        q[up, k] = q[up, k] + dq / dp[up, k]
+        dn = (q[:, k] < 0.0) & (q[:, k + 1] > 0.0)
+        dq = np.minimum(q[dn, k + 1] * dp[dn, k + 1], -q[dn, k] * dp[dn, k])
+        q[dn, k + 1] = q[dn, k + 1] - dq / dp[dn, k + 1]
+        q[dn, k] = q[dn, k] + dq / dp[dn, k]
+    # bottom layer (:98-110)
+    k = km
+    bt = (q[:, k] < 0.0) & (q[:, k - 1] > 0.0)
+    zfix |= bt
+    qup = q[bt, k - 1] * dp[bt, k - 1]
+    qly = -q[bt, k] * dp[bt, k]
+    dup = np.minimum(qly, qup)
+    q[bt, k - 1] = q[bt, k - 1] - dup / dp[bt, k - 1]
+    q[bt, k] = q[bt, k] + dup / dp[bt, k]
+    # non-local fix (:113-131): layers 2..km of the touched columns
+    for i in np.nonzero(zfix)[0]:
+        dm = q[i, 2:km + 1] * dp[i, 2:km + 1]
+        sum0 = 0.0
+        for v in dm:                       # the Fortran's left-to-right sum
+            sum0 = sum0 + v
+        if sum0 > 0.0:
+            sum1 = 0.0
+            for v in dm:
+                sum1 = sum1 + max(0.0, v)
+            fac = sum0 / sum1
+            q[i, 2:km + 1] = np.maximum(0.0, fac * dm / dp[i, 2:km + 1])
+    return q
+
+
 def mapn_tracer(pe1: np.ndarray, q1: list, pe2: np.ndarray,
                 dp2: np.ndarray, km: int, kords: list,
-                q_min: float) -> list:
+                q_min: float, fill: bool = False) -> list:
     """fv_mapz.F90:1758-1848 -- the nq > 5 tracer remap (:327).
 
     Per tracer: ``scalar_profile`` (ALWAYS -- unlike ``map1_q2``, which
@@ -748,8 +800,8 @@ def mapn_tracer(pe1: np.ndarray, q1: list, pe2: np.ndarray,
     ``mapn=True`` (that routine's product association).  The tracers
     share nothing but ``pe1``/``pe2``/``dp2`` (``k0`` is per column and
     identical across tracers because the edges are), so this is the
-    per-tracer routine applied in turn.  ``fill`` (fillz on all nq,
-    :1840) is NOT ported: the lane refuses it (``_refuse_unported_lane``).
+    per-tracer routine applied in turn.  ``fill``: fillz on every tracer
+    at the end (:1840) -- per tracer here, the same thing.
     """
     out = []
     if len(q1) != len(kords):
@@ -758,7 +810,8 @@ def mapn_tracer(pe1: np.ndarray, q1: list, pe2: np.ndarray,
     for qt, kord in zip(q1, kords):
         q4, dp1 = _build_q4(qt, pe1, km)
         scalar_profile(q4, dp1, km, 0, kord, q_min)
-        out.append(_rezone(q4, dp1, pe1, pe2, km, km, dp2=dp2, mapn=True))
+        q2 = _rezone(q4, dp1, pe1, pe2, km, km, dp2=dp2, mapn=True)
+        out.append(fillz(q2, dp2, km) if fill else q2)
     return out
 
 
@@ -811,12 +864,6 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
             f"fv3_native_dynamics.energy_fixer_dtmp, then apply "
             f"close_out_pt -- which is what fv_dynamics_step does. "
             f"|consv| <= {CONSV_MIN} keeps the fixer off entirely.")
-    # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
-    # opened at :330 -- with no tracers it is unreachable.
-    if fill and nq > 0:
-        raise NotImplementedError(
-            "fill=True with tracers: fillz (fv_mapz.F90:336) is NOT ported; "
-            "the reference deck pins fill=.F.")
     if int(kord_tm) >= 0:
         raise NotImplementedError(
             f"kord_tm={kord_tm} >= 0: the positive-kord_tm lane is a "
@@ -1133,14 +1180,18 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             if nq > 5:
                 qn = mapn_tracer(
                     pe1, [pad1(q[iq][ia:ia + n, jd, :]) for iq in range(nq)],
-                    pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0)
+                    pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0,
+                    fill=fill)
                 for iq in range(nq):
                     q[iq][ia:ia + n, jd, :] = unpad1(qn[iq])
             else:
                 for iq in range(nq):
-                    q[iq][ia:ia + n, jd, :] = unpad1(map1_q2(
+                    q2 = map1_q2(
                         pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km,
-                        km, 0, kords_tr[iq], 0.0))   # :335 -- literal 0.
+                        km, 0, kords_tr[iq], 0.0)    # :335 -- literal 0.
+                    if fill:                          # :336
+                        q2 = fillz(q2, dp2, km)
+                    q[iq][ia:ia + n, jd, :] = unpad1(q2)
 
             # :345-419 -- NH: remap w and delz, then the w_limiter.
             if not hydrostatic:

@@ -338,6 +338,11 @@ class DycoreConfig(NamedTuple):
     # CAM6 AMIP suite (physics on (nCells, nlev) columns) drives it
     # without any physics rewrite.  False = the closed certified duo lane.
     fv3_duo_column_lane: bool = False
+    # FV3's own tracer positivity in the vertical remap (fv_mapz.F90 fill
+    # -> fillz column borrow, fv_fill.F90).  Default False = the certified
+    # oracle deck (input.nml fill=.F.); the CAM6 deck sets it True
+    # (decision B3, 2026-10-01: every-step repair cadence as on MPAS).
+    fv3_duo_fill: bool = False
 
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
@@ -2002,6 +2007,10 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     "dycore.fv3_duo_column_lane runs on six faces; the window "
                     "layout is certification rung 7 (drop fv3_duo_windows)")
+        if d.fv3_duo_fill and d.discretization != "fv3_duo":
+            errors.append(
+                "dycore.fv3_duo_fill is the fv3_duo remap's fillz; got "
+                f"dycore.discretization={d.discretization!r}")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:

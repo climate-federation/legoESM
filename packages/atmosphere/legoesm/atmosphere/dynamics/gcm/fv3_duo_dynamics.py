@@ -111,6 +111,12 @@ class FV3DuoConfig(NamedTuple):
     #: ak/bk/ptop generically (no ks); the L32 deck is NOT
     #: Fortran-certified -- rung 4 gates it (rest states, DCMIP16 km=32).
     eta: str = "analytic"
+    #: fv_mapz.F90:336/:1840 ``fill``: FV3's column borrow (``fillz``) on
+    #: every tracer after the vertical remap -- the dycore-internal
+    #: positivity of the deck.  The oracle deck pins ``fill=.F.`` (the
+    #: certified parity arms), so the DEFAULT stays False; the CAM6 deck
+    #: sets it explicitly (decision B3, 2026-10-01).
+    fill: bool = False
 
 
 def duo_eta_table(eta: str, km: int):
@@ -357,6 +363,7 @@ class FV3DuoDynamicsModel:
             out_shardings=step_out_shardings,
             batched=step_face_batched,
             zvir=self.zvir, sphum_index=(0 if config.moist else None),
+            fill=config.fill,
         )
         self.step_face_batched = bool(step_face_batched)
 

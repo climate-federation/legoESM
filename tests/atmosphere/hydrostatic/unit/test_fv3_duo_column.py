@@ -1074,3 +1074,101 @@ def test_m6_the_model_is_built_on_the_grid_the_forcings_saw(tmp_path):
     cfg = _driver_cfg(tmp_path)
     with pytest.raises(ValueError, match="did not build the duo grid"):
         create_atmosphere_dycore(cfg, None, None)
+
+
+# ---------------------------------------------------------------------
+# B3 (2026-10-01): the MPAS lane's post-physics positivity stage
+# ---------------------------------------------------------------------
+
+def _plant(ic, where, value):
+    qc = jnp.asarray(ic["q"][1]).at[where].set(value)
+    return {**ic, "q": [ic["q"][0], qc] + list(ic["q"][2:])}
+
+
+def _window_mass(col, bundle, i):
+    area = np.asarray(col.mesh.areaCell).reshape(6, N, N)[..., None]
+    return float((np.asarray(bundle["q"][i])[:, CI, CI]
+                  * np.asarray(bundle["state"]["delp"])[:, CI, CI] * area).sum())
+
+
+def test_column_positivity_stage_is_the_mpas_borrow(moist):
+    """A negative planted in q_c survives the dynamics step (the raw
+    dycore step is the no-stage control: zero physics tendencies leave
+    the increment block an identity); the column model then applies the
+    MPAS lane's own end-of-step stage (apply_water_positivity,
+    conservative borrow weighted by delp*area): the window comes out
+    non-negative and the global tracer MASS is the raw step's to
+    roundoff; non-tracer fields are untouched."""
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    raw = dyn.step(ic2, DT)
+    out = col.step(col.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    qc_raw = np.asarray(raw["q"][1])[:, CI, CI]
+    qc_on = np.asarray(out["q"][1])[:, CI, CI]
+    assert qc_raw.min() < 0.0                     # the dycore left it
+    assert qc_on.min() >= 0.0
+    for i in range(len(col.tracer_names)):
+        assert np.isclose(_window_mass(col, out, i), _window_mass(col, raw, i),
+                          rtol=1e-12), i
+    # state and pressure windows bitwise the raw step's (the stage touches
+    # tracers only); halos are not part of the contract
+    _assert_bundle_equal({**out, "q": raw["q"]}, raw)
+
+
+def test_column_positivity_global_residual_is_area_weighted(moist):
+    """A column made WHOLLY negative in q_c (nothing to borrow locally):
+    the shared stage floors it and takes the invented mass back from
+    every positive cell in proportion to its MASS (delp*area).  The duo
+    cells differ 1.4x corner to centre, so the delp-only weight MPAS
+    passes on its quasi-uniform mesh would mis-conserve here: the
+    area-weighted global q_c mass is kept to 1e-12 by the model, and the
+    same routine fed delp alone (the control) does NOT keep it."""
+    from legoesm.core.conservation import apply_water_positivity
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (0, NG + 1, NG + 1, slice(None)), -4.0e-3)   # corner column
+    raw = dyn.step(ic2, DT)
+    out = col.step(col.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    delp = np.asarray(raw["state"]["delp"])[:, CI, CI]
+    area = np.asarray(col.mesh.areaCell).reshape(6, N, N)[..., None]
+    q_raw = np.asarray(raw["q"][1])[:, CI, CI]
+    q_on = np.asarray(out["q"][1])[:, CI, CI]
+    assert (q_raw[0, 1, 1, :] < 0.0).all()         # wholly negative column
+    assert q_on.min() >= 0.0
+    m = lambda q: float((q * delp * area).sum())   # noqa: E731
+    assert np.isclose(m(q_on), m(q_raw), rtol=1e-12)
+    fixed_dp, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp),
+        conservative=True, energy_consistent=False)
+    assert not np.isclose(m(np.asarray(fixed_dp["q_c"])), m(q_raw), rtol=1e-12)
+
+
+def test_column_positivity_knobs_follow_the_mpas_semantics(moist):
+    """conservative_tracer_clamp=False is the MPAS hard floor (max(q, 0):
+    negatives deleted, mass CREATED), not 'no stage'; the floor's
+    latent-heat T correction (energy_consistent_moisture_clip) is refused
+    on this lane rather than silently dropped."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, col_on, ic = moist
+    col_floor = FV3DuoColumnModel(dyn, tracer_names=col_on.tracer_names,
+                                  conservative_tracer_clamp=False)
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    out = col_floor.step(col_floor.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    assert np.asarray(out["q"][1])[:, CI, CI].min() >= 0.0       # floored ...
+    raw = dyn.step(ic2, DT)
+    assert _window_mass(col_on, out, 1) > _window_mass(col_on, raw, 1)  # ... creating mass
+    with pytest.raises(NotImplementedError, match="latent-heat T correction"):
+        FV3DuoColumnModel(dyn, tracer_names=col_on.tracer_names,
+                          conservative_tracer_clamp=False,
+                          energy_consistent_moisture_clip=True)
+
+
+def test_column_positivity_runs_on_the_dynamics_only_path_too(moist):
+    """As on MPAS the stage runs EVERY step: a planted negative is
+    repaired by a step with no physics function."""
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    out = col.step(col.from_bundle(ic2), DT)
+    assert np.asarray(out.native["q"][1])[:, CI, CI].min() >= 0.0
+    raw = dyn.step(ic2, DT)
+    assert np.asarray(raw["q"][1])[:, CI, CI].min() < 0.0   # the dycore alone did not

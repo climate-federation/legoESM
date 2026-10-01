@@ -1161,15 +1161,79 @@ def map1_q2(pe1, q1, pe2, dp2, km: int, kn: int, iv: int, kord: int,
     return (q2, ok) if return_ok else q2
 
 
+def fillz(q, dp, km: int):
+    """JAX twin of :func:`fv3_native_mapz.fillz` (fv_fill.F90:34-141, the
+    non-GFS branch), one tracer on the 1-based ``(im, km+1)`` layout:
+    top layer pushes down; interior borrows from above then below,
+    sequential in k (``lax.fori_loop``, the layer above was just
+    modified); bottom borrows from above; touched columns get the
+    non-local rescale of layers 2..km (layer 1 excluded) when their mass
+    sum is positive.  Sums are sequential left-to-right like the
+    Fortran, so the two lanes agree at the map1_q2 class."""
+    im = q.shape[0]
+    dp = jnp.asarray(dp)
+    col = lambda a, k: lax.dynamic_index_in_dim(a, k, axis=1, keepdims=False)  # noqa: E731
+    # top layer (:68-73)
+    neg = q[:, 1] < 0.0
+    q = q.at[:, 2].set(jnp.where(neg, q[:, 2] + q[:, 1] * dp[:, 1] / dp[:, 2],
+                                 q[:, 2]))
+    q = q.at[:, 1].set(jnp.where(neg, 0.0, q[:, 1]))
+    zfix = jnp.zeros(im, dtype=bool)
+
+    def interior(k, carry):                      # :76-95
+        q, zfix = carry
+        qkm, qk, qkp = col(q, k - 1), col(q, k), col(q, k + 1)
+        dkm, dk, dkp = col(dp, k - 1), col(dp, k), col(dp, k + 1)
+        neg = qk < 0.0
+        zfix = zfix | neg
+        up = neg & (qkm > 0.0)
+        dq = jnp.minimum(qkm * dkm, -qk * dk)
+        qkm = jnp.where(up, qkm - dq / dkm, qkm)
+        qk = jnp.where(up, qk + dq / dk, qk)
+        dn = (qk < 0.0) & (qkp > 0.0)
+        dq = jnp.minimum(qkp * dkp, -qk * dk)
+        qkp = jnp.where(dn, qkp - dq / dkp, qkp)
+        qk = jnp.where(dn, qk + dq / dk, qk)
+        q = lax.dynamic_update_index_in_dim(q, qkm, k - 1, axis=1)
+        q = lax.dynamic_update_index_in_dim(q, qk, k, axis=1)
+        q = lax.dynamic_update_index_in_dim(q, qkp, k + 1, axis=1)
+        return q, zfix
+    q, zfix = lax.fori_loop(2, km, interior, (q, zfix))
+    # bottom layer (:98-110)
+    k = km
+    bt = (q[:, k] < 0.0) & (q[:, k - 1] > 0.0)
+    zfix = zfix | bt
+    qup = q[:, k - 1] * dp[:, k - 1]
+    qly = -q[:, k] * dp[:, k]
+    dup = jnp.minimum(qly, qup)
+    q = q.at[:, k - 1].set(jnp.where(bt, q[:, k - 1] - dup / dp[:, k - 1],
+                                     q[:, k - 1]))
+    q = q.at[:, k].set(jnp.where(bt, q[:, k] + dup / dp[:, k], q[:, k]))
+    # non-local fix (:113-131): layers 2..km, sequential sums
+    dm = q[:, 2:km + 1] * dp[:, 2:km + 1]
+
+    def acc(j, c):
+        s0, s1 = c
+        v = col(dm, j)
+        return s0 + v, s1 + jnp.maximum(0.0, v)
+    sum0, sum1 = lax.fori_loop(0, km - 1, acc, (jnp.zeros(im, q.dtype),
+                                                jnp.zeros(im, q.dtype)))
+    fix = zfix & (sum0 > 0.0)
+    fac = jnp.where(fix, sum0 / jnp.where(fix, sum1, 1.0), 1.0)
+    qfix = jnp.maximum(0.0, fac[:, None] * dm / dp[:, 2:km + 1])
+    q = q.at[:, 2:km + 1].set(jnp.where(fix[:, None], qfix, q[:, 2:km + 1]))
+    return q
+
+
 def mapn_tracer(pe1, q1: list, pe2, dp2, km: int, kords: list,
-                q_min: float) -> list:
+                q_min: float, fill: bool = False) -> list:
     """fv_mapz.F90:1758-1848 -- the nq > 5 tracer remap (:327), the JAX
     twin of :func:`fv3_native_mapz.mapn_tracer`: per tracer
     ``scalar_profile`` (always, ``iv=0``, its own ``kord``) then
     :func:`_rezone` with ``mapn=True``.  The tracers share only the
     edges, so this is the per-tracer routine applied in turn (a Python
-    loop over nq <= 9; each is one scan chain).  ``fill`` is not ported
-    (the lane refuses it)."""
+    loop over nq <= 9; each is one scan chain).  ``fill``: fillz per
+    tracer at the end (:1840)."""
     out = []
     if len(q1) != len(kords):
         raise ValueError(f"mapn_tracer: {len(q1)} tracers but {len(kords)} "
@@ -1181,7 +1245,7 @@ def mapn_tracer(pe1, q1: list, pe2, dp2, km: int, kords: list,
         q4, dp1 = _build_q4(qt_, pe1_, km)
         q4 = scalar_profile(q4, dp1, km, 0, kord, q_min)
         q2, _ok = _rezone(q4, dp1, pe1_, pe2_, km, km, dp2=dp2_, mapn=True)
-        out.append(q2)
+        out.append(fillz(q2, dp2_, km) if fill else q2)
     return out
 
 
@@ -1363,12 +1427,6 @@ def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
             f"defer_close=True, reduce, then apply close_out_pt -- which "
             f"is what fv_dynamics_step does. |consv| <= {CONSV_MIN} keeps "
             f"the fixer off entirely.")
-    # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
-    # opened at :330 -- with no tracers it is unreachable.
-    if fill and nq > 0:
-        raise NotImplementedError(
-            "fill=True with tracers: fillz (fv_mapz.F90:336) is NOT ported; "
-            "the reference deck pins fill=.F.")
     if int(kord_tm) >= 0:
         raise NotImplementedError(
             f"kord_tm={kord_tm} >= 0: the positive-kord_tm lane is a "
@@ -1660,13 +1718,17 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
         qws = [pad1(_ijk_cols(q[iq][ia:ia + n, ia:ia + n, :]))
                for iq in range(nq)]
         q_out = [unpad1(a) for a in mapn_tracer(
-            pe1, qws, pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0)]
+            pe1, qws, pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0,
+            fill=fill)]
     else:
         q_out = []
         for iq in range(nq):
             qw = _ijk_cols(q[iq][ia:ia + n, ia:ia + n, :])
-            q_out.append(unpad1(map1_q2(pe1, pad1(qw), pe2, dp2, km, km, 0,
-                                        kords_tr[iq], 0.0)))  # :335 literal 0.
+            q2 = map1_q2(pe1, pad1(qw), pe2, dp2, km, km, 0,
+                         kords_tr[iq], 0.0)              # :335 literal 0.
+            if fill:                                     # :336
+                q2 = fillz(q2, dp2, km)
+            q_out.append(unpad1(q2))
 
     ww = None
     if not hydrostatic:
