@@ -53,6 +53,8 @@ _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 _ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
 _ORCA2_R79BZDF_COMPILED = (
     NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo")
+_ORCA2_R84FRAMES_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -118,6 +120,11 @@ FILES = {
         _ORCA2_R79BZDF_COMPILED / "trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2_R79BZDF_COMPILED / "dynzdf.f90"),
+    # Round 85 diagnoses the optimized frame-build crash against the exact
+    # preprocessed source that produced it.  A debug build must resolve the
+    # precise failing line before either statement can be repaired.
+    "ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R84FRAMES_COMPILED / "stprk3.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -4970,6 +4977,26 @@ CITATION_MAP = {
         ('! Stage 1 :', 1),
         ('IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )', 1),
         17,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
+        ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
+        ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
+        17,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:146-154': [
+        ('! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)', 1),
+        ('IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )', 1),
+        9,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:390-441': [
+        ('SUBROUTINE l4_dump_ocean_surface_input( kstp, klevel )', 1),
+        ("WRITE(numout,*) 'LANE4_OCEAN_SURFACE_INPUT_DUMP ', kstp, klevel", 1),
+        52,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:443-473': [
+        ('FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )', 1),
+        ('IF( llwet ) zfield(ji,jj) = pfield(ji,jj)', 1),
+        31,
     ],
     'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
     'domhgr.F90:222-227': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ('kff = 1', 1), 6],
