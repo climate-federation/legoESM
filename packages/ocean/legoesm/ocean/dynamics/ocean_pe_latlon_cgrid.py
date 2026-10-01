@@ -1607,12 +1607,46 @@ def nemo_qco_wzv_recurrence(
     return jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
 
 
+# The after-SSH forms NEMO's first ``wzv`` call can be handed.  One tuple, read
+# by the model's own raise, by the carried-slot predicate below and by every
+# card test and measurement arm -- a census computed from a re-derived
+# condition instead of this one is how a gate came to disagree with the code it
+# gated (operator note AR finding 2).
+NEMO_FIRST_WZV_AFTER_SSH_FORMS = (
+    "rk3_extrapolated",
+    "rk3_extrapolated_carried",
+    "leapfrog_continuity",
+)
+
+
+def nemo_rk3_after_ssh_is_carried(config) -> bool:
+    """Does this card CARRY NEMO's ``ssha`` after-SSH slot across steps?
+
+    True only for a card that both reaches NEMO's own first ``wzv`` call and
+    states the carried RK3 form.  The step writes the slot exactly when this
+    is true and the ``wzv`` call reads it exactly when this is true, so the
+    two can never disagree.
+    """
+    return (getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal"
+            and getattr(config, "nemo_first_wzv_after_ssh", "")
+            == "rk3_extrapolated_carried")
+
+
+def _carried_rk3_after_ssh(state):
+    """The carried ``ssha`` array, or ``None`` when the step has no previous
+    one (NEMO's ``rst_read_ssh`` fallback, restart.F90:370)."""
+    slot = getattr(state, "eta_rk3_after", None)
+    if slot is None:
+        return None
+    return getattr(slot, "data", slot)
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
-    after_ssh_form="",
+    after_ssh_form="", eta_after_carried=None,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1736,6 +1770,22 @@ def nemo_qco_wzv_operands(
             # leapfrog branch below folds emp in because ``ssh_nxt`` does.
             eta_after = jax.lax.optimization_barrier(
                 2.0 * eta_now - eta_before)
+        elif after_ssh_form == "rk3_extrapolated_carried":
+            # The SAME NEMO statement as above, but reading the slot the
+            # PREVIOUS step actually left rather than falling back to the
+            # step-entry height.  NEMO writes that slot at the end of every
+            # step, after the Nbb<==>Naa rotation:
+            #   ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
+            # (stprk3.F90:225 == 2*end-of-step - step-entry), carries it in
+            # its own restart file as 'ssha' (restart.F90:184), and reads it
+            # back here through r3t(:,:,Kaa) (stp2d.F90:149 -> :153).
+            # ``None`` is NEMO's own no-previous-step case: rst_read_ssh sets
+            # ssh(:,:,Kaa) = ssh(:,:,Kbb) when the archive carries no 'ssha'
+            # (restart.F90:370, "no ssh variation in ww computation"), and a
+            # from-rest run initialises all three slots from the user state.
+            eta_after = jax.lax.optimization_barrier(
+                eta_now if eta_after_carried is None
+                else jnp.asarray(eta_after_carried, dtype=eta_now.dtype))
         elif after_ssh_form == "leapfrog_continuity":
             # NEMO's modified-leapfrog program fills the after slot from the
             # barotropic continuity in ``ssh_nxt`` BEFORE ``wzv_MLF`` reads
@@ -1748,7 +1798,7 @@ def nemo_qco_wzv_operands(
         else:
             raise ValueError(
                 "nemo_first_wzv_after_ssh must be one of "
-                "['rk3_extrapolated', 'leapfrog_continuity'] -- it names the "
+                f"{list(NEMO_FIRST_WZV_AFTER_SSH_FORMS)} -- it names the "
                 "NEMO time-stepping scheme whose after-SSH slot this call "
                 "reads, and a card that resolves this branch states it "
                 f"rather than having it inferred; got {after_ssh_form!r}")
@@ -5046,6 +5096,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # hard error, not a guess -- same contract as
             # nemo_stage_momentum_wzv_split.
             after_ssh_form=getattr(config, "nemo_first_wzv_after_ssh", ""),
+            # NEMO's 'ssha' slot, carried by the step that wrote it.  Only the
+            # carried form reads it; every other form ignores it, so the two
+            # existing arms are byte-identical whether or not it is present.
+            eta_after_carried=_carried_rk3_after_ssh(state),
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;

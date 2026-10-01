@@ -829,7 +829,13 @@ def test_no_dino_nemo_card_inherits_the_explicit_cfl_cap(recipe_name):
 # call reads is therefore a field of its own, and a card that reaches the
 # branch without stating it raises.
 
-_AFTER_SSH_FORMS = {"rk3_extrapolated", "leapfrog_continuity"}
+# Read from the model, never re-listed here: a census computed from a
+# re-derived condition is how a gate came to disagree with the code it
+# gated (operator note AR finding 2).  Round 6 added a third form,
+# "rk3_extrapolated_carried", which no card states yet.
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
+    NEMO_FIRST_WZV_AFTER_SSH_FORMS as _AFTER_SSH_FORMS,
+)
 
 
 @pytest.mark.parametrize("case", _ALL_NEMO_TESTCASE_CARDS)

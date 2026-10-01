@@ -260,6 +260,7 @@ def run(
     arm_legacy_seed_faces=False, arm_legacy_hadv_min_face_thickness=False,
     arm_legacy_2d_stage_face_mask=False,
     arm_legacy_live_stage_mean_weights=False,
+    after_ssh_form=None,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -269,6 +270,7 @@ def run(
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
+        with_first_wzv_after_ssh,
     )
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
@@ -278,8 +280,12 @@ def run(
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
+    # Measurement arm only -- the card still STATES its own form; this scores
+    # the same card under the other one so the pair is one run's numbers.
+    arm_config = with_first_wzv_after_ssh(
+        card.recipe.model_config, after_ssh_form)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        card.recipe.grid, card.recipe.z_coord, arm_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             disable_bbl=diagnostic_disable_bbl,
             literal_stage_wzv=arm_literal_stage_wzv,
@@ -507,6 +513,9 @@ def run(
         "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "legoesm_git_sha": legoesm_git_sha,
+        # Which after-SSH arm produced these rows; None = the card.
+        "after_ssh_form_arm": after_ssh_form,
+        "after_ssh_form_resolved": arm_config.nemo_first_wzv_after_ssh,
         "case": case,
         "status": "AT-BAR" if first_over_bar is None else "DEBT",
         "precision_policy": "fp64",
@@ -588,6 +597,12 @@ def main() -> int:
               "_NEMOWSRK3TestHooks control; NEMO has no such switch): restore "
               "the live h_u_pre/H_u_pre weighting instead of NEMO's reference "
               "SUM(e3u_0*uu)*r1_hu_0 (stprk3_stg.F90:440, domain.F90:145)"))
+    parser.add_argument(
+        "--after-ssh-form", default=None,
+        help="measurement arm: score this card with NEMO's first-wzv "
+             "after-SSH form overridden (rk3_extrapolated | "
+             "rk3_extrapolated_carried | leapfrog_continuity). The card "
+             "still states its own form; omitting this flag is the card.")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -609,7 +624,8 @@ def main() -> int:
             arm_legacy_seed_faces=args.arm_legacy_seed_faces,
             arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
             arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
-            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights,
+            after_ssh_form=args.after_ssh_form)
     if args.output:
         write_residual_artifact(report, args.output, residuals)
     elif args.compare_to:

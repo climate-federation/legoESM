@@ -65,6 +65,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     compute_frozen_geom_density,
     nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
+    nemo_rk3_after_ssh_is_carried,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -12225,7 +12226,7 @@ class LatLonCGridOceanModel:
             new_state = self._apply_freeze_floor(new_state)
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
-        return new_state
+        return self._carry_nemo_rk3_after_ssh(state, new_state)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
@@ -12367,7 +12368,30 @@ class LatLonCGridOceanModel:
         # post-step projection (static config-bool gate; default off).
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
-        return new_state
+        return self._carry_nemo_rk3_after_ssh(state, new_state)
+
+    def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):
+        """Leave NEMO's next-step after-SSH guess in the state it hands on.
+
+        At the end of every RK3 step, after the Nbb<==>Naa rotation
+        (stprk3.F90:221), NEMO assigns
+        ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)`` (stprk3.F90:225),
+        where Nbb now holds the height this step PRODUCED and Naa still holds
+        the height it ENTERED with (Nbb is untouched across the three stages).
+        The next step reads that slot as ``r3t(:,:,Kaa)`` (stp2d.F90:149)
+        immediately before its first ``CALL wzv`` (stp2d.F90:153), and NEMO
+        carries it across a restart as ``ssha`` (restart.F90:184).
+
+        ``2*a`` is exact in binary floating point, so the subtraction is the
+        only rounding here and it is the one NEMO performs.  Inert unless the
+        card STATES the carried form -- the same predicate the ``wzv`` call
+        reads the slot with, so the writer and the reader cannot disagree.
+        """
+        if not nemo_rk3_after_ssh_is_carried(self.config):
+            return new_state
+        return new_state._replace(
+            eta_rk3_after=new_state.eta.replace(
+                data=2.0 * new_state.eta.data - entry_state.eta.data))
 
     def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float,
                             *, grid=None) -> LatLonCGridOceanState:
