@@ -31,8 +31,7 @@ CASE = "VORTEX_VEC-zco"
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round192/"
     "oracle_stage23_terms")
-OPERATORS = ("hpg", "vorticity", "keg", "zad")
-NEMO_NAMES = {"hpg": "hpg", "vorticity": "vor", "keg": "keg", "zad": "zad"}
+BOUNDARIES = ("hpg", "vor", "keg", "zad")
 
 
 def read_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
@@ -64,17 +63,9 @@ def read_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
 
 
 def nemo_components(groups: dict[str, np.ndarray]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Split the cumulative NEMO accumulator in compiled order."""
-    out = {"hpg": (groups["hpg_u"], groups["hpg_v"])}
-    previous = "hpg"
-    for operator in ("vorticity", "keg", "zad"):
-        current = NEMO_NAMES[operator]
-        out[operator] = (
-            groups[f"{current}_u"] - groups[f"{previous}_u"],
-            groups[f"{current}_v"] - groups[f"{previous}_v"],
-        )
-        previous = current
-    return out
+    """Return NEMO's cumulative accumulator at each compiled boundary."""
+    return {name: (groups[f"{name}_u"], groups[f"{name}_v"])
+            for name in BOUNDARIES}
 
 
 def _external(root: Path, entry2: dict):
@@ -89,7 +80,8 @@ def _external(root: Path, entry2: dict):
     )
 
 
-def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> dict:
+def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None,
+        source_order: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -108,7 +100,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
     require(jax.default_backend() == "cpu", "the stage walk must run on CPU")
 
     valid_plants = tuple(f"s{s}.{op}.{face}" for s in (2, 3)
-                         for op in OPERATORS for face in ("u", "v"))
+                         for op in BOUNDARIES for face in ("u", "v"))
     require(plant is None or plant in valid_plants,
             f"unknown plant {plant!r}; expected one of {valid_plants}")
 
@@ -142,20 +134,25 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
             _nemo_ws_test_hooks=hooks)
         return model.step(seed, dt=card.dt_s)
 
+    def owned(values, face):
+        values = np.asarray(values.data if hasattr(values, "data") else values)
+        return values[:, 1:, :nlev] if face == "u" else values[1:, :, :nlev]
+
     rows = []
     for stage in (2, 3):
         groups = read_stage_terms(root, stage)
         reference = nemo_components(groups)
-        for operator in OPERATORS:
-            hooks = _NEMOWSRK3TestHooks(
-                stage_barotropic_output_override=external,
-                stage_entry_override=stage_override(stage),
-                expose_momentum_operator=operator,
-                expose_momentum_operator_stage=stage,
-            )
-            fields = lego_fields(model_step(hooks))
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            stage_entry_override=stage_override(stage),
+            expose_live_stage_operands=True,
+            nemo_stage_rhs_accumulation_order_arm=source_order,
+        )
+        trace = model_step(hooks)
+        components = trace.operator_operands[stage - 2]
+        for operator in BOUNDARIES:
             for face, index in (("u", 0), ("v", 1)):
-                candidate = np.asarray(fields[face])[..., :nlev]
+                candidate = owned(components[f"after_{operator}_{face}"], face)
                 planted = plant == f"s{stage}.{operator}.{face}"
                 if planted:
                     candidate = candidate.copy()
@@ -172,9 +169,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
                 ref_peak = float(np.max(np.abs(ref[active])))
                 row["relative_max_abs"] = row["max_abs"] / max(ref_peak, 1.0e-300)
                 row["execution_regime"] = "production_step_jit"
-                row["nemo_boundary"] = (
-                    "hpg accumulator (overwrite)" if operator == "hpg"
-                    else f"{NEMO_NAMES[operator]} minus previous accumulator")
+                row["nemo_boundary"] = f"cumulative accumulator after {operator}"
                 row["planted"] = planted
                 # Operator-local exactness is bit equality. AT-BAR is retained
                 # as a separate trajectory classification, never as exactness.
@@ -200,7 +195,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
 
     first = None
     for stage in (2, 3):
-        for operator in OPERATORS:
+        for operator in BOUNDARIES:
             selected = [r for r in rows if f".stage{stage}.{operator}." in r["name"]]
             if any(not r["bit_exact"] for r in selected):
                 first = {"stage": stage, "operator": operator}
@@ -212,6 +207,7 @@ def run(root: Path, *, allow_dirty: bool = False, plant: str | None = None) -> d
         "case": CASE, "oracle_root": str(root), "legoesm_git_sha": sha,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
         "execution_regime": "production_step_jit", "bar": BAR,
+        "source_order_arm": source_order,
         "plant": plant, "rows": rows, "calibration": calibration,
         "first_non_bit_operator": first,
         "status": "PLANT-FIRED" if plant else ("DEBT" if first else "BIT"),
@@ -230,9 +226,12 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--plant")
+    parser.add_argument("--source-order", action="store_true",
+                        help="enable the existing private NEMO accumulator-order arm")
     args = parser.parse_args(argv)
     try:
-        report = run(args.oracle_root, allow_dirty=args.allow_dirty, plant=args.plant)
+        report = run(args.oracle_root, allow_dirty=args.allow_dirty,
+                     plant=args.plant, source_order=args.source_order)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2

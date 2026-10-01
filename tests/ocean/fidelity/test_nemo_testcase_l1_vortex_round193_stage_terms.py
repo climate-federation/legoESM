@@ -55,7 +55,7 @@ def test_reader_refuses_a_missing_required_group(tmp_path):
         gate.read_stage_terms(tmp_path, 2)
 
 
-def test_hpg_is_overwrite_and_later_terms_are_differences():
+def test_reader_preserves_each_cumulative_boundary():
     shape = (2, 3, 1)
     groups = {}
     for index, name in enumerate(("hpg", "vor", "keg", "zad"), start=1):
@@ -63,12 +63,12 @@ def test_hpg_is_overwrite_and_later_terms_are_differences():
         groups[f"{name}_v"] = np.full(shape, 10 * index, dtype=np.float64)
     parts = gate.nemo_components(groups)
     assert np.all(parts["hpg"][0] == 1.0)
-    assert np.all(parts["vorticity"][0] == 1.0)
-    assert np.all(parts["keg"][1] == 10.0)
-    assert np.all(parts["zad"][0] == 1.0)
+    assert np.all(parts["vor"][0] == 2.0)
+    assert np.all(parts["keg"][1] == 30.0)
+    assert np.all(parts["zad"][0] == 4.0)
 
 
 def test_every_stage_operator_face_has_a_named_plant():
     names = {f"s{s}.{op}.{face}" for s in (2, 3)
-             for op in gate.OPERATORS for face in ("u", "v")}
+             for op in gate.BOUNDARIES for face in ("u", "v")}
     assert len(names) == 16
