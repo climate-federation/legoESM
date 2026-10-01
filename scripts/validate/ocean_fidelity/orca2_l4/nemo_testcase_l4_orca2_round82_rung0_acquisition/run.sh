@@ -82,6 +82,12 @@ bash -n "$0"
 "$PY" "$DECK_GATE" --source "$BASE/namelist_cfg" --candidate "$CANONICAL" \
   --cpp "$CPP" --output "$EVIDENCE/rung0_deck_preflight.json"
 "$PY" "$RECORD_GATE" --preflight-only --output "$EVIDENCE/rung0_record_preflight.json"
+"$PY" "$RECORD_GATE" --render-run-deck --run-deck-source "$CANONICAL" \
+  --run-deck-output "$EVIDENCE/rung0_10step_namelist_preflight" \
+  --steps 10 --stock 1 --restart-list
+"$PY" "$RECORD_GATE" --render-run-deck --run-deck-source "$CANONICAL" \
+  --run-deck-output "$EVIDENCE/rung0_month_namelist_preflight" \
+  --steps 240 --stock 240
 for plant in extra-delta mixing-value live-module cpp; do
   if "$PY" "$DECK_GATE" --source "$BASE/namelist_cfg" --candidate "$CANONICAL" \
     --cpp "$CPP" --plant "$plant" >"$EVIDENCE/deck_${plant}_plant.log" 2>&1; then

@@ -340,11 +340,19 @@ def main() -> int:
             require(not args.preflight_only and args.run_deck_source
                     and args.run_deck_output and args.steps and args.stock,
                     "run-deck rendering requires source, output, steps, and stock")
+            source_text = args.run_deck_source.read_text()
             rendered = render_run_deck(
-                args.run_deck_source.read_text(), args.steps, args.stock,
-                args.restart_list,
+                source_text, args.steps, args.stock, args.restart_list,
             )
             args.run_deck_output.write_text(rendered)
+            controls = _validate_run_controls(
+                namelist_values(args.run_deck_output),
+                namelist_values(args.run_deck_source),
+                args.steps,
+                args.stock,
+                tuple(range(1, args.steps + 1)) if args.restart_list else None,
+            )
+            print(json.dumps(controls, sort_keys=True))
             print(f"STATUS RENDERED_RUNG0_RUN_DECK {args.run_deck_output}")
             return 0
         if args.preflight_only:
