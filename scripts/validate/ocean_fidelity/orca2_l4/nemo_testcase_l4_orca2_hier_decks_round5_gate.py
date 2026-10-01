@@ -294,7 +294,9 @@ def stage_deck(root: Path) -> None:
 
 def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     inherited_plant = plant if plant == "ice-sentinel-read" else "none"
-    inherited = rung7.rung8.rung9.validate_resolved(root, plant=inherited_plant)
+    inherited = rung7.rung8.rung9.validate_resolved(
+        root, plant=inherited_plant, tke_active=False
+    )
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
         "ln_zdfcst_true": re.search(r"constant vertical mixing coefficient\s+ln_zdfcst\s*=\s*T\b", ocean) is not None,

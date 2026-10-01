@@ -271,10 +271,18 @@ def validate_terminal(root: Path, *, plant: str = "none") -> dict[str, object]:
     return {"status": "FINITE_FP64_NO_ICE_PRODUCTS", "restart_shards": 2, "ocean_fields": rows}
 
 
-def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+def validate_resolved(
+    root: Path,
+    *,
+    plant: str = "none",
+    tke_active: bool = True,
+) -> dict[str, object]:
     ocean = (root / "ocean.output").read_text(errors="strict")
     stdout = (root / "run.user.stdout.log").read_text(errors="strict")
     timing = (root / "run.user.time.log").read_text(errors="strict")
+    nn_mxlice_print = re.search(
+        r"type of scaling under sea-ice\s+nn_mxlice\s*=\s*0\b", ocean
+    )
     checks = {
         "stop_0": "STOP 0" in stdout,
         "run_done": "RUN_DONE" in timing,
@@ -285,7 +293,7 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
         "no_si3_init": "Sea Ice Model: SI3" not in ocean,
         "no_ice_namelist_output": "output.namelist.ice" not in ocean,
         "sentinel_unread": SENTINEL.read_text().strip() not in ocean + stdout,
-        "nn_mxlice_0": re.search(r"type of scaling under sea-ice\s+nn_mxlice\s*=\s*0\b", ocean) is not None,
+        "nn_mxlice_0": nn_mxlice_print is not None if tke_active else nn_mxlice_print is None,
         "ln_drgice_imp_false": re.search(r"implicit ice-ocean drag\s+ln_drgice_imp\s*=\s*F\b", ocean) is not None,
         "nn_fwb_voltype_2": "nn_fwb_voltype = 2: Control OCEAN volume" in ocean,
     }

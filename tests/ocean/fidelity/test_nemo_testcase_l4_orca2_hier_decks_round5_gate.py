@@ -78,7 +78,6 @@ def _resolved_record(root: Path) -> None:
         "frequency of restart file nn_stock = 240\n"
         "restart logical ln_rstart = F\n"
         "ice management in the sbc nn_ice = 0\n"
-        "type of scaling under sea-ice nn_mxlice = 0\n"
         "implicit ice-ocean drag ln_drgice_imp = F\n"
         "nn_fwb_voltype = 2: Control OCEAN volume\n"
         "constant vertical mixing coefficient ln_zdfcst = T\n"
@@ -95,6 +94,13 @@ def _resolved_record(root: Path) -> None:
 def test_resolved_consequences_and_plants_refuse(tmp_path):
     _resolved_record(tmp_path)
     assert gate.validate_resolved(tmp_path)["status"] == "PASS_RUNG6_RESOLVED"
+    output = tmp_path / "ocean.output"
+    output.write_text(
+        output.read_text() + "type of scaling under sea-ice nn_mxlice = 0\n"
+    )
+    with pytest.raises(gate.rung7.rung8.rung9.GateError):
+        gate.validate_resolved(tmp_path)
+    _resolved_record(tmp_path)
     for plant in ("ice-sentinel-read", "tke-sentinel-read", "resolved-consequence"):
         with pytest.raises((gate.GateError, gate.rung7.rung8.rung9.GateError)):
             gate.validate_resolved(tmp_path, plant=plant)
