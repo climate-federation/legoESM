@@ -26,7 +26,7 @@ The exact compiled optimized branch writes the inherited lane-1 entry stream
 and then calls the new stage-0 writer
 (`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107`).  It next executes
 the surface boundary condition and calls the inherited surface-input writer
-(`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:146-154`).  That writer
+(`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-154`).  That writer
 canonicalizes every surface field
 (`ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:390-441`) through the local
 wet-cell copy loop

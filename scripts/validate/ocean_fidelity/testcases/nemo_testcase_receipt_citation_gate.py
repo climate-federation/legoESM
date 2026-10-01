@@ -4983,19 +4983,19 @@ CITATION_MAP = {
         ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
         17,
     ],
-    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:146-154': [
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-154': [
         ('! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)', 1),
         ('IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )', 1),
-        9,
+        8,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:390-441': [
         ('SUBROUTINE l4_dump_ocean_surface_input( kstp, klevel )', 1),
-        ("WRITE(numout,*) 'LANE4_OCEAN_SURFACE_INPUT_DUMP ', kstp, klevel", 1),
+        ('END SUBROUTINE l4_dump_ocean_surface_input', 1),
         52,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:443-473': [
         ('FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )', 1),
-        ('IF( llwet ) zfield(ji,jj) = pfield(ji,jj)', 1),
+        ('END FUNCTION l4_canon_2d', 1),
         31,
     ],
     'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
