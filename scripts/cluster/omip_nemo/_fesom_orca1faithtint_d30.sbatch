@@ -110,7 +110,8 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   `# ---- the adopted sets the FESOM lane wires ----` \
   --ice-exchange nemo_si3 \
   --forcing-time-interp linear \
-  --dt 1800 --years ${YEARS:-0.0822} --snapshot-every-days 5 ${EXTRA:-} \
+  --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip `# NEMO 3-D viscosity + no-slip walls, as the fesom_edgeldf comparisons ran` \
+  --dt 900 --years ${YEARS:-0.0822} --snapshot-every-days 5 ${EXTRA:-} \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the tripole card scores` \
   --output $OUT 2>&1 | tail -20
 run_rc=${PIPESTATUS[0]}

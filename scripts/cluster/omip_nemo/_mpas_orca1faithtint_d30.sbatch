@@ -113,7 +113,8 @@ echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
 rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
-JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` ${EXTRA:-} \
+JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` \
+  --A-h 0 --B-h 0 --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip `# NEMO 3-D viscosity + no-slip walls, as every MPAS comparison since 2026-09-22 ran` ${EXTRA:-} \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the tripole card scores` \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
