@@ -96,6 +96,14 @@ FILES = {
         _ORCA2_COMPILED / "zdfiwm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
         _ORCA2_COMPILED / "zdfddm.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2_COMPILED / "sbcmod.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
+        _ORCA2_COMPILED / "sbcflx.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_COMPILED / "traadv.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1120,6 +1128,34 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 82: hierarchy rung-0 deck semantics ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306': [
+        'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',
+        "sbc_init : choose ONE and only ONE sbc option", 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:440-449': [
+        'SELECT CASE( nsbc )',
+        'IF( ll_opa    )       CALL sbc_cpl_rcv', 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
+        'SELECT CASE( nn_ice )',
+        'END SELECT', 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90:191-204': [
+        'CALL fld_read( kt, nn_fsbc, sf )',
+        'emp (ji,jj) =   sf(jp_emp )%fnow(ji,jj,1)', 14],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:206-228': [
+        'IF( nn_avb == 0 ) THEN',
+        'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk)', 23],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:264-270': [
+        'IF( ln_zdfcst ) THEN',
+        'one and only one vertical diffusion option has to be defined', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:334-343': [
+        'SELECT CASE ( nzdf_phy )',
+        'END SELECT', 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:738-740': [
+        'IF( ln_trabbc  )   CALL tra_bbc',
+        'IF( ln_tradmp  )   CALL tra_dmp', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-260': [
+        'IF( ln_ldfeiv .AND. .NOT. ln_traldf_triad ) THEN',
+        'IF( ln_mle    )   THEN', 6],
     # --- ORCA2 round 81: the recorded build's IWM addition and backgrounds ---
     'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:313-316': [
         '!* update momentum & tracer diffusivity with wave-driven mixing',
