@@ -218,22 +218,44 @@ def test_the_measurement_arm_refuses_a_card_that_never_reaches_the_branch():
     assert with_first_wzv_after_ssh(vec, None) is vec
 
 
-def test_the_scan_carry_is_seeded_with_nemo_s_own_nit000_value(arms):
-    """A ``None -> Field`` transition mid-scan crashes ``lax.scan``, so the
-    slot is seeded before the loop -- with NEMO's own pre-first-step value,
-    ``ssh(:,:,Kaa) = ssh(:,:,Kbb)`` (restart.F90:370), which is why seeding
-    moves no number."""
+def test_pre_filling_the_slot_with_nemo_s_nit000_value_moves_no_number(arms):
+    """What the scan-carry seeding does, and why it is free.
+
+    A ``None -> Field`` transition on the first iteration changes a
+    ``lax.scan`` carry's tree structure and the scan rejects it, so the
+    scan-carry preparation fills the slot before the loop.  It fills it with
+    NEMO's own pre-first-step value -- ``ssh(:,:,Kaa) = ssh(:,:,Kbb)``
+    (restart.F90:370) -- and THAT is why seeding cannot move a number: the
+    branch reads the step-entry height whether the slot is absent or holds
+    exactly that height.  Measured here rather than argued.
+
+    ``seed_scan_carry`` itself is NOT exercised on this card, and that is
+    PRE-EXISTING: the card selects NEMO's AB3/AM4 barotropic filter, whose
+    six-array history the seeder cannot pre-fill (the module docstring records
+    that such runs are step-1-eager and only then scan).  It raises the same
+    way on BOTH arms, so this round neither uses nor breaks it; the test
+    below pins that rather than leaving it to a reader.
+    """
     arm = arms["carried"]
-    seeded = arm["model"].seed_scan_carry(arm["s0"], arms["dt"])
-    assert seeded.eta_rk3_after is not None
-    np.testing.assert_array_equal(np.asarray(seeded.eta_rk3_after.data),
-                                  _eta(arm["s0"]))
-    stepped = arm["model"].step(seeded, dt=arms["dt"])
+    prefilled = arm["s0"]._replace(eta_rk3_after=arm["s0"].eta)
+    stepped = arm["model"].step(prefilled, dt=arms["dt"])
     for field in ("eta", "u", "v", "T", "S"):
         np.testing.assert_array_equal(
             np.asarray(getattr(stepped, field).data),
             np.asarray(getattr(arm["s1"], field).data),
-            err_msg=f"seeding the scan carry moved {field}")
-    # and the uncarried arm is left alone by the seeder.
-    assert arms["card"]["model"].seed_scan_carry(
-        arms["card"]["s0"], arms["dt"]).eta_rk3_after is None
+            err_msg=f"pre-filling the slot moved {field}")
+    assert np.array_equal(np.asarray(stepped.eta_rk3_after.data),
+                          2.0 * _eta(stepped) - _eta(arm["s0"]))
+
+
+def test_the_scan_seeder_is_unreachable_on_this_card_on_both_arms(arms):
+    """Pre-existing, and identical on both arms: the AB3/AM4 barotropic
+    history cannot be pre-seeded, so ``seed_scan_carry`` refuses this card
+    whatever the after-SSH form is."""
+    messages = []
+    for name in ("card", "carried"):
+        with pytest.raises(ValueError) as caught:
+            arms[name]["model"].seed_scan_carry(arms[name]["s0"], arms["dt"])
+        messages.append(str(caught.value).splitlines()[0])
+    assert messages[0] == messages[1], (
+        "the two arms fail the seeder differently, so this round changed it")
