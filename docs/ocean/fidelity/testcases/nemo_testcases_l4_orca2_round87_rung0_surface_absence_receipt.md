@@ -89,7 +89,9 @@ record claim.
 
 ## Validation and review
 
-- Focused round-84/87 acquisition and clean-worktree tests: **6 passed**.
+- Focused citation plus round-84/87 acquisition tests: **22 passed**.  The
+  earlier clean-worktree regression selection also passed **6 tests** after
+  the syntax-module output fix.
 - The one permitted `tests/ocean/fidelity -n 12` battery selected 2,212 tests
   and reached 98% before a no-output stall was interrupted, so it has no suite
   PASS claim.  Two failures were visible.  The round-87 preflight initially
