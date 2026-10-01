@@ -60,3 +60,34 @@ and report HELD or STOPPED_FOR_RECORD.
 
 No configuration, card, carried-state, timestep, resolution, stabilizer, or
 default choice is made. ORCA2 remains unmeasured on its own lane.
+
+## Supplemental freeze before the source-order trajectory arm
+
+The committed cumulative walk (measurement made after the freeze above) names
+the baseline post-HPG accumulator as the first non-bit boundary: stage-2 U/V
+maxima `6.7246815857365635e-06` / `6.7126619267201494e-06 m s-2`, with every
+one of 36,600 scored cells unequal. The existing private source-order arm
+makes both stage-2 and stage-3 post-HPG rows bit-exact. The earlier prediction
+that HPG would be exact is therefore **REFUTED** for the production accumulator
+(the isolated HPG term itself was exact, but that is not the live boundary).
+
+Before changing production or measuring a trajectory, freeze these candidate
+predictions:
+
+1. Making NEMO's HPG -> VOR -> KEG -> ZAD association the shared
+   vector-invariant WS-RK3 implementation reproduces the private arm exactly
+   and keeps the post-HPG rows bit-exact.
+2. VORTEX-vector kt=2 U and V decrease by at least 10% from
+   `3.3693297863401916e-06` and `3.337024e-06`; kt=1 remains at the bar and
+   the first-over-bar row remains kt=2. A smaller improvement or any kt=1
+   loss refutes the candidate.
+3. The flux VORTEX card is bit-identical because it does not execute the
+   vector association. GYRE kt=1/2 remain at the bar and its first-over-bar
+   remains kt=3. LOCK_EXCHANGE and OVERFLOW retain their registered rows.
+4. The GYRE day-30 value decreases from `2.3432510206121264e-06 K`; day-240
+   and day-360 changes are each below the applicable Decision-59/AT threshold.
+   Any contrary result is retained as a refuted prediction and the candidate
+   does not land unless another explicit user exception applies.
+5. The DINO month gate remains at or below its pinned bar because the MLF card
+   does not execute this WS-RK3 stage program. The recipe-derived census must
+   prove that scope rather than infer it from the card name.
