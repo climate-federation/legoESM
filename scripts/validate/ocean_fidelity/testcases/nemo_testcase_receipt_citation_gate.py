@@ -104,6 +104,8 @@ FILES = {
         _ORCA2_COMPILED / "sbcflx.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
@@ -4959,6 +4961,16 @@ CITATION_MAP = {
     'zdftke.F90:845-846': [('ELSE                          ! standard case : associated avt minimum = molecular viscosity (10^-6 m2/s)', 1), ('rmxl_min = 1.e-6_wp / ( rn_ediff * SQRT( rn_emin ) )    ! resulting minimum length to recover molecular viscosity', 1), 2],
     'zdftke.F90:841-843': [('IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing', 1), ('rmxl_min = 1.e-03_wp             ! associated avt minimum = molecular salt diffusivity (10^-9 m2/s)', 1), 3],
     'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg:396': ('ln_zdfiwm   = .true.       ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:90-104': [
+        ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
+        ("WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP ', kstp, Nbb, STORAGE_SIZE(1._wp), TRIM(cl_traj)", 1),
+        15,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:211-227': [
+        ('! Stage 1 :', 1),
+        ('IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )', 1),
+        17,
+    ],
     'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
     'domhgr.F90:222-227': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ('kff = 1', 1), 6],
     'zdftke.F90:246,253-258': [('IF( nn_eice == 0 ) zice_fra(:) = 0._wp               ! No attenuation of TKE due to sea ice', 1), ('! ice fraction considered for attenuation of langmuir & wave breaking', 1), ('END SELECT', 1), 7],
