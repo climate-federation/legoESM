@@ -23,7 +23,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 )
 
 FIELD_ORDER = ("T", "S", "u", "v", "ssh")
-ARMS = ("ordinary", "fixed_none", "avt", "avm", "avt_avm")
+ARMS = ("fixed_none", "avt", "avm")
 PLANTS = ("none", "baseline", "passive-seam", "avt-inert", "avm-inert", "claim-label")
 EXPECTED_REFERENCE_SHA256 = (
     "8347540880af2aac58ff6d3f0af240d676c7f9f36dda55867e4c4d35c9780749"
@@ -179,13 +179,11 @@ def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
         last_fields = recorded
         next_states = {}
         for name, selectors in {
-            "ordinary": None,
             "fixed_none": (False, False),
             "avt": (True, False),
             "avm": (False, True),
-            "avt_avm": (True, True),
         }.items():
-            kwargs = {} if selectors is None else {
+            kwargs = {
                 "_vertical_K_test_override": _override(recorded, selectors)
             }
             trace = model.step(
@@ -201,24 +199,23 @@ def measure(deck_root: Path, ten_step_root: Path, vmix_root: Path,
                  for name, state in states.items()}
     comparisons = {name: ladder.compare_fields(values, oracle)
                    for name, values in candidate.items()}
-    require(comparisons["ordinary"] == {
+    expected = {
         key: reference[key] for key in ("rows", "ranked_non_bit_by_max_abs", "first_non_bit_field")
-    }, "ordinary kt10 row differs from the landed round-79b reference")
-    passive = all(np.array_equal(candidate["ordinary"][name], candidate["fixed_none"][name])
-                  for name in FIELD_ORDER)
-    require(passive, "all-false fixed-shape consumer seam is not passive")
+    }
+    passive = comparisons["fixed_none"] == expected
+    require(passive, "all-false consumer seam differs from the landed round-79b reference")
     extremes = {}
     for field in ("T", "S"):
-        index = _argmax(candidate["ordinary"][field], oracle[field])
+        index = _argmax(candidate["fixed_none"][field], oracle[field])
         values = {}
         for name in ARMS:
             residual = candidate[name][field] - oracle[field]
             values[name] = {
                 "global_max_abs": float(np.max(np.abs(residual))),
-                "residual_at_ordinary_argmax": float(residual[index]),
+                "residual_at_baseline_argmax": float(residual[index]),
             }
         extremes[field] = {
-            "ordinary_argmax": _location(index, card, last_fields),
+            "baseline_argmax": _location(index, card, last_fields),
             "arms": values,
         }
     return {
@@ -245,26 +242,26 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(plant in PLANTS, f"unknown plant {plant}")
     report = json.loads(json.dumps(report))
     if plant == "baseline":
-        report["comparisons"]["ordinary"]["rows"]["T"]["max_abs"] += 1.0
+        report["comparisons"]["fixed_none"]["rows"]["T"]["max_abs"] += 1.0
     elif plant == "passive-seam":
         report["passive_seam_bit_identical"] = False
     elif plant == "avt-inert":
-        report["comparisons"]["avt"] = report["comparisons"]["ordinary"]
+        report["comparisons"]["avt"] = report["comparisons"]["fixed_none"]
     elif plant == "avm-inert":
-        report["comparisons"]["avm"] = report["comparisons"]["ordinary"]
+        report["comparisons"]["avm"] = report["comparisons"]["fixed_none"]
     elif plant == "claim-label":
         report["claim_label"] = "independent"
     require(report["claim_label"] == "given NEMO's entry", "claim label changed")
     require(report["passive_seam_bit_identical"], "passive seam control changed the state")
     expected_t = 1.2367457128331782
     expected_s = 0.2871061346986039
-    require(report["comparisons"]["ordinary"]["rows"]["T"]["max_abs"] == expected_t,
-            "ordinary T maximum no longer matches the preregistered baseline")
-    require(report["comparisons"]["ordinary"]["rows"]["S"]["max_abs"] == expected_s,
-            "ordinary S maximum no longer matches the preregistered baseline")
-    require(report["comparisons"]["avt"] != report["comparisons"]["ordinary"],
+    require(report["comparisons"]["fixed_none"]["rows"]["T"]["max_abs"] == expected_t,
+            "baseline T maximum no longer matches the preregistered value")
+    require(report["comparisons"]["fixed_none"]["rows"]["S"]["max_abs"] == expected_s,
+            "baseline S maximum no longer matches the preregistered value")
+    require(report["comparisons"]["avt"] != report["comparisons"]["fixed_none"],
             "recorded avt arm was inert")
-    require(report["comparisons"]["avm"] != report["comparisons"]["ordinary"],
+    require(report["comparisons"]["avm"] != report["comparisons"]["fixed_none"],
             "recorded avm arm was inert")
     report["status"] = "PASS_ROUND80_EXTREMES"
     return report

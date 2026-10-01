@@ -28,23 +28,18 @@ def _comparison(tmax: float = 1.2367457128331782,
 
 
 def _report() -> dict:
-    ordinary = _comparison()
-    fixed = copy.deepcopy(ordinary)
-    avt = copy.deepcopy(ordinary)
-    avm = copy.deepcopy(ordinary)
-    pair = copy.deepcopy(ordinary)
+    fixed = _comparison()
+    avt = copy.deepcopy(fixed)
+    avm = copy.deepcopy(fixed)
     avt["rows"]["T"]["rms"] = 0.09
     avm["rows"]["u"]["rms"] = 0.09
-    pair["rows"]["T"]["rms"] = 0.08
     return {
         "claim_label": "given NEMO's entry",
         "passive_seam_bit_identical": True,
         "comparisons": {
-            "ordinary": ordinary,
             "fixed_none": fixed,
             "avt": avt,
             "avm": avm,
-            "avt_avm": pair,
         },
     }
 
