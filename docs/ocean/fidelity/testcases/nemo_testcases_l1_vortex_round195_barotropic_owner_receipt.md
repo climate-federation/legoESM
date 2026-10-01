@@ -11,9 +11,10 @@
    correction arithmetic are all already at the compiled-rounding floor.
 2. The held candidate's single card edit selects **two** NEMO statements,
    not one, and they fail the certified gate for **two different reasons**.
-   The literal stage continuity recurrence alone moves no row maximum
-   anywhere and still breaks the two-ULP cellwise ratchet on 33 certified
-   rows; the second per-stage solve alone owns both the kt=2 U/V
+   The literal stage continuity recurrence alone changes no row's STATUS and
+   buys none of the velocity gain (kt=2 u identical to production's last
+   bit), yet still breaks the two-ULP cellwise ratchet on 33 of the 50
+   certified rows; the second per-stage solve alone owns both the kt=2 U/V
    improvement and the kt=5 salinity AT-BAR loss — and that loss is a
    **single floating-point quantum**.
 
@@ -64,7 +65,14 @@ so this is the same error, not a second one.
 
 Everything upstream is already exact under the candidate, from the same two
 runs: the cumulative momentum accumulator at the KEG and ZAD boundaries is
-`1.355e-20 .. 2.033e-20` (round 194's result, reproduced here), and with the
+`1.355e-20 .. 2.033e-20` (round 194's result, reproduced here). The HPG and
+VOR rows in the same file read `6.72e-06` — that is NOT a contradiction and
+NOT an error in the accumulator: round 193 established that legoESM
+associates the accumulator's terms in a different ORDER than NEMO, so the
+intermediate boundaries disagree while the completed sum agrees, and the
+round-193 `--source-order` arm makes the intermediate boundaries bit-exact
+too without changing any certified number. The relevant quantity here is the
+completed accumulator, which is the ZAD boundary. With the
 barotropic operand supplied the whole stage reproduces NEMO's stage velocity
 at `1.1e-16`. Since the correction replaces exactly the depth mean, the
 baroclinic part of the velocity update is proven exact by the AT-BAR row and
@@ -100,11 +108,19 @@ worktree reproduces the certified round-191 residual fields with
 `max_worsening_ulps = 0`, so every move below is the statement's, not the
 worktree's.
 
-Arm B reproduces **every** row maximum of production to all 16 digits at
-every kt and every field, and changes no row's status — and still breaks the
-ratchet on 33 of the 50 certified rows. Its flagged cells are **disjoint**
-from arm C's (0 of 33 shared). So the literal recurrence is a pure last-bit
-reshuffle: it buys nothing and costs the ratchet.
+Arm B keeps **22 of the 50** row maxima bit-identical to production,
+including both headline rows (kt=2 u and kt=5 S); the other 28 move by at
+most `5.9e-10` relative, 21 of them toward NEMO and 7 away, and **no row
+changes status**. It buys none of the candidate's kt=2 velocity gain — kt=2 u
+is identical to production's last bit — and still breaks the ratchet on 33 of
+the 50 certified rows. The one cell each violating row reports (the gate
+names a row's FIRST offending cell, not its worst) is **disjoint** from arm
+C's set: 0 of 33 shared. So the literal recurrence is a last-bit reshuffle
+with no measurable benefit and a real ratchet cost.
+
+An earlier draft of this receipt said arm B reproduced *every* row maximum to
+16 digits. That is wrong and is corrected above: 28 of 50 move. The
+independent review below caught it; the substantive verdict is unchanged.
 
 Arm C minus arm B is the second per-stage continuity solve alone. It owns
 the whole kt=2 U/V improvement and both salinity status moves — the gate
@@ -155,8 +171,19 @@ last bit.
 * **Instrument control (the most important line):** production card, fresh
   worktree, against the certified round-191 reference —
   `ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0`.
-* Citation gate and the focused battery: quoted in the "Battery" section
-  appended below.
+* **Citation gate** on this receipt: `"status": "PASS"`,
+  `"unmapped_citations": []`, `"citations_found": 2`, worktree clean at
+  commit `5155d1318da844f2ab586d4183f2e4411202fcbb`
+  (`phase3/round195/citations.json`). Its planted control, shifting
+  `stprk3_stg.f90:421-429` by two lines, fires
+  `SYMBOL-NOT-AT-LINE ... that symbol identifies line 421` and exits 1
+  (`citations_plant.json`).
+* **Focused battery**, run serialized after confirming no other pytest was on
+  the host: the citation-gate tests, the three VORTEX walk-script tests, the
+  VORTEX card test and the NEMO recipe test —
+  `128 passed in 357.99s (0:05:57)` (`phase3/round195/focused_pytest.log`).
+  The lane's full required battery is the one the operator's `land.sh` runs
+  at the push gate; its decisive line is recorded with the push.
 * **Production diff for this round is empty.** `git diff` of the round's
   first commit against its last, restricted to `packages/` and `src/`,
   is zero lines: the two scratch arms were committed and reverted, so no
@@ -184,8 +211,9 @@ Three items, in priority order.
    `2.030122102e-16` with the bar at 4.926 quanta) — the 33-row ratchet
    break from the literal recurrence would still have to be waived, and it
    buys nothing on its own, so this is not recommended; (c) rule that a
-   NEMO-literal statement which moves no row maximum may not be held back
-   by the cellwise ratchet alone, i.e. amend Decision 71. My pick is (a).
+   NEMO-literal statement which changes no row's status may not be held
+   back by the cellwise ratchet alone, i.e. amend Decision 71. My pick is
+   (a).
 2. **ACQUISITION_NEEDED.** Naming the first non-bit statement inside the
    external-mode solve needs NEMO's barotropic substep operands, which no
    existing record carries (round 192 records the solve's *output* frames
@@ -196,3 +224,40 @@ Three items, in priority order.
    named but not resolved.
 3. The flux card's (`VORTEX-zco`) own kt=2 owner is still untouched since
    round 4. Decision 74's 30/15/10-km ladder stays blocked (note BO).
+
+## Independent adversarial review (fresh reviewer, this round)
+
+Codex is out of budget on this account for this window and the GLM tool is
+not reachable in this session, so the mandatory second opinion was a fresh
+reviewer agent given the diff, the evidence root and the claims, with no
+knowledge of how they were produced. Its verdict was **DO-NOT-SHIP until two
+things are fixed**, and both are now fixed in this file:
+
+* **DEFECT (accepted, corrected above).** The claim that arm B reproduced
+  *every* row maximum to 16 digits is false: 22 of 50 are bit-identical, 28
+  move (largest `5.9e-10` relative, plus one quantum-level salinity row at
+  kt=4 that improves 4 quanta -> 3), 21 toward NEMO and 7 away, no status
+  change. Re-measured here before correcting.
+* **BLOCKER (accepted, corrected above).** The gates section pointed at a
+  "Battery" section that did not exist; the citation-gate and focused-battery
+  lines are now quoted in place.
+* **NIT (accepted, corrected above).** "Everything upstream is already
+  exact" did not explain the `6.72e-06` HPG/VOR rows sitting in the same
+  file; round 193's accumulator-order finding is now cited there.
+* The reviewer independently CONFIRMED: the instrument control at 0 ULP; the
+  empty production diff and both scratch commits round-tripping to zero
+  (`git diff 9d384eaf7^ 4ac38a903` and `git diff 2b37155a0^ f8ff46de2` are
+  each 0 lines); the one-quantum salinity arithmetic (it recomputed the
+  quantum as `spacing(35)/35 = 2.0301221021717148e-16` and found the kt=5 and
+  kt=7 salinity rows swap values exactly, which is stronger than this receipt
+  claimed); that the script extension's default path is byte-identical to
+  before the edit and the new keys overwrite nothing; and that scoping the
+  owner to the whole external-mode routine rather than a statement inside it
+  is honest, because the finer attribution is declared ACQUISITION_NEEDED.
+* The reviewer could not re-derive the "flagged cells are disjoint" claim
+  from the persisted JSON alone and left it UNVERIFIED. It is measured here
+  from the two comparison reports' own violation lists; the sentence has been
+  tightened to say exactly what a violation line reports (a row's first
+  offending cell, not its worst).
+
+No finding changes the HELD verdict or the owner attribution.
