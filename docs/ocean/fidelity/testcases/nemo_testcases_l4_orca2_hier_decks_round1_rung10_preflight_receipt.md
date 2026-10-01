@@ -136,7 +136,7 @@ future user decision says otherwise.
 
 ## Validation and review
 
-Focused hierarchy plus citation-gate battery: **25 passed** on the clean tree.
+Focused hierarchy plus citation-gate battery: **26 passed** on the clean tree.
 The required `tests/ocean/fidelity -n 12` battery ran once and reached 99% of
 2,185 collected tests before the existing
 `test_prediction_plant_is_fail_closed` stage-sweep control stopped producing
