@@ -182,6 +182,13 @@ class SegmentCarry(NamedTuple):
         Accumulated sensible heat flux [W/m2 * s] over the segment.
     lhflx_accum : jax.Array
         Accumulated latent heat flux [W/m2 * s] over the segment.
+    evap_accum : jax.Array
+        Accumulated surface water flux [kg/m2] over the segment: the
+        ``PhysicsOutput.evap_sfc`` the column actually received (tiled /
+        prescribed water, else the bulk L_v(T_sfc) inverse) -- the CMOR
+        ``evspsbl`` and the moisture-budget closure read THIS, never
+        ``lhflx_accum / L_v``.  Read directly off the carry (not part of the
+        ``unpack_carry`` tuple), like the radiation accumulators.
     sw_up_toa_accum, lw_up_toa_accum, sw_down_toa_accum : jax.Array
         Time-integrated TOA radiative fluxes [W/m2 * s] over the segment
         (sign conventions unchanged: ``*_up`` positive-up, ``*_down``
@@ -263,6 +270,7 @@ class SegmentCarry(NamedTuple):
     precip_accum: jax.Array
     shflx_accum: jax.Array
     lhflx_accum: jax.Array
+    evap_accum: jax.Array
     sw_up_toa_accum: jax.Array
     lw_up_toa_accum: jax.Array
     sw_up_toa_clr_accum: jax.Array
@@ -331,7 +339,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                held_sw_up_toa_clr=None, held_lw_up_toa_clr=None,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None,
-               shflx_accum=None, lhflx_accum=None,
+               shflx_accum=None, lhflx_accum=None, evap_accum=None,
                sw_up_toa_accum=None, lw_up_toa_accum=None,
                sw_up_toa_clr_accum=None, lw_up_toa_clr_accum=None,
                sw_down_toa_accum=None, sw_net_sfc_accum=None,
@@ -384,6 +392,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         shflx_accum = jnp.zeros_like(state.p_s.data)
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
+    if evap_accum is None:
+        evap_accum = jnp.zeros_like(state.p_s.data)
     # Segment-mean flux / T_low accumulators (CMOR diurnal-alias fix):
     # always real arrays, reset to zero at every segment start.
     if sw_up_toa_accum is None:
@@ -457,6 +467,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         precip_accum=_promote(precip_accum, storage),
         shflx_accum=_promote(shflx_accum, storage),
         lhflx_accum=_promote(lhflx_accum, storage),
+        evap_accum=_promote(evap_accum, storage),
         sw_up_toa_accum=_promote(sw_up_toa_accum, storage),
         lw_up_toa_accum=_promote(lw_up_toa_accum, storage),
         sw_up_toa_clr_accum=_promote(sw_up_toa_clr_accum, storage),
@@ -542,6 +553,27 @@ def unpack_carry(carry, state_template):
             held_tuple, int(carry.step_index),
             carry.precip_accum,
             carry.shflx_accum, carry.lhflx_accum)
+
+
+def _segment_water_flux(phys_out, zeros):
+    """The surface water flux to accumulate this step [kg/m2/s, positive up].
+
+    ``PhysicsOutput.evap_sfc`` when the column received water; zeros when the
+    step had NO surface exchange at all (``lhflx`` None too, the fluxless
+    configs).  A step that reports latent heat but no water is refused at
+    trace time: silently accumulating zeros would publish CMOR ``evspsbl`` = 0
+    beside a nonzero ``hfls`` -- the hidden fallback this channel exists to
+    remove (never ``lhflx / L_v`` here).
+    """
+    if phys_out.evap_sfc is not None:
+        return phys_out.evap_sfc
+    if phys_out.lhflx is None:
+        return zeros
+    raise ValueError(
+        "compiled_segments: PhysicsOutput carries lhflx but no evap_sfc; the "
+        "segment water accumulator (CMOR evspsbl, moisture closure) needs the "
+        "water the column actually received -- the physics path must publish "
+        "evap_sfc beside lhflx (never derive it as lhflx / L_v).")
 
 
 def segment_accum_to_rate(accum, seg_steps: int, dt: float):
@@ -1156,6 +1188,7 @@ class _SplitStepLocals(NamedTuple):
     conv_precip_prev_new: object
     shflx_accum: object
     lhflx_accum: object
+    evap_accum: object
     sw_net_sfc_accum: object
     lw_net_sfc_accum: object
     sw_up_toa_accum: object
@@ -1458,6 +1491,8 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new)
     shflx_accum = carry.shflx_accum + _sh * statics.dt
     lhflx_accum = carry.lhflx_accum + _lh * statics.dt
+    _ev = _segment_water_flux(phys_out, jnp.zeros_like(p_s_new))
+    evap_accum = carry.evap_accum + _ev * statics.dt
 
     # --- Time-integrate radiative fluxes + lowest-level T ---
     # (segment-mean diagnostics; CMOR diurnal-alias fix).  held_new order:
@@ -1482,6 +1517,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         conv_prog_upd=conv_prog_upd, held_new=held_new,
         precip_accum=precip_accum, conv_precip_prev_new=conv_precip_prev_new,
         shflx_accum=shflx_accum, lhflx_accum=lhflx_accum,
+        evap_accum=evap_accum,
         sw_net_sfc_accum=sw_net_sfc_accum, lw_net_sfc_accum=lw_net_sfc_accum,
         sw_up_toa_accum=sw_up_toa_accum, lw_up_toa_accum=lw_up_toa_accum,
         sw_up_toa_clr_accum=sw_up_toa_clr_accum,
@@ -1608,6 +1644,7 @@ def finalize_split_step(carry, lz, statics):
         precip_accum=_match_dtype(lz.precip_accum, carry.precip_accum),
         shflx_accum=_match_dtype(lz.shflx_accum, carry.shflx_accum),
         lhflx_accum=_match_dtype(lz.lhflx_accum, carry.lhflx_accum),
+        evap_accum=_match_dtype(lz.evap_accum, carry.evap_accum),
         sw_up_toa_accum=_match_dtype(
             lz.sw_up_toa_accum, carry.sw_up_toa_accum),
         lw_up_toa_accum=_match_dtype(
@@ -2321,6 +2358,8 @@ def build_segment_fn(
                 _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new[_ofi])
                 shflx_accum = carry.shflx_accum.at[_ofi].add(_sh * _dt)
                 lhflx_accum = carry.lhflx_accum.at[_ofi].add(_lh * _dt)
+                _ev = _segment_water_flux(phys_out, jnp.zeros_like(p_s_new[_ofi]))
+                evap_accum = carry.evap_accum.at[_ofi].add(_ev * _dt)
 
                 # Radiative fluxes + lowest-level T: time-integrate at owned
                 # indices (segment-mean diagnostics; CMOR diurnal-alias fix).
@@ -2388,6 +2427,7 @@ def build_segment_fn(
                     precip_accum=precip_accum,
                     conv_precip_prev_new=conv_precip_prev_new,
                     shflx_accum=shflx_accum, lhflx_accum=lhflx_accum,
+                    evap_accum=evap_accum,
                     sw_net_sfc_accum=sw_net_sfc_accum,
                     lw_net_sfc_accum=lw_net_sfc_accum,
                     sw_up_toa_accum=sw_up_toa_accum,

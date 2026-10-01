@@ -733,13 +733,14 @@ def _make_hydrostatic_turbulence(
         # Surface turbulent fluxes [W/m^2, positive upward -- the schemes' own
         # sign, already the CMOR convention], exported on the tendency exactly
         # as the MPAS path below does.  They were missing HERE, so on the
-        # hydrostatic lane the CMOR hfls/hfss feed (and evspsbl = lhflx/L_v)
+        # hydrostatic lane the CMOR hfls/hfss feed (and, via evap_sfc, evspsbl)
         # had nothing to read, and a single-column water budget could not see
         # its own evaporation: the SCM-RCE budget measured E = 0.0000 mm/day on
         # a column whose bulk formula gives 1.559 (2026-08-11).  None-guarded,
         # so a scheme without surface fluxes is byte-identical to before.
         _shf_h = getattr(turb_out, "shflx", None)
         _lhf_h = getattr(turb_out, "lhflx", None)
+        _evp_h = getattr(turb_out, "evap_sfc", None)
         tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
@@ -753,6 +754,9 @@ def _make_hydrostatic_turbulence(
             lhflx_sfc=(None if _lhf_h is None else Field(
                 data=jnp.asarray(_lhf_h).reshape(shape_2d),
                 name="lhflx_sfc_turb", dims=dims_2d, units="W/m^2")),
+            evap_sfc=(None if _evp_h is None else Field(
+                data=jnp.asarray(_evp_h).reshape(shape_2d),
+                name="evap_sfc_turb", dims=dims_2d, units="kg/m^2/s")),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
@@ -1151,6 +1155,7 @@ def _make_mpas_turbulence(
         # unset, byte-identical to the pre-export tendency.
         _shf = getattr(turb_out, "shflx", None)
         _lhf = getattr(turb_out, "lhflx", None)
+        _evp = getattr(turb_out, "evap_sfc", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
             dv_dt=(None if _dv_leaf is None
@@ -1167,6 +1172,9 @@ def _make_mpas_turbulence(
             lhflx_sfc=None if _lhf is None else state.p_s.replace(
                 data=_lhf.reshape(p_s.shape), name="lhflx_sfc_turb",
                 units="W/m^2"),
+            evap_sfc=None if _evp is None else state.p_s.replace(
+                data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
+                units="kg/m^2/s"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

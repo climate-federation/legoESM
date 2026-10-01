@@ -73,7 +73,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/ocean/legoesm/ocean/physics/surface_forcing/config.py': 1,
     'packages/ocean/legoesm/ocean/simple_ocean.py': 1,
     'packages/ocean/legoesm/ocean/simple_ocean_mpas.py': 2,
-    'packages/tools/legoesm/diagnostics/energy_budget.py': 1,
     'scripts/data/build_rcemip1_small_reference.py': 1,
     'scripts/data/fetch_rcemip_reference.py': 1,
     'scripts/matrix/run_atmosphere_test_matrix.py': 1,

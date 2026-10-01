@@ -556,7 +556,7 @@ class TestTrackerAreaWeighting:
         area = jnp.cos(lat)[:, None] * jnp.ones((1, nlon))
         from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
         b = MoistureBudgetTracker().update(
-            q_v, p_s, dsigma, precip, jnp.zeros((nlat, nlon)),
+            q_v, p_s, dsigma, precip, evap=jnp.zeros((nlat, nlon)),
             elapsed_seconds=0.0, area_weights=area,
         )
         # Uniform fields: weighting leaves the means physically sensible.
