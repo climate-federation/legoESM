@@ -1,0 +1,137 @@
+"""Controls for the ORCA2 hierarchy rung-9 no-ice acquisition gate."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import pytest
+from netCDF4 import Dataset
+
+
+SCRIPT = (
+    Path(__file__).parents[3]
+    / "scripts/validate/ocean_fidelity/orca2_l4"
+    / "nemo_testcase_l4_orca2_hier_decks_round2_gate.py"
+)
+RUNNER = SCRIPT.parent / "nemo_testcase_l4_orca2_hier_decks_round2_acquisition/run.sh"
+SPEC = importlib.util.spec_from_file_location("orca2_hier_decks_round2_gate", SCRIPT)
+assert SPEC and SPEC.loader
+gate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gate)
+
+
+def test_real_rung9_preflight_has_exact_one_module_delta():
+    report = gate.preflight()
+    assert report["status"] == "PREFLIGHT_PASS_RUNG9"
+    assert report["assignment_delta"] == {"namsbc.nn_ice": ["2", "0"]}
+    assert len(report["line_delta"]) == 1
+    assert report["line_delta"][0][0] == 86
+    assert len(report["retained_ice_namelist_assignments_inert"]) == 91
+    assert report["compiled_consequences"] == {
+        "ice_fraction": 0,
+        "ice_init_called": False,
+        "ice_stp_called": False,
+        "namelist_ice_cfg_loaded": False,
+        "nn_mxlice": 0,
+        "ln_drgice_imp": False,
+        "nn_fwb_voltype": 2,
+    }
+
+
+@pytest.mark.parametrize("plant", ("deck-extra", "build-pin", "ice-artifact"))
+def test_preflight_plants_refuse(plant):
+    with pytest.raises(gate.GateError):
+        gate.preflight(plant=plant)
+
+
+def test_stage_deck_is_exact_and_idempotent(tmp_path):
+    gate.stage_deck(tmp_path)
+    gate.stage_deck(tmp_path)
+    assert gate.sha256_bytes((tmp_path / "namelist_cfg").read_bytes()) == gate.RUNG9_CFG_SHA
+    assert (tmp_path / "namelist_ice_cfg").read_bytes() == gate.RUNG10_ICE_CFG.read_bytes()
+    assert "nn_ice      = 0" in (tmp_path / "namelist_cfg").read_text()
+    assert len((tmp_path / "SHA256SUMS").read_text().splitlines()) == 3
+
+
+def _fake_frame(kt: int, rank: int) -> dict[str, object]:
+    return {
+        "fields": {
+            name: np.asarray([[kt + rank + index]], dtype=np.float64)
+            for index, name in enumerate(gate.rung10.surface.FIELDS)
+        }
+    }
+
+
+def test_frame_parser_and_inventory_plants_refuse(tmp_path, monkeypatch):
+    for kt in range(1, 241):
+        for rank in (0, 1):
+            (tmp_path / gate.rung10.surface._record_name(kt, rank)).touch()
+
+    def read_surface(_path, *, kt, rank, plant="none"):
+        if plant in ("field-name", "truncated"):
+            raise gate.rung10.surface.GateError(plant)
+        return _fake_frame(kt, rank)
+
+    monkeypatch.setattr(gate.rung10.surface, "read_surface", read_surface)
+    report = gate.validate_frames(tmp_path)
+    assert report == {
+        "status": "SELF_DESCRIBING_FINITE",
+        "frames": 480,
+        "finite_field_payloads": 4800,
+    }
+    for plant in ("field-name", "truncated", "missing-frame", "frame-nonfinite"):
+        with pytest.raises((gate.GateError, gate.rung10.surface.GateError)):
+            gate.validate_frames(tmp_path, plant=plant)
+
+
+def _ocean_restart(path: Path) -> None:
+    with Dataset(path, "w") as dataset:
+        dataset.createDimension("x", 2)
+        dataset.createVariable("kt", "f8")[:] = 240.0
+        for index, name in enumerate(gate.rung10.RESTART_FIELDS):
+            dataset.createVariable(name, "f8", ("x",))[:] = (index + 1.0, -0.0)
+
+
+def test_terminal_is_ocean_only_and_plants_refuse(tmp_path):
+    for rank in (0, 1):
+        _ocean_restart(tmp_path / f"ORCA2_00000240_restart_{rank:04d}.nc")
+    assert gate.validate_terminal(tmp_path)["status"] == "FINITE_FP64_NO_ICE_PRODUCTS"
+    for plant in ("terminal-nonfinite", "terminal-step"):
+        with pytest.raises(gate.GateError):
+            gate.validate_terminal(tmp_path, plant=plant)
+    (tmp_path / "ORCA2_00000240_restart_ice_0000.nc").touch()
+    with pytest.raises(gate.GateError, match="ice products"):
+        gate.validate_terminal(tmp_path)
+
+
+def _resolved_record(root: Path) -> None:
+    (root / "namelist_ice_cfg").write_bytes(gate.SENTINEL.read_bytes())
+    (root / "ocean.output").write_text(
+        "number of the last time step nn_itend = 240\n"
+        "frequency of restart file nn_stock = 240\n"
+        "restart logical ln_rstart = F\n"
+        "ice management in the sbc nn_ice = 0\n"
+        "type of scaling under sea-ice nn_mxlice = 0\n"
+        "implicit ice-ocean drag ln_drgice_imp = F\n"
+        "nn_fwb_voltype = 2: Control OCEAN volume\n"
+    )
+    (root / "run.user.stdout.log").write_text("STOP 0\n")
+    (root / "run.user.time.log").write_text("RUN_DONE\n")
+
+
+def test_unread_sentinel_and_resolved_consequence_plants_refuse(tmp_path):
+    _resolved_record(tmp_path)
+    assert gate.validate_resolved(tmp_path)["status"] == "PASS_NO_ICE_SENTINEL_UNREAD"
+    for plant in ("ice-sentinel-read", "resolved-consequence"):
+        with pytest.raises(gate.GateError):
+            gate.validate_resolved(tmp_path, plant=plant)
+
+
+def test_runner_stages_committed_unread_sentinel():
+    runner = RUNNER.read_text()
+    assert 'namelist_ice_cfg) cp -a "$SENTINEL" "$RUN/$name"' in runner
+    assert "makenemo" not in runner
+    assert "/usr/bin/time" not in runner
+    assert "REFUSE:" in runner
