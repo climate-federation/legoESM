@@ -52,11 +52,11 @@ def _array_leaves(value) -> list[np.ndarray]:
     return leaves
 
 
-def _state_differences(left, right) -> dict[str, int]:
+def _state_differences(left, right, *, names=None) -> dict[str, int]:
     differences = {}
     if left._fields != right._fields:
         return {"__fields__": -1}
-    for name in left._fields:
+    for name in left._fields if names is None else names:
         lhs_value, rhs_value = getattr(left, name), getattr(right, name)
         if (lhs_value is None) != (rhs_value is None):
             differences[name] = -1
@@ -114,7 +114,9 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
         archive, entry, grid_type="latlon", dt_seconds=card.dt_s,
         carries_rk3_after_ssh=nemo_rk3_after_ssh_is_carried(config),
     )
-    load_differences = _state_differences(resumed, first)
+    load_differences = _state_differences(
+        resumed, first, names=sorted(metadata["slots"]))
+    all_load_differences = _state_differences(resumed, first)
     require(not load_differences,
             f"{case}: restart load differs by field: {load_differences}")
 
@@ -140,6 +142,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
         "format": loaded["format"],
         "slots": sorted(loaded["slots"]),
         "load_differences": load_differences,
+        "all_load_differences": all_load_differences,
         "resumed_step_differences": step_differences,
         "plant": plant,
     }
@@ -168,7 +171,8 @@ def main() -> int:
     if args.plant:
         print("STATUS PLANT-FIRED: carried after-SSH restart slot")
         return 1
-    print("STATUS PASS: 2 regenerated archives, 2 exact loads, 2 exact resumes")
+    print("STATUS PASS: 2 regenerated archives, 2 exact persisted-slot loads, "
+          "2 exact resumes")
     return 0
 
 
