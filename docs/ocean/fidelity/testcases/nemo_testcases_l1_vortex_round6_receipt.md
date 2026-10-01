@@ -302,7 +302,7 @@ step if switched.
 
 | choice | ASKED or UNASKED | note |
 |---|---|---|
-| carry NEMO's `ssha` slot itself rather than the previous step's entry height | not a physics choice | the two are the same number (`2*a` is exact in binary, so the subtraction is the only rounding either way), but `ssha` is the variable NEMO's own restart carries (`restart.f90:184`) and it puts the arithmetic where `stprk3.f90:225` puts it |
+| carry NEMO's `ssha` slot itself rather than the previous step's entry height | not a physics choice | the two are the same number (`2*a` is exact in binary, so the subtraction is the only rounding either way), but `ssha` is the variable NEMO's own restart carries (`VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:184`) and it puts the arithmetic where `VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:221-225` puts it |
 | no card is switched to the carried form | ASKED — it IS the decision in section 6 | |
 | a pre-format-5 restart archive is REFUSED rather than taking NEMO's own missing-`ssha` fallback | UNASKED, and stated | NEMO's fallback is right for NEMO reading an older NEMO's file; here it would silently make a resume a different trajectory from a continuous run |
 | the scan carry is seeded with the step-entry height | not a choice | it is NEMO's own value before any step has run, and seeding is measured to move no number |
