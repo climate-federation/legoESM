@@ -82,9 +82,20 @@ lines, syntax-checks the Fortran module, and prints
 The frame gate preflight passes and its committed Fortran module passes a
 compiler syntax check.  Focused frame-gate tests pass **2/2**, including four
 in-memory corruption controls.  The campaign citation gate passes both the
-default cumulative receipt and this receipt; its shifted-citation plant
-fires.  The prescribed full fidelity battery and read-only Codex review are
-reported in the final committed version of this section.
+default cumulative receipt (274 citations) and this receipt (2 citations),
+with zero failures and zero unmapped citations; its shifted-citation plant
+fires `SYMBOL-NOT-AT-LINE`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,209 tests and
+reached 97% before repeating the established no-summary stall.  The six
+standing failure files were rerun without parallelism: **6 failed / 37
+passed**, exactly the known round-129 certification, round-35 stamp scope,
+worktree-stamp emitter, missing case-board row, SI3 scalar-math provenance,
+and round-51 private-trace registry reds.  No round-84 test failed.
+
+The required `codex exec --sandbox read-only` review failed before reading the
+diff: `failed to initialize in-process app-server client: Read-only file
+system`.  Verdict: **independent review unavailable in-sandbox**.
 
 No `packages/` file changed.  GYRE, DINO, tank cards, the shipped ORCA2 card,
 and its `unmeasured_features` sea-ice tuple are unchanged by construction.
