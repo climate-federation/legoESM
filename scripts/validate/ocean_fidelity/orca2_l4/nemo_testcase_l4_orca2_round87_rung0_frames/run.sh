@@ -126,8 +126,8 @@ cpp -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
 cpp -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
   -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$dry/stprk3.F90" \
   -o "$syntax/stprk3.f90"
-"$FC" -fsyntax-only -ffree-line-length-none -I "$syntax" -I "$SOURCE_ROOT/BLD/inc" \
-  "$syntax/stprk3.f90"
+"$FC" -fsyntax-only -ffree-line-length-none -J "$syntax" \
+  -I "$syntax" -I "$SOURCE_ROOT/BLD/inc" "$syntax/stprk3.f90"
 
 if [[ "$MODE" == --preflight-only ]]; then
   printf 'ORCA2_ROUND87_RUNG0_FRAMES_PREFLIGHT_READY %s\n' "$TARGET_RUN"
