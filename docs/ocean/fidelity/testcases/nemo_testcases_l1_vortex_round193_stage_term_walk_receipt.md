@@ -122,10 +122,12 @@ The separate read-only Codex review was attempted. Verbatim result:
 
 > `independent review unavailable in-sandbox — Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
 
-Focused gate controls: `41 passed`. The final focused/citation results are
-recorded in the commits following this receipt. No broad ocean battery is
-required for a private diagnostic-only seam; the production candidate is not
-present.
+Focused gate controls before the candidate measurement: `41 passed`. The final
+focused suite, including the round-193 gate, VORTEX kt2 walk, affected operator
+seams, and the complete receipt-citation test module: `87 passed in 7.85s`.
+The receipt citation gate passed all three compiled citations; its shifted-line
+plant exited 1 with `SYMBOL-NOT-AT-LINE`. No broad ocean battery is required for
+a private diagnostic-only seam; the production candidate is not present.
 
 ## OPEN — next VORTEX round
 
