@@ -63,9 +63,9 @@
 \title{
   \vspace{-1cm}
   \includegraphics[width=0.35\textwidth]{../assets/legoESM.png}\\[12pt]
-  \textbf{legoESM Scientific Guide}\\[6pt]
+  \textbf{legoESM \legoesmversion{} Scientific Guide}\\[6pt]
   {\Large A Fully Differentiable Earth System Model in JAX}\\[6pt]
-  {\large Version \legoesmversion{} --- June 2026}
+  {\large Version \legoesmversion{} --- October 2026}
 }
 \author{legoESM Development Team}
 \date{}
@@ -108,12 +108,15 @@ The model features:
   \item \textbf{35+ physics parameterisations} for radiation, convection,
     microphysics, boundary-layer turbulence, clouds, gravity wave drag,
     and surface exchange;
-  \item A \textbf{3D Boussinesq ocean} with split-explicit barotropic
-    solver, KPP vertical mixing, GM-Redi eddy parameterisation, and
+  \item A \textbf{3D Boussinesq ocean} with split-explicit and implicit
+    barotropic solvers, KPP, TKE and CATKE vertical mixing, GM-Redi eddy
+    parameterisation, an optional conservative frazil-ice closure, and
     biogeochemistry (abiotic carbon cycle + NPZD ecosystem);
   \item A \textbf{multi-layer land model} with Richards-equation
-    soil hydrology, Johansen thermal diffusion, Farquhar--Ball-Berry
-    photosynthesis, and a DALEC-990 carbon cycle;
+    soil hydrology, Johansen thermal diffusion, a two-leaf (sunlit/shaded)
+    canopy energy balance with Farquhar photosynthesis and stomatal
+    control, an optional CLM-ML multilayer canopy, and a DALEC-990 carbon
+    cycle;
   \item \textbf{Sea-ice dynamics} with EVP rheology, multi-category
     thickness distribution, and thermodynamic coupling;
   \item A \textbf{tile-based coupler} with Monin-Obukhov surface layer,
@@ -123,6 +126,50 @@ The model features:
     verification, and a 16-parameter tuning registry;
   \item A \textbf{Spherical Fourier Neural Operator} (SFNO) for
     learned dynamics and physics emulation.
+\end{itemize}
+
+\section{What Is New in legoESM 1.0}
+\label{sec:whats-new}
+
+Version~1.0 is the first release whose production AMIP configuration runs the
+full atmospheric physics suite over an interactive land model and a prognostic
+sea-ice skin, on the MPAS/Voronoi grid.  The principal scientific changes since the previous edition of this guide are:
+\begin{itemize}[nosep]
+  \item \textbf{A CAM6-homogenised production atmosphere}
+    (Section~\ref{sec:production-amip}): the CAM6 32-level hybrid
+    coordinate, a faithful port of the CAM6 Zhang--McFarlane deep convection
+    (Section~\ref{sec:zm-cam6}), the full prognostic CLUBB higher-order
+    closure (Section~\ref{sec:clubb}) with the CAM6 cloud-fraction assembly
+    (Section~\ref{sec:cam6-clouds}), MG2-style in-cloud warm rain in the
+    Morrison microphysics, McICA cloud overlap in radiation
+    (Section~\ref{sec:cloud-overlap}), and a CAM-style physics cadence with
+    macro/microphysics sub-cycling (Section~\ref{sec:physics-cadence}).
+  \item \textbf{One temperature-dependent latent-heat family}
+    (Section~\ref{sec:latent-heat}) used by the surface-flux interface,
+    the coupler tiles, the land canopy and the sea ice, with $\Ls=\Lv+\Lf$
+    closed identically; schemes ported from a reference model keep that
+    model's conventions.
+  \item \textbf{Conservative transport}: energy-conserving
+    Simmons--Burridge vertical transport and frictional heating on the
+    spectral core, a conservative slope-limited vertical tracer transport
+    on the MPAS hybrid lane, and a column-conserving tracer positivity
+    borrow on every grid (Chapter~\ref{ch:conservation}).
+  \item \textbf{Interactive land in production AMIP}: the multilayer
+    Richards land with the two-leaf canopy as default surface scheme,
+    calibrated parameters and a seasonal boundary-data update
+    (Section~\ref{sec:two-leaf}).
+  \item \textbf{A prognostic sea-ice skin} for prescribed-ice AMIP runs
+    (Section~\ref{sec:ice-skin}).
+  \item \textbf{Additional schemes}: the IFS/Bechtold convection port
+    (Section~\ref{sec:bechtold}), the E3SM/CAM spectral gravity-wave
+    solver with frontal and orographic sources, a raised Hines launch level
+    (Section~\ref{sec:gwd-schemes}), homogeneous cirrus ice nucleation, and a
+    native FV3 duo-grid dynamical-core lane scored against the GFDL Fortran.
+  \item \textbf{Ocean}: a fixed-iteration preconditioned conjugate-gradient
+    implicit free surface on the MPAS mesh (Section~\ref{sec:barotropic}),
+    NEMO-faithful TKE vertical mixing, and an optional frazil-ice closure.
+  \item \textbf{Numerical precision} selectable per run (fp32, fp64,
+    mixed, mixed with fp64 storage; Section~\ref{sec:precision}).
 \end{itemize}
 
 \section{Design Principles}
@@ -604,6 +651,39 @@ radiative heating rates constant between calls.  The branching is implemented
 via \texttt{jax.lax.cond} with both branches returning identical array
 shapes and dtypes.
 
+\section{Physics Cadence and Macro/Microphysics Sub-Cycling}
+\label{sec:physics-cadence}
+
+On the MPAS lane the whole column physics can run on a longer timestep than
+the dynamics, following the CAM-FV coupling sequence.  With
+$N_{\mathrm{phys}}$ dynamics steps of length $\Delta t$ per physics step, the
+physics is evaluated every $N_{\mathrm{phys}}$-th step with timestep
+$\Delta t_{\mathrm{phys}}=N_{\mathrm{phys}}\Delta t$, and its entire
+increment
+\begin{equation}
+  \vect{x} \leftarrow \vect{x} + \Delta t_{\mathrm{phys}}\,
+  \Bigl(\frac{\pp\vect{x}}{\pp t}\Bigr)_{\mathrm{phys}}
+\end{equation}
+is applied once, on that step; the intervening dynamics steps apply no physics
+tendency and only republish the cached diagnostic rates (precipitation,
+surface and top-of-atmosphere fluxes) to the accumulators.  Schemes that
+carry prognostic memory (turbulence moments, convective memory) integrate it
+over $\Delta t_{\mathrm{phys}}$.  Applying the increment once, rather than
+holding a tendency rate fixed for $N_{\mathrm{phys}}$ dynamics steps, prevents
+a condensation rate diagnosed at the start of the window from continuing to
+heat a column after the dynamics has removed its vapour.  The radiation
+interval must be a multiple of $N_{\mathrm{phys}}$, so every radiation call
+falls on a physics step.  Within each physics step the boundary-layer
+macrophysics and the cloud microphysics can be sub-cycled
+$N_{\mathrm{mac}}$ times at $\Delta t_{\mathrm{phys}}/N_{\mathrm{mac}}$,
+after the convective increment, as in CAM's \texttt{macmic} loop.  The
+production configuration uses $\Delta t=112.5$~s, $N_{\mathrm{phys}}=16$
+($\Delta t_{\mathrm{phys}}=1800$~s), radiation every 3600~s and
+$N_{\mathrm{mac}}=3$.  Two documented departures from CAM remain: the
+dynamics on a physics step sees the pre-increment state, and the land
+surface keeps its own coupling interval (set independently; 1800~s in
+production, equal to the physics step).
+
 \section{Grid-Agnostic Column Adapter}
 
 The \texttt{ColumnAdapter} reshapes any grid's 3D state into a
@@ -714,7 +794,7 @@ Scalar transport uses upwind C-grid mass fluxes:
   +(hv_c)_{i,j+\half}-(hv_c)_{i,j-\half}\bigr].
 \end{equation}
 
-\paragraph{FV3-faithful PPM transport (v3.9).}
+\paragraph{FV3-faithful PPM transport.}
 As of v3.9, the C-D grid operator module underwent a complete rewrite
 to implement FV3-faithful Piecewise Parabolic Method (PPM) transport
 \citep{ColellaWoodward1984} on staggered D/C grids.  Key elements include:
@@ -729,7 +809,7 @@ to implement FV3-faithful Piecewise Parabolic Method (PPM) transport
 \end{itemize}
 The module spans approximately 740~lines of JAX code.
 
-\paragraph{FV3 forward--backward shallow-water core (v4.0).}
+\paragraph{FV3 forward--backward shallow-water core.}
 An FV3-style implementation (kernels certified bit-exact; whole-chain fidelity in progress) of the c\_sw/d\_sw forward--backward
 stepping algorithm is provided in \texttt{fv3\_sw\_core.py}.  The forward
 step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward
@@ -956,7 +1036,19 @@ pre-factored (LU decomposition) for each wavenumber $n$ at initialisation,
 removing the gravity-wave CFL constraint and allowing 3--4$\times$ larger
 timesteps.
 
-\paragraph{Verification (v3.9).}
+\paragraph{Energy-conserving vertical transport and frictional heating.}
+By default the vertical transport of $u$, $v$ and $T$ uses the centred
+Simmons--Burridge form \citep{SimmonsBurridge1981}, which pairs discretely with
+the continuity equation on both the sigma and the hybrid coordinate, and the
+kinetic energy removed by the vorticity/divergence hyperdiffusion is returned
+to the temperature as local frictional heating.  The first-order upwind
+alternative has no such pairing: in a zero-physics integration it leaked
+0.48~K\,day$^{-1}$ of mass-weighted global-mean temperature, against
+0.015~K\,day$^{-1}$ with the centred form, and it remains selectable only to
+reproduce older results.  Tracers keep the upwind form, whose diffusion
+preserves the positivity of moisture.
+
+\paragraph{Verification.}
 A comprehensive spectral dycore test suite validates conservation
 (mass, energy, enstrophy), long-integration stability under
 Held--Suarez forcing, spectral convergence with increasing truncation
@@ -979,6 +1071,34 @@ potential vorticity flux options; the choice of PV flux selects which
 quadratic invariant the discretisation conserves to round-off, trading
 energetic fidelity against the enstrophy control that suppresses spurious
 grid-scale vorticity.
+
+\paragraph{Vertical transport on the MPAS lane.}
+On the sigma coordinate the vertical advection of the resolved fields is
+first-order upwind or a second-order, slope-limited van Leer scheme.  On the
+hybrid sigma--pressure coordinate (the production lane) the momentum and
+temperature use the conservative Simmons--Burridge flux form, and every
+tracer is transported in the face-minus-cell increment form
+\begin{equation}
+  \frac{\pp q_k}{\pp t}\Big|_{\mathrm{vert}} =
+  -\frac{\dot m_{k+\half}\,(q_{k+\half}-q_k)
+         -\dot m_{k-\half}\,(q_{k-\half}-q_k)}{\Delta p_k},
+\end{equation}
+with the interface mass flux $\dot m$ (zero at the top and the surface), the
+layer thickness $\Delta p_k$ and van Leer face values reconstructed in
+pressure.  Paired with the continuity that defines $\dot m$, the column
+integral of $q\,\Delta p$ telescopes to the zero boundary fluxes, so the
+vertical transport neither creates nor destroys water; a constant field has
+zero tendency.  The earlier advective upwind operator lacked this property
+and created water at a rate comparable to the model's whole global water
+imbalance.  The horizontal MPAS tracer operator remains advective.
+
+\paragraph{FV3 duo-grid lane.}
+Separately from the operator-level C-D grid core above, a native port of the
+GFDL FV3 dynamical core runs on the duo-grid cubed sphere: the hydrostatic and
+non-hydrostatic acoustic cores, tracer transport and vertical remapping,
+each scored against a pinned build of the Fortran.  It couples to
+Held--Suarez forcing and to Kessler warm-rain microphysics, and runs sharded
+by cube face across devices.
 
 
 % ---------------------------------------------------------------------------
@@ -1313,6 +1433,39 @@ the correction terms in numerator and denominator scaling with $\Lv q_s$:
   \frac{1+\Lv q_s/(\Rd T)}{1+\Lv^2 q_s/(\cpd\Rv T^2)}.
 \end{equation}
 
+\subsection{Temperature-Dependent Latent Heats}
+\label{sec:latent-heat}
+
+The latent heats of phase change vary with temperature because the heat
+capacities of vapour, liquid and ice differ.  legoESM uses a single
+Kirchhoff-form family, referenced to the freezing point
+$T_{\mathrm{freeze}}=273.15$~K.  The surface-flux interface, the coupler
+tiles, the land canopy and the sea-ice categories evaluate their latent heats
+from it; schemes ported term by term from a reference model (for example
+the CAM6 convection) keep that model's own latent-heat conventions.  The family is:
+\begin{align}
+  \Lv(T) &= \Lv^{0} - (c_{pw}-c_{pv})\,(T-T_{\mathrm{freeze}}),\\
+  \Ls(T) &= \Ls^{0} + (c_{pv}-c_{pi})\,(T-T_{\mathrm{freeze}}),\\
+  \Lf(T) &= \Ls(T)-\Lv(T),
+\end{align}
+with $\Lv^{0}=2.501\times10^{6}$~J\,kg$^{-1}$,
+$\Lf^{0}=3.337\times10^{5}$~J\,kg$^{-1}$ and $\Ls^{0}=\Lv^{0}+\Lf^{0}$, so
+the three heats close identically at every temperature.  The heat capacities
+are $c_{pv}=1846$, $c_{pw}=4218$ and $c_{pi}=2106$~J\,kg$^{-1}$\,K$^{-1}$:
+$\Lv$ falls by 2372~J\,kg$^{-1}$ per kelvin (about 3\% lower at
+30\,$^\circ$C) while $\Ls$ increases in the cold.  Water leaving a partly
+frozen surface carries the phase-weighted heat
+\begin{equation}
+  L_{\mathrm{sfc}}(T_{\mathrm{sfc}}) = (1-f)\,\Lv(T_{\mathrm{sfc}})
+  + f\,\Ls(T_{\mathrm{sfc}}),
+\end{equation}
+where $f\in[0,1]$ is the frozen (snow or ice) fraction of the evaporating
+surface; the weighting is fractional rather than a threshold, so the flux stays
+continuous and differentiable through melt-out.  A tile with several
+evaporating components (a transpiring canopy above a sublimating snowpack, or
+several ice-thickness categories) sums $L\,E$ component by component rather
+than applying one heat to an aggregate temperature.
+
 
 % ---------------------------------------------------------------------------
 \section{Radiation}
@@ -1421,11 +1574,36 @@ $g$-points per band. The RRTMGP backend uses JAX-RRTMGP with:
   \item Cloud optics via liquid/ice water path and effective radii lookup
     tables;
   \item Optional aerosol optical depth with prescribed single-scattering
-    albedo ($\omega_0=0.93$) and asymmetry factor ($g=0.70$).
+    albedo ($\omega_0=0.93$) and asymmetry factor ($g=0.70$), or with
+    per-shortwave-band values of both.
 \end{itemize}
 
 Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv,
 N$_2$O=332~ppbv.
+
+\subsection{Cloud Vertical Overlap and Sub-Grid Cloud Optics}
+\label{sec:cloud-overlap}
+
+Handing every layer's grid-mean water path to a single homogeneous column
+solves a sky whose cloud is spread thinly over many partly cloudy layers as one
+deep uniform cloud, and over-estimates the cloud albedo.  Three treatments of
+partial cloudiness are selectable:
+\begin{itemize}[nosep]
+  \item \textbf{none}: one homogeneous column carrying the grid-mean paths;
+  \item \textbf{max\_random}: $n_{\mathrm{sub}}$ (default 8) binary cloud
+    masks drawn with maximum--random overlap, each carrying the in-cloud
+    water path, solved as independent columns and averaged.  The random
+    numbers are a deterministic stratified set $(i+\half)/n_{\mathrm{sub}}$
+    permuted per layer from a fixed table, so each layer keeps an exact
+    uniform marginal, the result is reproducible, and \texttt{jax.grad}
+    flows through it;
+  \item \textbf{mcica}: the Monte Carlo Independent Column Approximation of
+    \citet{Pincus2003} as used in CAM6 --- the same maximum--random
+    generator, but one subcolumn per $g$-point inside a single radiative
+    solve, so the cost is that of one column.
+\end{itemize}
+The production configuration uses McICA and, as CAM6's RRTMG does, applies no
+additional in-cloud inhomogeneity reduction to the cloud optical depth.
 
 \subsection{Solar Geometry}
 
@@ -1441,7 +1619,12 @@ Daily-mean insolation and perpetual-equinox modes are also available.
 \section{Deep Convection}
 \label{sec:convection}
 
-Five convection schemes are available, all fully JAX-differentiable.
+Ten convection schemes are selectable (\texttt{sbm}, \texttt{dca},
+\texttt{kuo}, \texttt{mass\_flux}, \texttt{edmf}, \texttt{zhang\_mcfarlane},
+\texttt{tiedtke}, \texttt{bechtold}, \texttt{kain\_fritsch},
+\texttt{emanuel}), all JAX-differentiable; an unknown name is rejected.  The
+schemes most used in practice are described below and the remainder in
+Section~\ref{sec:conv-additional}.
 
 \subsection{Simplified Betts--Miller (SBM) Relaxation}
 \label{sec:sbm}
@@ -1578,6 +1761,53 @@ is diagnosed from condensate detrainment using $\Delta z$:
 \end{equation}
 with $M_{u,k}=\rho_k\,a_u\,w_{u,k}$ and $\delta_0=2\times10^{-3}$~m$^{-1}$.
 
+\subsection{Zhang--McFarlane (CAM6)}
+\label{sec:zm-cam6}
+
+The production deep convection is a port of the CESM2.1/CAM6
+\texttt{zm\_conv\_tend} sequence \citep{ZhangMcFarlane1995}, pinned against
+a transcription of the Fortran.  One step of the original is not wired: CAM6
+also transports cloud liquid and ice with \texttt{convtran}, but the
+convection interface here receives no cloud condensate, so that transport is
+omitted.  Each call runs, in order:
+\begin{enumerate}[nosep]
+  \item a dilute-parcel CAPE computation, with the parcel entraining
+    environmental air at the rate set by \texttt{dmpdz}
+    ($-10^{-3}$~m$^{-1}$), followed by the entraining/detraining updraught
+    and downdraught cloud model and the quasi-equilibrium closure, in which
+    the cloud-base mass flux removes the CAPE in excess of the threshold
+    $\mathrm{CAPE}_{\mathrm{lim}}=70$~J\,kg$^{-1}$ over
+    $\tau=3600$~s, capped at its CFL bound;
+  \item application of these tendencies to the state;
+  \item Sundqvist-type evaporation of the falling convective rain on the
+    updated state, with snow formation and the associated fusion heating;
+  \item convective momentum transport following Richter and Rasch, with the
+    dissipated kinetic energy returned as heat.
+\end{enumerate}
+The rain-conversion coefficient differs over land and ocean
+($c_0=0.0075$ and $0.03$~m$^{-1}$), so the scheme requires the land fraction
+unless the run is explicitly declared an aquaplanet.  As in CAM6 the base mass
+flux is diagnosed afresh each call and carries no memory.  The scheme
+publishes its updraught mass flux and in-cloud water to the CAM6
+cloud-fraction assembly (Section~\ref{sec:cam6-clouds}).
+
+\subsection{Bechtold / IFS Convection}
+\label{sec:bechtold}
+
+The \texttt{bechtold} scheme builds on the Tiedtke bulk mass-flux skeleton
+and follows the ECMWF IFS formulation of \citet{Bechtold2008}.  The
+cloud-base mass flux is diagnosed from a boundary-layer (departure) CAPE
+rather than the surface parcel, which sharpens the diurnal cycle over land,
+and is relaxed on a convective-turnover timescale.  Ported from the IFS source
+and pinned against it are the CAPE closure with its resolution factor, the
+in-plume precipitation conversion, the sub-cloud rain-evaporation march, the
+IFS downdraught, the diurnal-cycle CAPE correction, the land/ocean split of the
+relative-humidity threshold for rain evaporation, and snow melt.  An
+autoregressive stochastic perturbation of the base mass flux
+\citep{Bechtold2014} is available and off by default.  Smooth sigmoid gates
+replace the hard thresholds of the Fortran so that the scheme remains
+differentiable.
+
 \subsection{Deep Convective Adjustment}
 
 The simplest parameterisation: scans bottom-to-top adjusting unstable
@@ -1713,6 +1943,33 @@ Melting: sigmoid-activated near $T_{\mathrm{freeze}}$.
   \text{snow: } a=30,\,b=0.3.
 \end{equation}
 
+\paragraph{Warm rain.}
+Autoconversion and accretion default to \citet{KhairoutdinovKogan2000}
+(KK2000), $P_{\mathrm{auto}}=1350\,q_c^{2.47}N_c^{-1.79}$ with $N_c$ in
+cm$^{-3}$ and $P_{\mathrm{acc}}=67\,(q_cq_r)^{1.15}$.  The CAM6 MG2 variant
+(\texttt{kk2000\_cam6}) uses CAM6's coefficient ($0.01\times1350$) and droplet-number exponent ($-1.1$) and adds MG2's enhancement for sub-grid liquid variance.
+With \emph{in-cloud warm rain} enabled, as in the production configuration,
+both rates are evaluated on the in-cloud water $q_c/f_\ell$ and rain
+$q_r/f_p$ and multiplied back by $f_\ell$, where $f_\ell$ is the CLUBB liquid
+cloud fraction (floored at $10^{-4}$) and $f_p$ the precipitation fraction.
+Because the rates are strongly non-linear in $q_c$, evaluating them on the
+grid mean would under-produce drizzle in partly cloudy cells.
+
+\paragraph{Sedimentation sub-stepping.}
+Hydrometeor sedimentation is sub-stepped per column with
+$n=1+\lfloor\max_k V_k\Delta t/\Delta z_k\rfloor$ steps, as in MG2, so that a
+fast-falling species can cross more than one layer per call; the number of
+sub-steps is bounded by a static cap, and the count each column required is
+reported.
+
+\paragraph{Homogeneous ice nucleation.}
+Optionally, haze droplets freeze homogeneously when the ice supersaturation
+exceeds the threshold
+$S_{\mathrm{hom}}(T)=a-bT$ ($a=2.349$, $b=1/259$~K$^{-1}$), the
+linear fit of Ren and MacKenzie (2005) to the water-activity criterion of
+\citet{Koop2000}, restricted to cirrus temperatures below about
+$-38\,^\circ$C.  The production configuration enables it.
+
 \subsection{Thompson Hybrid-Moment Microphysics}
 
 The Thompson scheme \citep{Thompson2008} adds a graupel category, predicting
@@ -1770,10 +2027,41 @@ responds both to ambient RH and to the presence of condensate $q_c$:
   \qquad p=2,\;\alpha=100.
 \end{equation}
 
+\subsection{CAM6 Cloud Fraction with CLUBB}
+\label{sec:cam6-clouds}
+
+The \texttt{cam6\_clubb} scheme (MPAS lane, production) assembles the cloud
+fraction as CAM6 does from three parts: the liquid fraction $a_{\ell}$ of the
+CLUBB assumed PDF (Section~\ref{sec:clubb}), an ice-stratus fraction
+$a_i$, and a deep-convective fraction $a_{\mathrm{dc}}$:
+\begin{equation}
+  c_f=\min\bigl(\max(a_\ell,a_i)+a_{\mathrm{dc}},\,1\bigr).
+\end{equation}
+The ice-stratus fraction ramps quadratically in the ice relative humidity
+$\mathrm{RH}_i=(q_v+q_i)/q_s\cdot e_{s,\ell}/e_{s,i}$,
+\begin{equation}
+  a_i=\min\Bigl\{1,\Bigl[\max\Bigl(\frac{\mathrm{RH}_i-\mathrm{RH}_{\min}}
+  {\mathrm{RH}_{\max}-\mathrm{RH}_{\min}},0\Bigr)\Bigr]^2\Bigr\},
+\end{equation}
+with $\mathrm{RH}_{\min}=0.80$ and $\mathrm{RH}_{\max}=1.0$ in the
+troposphere and a step at ice saturation above an analytic tropopause
+$p_{\mathrm{trop}}=250-150\cos^2\phi$~hPa, followed by CAM's limiters on
+in-cloud ice.  The deep-convective fraction follows the updraught mass flux
+$M_u$ of the convection scheme,
+$a_{\mathrm{dc}}=\min\bigl(0.1\ln(1+500\,M_u),\,0.6\bigr)$ with $M_u$ in
+kg\,m$^{-2}$\,s$^{-1}$, and is zeroed
+where it is below 0.01 or the convective in-cloud water vanishes.  The scheme
+requires the CLUBB cloud-fraction carry and explicit condensate from the
+microphysics, and refuses the generic convective-cloud overlay.
+
 \paragraph{Scheme dispatch.}
 \texttt{cloud\_fraction.compute\_cloud\_properties} dispatches on
-\texttt{config.scheme} and accepts only \texttt{"sundqvist"} or
-\texttt{"xu\_randall"}; any other value raises \texttt{ValueError}.
+\texttt{config.scheme} and accepts \texttt{"sundqvist"},
+\texttt{"xu\_randall"}, \texttt{"resolved"} (cloud-resolving: a cell is
+smoothly fully cloudy where it holds condensate) or \texttt{"cam6\_clubb"};
+any other value raises \texttt{ValueError}.  The relative humidity of the
+RH-based schemes is measured against either the liquid or a mixed-phase
+saturation curve.
 Disabling cloud diagnostics is handled \emph{upstream} by setting
 \texttt{cloud\_scheme="none"} on the caller's config so that
 \texttt{compute\_cloud\_properties} is not invoked at all --- passing
@@ -2078,12 +2366,49 @@ Cloud fraction and condensate are diagnosed by integrating an assumed
 bivariate Gaussian PDF of $\theta_l$ and $r_t$, unifying boundary-layer
 turbulence and shallow-cloud closure in a single framework.
 
+\subsection{CLUBB}
+\label{sec:clubb}
+The \texttt{clubb} scheme is a fuller port of CLUBB \citep{Golaz2002},
+restricted to the call tree of the CAM-default model flags, with every
+component either reproduced to round-off against the CLUBB-JAX port or pinned
+against an independent transcription of the CLUBB Fortran.  Its eddy
+diffusivity uses CLUBB's parcel buoyancy-sorting mixing length $L$,
+$K_m=c_K\,L\,\sqrt{e}$, and it diagnoses cloud fraction and liquid water from
+the ADG1 double-Gaussian PDF.  In its default (diagnostic) form the mean fields
+are advanced by the shared implicit eddy diffusion with $\overline{w'^2}$
+carried as a prognostic budget.  In the prognostic form, used in production,
+the full set of higher-order moments is advanced --- the coupled
+$\overline{w'^2}$/$\overline{w'^3}$ system, the variances and covariances of
+$\theta_l$ and $r_t$, and the turbulent fluxes
+$\overline{w'\theta_l'}$, $\overline{w'r_t'}$ --- through implicit tridiagonal
+and pentadiagonal solves coupled by the PDF buoyancy flux, with the surface
+second moments set by CLUBB's surface-variance boundary condition.  As in CAM,
+the PDF closure is evaluated on both the thermodynamic and momentum level sets.
+With the liquid partition enabled (production), CLUBB exchanges cloud liquid
+with the host as CAM's interface does: total water $r_t=q_v+q_c$ enters, and
+the PDF liquid $\bar r_c$ is returned as cloud water with $q_v=r_t-\bar r_c$,
+so the microphysics and radiation see the condensate whose cloud fraction
+CLUBB diagnosed.  The mixing is tapered to zero above a configurable pressure
+(150~hPa in production).
+
 \subsection{EDMF Turbulence}
 Eddy-diffusivity mass-flux unified boundary-layer framework combining
 diffusive transport (for weakly convective conditions) with explicit
 updraft mass flux (for strongly convective conditions) in a single scheme.
 
 \section{Additional Convection Schemes}
+\label{sec:conv-additional}
+
+\subsection{Tiedtke, Kain--Fritsch and Emanuel}
+The \citet{Tiedtke1989} bulk mass-flux scheme blends deep, mid-level and
+shallow cloud types smoothly on cloud depth and carries its per-level updraught
+mass-flux profile between steps.  The Kain--Fritsch scheme fires on a smoothed
+boundary-layer parcel trigger at the lifting condensation level and blends
+deep and shallow branches.  The Emanuel scheme mixes the parcel with
+environmental air over a spectrum of mixing fractions and sorts the mixtures
+by buoyancy, giving a per-level spread of detrainment heights, with an
+optional unsaturated downdraught.  In all three the thresholds are sigmoid
+gates so that gradients flow through the triggers.
 
 \subsection{Kuo}
 The \citet{Kuo1974} column moisture-excess scheme activates when column-integrated moisture
@@ -2096,13 +2421,22 @@ Bottom-to-top column adjustment toward a moist-adiabatic reference profile,
 with smooth sigmoid activation for JAX differentiability.
 
 \section{Gravity Wave Drag Schemes}
+\label{sec:gwd-schemes}
 
-Six GWD parameterisations are available:
+Seven GWD parameterisations are available, and several may be combined into
+one composite source (for example \texttt{hines+mcfarlane}, orographic plus
+non-orographic):
 \begin{enumerate}[nosep]
   \item \textbf{Rayleigh friction}: Linear damping above a threshold height.
   \item \textbf{Lindzen (1981)}: Orographic GWD with saturation and critical-level absorption \citep{Lindzen1981}.
   \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved wave saturation \citep{McFarlane1987}.
-  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions \citep{Hines1997}.
+  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions \citep{Hines1997}.  An optional launch pressure starts the spectrum above the boundary layer; when it is unset the waves are launched at the surface, where the weak stratification of the mixed layer makes them break immediately and deposit much of their momentum near the ground.
+  \item \textbf{E3SM/CAM spectral GWD}: a term-by-term port of the
+    spectral solver of E3SM version 3.0.1 --- a bottom-up stress
+    profile with Lindzen saturation and WKB damping, then a top-down
+    stress-divergence tendency with stability limiters --- driven by
+    selectable orographic (McFarlane), frontal (frontogenesis-triggered
+    Gaussian spectrum) and convective (Beres) sources.
   \item \textbf{Prognostic Spectral}: Multi-azimuthal ($N_{\mathrm{az}}$), multi-wavenumber ($N_k$) spectrum with prognostic wave momentum flux and vertical propagation via \texttt{jax.lax.scan}, following the spectral non-orographic approach of \citet{AlexanderDunkerton1999}.
   \item \textbf{ML Emulator}: Equinox MLP surrogate mapping column state to GWD tendencies.
 \end{enumerate}
@@ -2225,6 +2559,22 @@ Coriolis rotation implicitly over the substep prevents the inertial
 oscillation from being amplified by the many barotropic sub-cycles and
 keeps the substep stability set by the gravity-wave CFL alone.
 
+\paragraph{Implicit free surface.}
+As an alternative to sub-cycling, the barotropic mode can be advanced in one
+step with a $\theta$-weighted Crank--Nicolson free surface
+($\theta=0.55$ for both the surface elevation and the pressure gradient,
+slightly past centred to suppress chequerboard noise), which reduces to a
+Helmholtz equation for $\eta$ solved by preconditioned conjugate gradients.
+On the MPAS mesh this removes the rotational null branch of the TRiSK
+barotropic operator by construction.  In distributed runs the solve uses a
+fixed number of iterations (20) so that its cost and its adjoint are
+static; the default preconditioner is a communication-free Neumann-series
+polynomial (four sweeps) in each device's block of the operator, and the
+Chronopoulos--Gear single-reduction variant batches each iteration's two
+inner products into one global reduction.  A variant that applies the same
+polynomial to the global operator, making the result independent of the
+device count, is available.
+
 
 \section{Equation of State (Wright 1997)}
 \label{sec:eos}
@@ -2328,6 +2678,26 @@ This is active only within the diagnosed boundary layer ($\sigma<1$)
 and only under unstable forcing.
 
 
+\section{Vertical Mixing: Prognostic TKE Closures}
+\label{sec:ocean-tke}
+
+Two one-equation turbulent-kinetic-energy closures are available besides KPP.
+The Gaspar/Burchard closure, as in NEMO's \texttt{zdftke} and Veros, solves
+\begin{equation}
+  \frac{\pp e}{\pp t}=K_M\Bigl[\Bigl(\frac{\pp u}{\pp z}\Bigr)^2
+  +\Bigl(\frac{\pp v}{\pp z}\Bigr)^2\Bigr]-K_HN^2
+  -c_\varepsilon\frac{e^{3/2}}{l_\varepsilon}
+  +\frac{\pp}{\pp z}\Bigl(\alpha_e K_M\frac{\pp e}{\pp z}\Bigr),
+  \qquad K_M=c_k\,l_k\sqrt{2e},
+\end{equation}
+with the mixing lengths from upward and downward integrations of the TKE
+against the local stratification (Bougeault--Lacarr\`ere); NEMO's mixing-length
+choices, surface boundary conditions and TKE floors are available as options so
+the scheme can reproduce the NEMO configuration term by term.  CATKE
+(Wagner et al.\ 2025) derives instead a dynamic convective mixing length from
+the convective buoyancy flux and blends stable, shear and convective regimes with
+separate coefficients for momentum, tracers and TKE.
+
 \section{Lateral Mixing}
 \label{sec:lateral}
 
@@ -2378,7 +2748,7 @@ introduce on sloping density surfaces.
 
 The legoESM ocean carries a family of flux-form tracer advection
 schemes of increasing accuracy in
-\texttt{src/legoesm/ocean/advection.py} and
+\texttt{packages/ocean/legoesm/ocean/advection.py} and
 \texttt{advection\_som.py}.  Following \citet{Hill2012}, implicit
 numerical mixing is the dominant source of spurious diapycnal
 transport in $z$-coordinate models, so the volume-weighted variance
@@ -2482,7 +2852,7 @@ of stability-conditioning operators specific to coastal partial cells
 and high latitudes.
 
 \paragraph{Bathymetry pre-processing.}
-\texttt{src/legoesm/ocean/bathymetry.py} exposes
+\texttt{packages/ocean/legoesm/ocean/bathymetry.py} exposes
 \texttt{BathymetryConfig} and the per-grid loaders
 (\texttt{load\_bathymetry\_latlon\_cgrid},
 \texttt{load\_bathymetry\_cubed\_sphere},
@@ -2703,6 +3073,27 @@ background detrainment $\varepsilon=10^{-3}$~m$^{-1}$ depositing it,
 resolving the convective transport rather than only diffusing the
 instability away.
 
+\section{Frazil Ice}
+\label{sec:frazil}
+
+When the ocean cools below its freezing point the supercooling is removed by
+forming frazil ice in place.  For a layer of initial liquid mass $M=\rho\Delta
+z$ that produces ice mass $m$ (negative on melting) of salinity $S_i$, the
+closure conserves mass, salt and heat content under a constant-enthalpy ice
+approximation (ice sensible heat, pressure work and density changes are
+omitted),
+\begin{equation}
+  M'=M-m,\qquad M'S'=MS-mS_i,\qquad M'c_pT'-m\Lf=Mc_pT,
+\end{equation}
+so the transported ice carries the constant specific enthalpy $-\Lf$
+relative to liquid water at 0\,$^\circ$C.  The non-linear liquidus is solved
+by a fixed number of contractive fixed-point iterations in in-situ
+temperature, converting to and from the model's potential temperature through
+the equation of state.  Optionally, frazil formed at depth remelts in warmer
+layers above.  The closure is opt-in in the OMIP driver, where the
+exported ice mass is deposited into the slab sea-ice tile, which must use the
+same enthalpy and ice salinity (fresh ice for the slab).
+
 \section{Richardson-Number Vertical Mixing}
 
 Below the surface boundary layer, mixing is driven by shear instability,
@@ -2810,6 +3201,58 @@ and field capacity ($\theta_{\mathrm{fc}}$).
 \end{equation}
 with age-dependent albedo: $\alpha_{\mathrm{snow}}(t)=\alpha_{\max}\,e^{-t/\tau_{\mathrm{age}}}
 + \alpha_{\min}(1-e^{-t/\tau_{\mathrm{age}}})$.
+
+\subsection{Soil Freezing and Thawing}
+Optionally the soil column carries the latent heat of freezing and thawing of
+its water, and the hydraulic conductivity of partly frozen soil is reduced by
+the CLM5 ice impedance factor $10^{-e\,f_{\mathrm{ice}}}$, with
+$f_{\mathrm{ice}}$ the ice fraction of the pore water and $e=6$ as in CLM5.
+Both are enabled in the production configuration.
+
+\section{Two-Leaf Canopy Surface Scheme}
+\label{sec:two-leaf}
+
+The default land surface scheme resolves the vegetation canopy as two big
+leaves, sunlit and shaded, above a soil surface, sharing one canopy air space
+(after the DifferBESS formulation).  Each call solves by Newton iteration for
+the six-variable canopy state
+\begin{equation}
+  \bigl(T_{f,\mathrm{sun}},\,T_{f,\mathrm{sh}},\,C_{i,\mathrm{sun}},\,
+  C_{i,\mathrm{sh}},\,T_c,\,q_c\bigr),
+\end{equation}
+the two leaf temperatures, the two intercellular CO$_2$ concentrations, and the
+temperature and humidity of the canopy air.  The residuals are the leaf energy
+balances, the coupling of Farquhar photosynthesis \citep{Farquhar1980} to
+stomatal conductance (Ball--Berry by default, Medlyn optional), and the
+conductance-weighted mixing of heat and vapour from leaves, soil and the
+atmosphere into the canopy air.  Leaf latent heat uses the bulk-transfer form
+$\lambda\rho(q_f-q_c)/(r_b+r_s)$ by default (a second-order
+Penman--Monteith solution is optional), with the latent heat taken from the
+temperature-dependent family of Section~\ref{sec:latent-heat}.  Shortwave
+radiation is split into direct and diffuse components and partitioned
+between sunlit and shaded leaves by a canopy radiative-transfer model.  An
+outer Picard iteration reconciles the canopy's fast turbulent response with
+the soil column's thermal time constant: the soil skin temperature is held
+fixed during the Newton solve and updated between passes.  Above-canopy
+stability follows Monin--Obukhov similarity, using the CLM5 functions on the
+unstable side and the \citet{Beljaars1991} functions on the stable side.
+
+Canopy parameters are supplied per plant functional type from the CLM
+surface data set, and leaf area index, canopy height and wet-soil albedo are
+refreshed through the season; a canopy run without that surface data is
+refused rather than given generic constants.  The parameters are built by the
+same routine as in the offline LMIP land simulations, so the coupled model
+runs the land physics and calibrated parameters of the offline calibration.  Two alternatives
+remain selectable: a simple surface energy balance (for idealised studies)
+and the CLM-ML-JAX multilayer canopy, which resolves the canopy in many
+layers and is coupled through the same surface-flux interface.
+
+\paragraph{Land coupling interval.}
+On the MPAS lane the land tile may be called once every
+$\Delta t_{\mathrm{land}}$ seconds with the atmospheric forcing averaged over
+the interval, so that the interval's mass and energy are conserved, and its
+fluxes and skin temperature held in between.  The production configuration
+uses $\Delta t_{\mathrm{land}}=1800$~s, the CAM6 land coupling interval.
 
 
 \section{Land Carbon Cycle}
@@ -2988,6 +3431,36 @@ column energy budget.
   \end{cases}
 \end{equation}
 
+
+\paragraph{Surface latent heat.}
+Sublimation from the ice surface is charged at the temperature-dependent
+$\Ls(T_{\mathrm{ice}})$ of Section~\ref{sec:latent-heat}, evaluated at the
+same skin temperature that sets the surface saturation humidity, and the heat
+reported to the coupler is paired with the sublimated mass.
+
+\section{Prognostic Sea-Ice Skin for Prescribed-Ice Runs}
+\label{sec:ice-skin}
+
+In AMIP runs the sea-ice concentration is prescribed and there is no ice
+model, so without further treatment an ice-covered cell would sit at a fixed
+temperature year-round, far warmer than the real winter ice surface.  On the
+MPAS lane an optional prognostic skin temperature $T_s$ follows the
+zero-layer conduction model of \citet{Semtner1976} through an ice slab of
+climatological thickness $h$, with half the slab's heat capacity
+$C=\rho_i c_{pi} h/2$ as thermal inertia:
+\begin{equation}
+  C\,\frac{\dd T_s}{\dd t} = F_{\mathrm{net}}
+  + \frac{k_i}{h}\,\bigl(T_b - T_s\bigr),
+\end{equation}
+where $F_{\mathrm{net}}$ is the net downward surface energy flux (net
+shortwave and longwave into the surface minus the upward sensible and latent
+heat fluxes), $k_i$ the ice conductivity and $T_b$ the freezing point of
+seawater at the ice base.  The conductive term is integrated backward-Euler,
+which is unconditionally stable for any timestep; the surface cannot warm
+above 0\,$^\circ$C, and an open-water cell resets to the seawater freezing
+point so that it refreezes from there.  In polar night $F_{\mathrm{net}}<0$
+and the skin cools until conduction from the ocean balances the loss,
+$T_s=T_b+F_{\mathrm{net}}h/k_i$.  The production configuration enables it.
 
 \section{EVP Rheology}
 
@@ -3299,6 +3772,34 @@ before and after the update.  Multiplicative rescaling preserves the sign and
 relative vertical structure of $q$, so positivity is maintained while the total
 water is exactly restored.
 
+\paragraph{Column-conserving tracer positivity.}
+Transport undershoots leave small negative tracer values that must be
+removed.  Clipping them to zero creates mass: on a state from a century AMIP
+integration, one step of the plain clip invented water at a rate equivalent to
+about 30~kg\,m$^{-2}$ per year.  Instead, the
+deficit clipped in a column is borrowed back from that column's positive values
+weighted by their true layer mass, so the column integral is unchanged; a
+column whose total is itself negative passes the residual to a global
+redistribution.  Each water species and each hydrometeor number concentration
+is borrowed only from itself.  This borrow is the default on every
+atmospheric grid; because it preserves every column integral it adds no column
+water, although it moves water (and hence latent energy) between layers of the
+column.
+
+\paragraph{Energy-consistent moisture floor.}
+Where a hard floor $q\ge0$ is used instead of the borrow (for example on the
+physics-side vapour floors), the latent heat implied by the added water can
+optionally be charged to the temperature (cooling for vapour, warming for the
+ice species), so that the floor conserves moist static energy.  The
+production configuration enables it.
+
+\paragraph{Conservative vertical transport.}
+The transport operators themselves are built to conserve where the fixers
+cannot: the spectral core pairs its vertical transport of momentum and
+temperature with continuity (Section~\ref{sec:spe}), and the MPAS hybrid lane
+transports tracers vertically in a form whose column integral telescopes to
+the boundary fluxes (Section~\ref{sec:pe}).
+
 \section{Ocean Conservation}
 
 The ocean's free surface plays the role surface pressure plays in the
@@ -3410,6 +3911,29 @@ spatially compact (cache and GPU memory locality).  Each rank's local arrays use
 \emph{owned-first} indexing (owned cells precede halo cells), so owned-cell loops
 are a contiguous slice.  A two-layer halo supports biharmonic operators.
 
+\section{Numerical Precision}
+\label{sec:precision}
+
+Each run selects one precision policy, which assigns a floating-point type to
+four roles --- storage of the state, computation in the kernels, accumulation
+of sums and reductions, and control quantities such as solver residuals:
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Mode & Storage & Compute & Accumulate & Control \\
+\midrule
+\texttt{fp32} & 32 & 32 & 32 & 32 \\
+\texttt{fp64} & 64 & 64 & 64 & 64 \\
+\texttt{mixed} & 32 & 32 & 64 & 64 \\
+\texttt{mixed\_fp64\_storage} & 64 & 32 & 64 & 64 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The modes with float64 storage need a float64-capable backend.  The spectral
+shallow-water and primitive-equation cores also offer a complex64 transform
+path for float32 runs.  The production AMIP configuration runs in
+\texttt{fp64}.
+
 \section{MPI Differentiability}
 
 All halo exchange \texttt{sendrecv} calls go through a
@@ -3491,7 +4015,7 @@ Template & Period & Forcing & CO$_2$ range \\
 The CMIP6 AMIP protocol prescribes a six-channel external-forcing stack
 on top of monthly SST/SIC.  legoESM consumes the canonical
 input4MIPs/MPI-M files directly through six \texttt{NamedTuple} configs in
-\texttt{src/legoesm/forcing/external.py}, all of which carry an explicit
+\texttt{packages/tools/legoesm/}\allowbreak\texttt{forcing/external.py}, all of which carry an explicit
 \texttt{start\_year} so multi-year files are sampled on their actual
 calendar timeline rather than collapsed onto a 12-month cyclic axis.
 
@@ -3560,7 +4084,7 @@ on top, with optional scaling \texttt{volcanic\_scale}; both are clipped
 to $\mathrm{AOD} \ge 0$ before reaching the SW radiation pathway.
 
 \paragraph{Deck driver.}
-\texttt{scripts/run\_amip\_cmip6\_deck.py} pins a CMIP6 AMIP physics
+\texttt{scripts/run/run\_amip\_cmip6\_deck.py} pins a CMIP6 AMIP physics
 stack of RRTMG radiation, Sundqvist cloud fraction, Sundqvist
 large-scale condensation (the deck microphysics default --- Kessler
 in the integrated AMIP path produces NaN winds at day ${\sim}2$ and
@@ -3569,27 +4093,80 @@ and fixes \texttt{--ghg-forcing external}, \texttt{--ozone-forcing external},
 \texttt{--solar-source spectral\_file}, \texttt{--solar-tsi-var TSI},
 \texttt{--solar-spectral-var SSI\_frac}.  When forcing files are
 absent the user must opt in with \texttt{--auto-generate} to invoke
-\texttt{scripts/generate\_amip\_forcing.py} for synthetic CMIP6-shape
+\texttt{scripts/data/generate\_amip\_forcing.py} for synthetic CMIP6-shape
 replacements; otherwise the deck refuses to run.
-\texttt{scripts/validate\_amip\_run.py} reads the resulting CMOR
+\texttt{scripts/validate/validate\_amip\_run.py} reads the resulting CMOR
 output for post-run sanity.
 
 \paragraph{Multi-grid dispatch coverage.}
-\texttt{scripts/smoke\_test\_amip\_all\_grids.py} exercises the deck
+\texttt{scripts/validate/smoke\_test\_amip\_all\_grids.py} exercises the deck
 \emph{dispatch path} on cubed-sphere (centred / FV3 / C-D), lat-lon
 (centred / FV3 / C-grid), Gaussian spectral, and Voronoi/MPAS.
 For run-time bound and stability the smoke test uses gray radiation
 with aerosol and volcanic disabled (\texttt{--radiation gray
 --no-aerosol --no-volcanic}); it confirms the (grid, discretisation,
 forcing-loader) machinery wires up but does \emph{not} validate the
-full forcing stack on every grid.  The Voronoi/MPAS branch
-additionally requires \texttt{--turbulence none} (the TKE bridge
-expects cell-centred winds, MPAS stores edge-normal winds) and
-\texttt{--dt 60} (the MPAS hydrostatic dycore is unstable at the
-default $600$~s step despite a CFL diagnostic of $0.09$).  Spectral
-and MPAS run paths bypass \texttt{DiagnosticCollector}, so detailed
-zonal/profile diagnostics are unavailable on those grids; production
-science runs target cubed-sphere or lat-lon.
+full forcing stack on every grid.  The Voronoi/MPAS smoke case runs with \texttt{--turbulence none},
+since it checks the dycore and forcing wiring rather than realism (the
+production deck runs CLUBB on MPAS), at the standard $600$~s step.  The MPAS run
+path feeds the CMOR accumulators through a native-cell bridge that regrids to
+the CMOR latitude--longitude grid (gathering the owned cells of every rank in
+multi-rank runs); the spectral run path bypasses \texttt{DiagnosticCollector},
+so detailed zonal/profile diagnostics are unavailable there.  Production AMIP
+runs use the MPAS lane (Section~\ref{sec:production-amip}).
+
+\section{The legoESM 1.0 Production AMIP Configuration}
+\label{sec:production-amip}
+
+The production AMIP configuration homogenises the atmosphere with CAM6
+(CESM2.1), one faithful port per component, and couples it to the interactive
+multilayer land.  Its scientific choices are named explicitly in the
+configuration file, including those that equal a code default.  The principal
+settings are:
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Component & Setting \\
+\midrule
+Grid & MPAS/Voronoi, 40\,962 cells (icosahedral subdivision 6, about
+  1$^\circ$), comparable to CAM6's f09 grid \\
+Vertical & CAM6 32-level hybrid table, top interface 2.255~hPa; two-layer
+  del$^2$ sponge \\
+Precision & float64 \\
+Timesteps & dynamics 112.5~s; physics 1800~s; radiation 3600~s;
+  three macro/microphysics sub-cycles per physics step
+  (Section~\ref{sec:physics-cadence}) \\
+Vertical transport & Simmons--Burridge flux form for momentum and
+  temperature; conservative van Leer for tracers \\
+Radiation & RRTMGP correlated-$k$ with McICA cloud overlap, no in-cloud
+  inhomogeneity reduction (Section~\ref{sec:cloud-overlap}) \\
+Deep convection & CAM6 Zhang--McFarlane (Section~\ref{sec:zm-cam6}) \\
+Turbulence & prognostic CLUBB with liquid partition
+  (Section~\ref{sec:clubb}) \\
+Clouds & CAM6 cloud fraction: CLUBB liquid, ice stratus, deep-convective
+  (Section~\ref{sec:cam6-clouds}) \\
+Microphysics & Morrison two-moment (MG flavour) with graupel, KK2000 warm
+  rain evaluated in cloud, CFL sub-stepped sedimentation, homogeneous ice
+  nucleation, aerosol-derived droplet number \\
+Gravity-wave drag & orographic only (McFarlane), as in CAM6 f09 L32 \\
+Air--sea fluxes & CESM Large--Yeager bulk formula \\
+Land & multilayer Richards land (10 layers, 3~m) with the two-leaf canopy,
+  calibrated parameters, soil freezing/thawing with ice impedance, 1800~s
+  coupling, soil temperature initialised from ERA5 (Section~\ref{sec:two-leaf}) \\
+Sea ice & prescribed concentration with prognostic Semtner skin
+  (Section~\ref{sec:ice-skin}), ice albedo 0.80 \\
+Forcing & CMIP6 AMIP SST/SIC, spectral solar, external ozone, greenhouse
+  gases and aerosol (Section~\ref{sec:amip-cmip6-deck}) \\
+Conservation & column-conserving tracer borrow, energy-consistent moisture
+  floor (Chapter~\ref{ch:conservation}) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The configuration departs from
+CAM6 where a component has not been ported (for example, the Morrison scheme
+in place of MG2 and McFarlane in place of CAM's orographic source); these
+departures are recorded in the configuration file next to the settings they
+affect.
 
 \section{Restart and Reproducibility}
 
@@ -3734,6 +4311,24 @@ A model predicting stomatal conductance and its contribution to the control
 of photosynthesis under different environmental conditions.
 \textit{Prog.\ in Photosynthesis Res.}, \textbf{4}, 221--224.
 
+\bibitem[Bechtold et al.(2008)]{Bechtold2008}
+Bechtold, P., M.~K\"ohler, T.~Jung, F.~Doblas-Reyes, M.~Leutbecher,
+M.~J.~Rodwell, F.~Vitart, and G.~Balsamo, 2008:
+Advances in simulating atmospheric variability with the ECMWF model: From
+synoptic to decadal time-scales.
+\textit{Quart.\ J.\ Roy.\ Meteor.\ Soc.}, \textbf{134}, 1337--1351.
+
+\bibitem[Bechtold et al.(2014)]{Bechtold2014}
+Bechtold, P., N.~Semane, P.~Lopez, J.-P.~Chaboureau, A.~Beljaars, and
+N.~Bormann, 2014:
+Representing equilibrium and nonequilibrium convection in large-scale models.
+\textit{J.\ Atmos.\ Sci.}, \textbf{71}, 734--753.
+
+\bibitem[Beljaars and Holtslag(1991)]{Beljaars1991}
+Beljaars, A.C.M.\ and A.A.M.~Holtslag, 1991:
+Flux parameterization over land surfaces for atmospheric models.
+\textit{J.\ Appl.\ Meteor.}, \textbf{30}, 327--341.
+
 \bibitem[Bernacchi et al.(2001)]{Bernacchi2001}
 Bernacchi, C.J., E.L.~Singsaas, C.~Pimentel, A.R.~Portis, and S.P.~Long, 2001:
 Improved temperature response functions for models of Rubisco-limited
@@ -3838,6 +4433,12 @@ Johansen, O., 1975:
 Thermal conductivity of soils.
 Ph.D.\ thesis, University of Trondheim, 236~pp.
 
+\bibitem[Koop et al.(2000)]{Koop2000}
+Koop, T., B.~Luo, A.~Tsias, and T.~Peter, 2000:
+Water activity as the determinant for homogeneous ice nucleation in aqueous
+solutions.
+\textit{Nature}, \textbf{406}, 611--614.
+
 \bibitem[Kessler(1969)]{Kessler1969}
 Kessler, E., 1969:
 On the Distribution and Continuity of Water Substance in Atmospheric
@@ -3899,6 +4500,12 @@ for dynamical models.
 Mouallem, J., L.M.~Harris, and R.~Benson, 2023:
 A duo-grid methodology for cubed-sphere shallow water models.
 \textit{J.\ Comput.\ Phys.}, \textbf{485}, 112097.
+
+\bibitem[Pincus et al.(2003)]{Pincus2003}
+Pincus, R., H.W.~Barker, and J.-J.~Morcrette, 2003:
+A fast, flexible, approximate technique for computing radiative transfer in
+inhomogeneous cloud fields.
+\textit{J.\ Geophys.\ Res.}, \textbf{108}, 4376.
 
 \bibitem[Putman and Lin(2007)]{PutmanLin2007}
 Putman, W.M.\ and S.-J.~Lin, 2007:
