@@ -833,6 +833,10 @@ FILES = {
         NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
     "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
         NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
     # --- round 6: the after-SSH slot the RK3 program leaves behind, in the
     # vector card's own build and in GYRE's (the statement is shared). ---
     "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
@@ -3898,15 +3902,15 @@ CITATION_MAP = {
         ('END DO   ;   END DO   ;   END DO', 6), 12],
     # --- round 193: exact lines in the acquired R8 build after its additive
     # writer shifted stprk3_stg; HPG is a write, then VOR and KEG/ZAD follow.
-    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-341': [
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-341': [
         'CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!',
         'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 19],
-    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:135-141': [
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:135-141': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         "CALL vortex_r8_stage_rhs( 'zad', Krhs, puu, pvv )", 7],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:320-334': [
         'puu(ji,jj,1,Krhs) = zhpi(ji,jj)     ! RK3 case: dyn_hpg always called first',
-        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj)', 15],
+        ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj)', 1), 15],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],
