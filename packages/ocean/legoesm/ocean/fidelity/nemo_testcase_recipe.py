@@ -1944,7 +1944,11 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
         whole_step_identity=("vortex_flux_up3_een" if momentum == "flux"
                              else "vortex_vector_een_c2"),
         tke_langmuir_evaluation=None,
-    )
+    )._replace(
+        wzv_call2_evaluation=("nemo_literal" if momentum == "vector"
+                              else "generic"),
+        nemo_stage_momentum_wzv_split=(True if momentum == "vector"
+                                       else None))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
