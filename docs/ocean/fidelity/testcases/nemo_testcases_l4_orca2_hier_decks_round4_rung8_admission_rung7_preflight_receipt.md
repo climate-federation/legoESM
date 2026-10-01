@@ -82,9 +82,9 @@ It first builds `avmb` and `avtb` from the retained `rn_avm0=1.2e-4` and
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:205-228`).
 
 The only compiled initializer call is guarded by the selector
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:282-284`), as is
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:283-284`), as is
 the per-step internal-wave increment
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:345-372`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:353-372`).
 Turning the selector off therefore removes both.  The skipped initializer is
 the only branch that overwrites the backgrounds with molecular values and a
 uniform horizontal shape
