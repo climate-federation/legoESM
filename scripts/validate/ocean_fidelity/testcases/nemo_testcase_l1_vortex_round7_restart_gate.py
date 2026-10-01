@@ -89,7 +89,7 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
     save_run_restart(
         archive, first, step=1, time_days=card.dt_s / 86400.0,
         grid_type="latlon", dt_seconds=card.dt_s,
-        sha=worktree_stamp()["git_sha"],
+        sha=worktree_stamp()["commit"],
     )
     metadata = run_restart_metadata(archive)
     require(metadata["format"] == 5,
