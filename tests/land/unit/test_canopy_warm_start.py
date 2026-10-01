@@ -198,7 +198,8 @@ def test_degenerate_regimes_stay_inside_the_feasible_set(name, kw):
 # entry point instead.
 # ---------------------------------------------------------------------------
 
-def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None):
+def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None,
+                 lw_scale=1.0):
     """One two-leaf canopy call over a small realistic column batch."""
     import numpy as np
     from legoesm.core.coupling_fields import AtmToSurface
@@ -212,7 +213,7 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None):
     Ta = 290.0 + 8.0 * r.random(ncol)
     forcing = AtmToSurface(
         sw_down=f(200.0 + 400.0 * r.random(ncol)),
-        lw_down=f(300.0 + 60.0 * r.random(ncol)),
+        lw_down=f(300.0 + 60.0 * r.random(ncol)) * lw_scale,
         precip_total=f(np.zeros(ncol)), precip_snow=f(np.zeros(ncol)),
         T_lowest=f(Ta), q_lowest=f(0.006 + 0.006 * r.random(ncol)),
         u_lowest=f(1.0 + 3.0 * r.random(ncol)), v_lowest=f(np.zeros(ncol)),
