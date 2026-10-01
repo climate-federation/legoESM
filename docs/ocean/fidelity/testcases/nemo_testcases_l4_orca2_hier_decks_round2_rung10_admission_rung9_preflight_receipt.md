@@ -112,13 +112,34 @@ and `ln_spc_dyn` are unchanged.
 
 ## Validation, review, and scope
 
-The rung-10/rung-9 focused battery passes **18 tests**.  Rung-9 preflight and
-its three real preflight plants pass/fire.  Synthetic tests prove the nine
-record-stage violations fire: malformed name, truncation, missing frame,
-non-finite frame, non-finite terminal state, wrong terminal step, sentinel
-read, wrong resolved no-ice consequence, and incomplete SHA inventory.
+The focused rung-10/rung-9 plus citation-gate battery passes **35 tests**.
+Rung-9 preflight and its three real preflight plants pass/fire.  Synthetic
+tests prove the nine record-stage violations fire: malformed name, truncation,
+missing frame, non-finite frame, non-finite terminal state, wrong terminal
+step, sentinel read, wrong resolved no-ice consequence, and incomplete SHA
+inventory.
 
-Independent diff review: **PENDING at receipt draft**.
+The required `tests/ocean/fidelity -n 12` battery ran once.  It reached 99%
+with six failures, then reproduced the known
+`test_prediction_plant_is_fail_closed` hang and was interrupted after a
+bounded wait.  A remainder run excluding that hanging file and the three
+previously declared red files completed: **2,156 passed, 7 skipped, 3 failed**.
+Every failure was rerun in isolation.  The six reds are all unrelated files
+unchanged by this round:
+
+1. the worktree-stamp ratchet (six legacy report emitters);
+2. the SI3 scalar-math V2 provenance gate (`A MY_SRC is not verbatim`);
+3. the stale GYRE live-trace six-field expectation;
+4. the GYRE round-129 record pin (`certified phase-3 stepping gate moved`);
+5. the allow-dirty scope ratchet (two VORTEX drivers); and
+6. the case board missing `hires_lane_surface`.
+
+The stage-sweep control also hangs in isolation after collection.  All new
+hierarchy and citation tests pass in both focused and broad runs.
+
+The required separate `codex exec --sandbox read-only` review failed before it
+could read the diff: `failed to initialize in-process app-server client:
+Read-only file system`.  Verdict: **independent review unavailable in-sandbox**.
 
 No file under `packages/` or `src/` changed.  GYRE is byte-identical by
 construction and its year gate was not rerun.  This round changes no legoESM
