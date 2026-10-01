@@ -130,7 +130,107 @@ generic-card, month, or year landing claim is made. Production at final commit
   in-sandbox. Verbatim result: `Error: failed to initialize in-process
   app-server client: Read-only file system (os error 30)`.
 
-Validation summaries appear below after the fail-closed commands complete.
+## Correction (Claude, salvage)
+
+One quoted number in "Compiled program" / "Production-JIT operand walk" above
+is imprecise. The claim "candidate minus oracle equals the negative of the
+compiled scale-factor contribution to `1.80e-19 m s-1` at both stages" is only
+true for stage 3 (`max_abs_delta_plus_stretch = 1.7957098481791167e-19`).
+Stage 2's own value, from the same field in
+`phase3/round194/zad_operands.json`, is `1.2874900798265365e-19`, not
+`1.80e-19`. Both are at the compiled-rounding floor the claim is making (the
+substantive point — the W residual is fully explained by the stretch term,
+nothing else), so this does not change the verdict; it corrects one digit
+string in the evidence quote.
+
+## Gates and tests (Claude, salvage)
+
+- Round-specific citation gate, as part of the battery below: `16 passed`,
+  `unmapped_citations: []`, planted-shift self-test fires (9/9), reproduced
+  from `phase3/round194/citations.json` and `citations_plant.json`.
+- Required focused battery (citation gate + `test_nemo_recipe.py` +
+  `test_tke_nemo_terms.py` + `test_real_freshwater_closure.py` +
+  `test_nemo_ws_stage_face_mask_rank.py` + `test_nemo_prognostic_barotropic_state.py`
+  + this round's own three test files), run serialized (host checked clear of
+  any other pytest battery first, `pgrep -af "[p]ython -m pytest"` empty):
+  `202 passed in 983.14s (0:16:23)` at clean commit `de8657076`. Decisive
+  line quoted verbatim above.
+- GYRE certified ladder, trajectory-only, kt=1..10, re-run fresh at the same
+  commit (`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_phase3_gate.py
+  --trajectory-only --max-step 10`): kt=3 u `4.4348118233283884e-10`, ssh
+  `6.695687992767929e-11`; kt=10 u `1.789976031979501e-09`, ssh
+  `1.2749811068024641e-09` — bit-identical to round 191's landed/certified
+  values (`4.4348e-10`, `6.6957e-11`, `1.7900e-09`). GYRE day-30/240/360 were
+  NOT re-run as a full year (expensive, ~hours): the production diff to the
+  card-selection file (`nemo_testcase_recipe.py`) is net zero (commit
+  `858822b5f` added the VORTEX_VEC selection, commit `c8a759321` reverted it
+  exactly — `git diff 034c89d6b..HEAD -- packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`
+  is empty), and the two dynamics-file edits only add new `_NEMOWSRK3TestHooks`
+  fields (`stage3_zad_operand_observer`, `stage3_zad_operand_override`)
+  defaulting to `None`, generalizing round 158's stage-2-only private test
+  hook to stage 3; no card constructs either field, so no executed GYRE value
+  can move. The kt=1..10 ladder match is the executable confirmation of that
+  reading.
+- DINO from-rest month gate: reused codex's own run rather than repeating a
+  ~700s job — `phase3/round194/dino_month.log` stamps
+  `PROVENANCE git_sha=de8657076` (the round's own final commit, i.e. already
+  at this tip), day-30 wet 3-D T rms `2.040288957e-03 K` against bar
+  `2.244317642e-03 K` (certified `2.040288765e-03 K`) — PASS, inert.
+- Codex review: genuinely unavailable in this sandbox (`Error: failed to
+  initialize in-process app-server client: Read-only file system`), confirmed
+  reproducible from `phase3/round194/codex_review.log`; the GLM review tool
+  was not available in this session either. This receipt's independent review
+  is the Claude pass below.
+
+## Independent review (Claude, salvage)
+
+Reviewed as the independent reviewer of codex-authored, unreviewed work.
+
+1. **Production diff, verified by reading + running.** The two touched
+   dynamics files only add stage-3 twins of round 158's existing stage-2
+   private test hooks (`_NEMOWSRK3TestHooks` fields default `None`;
+   `jax.debug.callback` observer is write-only and cannot feed the
+   computation) and a write-only `u`/`v` addition to an existing observer
+   payload. The card-selection file's diff across the round is empty (added
+   then exactly reverted). The GYRE kt=1..10 ladder, re-run fresh, reproduces
+   round 191's certified values bit-for-bit, which is the executable half of
+   "production at `4e916e8e` reproduces the before arm."
+2. **Numbers, verified by reproducing from the evidence root**, not by
+   re-deriving: the kt=2 ZAD operand table (`zad_operands.json`), the
+   one-variable ownership table (`fraction_removed`/baseline/w arms in the
+   same file), and the certified-trajectory veto (`vortex_vec_compare.json`:
+   `status: FAIL`, `n_certified_rows_compared: 50`, the kt=5 S
+   `AT-BAR -> DEBT` row, and multiple cellwise worsenings past the two-ULP
+   bar) all reproduce to the quoted digits. Spot-checked the full kt=1/2/5/10
+   "before" column against `phase3/round191/vortex_vec_ladder.json`
+   independently of the receipt's own table — matches. One imprecise digit
+   found and corrected above; it does not change the verdict.
+3. **Scope, verified by reading.** `wzv_call2_evaluation` and
+   `nemo_stage_momentum_wzv_split` are pre-existing config fields (round 163,
+   Decision 55) already selected in production on GYRE-zco
+   (`nemo_literal`/`True`) and explicitly opted out on ORCA2-zps (`False`);
+   round 194 only tried selecting the already-existing `nemo_literal` value
+   on `VORTEX_VEC-zco`, then reverted that selection. No new option, no new
+   physics, no card's existing selection changed.
+4. **Non-vacuity.** The citation-gate plant and the operand-row unit plants
+   fire (self-tests above); the one production-output plant (field-wide
+   one-ULP thickness move) is reported REFUTED in the receipt rather than
+   papered over — a held candidate whose own plant was honestly reported as
+   not working the way predicted, which is the correct way to log a dead end.
+
+Verdict: SHIP the receipt as a HELD landing. No defect found that changes the
+HOLD decision.
+
+## Landing verdict: HELD
+
+Docs + the held patch land; production carries no selection change for any
+card (net-zero diff on the card-selection file) and the only touched dynamics
+code is additive, default-`None`, private test-hook plumbing. GYRE, both
+tanks, and the generic NEMO-GYRE recipe are unaffected because no card
+constructs the new hooks — confirmed for GYRE by re-running its certified
+kt=1..10 ladder bit-identical to round 191. All required gates above are
+green. This is not a physics landing and does not touch any certified
+production number.
 
 ## OPEN — round 195 / VORTEX round 11
 
