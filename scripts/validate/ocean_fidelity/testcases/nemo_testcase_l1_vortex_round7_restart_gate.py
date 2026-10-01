@@ -52,25 +52,31 @@ def _array_leaves(value) -> list[np.ndarray]:
     return leaves
 
 
-def _state_equal(left, right) -> tuple[bool, int]:
-    unequal = 0
+def _state_differences(left, right) -> dict[str, int]:
+    differences = {}
     if left._fields != right._fields:
-        return False, -1
+        return {"__fields__": -1}
     for name in left._fields:
         lhs_value, rhs_value = getattr(left, name), getattr(right, name)
         if (lhs_value is None) != (rhs_value is None):
-            return False, -1
+            differences[name] = -1
+            continue
         if lhs_value is None:
             continue
         left_leaves = _array_leaves(lhs_value)
         right_leaves = _array_leaves(rhs_value)
         if len(left_leaves) != len(right_leaves):
-            return False, -1
+            differences[name] = -1
+            continue
+        unequal = 0
         for lhs, rhs in zip(left_leaves, right_leaves, strict=True):
             if lhs.shape != rhs.shape or lhs.dtype != rhs.dtype:
-                return False, -1
+                unequal = -1
+                break
             unequal += int(np.count_nonzero(lhs != rhs))
-    return unequal == 0, unequal
+        if unequal:
+            differences[name] = unequal
+    return differences
 
 
 def _sha256(path: Path) -> str:
@@ -108,8 +114,9 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
         archive, entry, grid_type="latlon", dt_seconds=card.dt_s,
         carries_rk3_after_ssh=nemo_rk3_after_ssh_is_carried(config),
     )
-    exact_load, load_unequal = _state_equal(resumed, first)
-    require(exact_load, f"{case}: restart load changed {load_unequal} values")
+    load_differences = _state_differences(resumed, first)
+    require(not load_differences,
+            f"{case}: restart load differs by field: {load_differences}")
 
     if plant:
         values = np.asarray(resumed.eta_rk3_after.data).copy()
@@ -118,21 +125,22 @@ def run_case(case: str, root: Path, *, plant: bool) -> dict:
             eta_rk3_after=resumed.eta_rk3_after.replace(data=jnp.asarray(values)))
 
     after_resume = model.step(resumed, dt=card.dt_s)
-    exact_step, step_unequal = _state_equal(after_resume, continuous)
+    step_differences = _state_differences(after_resume, continuous)
+    exact_step = not step_differences
     if plant:
         require(not exact_step,
                 f"{case}: carried-slot plant did not move the resumed step")
     else:
         require(exact_step,
-                f"{case}: resumed step changed {step_unequal} values")
+                f"{case}: resumed step differs by field: {step_differences}")
     return {
         "case": case,
         "archive": str(archive),
         "archive_sha256": _sha256(archive),
         "format": loaded["format"],
         "slots": sorted(loaded["slots"]),
-        "load_cells_unequal": load_unequal,
-        "resumed_step_cells_unequal": step_unequal,
+        "load_differences": load_differences,
+        "resumed_step_differences": step_differences,
         "plant": plant,
     }
 
