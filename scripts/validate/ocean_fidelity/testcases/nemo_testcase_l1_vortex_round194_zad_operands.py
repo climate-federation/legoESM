@@ -191,9 +191,9 @@ def run(root: Path, expect_commit: str, *, plant: str | None = None) -> dict:
             idx = _first_active(np.ones(ref_w.shape, dtype=bool))
             ref_w[idx] = np.nextafter(ref_w[idx], np.inf)
         if plant == "thickness-ulp" and stage == 2:
-            idx = _first_active(masks["u"])
-            full_idx = (idx[0], idx[1] + 1, idx[2])
-            ref_hu_full[full_idx] = np.nextafter(ref_hu_full[full_idx], np.inf)
+            owned_hu = ref_hu_full[:, 1:, :nlev]
+            owned_hu[masks["u"]] = np.nextafter(
+                owned_hu[masks["u"]], np.inf)
 
         arms = {}
         substitutions = {
