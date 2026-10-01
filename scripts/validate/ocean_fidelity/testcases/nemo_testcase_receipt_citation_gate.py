@@ -1133,10 +1133,10 @@ CITATION_MAP = {
         'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',
         "sbc_init : choose ONE and only ONE sbc option", 8],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:440-449': [
-        'SELECT CASE( nsbc )',
+        ('SELECT CASE( nsbc )', 2),
         'IF( ll_opa    )       CALL sbc_cpl_rcv', 10],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
-        'SELECT CASE( nn_ice )',
+        ('SELECT CASE( nn_ice )', 2),
         'END SELECT', 5],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90:191-204': [
         'CALL fld_read( kt, nn_fsbc, sf )',
