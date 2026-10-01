@@ -1257,7 +1257,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:5530-5574': [
         'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
         'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 45],
-    'ocean_model_latlon_cgrid.py:6085-6144': [
+    'ocean_model_latlon_cgrid.py:6083-6142': [
         '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 60],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
@@ -2640,7 +2640,7 @@ CITATION_MAP = {
         'if _cfg_b.fix_eta_drift:',
         'eta=state_new.eta.replace(data=eta_fixed),', 66],
     # --- round 51: live WS-RK3 operand selection and history carry ---
-    'ocean_model_latlon_cgrid.py:6035-6036': [
+    'ocean_model_latlon_cgrid.py:6030-6031': [
         ('u0 = state.u.data', 2), ('v0 = state.v.data', 2), 2],
     'ocean_model_latlon_cgrid.py:7277-7282': [
         '_p0_with_zub = _mom_pert_ws(',
@@ -2990,7 +2990,7 @@ CITATION_MAP = {
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
     'vertical.py:1625': ('def compute_ocean_jacobian(', 1),
-    'ocean_model_latlon_cgrid.py:6072-6076': [
+    'ocean_model_latlon_cgrid.py:6067-6071': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
     'ocean_model_latlon_cgrid.py:7412': ('_g2 = _nemo_ws_stage_transport(', 1),
     'ocean_model_latlon_cgrid.py:7431': (
@@ -3920,19 +3920,19 @@ CITATION_MAP = {
         'puu(ji,jj,1,Krhs) = zhpi(ji,jj)     ! RK3 case: dyn_hpg always called first',
         ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj)', 1), 15],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:289-300': [
-        'IF( ln_dynadv_vec ) THEN',
+        ('IF( ln_dynadv_vec ) THEN', 1),
         'CALL wzv( kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport )', 12],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/divhor.f90:123-140': [
         'SELECT CASE ( ik_ind )', 'END SELECT', 18],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:271-299': [
-        'pww(ji,jj,jpk) = 0._wp',
-        'END DO   ;   END DO   ;   END DO', 29],
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
+        ('END DO   ;   END DO   ;   END DO', 6), 29],
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynzad.f90:105-137': [
         'DO jk =  1,  jpk-2',
-        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 33],
-    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-281': [
+        '&                                              * zWdzV(ji,jj)', 33],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-273': [
         'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
-        'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 14],
+        ('END DO   ;   END DO   ;   END DO', 3), 6],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],

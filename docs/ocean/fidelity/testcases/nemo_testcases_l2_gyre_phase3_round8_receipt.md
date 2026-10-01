@@ -10254,7 +10254,7 @@ legoESM's corresponding statement.
 
 | # | NEMO statement | operands / time level | legoESM |
 |---|---|---|---|
-| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`); the compiled form divides by `1+r3u(Kmm)` rather than multiplying a stored reciprocal | `_mom_pert_ws`'s `transport_velocity`, `ocean_model_latlon_cgrid.py:6072-6076` |
+| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`); the compiled form divides by `1+r3u(Kmm)` rather than multiplying a stored reciprocal | `_mom_pert_ws`'s `transport_velocity`, `ocean_model_latlon_cgrid.py:6067-6071` |
 | 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_3d*(1+r3u(Kmm)*umask)` | `_nemo_ws_stage_transport`, `ocean_model_latlon_cgrid.py:7412` |
 | 3 | `stprk3_stg.F90:290` `CALL wzv(... uu(Kmm), vv(Kmm), ww, np_velocity)` | velocity form, because `ln_dynadv_vec = T` (`round38_oracle_trazdf_kt2/ocean.output:798`) | `literal_wzv` inside the same helper |
 | 4 | `stprk3_stg.F90:322` `CALL eos( ts, Kmm, rhd, rhop )` | stage tracers | `_stage_hpg_operands`, `ocean_model_latlon_cgrid.py:7431` |
@@ -10508,7 +10508,7 @@ configuration built.
 
 | # | NEMO statement | operands / time level | legoESM |
 |---|---|---|---|
-| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`) | `ocean_model_latlon_cgrid.py:6072-6076` |
+| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`) | `ocean_model_latlon_cgrid.py:6067-6071` |
 | 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_0*(1+r3u(Kmm)*umask)` | `ocean_model_latlon_cgrid.py:7412` |
 | 3 | `stprk3_stg.F90:290` `wzv(... uu(Kmm), vv(Kmm), ww, np_velocity)` | velocity form: `ln_dynadv_vec = T` (`round38_oracle_trazdf_kt2/ocean.output:798`) | the same helper's `literal_wzv` |
 | 4 | `stprk3_stg.F90:322` `eos( ts, Kmm, rhd, rhop )` | stage tracers | `ocean_model_latlon_cgrid.py:7431` |

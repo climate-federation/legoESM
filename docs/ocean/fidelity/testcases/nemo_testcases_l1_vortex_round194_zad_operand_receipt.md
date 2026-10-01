@@ -30,7 +30,7 @@ face thickness, with its separate bottom statement, at
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynzad.f90:105-137`. After momentum
 has consumed the velocity-form W, the vector tracer path re-solves on
 transports at
-`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-281`. Thus one shared
+`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-273`. Thus one shared
 generic W is not NEMO's vector stage program.
 
 ## Production-JIT operand walk
