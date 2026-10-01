@@ -1,0 +1,143 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -26,6 +26,7 @@
+    USE lib_mpp, ONLY : l_perpetual_ts
+    USE sbc_ice, ONLY : snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice
+    USE sbc_oce, ONLY : ln_icebergs
++   USE sbc_oce, ONLY : ln_rnf, nn_ice
+    USE icb_oce, ONLY : berg_grid, nclasses
+ 
+    IMPLICIT NONE
+@@ -432,6 +433,9 @@
+       CHARACTER(LEN=16) :: magic
+       REAL(wp), DIMENSION(jpi,jpj) :: zicb_zero
+       IF( .NOT.lwp ) RETURN
++      CALL l4_r87_dump_surface_input( kstp, klevel )
++      ! Keep the inherited schema below as provenance; rung-0 uses the v2 record.
++      RETURN
+       IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 surface input dump requires 64-bit wp' )
+       OPEN( NEWUNIT=iunit, FILE='oracle_ocean_surface_input_kt00000001.bin', ACCESS='STREAM', &
+          &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
+@@ -473,8 +477,122 @@
+       CLOSE(iunit)
+       WRITE(numout,*) 'LANE4_OCEAN_SURFACE_INPUT_DUMP ', kstp, klevel
+    END SUBROUTINE l4_dump_ocean_surface_input
++   SUBROUTINE l4_r87_put_absent( iunit, cdname )
++      !! Explicit missing-value record: a named field, zero rank and no payload.
++      INTEGER, INTENT(in) :: iunit
++      CHARACTER(LEN=*), INTENT(in) :: cdname
++      CHARACTER(LEN=16) :: field
++      field = cdname
++      WRITE(iunit) field
++      WRITE(iunit) 0, 0, 0, 0
++   END SUBROUTINE l4_r87_put_absent
++
++
++   SUBROUTINE l4_r87_put_2d( iunit, cdname, pfield, cdgrid )
++      INTEGER, INTENT(in) :: iunit
++      CHARACTER(LEN=*), INTENT(in) :: cdname
++      REAL(wp), DIMENSION(:,:), INTENT(in) :: pfield
++      CHARACTER(LEN=1), INTENT(in) :: cdgrid
++      CHARACTER(LEN=16) :: field
++      field = cdname
++      WRITE(iunit) field
++      WRITE(iunit) 2, SIZE(pfield,1), SIZE(pfield,2), 1
++      WRITE(iunit) l4_canon_2d( pfield, cdgrid )
++   END SUBROUTINE l4_r87_put_2d
++
++
++   SUBROUTINE l4_r87_put_3d( iunit, cdname, pfield, cdgrid )
++      INTEGER, INTENT(in) :: iunit
++      CHARACTER(LEN=*), INTENT(in) :: cdname
++      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: pfield
++      CHARACTER(LEN=1), INTENT(in) :: cdgrid
++      CHARACTER(LEN=16) :: field
++      field = cdname
++      WRITE(iunit) field
++      WRITE(iunit) 3, SIZE(pfield,1), SIZE(pfield,2), SIZE(pfield,3)
++      WRITE(iunit) l4_canon_3d( pfield, cdgrid )
++   END SUBROUTINE l4_r87_put_3d
++
++
++   SUBROUTINE l4_r87_dump_surface_input( kstp, klevel )
++      !! Round-87 self-describing replacement for the inherited fixed schema.
++      !! An owner-disabled field is ABSENT, never a plausible zero payload.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      INTEGER, PARAMETER :: ihalo = 2, nfields = 35
++      CHARACTER(LEN=16) :: magic
++      OPEN( NEWUNIT=iunit, FILE='oracle_ocean_surface_input_kt00000001.bin', ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open round87 surface input file' )
++      magic = 'NEMO_L4_SBCIN_2'
++      WRITE(iunit) magic
++      WRITE(iunit) 2, kstp, klevel, jpi, jpj, jpts, ihalo, STORAGE_SIZE(1._wp), &
++         & nfields, MERGE(1,0,ln_rnf), MERGE(1,0,ln_icebergs), nn_ice
++
++      CALL l4_r87_put_2d( iunit, 'utau', utau, 'T' )
++      CALL l4_r87_put_2d( iunit, 'vtau', vtau, 'T' )
++      CALL l4_r87_put_2d( iunit, 'utauU', utauU, 'U' )
++      CALL l4_r87_put_2d( iunit, 'vtauV', vtauV, 'V' )
++      CALL l4_r87_put_2d( iunit, 'utau_b', utau_b, 'T' )
++      CALL l4_r87_put_2d( iunit, 'vtau_b', vtau_b, 'T' )
++      IF( ln_icebergs ) THEN
++         CALL l4_r87_put_2d( iunit, 'utau_icb', utau_icb, 'T' )
++         CALL l4_r87_put_2d( iunit, 'vtau_icb', vtau_icb, 'T' )
++      ELSE
++         CALL l4_r87_put_absent( iunit, 'utau_icb' )
++         CALL l4_r87_put_absent( iunit, 'vtau_icb' )
++      ENDIF
++      CALL l4_r87_put_2d( iunit, 'taum', taum, 'T' )
++      CALL l4_r87_put_2d( iunit, 'wndm', wndm, 'T' )
++      CALL l4_r87_put_2d( iunit, 'qsr', qsr, 'T' )
++      CALL l4_r87_put_2d( iunit, 'qns', qns, 'T' )
++      CALL l4_r87_put_2d( iunit, 'qns_b', qns_b, 'T' )
++      CALL l4_r87_put_2d( iunit, 'qsr_tot', qsr_tot, 'T' )
++      CALL l4_r87_put_2d( iunit, 'qns_tot', qns_tot, 'T' )
++      CALL l4_r87_put_2d( iunit, 'emp', emp, 'T' )
++      CALL l4_r87_put_2d( iunit, 'emp_b', emp_b, 'T' )
++      CALL l4_r87_put_2d( iunit, 'sfx', sfx, 'T' )
++      CALL l4_r87_put_2d( iunit, 'sfx_b', sfx_b, 'T' )
++      CALL l4_r87_put_2d( iunit, 'emp_tot', emp_tot, 'T' )
++      CALL l4_r87_put_2d( iunit, 'fwfice', fwfice, 'T' )
++      IF( ln_rnf ) THEN
++         CALL l4_r87_put_2d( iunit, 'rnf', rnf, 'T' )
++         CALL l4_r87_put_2d( iunit, 'rnf_b', rnf_b, 'T' )
++      ELSE
++         CALL l4_r87_put_absent( iunit, 'rnf' )
++         CALL l4_r87_put_absent( iunit, 'rnf_b' )
++      ENDIF
++      CALL l4_r87_put_2d( iunit, 'fwficb', fwficb, 'T' )
++      CALL l4_r87_put_2d( iunit, 'fr_i', fr_i, 'T' )
++      CALL l4_r87_put_2d( iunit, 'snwice_mass', snwice_mass, 'T' )
++      CALL l4_r87_put_2d( iunit, 'snwice_mass_b', snwice_mass_b, 'T' )
++      CALL l4_r87_put_2d( iunit, 'snwice_fmass', snwice_fmass, 'T' )
++      CALL l4_r87_put_2d( iunit, 'rCdU_ice', rCdU_ice, 'T' )
++      IF( ln_icebergs ) THEN
++         CALL l4_r87_put_2d( iunit, 'berg_calving', berg_grid%calving, 'T' )
++         CALL l4_r87_put_2d( iunit, 'berg_calv_hflx', berg_grid%calving_hflx, 'T' )
++         CALL l4_r87_put_2d( iunit, 'berg_float_melt', berg_grid%floating_melt, 'T' )
++         CALL l4_r87_put_2d( iunit, 'berg_stored_heat', berg_grid%stored_heat, 'T' )
++      ELSE
++         CALL l4_r87_put_absent( iunit, 'berg_calving' )
++         CALL l4_r87_put_absent( iunit, 'berg_calv_hflx' )
++         CALL l4_r87_put_absent( iunit, 'berg_float_melt' )
++         CALL l4_r87_put_absent( iunit, 'berg_stored_heat' )
++      ENDIF
++      IF( ln_rnf ) THEN
++         CALL l4_r87_put_3d( iunit, 'rnf_tsc', rnf_tsc, 'T' )
++         CALL l4_r87_put_3d( iunit, 'rnf_tsc_b', rnf_tsc_b, 'T' )
++      ELSE
++         CALL l4_r87_put_absent( iunit, 'rnf_tsc' )
++         CALL l4_r87_put_absent( iunit, 'rnf_tsc_b' )
++      ENDIF
++      CLOSE(iunit)
++      WRITE(numout,*) 'ROUND87_SURFACE_INPUT_DUMP ', kstp, klevel
++   END SUBROUTINE l4_r87_dump_surface_input
++
++
+ 
+ #include "l4_oracle_canon_subroutines.h90"
+ 
+ 
+    SUBROUTINE rk3_dia( kswitch )
