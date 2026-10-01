@@ -53,15 +53,23 @@ def _array_leaves(value) -> list[np.ndarray]:
 
 
 def _state_equal(left, right) -> tuple[bool, int]:
-    left_leaves = _array_leaves(left)
-    right_leaves = _array_leaves(right)
-    if len(left_leaves) != len(right_leaves):
-        return False, -1
     unequal = 0
-    for lhs, rhs in zip(left_leaves, right_leaves, strict=True):
-        if lhs.shape != rhs.shape or lhs.dtype != rhs.dtype:
+    if left._fields != right._fields:
+        return False, -1
+    for name in left._fields:
+        lhs_value, rhs_value = getattr(left, name), getattr(right, name)
+        if (lhs_value is None) != (rhs_value is None):
             return False, -1
-        unequal += int(np.count_nonzero(lhs != rhs))
+        if lhs_value is None:
+            continue
+        left_leaves = _array_leaves(lhs_value)
+        right_leaves = _array_leaves(rhs_value)
+        if len(left_leaves) != len(right_leaves):
+            return False, -1
+        for lhs, rhs in zip(left_leaves, right_leaves, strict=True):
+            if lhs.shape != rhs.shape or lhs.dtype != rhs.dtype:
+                return False, -1
+            unequal += int(np.count_nonzero(lhs != rhs))
     return unequal == 0, unequal
 
 
