@@ -75,10 +75,11 @@ write all 80 frames, fire the five round-84 corruption plants, and compare all
 
 ## Gates, review, and tests
 
-The debug launcher passes its clean-tree preflight.  The reused round-84 frame
-gate passes its focused tests **2/2**, including its corruption controls.  The
-campaign citation gate passes the default cumulative receipt and this receipt
-with no unmapped or failing citations; its shifted-citation plant fires.
+The debug launcher passes its clean-tree preflight.  The citation-gate and
+reused round-84 frame-gate focused tests pass **19/19**, including their
+corruption controls.  The campaign citation gate passes the default cumulative
+receipt and this receipt with no unmapped or failing citations; its
+shifted-citation plant fires.
 
 The prescribed `tests/ocean/fidelity -n 12` battery selected 2,209 tests,
 reached 99%, and repeated the established no-summary stall.  The three visible
