@@ -1195,6 +1195,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:140-149': [
         'NAMELIST/namzdf/ ln_zdfcst',
         '&             rn_avm0, rn_avt0, nn_avb, nn_havtb', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
+        '!==  Background eddy viscosity and diffusivity  ==!',
+        'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk) =', 24],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90:257-258': [
         "IF( ln_zdfddm ) THEN   ;   WRITE(numout,*) '   ==>>>   use double diffusive mixing: avs /= avt'",
         "ELSE                   ;   WRITE(numout,*) '   ==>>>   No  double diffusive mixing: avs = avt'", 2],
@@ -1216,6 +1219,12 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfiwm.f90:421-447': [
         'NAMELIST/namzdf_iwm/ ln_mevar, ln_tsdiff',
         "'the viscous molecular value & a very small diffusive value, resp.'", 27],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90:776': [
+        'minimum value of tke                        rn_emin',
+        'minimum value of tke                        rn_emin'],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdftke.f90:835-841': [
+        'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
+        'minimum mixing length with your parameters rmxl_min', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trazdf.f90:175-180': [
         'IF(  ( cdtype == \'TRA\'',
         'IF( cdtype == \'TRA\' .AND. jn == jp_tem ) THEN', 6],
