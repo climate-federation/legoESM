@@ -271,7 +271,7 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
         "rn_avm0_retained": re.search(r"rn_avm0\s*=\s*1\.2000000000000000E-004", ocean) is not None,
         "rn_avt0_retained": re.search(r"rn_avt0\s*=\s*1\.2000000000000000E-005", ocean) is not None,
         "rn_emin_retained": re.search(r"minimum value of tke\s+rn_emin\s*=\s*9\.9999999999999995E-007", ocean) is not None,
-        "rmxl_min_standard": re.search(r"minimum mixing length with your parameters rmxl_min\s*=\s*1\.0000000000000000E-002", ocean) is not None,
+        "rmxl_min_standard": re.search(r"minimum mixing length with your parameters rmxl_min\s*=\s*9\.9999999999999985E-003", ocean) is not None,
         "iwm_sentinel_unread": "THIS_GROUP_MUST_NOT_BE_READ" not in ocean,
     }
     if plant == "iwm-sentinel-read":

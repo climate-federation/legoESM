@@ -75,7 +75,7 @@ def _resolved_record(root: Path) -> None:
         "vertical eddy viscosity rn_avm0 = 1.2000000000000000E-004\n"
         "vertical eddy diffusivity rn_avt0 = 1.2000000000000000E-005\n"
         "minimum value of tke rn_emin = 9.9999999999999995E-007\n"
-        "minimum mixing length with your parameters rmxl_min = 1.0000000000000000E-002\n"
+        "minimum mixing length with your parameters rmxl_min = 9.9999999999999985E-003\n"
     )
     (root / "run.user.stdout.log").write_text("STOP 0\n")
     (root / "run.user.time.log").write_text("RUN_DONE\n")
@@ -84,6 +84,13 @@ def _resolved_record(root: Path) -> None:
 def test_resolved_consequences_and_plants_refuse(tmp_path):
     _resolved_record(tmp_path)
     assert gate.validate_resolved(tmp_path)["status"] == "PASS_RUNG7_RESOLVED"
+    output = tmp_path / "ocean.output"
+    output.write_text(
+        output.read_text().replace("9.9999999999999985E-003", "1.0000000000000000E-002")
+    )
+    with pytest.raises(gate.GateError):
+        gate.validate_resolved(tmp_path)
+    _resolved_record(tmp_path)
     for plant in ("ice-sentinel-read", "iwm-sentinel-read", "resolved-consequence"):
         with pytest.raises((gate.GateError, gate.rung8.rung9.GateError)):
             gate.validate_resolved(tmp_path, plant=plant)
