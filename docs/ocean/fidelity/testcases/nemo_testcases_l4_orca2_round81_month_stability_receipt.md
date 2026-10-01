@@ -120,6 +120,21 @@ plants fire on both failing and completing report classes.  The failure arms'
 only instrumentation is a scalar callback at the existing raw-thickness
 assertion; the completing arm is uninstrumented production execution.
 
+Validation at the committed script/citation-map tip:
+
+* focused round-81 plus citation-gate battery: **34 passed**;
+* complete ORCA2-named card battery: **436 passed**;
+* round receipt citation gate: **PASS**, five citations, zero failures and
+  zero unmapped; campaign-default citation gate: **PASS**, zero failures and
+  zero unmapped; the shifted `zdfiwm` citation plant exits 1;
+* wide `tests/ocean/fidelity -n 12`: 2,194 selected; the xdist wrapper was
+  stopped after the standing 98% no-summary stall, after six failures and six
+  skips.  The six failures were rerun together in isolation and are exactly
+  the existing round-129 record certification, round-35 stamp scope,
+  worktree-stamp emitter, missing case-board row, SI3 scalar-math provenance,
+  and round-51 private-trace registry reds.  Every round-81 and every ORCA2
+  test passed.
+
 No `packages/` file changed.  GYRE is unchanged by construction from its
 certified day-30 `2.3440e-06` K, day-240 `6.5826e-05` K, and day-360
 `5.4085e-05` K trajectory; DINO and tank cards likewise cannot move from this
