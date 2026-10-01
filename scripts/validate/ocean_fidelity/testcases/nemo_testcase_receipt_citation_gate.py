@@ -2158,7 +2158,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:8578-8586': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:557-644': [
+    'nemo_testcase_recipe.py:558-645': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 88],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -2407,7 +2407,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:407-409': [
+    'nemo_testcase_recipe.py:408-410': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:10156-10173': [
@@ -3457,7 +3457,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:625': [
+    'nemo_testcase_recipe.py:626': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -3501,7 +3501,7 @@ CITATION_MAP = {
     # added eighteen lines above the SECOND and THIRD anchors, then decision
     # 36 added fifteen more, so the current lines are 314 and 971.  The first
     # (92) is above both edits and remains unmoved.
-    'nemo_testcase_recipe.py:340,585,2033': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:341,586,2034': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
