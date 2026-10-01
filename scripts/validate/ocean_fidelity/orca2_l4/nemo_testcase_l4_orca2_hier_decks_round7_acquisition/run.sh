@@ -85,7 +85,7 @@ mkdir -p "$EVIDENCE"
 }
 bash -n "$0"
 "$PY" -m py_compile "$GATE"
-"$PY" "$GATE" --preflight-only >"$EVIDENCE/round7_preflight.json"
+"$PY" "$GATE" --preflight-only --output "$EVIDENCE/round7_preflight.json" >/dev/null
 
 dry=$(mktemp -d /tmp/orca2-hier-r7.XXXXXX)
 cp "$SOURCE_ROOT/MY_SRC/l4_r69_surface.F90" "$dry/l4_r69_surface.F90"

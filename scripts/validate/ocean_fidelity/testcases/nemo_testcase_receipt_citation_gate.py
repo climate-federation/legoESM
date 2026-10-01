@@ -113,6 +113,8 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "stprk3.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/l4_r69_surface.f90": (
         _ORCA2_R69SURFACE_COMPILED / "l4_r69_surface.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "sbc_oce.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2_R69SURFACE_COMPILED / "sbcmod.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/icestp.f90": (
@@ -1172,6 +1174,12 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/l4_r69_surface.f90:65-88': [
         "IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round69: surface record requires fp64')",
         'CLOSE(unit)', 24],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
+        'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj)',
+        'wndm(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , taum', 22],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcrnf.f90:146-152': [
+        'INTEGER FUNCTION sbc_rnf_alloc()',
+        'rnf_tsc_b(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts)', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:247-252': [
         ('SELECT CASE( nn_ice )', 1),
         "CALL ctl_stop( 'sbc_init : SI3 sea-ice model requires ln_blk or ln_cpl or ln_abl or ln_usr = T' )", 6],
