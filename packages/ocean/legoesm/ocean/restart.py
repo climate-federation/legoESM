@@ -1662,8 +1662,8 @@ def _refuse_pre_v5_missing_rk3_after_ssh(meta, template, in_path: Path, *,
     its own restart carries as ``ssha`` (restart.F90:184) and reads back at the
     next ``nit000`` (restart.F90:362-370).  An older archive has no such entry.
 
-    For a run that does NOT carry the slot -- every card today -- the absence
-    is not a loss: the slot is never read, so such an archive still loads and
+    For a run that does NOT carry the slot, the absence is not a loss: the
+    slot is never read, so such an archive still loads and
     the resume is byte-identical to what it was before this field existed.
     That is why the layout check migrates the one slot rather than refusing.
 

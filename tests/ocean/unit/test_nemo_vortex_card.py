@@ -579,8 +579,11 @@ _CERTIFIED_CARD_DIGESTS_ROUND2 = {          # 5bbac73f6, superseded by round 4
 # value it already resolved to before the field existed, so the digest moved
 # and its numbers did not: the certified kt=1..10 rows are re-measured in the
 # round-5 receipt.
-_CERTIFIED_CARD_DIGESTS = {                 # 85607c118588 + rounds 4 and 5
-    "GYRE-zco": "da52bd90a40f71fd",
+# Round 191 / Decision 78 changes GYRE's explicit value from the uncarried to
+# the carried form after round 6 measured the latter.  The tank values and
+# digests stay fixed; GYRE's new digest is pinned with its switched trajectory.
+_CERTIFIED_CARD_DIGESTS = {                 # round 191 / Decision 78
+    "GYRE-zco": "308af4c536cbfd9a",
     "LOCK_EXCHANGE-zco": "d794c4c5cb3dd880",
     "OVERFLOW-zps": "2bb9d9be75fd924d",
 }
@@ -831,8 +834,8 @@ def test_no_dino_nemo_card_inherits_the_explicit_cfl_cap(recipe_name):
 
 # Read from the model, never re-listed here: a census computed from a
 # re-derived condition is how a gate came to disagree with the code it
-# gated (operator note AR finding 2).  Round 6 added a third form,
-# "rk3_extrapolated_carried", which no card states yet.
+# gated (operator note AR finding 2).  Round 6 added a third form; Decision 78
+# selects it on GYRE and VORTEX-vector while ORCA2 waits for its own ladder.
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
     NEMO_FIRST_WZV_AFTER_SSH_FORMS as _AFTER_SSH_FORMS,
 )
@@ -869,7 +872,7 @@ def test_the_after_ssh_form_does_not_follow_the_time_integrator():
 
     vortex = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
     dino = dino_config_for_recipe("nemo_dino_kamm")
-    assert vortex.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert vortex.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
     assert dino.nemo_first_wzv_after_ssh == "leapfrog_continuity"
     # The inference this replaced read momentum_time_integrator, and on the
     # DINO card that field is not even set to the value the inference keyed

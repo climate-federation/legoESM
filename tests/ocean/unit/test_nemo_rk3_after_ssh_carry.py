@@ -14,8 +14,8 @@ its first ``CALL wzv`` (stp2d.F90:153), and NEMO persists it across a restart
 as ``ssha`` (restart.F90:184, read back at restart.F90:362-370).
 
 legoESM carries it only when the card STATES
-``nemo_first_wzv_after_ssh="rk3_extrapolated_carried"``.  No card states that
-yet; these tests drive the measurement arm directly.
+``nemo_first_wzv_after_ssh="rk3_extrapolated_carried"``.  Decision 78 switches
+GYRE and VORTEX-vector; these tests retain the old form as a measured control.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def arms():
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_nemo_testcase_card(CASE)
     out = {}
-    for name, form in (("card", None), ("carried", "rk3_extrapolated_carried")):
+    for name, form in (("card", "rk3_extrapolated"), ("carried", None)):
         cfg = with_first_wzv_after_ssh(card.recipe.model_config, form)
         model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
         s0 = card.recipe.initial_state
@@ -76,7 +76,7 @@ def test_the_predicate_is_the_one_both_sides_read():
     predicate, so a card can never write the slot without reading it."""
     card = build_nemo_testcase_card(CASE).recipe.model_config
     assert "rk3_extrapolated_carried" in NEMO_FIRST_WZV_AFTER_SSH_FORMS
-    assert not nemo_rk3_after_ssh_is_carried(card)
+    assert nemo_rk3_after_ssh_is_carried(card)
     assert nemo_rk3_after_ssh_is_carried(
         card._replace(nemo_first_wzv_after_ssh="rk3_extrapolated_carried"))
     # A card that never reaches NEMO's own first wzv call never carries it,
@@ -86,11 +86,8 @@ def test_the_predicate_is_the_one_both_sides_read():
                       nemo_first_wzv_after_ssh="rk3_extrapolated_carried"))
 
 
-def test_no_card_states_the_carried_form_yet():
-    """Round 6 BUILDS the carry and does not switch any card to it; the
-    switch is the operator's decision.  This test is the record of that, and
-    it goes red the moment a card is switched -- which is when the receipt's
-    numbers have to be re-measured."""
+def test_decision_78_switches_exactly_gyre_and_vortex_vector():
+    """The authorization is two named cards, not a shared RK3 default."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card as build,
     )
@@ -99,13 +96,15 @@ def test_no_card_states_the_carried_form_yet():
     # ORCA2-zps needs an explicit deck_root and is not constructible here;
     # its stated form is covered by the card census in
     # tests/ocean/unit/test_nemo_vortex_card.py.
-    for case in ("GYRE-zco", "VORTEX_VEC-zco", "VORTEX-zco",
-                 "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
+    for case in ("GYRE-zco", "VORTEX_VEC-zco"):
+        cfg = build(case).recipe.model_config
+        assert cfg.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried", case
+    for case in ("VORTEX-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
         cfg = build(case).recipe.model_config
         assert cfg.nemo_first_wzv_after_ssh != "rk3_extrapolated_carried", case
     for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         assert (dino_config_for_recipe(recipe).nemo_first_wzv_after_ssh
-                != "rk3_extrapolated_carried")
+                == "leapfrog_continuity")
 
 
 def test_the_carried_slot_is_nemo_s_own_extrapolation(arms):

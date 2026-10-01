@@ -166,7 +166,7 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",
@@ -310,6 +310,7 @@ def _model_config(
         return base._replace(
             eos="nemo_eos80",
             physics=physics,
+            nemo_first_wzv_after_ssh="rk3_extrapolated",
             # Round 163 (Decision 55, note AT): ORCA2-zps resolves the SAME
             # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does (via
             # this shared base), but has never been measured under the
@@ -455,7 +456,7 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             wzv_call2_evaluation="nemo_literal",
             # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
             # landed choice -- explicit here, not inferred from EOS or any

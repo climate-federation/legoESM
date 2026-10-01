@@ -1434,9 +1434,7 @@ def _format_4_copy(path, tmp_path):
 
 def test_a_pre_format_5_archive_still_loads_for_a_run_that_never_reads_it(
         tmp_path):
-    """Every card today: the slot is never read, so the absence loses nothing
-    and the archive must keep loading exactly as it did before the field
-    existed."""
+    """An uncarried card loses nothing when the old archive omits the slot."""
     from legoesm.ocean.restart import load_run_restart, save_run_restart
 
     _, _, state = _base_state()
