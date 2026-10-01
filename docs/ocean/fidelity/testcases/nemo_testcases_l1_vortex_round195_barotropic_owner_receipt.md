@@ -175,7 +175,7 @@ last bit.
   `"unmapped_citations": []`, `"citations_found": 2`, worktree clean at
   commit `5155d1318da844f2ab586d4183f2e4411202fcbb`
   (`phase3/round195/citations.json`). Its planted control, shifting
-  `stprk3_stg.f90:421-429` by two lines, fires
+  the compiled barotropic-correction span cited above by two lines, fires
   `SYMBOL-NOT-AT-LINE ... that symbol identifies line 421` and exits 1
   (`citations_plant.json`).
 * **Focused battery**, run serialized after confirming no other pytest was on
