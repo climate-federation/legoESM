@@ -467,7 +467,8 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
             f"choose a lane that supports them.")
 
 
-def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
+def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
+                                 *, bundle=None):
     """The FV3 duo as a COLUMN model for the MPAS lane (route A).
 
     The MPAS lane consumes the whole ExperimentConfig surface, so the
@@ -489,7 +490,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
         FV3DuoConfig,
         FV3DuoDynamicsModel,
     )
-    from legoesm.grids.factory import create_fv3_duo_grid
 
     refused = []
     if getattr(config, "sponge_enabled", False):
@@ -514,24 +514,27 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     if eta is None:
         refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}} "
                        "or the CAM6 L32 table at 32)")
-    # Anything the driver regrids onto self.grid in setup() lands on the
-    # STANDARD cubed-sphere cell centres, which are NOT the duo's A-grid
-    # (MEASURED 2026-09-26, C12: 1.6 deg offsets on matching faces, faces
-    # 2-4 permuted) -- until M6 builds the forcings on the column mesh,
-    # every such input is refused rather than misplaced.
-    if config.dataset != "analytical":
-        refused.append(f"dataset={config.dataset!r} (SST/SIC regrid on the "
-                       "driver grid is M6)")
-    if config.topography != "flat":
-        refused.append(f"topography={config.topography!r} (an elevation "
-                       "file is M6; with ic='era5' the terrain is ERA5's own "
-                       "phis, del-2 filtered topo_smoothing passes, as on "
-                       "the MPAS lane)")
-    if config.use_multilayer_land:
-        refused.append("use_multilayer_land=True (land data regrid is M6)")
-    if config.radiation != "none":
-        refused.append(f"radiation={config.radiation!r} (ozone/aerosol/solar "
-                       "boundary regrids are M6)")
+    # Setup-time regrids (topography, SST/SIC, land, ozone) land on
+    # ``self.grid``, which the driver sets to the duo's own column mesh
+    # at grid-creation time (M6, ``ModelDriver._create_grid``) -- the
+    # standard cubed-sphere centres are NOT the duo's A-grid (MEASURED
+    # 2026-09-26, C12: 1.6 deg offsets).  The factory is handed that same
+    # grid bundle so the model's mesh is the driver's mesh.
+    if bundle is None:
+        refused.append("the driver did not build the duo grid at grid "
+                       "creation (ModelDriver._create_grid, M6); setup-time "
+                       "regrids would land on the standard cubed sphere")
+    # The column lane's DYNAMICS terrain is the ERA5 IC's own phis (the
+    # grid is rebuilt with it, del-2 filtered -- the MPAS lane's choice);
+    # a topography file / analytic mountain feeds land fraction and CMOR
+    # orog only.  Under the analytic baroclinic-wave IC (flat-terrain
+    # balanced) a mountain would be placed in the diagnostics and never
+    # reach dynamics -- refused rather than silently flat (codex M6 r1).
+    if config.topography != "flat" and config.ic != "era5":
+        refused.append(f"topography={config.topography!r} with ic="
+                       f"{config.ic!r} (only ic='era5' carries a dynamics "
+                       "terrain on this lane; the file/mountain would be "
+                       "diagnostic-only while dynamics stayed flat)")
     # The column model's mass block is FV3's nwat block on the slot list
     # the driver's tracer registry names (3 warm-rain species, or the six
     # water species + numbers for an ice scheme): every registered tracer
@@ -578,7 +581,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     validate_microphysics_tracer_slots(
         config.microphysics, registry.n_tracers,
         context="fv3_duo column lane tracer slots")
-    bundle = create_fv3_duo_grid(gc.resolution)
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
                          "(ctx['ectx'] with amat6) for the c2l column winds")
@@ -593,8 +595,13 @@ def create_atmosphere_dycore(
     grid,
     sigma,
     coeff_grid=None,
+    fv3_duo_bundle=None,
 ) -> Any:
     """Resolve and instantiate the configured atmosphere dynamical core.
+
+    ``fv3_duo_bundle``: the duo grid the driver built at grid creation
+    (column lane only); the column model is built ON it so its mesh is
+    the grid every forcing was regridded onto.
 
     Parameters
     ----------
@@ -960,7 +967,8 @@ def create_atmosphere_dycore(
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if (solver_name == "fv3_duo_primitive_equations"
             and getattr(config.dycore, "fv3_duo_column_lane", False)):
-        return _create_fv3_duo_column_model(config, gc, model_type)
+        return _create_fv3_duo_column_model(config, gc, model_type,
+                                            bundle=fv3_duo_bundle)
     if solver_name == "fv3_duo_primitive_equations":
         # Slice 1 contract, enforced LOUDLY. The core SUPPORTS moist
         # coupling (zvir != 0) on both arms now, but this lane never

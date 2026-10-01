@@ -35,7 +35,9 @@ from legoesm.core.field import Field
 from legoesm.core.fv3_native_physics_coupling import (
     FV3_WATER_SPECIES, apply_column_increments_sixface_jax,
     column_view_sixface_jax, stack_held_suarez_metrics)
-from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+from legoesm.grids.fv3_native_gridstruct import (
+    FV3_KAPPA, FV3_OMEGA, FV3_RADIUS_M,
+)
 from legoesm.grids.vertical import create_hybrid_coordinate
 from legoesm.timestepping.integration import (
     refuse_unthreaded_stateful_physics)
@@ -51,7 +53,11 @@ DUO_COLUMN_TRACER_NAMES = FV3_WATER_SPECIES[:3]
 class DuoColumnMesh(NamedTuple):
     """What the MPAS lane and its physics read off ``model.mesh``: cell
     lat/lon [rad] and area [m^2] per column, no edge topology (a frontal
-    GWD source, which needs gradients, is refused on it)."""
+    GWD source, which needs gradients, is refused on it).  Per-cell 1-D
+    like the Voronoi mesh (``grid_shape_2d == (nCells,)``), so every
+    setup-time regrid (topography, SST/SIC, land, ozone) lands on the
+    duo's own A-grid centres -- the driver's standard cubed-sphere
+    centres are NOT these (MEASURED 2026-09-26: 1.6 deg offsets)."""
     latCell: jax.Array
     lonCell: jax.Array
     areaCell: jax.Array
@@ -59,6 +65,61 @@ class DuoColumnMesh(NamedTuple):
     grid_lat: jax.Array
     grid_lon: jax.Array
     grid_shape_2d: tuple
+    lat: jax.Array
+    lon: jax.Array
+
+    # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
+    # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the
+    # six-face context is built with: areas, metrics, Coriolis), not
+    # legoESM's -- 3.1e-5 relative apart; a mesh reporting one radius
+    # while its areas use another would be a hidden choice.
+    @property
+    def grid_area(self) -> jax.Array:
+        return self.areaCell
+
+    @property
+    def grid_total_area(self) -> jax.Array:
+        return jnp.sum(self.areaCell)
+
+    @property
+    def grid_coriolis(self) -> jax.Array:
+        return 2.0 * FV3_OMEGA * jnp.sin(self.latCell)
+
+    @property
+    def grid_radius(self) -> float:
+        return FV3_RADIUS_M
+
+    @property
+    def radius(self) -> float:
+        return FV3_RADIUS_M
+
+    @property
+    def grid_n_columns(self) -> int:
+        return self.nCells
+
+    def to_columns(self, field):
+        return field
+
+    def from_columns(self, cols):
+        return cols
+
+
+def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
+    """The column mesh of a duo grid context: the six faces' compute-
+    window A-grid centres and areas, flattened ``(6, n, n) -> (6*n*n,)``
+    row-major (the model's ``_columns`` order).  Built by the driver at
+    grid-creation time so the forcings are regridded onto it, and by the
+    model from the same context -- identical by construction."""
+    ci = slice(ng, ng + n)
+    def cols(key):
+        return np.stack([ctx_np["gs6"][t][key][ci, ci]
+                         for t in range(6)]).reshape(6 * n * n)
+    lat, lon, area = cols("agrid_lat"), cols("agrid_lon"), cols("area")
+    jlat, jlon = jnp.asarray(lat), jnp.asarray(lon)
+    return DuoColumnMesh(
+        latCell=jlat, lonCell=jlon, areaCell=jnp.asarray(area),
+        nCells=int(lat.shape[0]), grid_lat=jlat, grid_lon=jlon,
+        grid_shape_2d=(int(lat.shape[0]),), lat=jlat, lon=jlon)
 
 
 class FV3DuoColumnState(NamedTuple):
@@ -115,17 +176,7 @@ class FV3DuoColumnModel:
         self._tab = dyn.sixface_halo_tables
         self._amat6, _, self._wv6 = stack_held_suarez_metrics(ctx)
         ci = slice(self.ng, self.ng + self.n)
-        lat = self._columns(np.stack([ctx["gs6"][t]["agrid_lat"][ci, ci]
-                                      for t in range(6)]))
-        lon = self._columns(np.stack([ctx["gs6"][t]["agrid_lon"][ci, ci]
-                                      for t in range(6)]))
-        area = self._columns(np.stack([ctx["gs6"][t]["area"][ci, ci]
-                                       for t in range(6)]))
-        self.mesh = DuoColumnMesh(
-            latCell=jnp.asarray(lat), lonCell=jnp.asarray(lon),
-            areaCell=jnp.asarray(area), nCells=int(lat.shape[0]),
-            grid_lat=jnp.asarray(lat), grid_lon=jnp.asarray(lon),
-            grid_shape_2d=(6, self.n, self.n))
+        self.mesh = build_duo_column_mesh(ctx, self.n, self.ng)
         hs6 = ctx.get("hs6")
         self._phis = (np.zeros(self.mesh.nCells) if hs6 is None else
                       self._columns(np.stack([np.asarray(hs6[t])[ci, ci]

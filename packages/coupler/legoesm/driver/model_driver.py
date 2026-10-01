@@ -1954,6 +1954,23 @@ class ModelDriver:
                 nx=gc.resolution, ny=gc.resolution, nlev=gc.nlev,
                 dx=10_000.0, dy=10_000.0,
             )
+        elif (gc.grid_type == "cubed_sphere"
+              and getattr(self.config.dycore, "fv3_duo_column_lane", False)):
+            # M6: the FV3 duo column lane's grid IS the duo's column mesh
+            # (its six faces' A-grid centres, per-cell like the Voronoi
+            # mesh), built here so every setup-time regrid -- topography,
+            # SST/SIC, land, ozone -- lands on the columns the model
+            # steps.  The standard cubed-sphere centres are NOT these
+            # (MEASURED 2026-09-26, C12: 1.6 deg offsets).  The bundle is
+            # handed to the dycore factory so the model's mesh is this
+            # one by construction.
+            from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+                build_duo_column_mesh,
+            )
+            from legoesm.grids.factory import create_fv3_duo_grid
+            self._fv3_duo_bundle = create_fv3_duo_grid(gc.resolution)
+            bnd = self._fv3_duo_bundle
+            self.grid = build_duo_column_mesh(bnd.ctx_np, bnd.n, bnd.ng)
         else:
             # cubed_sphere / gaussian / mpas.  mpas keeps the driver's
             # 50-iteration Lloyd relaxation default; unknown grid types raise
@@ -2233,7 +2250,25 @@ class ModelDriver:
         # a different viscosity.
         coeff_grid = self._coeff_grid()
         self.model = create_atmosphere_dycore(
-            self.config, self.grid, self.sigma, coeff_grid=coeff_grid)
+            self.config, self.grid, self.sigma, coeff_grid=coeff_grid,
+            fv3_duo_bundle=getattr(self, "_fv3_duo_bundle", None))
+        if self._fv3_duo_column_model() is not None:
+            # the model's own mesh (same values as the grid built in
+            # _create_grid, by construction -- asserted) and the hybrid
+            # coordinate of ITS ak/bk table replace the driver's
+            # provisional ones, so every later consumer (ozone p-grid,
+            # CMOR levels, land) reads the model's.
+            m = self.model.mesh
+            for k in ("latCell", "lonCell", "areaCell"):
+                if not np.array_equal(np.asarray(getattr(m, k)),
+                                      np.asarray(getattr(self.grid, k))):
+                    raise AssertionError(
+                        f"fv3_duo column lane: model mesh {k} differs from "
+                        "the grid the forcings were regridded onto")
+            self.grid = m
+            self.sigma = self.model.sigma_coord
+            self._grid_lat = self.grid.grid_lat
+            self._grid_lon = self.grid.grid_lon
 
         # Stage 3-B: under lat-lon band MPI the dycore model needs its
         # config's ``pole_v_bc`` flags set per this rank's pole-touch
@@ -2552,6 +2587,10 @@ class ModelDriver:
         self._reject_shallow_water_unrunnable()
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
+
+        if self._fv3_duo_column_model() is not None:
+            self._fv3_duo_column_init_state()
+            return
 
         if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
@@ -4276,7 +4315,10 @@ class ModelDriver:
                 _cmip_fland = gather_voronoi_field(
                     self._f_land, _vl.partition, "cell")
             self.diagnostics.set_cmip_grid_info(
-                grid_type=self.config.grid.grid_type,
+                # the duo column mesh is a cell list: the Voronoi branch
+                # (lat/lon KD-tree weights), not the standard cube's
+                grid_type=("mpas" if self._fv3_duo_column_model() is not None
+                           else self.config.grid.grid_type),
                 grid=_cmip_grid,
                 start_year=self.config.start_year,
             )
@@ -8638,47 +8680,20 @@ class ModelDriver:
         if getattr(self, "_ensemble_size", 1) not in (None, 1):
             raise NotImplementedError(
                 "fv3_duo column lane threads no ensemble axis")
-        cfg = self.config
         if getattr(self, "_fv3_duo_column_restored", False):
             if start_step == 0 and self._loaded_checkpoint_step_day is None:
                 raise ValueError(
                     "fv3_duo column lane: a checkpoint was loaded but "
                     "run() was called from step 0; pass the (step, day) "
                     "load_checkpoint returned.")
-            self.grid = self.model.mesh
-            self.sigma = self.model.sigma_coord
-            bundle = self.state.native
-        elif cfg.ic == "era5":
-            from legoesm.training.era5_to_state import era5_to_fv3_duo_bundle
-            era5 = self._fv3_duo_column_era5_terrain()
-            bundle = era5_to_fv3_duo_bundle(
-                era5, self.model, n_tracers=len(self.model.tracer_names))
-            logger.info(
-                "  fv3_duo column lane: ERA5 IC %s year %s, terrain del-2 "
-                "x%d, phis max %.0f m2/s2, p_s [%.0f, %.0f] Pa",
-                cfg.ic_path, cfg.start_year, int(cfg.topo_smoothing),
-                float(np.max(self.model._phis)),
-                float(jnp.min(bundle["press"]["ps"][:, self.model.ng:-self.model.ng,
-                                                    self.model.ng:-self.model.ng])),
-                float(jnp.max(bundle["press"]["ps"][:, self.model.ng:-self.model.ng,
-                                                    self.model.ng:-self.model.ng])))
-        else:
-            self.grid = self.model.mesh
-            self.sigma = self.model.sigma_coord
-            # the duo's own IC through the view (Kessler slots when on)
-            dyn = self.model.dyn
-            bundle = dyn.dcmip16_initial_state(do_pert=True)
-            # one slot per registered tracer name (the model's list order):
-            # vapour from the IC, every other species / number at zero
-            q0 = bundle["q"][0]
-            bundle = {**bundle,
-                      "q": [q0] + [jnp.zeros_like(q0)
-                                   for _ in self.model.tracer_names[1:]]}
-        if not getattr(self, "_fv3_duo_column_restored", False):
-            self.state = self.model.from_bundle(bundle)
+        if not (self.grid is self.model.mesh
+                and self.sigma is self.model.sigma_coord
+                and isinstance(self.state, self.model._state_type)):
+            raise AssertionError(
+                "fv3_duo column lane: the driver's grid / coordinate / state "
+                "are not the column model's (setup order broken)")
         dyn = self.model.dyn
         self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
-        self._phis_data = self.state.phis.data
         logger.info(
             "  fv3_duo COLUMN lane: C%d km=%d moist=%s, %d columns through "
             "_run_mpas", dyn.grid.n, dyn.config.km, dyn.config.moist,
@@ -9396,6 +9411,43 @@ class ModelDriver:
             return np.zeros((6, m_a, m_a), dtype=np.float64)
         return np.stack([np.asarray(h, dtype=np.float64) for h in hs6])
 
+    def _fv3_duo_column_init_state(self) -> None:
+        """The column lane's fresh IC at setup (M6: before land / physics
+        / diagnostics read the state, as on the MPAS lane): ERA5 on the
+        grid REBUILT with ERA5's terrain, else the closed lane's own
+        DCMIP16 baroclinic wave through the view.  One tracer slot per
+        registered name.  ``_phis_data`` stays what ``_create_topography``
+        loaded (ETOPO: land fraction + CMOR ``orog``; zeros when flat),
+        as on the MPAS lane -- the dynamics terrain is the state's
+        ``phis`` (ERA5's, del-2 filtered)."""
+        cfg = self.config
+        if cfg.ic == "era5":
+            from legoesm.training.era5_to_state import era5_to_fv3_duo_bundle
+            era5 = self._fv3_duo_column_era5_terrain()
+            bundle = era5_to_fv3_duo_bundle(
+                era5, self.model, n_tracers=len(self.model.tracer_names))
+            ng = self.model.ng
+            logger.info(
+                "  fv3_duo column lane: ERA5 IC %s year %s, terrain del-2 "
+                "x%d, phis max %.0f m2/s2, p_s [%.0f, %.0f] Pa",
+                cfg.ic_path, cfg.start_year, int(cfg.topo_smoothing),
+                float(np.max(self.model._phis)),
+                float(jnp.min(bundle["press"]["ps"][:, ng:-ng, ng:-ng])),
+                float(jnp.max(bundle["press"]["ps"][:, ng:-ng, ng:-ng])))
+        else:
+            bundle = self.model.dyn.dcmip16_initial_state(do_pert=True)
+            q0 = bundle["q"][0]
+            bundle = {**bundle,
+                      "q": [q0] + [jnp.zeros_like(q0)
+                                   for _ in self.model.tracer_names[1:]]}
+        self.state = self.model.from_bundle(bundle)
+        self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
+        self._ensemble_size = cfg.ensemble_size
+        self._state_template = self.state
+        if self._ensemble_size != 1:
+            raise NotImplementedError(
+                "fv3_duo column lane threads no ensemble axis")
+
     def _fv3_duo_column_rewrap(self, grid):
         """Re-wrap the column model on *grid* (same deck, same tracer
         names); the factory's model is discarded.  The state the driver
@@ -9407,12 +9459,32 @@ class ModelDriver:
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoDynamicsModel,
         )
-        old = self.model.dyn
+        old = self.model
         self.model = FV3DuoColumnModel(
-            FV3DuoDynamicsModel(grid, old.config),
-            tracer_names=self.model.tracer_names)
+            FV3DuoDynamicsModel(grid, old.dyn.config),
+            tracer_names=old.tracer_names)
+        # a rebuild changes terrain only: the geometry every setup-time
+        # regrid was placed on must be unchanged (asserted, not assumed)
+        for k in ("latCell", "lonCell", "areaCell"):
+            if not np.array_equal(np.asarray(getattr(self.model.mesh, k)),
+                                  np.asarray(getattr(old.mesh, k))):
+                raise AssertionError(
+                    f"fv3_duo column lane: grid rebuild changed {k}; the "
+                    "forcings regridded at setup no longer sit on the "
+                    "model's columns")
         self.grid = self.model.mesh
         self.sigma = self.model.sigma_coord
+        self._grid_lat = self.grid.grid_lat
+        self._grid_lon = self.grid.grid_lon
+        self._fv3_duo_bundle = grid
+        # a state already built (M6: the IC is built at setup) belongs to
+        # the OLD model by identity; re-view its bundle through the new
+        # one (its phis is the new grid's terrain)
+        st = getattr(self, "state", None)
+        if isinstance(st, old._state_type) and st.native is not None:
+            self.state = self.model.from_bundle(st.native)
+            self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
+            self._state_template = self.state
         return self.model
 
     def _fv3_duo_column_era5_terrain(self):
@@ -9420,8 +9492,11 @@ class ModelDriver:
         is REBUILT with the ERA5 terrain (phis_fn on the padded A-grid,
         FV3's del-2 filter ON the duo grid, cfg.topo_smoothing passes --
         the same field the MPAS path reads for its Laplacian passes) and
-        the column model re-wrapped on it.  A restart never comes here:
-        the checkpoint carries the terrain (``fv3duo_hs6``).  Returns the
+        the column model re-wrapped on it.  Runs at setup (M6, from
+        ``_init_state``) on EVERY ic='era5' run, a restarted one included
+        -- as the MPAS lane builds its ERA5 IC at setup -- so the IC file
+        is needed at setup; ``load_checkpoint`` then replaces the terrain
+        and state with the checkpoint's (``fv3duo_hs6``).  Returns the
         loaded ERA5 dataset for the IC builder."""
         from legoesm.grids.factory import create_fv3_duo_grid
         from legoesm.training.era5_to_state import (

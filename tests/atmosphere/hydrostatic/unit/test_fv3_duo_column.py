@@ -533,7 +533,7 @@ def test_driver_column_lane_refusals(tmp_path):
                        (dict(mpas_qv_smooth_del4_m4s=1e14),
                         "MPAS-lane knob|smoothing"),
                        (dict(held_suarez_forcing=True), "hswf"),
-                       (dict(topography="gaussian"), "topography"),
+                       (dict(topography="gaussian"), "only ic='era5'"),
                        (dict(convection="kuo"), "grid operator"),
                        (dict(convection="kain_fritsch"), "grid operator")):
         drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
@@ -864,3 +864,213 @@ def test_driver_column_lane_accepts_ice_microphysics_with_nine_slots(tmp_path):
     assert len(drv.state.native["q"]) == 9
     assert all(np.isfinite(np.asarray(a)).all() for a in drv.state.native["q"])
     assert set(drv.state.tracers) == set(FULL_NAMES)
+
+
+# ---------------------------------------------------------------------
+# M6: the forcings are regridded onto the duo's OWN columns at setup
+# ---------------------------------------------------------------------
+
+def _write_sst_file(path):
+    """A small monthly SST/SIC file whose SST varies in lat AND lon, so a
+    field sampled at the wrong cell centres is measurably wrong."""
+    import xarray as xr
+    nlat, nlon, nt = 36, 72, 12
+    lat = np.linspace(-89, 89, nlat)
+    lon = np.linspace(0, 357.5, nlon)
+    la, lo = np.deg2rad(lat)[:, None], np.deg2rad(lon)[None, :]
+    tos = (285.0 + 15.0 * np.cos(la) * np.cos(lo)
+           + 5.0 * np.sin(2 * la) * np.sin(lo)) * np.ones((nt, 1, 1))
+    sic = np.zeros((nt, nlat, nlon))
+    ds = xr.Dataset({"tosbcs": (("time", "lat", "lon"), tos),
+                     "siconcbcs": (("time", "lat", "lon"), sic)},
+                    coords={"time": np.arange(nt, dtype=float),
+                            "lat": lat, "lon": lon})
+    ds["tosbcs"].attrs["units"] = "K"
+    ds["siconcbcs"].attrs["units"] = "%"
+    ds.to_netcdf(path)
+
+
+def _sst_analytic(lat, lon):
+    return (285.0 + 15.0 * np.cos(lat) * np.cos(lon)
+            + 5.0 * np.sin(2 * lat) * np.sin(lon))
+
+
+def _elev_analytic(lat, lon):
+    """Elevation [m]: a continent (positive) around (30N, 100E), ocean
+    (negative) elsewhere -- lat AND lon dependent."""
+    return 2000.0 * np.exp(-((lat - 0.52) ** 2 + (lon - 1.75) ** 2) / 0.3) - 300.0
+
+
+def _write_elevation_file(path):
+    import xarray as xr
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(0.0, 360.0, 2.0)
+    la, lo = np.deg2rad(lat)[:, None], np.deg2rad(lon)[None, :]
+    z = _elev_analytic(la, lo) * np.ones((lat.size, lon.size))
+    xr.Dataset({"z": (("lat", "lon"), z)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+
+
+def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
+    """The driver's grid IS the column mesh from grid creation on
+    (per-cell, like the Voronoi mesh), so the setup-time regrids -- an
+    elevation file, its derived land fraction, a custom SST file -- are
+    sampled at the duo's A-grid centres.  The gate: each field matches
+    its analytic value at the DUO's cell positions, and the same regrid
+    on the standard cubed sphere's centres (the pre-M6 placement,
+    MEASURED 1.6 deg off) does NOT.  The dynamics terrain is the ERA5
+    IC's own mountain (nonzero, smoothed), NOT the elevation file (which
+    is land fraction + CMOR orog only, as on the MPAS lane).  The run
+    then completes through gray radiation, and the driver's grid /
+    vertical coordinate / state are the model's own objects."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import FV3DuoColumnState
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.factory import create_grid
+    from tests.atmosphere.hydrostatic.unit.test_fv3_duo_era5_orography import (
+        _synthetic_era5)
+    import legoesm.training.era5_to_state as e2s
+    era5 = _synthetic_era5(1500.0)
+    monkeypatch.setattr(e2s, "load_era5_ic", lambda path, year: era5)
+    sst_path, elev_path = tmp_path / "sst.nc", tmp_path / "elev.nc"
+    _write_sst_file(sst_path)
+    _write_elevation_file(elev_path)
+    cfg = _driver_cfg(
+        tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
+        ic="era5", ic_path="synthetic", topo_smoothing=2,
+        topography=str(elev_path), dataset="custom",
+        forcing_path=str(sst_path), sst_var="tosbcs", sic_var="siconcbcs",
+        sst_offset=0.0, sic_scale=0.01, radiation="gray")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    mesh = drv.model.mesh
+    assert drv.grid is mesh and drv.sigma is drv.model.sigma_coord
+    assert mesh.grid_shape_2d == (mesh.nCells,) == (6 * N * N,)
+    lat, lon = np.asarray(mesh.latCell), np.asarray(mesh.lonCell)
+    cube = create_grid("cubed_sphere", N)
+    clat, clon = np.asarray(cube.lat).reshape(-1), np.asarray(cube.lon).reshape(-1)
+
+    # elevation file -> _phis_data at the duo columns (bilinear from a
+    # 2 deg file of a smooth field, ocean clipped to zero by the loader
+    # default, no smoothing on a cell list; the cube placement is much
+    # worse)
+    phis = np.asarray(drv._phis_data).reshape(-1)
+    assert phis.shape == (mesh.nCells,)
+    want = constants.g * np.maximum(_elev_analytic(lat, lon), 0.0)
+    err_duo = np.abs(phis - want).max() / (constants.g * 2000.0)
+    err_cube = np.abs(phis - constants.g * np.maximum(
+        _elev_analytic(clat, clon), 0.0)).max() / (constants.g * 2000.0)
+    assert err_duo < 0.02, err_duo
+    assert err_cube > 4.0 * err_duo, (err_duo, err_cube)
+    # ... and the land fraction it derives: the continent sits where the
+    # analytic elevation is positive AT THE DUO COLUMNS
+    f_land = np.asarray(drv._f_land).reshape(-1)
+    assert f_land.shape == (mesh.nCells,) and 0.0 < f_land.mean() < 1.0
+    land_duo = (f_land > 0.5) == (_elev_analytic(lat, lon) > 0.0)
+    land_cube = (f_land > 0.5) == (_elev_analytic(clat, clon) > 0.0)
+    assert land_duo.mean() > 0.97, land_duo.mean()
+    assert land_cube.mean() < land_duo.mean()
+
+    # SST: the file's analytic field sampled at the duo columns.  Bilinear
+    # from a 5x5 deg file of a smooth field: ~0.03 K; a 1.6 deg placement
+    # offset is ~0.4 K (15 K/rad * 0.028 rad), so 0.1 K catches the pre-M6
+    # placement (GLM: 0.5 K would have let it pass)
+    sst = np.asarray(drv._forcing.sst[0]).reshape(-1)
+    assert sst.shape == (mesh.nCells,)
+    err_duo = np.abs(sst - _sst_analytic(lat, lon)).max()
+    err_cube = np.abs(sst - _sst_analytic(clat, clon)).max()
+    assert err_duo < 0.1, err_duo
+    assert err_cube > 4.0 * err_duo, (err_duo, err_cube)
+
+    # dynamics terrain = ERA5's mountain (rebuilt grid), not the file
+    dyn_phis = np.asarray(drv.state.phis.data).reshape(-1)
+    assert 1000.0 * constants.g < dyn_phis.max() <= 1500.0 * constants.g
+    assert np.abs(dyn_phis - phis).max() > 500.0 * constants.g
+    hs6 = drv._fv3_duo_column_hs6(drv.model)
+    assert np.abs(hs6).max() == dyn_phis.max()
+
+    assert drv.run() == "COMPLETED"
+    assert isinstance(drv.state, FV3DuoColumnState)
+    assert np.isfinite(np.asarray(drv.state.native["state"]["pt"])).all()
+
+
+def _fake_surface_map_by_latitude(path, lat_deg, lon_deg):
+    """A CLM map whose plant type is boreal needleleaf (PFT 2) exactly on
+    the columns north of 60N and bare soil elsewhere -- at the latitudes
+    the LOADER was handed, so the PFT-weighted land parameters (root
+    depth) come back in the duo's column order or not at all."""
+    n = int(np.asarray(lat_deg).size)
+    north = np.asarray(lat_deg) > 60.0
+    pft = np.zeros((n, 17)); pft[~north, 0] = 1.0; pft[north, 2] = 1.0
+    o = np.ones(n)
+    return dict(
+        pft_fractions=jnp.asarray(pft),
+        theta_wp=jnp.asarray(0.12 * o), theta_fc=jnp.asarray(0.30 * o),
+        glacier_frac=jnp.asarray(np.zeros(n)),
+        pct_sand=jnp.asarray(40.0 * o), pct_clay=jnp.asarray(20.0 * o),
+        theta_r=jnp.asarray(0.05 * o), theta_sat=jnp.asarray(0.45 * o),
+        alpha_vg=jnp.asarray(2.0 * o), n_vg=jnp.asarray(1.4 * o),
+        K_sat=jnp.asarray(1.0e-5 * o),
+    )
+
+
+def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypatch):
+    """The two lifted refusals the placement test does not cover: the
+    multilayer land model builds its columns on the duo mesh (the
+    boreal-forest cells the synthetic map puts north of 60N are exactly
+    the columns with latCell > 60N -- loader latitudes in duo column
+    order, read back through the PFT-weighted root depth; soil state
+    (nCells, n_layers), advancing) and RRTMGP radiation runs
+    on it (daily-mean surface SW at the columns finite, latitude-
+    structured)."""
+    import legoesm.grids.topography as topo
+    import legoesm.land.clm_surface_map as clm
+    from legoesm.driver.model_driver import ModelDriver
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map_by_latitude)
+    monkeypatch.setattr(topo, "load_land_fraction",
+                        lambda grid, path, *a, **k: jnp.full(grid.lat.shape, 0.5))
+    cfg = _driver_cfg(
+        tmp_path, days=3 * 600.0 / 86400.0, dt=600.0,
+        radiation="rrtmgp", rad_update_steps=1,
+        land_mask_path="synthetic.nc", use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # the canopy schemes refuse to start without the per-PFT surfdata
+        # file; the soil column + placement is what this test is about
+        land_surface_scheme="simple_seb")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    mesh = drv.model.mesh
+    lat_deg = np.degrees(np.asarray(mesh.latCell))
+    st0 = drv._land_ml_state
+    assert st0 is not None and st0.theta_soil.shape == (mesh.nCells, 6)
+    rd = np.asarray(drv.physics.land_ml_params.root_depth).reshape(-1)
+    north = lat_deg > 60.0
+    assert north.any() and (~north).any()
+    assert np.unique(rd[north]).size == 1 and np.unique(rd[~north]).size == 1
+    assert rd[north][0] != rd[~north][0], (rd[north][0], rd[~north][0])
+    assert drv.run() == "COMPLETED"
+    st1 = drv._land_ml_state
+    assert np.isfinite(np.asarray(st1.T_soil)).all()
+    assert not np.array_equal(np.asarray(st1.T_soil), np.asarray(st0.T_soil))
+    sfc = drv.model._sfc_diag
+    assert sfc is not None
+    from legoesm.core.state import MPAS_SFC_DIAG_BASE_KEYS, MPAS_SFC_DIAG_EXTRA_KEYS
+    keys = MPAS_SFC_DIAG_BASE_KEYS + MPAS_SFC_DIAG_EXTRA_KEYS
+    f = sfc[keys.index("sw_down_sfc")]
+    sw = np.asarray(getattr(f, "data", f)).reshape(-1)
+    assert sw.shape == (mesh.nCells,) and np.isfinite(sw).all()
+    assert sw.min() >= 0.0 and sw.max() > 100.0
+    # daily-mean insolation (no diurnal cycle on this deck): a strong
+    # latitude structure on the duo columns, not a uniform value
+    corr = np.corrcoef(sw, np.cos(np.asarray(mesh.latCell)))[0, 1]
+    assert corr > 0.5, corr
+
+
+def test_m6_the_model_is_built_on_the_grid_the_forcings_saw(tmp_path):
+    """The factory refuses to build its own grid: without the bundle the
+    driver built at grid creation, the model's mesh could differ from
+    the one the forcings were regridded onto."""
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    cfg = _driver_cfg(tmp_path)
+    with pytest.raises(ValueError, match="did not build the duo grid"):
+        create_atmosphere_dycore(cfg, None, None)
