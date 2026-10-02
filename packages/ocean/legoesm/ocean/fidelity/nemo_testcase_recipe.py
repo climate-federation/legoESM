@@ -167,6 +167,17 @@ def _model_config(
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
             nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
+            # DECISION 85 (operator note BT), measured in rounds 194/198
+            # and landed here.  In NEMO's vector-invariant RK3 stage the
+            # continuity solve is called TWICE and the two calls are not the
+            # same statement: stprk3_stg.f90:289-300 hands wzv the RAW stage
+            # velocity for the momentum program, while the tracer program
+            # re-solves it on the transports (traadv.f90:274); sshwzv.f90:
+            # 271-299 is the solve itself.  Both fields are STATED here, per
+            # decision 75 -- the split is NOT inferred from the time
+            # integrator, the momentum form or wzv_call2_evaluation.
+            wzv_call2_evaluation="nemo_literal",
+            nemo_stage_momentum_wzv_split=True,
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",
