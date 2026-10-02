@@ -13,6 +13,9 @@ ARTIFACTS = ROOT / (
 )
 PATCH = ARTIFACTS / "traadv_round88_skip_off_runoff_probe.patch"
 RUN = ARTIFACTS / "run.sh"
+DEBUG_RUN = ARTIFACTS.parent / (
+    "nemo_testcase_l4_orca2_round88_rung0_frame_debug/run.sh"
+)
 SOURCE = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
     "ORCA2_OMIP_L4_R87FRAMES/MY_SRC/traadv.F90"
@@ -49,10 +52,17 @@ def test_repair_is_additions_only_and_scopes_all_stage1_probe_writes(
     assert stage1_probe.count("CLOSE(993)") == 1
 
 
-def test_launcher_uses_a_fresh_target_and_has_no_time_dependency() -> None:
+def test_retracted_launcher_refuses_before_using_the_candidate() -> None:
     text = RUN.read_text()
-    assert "TARGET_CFG=ORCA2_OMIP_L4_R88FRAMES" in text
-    assert "round88/acquisition" in text
+    assert "runoff attribution retracted" in text
+    assert text.index("exit 79") < text.index("TARGET_CFG=ORCA2_OMIP_L4_R88FRAMES")
+
+
+def test_debug_launcher_uses_exact_failed_source_and_fresh_target() -> None:
+    text = DEBUG_RUN.read_text()
+    assert "SOURCE_CFG=ORCA2_OMIP_L4_R87FRAMES" in text
+    assert "TARGET_CFG=ORCA2_OMIP_L4_R88FRAMEDEBUG" in text
+    assert "-O0 -g -fbacktrace -fcheck=bounds" in text
+    assert "traadv\\.f90:[0-9]+" in text
     assert "/usr/bin/time" not in text
-    assert "--admit-existing" in text
-    assert "ORCA2_ROUND88_RUNG0_FRAMES_ACQUISITION_PASS" in text
+    assert "ORCA2_ROUND88_RUNG0_FRAME_DEBUG_REPRODUCED" in text

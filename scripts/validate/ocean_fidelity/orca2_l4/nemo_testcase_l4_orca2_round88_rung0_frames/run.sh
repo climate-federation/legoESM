@@ -2,6 +2,9 @@
 # Operator-executed rung-0 frame acquisition after the OFF-runoff probe repair.
 set -Eeuo pipefail
 
+printf 'REFUSE: round-88 runoff attribution retracted; use ../nemo_testcase_l4_orca2_round88_rung0_frame_debug/run.sh\n' >&2
+exit 79
+
 refuse_unexpected() {
   local status=$?
   printf 'REFUSE: round-88 rung-0 frame acquisition failed at line %s (exit %s)\n' \
