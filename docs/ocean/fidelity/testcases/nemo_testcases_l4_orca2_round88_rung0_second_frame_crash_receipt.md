@@ -32,7 +32,7 @@ The optimized addresses mechanically resolve the failure stack to
 `tra_adv_trp_t` called from `stp_RK3_stg`; they do not carry source-line debug
 information. The inherited stage-1 WZV probe does include an unconditional
 canonicalization of `rnf`
-(`ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-288`), while the
+(`ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-287`), while the
 resolved rung-0 deck has `ln_rnf=F` and the compiled allocator allocates `rnf`
 only inside that switch
 (`ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90:195-216`). That makes the

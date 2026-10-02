@@ -1165,9 +1165,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90:90-108': [
         "IF( ln_timing )   CALL timing_start('stp_RK3')",
         'CALL r84_dump_frame( kstp, 0, Nbb )', 19],
-    'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-288': [
-        'ALLOCATE( l4_e3t_kmm(jpi,jpj,jpk) )',
-        "&       l4_canon_2d(rnf,'T')", 16],
+    'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-287': [
+        'IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN',
+        "&       l4_canon_2d(rnf,'T')", 15],
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
         'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj) , &',
         'wndm(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , taum (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(6) )', 22],
