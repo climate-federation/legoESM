@@ -213,10 +213,10 @@ def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_subste
         # armed — the OMIP production barotropic path.  The model ctor
         # validates the literal (raises on unknown).
         barotropic_solver=barotropic_solver,
-        # Reduction strategy inside the distributed fixed-M PCG.  At M=60
-        # (the config default) "standard" costs 1 + 2*M batched allreduces
+        # Reduction strategy inside the distributed fixed-M PCG.  At M=20
+        # (this bench's poly pin) "standard" costs 1 + 2*M batched allreduces
         # per implicit solve and "single_reduce" (Chronopoulos-Gear) costs
-        # 1 + M -- 121 vs 61 latency-serialized global reductions, which is
+        # 1 + M -- 41 vs 21 latency-serialized global reductions, which is
         # what actually binds as the communicator reaches 256-512 ranks.
         # Not the default: it is a different (equivalent-in-exact-arithmetic)
         # recurrence, so it is opt-in and parity-gated, per the audit.
@@ -368,8 +368,8 @@ def main() -> int:
                    help="reduction strategy inside the distributed fixed-M "
                         "PCG (implicit_cn only). 'standard' costs 1+2M "
                         "batched allreduces per solve, 'single_reduce' "
-                        "(Chronopoulos-Gear) costs 1+M -- at the M=60 "
-                        "default that is 121 vs 61 latency-serialized "
+                        "(Chronopoulos-Gear) costs 1+M -- at this bench's "
+                        "M=20 that is 41 vs 21 latency-serialized "
                         "global reductions, the term that binds at "
                         "256-512 ranks. NOT a 2x step speedup: it also adds "
                         "one extra A_op (hence one extra halo exchange) in "
