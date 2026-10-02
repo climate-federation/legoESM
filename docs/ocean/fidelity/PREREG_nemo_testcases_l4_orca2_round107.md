@@ -46,3 +46,27 @@ the independent read-only review is clean. Otherwise the round is **HELD**.
 
 No configuration choice, threshold, stabilizer, carried-state change, sea-ice
 change, or `unmeasured_features` change is authorized.
+
+## Post-refutation preregistration — literal bottom-index loop
+
+Committed after R107-P1 through P3 were measured and before this arm. R107-P1
+is **CONFIRMED only as an unchanged-expression control**; no rank-complete
+oracle `zpvo_nw` operand was recorded. R107-P2 and P3 are **REFUTED**: removing
+the trailing masks worsens `acc_u_nw` from 438 to 3,150 magnitude differences
+and from 3,953 to 6,665 bit differences.
+
+The missing source statement precedes the recurrence. NEMO executes the U loop
+only through `mbku(ji,jj)` (`dynspg_ts.f90:1230`) and the V loop only through
+`mbkv(ji,jj)` (`dynspg_ts.f90:1263`). The mask builder makes a fully dry face's
+mask zero at every level but retains its bottom index as one
+(`dommsk.f90:223-230`); therefore multiplying every level by the face mask is
+not equivalent to the compiled loop. The second arm uses the unmasked live
+thicknesses and updates the accumulator only for `jk <= mbku/mbkv`, deriving
+those indices as the last wet mask level or one for a fully dry face. It leaves
+the recurrence operands and final scaling fixed.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R107-P6 | The literal `mbku` loop is the first owner of `ffu_nw` magnitude debt. | The source-loop arm makes all 438 `acc_u_nw` magnitude differences exact without introducing a new one. | Any magnitude remains or appears: **REFUTED**; acquire the rank-complete per-level `zpvo`, two thickness, neighbor-mask, term, and carried-accumulator record. |
+| R107-P7 | The literal loop also owns the 3,515 signed-zero-only `ffu_nw` differences. | `acc_u_nw` becomes bit-exact. | Magnitudes exact but bits remain: hold and acquire the per-level carried accumulator before changing production. |
+| R107-P8 | The same source statement closes every non-fold U accumulator magnitude while the registered northern V pair stays separate. | All four U accumulators are non-fold magnitude-exact; no claim is made for the V fold row. | Any U non-fold magnitude remains: hold at its first unequal operand. |
