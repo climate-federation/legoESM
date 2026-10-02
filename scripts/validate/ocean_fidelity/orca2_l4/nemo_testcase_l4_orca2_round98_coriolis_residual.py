@@ -209,8 +209,9 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     # The literal builder freezes at Kmm. On rung 0 this is the bridged state
     # eta; prove that by equality to all eight production-traced coefficients.
+    coefficient_eta = source_trace["coefficient_eta"][0]
     source_coeff = jax.device_get(_nemo_literal_een_coefficients(
-        state.eta.data, source_z, jnp.float64, scheme="een"))
+        coefficient_eta, source_z, jnp.float64, scheme="een"))
     coefficient_seed = {
         name: rhs_walk.score(np.asarray(source_coeff[name]),
                              np.asarray(source_trace[name][0]),
@@ -229,7 +230,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         raise GateError("application-bit plant fired")
 
     live_source = nemo_qco_live_vorticity_e3f_cgrid(
-        state.eta.data, source_z, jnp.float64, grid=card.recipe.grid,
+        coefficient_eta, source_z, jnp.float64, grid=card.recipe.grid,
         e3t_0=card.recipe.z_coord.nemo_e3t_0,
         tmask=card.recipe.z_coord.is_active,
         reference_e3f=source_divisor,
@@ -243,7 +244,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     one = jnp.asarray(1.0, dtype=jnp.float64)
     half = jnp.asarray(0.5, dtype=jnp.float64)
     quarter = jnp.asarray(0.25, dtype=jnp.float64)
-    eta = jnp.asarray(state.eta.data, dtype=jnp.float64)
+    eta = jnp.asarray(coefficient_eta, dtype=jnp.float64)
     area_eta = b(b(jnp.asarray(raw.e1t) * jnp.asarray(raw.e2t)) * eta)
     east = jnp.roll(area_eta, -1, axis=1)
     north = jnp.roll(area_eta, -1, axis=0)
@@ -268,7 +269,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     }
 
     fold_coeff = jax.device_get(_nemo_literal_een_coefficients(
-        state.eta.data, source_z, jnp.float64, scheme="een",
+        coefficient_eta, source_z, jnp.float64, scheme="een",
         _e3f_test_override=fold_only))
     if plant == "coefficient-bit":
         fold_coeff = dict(fold_coeff)

@@ -1196,6 +1196,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     if coefficient_evaluation == "nemo_literal":
         out["literal_coefficients"] = _nemo_literal_een_coefficients(
             eta, z_coord, dtype, scheme=scheme)
+        out["coefficient_eta"] = jnp.asarray(eta, dtype=dtype)
     out["coefficient_evaluation"] = coefficient_evaluation
     return out
 
@@ -2115,6 +2116,10 @@ def _run_substep_loop(
                 "ffv_ne": (_literal_cor_coeff["ffv_ne"]
                            if _literal_cor_coeff is not None
                            else _zero_cor_coeff),
+                "coefficient_eta": (
+                    een_pre["coefficient_eta"]
+                    if _literal_cor_coeff is not None
+                    else jnp.zeros_like(eta)),
                 "cor_u": jnp.asarray(_cor_u) * jnp.ones_like(U_bar_c),
                 "cor_v": jnp.asarray(_cor_v) * jnp.ones_like(V_bar_c),
                 "drag_coefficient_u": (
