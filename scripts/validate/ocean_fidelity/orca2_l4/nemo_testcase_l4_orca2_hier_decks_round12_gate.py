@@ -29,8 +29,8 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 RUNG1_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung1"
 )
-RUNG1_RECORD = RUNG1_ROOT / "record"
-RUNG1_ADMISSION = RUNG1_ROOT / "rung1_admission.json"
+RUNG1_RECORD = RUNG1_ROOT / "record_havtb1_superseded"
+RUNG1_ADMISSION = RUNG1_ROOT / "rung1_admission_havtb1_superseded.json"
 MAIN_RUNG0_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round90/"
     "acquisition/orca2_rung0_entry_stage_runoff_guarded_10step_np2"

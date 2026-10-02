@@ -23,6 +23,7 @@ def test_complete_hierarchy_is_admitted_at_authorized_background_boundary():
     assert report["status"] == "PASS_ORCA2_NEMO_HIERARCHY_RUNGS_1_10"
     assert [row["rung"] for row in report["rungs"]] == list(range(1, 11))
     assert [row["nn_havtb"] for row in report["rungs"]] == [0] * 6 + [1] * 4
+    assert {row["ln_spc_dyn"] for row in report["rungs"]} == {True}
     assert {row["frames"] for row in report["rungs"]} == {480}
     assert report["adjacent_rung_differences"]["rung7_to_rung6"] == {
         "namzdf.ln_zdfcst": ["ABSENT", ".true."],

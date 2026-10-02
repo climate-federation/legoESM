@@ -173,7 +173,7 @@ def test_every_hierarchy_cli_plant_reports_marker(module, plant, monkeypatch, ca
         # failure that escaped round 14's explicit exception inventory.
         raise gate.GateError(f"deterministic {plant} failure")
 
-    if module.__name__.endswith("round12_gate"):
+    if module.__name__.endswith(("round12_gate", "round19_gate")):
         monkeypatch.setattr(module, "evaluate", fail)
         argv = [module.__file__, "--plant", plant]
     else:

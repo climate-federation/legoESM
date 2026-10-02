@@ -193,6 +193,10 @@ def evaluate(*, plant: str = "none") -> dict[str, object]:
             expected_havtb = "1"
         actual_havtb = rung1.legacy._token(values["namzdf.nn_havtb"])
         require(actual_havtb == expected_havtb, f"rung-{level} nn_havtb changed")
+        require(
+            rung1.legacy._token(values["namagrif.ln_spc_dyn"]) == ".true.",
+            f"rung-{level} ln_spc_dyn changed",
+        )
 
         if level <= 6:
             superseded = root / "record_havtb1_superseded"
@@ -208,6 +212,7 @@ def evaluate(*, plant: str = "none") -> dict[str, object]:
                 "status": admission["status"],
                 "frames": admission["frames"]["frames"],
                 "nn_havtb": int(actual_havtb),
+                "ln_spc_dyn": True,
                 "regular_files": admission["sha_inventory"]["regular_files"],
             }
         )
