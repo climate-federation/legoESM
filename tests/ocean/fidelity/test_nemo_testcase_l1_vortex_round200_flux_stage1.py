@@ -130,6 +130,7 @@ def test_the_walk_names_nemos_stage1_order():
     # which comes before the stage output; a reordering here would report the
     # wrong statement as the first non-bit producer.
     assert walk.PLANTS == ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
+                           "adv.u", "adv.v", "update.u", "update.v",
                            "out.u", "out.v")
     assert walk.CASE == "VORTEX-zco"
 

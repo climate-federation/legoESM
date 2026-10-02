@@ -7,9 +7,9 @@ momentum statement beyond what ``stp_2D`` already completed:
 
     stprk3_stg.F90:298     CALL wzv( ..., zFu, zFv, ww, np_transport )
     stprk3_stg.F90:301     zFw = e1e2t * ww
-    stprk3_stg.F90:315     IF( .NOT.ln_dynadv_vec ) CALL dyn_adv( ..., zFu, zFv, zFw )
-    stprk3_stg.F90:371-378 Kaa = ( e3u(Kbb)*u(Kbb) + rDt*e3u(Kmm)*Krhs ) / e3u(Kaa)
-    stprk3_stg.F90:437-448 barotropic replacement, then the stage output
+    stprk3_stg.F90:316     IF( .NOT.ln_dynadv_vec ) CALL dyn_adv( ..., zFu, zFv, zFw )
+    stprk3_stg.F90:372-379 Kaa = ( e3u(Kbb)*u(Kbb) + rDt*e3u(Kmm)*Krhs ) / e3u(Kaa)
+    stprk3_stg.F90:409-421 barotropic replacement, then the stage output
 
 Round 200's acquisition records NEMO's operands at every one of those
 boundaries (``oracle_stage_flux_terms_kt00000001_s1.bin``).  This walk scores
@@ -51,6 +51,7 @@ DEFAULT_ROOT = Path(
 # The boundaries this walk can score with an existing WRITE-only seam, in
 # NEMO's own stage-1 execution order.
 PLANTS = ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
+          "adv.u", "adv.v", "update.u", "update.v",
           "out.u", "out.v")
 
 
@@ -192,6 +193,27 @@ def run(root: Path, *, plant: str | None = None,
         return _hook
 
     rows = []
+    carrier_rows: list[dict] = []
+
+    def _unowned(values, face, levels):
+        """Put a record array back on the model's INTERNAL array layout.
+
+        ``_owned`` above drops the model's leading ghost line on the face's
+        own axis (``[:, 1:, :]`` on ``u``, ``[1:, :, :]`` on ``v``) because
+        NEMO's local interior stores one record per T column.  An override
+        is handed to the model, so it has to go the other way.  The restored
+        ghost line is never scored -- every row of this walk is compared on
+        the owned slice -- and the stage update is pointwise, so a ghost
+        value cannot reach an owned cell within the stage.
+        """
+        values = np.asarray(values)
+        require(values.shape[-1] >= levels,
+                f"the record has {values.shape[-1]} levels, the model needs "
+                f"{levels}")
+        values = values[..., :levels]
+        pad = [(0, 0), (0, 0), (0, 0)]
+        pad[1 if face == "u" else 0] = (1, 0)
+        return np.pad(values, pad)
 
     def _row(label, reference, candidate, mask, nemo_boundary, planted,
              convention_sensitive=False):
@@ -320,7 +342,45 @@ def run(root: Path, *, plant: str | None = None,
          "ww after wzv(..., np_transport) (stprk3_stg.F90:298)",
          plant == "ww")
 
-    # ---- 4. the stage-1 output, after the barotropic replacement ---------
+    # ---- 4. the completed stage-1 Krhs, after the flux-form dyn_adv ------
+    # stprk3_stg.F90:316 is the ONLY momentum statement stage 1 runs in the
+    # flux-form program: it adds dyn_adv's trend, built on zFu/zFv/zFw, to
+    # the right-hand side stp_2D left.  NEMO's record writes Krhs right after
+    # that call.  Unlike the `base` rows this one IS like-for-like: both
+    # sides are the completed stage-1 Krhs, whatever channel each built it
+    # through.
+    hooks = _NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external,
+        expose_stage1_momentum_rhs=True)
+    fields = lego_fields(model_step(hooks))
+    for face in ("u", "v"):
+        _require_live("adv." + face, face,
+                      np.asarray(fields[face])[..., :nlev])
+        _row(f"adv.{face}", groups[f"adv_{face}"][..., :nlev],
+             np.asarray(fields[face])[..., :nlev], masks[face],
+             "Krhs after the flux-form dyn_adv (stprk3_stg.f90:316)",
+             plant == f"adv.{face}")
+
+    # ---- 5. the stage-1 Kaa, after the thickness-weighted update ---------
+    # stprk3_stg.F90:372-379 (the ELSE branch at :371, taken because the deck
+    # pins ln_vvl_zstar=.true. so lk_linssh is false):
+    #   uu(Kaa) = ( (1+r3u(Kbb))*uu(Kbb) + rDt*(1+r3u(Kmm))*uu(Krhs) )
+    #             / (1+r3u(Kaa)) * umask
+    # Scored BEFORE the barotropic replacement, the same boundary
+    # expose_stage2_raw_momentum reads one stage later.
+    hooks = _NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external,
+        expose_stage1_raw_momentum=True)
+    fields = lego_fields(model_step(hooks))
+    for face in ("u", "v"):
+        _require_live("update." + face, face,
+                      np.asarray(fields[face])[..., :nlev])
+        _row(f"update.{face}", groups[f"update_{face}"][..., :nlev],
+             np.asarray(fields[face])[..., :nlev], masks[face],
+             "Kaa after the thickness-weighted stage update "
+             "(stprk3_stg.f90:372-379)", plant == f"update.{face}")
+
+    # ---- 6. the stage-1 output, after the barotropic replacement ---------
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
         expose_momentum_stage=1, expose_tracer_stage=1)
@@ -333,12 +393,43 @@ def run(root: Path, *, plant: str | None = None,
              "stage-1 output after the barotropic correction "
              "(stprk3_stg.f90:412-419)", plant == f"out.{face}")
 
+    # ---- 7. THE CARRIER ARM: NEMO's own stage-1 Krhs, everything else ours
+    # One variable.  If the update statement (:372-379) and the barotropic
+    # replacement (:409-421) are faithful carriers, handing them NEMO's
+    # recorded completed Krhs must put the stage-1 OUTPUT at the bar, even
+    # though that array's depth-uniform part is on NEMO's convention and
+    # legoESM's is not -- the replacement sets the depth mean from the
+    # external solve, so only the depth-varying part can survive.
+    if plant is None:
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            expose_momentum_stage=1, expose_tracer_stage=1,
+            stage1_momentum_rhs_override=(
+                jnp.asarray(_unowned(groups["adv_u"], "u", nlev)),
+                jnp.asarray(_unowned(groups["adv_v"], "v", nlev))))
+        carrier = lego_fields(model_step(hooks))
+        for face in ("u", "v"):
+            reference = groups[f"out_{face}"][..., :nlev]
+            candidate = np.asarray(carrier[face])[..., :nlev]
+            active = np.asarray(masks[face], dtype=bool)
+            carrier_rows.append({
+                "name": f"{CASE}.stage1.carrier.out.{face}",
+                "cells_unequal": int(np.count_nonzero(
+                    (candidate != reference)[active])),
+                "max_abs": float(np.max(np.abs(
+                    (candidate - reference)[active]))),
+                "execution_regime": "production_step_jit",
+                "nemo_boundary": (
+                    "stage-1 output given NEMO's recorded completed Krhs "
+                    "(stprk3_stg.f90:316) as the only substituted operand"),
+            })
+
     first = next((r for r in rows
                   if not r["bit_exact"] and not r["convention_sensitive"]),
                  None)
     report = {
         "case": CASE, "oracle_root": str(root), "legoesm_git_sha": sha,
-        "plant": plant, "rows": rows,
+        "plant": plant, "rows": rows, "carrier_rows": carrier_rows,
         "first_non_bit": first["name"] if first else None,
         "first_non_bit_max_abs": first["max_abs"] if first else 0.0,
         "status": "MEASURED",
@@ -379,6 +470,10 @@ def main(argv=None) -> int:
                   r=row["relative_max_abs"],
                   tag="  (convention-sensitive, not an owner)"
                       if row["convention_sensitive"] else ""))
+    for row in report.get("carrier_rows", []):
+        print("{name:34s} cells={cells:7d} max_abs={m:.6e}".format(
+            name=row["name"].split(".", 1)[1], cells=row["cells_unequal"],
+            m=row["max_abs"]))
     print("first non-bit:", report["first_non_bit"])
     print("status:", report["status"])
     if args.plant:
