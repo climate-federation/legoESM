@@ -1261,7 +1261,7 @@ CITATION_MAP = {
         ('ffu_nw(ji,jj) = ffu_nw(ji,jj) +', 1), 14],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1277-1278': [
         ('ffv_nw(ji,jj) = ffv_nw(ji,jj) +', 1),
-        'ffv_ne(ji,jj) = ffv_ne(ji,jj) +', 2],
+        ('ffv_ne(ji,jj) = ffv_ne(ji,jj) +', 1), 2],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1288-1289': [
         'ffv_nw(ji,jj) = r1_12 * r1_e2v',
         'ffv_ne(ji,jj) = r1_12 * r1_e2v', 2],
