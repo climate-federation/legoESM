@@ -79,7 +79,7 @@ baroclinic drag and returns its drag coefficients
 (`ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:232-245`), constructs the sea
 surface RHS (`ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:283-300`), and
 calls the split-explicit solver
-(`ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:304-315`). The resolved rung-0
+(`ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:305-315`). The resolved rung-0
 deck leaves atmospheric pressure, embedded ice load, and wave load off; their
 guarded branches remain visible at
 `ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:247-277` and are not collapsed

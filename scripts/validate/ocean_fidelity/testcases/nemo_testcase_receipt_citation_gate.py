@@ -1191,22 +1191,22 @@ CITATION_MAP = {
         'CALL r92_rhs_finish( kt )', 35],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
-        'END SELECT', 13],
+        ('END SELECT', 2), 13],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:227-230': [
         '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
         "l4_canon_2d(Ve_rhs,'V'), l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:232-245': [
         '!* wind forcing *!',
-        'ENDIF', 14],
+        ('ENDIF', 7), 14],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:247-277': [
         '!* atmospheric pressure forcing *!',
-        'ENDIF', 31],
+        ('ENDIF', 10), 31],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:283-300': [
         '!==   2D sea surface height forcing   ==!',
-        'ENDIF', 18],
-    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:304-315': [
+        ('ENDIF', 11), 18],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:305-315': [
         'Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
-        'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 12],
+        'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 11],
     # --- ORCA2 round 92: rung-0 card and source-order RHS acquisition ---
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:148-217': [
         '! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)',
