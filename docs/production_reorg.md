@@ -69,7 +69,7 @@ dcmip2025_ic.py
 spectral_les_plane.py    spectral_les_moist.py    spectral_plane.py
 column_les.py            column_les_diagnosis.py
 les_closure_diagnosis.py les_regime.py            les_vertical_mapping.py
-pseudo_incompressible_plane.py       pseudo_incompressible_plane_mpi.py
+pseudo_incompressible_plane.py
 pseudo_incompressible_poisson.py     pseudo_incompressible_poisson_mpi.py
 compressible_euler_plane.py          compressible_euler_plane_halo.py
 plane_fd_advection.py   plane_operators.py        plane_operators_halo.py
