@@ -3954,6 +3954,23 @@ CITATION_MAP = {
         'zu_spg(ji,jj) = - zldg * ( zsshp2_e(ji+1,jj) - zsshp2_e(ji,jj) ) * r1_e1u(ji,jj)',
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:503':
         'CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )',
+    # Round 197: the Coriolis routine itself, the routine that freezes its
+    # coefficients, the statement that divides ff_f by e3f_0vor, and
+    # e3f_0vor's own construction in dyn_vor_init.
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:933':
+        'SUBROUTINE dyn_cor_2D_init( Kmm )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:960':
+        'zpvo_nw = ff_f(ji-1,jj  ) / (e3f_0vor(ji-1,jj  ,jk) '
+        '*(1._wp+r3f(ji-1,jj  )*fe3mask(ji-1,jj  ,jk))) + &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1112':
+        'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:892':
+        'ALLOCATE( e3f_0vor(jpi,jpj,jpk) )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897':
+        'e3f_0vor(ji,jj,jk) = (   ( e3t_1d(jk)*tmask(ji  ,jj+1,jk)     &   '
+        '! need additional () for',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:920':
+        'WHERE( e3f_0vor(:,:,jk) == 0._wp )   e3f_0vor(:,:,jk) = e3t_1d(jk)',
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517':
         'zu_trd(ji,jj) = zu_trd(ji,jj) + zCdU_u(ji,jj) * un_e(ji,jj) * hur_e(ji,jj)',
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:535':
