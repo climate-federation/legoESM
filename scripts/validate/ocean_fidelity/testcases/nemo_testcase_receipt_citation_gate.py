@@ -1338,7 +1338,7 @@ CITATION_MAP = {
         'IF( ln_ssr      )   CALL sbc_ssr_init', 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:440-449': [
         ('SELECT CASE( nsbc )', 2),
-        'END SELECT', 10],
+        ('END SELECT', 4), 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:517-521': [
         'IF( ln_rnf         )   CALL sbc_rnf( kt )',
         'IF( nn_fwb    /= 0 )   CALL sbc_fwb', 5],
