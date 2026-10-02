@@ -321,8 +321,12 @@ def coupled_rollout_to_dataset(
         )
         state_new, sst_new, _, _ = ocean_step(ocean_state, forcing, config.dt_seconds)
         sst_new = np.asarray(sst_new, dtype=np.float32)
-        sst_prev = np.asarray(ocean_state.T_sfc.data, dtype=np.float32)
-        sst_new = np.where(np.isfinite(sst_new), sst_new, sst_prev)
+        n_bad = int(np.size(sst_new) - np.isfinite(sst_new).sum())
+        if n_bad:
+            raise FloatingPointError(
+                f"slab ocean returned non-finite SST at {n_bad} cells on lead day {day}; "
+                "refusing to carry the previous SST forward."
+            )
         if sea_ice_cover is not None:
             sst_new = np.where(
                 sea_ice_cover >= config.sea_ice_threshold,

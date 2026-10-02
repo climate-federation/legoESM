@@ -898,3 +898,30 @@ def test_sfno_slab_forcing_passthrough_and_nonfinite_raises():
     bad_aux["lw_down"][0, 0] = np.nan
     with pytest.raises(ValueError, match="lw_down"):
         s2s_coupling._build_atm_to_surface(pred, bad_aux, **kw)
+
+
+def test_coupled_rollout_raises_when_the_slab_returns_nan_sst(tmp_path: Path, monkeypatch):
+    """A non-finite slab SST must stop the rollout, not be replaced by the previous SST."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
+    real_make_ocean = s2s_coupling.make_ocean
+
+    def _nan_ocean(ocean_config):
+        step = real_make_ocean(ocean_config)
+
+        def poisoned(state, forcing, dt):
+            new_state, sst, a, b = step(state, forcing, dt)
+            return new_state, jnp.asarray(sst).at[0, 0].set(jnp.nan), a, b
+        return poisoned
+
+    monkeypatch.setattr(s2s_coupling, "make_ocean", _nan_ocean)
+    with pytest.raises(FloatingPointError, match="non-finite SST"):
+        coupled_rollout_to_dataset(
+            _PassThroughCoupledAtmosModel(),
+            config,
+            sample_index=0,
+            coupled=True,
+            surface_forcing=None,
+            stochastic_config=S2SStochasticConfig(
+                ensemble_members=1, noise_channels=0, use_time_signal=False),
+        )
