@@ -1319,7 +1319,7 @@ CITATION_MAP = {
         'IF( ln_traqsr  )   CALL tra_qsr'],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:267-270': [
         'IF( .NOT.ln_traqsr  .AND. kstg == 1) THEN',
-        'qsr(ji,jj) = 0._wp', 4],
+        ('qsr(ji,jj) = 0._wp', 2), 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcssm.f90:284': [
         'IF( .NOT. ln_traqsr )   fraqsr_1lev(:,:) = 1._wp',
         'IF( .NOT. ln_traqsr )   fraqsr_1lev(:,:) = 1._wp'],
