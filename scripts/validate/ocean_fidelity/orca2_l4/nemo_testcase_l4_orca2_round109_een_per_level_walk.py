@@ -28,7 +28,10 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round107_ee
 
 
 PLANTS = ("none", "oracle-bit", "model-bit")
-SOURCE_ORDER = ("mbku", "zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw")
+SOURCE_ORDER = (
+    "mbku", "zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw",
+    "acc_before", "acc_after",
+)
 
 
 class GateError(RuntimeError):
@@ -108,6 +111,7 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
 
     require(plant in PLANTS, f"unknown plant {plant}")
@@ -146,6 +150,20 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     )(jnp.asarray(state.eta.data, dtype=jnp.float64)))
     mbku = np.asarray(parts["mbku"], dtype=np.float64)
     executed = np.arange(1, 31)[None, None, :] <= mbku[..., None]
+
+    def recurrence(term, bottom):
+        acc = jnp.zeros(term.shape[:2], dtype=term.dtype)
+        before = jnp.zeros_like(term)
+        after = jnp.zeros_like(term)
+        for jk in range(term.shape[-1]):
+            before = before.at[..., jk].set(acc)
+            updated = nemo_source_round(acc + term[..., jk])
+            acc = jnp.where(jk < bottom, updated, acc)
+            after = after.at[..., jk].set(acc)
+        return before, after
+
+    acc_before, acc_after = jax.device_get(jax.jit(recurrence)(
+        jnp.asarray(parts["term_u_nw"]), jnp.asarray(parts["mbku"])))
     model = {
         "mbku": mbku,
         "zpvo_nw": np.asarray(parts["zpvo_u_nw"]),
@@ -153,6 +171,8 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         "e3v_live": np.asarray(parts["source_e3v"]),
         "neighbor_mask": np.asarray(raw.vmask, dtype=np.float64),
         "term_nw": np.asarray(parts["term_u_nw"]),
+        "acc_before": np.asarray(acc_before),
+        "acc_after": np.asarray(acc_after),
     }
     for name in SOURCE_ORDER[1:]:
         model[name] = np.where(executed, model[name], np.float64(0.0))
@@ -162,6 +182,9 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         model["zpvo_nw"] = changed
     scores = {name: _score(model[name], oracle[name]) for name in SOURCE_ORDER}
     first = next((name for name in SOURCE_ORDER if scores[name]["bit_unequal"]), None)
+    first_accumulator = next((
+        name for name in ("term_nw", "acc_before", "acc_after")
+        if scores[name]["bit_unequal"]), None)
     require(first is not None, "all recorded operands unexpectedly bit-exact")
     if plant != "none":
         raise GateError(f"{plant} plant fired")
@@ -173,6 +196,7 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         "source_order": list(SOURCE_ORDER),
         "scores": scores,
         "first_non_bit_operand": first,
+        "first_accumulator_path_non_bit": first_accumulator,
         "worktree": stamp,
     }
 
