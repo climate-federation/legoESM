@@ -41,7 +41,7 @@ external state, and enters its substep loop in that order at
 1. mid-step velocity and sea-surface extrapolation plus face depths
    (`ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:460-519`);
 2. transports and after-SSH (`:530-557`);
-3. the half-step-back sea surface and pressure gradient (`:601-616`);
+3. the half-step-back sea surface and pressure gradient (`:601-615`);
 4. the 2-D Coriolis trend and explicit drag (`:618-652`);
 5. the vector-form velocity update (`:655-708`).
 
