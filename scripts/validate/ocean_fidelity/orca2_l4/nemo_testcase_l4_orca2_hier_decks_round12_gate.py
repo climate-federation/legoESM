@@ -224,7 +224,7 @@ def main() -> int:
     try:
         report = evaluate(plant=args.plant)
         report["worktree"] = worktree_stamp()
-    except (GateError, KeyError, OSError, TypeError, UnicodeError, ValueError) as error:
+    except (RuntimeError, KeyError, OSError, TypeError, UnicodeError, ValueError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "FAIL"
         print(f"STATUS {marker}: {error}")
         return 1

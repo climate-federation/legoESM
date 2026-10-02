@@ -381,7 +381,7 @@ def main() -> int:
             require(args.record is not None and args.expect_commit, "record and expected commit are required")
             report = validate_record(args.record, expect_commit=args.expect_commit, plant=args.plant)
         report["worktree"] = worktree_stamp()
-    except (GateError, surface.GateError, phase1.GateError, KeyError, OSError, TypeError, ValueError) as error:
+    except (RuntimeError, KeyError, OSError, TypeError, ValueError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "FAIL"
         print(f"STATUS {marker}: {error}")
         return 1

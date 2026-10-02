@@ -348,6 +348,7 @@ def main() -> int:
             report = validate_record(args.record, expect_commit=args.expect_commit, plant=args.plant)
         report["worktree"] = worktree_stamp()
     except (
+        RuntimeError,
         GateError,
         rung9.GateError,
         rung10.GateError,

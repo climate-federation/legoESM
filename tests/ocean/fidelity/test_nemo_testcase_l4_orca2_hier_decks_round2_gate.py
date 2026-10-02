@@ -170,7 +170,9 @@ HIERARCHY_PLANTS = tuple(
 @pytest.mark.parametrize(("module", "plant"), HIERARCHY_PLANTS)
 def test_every_hierarchy_cli_plant_reports_marker(module, plant, monkeypatch, capsys):
     def fail(*_args, **_kwargs):
-        raise module.GateError(f"deterministic {plant} failure")
+        # Use a foreign hierarchy GateError to reproduce the inherited-class
+        # failure that escaped round 14's explicit exception inventory.
+        raise gate.GateError(f"deterministic {plant} failure")
 
     if module.__name__.endswith("round12_gate"):
         monkeypatch.setattr(module, "evaluate", fail)

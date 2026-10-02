@@ -449,6 +449,7 @@ def main() -> int:
             )
         report["worktree"] = worktree_stamp()
     except (
+        RuntimeError,
         GateError,
         rung6.GateError,
         rung6.rung7.GateError,
