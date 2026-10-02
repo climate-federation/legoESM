@@ -1,10 +1,20 @@
-# VORTEX round 16 (lane round 200) — the flux card's kt=2 velocity owner is the stage advective transport
+# VORTEX round 16 (lane round 200) — the flux card's stage-1 walk, and what it does NOT yet name
 
-**ROUND_STATUS: HELD (measurement landed, no model change).**  The round names
-the first statement of NEMO's stage-1 flux-form program that legoESM does not
-reproduce bit for bit, with its compiled citation, and lands the record and the
-walk that name it.  It changes no model code, so both VORTEX cards' certified
-registries and GYRE are unmoved by construction.
+**ROUND_STATUS: HELD (measurement landed, no model change).**
+
+**RETRACTION, up front.**  The first draft of this receipt named the stage
+advective transport statement (`stprk3_stg.f90:276-277`) as the OWNER of the
+flux card's kt=2 velocity residual.  **That claim is withdrawn.**  It is the
+first boundary in NEMO's stage-1 order that is not bit-identical, and it stays
+reported as that — but it cannot produce the magnitude it was said to own, and
+two further controls in this round agree.  The independent reviewer caught it;
+the arithmetic is in "Why the first non-bit boundary is not the owner" below.
+
+What this round does land: the flux card's own per-stage term record, which did
+not exist; a committed walk of NEMO's stage-1 statement chain against it; and
+the two measurements that narrow the owner to **one of two statements**, with
+the single run that separates them preregistered.  No model code changes, so
+both VORTEX cards' certified registries and GYRE are unmoved by construction.
 
 Pre-registration, frozen before any measurement:
 `docs/ocean/fidelity/PREREG_nemo_testcases_l1_vortex_round200.md`
@@ -111,11 +121,12 @@ The first two rows are **convention-sensitive and carry no attribution**, for
 the reason given above: in flux form NEMO's three-dimensional array does not
 hold the advection and legoESM's does.
 
-**FIRST NON-BIT PRODUCER: the stage advective transport statement,
-`stprk3_stg.f90:276-277` of `VORTEX_OMIP_L1_P3`** — 118 of 36600 active `u`
-faces and 128 of 36600 active `v` faces.  Everything downstream of it in the
-stage is non-bit, and nothing upstream of it that this walk can score the same
-quantity on both sides of is.
+**FIRST NON-BIT BOUNDARY (not the owner): the stage advective transport
+statement, `stprk3_stg.f90:276-277` of `VORTEX_OMIP_L1_P3`** — 118 of 36600
+active `u` faces and 128 of 36600 active `v` faces, one unit in the last place
+of the field's own peak.  Everything downstream of it in the stage is non-bit,
+and nothing upstream of it that this walk can score as the same quantity on
+both sides is.  Read the next section before using that sentence.
 
 ## What the 118 cells look like
 
@@ -129,20 +140,55 @@ field.  Measured per cell the discrepancy reaches 3662 units in the last place
 on `u` and 7325 on `v`, because the affected faces include ones whose own
 transport is as small as `4.7e+02`.
 
-That is the signature of a difference made in a product or a sum of operands of
-size `1e7`, not of a uniformly mistranscribed factor: a wrong `e3` or a wrong
-metric would move every face.  Which of the statement's two factors carries it
-— the `Kmm` face thickness `e3t_1d*(1+r3u(Kmm)*umask)` or the corrected
-velocity `uu(Kmm)+zub*umask`, whose `zub` is built at `:270` — is **not**
-decided by this round, because the record does not carry NEMO's `zub` or its
-`e3u(Kmm)`.  That is the next step, preregistered below.
+Those numbers are produced by the walk itself and land in its report
+(`phase3/round200/flux_stage1_walk.json`, every row's `structure` block); they
+are no longer quoted from a throwaway probe.
 
-**PLAUSIBLE, not confirmed**: the `ww` row's relative `2.800e-13` is inherited
-amplification of the transports' `1.4e-16`, because `ww` is the vertical
-integral of a divergence of those transports and is a small residual of large
-cancelling terms.  The measurement that would decide it is substituting NEMO's
-own `zFu/zFv` into the continuity solve, which needs a substitution seam this
-round did not build.
+## Why the first non-bit boundary is NOT the owner
+
+**Two independent arguments, both refuting it.**
+
+**1. The amplification required does not exist.**  The transports are wrong by
+`1.862645e-09` absolute, `1.4e-16` relative — one unit in the last place.  The
+stage-1 OUTPUT is wrong by `4.358845e-08` m/s.  The whole of stage 1's explicit
+velocity increment, taken from NEMO's own record as `update_u − kmm_u`, peaks
+at `0.0811` m/s, so the output error is `5.4e-07` of the entire increment while
+its inputs are wrong by `1.4e-16` of theirs.  That is more than eight orders of
+amplification across one advection operator and one division by a thickness,
+and nothing in those statements can supply it.  The same arithmetic disposes of
+`ww` and `zFw`: a `zFw` discrepancy of `2.45e-08` on a cell of volume
+`~4.4e+11` m³ moves the velocity by `~1e-16` over the stage, not by `4e-08`.
+**The producer is downstream of `:301`.**
+
+**2. The output error has no depth-uniform part, so the barotropic correction
+cannot be making it either.**  The stage's barotropic replacement
+(`stprk3_stg.f90:412-419`) adds exactly ONE number per column, the same at
+every level.  Measured on the output rows this round: the largest column mean
+of the error is `7.715e-17` on `u` and `8.772e-17` on `v` — at the bar — while
+the largest departure from the column mean is `4.359e-08` and `4.355e-08`, the
+whole of it.  **The error is entirely depth-varying.**
+
+Those two together leave exactly two statements, both inside stage 1 and both
+between `:301` and `:412`:
+
+* the flux-form advection trend, `stprk3_stg.f90:315`
+  (`IF( .NOT.ln_dynadv_vec ) CALL dyn_adv( ..., zFu, zFv, zFw )`), and
+* the thickness-weighted explicit update, `stprk3_stg.f90:371-378`.
+
+## Prediction P3's disposition: RECORDED BUT NOT RUN
+
+The pre-registration predicted the flux-form advection trend and set its
+falsifier as "`dyn_adv`'s trend bit-identical while another term is not".  **That
+test was not run this round, and the receipt says so rather than implying the
+walk settled it.**  The record this round built *does* carry both groups NEMO
+needs for it — `adv_u/adv_v` (the accumulator after `:315`) and
+`update_u/update_v` (the state after `:371-378`) — and the checker requires
+both present.  What is missing is on legoESM's side: its momentum-accumulator
+exposure is refused for stage 1 by construction
+(`expose_momentum_operator_stage must be 2 or 3`), and there is no stage-1
+raw-momentum seam.  Adding one is a model-file edit and therefore its own
+round, under the full gate.  Because the oracle side is already acquired, that
+round needs no NEMO run at all.
 
 ## Non-vacuity
 
@@ -152,8 +198,12 @@ round did not build.
   step once and refuses unless every exposed slot differs from it.  A plant
   that perturbs the candidate afterwards proves the scoring reacts, not that
   the seam is live, and is not relied on for this.
-* **Plants.**  All eight fire: `base.u base.v zfu zfv zfw ww out.u out.v`, each
-  `VISIBLE` (`phase3/round200/walk_plants.txt`).
+* **Plants, now a DIFFERENCE and not a status read.**  The first draft read
+  visibility off the planted row's bit-exact status, and every row of this
+  walk is already non-bit, so every plant would have reported `VISIBLE`
+  whether or not the perturbation did anything.  The reviewer caught it; the
+  plant is now a difference against the unplanted run of the same row.  All
+  eight fire (`phase3/round200/walk_plants.txt`).
 * **Record boundary control.**  The walk refuses before scoring anything unless
   the new record's post-correction group is identical, cell for cell, to the
   older stage-1 output record — a writer placed at the wrong boundary cannot be
@@ -187,23 +237,31 @@ DINO's reference stays `2.053801168e-03` K.
 | Record at the advection CALL SITE in `stprk3_stg` instead of patching `dynadv.F90` | mechanical: one fewer shipped file patched, same boundary |
 | Deck for the new build is the committed flux deck, unchanged (`namelist_cfg_omip_l1.patch`) | no new option; the run.sh guard refuses any other advection-form pair |
 | Report the pre-stage RHS row but exclude it from attribution | required by the quantity mismatch the compiled source states |
+| Withdraw the first draft's owner claim rather than defend it | forced by the reviewer's scaling refutation and this round's own column-structure measurement |
 
 UNASKED list: **empty**.  No default, scheme, bound, threshold or deck value
 was changed; nothing the NEMO deck does not pin was selected.
 
 ## OPEN, in order
 
-1. **Split the `zFu/zFv` statement's two factors.**  Extend this round's writer
-   by two groups — NEMO's `zub/zvb` (`stprk3_stg.F90:270`) and its
-   `e3t_1d*(1+r3u(Kmm)*umask)` face thickness — re-run the paired build, and
-   score each against legoESM's existing `expose_stage1_transport_operand`
-   arms (`thickness`, `corrected_velocity`).  Prediction, to be frozen before
-   measuring: the corrected velocity carries it, because the discrepancy's
-   absolute size is set by the largest transports and `zub` is a difference of
-   two nearly equal numbers at `:270`.  Falsifier: the thickness row is the
-   non-bit one.
-2. Then the statement that fixes it, cited, under the full Decision 43/45/55/59
-   gate, with the vector card proven inert and GYRE byte-identical.
+1. **Run prediction P3.  NO NEMO RUN IS NEEDED — the oracle side is already in
+   hand.**  Add a stage-1 momentum-accumulator seam to legoESM (the existing
+   one refuses stage 1 by construction) and score two rows from the record
+   this round committed: the accumulator after the flux-form advection call
+   (`adv_u/adv_v`, `stprk3_stg.f90:315`) and the state after the
+   thickness-weighted update (`update_u/update_v`, `:371-378`).  Those two
+   statements are the only candidates left, by the two refutations above.
+   Prediction, to be frozen first: the advection trend carries it.  Falsifier:
+   the advection accumulator is bit-identical and the update is not, which
+   would make it the thickness weighting.  The seam is a model-file edit and
+   needs the full Decision 43/45/55/59 gate, the vector card proven inert and
+   GYRE byte-identical.
+2. The transports' own one-unit-in-the-last-place difference
+   (`stprk3_stg.f90:276-277`) stays open as a SEPARATE, smaller debt; split its
+   two factors by recording NEMO's `zub/zvb` (`:270`) and its
+   `e3t_1d*(1+r3u(Kmm)*umask)` face thickness, which this round's record does
+   not carry, and score them against legoESM's existing
+   `expose_stage1_transport_operand` arms.
 3. The `fmask`-versus-`fe3mask` `r3f` factor (inert only at `rn_shlat=0`; cite
    and test at the cards' own `rn_shlat`).
 4. Decision 74's 30/15/10-km ladder, once the flux card's kt=2 rows are at the
