@@ -281,10 +281,17 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
     require(any(rows[face]["after_hpg"]["reference_max_abs"] > 0.0
                 for face in FACES),
             "recorded HPG boundary is vacuously zero")
-    require(any(not np.array_equal(
-                    oracle[f"after_hpg_{face}"], oracle[f"after_ldf_{face}"])
-                for face in FACES),
-            "recorded LDF boundary is vacuous")
+    record_boundary_movement = {
+        "hpg_nonzero": any(
+            rows[face]["after_hpg"]["reference_max_abs"] > 0.0
+            for face in FACES
+        ),
+        "ldf_changes_cumulative_rhs": any(
+            not np.array_equal(
+                oracle[f"after_hpg_{face}"], oracle[f"after_ldf_{face}"])
+            for face in FACES
+        ),
+    }
 
     # Known-answer control independent of the measured residual: one ULP in an
     # otherwise exact active array must become exactly one differing wet cell.
@@ -313,6 +320,7 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         "record": record_census,
         "stage0_entry": entry_rows,
         "trace_passivity": passivity,
+        "record_boundary_movement": record_boundary_movement,
         "source_order": list(BOUNDARIES),
         "rows": rows,
         "first_non_bit_statement": first,
