@@ -1266,7 +1266,7 @@ CITATION_MAP = {
     # --- ORCA2 round 109: admitted EEN per-level recurrence ---
     'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1245': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
-        ('& ff_f(ji  ,jj-1) /', 2), 5],
+        ('& ff_f(ji  ,jj-1) /', 1), 5],
     'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1256-1263': [
         ('r107_zpvo_nw(ji,jj,jk) = zpvo_nw', 1),
         ('r107_acc_after(ji,jj,jk) = ffu_nw(ji,jj)', 1), 8],
