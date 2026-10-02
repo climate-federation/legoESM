@@ -516,6 +516,12 @@ def test_land_stress_ustar_bulk_off_land_rebuilt_on_land():
     np.testing.assert_allclose([float(out[0][3]), float(out[1][3])],
                                [-0.165, -0.22], rtol=1e-12)
     np.testing.assert_array_equal(np.asarray(out[2]), np.asarray(sh))
+    # non-finite land magnitude on a land column keeps the bulk ustar
+    for bad in (jnp.inf, jnp.nan):
+        bo = land_stress_into_surface_flux(
+            (tx, ty, sh, lh, us_bulk), jnp.full(n, bad), jnp.full(n, 3.0),
+            jnp.full(n, 4.0), jnp.ones(n), rho)
+        np.testing.assert_array_equal(np.asarray(bo[4]), np.asarray(us_bulk))
     np.testing.assert_array_equal(np.asarray(out[3]), np.asarray(lh))
 
 
