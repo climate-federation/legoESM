@@ -82,3 +82,17 @@ neighbor masks, accumulation order, and final scale remain fixed.
 | R104-P9 | The compiled minimum-one bottom-index rule owns every remaining non-fold signed zero. | All six coefficients without fold magnitude debt are bit-exact; `ffv_nw/ne` differ only at their registered 66/67 fold cells. | Any other bit difference: **REFUTED** and hold. |
 | R104-P10 | The minimum-one arm closes substep-1 U/V and preserves the 68-cell substep-2 U residual exactly. | Same consumer rows as R104-P3, with no additional moved row. | Any other movement: hold and name it. |
 | R104-P11 | A fully dry synthetic face distinguishes minimum-one from zero-iteration gating. | The production builder's coefficient sign changes when the planted first-level iteration is suppressed, and the gate rejects that arm. | No sign change: the control is vacuous; no landing. |
+
+## Acquisition preregistration — pre-scale accumulator discriminator
+
+Committed after R104-P9 was measured and **REFUTED**, before the requested
+NEMO acquisition exists. The three arms do not distinguish whether the final
+zero sign is created by the recurrence or by the subsequent scale. The next
+record therefore captures, on both MPI ranks and before the eight scale
+statements, (a) each accumulator and (b) its exact multiplicative scale.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R104-P12 | NEMO's pre-scale arrays localize each remaining signed-zero mismatch to either accumulation or scaling. | For every final coefficient mismatch, bit comparison of the paired pre-scale accumulator and scale identifies the first unequal operand; the record covers the global domain exactly once. | Missing rank/cell/field, a mismatch unexplained by `scale * accumulator`, or any terminal-restart byte difference: refuse the record. |
+| R104-P13 | The acquisition is observational only. | All 20 target terminal restart shards are byte-identical to the admitted round-98 source run. | Any byte differs: refuse the record and do not cite it. |
+| R104-P14 | Header, dimensions, field names, truncation, signed-zero payload, rank coverage, and restart plants all fire. | Every named plant exits nonzero with `PLANT-FIRED`. | Any plant stays green: the checker is invalid. |
