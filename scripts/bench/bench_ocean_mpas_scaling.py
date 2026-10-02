@@ -949,7 +949,11 @@ def main() -> int:
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
             "pcg_precond": config.barotropic_implicit_pcg_precond,
-            "pcg_variant_effective": config.barotropic_implicit_pcg_variant,
+            # The recurrence only runs on the distributed implicit solve.
+            "pcg_variant_effective": (
+                config.barotropic_implicit_pcg_variant
+                if args.barotropic_solver == "implicit_cn" and n_ranks > 1
+                else None),
             "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
             "n_barotropic_substeps": args.n_substeps,
             "conservation_fixer": args.conservation_fixer,

@@ -105,7 +105,9 @@ class TestValidation:
         monkeypatch.setattr(vm, "get_matching_voronoi_layout",
                             lambda mesh: object())
         with pytest.raises(ValueError, match="select 'poly' there"):
-            barotropic_implicit_mpas(None, None, None, MPASOceanConfig(), 1.0)
+            barotropic_implicit_mpas(
+                None, None, None,
+                MPASOceanConfig(barotropic_implicit_pcg_precond="gpoly"), 1.0)
 
     def test_defaults(self):
         cfg = MPASOceanConfig()

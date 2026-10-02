@@ -365,8 +365,8 @@ class MPASOceanConfig(NamedTuple):
     # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
     # GPUs); gpoly x 15 with "single_reduce" has not been measured.
     # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
-    # iteration instead of two) was the default 2026-09-26..2026-10-02, owner-approved after two
-    # checks: convergence on the REAL captured systems is identical (s7 L40,
+    # iteration instead of two) was the default 2026-09-26..2026-10-02. It
+    # had been owner-approved after two checks: convergence on the REAL captured systems is identical (s7 L40,
     # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
     # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
     # Derecho CPU with the butterfly global sum, s7 16 ranks/node, 313 vs 315

@@ -368,7 +368,7 @@ def test_cfl_check_ignores_padded_edges():
 _GPOLY = dict(barotropic_solver="implicit_cn", tracer_advection="superbee",
               K_zeta_bih=1.0e13, n_barotropic_substeps=10,
               barotropic_implicit_pcg_precond="gpoly",
-              barotropic_implicit_pcg_variant="single_reduce",
+              barotropic_implicit_pcg_variant="standard",
               barotropic_implicit_pcg_fixed_iters=3)
 
 # At 300 s on ico4 the Helmholtz is ~identity and 3 iterations converge
