@@ -1173,6 +1173,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 92: rung-0 card and source-order RHS acquisition ---
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-217': [
+        '! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)',
+        'CALL r84_dump_frame( kstp, 1, Naa )', 71],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90:139-166': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 28],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
+        '!==  Background eddy viscosity and diffusivity  ==!',
+        'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk) =                avmb(jk) * wmask(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk)', 24],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90:262-284': [
+        '!==  type of vertical turbulent closure  ==!',
+        'IF( ln_zdfswm )   CALL zdf_swm_init       ! surface  wave-driven mixing', 23],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfdrg.f90:540-547': [
+        'CASE( np_lin )             !==  linear friction  ==!   (pCdU = Cd0 * Uc0)',
+        'CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )  !  using a constant velocity', 8],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/istate.f90:143-162': [
+        ('IF( .NOT. ln_rstart ) THEN', 1),
+        'vv_b(:,:,Kmm)   = vv_b(:,:,Kbb)', 20],
     # --- ORCA2 round 91: admitted rung-0 entry/stage frames ---
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:92-108': [
         '! Lane-1 certified oracle: exact step-entry Nbb state.  This is a',
