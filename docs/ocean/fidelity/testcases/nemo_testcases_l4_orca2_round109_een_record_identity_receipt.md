@@ -105,9 +105,25 @@ header/field/dimension/truncation/missing-field/rank/bottom/recurrence/
 association/restart plants, and the per-level oracle/model bit plants all
 fire. The measurement runs production JIT on CPU in fp64/x64 with libm.
 
-Focused recorder, operand-walk, and three-build tests pass. This round changes
-no `packages/` file, so the GYRE, DINO, tank, rung-0 trajectory, and rung-7
-trajectory implementations do not move.
+Focused recorder, operand-walk, and three-build tests pass 11/11. The required
+`tests/ocean/fidelity -n 12` invocation collected 2,321 tests, reached 96%,
+and emitted six failure markers before every Python/pytest worker exited
+without a terminal summary; the inert wrapper was interrupted and the battery
+is not counted as a pass. The count and progress positions reproduce the six
+pre-existing reds named in rounds 105-108 (SI3 scalar math, live-operands
+field order, dirty escape scope, worktree stamp, the missing
+`hires_lane_surface` case-board row, and the round-129 certified-year stamp).
+No failure marker appeared in a round-109 path.
+
+The default citation gate passes 274 citations and this receipt passes two,
+with zero failures, zero unmapped citations, and zero map-audit failures. The
+real two-line displacement plant exits nonzero with `SYMBOL-NOT-AT-LINE`.
+Separate `codex exec --sandbox read-only` review was attempted. Verdict:
+**independent review unavailable in-sandbox** (`failed to initialize
+in-process app-server client: Read-only file system`).
+
+This round changes no `packages/` file, so the GYRE, DINO, tank, rung-0
+trajectory, and rung-7 trajectory implementations do not move.
 
 ## OPEN
 
