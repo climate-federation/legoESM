@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
@@ -94,13 +96,14 @@ def _ocean_restart(path: Path) -> None:
             dataset.createVariable(name, "f8", ("x",))[:] = (index + 1.0, -0.0)
 
 
-def test_terminal_is_ocean_only_and_plants_refuse(tmp_path):
+def test_terminal_is_ocean_only_and_plants_refuse(tmp_path, capsys):
     for rank in (0, 1):
         _ocean_restart(tmp_path / f"ORCA2_00000240_restart_{rank:04d}.nc")
     assert gate.validate_terminal(tmp_path)["status"] == "FINITE_FP64_NO_ICE_PRODUCTS"
     for plant in ("terminal-nonfinite", "terminal-step"):
         with pytest.raises(gate.GateError):
             gate.validate_terminal(tmp_path, plant=plant)
+        assert "STATUS PLANT-FIRED:" in capsys.readouterr().out
     (tmp_path / "ORCA2_00000240_restart_ice_0000.nc").touch()
     with pytest.raises(gate.GateError, match="ice products"):
         gate.validate_terminal(tmp_path)
@@ -147,3 +150,45 @@ def test_runner_stages_committed_unread_sentinel():
     assert "makenemo" not in runner
     assert "/usr/bin/time" not in runner
     assert "REFUSE:" in runner
+
+
+HIERARCHY_GATES = tuple(
+    importlib.import_module(
+        "scripts.validate.ocean_fidelity.orca2_l4."
+        f"nemo_testcase_l4_orca2_hier_decks_round{round_number}_gate"
+    )
+    for round_number in range(1, 15)
+)
+HIERARCHY_PLANTS = tuple(
+    (module, plant)
+    for module in HIERARCHY_GATES
+    for plant in module.PLANTS
+    if plant != "none"
+)
+
+
+@pytest.mark.parametrize(("module", "plant"), HIERARCHY_PLANTS)
+def test_every_hierarchy_cli_plant_reports_marker(module, plant, monkeypatch, capsys):
+    def fail(*_args, **_kwargs):
+        raise module.GateError(f"deterministic {plant} failure")
+
+    if module.__name__.endswith("round12_gate"):
+        monkeypatch.setattr(module, "evaluate", fail)
+        argv = [module.__file__, "--plant", plant]
+    else:
+        monkeypatch.setattr(module, "validate_record", fail)
+        argv = [
+            module.__file__,
+            "--record",
+            "/nonexistent",
+            "--expect-commit",
+            "0" * 40,
+            "--plant",
+            plant,
+        ]
+        if module.__name__.endswith("round7_gate"):
+            argv.extend(("--calibration", "/nonexistent"))
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert module.main() != 0
+    assert "STATUS PLANT-FIRED:" in capsys.readouterr().out

@@ -255,7 +255,11 @@ def validate_terminal(root: Path, *, plant: str = "none") -> dict[str, object]:
             step = float(np.asarray(dataset["kt"][:]))
             if plant == "terminal-step" and rank == 0:
                 step = 239.0
-            require(step == 240.0, f"{path.name}: wrong terminal step {step}")
+            if step != 240.0:
+                message = f"{path.name}: wrong terminal step {step}"
+                if plant == "terminal-step":
+                    print(f"STATUS PLANT-FIRED: {message}")
+                raise GateError(message)
             fields = {}
             for field in rung10.RESTART_FIELDS:
                 variable = dataset[field]
@@ -265,7 +269,11 @@ def validate_terminal(root: Path, *, plant: str = "none") -> dict[str, object]:
                 if plant == "terminal-nonfinite" and rank == 0 and field == rung10.RESTART_FIELDS[0]:
                     values = values.copy()
                     values.flat[0] = np.nan
-                require(bool(np.isfinite(values).all()), f"{path.name}: {field} is non-finite")
+                if not bool(np.isfinite(values).all()):
+                    message = f"{path.name}: {field} is non-finite"
+                    if plant == "terminal-nonfinite":
+                        print(f"STATUS PLANT-FIRED: {message}")
+                    raise GateError(message)
                 fields[field] = list(values.shape)
         rows.append({"file": path.name, "fields": fields})
     return {"status": "FINITE_FP64_NO_ICE_PRODUCTS", "restart_shards": 2, "ocean_fields": rows}
