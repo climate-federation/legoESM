@@ -170,9 +170,13 @@ def test_a_carbon_structure_change_reverts_the_fallback_column():
         carbon_old={"C_fol": jnp.full(_N, 100.0)},
         carbon_new={"C_fol": jnp.full(_N, 101.0), "C_root": jnp.full(_N, 5.0)},
         fallback_ok=True)
-    st, _r, _c, held, n_held, fb, n_fb, rej, n_rej = out
+    st, _r, carbon, held, n_held, fb, n_fb, rej, n_rej = out
     assert int(n_fb) == 0 and bool(held[1]) and bool(rej[1]) and int(n_rej) == 1
     assert float(st.T_soil[1, 0]) == 300.0
+    # Known limitation, pinned so a change is deliberate: with no matching old
+    # carrier the carbon cannot be reverted and is returned as computed (the
+    # same as for any reverted column).  Unreachable with today's CarbonState.
+    assert float(carbon["C_fol"][1]) == 101.0 and "C_root" in carbon
 
 
 # --------------------------------------------------------------------------- #

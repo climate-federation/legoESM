@@ -1513,8 +1513,9 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     On the MPAS lane with ``mpas_land_beta_soil`` (production) the atmosphere
     receives the land's own sensible and latent fluxes (``shflx_land`` /
     ``lhflx_land``), so what this returns is what it exchanges with; without
-    that switch it recomputes its fluxes from the returned skin state.  This runs inside the jitted step, where a host print is not
-    available on a GPU-only runtime; the caller surfaces the counts.
+    that switch it recomputes its fluxes from the returned skin state.  This
+    runs inside the jitted step, where a host print is not available on a
+    GPU-only runtime; the caller surfaces the counts.
 
     Returns
     -------
@@ -1601,8 +1602,11 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
             return new_field
 
     # Carbon first: an accepted unsolved column keeps its pools (D3).  If the
-    # carrier changed structure this step there is nothing to revert to, so the
-    # fallback cannot honour that and the column is reverted instead.
+    # carrier changed structure this step there is nothing to revert to: the
+    # fallback cannot honour D3, so the column's state and response are reverted
+    # instead, but its carbon CANNOT be and stays new -- the same pre-existing
+    # limitation as for any reverted column.  Unreachable today: CarbonState has
+    # no optional fields and step_carbon returns the structure it was given.
     held_carbon = carbon_new
     if carbon_old is not None and carbon_new is not None:
         try:

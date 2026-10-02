@@ -11274,7 +11274,9 @@ class ModelDriver:
                              & (jnp.asarray(_f_land_cols_p) > 0.5))
                             .astype(jnp.int32))
                     if _fb_rej_mask is not None
-                    else jnp.zeros((), jnp.int32))
+                    else (_sfc.n_fallback_rejected
+                          if getattr(_sfc, "n_fallback_rejected", None)
+                          is not None else jnp.zeros((), jnp.int32)))
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
