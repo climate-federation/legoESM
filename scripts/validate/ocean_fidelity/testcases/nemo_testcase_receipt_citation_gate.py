@@ -1169,6 +1169,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 91: admitted rung-0 entry/stage frames ---
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:92-108': [
+        '! Lane-1 certified oracle: exact step-entry Nbb state.  This is a',
+        'CALL r84_dump_frame( kstp, 0, Nbb )', 17],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:214-217': [
+        '! Stage 1 :',
+        'CALL r84_dump_frame( kstp, 1, Naa )', 4],
     # --- ORCA2 round 90: source-resolved OFF-runoff recorder fault ---
     'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:287':
         "&       l4_canon_2d(rnf,'T')",
