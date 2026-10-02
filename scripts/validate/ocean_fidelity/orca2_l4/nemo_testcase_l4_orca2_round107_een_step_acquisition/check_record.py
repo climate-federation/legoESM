@@ -28,7 +28,8 @@ FIELDS = (
 )
 PLANTS = (
     "none", "header", "field-name", "field-dims", "truncation",
-    "missing-field", "duplicate-rank", "bottom", "recurrence", "restart-byte",
+    "missing-field", "duplicate-rank", "bottom", "recurrence", "association",
+    "restart-byte",
 )
 
 
@@ -167,7 +168,12 @@ def run(root: Path, source_root: Path, plant: str) -> dict:
 
         old = accumulator_record.read_operand(
             source_root / f"oracle_r104_een_accum_rank{expected_rank:04d}_kt00000001.bin")
-        old_acc = r97._owned_block(old["groups"]["acc_u_nw"], ntsi, ntsj, ntei, ntej)
+        # The inherited round-105 parser returns global ocean arrays in (j, i)
+        # order.  This self-describing Fortran stream stores its owned slab in
+        # native (i, j, k) order.  Associate axes explicitly before comparing.
+        old_acc_ji = r97._owned_block(
+            old["groups"]["acc_u_nw"], ntsi, ntsj, ntei, ntej)
+        old_acc = old_acc_ji if plant == "association" and expected_rank == 0 else old_acc_ji.T
         bottom_zero = bottom.astype(np.int64) - 1
         final = np.take_along_axis(after, bottom_zero[..., None], axis=2)[..., 0]
         require(bit_equal(final, old_acc),

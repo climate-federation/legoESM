@@ -55,6 +55,14 @@ def test_parser_refuses_header_dimension_mutation(tmp_path):
         raise AssertionError("dimension mutation stayed green")
 
 
+def test_round105_association_transposes_j_i_to_native_i_j():
+    old_ji = np.arange(6, dtype=np.float64).reshape(3, 2)
+    native_ij = old_ji.T
+    assert native_ij.shape == (2, 3)
+    assert gate.bit_equal(native_ij, old_ji.T)
+    assert not gate.bit_equal(native_ij, old_ji)
+
+
 def test_patch_is_additions_only_and_launcher_is_fail_closed():
     patch = (ACQ / "dynspg_ts_round107.patch").read_text(encoding="utf-8").splitlines()
     removed = [line for line in patch if line.startswith("-") and not line.startswith("---")]
