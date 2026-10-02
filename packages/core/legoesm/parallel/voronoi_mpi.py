@@ -1242,9 +1242,13 @@ def make_voronoi_mpi_step(
             # mass (post-mass-fix p_s; non-positive dp zero-weighted).
             from legoesm.core.conservation import (
                 apply_water_positivity, broadcast_allreduce_sum,
+                cell_mass_weight,
             )
             _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
             _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+            _dp = cell_mass_weight(      # local areas, GLOBAL mean as the scale
+                _dp, local_mesh.areaCell,
+                area_ref=_total_area_global / layout.partition.nCells_global)
             _owned = layout.owned_mask_cells[:, None]
 
             def _mpi_owned_sum(x, _o=_owned):

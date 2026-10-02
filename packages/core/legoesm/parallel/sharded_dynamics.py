@@ -4465,7 +4465,6 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -4477,15 +4476,15 @@ def make_voronoi_sharded_step(
         # stay replicated under multi-controller.  A host array is
         # always fully addressable, so the P("device") shard is
         # guaranteed on both controllers.  total_area is a host float.
-        _area_for_mass = multiprocess_safe_device_put(
-            np.asarray(global_mesh.areaCell), dev_sharding)
         # fp64 area sum to match the fp64 mass-budget accumulator below
         # (mirrors make_voronoi_mpi_step; identical under x64).
-        _total_area = float(jnp.sum(
-            global_mesh.areaCell.astype(jnp.float64)))
-    else:
-        _area_for_mass = jnp.zeros((0,))  # unused placeholder arg
-        _total_area = 1.0
+    # The global cell areas ride for BOTH the dry-mass fixer and the
+    # positivity stage's mass weight (cell_mass_weight), so they are built
+    # whether or not the fixer is on.
+    _area_for_mass = multiprocess_safe_device_put(
+        np.asarray(global_mesh.areaCell), dev_sharding)
+    _total_area = (float(jnp.sum(global_mesh.areaCell.astype(jnp.float64)))
+                   if cfg.fix_mass else 1.0)
 
     # ------------------------------------------------------------------
     # JIT-compiled step: dispatch_integrator dynamics (tracer advection
@@ -4719,6 +4718,8 @@ def make_voronoi_sharded_step(
                 from legoesm.core.conservation import apply_water_positivity
                 _ph = sigma.pressure_at_half(state_new.p_s.data)
                 _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                from legoesm.core.conservation import cell_mass_weight
+                _dp = cell_mass_weight(_dp, area_arg)     # local cell areas
                 _tr_out, _T_out = apply_water_positivity(
                     state_new.tracers, state_new.T.data, _dp,
                     conservative=getattr(

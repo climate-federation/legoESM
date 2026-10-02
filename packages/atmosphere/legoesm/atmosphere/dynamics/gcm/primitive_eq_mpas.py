@@ -1251,7 +1251,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # the hard-floor fallback carries the per-species latent-heat T
             # correction incl ice.  Serial jnp.sum here; the MPI lane passes an
             # allreduce-SUM reduction.
-            from legoesm.core.conservation import apply_water_positivity
+            from legoesm.core.conservation import (
+                apply_water_positivity, cell_mass_weight)
+            _dp = cell_mass_weight(_dp, self.mesh.areaCell)  # res6 cells span 1.6x
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,

@@ -1441,12 +1441,14 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # tiny correction that only fires on fully net-negative columns (rare on
         # smooth water fields).  A band-aware psum sum_fn is the SPMD upgrade.
         if state.tracers:
-            from legoesm.core.conservation import apply_water_positivity
+            from legoesm.core.conservation import (
+                apply_water_positivity, cell_mass_weight)
             _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
             if _hybrid:
                 _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
             else:
                 _dp = state.p_s[..., jnp.newaxis] * sigma_coord.dsigma
+            _dp = cell_mass_weight(_dp, grid.grid_area)   # cos(lat) areas
             _tr_out, _T_out = apply_water_positivity(
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,

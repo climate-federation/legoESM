@@ -2024,6 +2024,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 _dp = jnp.maximum(dp_from_hybrid(_coord, _ps), 0.0)  # +weight contract
             else:
                 _dp = _ps[..., jnp.newaxis] * _coord.dsigma.astype(_ps.dtype)
+            from legoesm.core.conservation import cell_mass_weight
+            _dp = cell_mass_weight(_dp, self.grid.grid_area)  # cube cell areas
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,

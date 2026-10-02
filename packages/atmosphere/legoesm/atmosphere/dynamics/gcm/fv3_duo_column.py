@@ -370,10 +370,11 @@ class FV3DuoColumnModel:
         arithmetic otherwise, but the global rescale is 1 ulp off under
         jit, and the certified bitwise identities with the closed lane
         (rung 1) must hold on non-negative fields."""
-        from legoesm.core.conservation import apply_water_positivity
+        from legoesm.core.conservation import (
+            apply_water_positivity, cell_mass_weight)
         ci = slice(self.ng, self.ng + self.n)
-        dp_w = st["delp"][:, ci, ci, :] * self._faces(
-            self.mesh.areaCell)[..., None]
+        dp_w = cell_mass_weight(st["delp"][:, ci, ci, :],
+                                self._faces(self.mesh.areaCell))
         tr_w = {nm: q[i][:, ci, ci, :]
                 for i, nm in enumerate(self.tracer_names)}
         fixed, _ = apply_water_positivity(

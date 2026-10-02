@@ -162,6 +162,32 @@ def energy_consistent_water_floor(tracers, T):
     return out, T_out
 
 
+def cell_mass_weight(dp, area, area_ref=None):
+    """The weight of the positivity stage: layer MASS per cell, ``dp`` times
+    the cell area RELATIVE to ``area_ref`` (default: the mean of ``area``),
+    broadcast over the trailing level axis.  The per-column borrow is
+    unchanged by a per-column factor (it cancels in the rescale), but the
+    GLOBAL residual redistribution of :func:`conservative_positive_clip_global`
+    sums over cells, so with ``dp`` alone a net-negative column's invented
+    mass is handed back per unit of layer pressure, not per unit of mass --
+    mis-conserving on any grid whose cells differ in area (lat-lon cos(lat):
+    1 -> 0 at the pole; Voronoi res6: 1.6x; duo cube: 1.4x corner to centre).
+    User directive 2026-10-02: every lane weights by mass.
+
+    The area enters as a dimensionless RATIO so the weights keep ``dp``'s
+    magnitude: the clip's fixed degeneracy threshold and its fp32 quotient
+    VJP (``after**2``) then see the same scale as the dp-only weight they
+    replace (codex 2026-10-02: Earth-scale ``dp*area`` on fp32 number
+    tracers overflowed the squared denominator and silently zeroed a
+    gradient term).  ``area_ref`` must be partition-independent: under MPI
+    pass the GLOBAL mean cell area (a per-rank local mean would give each
+    rank a different scale inside one allreduced residual).
+    """
+    a = jnp.asarray(area, dtype=dp.dtype)
+    ref = jnp.mean(a) if area_ref is None else jnp.asarray(area_ref, dtype=dp.dtype)
+    return dp * (a / ref)[..., None]
+
+
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
                            sum_fn=None):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
@@ -341,8 +367,16 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     # residual so the two nominally-identical q_col sums cannot differ by
     # reduction roundoff, and the MPI closure issues exactly two allreduces
     # per tracer (codex 2026-07-28 global-residual review).
-    pos_total = s(q_col * w)
-    resid = jnp.maximum(pos_total - s(q * w), 0.0)
+    # Global sums in the budget accumulator (fp64 under x64): the residual
+    # is the difference of two near-equal totals over every cell, and on an
+    # fp32 lane that cancellation would otherwise carry ~1e-7 x total mass
+    # of noise into the redistribution (GLM 2026-10-02).  Column sums stay
+    # in tracer dtype (one 2-D promotion, not a 3-D one); ``keepdims`` keeps
+    # the MPI owned-mask broadcast ``(n, 1)`` valid.
+    acc = conservation_accumulator()
+    pos_total = s(jnp.sum(q_col * w, axis=axis, keepdims=True).astype(acc))
+    resid = jnp.maximum(
+        pos_total - s(jnp.sum(q * w, axis=axis, keepdims=True).astype(acc)), 0.0)
     live = pos_total > eps_eff
     safe_total = jnp.where(live, pos_total, 1.0)
     # Degenerate-but-positive global total: KEEP the column result (error
@@ -352,7 +386,7 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     # global total is non-positive (nothing exists to borrow anywhere).
     factor = jnp.where(live, 1.0 - resid / safe_total,
                        jnp.where(pos_total > 0.0, 1.0, 0.0))
-    return q_col * jnp.clip(factor, 0.0, 1.0), created
+    return q_col * jnp.clip(factor, 0.0, 1.0).astype(q.dtype), created
 
 
 def _accumulation_dtype():

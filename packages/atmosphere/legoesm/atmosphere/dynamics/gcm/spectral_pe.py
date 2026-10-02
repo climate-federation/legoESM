@@ -1787,6 +1787,8 @@ class SpectralPrimitiveEquationModel:
             dp = jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)  # +weight contract
         else:
             dp = p_s[..., None] * coord.dsigma.astype(p_s.dtype)
+        from legoesm.core.conservation import cell_mass_weight
+        dp = cell_mass_weight(dp, self.grid.grid_area)   # Gaussian-weight areas
         tracers_out, _ = apply_water_positivity(
             state.tracers, None, dp,
             conservative=self.config.conservative_tracer_clamp,

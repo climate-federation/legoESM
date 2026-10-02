@@ -779,3 +779,49 @@ class TestNonConservingFormsWarn:
             base.validate_strict()
         assert not any("NON-CONSERVING" in r.message
                        for r in caplog.records)
+
+
+def test_cell_mass_weight_is_scale_safe_for_fp32_number_tracers():
+    """codex 2026-10-02 P1: Earth-scale ``dp*area`` weights (1e16) on an
+    fp32 per-mass number field put ``after**2`` past fp32's range inside the
+    quotient VJP, silently zeroing the borrow's gradient term.  The helper
+    feeds the area as a ratio to its mean, so the fp32 gradient matches
+    fp64; the raw dimensional weight is the control that loses it."""
+    import jax
+
+    from legoesm.core.conservation import (
+        cell_mass_weight, conservative_positive_clip_global)
+
+    N = jnp.asarray([[4e4, -1e4, 3e4, 2e4]])
+    dp = jnp.full((1, 4), 1e4)
+    area = jnp.asarray([1e12])
+
+    def total(q, w):
+        return jnp.sum(conservative_positive_clip_global(q, w)[0])
+
+    w32 = cell_mass_weight(dp.astype(jnp.float32), area.astype(jnp.float32))
+    g32 = jax.grad(total)(N.astype(jnp.float32), w32)
+    g64 = jax.grad(total)(N.astype(jnp.float64),
+                          cell_mass_weight(dp, area).astype(jnp.float64))
+    assert np.isfinite(np.asarray(g32)).all()
+    np.testing.assert_allclose(np.asarray(g32), np.asarray(g64), rtol=1e-4)
+    raw32 = (dp * area[:, None]).astype(jnp.float32)
+    g_raw = jax.grad(total)(N.astype(jnp.float32), raw32)
+    assert float(jnp.max(jnp.abs(g_raw - g64.astype(jnp.float32)))) > 0.05
+
+
+def test_cell_mass_weight_area_ref_matches_the_global_mean():
+    """Under MPI each rank holds a local slice; the explicit ``area_ref``
+    (global mean) must reproduce the serial default on every slice."""
+    from legoesm.core.conservation import cell_mass_weight
+
+    area = jnp.asarray([1.0, 2.0, 3.0, 6.0])
+    dp = jnp.ones((4, 2))
+    full = cell_mass_weight(dp, area)
+    ref = float(area.mean())
+    for sl in (slice(0, 2), slice(2, 4)):
+        np.testing.assert_allclose(
+            np.asarray(cell_mass_weight(dp[sl], area[sl], area_ref=ref)),
+            np.asarray(full[sl]), rtol=1e-12)
+    assert not np.allclose(np.asarray(cell_mass_weight(dp[0:2], area[0:2])),
+                           np.asarray(full[0:2]))
