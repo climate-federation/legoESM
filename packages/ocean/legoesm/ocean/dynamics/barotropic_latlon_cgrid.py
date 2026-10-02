@@ -1078,26 +1078,6 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         "sw": (shift(e3u, 1, 0), shift(umask, 1, 0), shift(e2u, 1, 0)),
         "se": (e3u, umask, e2u),
     }
-    # dynspg_ts.f90:1282-1283 reads e2u(:,jj+1) for the two northern
-    # V-point scales.  At ORCA's top row that is NEMO's U-stagger fold halo,
-    # not the southern row selected by periodic jnp.roll.
-    nmask = north_fold_mask(grid)
-    if fold_is_local(grid) or nmask is not None:
-        from legoesm.grids.operators_latlon_cgrid import (
-            fold_ghost_source_T,
-            fold_perm_u,
-        )
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_row
-
-        fold = grid.fold
-        north_e2u = shift(e2u, 0, -1)
-        north_e2u = apply_north_fold(
-            north_e2u,
-            fold_row(fold_ghost_source_T(e2u, fold), fold_perm_u(fold),
-                     1.0, fold.perm_T.shape[0]),
-            grid, north_mask=nmask)
-        vn["nw"] = (vn["nw"][0], vn["nw"][1], shift(north_e2u, 1, 0))
-        vn["ne"] = (vn["ne"][0], vn["ne"][1], north_e2u)
     r1_hu = b(r1_hu0 / b(one + r3u))
     r1_hv = b(r1_hv0 / b(one + r3v))
     out = {}
