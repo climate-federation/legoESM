@@ -105,6 +105,22 @@ class TestBootstrapFromYamlConfig:
         init_dist.assert_called_once()
         create_mesh.assert_not_called()
 
+    @pytest.mark.parametrize("precision, mode", [
+        ({"dynamics": "float64", "conservation": "float32"}, "fp64"),
+        ({"dynamics": "float32", "conservation": "float64"}, "mixed"),
+        ({}, "fp32"),
+        ({"mode": "Mixed", "dynamics": "float64"}, "mixed"),
+    ])
+    def test_precision_keys_reach_bootstrap(self, precision, mode):
+        cfg = Config.from_dict({"hardware": {
+            "precision": precision,
+            "parallelism": {"distributed": False, "n_devices": 1,
+                            "backend": "cpu"},
+        }})
+        with patch("legoesm.runtime.config.bootstrap") as boot:
+            bootstrap_from_yaml_config(cfg)
+        assert boot.call_args.kwargs["precision"] == mode
+
     def test_create_model_consumes_hardware_config(self):
         cfg = Config.from_dict(
             {
