@@ -71,7 +71,7 @@ The production-JIT CPU/fp64/libm replay uses exact-zero surface inputs and the
 gate-local selector census above. NEMO performs surface, EOS/buoyancy,
 vertical-physics, lateral-physics, external-mode, and stage-1 work in the order
 shown by
-`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-217`. Its admitted
+`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:148-217`. Its admitted
 stage-1 frame is written immediately after the complete call
 (`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:214-217`).
 

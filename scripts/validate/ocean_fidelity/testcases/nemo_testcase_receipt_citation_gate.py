@@ -144,6 +144,14 @@ FILES = {
         _ORCA2_R88FRAMEDEBUG_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R90FRAMES_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "zdfdrg.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/istate.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "istate.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1174,9 +1182,9 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 92: rung-0 card and source-order RHS acquisition ---
-    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-217': [
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:148-217': [
         '! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)',
-        'CALL r84_dump_frame( kstp, 1, Naa )', 71],
+        'CALL r84_dump_frame( kstp, 1, Naa )', 70],
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90:139-166': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 28],
