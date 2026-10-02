@@ -2154,6 +2154,8 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
     explicit_scheme: str = "upwind",
+    w_area_half: jnp.ndarray | None = None,
+    face_area: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -2222,9 +2224,19 @@ def adaptive_implicit_vertical_momentum_advection(
         tend_exp = nemo_up3_vertical_momentum_advection(
             u, w_exp, h, face_active=face_active,
         )
+    elif explicit_scheme == "nemo_advective":
+        # NEMO ln_dynadv_vec + ln_zad_Aimp: dynzad (centered advective, full u)
+        # on the explicit share of the e1e2t-weighted w; the implicit share
+        # goes to the upwind solve below, as dynzdf does with wi.
+        if w_area_half is None or face_area is None:
+            raise ValueError(
+                "explicit_scheme='nemo_advective' needs w_area_half and face_area")
+        tend_exp = nemo_advective_vertical_momentum_advection(
+            u, (1.0 - zcff) * w_area_half, h, face_area, face_active=face_active,
+        )
     else:
         raise ValueError(
-            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            "explicit_scheme must be 'upwind', 'nemo_up3' or 'nemo_advective', got "
             f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 

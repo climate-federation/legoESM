@@ -1785,6 +1785,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   nemo_een_coriolis=False,
+                  vertical_momentum_scheme=None,
                   lateral_side_bc=None, barotropic_coriolis=None,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
@@ -1893,6 +1894,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_boost", A_h_eq_boost),
                               ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
+                              ("vertical_momentum_scheme", vertical_momentum_scheme),
                               ("lateral_side_bc", lateral_side_bc),
                               ("barotropic_coriolis", barotropic_coriolis),
                               ("lateral_viscosity_operator",
@@ -7031,6 +7033,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
     p.add_argument("--woa-s", type=str, default="data/woa18/woa18_decav_s00_01.nc")
+    p.add_argument("--vertical-momentum-scheme", type=str, default=None,
+                   choices=["nemo_advective"],
+                   help="Tripole only: vertical momentum advection. 'nemo_advective' "
+                        "= NEMO dynzad (centered advective form on the full velocity; "
+                        "with --adaptive-implicit-vertadv it is the explicit part of "
+                        "the Courant split, as ln_zad_Aimp). Default (None) keeps the "
+                        "1st-order upwind of the baroclinic perturbation.")
     p.add_argument("--nemo-een-coriolis", action="store_true",
                    help="Tripole only: NEMO ln_dynvor_een Coriolis -- planetary f "
                         "inside the EEN vorticity triad (vorticity_scheme=een_total, "
@@ -8289,6 +8298,9 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    if args.vertical_momentum_scheme is not None and args.grid != "tripole":
+        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole only "
+                         f"(got {args.grid!r}); it would be silently ignored.")
     if args.nemo_een_coriolis and args.grid != "tripole":
         raise SystemExit("--nemo-een-coriolis is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -8910,6 +8922,7 @@ def main() -> int:
             nemo_ldf_file=args.nemo_ldf_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             nemo_een_coriolis=args.nemo_een_coriolis,
+            vertical_momentum_scheme=args.vertical_momentum_scheme,
             lateral_side_bc=args.lateral_side_bc,
             barotropic_coriolis=args.barotropic_coriolis,
             tke_kappah_min=args.tke_kappah_min,

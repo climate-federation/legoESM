@@ -43,3 +43,17 @@ def test_main_forwards_the_flag_to_build_tripole():
     import inspect
     assert "nemo_een_coriolis=args.nemo_een_coriolis" in inspect.getsource(_core2().main)
     assert "nemo_een_coriolis" in inspect.signature(_core2().build_tripole).parameters
+
+
+def test_vertical_momentum_flag_defaults_off_and_is_forwarded():
+    import inspect
+    args = _core2()._build_arg_parser().parse_args(["--grid", "tripole"])
+    assert args.vertical_momentum_scheme is None
+    assert "vertical_momentum_scheme=args.vertical_momentum_scheme" in inspect.getsource(_core2().main)
+
+
+def test_vertical_momentum_flag_refused_off_tripole(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "fesom",
+                                      "--vertical-momentum-scheme", "nemo_advective"])
+    with pytest.raises(SystemExit, match="tripole only"):
+        _core2().main()
