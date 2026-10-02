@@ -1511,6 +1511,7 @@ def run(
             card.recipe.z_coord,
             jnp.float64,
             scheme="ene",
+            grid=card.recipe.grid,
         ).items()
     }
     if ene_available:

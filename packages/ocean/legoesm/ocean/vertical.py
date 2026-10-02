@@ -312,9 +312,11 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
     kept: the compiled source brackets the north pair first "for
     reproducibility around NP".  The lateral boundary condition runs before
     the "insure e3f_0vor /= 0" sweep, which restores ``dry_vertex_fill`` at a
-    fully dry vertex (``dynvor.f90:918-920``; that operand is ``e3t_1d(jk)``
-    on the key_vco_1d builds and ``e3f_0`` on the key_vco_3d ones, so the
-    caller passes its own card's).
+    fully dry vertex.  The unpreprocessed ``dynvor.F90:945-951`` restores
+    ``e3f_0`` in BOTH ``nn_e3f_typ`` arms; ``domzgr_substitute.h90`` then
+    expands that name to ``e3t_1d(jk)`` under key_vco_1d (the VORTEX build's
+    ``dynvor.f90:920``) and to ``e3f_3d`` under key_vco_3d (GYRE's
+    ``dynvor.f90:936``), so the caller passes its own card's array.
 
     Sibling implementations of the same NEMO statement, both in a DIFFERENT
     layout and neither interchangeable with this one: the live baroclinic
@@ -329,7 +331,11 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
     e3t0 = jnp.asarray(e3t_0)
     dtype = e3t0.dtype
     active = jnp.asarray(tmask, dtype=dtype)
-    b = lax.optimization_barrier
+    # A bare optimization_barrier is stripped from optimized HLO, so the
+    # bracketing above would not survive JIT on a card whose e3t_0 varies
+    # horizontally.  Hold every written binary64 result the way the literal
+    # coefficient builder does.
+    b = nemo_source_round
 
     def east(value):
         return jnp.roll(value, -1, axis=1)
