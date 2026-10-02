@@ -172,7 +172,7 @@ def _model_config(
             # continuity solve is called TWICE and the two calls are not the
             # same statement: stprk3_stg.f90:289-300 hands wzv the RAW stage
             # velocity for the momentum program, while the tracer program
-            # re-solves it on the transports (traadv.f90:274); sshwzv.f90:
+            # re-solves it on the transports (traadv.f90:268); sshwzv.f90:
             # 271-299 is the solve itself.  Both fields are STATED here, per
             # decision 75 -- the split is NOT inferred from the time
             # integrator, the momentum form or wzv_call2_evaluation.

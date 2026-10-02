@@ -84,6 +84,12 @@ def test_the_vector_card_states_nemos_two_continuity_solves():
     flux = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
     assert flux.wzv_call2_evaluation == "generic"
     assert flux.nemo_stage_momentum_wzv_split is None
+    # The stated line must also be the line the stepper resolves, or a future
+    # edit to the predicate could leave the card's statement inert.
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        nemo_stage_momentum_wzv_executes)
+    assert nemo_stage_momentum_wzv_executes(vec) is True
+    assert nemo_stage_momentum_wzv_executes(flux) is False
 
 
 def test_card_resolves_the_shipped_namelist(card):
