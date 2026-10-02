@@ -157,7 +157,8 @@ def run(root: Path, *, plant: str | None = None,
 
     rows = []
 
-    def _row(label, reference, candidate, mask, nemo_boundary, planted):
+    def _row(label, reference, candidate, mask, nemo_boundary, planted,
+             convention_sensitive=False):
         reference = np.asarray(reference)
         candidate = np.asarray(candidate)
         if planted:
@@ -175,6 +176,15 @@ def run(root: Path, *, plant: str | None = None,
         row["nemo_boundary"] = nemo_boundary
         row["execution_regime"] = "production_step_jit"
         row["planted"] = bool(planted)
+        # A row whose two sides are the same NAME but not provably the same
+        # QUANTITY cannot carry an attribution.  In flux form NEMO leaves the
+        # advection OUT of the three-dimensional Krhs and puts its depth mean
+        # straight into the two-dimensional Ue_rhs/Ve_rhs instead
+        # (stp2d.F90:170 `dyn_adv_up3(..., pUe=Ue_rhs, pVe=Ve_rhs)`, labelled
+        # "2D RHS only", then :183 cumulates), while legoESM's observed
+        # pre-stage array is its own completed right-hand side.  The row is
+        # reported, never used to name an owner.
+        row["convention_sensitive"] = bool(convention_sensitive)
         rows.append(row)
         return row
 
@@ -191,7 +201,7 @@ def run(root: Path, *, plant: str | None = None,
         _row(f"base.{face}", groups[f"base_{face}"][..., :nlev],
              observed[f"base_{face}"][..., :nlev], masks[face],
              "Krhs at the stage-1 boundary (stp2d.F90:126-171)",
-             plant == f"base.{face}")
+             plant == f"base.{face}", convention_sensitive=True)
 
     # ---- 2. the stage-1 continuity solve (NEMO's np_transport wzv) --------
     # stprk3_stg.F90:298.  Its ww is dyn_adv's vertical operand through
@@ -218,7 +228,9 @@ def run(root: Path, *, plant: str | None = None,
              "stage-1 output after the barotropic correction "
              "(stprk3_stg.F90:437-450)", plant == f"out.{face}")
 
-    first = next((r for r in rows if not r["bit_exact"]), None)
+    first = next((r for r in rows
+                  if not r["bit_exact"] and not r["convention_sensitive"]),
+                 None)
     report = {
         "case": CASE, "oracle_root": str(root), "legoesm_git_sha": sha,
         "plant": plant, "rows": rows,
@@ -253,10 +265,12 @@ def main(argv=None) -> int:
                                + "\n")
     for row in report["rows"]:
         print("{name:34s} bit={bit!s:5s} cells={cells:7d} "
-              "max_abs={m:.6e} rel={r:.3e}".format(
+              "max_abs={m:.6e} rel={r:.3e}{tag}".format(
                   name=row["name"].split(".", 1)[1], bit=row["bit_exact"],
                   cells=row["cells_unequal"], m=row["max_abs"],
-                  r=row["relative_max_abs"]))
+                  r=row["relative_max_abs"],
+                  tag="  (convention-sensitive, not an owner)"
+                      if row["convention_sensitive"] else ""))
     print("first non-bit:", report["first_non_bit"])
     print("status:", report["status"])
     if args.plant:
