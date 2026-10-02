@@ -2156,6 +2156,7 @@ def adaptive_implicit_vertical_momentum_advection(
     explicit_scheme: str = "upwind",
     w_area_half: jnp.ndarray | None = None,
     face_area: jnp.ndarray | None = None,
+    bottom_face_mask_mode: str = "min_rule",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -2233,6 +2234,7 @@ def adaptive_implicit_vertical_momentum_advection(
                 "explicit_scheme='nemo_advective' needs w_area_half and face_area")
         tend_exp = nemo_advective_vertical_momentum_advection(
             u, (1.0 - zcff) * w_area_half, h, face_area, face_active=face_active,
+            bottom_face_mask_mode=bottom_face_mask_mode,
         )
     else:
         raise ValueError(

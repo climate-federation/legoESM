@@ -484,3 +484,27 @@ def test_step_nemo_advective_leaves_depth_mean_to_the_barotropic_solver(small_mo
         return (x * h).sum(-1) / h.sum()
     assert np.max(np.abs(np.asarray(na.u.data) - np.asarray(up.u.data))) > 1e-9
     np.testing.assert_allclose(dmean(na.u.data), dmean(up.u.data), rtol=0, atol=1e-7)
+
+
+def test_nemo_advective_threads_the_bottom_face_mask_mode():
+    from legoesm.ocean.vertical import nemo_advective_vertical_momentum_advection
+    u, w, h = _col()
+    act = jnp.ones_like(u).at[:, -1].set(0.0)          # last level below the seafloor
+    area = jnp.ones((3, 1))
+    for mode in ("min_rule", "nemo_faithful"):
+        out = adaptive_implicit_vertical_momentum_advection(
+            u, w, h, 60.0, explicit_scheme="nemo_advective", face_active=act,
+            w_area_half=w, face_area=area, bottom_face_mask_mode=mode)
+        want = u + 60.0 * nemo_advective_vertical_momentum_advection(
+            u, w, h, area, face_active=act, bottom_face_mask_mode=mode)
+        np.testing.assert_allclose(np.asarray(out), np.asarray(want), rtol=0, atol=1e-15)
+
+
+def test_nemo_advective_aimp_refused_with_implicit_unsplit(small_model_pieces):
+    grid, z_coord, state, Config, Model = small_model_pieces
+    base = Config()
+    cfg = base.replace_flat(adaptive_implicit_vertadv=True,
+                            vertical_momentum_scheme="nemo_advective",
+                            barotropic_solver="implicit_unsplit")
+    with pytest.raises(ValueError, match="implicit_unsplit"):
+        Model(grid, z_coord, cfg)

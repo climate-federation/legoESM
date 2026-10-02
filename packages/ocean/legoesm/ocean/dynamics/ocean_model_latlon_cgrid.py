@@ -2716,6 +2716,14 @@ class LatLonCGridOceanModel:
         # option here would be a silent no-op.  Fail fast rather than mislead.
         # nemo_advective IS supported: the step-level adaptive stage takes it
         # as its explicit part (NEMO ln_dynadv_vec + ln_zad_Aimp).
+        if (_vert_mom_scheme == "nemo_advective"
+                and getattr(config, "adaptive_implicit_vertadv", False)
+                and config.barotropic.barotropic_solver == "implicit_unsplit"):
+            raise ValueError(
+                "vertical_momentum_scheme='nemo_advective' with "
+                "adaptive_implicit_vertadv=True is not threaded through the "
+                "implicit_unsplit step (it skips the adaptive stage), so dynzad "
+                "would never be applied. Use barotropic_solver='implicit_cn'.")
         if (_vert_mom_scheme == "centered_full"
                 and getattr(config, "adaptive_implicit_vertadv", False)):
             raise ValueError(
@@ -5825,14 +5833,17 @@ class LatLonCGridOceanModel:
                 # faces (same construction as the in-tendency nemo_advective
                 # branch); Courant split from the plain face w.
                 _area_w = _grid.area_T[..., jnp.newaxis] * w_baro
+                _zad_mask = getattr(_cfg_b, "zad_bottom_face_mask", "min_rule")
                 u_adv = adaptive_implicit_vertical_momentum_advection(
                     u_3d, w_u_half, h_u_old, dt,
                     face_active=u_face_active, explicit_scheme="nemo_advective",
+                    bottom_face_mask_mode=_zad_mask,
                     w_area_half=interp_cell_to_uface(_area_w),
                     face_area=(_grid.dx_u * _grid.dy_u)[..., jnp.newaxis])
                 v_adv = adaptive_implicit_vertical_momentum_advection(
                     v_3d, w_v_half, h_v_old, dt,
                     face_active=v_face_active, explicit_scheme="nemo_advective",
+                    bottom_face_mask_mode=_zad_mask,
                     w_area_half=interp_cell_to_vface(_area_w, _grid),
                     face_area=(_grid.dx_v * _grid.dy_v)[..., jnp.newaxis])
                 # The advective form has a non-zero column integral, and this
