@@ -265,17 +265,12 @@ def measure(
         _to_model_v(oracle["i000_vbb_e"]),
         oracle["i000_sshb_e"], oracle["i000_sshbb_e"],
     )
-    drag_rate = (
-        -_to_model_u(oracle["i000_zCdU_u"]),
-        -_to_model_v(oracle["i000_zCdU_v"]),
-    )
     substituted_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
             barotropic_slow_forcing_override=(slow_u, slow_v),
             barotropic_raw_history_override=raw_history,
-            barotropic_drag_rate_override=drag_rate,
         ),
     )
     observed = jax.device_get(substituted_model.step(
@@ -373,8 +368,8 @@ def measure(
         "record_census": census,
         "observer_passivity": passive_fields,
         "substitutions": (
-            "NEMO recorded final slow forcing, raw barotropic history, "
-            "and drag rates"
+            "NEMO recorded final slow forcing and raw barotropic history; "
+            "drag is left live for causal scoring"
         ),
         "coefficients": coefficients,
         "rows": rows,
