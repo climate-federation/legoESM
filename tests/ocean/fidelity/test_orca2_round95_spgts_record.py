@@ -211,6 +211,20 @@ def test_round98_ranked_coefficient_record_uses_declared_owned_shape(
     }
 
 
+def test_round99_ranked_coefficients_assemble_owned_domain(tmp_path: Path) -> None:
+    for rank in (0, 1):
+        synthetic_r98_coefficient_record(
+            tmp_path / f"oracle_r98_een_coeff_rank{rank:04d}_kt00000001.bin",
+            rank,
+        )
+    coefficients, census = residual.assemble_oracle_coefficients(tmp_path)
+    assert census["coverage"] == "exactly-once"
+    assert [row["rank"] for row in census["records"]] == [0, 1]
+    for index, name in enumerate(residual.COEFFICIENTS):
+        assert coefficients[name].shape == (148, 180)
+        np.testing.assert_array_equal(coefficients[name], index + 1.0)
+
+
 @pytest.mark.parametrize(
     "plant", ("header", "field-name", "field-dims", "truncation",
               "missing-field", "zero-payload"),

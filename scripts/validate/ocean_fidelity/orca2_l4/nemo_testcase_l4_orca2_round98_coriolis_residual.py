@@ -25,6 +25,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round97_spgts_walk as r97,
 )
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round98_een_coeff_acquisition import (
+    check_record as coefficient_record,
+)
 from scripts.validate.ocean_fidelity.testcases import (
     nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
 )
@@ -155,8 +158,58 @@ def one_ulp_sensitive_coefficient(trace, coefficients, active):
     raise GateError("no active one-ULP coefficient mutation reaches Coriolis")
 
 
+def assemble_oracle_coefficients(root: Path) -> tuple[dict[str, np.ndarray], dict]:
+    """Assemble validated owned-only coefficient groups from both ranks."""
+
+    assembled = {
+        name: np.empty((148, 180), dtype=np.float64) for name in COEFFICIENTS
+    }
+    coverage = np.zeros((148, 180), dtype=np.int8)
+    records = []
+    for expected_rank in (0, 1):
+        path = root / (
+            f"oracle_r98_een_coeff_rank{expected_rank:04d}_kt00000001.bin"
+        )
+        metadata = coefficient_record.read_record(path)
+        require(metadata["rank"] == expected_rank, f"{path.name}: rank moved")
+        raw = path.read_bytes()
+        offset = 16 + coefficient_record.HEADER.size
+        values = {}
+        for _ in range(len(COEFFICIENTS)):
+            name = raw[offset:offset + 16].decode("ascii").rstrip(" \x00")
+            offset += 16
+            ndim, n1, n2, n3 = coefficient_record.GROUP.unpack_from(raw, offset)
+            offset += coefficient_record.GROUP.size
+            require((ndim, n3) == (2, 1), f"{path.name}: {name} rank moved")
+            count = n1 * n2
+            values[name] = np.frombuffer(
+                raw, dtype="=f8", count=count, offset=offset,
+            ).copy().reshape((n1, n2), order="F")
+            offset += 8 * count
+        require(offset == len(raw), f"{path.name}: coefficient extraction missed EOF")
+        require(set(values) == set(COEFFICIENTS),
+                f"{path.name}: coefficient payload registry moved")
+
+        nimpp, njmpp = metadata["origin"]
+        ntsi, ntsj, ntei, ntej = metadata["owned"]
+        i0, j0 = nimpp + ntsi - 4, njmpp + ntsj - 4
+        i1, j1 = i0 + ntei - ntsi + 1, j0 + ntej - ntsj + 1
+        require((j0, j1) == (0, 148) and 0 <= i0 < i1 <= 180,
+                f"{path.name}: owned placement moved")
+        coverage[j0:j1, i0:i1] += 1
+        for name, value in values.items():
+            assembled[name][j0:j1, i0:i1] = r97._owned_block(
+                value, ntsi, ntsj, ntei, ntej)
+        records.append({key: metadata[key] for key in (
+            "rank", "sha256", "bytes", "origin", "owned")})
+    require(bool(np.all(coverage == 1)),
+            "rank-owned coefficient slabs do not cover the domain exactly once")
+    return assembled, {"coverage": "exactly-once", "records": records}
+
+
 def measure(deck_root: Path, frame_root: Path, spg_root: Path,
-            expect_commit: str, *, plant: str) -> dict:
+            expect_commit: str, *, plant: str,
+            coefficient_root: Path | None = None) -> dict:
     import jax
     import jax.numpy as jnp
 
@@ -256,6 +309,28 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "external literal coefficient seed is not the production Kmm seed: "
             + json.dumps(coefficient_seed, sort_keys=True))
 
+    oracle_coefficient_census = None
+    oracle_coefficient_identity = None
+    oracle_coefficient_application = None
+    discriminator = "UNMEASURED_NO_RANK_COMPLETE_ORACLE_COEFFICIENTS"
+    if coefficient_root is not None:
+        oracle_coeff, oracle_coefficient_census = assemble_oracle_coefficients(
+            coefficient_root)
+        oracle_coefficient_identity = {
+            name: rhs_walk.score(
+                np.asarray(source_coeff[name]), oracle_coeff[name],
+                np.ones_like(oracle_coeff[name], dtype=bool),
+            )
+            for name in COEFFICIENTS
+        }
+        oracle_coefficient_application = score_application(
+            source_trace, oracle_coeff, oracle, active)
+        discriminator = (
+            "APPLICATION_AFTER_BIT_EXACT_COEFFICIENTS"
+            if all(row["bit_exact"] for row in oracle_coefficient_identity.values())
+            else "COEFFICIENT_CONSTRUCTION"
+        )
+
     source_application = score_application(
         source_trace, source_coeff, oracle, active,
         plant="application-bit" if plant == "application-bit" else "none")
@@ -344,7 +419,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     movement = coefficient_movement(source_coeff, fold_coeff)
     return {
-        "status": "MEASURED_R98_CORIOLIS_RESIDUAL",
+        "status": (
+            "MEASURED_R99_EEN_COEFFICIENT_DISCRIMINATOR"
+            if coefficient_root is not None
+            else "MEASURED_R98_CORIOLIS_RESIDUAL"
+        ),
         "claim_label": "independent",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "record_census": census,
@@ -358,6 +437,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "fold_active": bool(card.recipe.grid.fold.is_active),
         },
         "coefficient_seed_identity": coefficient_seed,
+        "oracle_coefficient_census": oracle_coefficient_census,
+        "oracle_coefficient_identity": oracle_coefficient_identity,
+        "oracle_coefficient_application": oracle_coefficient_application,
+        "discriminator": discriminator,
         "source_divisor_score": source_score,
         "source_associated_application": source_application,
         "divisor_movement": divisor_movement,
@@ -372,13 +455,15 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--frame-root", type=Path, required=True)
     parser.add_argument("--spg-root", type=Path, required=True)
+    parser.add_argument("--coefficient-root", type=Path)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
         result = measure(args.deck_root, args.frame_root, args.spg_root,
-                         args.expect_commit, plant=args.plant)
+                         args.expect_commit, plant=args.plant,
+                         coefficient_root=args.coefficient_root)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, ValueError, GateError, rhs_walk.GateError) as error:
         if args.plant != "none":
@@ -390,7 +475,7 @@ def main() -> int:
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
-    print("STATUS MEASURED_R98_CORIOLIS_RESIDUAL")
+    print(f"STATUS {result['status']}")
     return 0
 
 
