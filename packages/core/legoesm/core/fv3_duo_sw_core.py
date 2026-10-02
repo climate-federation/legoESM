@@ -237,7 +237,6 @@ __all__ = [
     "d_sw6_duo",
     "make_edge_interpolate4_jit",
     "make_fill_4corners_jit",
-    "make_fill2_4corners_jit",
     "make_d2a2c_vect_jit",
     "make_d2a2c_vect_duo_jit",
     "make_divergence_corner_jit",
@@ -3096,12 +3095,6 @@ def make_edge_interpolate4_jit(fn=edge_interpolate4):
 def make_fill_4corners_jit(fn=fill_4corners):
     """Static: direction/npx/npy/bd and the four corner flags."""
     return jax.jit(fn, static_argnums=(1, 2, 3, 4),
-                   static_argnames=("sw", "se", "ne", "nw"))
-
-
-def make_fill2_4corners_jit(fn=fill2_4corners):
-    """Same policy as :func:`make_fill_4corners_jit`."""
-    return jax.jit(fn, static_argnums=(2, 3, 4, 5),
                    static_argnames=("sw", "se", "ne", "nw"))
 
 

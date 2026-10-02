@@ -532,8 +532,6 @@ gradient_y(field, grid)           # d/dy via centered differences
 divergence(u_field, v_field, grid) # div(u,v) with vector halo exchange
 curl_z(u_field, v_field, grid)    # vorticity: dv/dx − du/dy
 laplacian(field, grid)            # 2nd-order ∇²
-advect_upwind(q, u, v, grid)     # 1st-order upwind advection
-advect_centered(q, u, v, grid)   # 2nd-order centered advection
 hyperdiffusion(field, grid, coeff) # 4th-order ∇⁴ damping (two Laplacians)
 global_integral(field, grid)      # Area-weighted integral (MPI-aware via allreduce)
 global_mean(field, grid)          # Area-weighted mean

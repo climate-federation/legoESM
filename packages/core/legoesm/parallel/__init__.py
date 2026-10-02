@@ -143,7 +143,6 @@ from legoesm.parallel.profiling import (
     get_stats as get_mpi_profile_stats,
 )
 from legoesm.parallel.profiling import (
-    is_profiling_enabled,
     mpi_timer,
     print_mpi_profile,
 )
@@ -263,7 +262,6 @@ __all__ = [
     # Batch MPI reductions
     "batch_allreduce_mpi",
     # MPI profiling
-    "is_profiling_enabled",
     "mpi_timer",
     "get_mpi_profile_stats",
     "reset_mpi_profile_stats",

@@ -283,16 +283,6 @@ def _get_git_hash() -> str:
     return git_provenance(_package_anchor()).commit
 
 
-def _get_git_ref() -> str:
-    """Branch name of the imported package's repo ("" if detached / no repo)."""
-    return git_provenance(_package_anchor()).ref
-
-
-def _get_git_dirty() -> bool:
-    """True if the imported package's repo has uncommitted changes."""
-    return git_provenance(_package_anchor()).dirty
-
-
 def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
                                        carry_aux=None) -> dict[str, np.ndarray]:
     """Build a dict of numpy arrays mirroring save_checkpoint layout.
