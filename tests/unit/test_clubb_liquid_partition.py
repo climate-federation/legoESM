@@ -621,7 +621,8 @@ def test_mpas_lane_refuses_a_state_missing_either_tracer():
     off = make_turbulence_physics(
         TurbulenceConfig(scheme="clubb", clubb=_ON), model_type="mpas", dt=300.0)
     tends_off, _ = off(state(q_v=q_v, q_c=q_c), mesh, sigma)
-    assert "q_c" not in (tends_off.tracer_tendencies or {})
+    assert "q_v" in tends_off.tracer_tendencies  # control: the lane did publish
+    assert "q_c" not in tends_off.tracer_tendencies
 
 
 def test_public_wrapper_publishes_liquid_iff_the_host_supplies_it():
