@@ -125,7 +125,8 @@ awk 'BEGIN { removed=0 } !removed && /IF\( ln_rnf \) THEN/ { removed=1; next } {
 }
 cpp -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
   -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$dry/traadv.F90" -o "$dry/traadv.f90"
-"$FC" -fsyntax-only -ffree-line-length-none -I "$SOURCE_ROOT/BLD/inc" "$dry/traadv.f90"
+"$FC" -fsyntax-only -ffree-line-length-none -J "$dry" \
+  -I "$SOURCE_ROOT/BLD/inc" "$dry/traadv.f90"
 
 if [[ "$MODE" == --preflight-only ]]; then
   printf 'ORCA2_ROUND90_RUNG0_FRAMES_PREFLIGHT_READY %s\n' "$TARGET_RUN"

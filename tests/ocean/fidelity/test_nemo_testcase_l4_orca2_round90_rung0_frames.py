@@ -72,6 +72,7 @@ def test_launcher_pins_the_source_resolved_fault_and_fresh_target() -> None:
     assert "round90/acquisition" in text
     assert "carry 80 frames" in text
     assert "write-only repair changed" in text
+    assert '-J "$dry"' in text
     assert "/usr/bin/time" not in text
 
 
@@ -82,4 +83,3 @@ def test_launcher_requires_all_firing_record_plants() -> None:
     for plant in ("absent-as-zero", "owner-on"):
         assert plant in text
     assert "missing-guard plant stayed green" in text
-
