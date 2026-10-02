@@ -99,24 +99,38 @@ def duo_rest_bundle(dyn, *, t_k: float, ps: float):
     return bundle
 
 
-def duo_plant(dyn, bundle, *, degree: int, amp: float):
-    """Potential wind through the D-grid corner differences on the compute
-    window ([cs, cc] for u, [cc, cs] for v, the certified IC convention)."""
+def duo_plant(dyn, bundle, *, degree: int, amp: float, mode: str = "div",
+              levels=None):
+    """Potential (``mode="div"``, phi at B-grid corners differenced over
+    dx/dy) or streamfunction (``mode="rot"``, psi at A-grid centres
+    differenced over dxc/dyc) wind through the D-grid differences on the
+    compute window ([cs, cc] for u, [cc, cs] for v, the certified IC
+    convention).  ``levels``: the k indices planted (default: all)."""
     import jax.numpy as jnp
-    n, ng = dyn.grid.n, dyn.grid.ng
+    n, ng, km = dyn.grid.n, dyn.grid.ng, dyn.config.km
     cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
+    lv = list(range(km)) if levels is None else list(levels)
     u0, v0 = [], []
     for t in range(6):
         gs = dyn.grid.ctx_np["gs6"][t]
-        lat_c = np.asarray(gs["grid_lat"])
-        dx, dy = np.asarray(gs["dx"]), np.asarray(gs["dy"])
-        phi = eval_legendre(degree, np.sin(lat_c))      # corners (m_b, m_b)
         u = np.zeros(bundle["state"]["u"].shape[1:])
         v = np.zeros(bundle["state"]["v"].shape[1:])
-        du = (phi[1:, :] - phi[:-1, :]) / dx              # (m_a, m_b)
-        dv = (phi[:, 1:] - phi[:, :-1]) / dy              # (m_b, m_a)
-        u[cs, cc, :] = du[cs, cc][..., None]
-        v[cc, cs, :] = dv[cc, cs][..., None]
+        if mode == "div":
+            phi = eval_legendre(degree, np.sin(np.asarray(gs["grid_lat"])))
+            du = (phi[1:, :] - phi[:-1, :]) / np.asarray(gs["dx"])     # (m_a, m_b)
+            dv = (phi[:, 1:] - phi[:, :-1]) / np.asarray(gs["dy"])     # (m_b, m_a)
+        elif mode == "rot":
+            psi = eval_legendre(degree, np.sin(np.asarray(gs["agrid_lat"])))
+            dyc, dxc = np.asarray(gs["dyc"]), np.asarray(gs["dxc"])   # (m_a,m_b),(m_b,m_a)
+            du = np.zeros(dyc.shape)
+            du[:, 1:-1] = -(psi[:, 1:] - psi[:, :-1]) / dyc[:, 1:-1]
+            dv = np.zeros(dxc.shape)
+            dv[1:-1, :] = (psi[1:, :] - psi[:-1, :]) / dxc[1:-1, :]
+        else:
+            raise ValueError(mode)
+        for k in lv:
+            u[cs, cc, k] = du[cs, cc]
+            v[cc, cs, k] = dv[cc, cs]
         u0.append(u)
         v0.append(v)
     u0, v0 = np.stack(u0), np.stack(v0)
@@ -130,49 +144,93 @@ def duo_plant(dyn, bundle, *, degree: int, amp: float):
     return out, (u0, v0)
 
 
-def duo_project(dyn, bundle, mode):
+def duo_project(dyn, bundle, mode, level=None, template_level=None):
     """Signed projection of the compute-window wind onto the planted
-    pattern (unweighted: a GLOBAL effective rate, cell areas span ~1.3x)."""
+    pattern (unweighted: a GLOBAL effective rate, cell areas span ~1.3x);
+    ``level`` restricts the wind to one k; ``template_level`` picks the
+    planted pattern's level (an UNPLANTED ``level`` against a planted
+    ``template_level`` measures leakage)."""
     u0, v0 = mode
     n, ng = dyn.grid.n, dyn.grid.ng
     cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
     u = np.asarray(bundle["state"]["u"])
     v = np.asarray(bundle["state"]["v"])
-    num = (np.sum(u[:, cs, cc] * u0[:, cs, cc])
-           + np.sum(v[:, cc, cs] * v0[:, cc, cs]))
-    den = np.sum(u0[:, cs, cc] ** 2) + np.sum(v0[:, cc, cs] ** 2)
+    ks = slice(None) if level is None else slice(level, level + 1)
+    tl = ks if template_level is None else slice(template_level, template_level + 1)
+    num = (np.sum(u[:, cs, cc, ks] * u0[:, cs, cc, tl])
+           + np.sum(v[:, cc, cs, ks] * v0[:, cc, cs, tl]))
+    den = np.sum(u0[:, cs, cc, tl] ** 2) + np.sum(v0[:, cc, cs, tl] ** 2)
     return float(num / den)
 
 
+def _duo_model(grid, cfg, damp_v=None):
+    """A duo model; ``damp_v`` (vorticity/delp del-6 coefficient, NOT a
+    model knob) overrides the deck through the model's own deck builder --
+    instrument-only, for the rotational positive control."""
+    import legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics as m
+    if damp_v is None:
+        return m.FV3DuoDynamicsModel(grid, cfg)
+    base = m.duo_sw_deck
+    m.duo_sw_deck = lambda **kw: base(**kw)._replace(damp_v=float(damp_v))
+    try:
+        return m.FV3DuoDynamicsModel(grid, cfg)
+    finally:
+        m.duo_sw_deck = base
+
+
 def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
-            d4_bg_list, cells_per_wave, steps: int, amp: float):
-    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig, FV3DuoDynamicsModel
+            d4_bg_list, cells_per_wave, steps: int, amp: float,
+            mode: str = "div", levels=None, damp_v_list=None):
+    """``damp_v_list`` given: the arms vary the VORTICITY damping
+    coefficient instead (control damp_v=0, d4_bg fixed at d4_bg_list[0])
+    -- the positive control that the rotational projection sees damping."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
     from legoesm.grids.factory import create_fv3_duo_grid
     grid = create_fv3_duo_grid(n, 3)
     area = np.concatenate([np.asarray(gs["area"])[3:3 + n, 3:3 + n].ravel()
                            for gs in grid.ctx_np["gs6"]])
     delta = float(np.sqrt(area.mean()))
     rows = []
+    mode_name = mode
     for cpw in cells_per_wave:
         deg = legendre_degree_for(delta, cpw)
-        cfg_ctrl = FV3DuoConfig(km=km, n_split=n_split, nord=nord, d4_bg=0.0)
-        dyn_c = FV3DuoDynamicsModel(grid, cfg_ctrl)
+        vary_damp_v = damp_v_list is not None
+        d4_fixed = float(d4_bg_list[0]) if vary_damp_v else 0.0
+        cfg_ctrl = FV3DuoConfig(km=km, n_split=n_split, nord=nord, d4_bg=d4_fixed)
+        dyn_c = _duo_model(grid, cfg_ctrl, damp_v=0.0 if vary_damp_v else None)
         rest = duo_rest_bundle(dyn_c, t_k=300.0, ps=1.0e5)
-        ic, mode = duo_plant(dyn_c, rest, degree=deg, amp=amp)
-        a0 = duo_project(dyn_c, ic, mode)
-        ctrl, b = [], ic
+        ic, planted = duo_plant(dyn_c, rest, degree=deg, amp=amp,
+                                mode=mode_name, levels=levels)
+        a0 = duo_project(dyn_c, ic, planted)
+        lv = list(range(km)) if levels is None else list(levels)
+        ctrl, ctrl_k, b = [], {k: [] for k in lv}, ic
         t0 = time.time()
         for _ in range(steps):
             b = dyn_c.step(b, dt)
-            ctrl.append(duo_project(dyn_c, b, mode))
+            ctrl.append(duo_project(dyn_c, b, planted))
+            for k in lv:
+                ctrl_k[k].append(duo_project(dyn_c, b, planted, level=k))
         b_ctrl = b
-        for d4 in d4_bg_list:
-            dyn_a = FV3DuoDynamicsModel(
-                grid, FV3DuoConfig(km=km, n_split=n_split, nord=nord, d4_bg=d4))
-            arm, b = [], ic
+        for d4 in (damp_v_list if vary_damp_v else d4_bg_list):
+            if vary_damp_v:
+                dyn_a = _duo_model(grid, cfg_ctrl, damp_v=d4)
+            else:
+                dyn_a = _duo_model(grid, FV3DuoConfig(
+                    km=km, n_split=n_split, nord=nord, d4_bg=d4))
+            arm, arm_k, b = [], {k: [] for k in lv}, ic
             for _ in range(steps):
                 b = dyn_a.step(b, dt)
-                arm.append(duo_project(dyn_a, b, mode))
+                arm.append(duo_project(dyn_a, b, planted))
+                for k in lv:
+                    arm_k[k].append(duo_project(dyn_a, b, planted, level=k))
+            per_level = {int(k): (_fit_retention(arm_k[k], ctrl_k[k])[0]
+                                  if d4 != 0.0 else 1.0) for k in lv}
+            # leakage into UNPLANTED levels (codex 2026-10-02 P2): the
+            # planted template's projection at each unplanted k, arm and
+            # control, after the last step (fraction of the planted amplitude)
+            leak = {int(k): [duo_project(dyn_a, b, planted, level=k, template_level=lv[0]),
+                             duo_project(dyn_c, b_ctrl, planted, level=k, template_level=lv[0])]
+                    for k in range(km) if k not in lv}
             bitwise = None
             if d4 == 0.0:
                 # the planted-failure control: every state leaf, not the
@@ -187,7 +245,11 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
                 r, dev = _fit_retention(arm, ctrl)
             ef_steps, ef_s = _efold(r, dt)
             rows.append(dict(lane="duo", n=n, km=km, dt=dt, n_split=n_split,
-                             nord=nord, d4_bg=d4, cells_per_wave=cpw,
+                             nord=nord, d4_bg=(d4_fixed if vary_damp_v else d4),
+                             damp_v=(d4 if vary_damp_v else None),
+                             cells_per_wave=cpw, amp=amp,
+                             mode=mode_name, levels=lv, retention_per_level=per_level,
+                             leakage_unplanted_arm_ctrl=leak,
                              degree=deg, delta_m=delta, a0=a0,
                              ctrl=[float(x) / a0 for x in ctrl],
                              arm=[float(x) / a0 for x in arm],
@@ -195,27 +257,52 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
                              efold_steps=ef_steps, efold_s=ef_s,
                              bitwise_vs_ctrl=bitwise,
                              wall_s=time.time() - t0))
-            print(f"duo C{n} dt={dt} n_split={n_split} nord={nord} "
-                  f"d4_bg={d4} {cpw}dx(l={deg}) r={r:.6f} dev={dev:.2e} "
+            pl = {k: round(v, 6) for k, v in per_level.items()}
+            lk = {k: [round(x, 5) for x in v] for k, v in leak.items()}
+            knob = f"damp_v={d4} d4_bg={d4_fixed}" if vary_damp_v else f"d4_bg={d4}"
+            print(f"duo C{n} {mode_name} lv={lv} dt={dt} n_split={n_split} "
+                  f"nord={nord} {knob} {cpw}dx(l={deg}) r={r:.6f} "
+                  f"per_level={pl} leak={lk} dev={dev:.2e} "
                   f"efold={ef_steps:.2f} steps = {ef_s:.0f} s  ctrl[-1]="
                   f"{ctrl[-1] / a0:.4f} bitwise_vs_ctrl={bitwise}", flush=True)
+    n_arms = len(damp_v_list if vary_damp_v else d4_bg_list)
+    assert len(rows) == len(cells_per_wave) * n_arms, (len(rows), n_arms)
     return rows
 
 
 # --------------------------------------------------------------------------
 # MPAS
 # --------------------------------------------------------------------------
-def mpas_plant(mesh, *, degree: int, amp: float):
-    """Potential wind through the native cell-difference gradient."""
-    phi = eval_legendre(degree, np.sin(np.asarray(mesh.latCell)))
-    c = np.asarray(mesh.cellsOnEdge)
-    assert c.shape[0] == 2 and c.max() < mesh.nCells
-    u_e = (phi[c[1]] - phi[c[0]]) / np.asarray(mesh.dcEdge)
+def mpas_plant(mesh, *, degree: int, amp: float, mode: str = "div"):
+    """Potential wind through the native cell-difference gradient
+    (``div``) or streamfunction wind through the vertex difference along
+    the edge (``rot``, psi on vertices / dvEdge)."""
+    if mode == "div":
+        phi = eval_legendre(degree, np.sin(np.asarray(mesh.latCell)))
+        c = np.asarray(mesh.cellsOnEdge)
+        assert c.shape[0] == 2 and c.max() < mesh.nCells
+        u_e = (phi[c[1]] - phi[c[0]]) / np.asarray(mesh.dcEdge)
+    elif mode == "rot":
+        psi = eval_legendre(degree, np.sin(np.asarray(mesh.latVertex)))
+        v = np.asarray(mesh.verticesOnEdge)
+        assert v.shape[0] == 2 and v.max() < psi.shape[0]
+        u_e = (psi[v[1]] - psi[v[0]]) / np.asarray(mesh.dvEdge)
+    else:
+        raise ValueError(mode)
     return u_e * (amp / np.abs(u_e).max())
 
 
 def run_mpas(*, level: int, nlev: int, dt_list, scale: float,
-             cells_per_wave, steps: int, amp: float):
+             cells_per_wave, steps: int, amp: float, mode: str = "div",
+             levels=None, sponge: bool = False, a_h_scale: float = 0.375,
+             sponge_layers: int = 2, sponge_factor: float = 8.0):
+    """``sponge=False``: ldiv4 arm (nu_div4 = scale*0.01*min(area)^2/dt) vs
+    control.  ``sponge=True`` (decision B1): the production del2 viscosity
+    A_h = a_h_scale*3e-3*min(dcEdge)^2/dt at every level with the
+    CAM-style top sponge (x factor^((n-k)/n) in the top ``sponge_layers``)
+    as the ARM, the same A_h without the sponge as the CONTROL (the
+    sponge's increment), plus a third run with no del2 at all so the
+    TOTAL top-layer del2 retention is reported too.  ldiv4 off in both."""
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig,
@@ -233,11 +320,25 @@ def run_mpas(*, level: int, nlev: int, dt_list, scale: float,
     delta = float(np.sqrt(area.mean()))
     rows = []
     w_e = (np.asarray(mesh.dcEdge) * np.asarray(mesh.dvEdge))
+    lv = list(range(nlev)) if levels is None else list(levels)
     for cpw in cells_per_wave:
         deg = legendre_degree_for(delta, cpw)
-        u0 = mpas_plant(mesh, degree=deg, amp=amp)
-        u3 = jnp.asarray(np.repeat(u0[:, None], nlev, axis=1))
-        div0 = np.asarray(divergence_cell_3d(u3, mesh))[:, 0]
+        u0 = mpas_plant(mesh, degree=deg, amp=amp, mode=mode)
+        u3n = np.zeros((u0.shape[0], nlev))
+        for k in lv:
+            u3n[:, k] = u0
+        u3 = jnp.asarray(u3n)
+        div0 = np.asarray(divergence_cell_3d(u3, mesh))[:, lv[0]]
+        # planted-field check (GLM 2026-10-02): the rot field must be
+        # discretely non-divergent; the div field is the yardstick
+        div_ref = np.asarray(divergence_cell_3d(jnp.asarray(np.repeat(
+            mpas_plant(mesh, degree=deg, amp=amp, mode="div")[:, None], nlev, axis=1)),
+            mesh))[:, 0]
+        div_ratio = float(np.abs(div0).max() / np.abs(div_ref).max())
+        if mode == "rot":
+            assert div_ratio < 1e-10, f"planted rot field is divergent: {div_ratio:.2e}"
+        print(f"mpas res{level} {mode} planted |div|/|div of div-mode| = {div_ratio:.2e}",
+              flush=True)
         state = MPASHydrostaticState(
             u=Field(u3, name="u", dims=("nEdges", "nlev"), units="m/s"),
             T=Field(jnp.full((nc, nlev), 300.0), name="T",
@@ -248,44 +349,75 @@ def run_mpas(*, level: int, nlev: int, dt_list, scale: float,
                        units="m^2/s^2"),
             tracers=None)
 
-        def proj(st):
-            u = np.asarray(st.u.data)[:, 0]
+        def proj(st, k=lv[0]):
+            u = np.asarray(st.u.data)[:, k]
             pu = float(np.sum(w_e * u * u0) / np.sum(w_e * u0 * u0))
-            d = np.asarray(divergence_cell_3d(st.u.data, mesh))[:, 0]
-            pd = float(np.sum(area * d * div0) / np.sum(area * div0 * div0))
+            d = np.asarray(divergence_cell_3d(st.u.data, mesh))[:, k]
+            den = np.sum(area * div0 * div0)
+            pd = float(np.sum(area * d * div0) / den) if den > 0 else float("nan")
             return pu, pd
 
         for dt in dt_list:
             nu = scale * 0.01 * float(area.min()) ** 2 / dt
-            out = {}
+            a_h = a_h_scale * 3.0e-3 * float(np.min(np.asarray(mesh.dcEdge))) ** 2 / dt
+            if sponge:
+                arms = (("off", dict(nu_del2=0.0)),
+                        ("ctrl", dict(nu_del2=a_h)),
+                        ("arm", dict(nu_del2=a_h,
+                                     sponge_del2_top_layers=sponge_layers,
+                                     sponge_del2_top_factor=sponge_factor)))
+            else:
+                arms = (("ctrl", dict(nu_div4=0.0)), ("arm", dict(nu_div4=nu)))
+            out, out_k = {}, {}
             t0 = time.time()
-            for label, nu_arm in (("ctrl", 0.0), ("arm", nu)):
+            for label, kw in arms:
                 model = MPASPrimitiveEquationModel(
-                    mesh, sigma, MPASPrimitiveEquationConfig(
-                        fix_mass=False, nu_div4=nu_arm))
+                    mesh, sigma, MPASPrimitiveEquationConfig(fix_mass=False, **kw))
                 st, pu, pd = state, [], []
+                pk = {k: [] for k in lv}
                 for _ in range(steps):
                     st = model.step(st, dt)
                     a, b = proj(st)
                     pu.append(a)
                     pd.append(b)
+                    for k in lv:
+                        pk[k].append(proj(st, k)[0])
                 out[label] = (pu, pd)
+                out_k[label] = pk
+                out_k[label + "_leak"] = {int(k): proj(st, k)[0]
+                                          for k in range(nlev) if k not in lv}
             r_u, dev_u = _fit_retention(out["arm"][0], out["ctrl"][0])
-            r_d, dev_d = _fit_retention(out["arm"][1], out["ctrl"][1])
+            r_d, dev_d = (_fit_retention(out["arm"][1], out["ctrl"][1])
+                          if mode == "div" else (float("nan"), float("nan")))
+            per_level = {int(k): _fit_retention(out_k["arm"][k], out_k["ctrl"][k])[0]
+                         for k in lv}
+            total_per_level = ({int(k): _fit_retention(out_k["arm"][k], out_k["off"][k])[0]
+                                for k in lv} if sponge else None)
             ef_steps, ef_s = _efold(r_u, dt)
             rows.append(dict(lane="mpas", level=level, nlev=nlev, dt=dt,
-                             scale=scale, nu_div4=nu, cells_per_wave=cpw,
-                             degree=deg, delta_m=delta,
+                             scale=scale, nu_div4=(0.0 if sponge else nu),
+                             cells_per_wave=cpw,
+                             degree=deg, delta_m=delta, mode=mode, levels=lv,
+                             amp=amp, div_ratio=div_ratio,
+                             leakage_unplanted={lab: out_k[lab + "_leak"] for lab, _ in arms},
+                             sponge=sponge, a_h=a_h if sponge else None,
+                             retention_per_level=per_level,
+                             total_retention_per_level=total_per_level,
                              ctrl_u=out["ctrl"][0], arm_u=out["arm"][0],
                              ctrl_div=out["ctrl"][1], arm_div=out["arm"][1],
                              retention=r_u, per_step_dev=dev_u,
                              retention_div=r_d, per_step_dev_div=dev_d,
                              efold_steps=ef_steps, efold_s=ef_s,
                              wall_s=time.time() - t0))
-            print(f"mpas res{level} dt={dt} scale={scale} {cpw}dx(l={deg}) "
-                  f"r_u={r_u:.6f} r_div={r_d:.6f} dev={dev_u:.2e} "
+            pl = {k: round(v, 6) for k, v in per_level.items()}
+            tl = (None if total_per_level is None
+                  else {k: round(v, 6) for k, v in total_per_level.items()})
+            print(f"mpas res{level} {mode} lv={lv} sponge={sponge} dt={dt} "
+                  f"scale={scale} {cpw}dx(l={deg}) r_u={r_u:.6f} "
+                  f"r_div={r_d:.6f} per_level={pl} total={tl} dev={dev_u:.2e} "
                   f"efold={ef_steps:.2f} steps = {ef_s:.0f} s  ctrl[-1]="
                   f"{out['ctrl'][0][-1]:.4f}", flush=True)
+    assert len(rows) == len(cells_per_wave) * len(dt_list), len(rows)
     return rows
 
 
@@ -296,6 +428,17 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--amp", type=float, default=1e-3)
     ap.add_argument("--cells-per-wave", type=float, nargs="+", default=[4.0, 8.0])
+    ap.add_argument("--mode", choices=("div", "rot"), default="div")
+    ap.add_argument("--levels", type=int, nargs="*", default=None,
+                    help="k indices planted (default all)")
+    ap.add_argument("--damp-v", type=float, nargs="+", default=None,
+                    help="duo: vary the vorticity del-6 coefficient instead of "
+                         "d4_bg (positive control for --mode rot)")
+    ap.add_argument("--mpas-sponge", action="store_true",
+                    help="B1: del2 top-sponge arms instead of ldiv4 arms")
+    ap.add_argument("--a-h-scale", type=float, default=0.375)
+    ap.add_argument("--sponge-layers", type=int, default=2)
+    ap.add_argument("--sponge-factor", type=float, default=8.0)
     # duo
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--km", type=int, default=5)
@@ -317,11 +460,16 @@ def main(argv=None):
             rows += run_duo(n=args.n, km=args.km, dt=dt, n_split=args.n_split,
                             nord=args.nord, d4_bg_list=args.d4_bg,
                             cells_per_wave=args.cells_per_wave,
-                            steps=args.steps, amp=args.amp)
+                            steps=args.steps, amp=args.amp, mode=args.mode,
+                            levels=args.levels, damp_v_list=args.damp_v)
     else:
         rows = run_mpas(level=args.level, nlev=args.nlev, dt_list=args.dt,
                         scale=args.scale, cells_per_wave=args.cells_per_wave,
-                        steps=args.steps, amp=args.amp)
+                        steps=args.steps, amp=args.amp, mode=args.mode,
+                        levels=args.levels, sponge=args.mpas_sponge,
+                        a_h_scale=args.a_h_scale,
+                        sponge_layers=args.sponge_layers,
+                        sponge_factor=args.sponge_factor)
     with open(args.out, "w") as f:
         json.dump(dict(meta=meta, rows=rows), f, indent=1)
     print(f"wrote {args.out}")
