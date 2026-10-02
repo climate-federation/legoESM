@@ -464,3 +464,23 @@ def test_step_nemo_advective_with_aimp_runs_and_differs(small_model_pieces):
         s_na = na.step(s_na, dt=600.0)
     assert bool(jnp.all(jnp.isfinite(s_na.u.data)))
     assert float(jnp.max(jnp.abs(s_na.u.data - s_up.u.data))) > 0.0
+
+
+def test_step_nemo_advective_leaves_depth_mean_to_the_barotropic_solver(small_model_pieces):
+    """The stage runs after the barotropic solve, so it must not move the
+    column-mean velocity: after ONE step (the only difference between the two
+    models is this stage) the thickness-weighted depth means must agree."""
+    grid, z_coord, state, Config, Model = small_model_pieces
+    u0 = np.asarray(state.u.data)
+    jj, ii, kk = np.meshgrid(*(np.arange(n) for n in u0.shape), indexing="ij")
+    u0 = 0.1 * np.sin(2 * np.pi * ii / u0.shape[1]) * np.cos(np.pi * kk / u0.shape[2])
+    state = state._replace(u=state.u.replace(data=jnp.asarray(u0, state.u.data.dtype)))
+    up = Model(grid, z_coord, Config(adaptive_implicit_vertadv=True)).step(state, dt=600.0)
+    na = Model(grid, z_coord, Config(adaptive_implicit_vertadv=True,
+                                     vertical_momentum_scheme="nemo_advective")).step(state, dt=600.0)
+    h = np.asarray(z_coord.dz_ref)[None, None, :]
+    def dmean(x):
+        x = np.asarray(x, float)
+        return (x * h).sum(-1) / h.sum()
+    assert np.max(np.abs(np.asarray(na.u.data) - np.asarray(up.u.data))) > 1e-9
+    np.testing.assert_allclose(dmean(na.u.data), dmean(up.u.data), rtol=0, atol=1e-7)

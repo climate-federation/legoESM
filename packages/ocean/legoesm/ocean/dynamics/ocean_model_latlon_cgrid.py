@@ -5835,6 +5835,17 @@ class LatLonCGridOceanModel:
                     face_active=v_face_active, explicit_scheme="nemo_advective",
                     w_area_half=interp_cell_to_vface(_area_w, _grid),
                     face_area=(_grid.dx_v * _grid.dy_v)[..., jnp.newaxis])
+                # The advective form has a non-zero column integral, and this
+                # stage runs AFTER the barotropic solve (NEMO feeds dynzad's
+                # depth mean to dynspg_ts). Remove the stage's depth-mean
+                # change so transport stays consistent with eta.
+                def _keep_depth_mean(new, old, h, act):
+                    hw = h * act
+                    d = jnp.sum((new - old) * hw, -1, keepdims=True) / jnp.maximum(
+                        jnp.sum(hw, -1, keepdims=True), 1e-10)
+                    return new - d * act
+                u_adv = _keep_depth_mean(u_adv, u_3d, h_u_old, u_face_active)
+                v_adv = _keep_depth_mean(v_adv, v_3d, h_v_old, v_face_active)
             else:
                 u_adv = adaptive_implicit_vertical_momentum_advection(
                     u_3d - U_bar, w_u_half, h_u_old, dt,
