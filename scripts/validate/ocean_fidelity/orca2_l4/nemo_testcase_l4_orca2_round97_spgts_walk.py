@@ -162,6 +162,33 @@ def _first_nonbit(rows: dict[str, dict]) -> dict | None:
     return None
 
 
+def _coriolis_arm(trace: dict, oracle: dict, active: dict[str, np.ndarray]) -> dict:
+    """Score both faces at every substep without aggregating away first movement."""
+
+    rows = []
+    for substep in range(1, 66):
+        prefix = f"j{substep:03d}"
+        for face, candidate, mask in (
+            ("u", _native_u(trace["cor_u"][substep - 1]), active["u"]),
+            ("v", _native_v(trace["cor_v"][substep - 1]), active["v"]),
+        ):
+            row = rhs_walk.score(candidate, oracle[f"{prefix}_cor_{face}"], mask)
+            rows.append({"substep": substep, "face": face, **row})
+    first_nonbit = next((row for row in rows if not row["bit_exact"]), None)
+    first_nonzero = next((row for row in rows if row["absolute_max"] > 0.0), None)
+    return {
+        "rows": len(rows),
+        "bit_exact_rows": sum(row["bit_exact"] for row in rows),
+        "signed_zero_only_rows": sum(
+            not row["bit_exact"] and row["absolute_max"] == 0.0 for row in rows),
+        "nonzero_rows": sum(row["absolute_max"] > 0.0 for row in rows),
+        "differing_cells_sum": sum(row["differing_cells"] for row in rows),
+        "maximum_absolute": max(row["absolute_max"] for row in rows),
+        "first_non_bit": first_nonbit,
+        "first_nonzero": first_nonzero,
+    }
+
+
 def measure(
     deck_root: Path, frame_root: Path, spg_root: Path, expect_commit: str,
     *, plant: str,
@@ -361,6 +388,34 @@ def measure(
     }
     require(all(row["bit_exact"] for row in coefficients.values()),
             "recorded substep coefficients moved")
+
+    current_e3f = _coriolis_arm(trace, oracle, active)
+    control_config = card.recipe.model_config._replace(een_e3f_scheme="min")
+    control_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, control_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_slow_forcing_override=(slow_u, slow_v),
+            barotropic_raw_history_override=raw_history,
+        ),
+    )
+    control_observed = jax.device_get(control_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    control_e3f = _coriolis_arm(control_observed.substeps, oracle, active)
+    e3f_arm = {
+        "statement": "een_e3f_scheme",
+        "source_exact": "nemo_avg4",
+        "control": "min",
+        "source_exact_score": current_e3f,
+        "control_score": control_e3f,
+        "verdict": (
+            "CONFIRMED_SOURCE_EXACT" if (
+                current_e3f["maximum_absolute"] < control_e3f["maximum_absolute"]
+                or current_e3f["differing_cells_sum"]
+                < control_e3f["differing_cells_sum"]
+            ) else "REFUTED_AS_FIRST_NONBIT_OWNER"
+        ),
+    }
     return {
         "status": "MEASURED_R97_SPGTS_WALK",
         "claim_label": "independent",
@@ -374,11 +429,7 @@ def measure(
         "coefficients": coefficients,
         "rows": rows,
         "first_non_bit": first,
-        "e3f_0vor_arm": (
-            "NOT_REACHED" if first is not None and SOURCE_ORDER.index(
-                first["boundary"]) < SOURCE_ORDER.index("coriolis_u")
-            else "REACHED_REQUIRES_COEFFICIENT_CROSS_TEST"
-        ),
+        "e3f_0vor_arm": e3f_arm,
         "worktree": stamp,
     }
 
