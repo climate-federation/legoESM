@@ -586,6 +586,12 @@ def main() -> int:
         n_barotropic_substeps=args.n_substeps,
         conservation_fixer=(args.conservation_fixer == "on"),
         eta_floor_clamp_iters=args.eta_floor_iters)
+    # The MPI Voronoi lane cannot run the global "gpoly" preconditioner (no
+    # deep SPMD halo; the solver refuses it), so this bench keeps the solve
+    # that preceded the 2026-10-02 default move: block-local poly at 20
+    # iterations. Rows from here are therefore NOT the production solver.
+    config = config._replace(barotropic_implicit_pcg_precond="poly",
+                             barotropic_implicit_pcg_fixed_iters=20)
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI

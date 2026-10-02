@@ -308,6 +308,7 @@ class MPASOceanConfig(NamedTuple):
     # same with the halo exchanged every few iterations — validated at solver
     # entry, ValueError on unknown).
     #
+    # History (superseded 2026-10-02 by gpoly@15, see the end of this block):
     # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
     # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
     # Jacobi at 30, same residual).  The Jacobi history that set 30:
@@ -348,11 +349,16 @@ class MPASOceanConfig(NamedTuple):
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
     #
-    # 30 since 2026-09-30 (owner decision): the default solver became Jacobi
-    # with the deep-halo exchange (see pcg_variant below); Jacobi reaches the
-    # 1e-10 relative residual in 27-30 iterations on real s7 systems (spin-up
-    # 30/150/400 steps, 128 emulated ranks; identical at 16 ranks).
-    barotropic_implicit_pcg_fixed_iters: int = 30
+    # 15 with the GLOBAL polynomial ("gpoly", below) since 2026-10-02 (owner
+    # decision). Saved L9 systems, 128 emulated devices: gpoly@15 beats the
+    # block-local poly@20 it replaces (f64 rel_res 6.4e-8 vs 8.9e-8; f32
+    # surface error vs converged 1.1e-7 m vs 2.4e-7 m). GPU weak ladder
+    # (20480 cells/GPU, f32, two repeats): step -6% / -8.5% / -10.4% at
+    # 8 / 32 / 128 GPUs. Single-device runs are unaffected (stock CG).
+    # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
+    # reaches the 1e-10 relative residual in 27-30 iterations on real s7
+    # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
+    barotropic_implicit_pcg_fixed_iters: int = 15
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # "single_reduce" (Chronopoulos-Gear, one batched allreduce per
     # iteration instead of two) since 2026-09-26, owner-approved after two
@@ -364,19 +370,21 @@ class MPASOceanConfig(NamedTuple):
     # float32 checked too (same systems): both recurrences reach the f32
     # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
     # GPU (NCCL) was not re-measured with it; "standard" stays selectable.
-    # "single_reduce_deep": the same recurrence with the cell halo of (r, s)
-    # exchanged once every `complete_cell_rings` iterations instead of every
-    # iteration; the halo is recomputed redundantly.  Owned results equal the
-    # per-iteration exchange bit for bit (x64 test).  Needs precond "jacobi".
-    # Cadence = rings the layout certifies: 3 on the SPMD layout, 1 on the
-    # MPI-per-rank layout (its halo has no closure passes, so there it is the
-    # per-iteration exchange of two vectors).  Default since 2026-09-30
-    # (owner decision) with Jacobi x 30, Derecho CPU s7 L40 f64, 3 repeats,
-    # ms/step: 8 nodes 82.8 (poly4 x 20) -> 75.8; 2 nodes 164.2 -> 152.8;
-    # Jacobi x 30 with per-iteration exchange 92.7 / 165.3.
-    barotropic_implicit_pcg_variant: str = "single_reduce_deep"
-    # Distributed-only preconditioner for the fixed-iteration PCG.
-    # "jacobi" or "poly": a communication-free Neumann-series
+    # "single_reduce_deep" (opt-in): the same recurrence with the cell halo
+    # of (r, s) exchanged once every `complete_cell_rings` iterations instead
+    # of every iteration; the halo is recomputed redundantly.  Owned results
+    # equal the per-iteration exchange bit for bit (x64 test).  Needs precond
+    # "jacobi" and fixed_iters=30.  Cadence = rings the layout certifies: 3 on
+    # the SPMD layout, 1 on the MPI-per-rank layout (its halo has no closure
+    # passes, so there it is the per-iteration exchange of two vectors).
+    # Derecho CPU s7 L40 f64, 3 repeats, ms/step: 8 nodes 82.8 (poly4 x 20)
+    # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
+    # with per-iteration exchange 92.7 / 165.3.  Not the default: owner
+    # decision 2026-10-02 keeps gpoly x 15 (no head-to-head measurement).
+    barotropic_implicit_pcg_variant: str = "single_reduce"
+    # Distributed-only preconditioner for the fixed-iteration PCG
+    # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
+    # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no
     # halo exchange, so it costs nothing in ppermute rounds and buys
     # iterations back).  Measured on the real subdivision-9 systems,
@@ -388,16 +396,18 @@ class MPASOceanConfig(NamedTuple):
     # Each PCG iteration still costs one cell-halo exchange plus two
     # allreduces; the win is reaching the target residual at a smaller
     # ``fixed_iters`` (30 -> 20 at poly4).
-    # "gpoly" (opt-in): the same polynomial on the GLOBAL operator, evaluated
+    # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above);
+    # "jacobi" is the pre-2026-09-20 solver and needs fixed_iters=30 for the
+    # same residual (and is what "single_reduce_deep" requires).
+    # Default "gpoly" since 2026-10-02 (owner decision; see fixed_iters for
+    # the A/B): the same polynomial on the GLOBAL operator, evaluated
     # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
     # historical 2 satisfies at 4 sweeps); one exchange per iteration as
     # before, and the answer no longer depends on the device count. Same
     # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
-    # iters 10 / 15 / 20. The single-device path runs the same fixed-M PCG.
-    # "poly" was the default 2026-09-20..2026-09-30 (A/B above).  "jacobi"
-    # again since 2026-09-30 (owner decision): it is pointwise, which the
-    # deep-halo variant needs, and needs fixed_iters=30 for the same residual.
-    barotropic_implicit_pcg_precond: str = "jacobi"
+    # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
+    # (select "poly" there) and a single device keeps the stock CG solve.
+    barotropic_implicit_pcg_precond: str = "gpoly"
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global

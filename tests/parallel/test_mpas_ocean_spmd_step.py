@@ -358,18 +358,18 @@ def test_cfl_check_ignores_padded_edges():
 
 
 # --- global-polynomial preconditioner ("gpoly") ------------------------------
-# gpoly is the SAME fixed-M PCG on one device and on the SPMD lane (single
-# device runs it without a halo), so at a SMALL M — where the preconditioner
-# still shapes the answer — the sharded result must equal the serial one to
-# the re-association floor at every device count. A ring-validity error in
-# the redundant halo evaluation (too few rings, stale coefficients, edge
-# depth) changes the answer on partition seams and breaks this.
+# gpoly is partition-independent, so at a SMALL M — where the preconditioner
+# still shapes the answer — the 4-device result must equal the SAME SPMD solve
+# on 2 devices (same reordered mesh and inputs; different seams) to the
+# re-association floor. (The layout refuses a 1-device mesh.) A ring-validity error in the
+# redundant halo evaluation (too few rings, stale coefficients, edge depth)
+# changes the answer on partition seams and breaks this. (The serial model
+# keeps stock CG to tolerance, so it is not the reference here.)
 _GPOLY = dict(barotropic_solver="implicit_cn", tracer_advection="superbee",
               K_zeta_bih=1.0e13, n_barotropic_substeps=10,
               barotropic_implicit_pcg_precond="gpoly",
               barotropic_implicit_pcg_variant="single_reduce",
               barotropic_implicit_pcg_fixed_iters=3)
-
 
 # At 300 s on ico4 the Helmholtz is ~identity and 3 iterations converge
 # whatever the preconditioner, which made the parity test blind to it.
@@ -385,8 +385,10 @@ def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
         dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps), n_dev=n_dev,
         level=4)
     spmd_kw.setdefault("halo_depth", halo_depth_for_config(model.config))
-    ref = _run_serial(model, state, forcing, _GPOLY_DT, 3)
     try:
+        ref, _ = _run_spmd(model, mesh, n_real, state, forcing, _GPOLY_DT, 3,
+                           "superbee", n_dev=2,
+                           halo_depth=halo_depth_for_config(model.config))
         got, layout = _run_spmd(model, mesh, n_real, state, forcing, _GPOLY_DT, 3,
                                 "superbee", n_dev=n_dev, **spmd_kw)
     finally:
@@ -395,8 +397,8 @@ def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
     return _compare(ref, got, n_real, mesh), layout
 
 
-@pytest.mark.parametrize("n_dev", [2, 3, 4])
-def test_gpoly_spmd_matches_serial_at_small_m(n_dev):
+@pytest.mark.parametrize("n_dev", [4])
+def test_gpoly_spmd_partition_independent_at_small_m(n_dev):
     _need_devices(n_dev)
     worst, layout = _gpoly_pair(n_dev)
     assert layout.halo_depth == 2      # K=4 fits the historical depth
@@ -440,7 +442,7 @@ def test_gpoly_refuses_shallow_halo():
 
 
 def test_poly_unchanged_by_deeper_halo():
-    """The production block-local preconditioner on a depth-4 layout: same
+    """The block-local preconditioner on a depth-4 layout: same
     parity against serial as on depth 2 (the deeper halo changes nothing
     else in the step)."""
     _need_devices(N_DEV)
@@ -461,23 +463,16 @@ def test_poly_unchanged_by_deeper_halo():
     assert not bad, (bad, worst)
 
 
-def test_gpoly_serial_gradient_matches_finite_difference():
-    """Reverse mode through the unrolled global-polynomial solve (single
-    device): d/ds sum(eta^2) after one step from s * eta0 vs a central
-    difference."""
-    mesh, n_real, model, state, (fw, sf, sp) = _build(dict(_GPOLY), level=4)
-
-    def loss(s):
-        st = state._replace(eta=state.eta.replace(data=state.eta.data * s))
-        out = model._step_impl(st, _GPOLY_DT, freshwater=fw, surface_forcing=sf,
-                               sponge=sp)
-        return jnp.sum(out.eta.data ** 2)
-
-    g = float(jax.jit(jax.grad(loss))(1.0))
-    h = 1e-4
-    fd = (float(jax.jit(loss)(1.0 + h)) - float(jax.jit(loss)(1.0 - h))) / (2 * h)
-    assert np.isfinite(g) and g != 0.0
-    np.testing.assert_allclose(g, fd, rtol=1e-6)
+def test_single_device_ignores_gpoly():
+    """One device keeps the stock CG solve to tolerance whatever the
+    preconditioner (owner decision 2026-10-02): gpoly and poly give the
+    bit-identical serial step."""
+    out = {}
+    for pc in ("gpoly", "poly"):
+        mesh, n_real, model, state, forcing = _build(
+            dict(_GPOLY, barotropic_implicit_pcg_precond=pc), level=3)
+        out[pc] = np.asarray(_run_serial(model, state, forcing, _GPOLY_DT, 1).eta.data)
+    np.testing.assert_array_equal(out["gpoly"], out["poly"])
 
 
 # --- deep-halo Jacobi PCG ("single_reduce_deep") ---------------------------

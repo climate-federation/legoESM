@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
                    choices=["jacobi", "poly", "gpoly"],
-                   help="distributed PCG preconditioner (config default poly); "
+                   help="distributed PCG preconditioner (config default gpoly); "
                         "'poly' is the communication-free local Neumann polynomial, "
                         "'gpoly' the same polynomial on the GLOBAL operator "
                         "(evaluated on a K-ring halo, one exchange per iteration)")
@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
-                   help="unset = MPASOceanConfig default (single_reduce_deep); "
+                   help="unset = MPASOceanConfig default (single_reduce); "
                         "single_reduce_deep needs --pcg-precond jacobi (poly/gpoly need "
                         "--pcg-variant single_reduce or standard)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
