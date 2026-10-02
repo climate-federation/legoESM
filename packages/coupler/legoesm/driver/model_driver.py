@@ -11268,9 +11268,13 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _fb_mask is not None
                     else jnp.zeros((), jnp.int32))
-                _n_fb_rej = (_sfc.n_fallback_rejected
-                             if getattr(_sfc, "n_fallback_rejected", None)
-                             is not None else jnp.zeros((), jnp.int32))
+                _fb_rej_mask = getattr(_sfc, "fallback_rejected", None)
+                _n_fb_rej = (
+                    jnp.sum((jnp.asarray(_fb_rej_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.5))
+                            .astype(jnp.int32))
+                    if _fb_rej_mask is not None
+                    else jnp.zeros((), jnp.int32))
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -12361,8 +12365,9 @@ class ModelDriver:
                         logger.warning(
                             "land: %d LAND column-steps accepted with an "
                             "unsolved canopy (energy-closed fallback) and %d "
-                            "unsolved column-steps rejected by the fallback "
-                            "guards (reverted, inside the held count) in the "
+                            "LAND column-steps rejected by the fallback "
+                            "guards (reverted; included in the hold count) "
+                            "in the "
                             "last %d steps; %d accepted / %d rejected since "
                             "the run began — at step %d",
                             _window_fb, _window_fb_rej,

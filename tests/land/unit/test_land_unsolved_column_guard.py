@@ -10,11 +10,14 @@ reported a root on exactly the column whose Jacobian had just collapsed, and the
 backward pass's convergence mask (there to zero the gradient of a non-root)
 never fired.
 
-**An unsolved or non-finite column is held, not spent.**  In the coupled model
-one column of 2562 going non-finite reached the atmosphere through the land skin
-temperature and, through the dynamical core's global mass fixer, made every
-column non-finite one step later — a 5-day run died 7 hours in.  The guard
-freezes such a column and leaves every other column untouched.
+**A non-finite column is held, not spent.**  In the coupled model one column of
+2562 going non-finite reached the atmosphere through the land skin temperature
+and, through the dynamical core's global mass fixer, made every column
+non-finite one step later — a 5-day run died 7 hours in.  The guard freezes such
+a column and leaves every other column untouched.  A FINITE unsolved column is
+held here only without ``fallback_ok``; with it (two-leaf canopy, no elevation
+bands) it is accepted with energy-closed fallback fluxes, tested in
+``test_land_unsolved_fallback.py``.
 """
 from __future__ import annotations
 
@@ -332,6 +335,9 @@ def test_the_hold_count_is_actually_logged():
     # many columns failing once, and those are different problems, so the
     # number of steps that held has to be reported too.
     assert "steps" in hold_messages[0].lower()
+    # Accepted fallbacks and guard rejections are reported too (D4).
+    assert any("fallback" in m.lower() and "rejected" in m.lower()
+               for m in logged), logged[:8]
 
 
 def test_the_hold_count_is_read_at_a_cadence_and_cannot_overflow():

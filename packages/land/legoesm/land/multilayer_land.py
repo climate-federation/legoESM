@@ -1453,13 +1453,14 @@ def _step_multilayer_land_impl(
     # carbon pools and exchanges no CO2: the fallback GPP is the cold state's,
     # not physics, and pools + flux are held as a consistent pair.
     (new_state, response, carbon_state_new, _held_mask, _n_held,
-     _fb_mask, _n_fb, _n_fb_rej) = _hold_unsolved_columns(
+     _fb_mask, _n_fb, _fb_rej_mask, _n_fb_rej) = _hold_unsolved_columns(
         state, new_state, response, surface_out, forcing, config, ncol,
         carbon_old=carbon_state, carbon_new=carbon_state_new,
         fallback_ok=_fallback_ok)
     surface_out = surface_out._replace(
         held=_held_mask, n_held=_n_held, fallback=_fb_mask,
-        n_fallback=_n_fb, n_fallback_rejected=_n_fb_rej)
+        n_fallback=_n_fb, fallback_rejected=_fb_rej_mask,
+        n_fallback_rejected=_n_fb_rej)
 
     return new_state, response, carbon_state_new, surface_out
 
@@ -1509,9 +1510,10 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     The canopy warm-start cache (``canopy_x``) is NaN by design where a column
     has never converged ("cold start"), so NaN there is not a failure; Inf is.
 
-    The atmosphere receives the land's own sensible and latent fluxes on the
-    MPAS lane (``shflx_land`` / ``lhflx_land``), so what this returns is what it
-    exchanges with.  This runs inside the jitted step, where a host print is not
+    On the MPAS lane with ``mpas_land_beta_soil`` (production) the atmosphere
+    receives the land's own sensible and latent fluxes (``shflx_land`` /
+    ``lhflx_land``), so what this returns is what it exchanges with; without
+    that switch it recomputes its fluxes from the returned skin state.  This runs inside the jitted step, where a host print is not
     available on a GPU-only runtime; the caller surfaces the counts.
 
     Returns
@@ -1519,7 +1521,8 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     held_state, held_response, held_carbon,
     held_mask (ncol,) bool, n_held () int32         -- reverted columns
     fallback_mask (ncol,) bool, n_fallback () int32 -- accepted unsolved columns
-    n_fallback_rejected () int32 -- finite unsolved columns the guards reverted
+    rejected_mask (ncol,) bool, n_rejected () int32 -- finite unsolved columns
+        the guards reverted (already inside held_mask / n_held)
     """
     def _is_float_leaf(leaf):
         # NOT ``dtype.kind in "fc"``: bfloat16 is an extension dtype whose kind
@@ -1566,12 +1569,6 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     else:
         fallback = jnp.zeros(ncol, dtype=bool)
         rejected = jnp.zeros(ncol, dtype=bool)
-    bad = nonfinite | (unsolved & ~fallback)
-
-    n_held = jnp.sum(bad.astype(jnp.int32))
-    n_fallback = jnp.sum(fallback.astype(jnp.int32))
-    n_rejected = jnp.sum(rejected.astype(jnp.int32))
-
     def _revert_leaf(mask):
         def _rl(new_leaf, old_leaf):
             if not _is_float_leaf(new_leaf) or old_leaf is None:
@@ -1602,6 +1599,24 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
             # scratch): nothing to revert to, so leave it. Loud rather than
             # silent — the count below still reports the column as held.
             return new_field
+
+    # Carbon first: an accepted unsolved column keeps its pools (D3).  If the
+    # carrier changed structure this step there is nothing to revert to, so the
+    # fallback cannot honour that and the column is reverted instead.
+    held_carbon = carbon_new
+    if carbon_old is not None and carbon_new is not None:
+        try:
+            held_carbon = jax.tree.map(
+                _revert_leaf(nonfinite | unsolved), carbon_new, carbon_old)
+        except (ValueError, TypeError):
+            held_carbon = carbon_new
+            rejected = rejected | fallback
+            fallback = jnp.zeros(ncol, dtype=bool)
+
+    bad = nonfinite | (unsolved & ~fallback)
+    n_held = jnp.sum(bad.astype(jnp.int32))
+    n_fallback = jnp.sum(fallback.astype(jnp.int32))
+    n_rejected = jnp.sum(rejected.astype(jnp.int32))
 
     # The canopy cache of an accepted unsolved column keeps its previous root
     # (its new entry is NaN: nothing converged this step).
@@ -1642,19 +1657,8 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         **{name: _hold_response(name, getattr(response, name))
            for name in response._fields})
 
-    held_carbon = carbon_new
-    if carbon_old is not None and carbon_new is not None:
-        try:
-            held_carbon = jax.tree.map(
-                _revert_leaf(bad | fallback), carbon_new, carbon_old)
-        except (ValueError, TypeError):
-            # The carbon carrier changed structure this step, so there is no
-            # matching value to revert to. Leave it rather than guess; the
-            # column is still reported held by the count below.
-            held_carbon = carbon_new
-
     return (held_state, held_response, held_carbon, bad, n_held,
-            fallback, n_fallback, n_rejected)
+            fallback, n_fallback, rejected, n_rejected)
 
 
 def soil_ice_log_impedance(

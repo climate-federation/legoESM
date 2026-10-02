@@ -17,6 +17,8 @@ still reverted.  float64.
 """
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -109,12 +111,13 @@ def test_a_finite_unsolved_column_is_accepted_and_the_guards_revert_the_rest():
     # col 2 unsolved, finite but SH/LH -2040/-3231 W/m2 (the old guard fixture)
     # -> flux guard reverts it; col 3 unsolved, top soil +25 K -> T guard reverts.
     new_T = [301.0, 290.0, 299.0, 300.0 + FALLBACK_MAX_TOP_SOIL_CHANGE_K + 5.0]
-    old, new, (st, resp, carbon, held, n_held, fb, n_fb, n_rej) = _decide(
+    old, new, (st, resp, carbon, held, n_held, fb, n_fb, rej, n_rej) = _decide(
         new_T, [40.0, -150.0, -2040.0, 30.0], [60.0, 20.0, -3231.0, 10.0],
         [True, False, False, False])
     assert [bool(v) for v in fb] == [False, True, False, False]
     assert [bool(v) for v in held] == [False, False, True, True]
     assert (int(n_fb), int(n_held), int(n_rej)) == (1, 2, 2)
+    assert [bool(v) for v in rej] == [False, False, True, True]
     # accepted column advanced, kept its fluxes
     assert float(st.T_soil[1, 0]) == 290.0
     assert float(resp.shflx[1]) == -150.0 and float(resp.lhflx[1]) == 20.0
@@ -128,7 +131,8 @@ def test_a_finite_unsolved_column_is_accepted_and_the_guards_revert_the_rest():
 
 
 def test_fallback_holds_carbon_zeroes_co2_and_keeps_the_previous_root():
-    # Contract (passes on the old code too, where the column is fully held).
+    # Contract: on the old code (column fully held) these values also hold, so
+    # this pins the D3 / cache contract of the new path rather than the fix.
     _old, _new, (st, resp, carbon, *_rest) = _decide(
         [301.0, 295.0, 301.0, 301.0], [40.0] * 4, [60.0] * 4,
         [True, False, True, True])
@@ -140,7 +144,7 @@ def test_fallback_holds_carbon_zeroes_co2_and_keeps_the_previous_root():
 
 def test_a_nan_cache_is_the_cold_start_sentinel_but_inf_is_a_failure():
     cache = jnp.full((_N, 6), jnp.nan).at[2, 0].set(jnp.inf).at[0].set(1.0)
-    _o, _n, (_st, _r, _c, held, _nh, fb, _nfb, _nr) = _decide(
+    _o, _n, (_st, _r, _c, held, _nh, fb, _nfb, _rj, _nr) = _decide(
         [301.0, 295.0, 296.0, 301.0], [40.0] * 4, [60.0] * 4,
         [True, False, False, True], new_cache=cache)
     assert [bool(v) for v in fb] == [False, True, False, False]
@@ -148,10 +152,26 @@ def test_a_nan_cache_is_the_cold_start_sentinel_but_inf_is_a_failure():
 
 
 def test_without_fallback_ok_every_unsolved_column_is_still_reverted():
-    _o, _n, (st, _r, _c, held, n_held, fb, n_fb, n_rej) = _decide(
+    _o, _n, (st, _r, _c, held, n_held, fb, n_fb, _rj, n_rej) = _decide(
         [301.0, 295.0, 301.0, 301.0], [40.0] * 4, [60.0] * 4,
         [True, False, True, True], fallback_ok=False)
     assert int(n_held) == 1 and bool(held[1]) and int(n_fb) == 0 and int(n_rej) == 0
+    assert float(st.T_soil[1, 0]) == 300.0
+
+
+def test_a_carbon_structure_change_reverts_the_fallback_column():
+    # Carrier rebuilt this step: the pools cannot be kept, so the column cannot
+    # be accepted under D3 and is reverted (and counted as guard-rejected).
+    old = _state([300.0] * _N)
+    new = _state([301.0, 295.0, 301.0, 301.0])
+    out = _hold_unsolved_columns(
+        old, new, _response([40.0] * 4, [60.0] * 4),
+        _sfc([True, False, True, True]), _forcing(), _CFG, _N,
+        carbon_old={"C_fol": jnp.full(_N, 100.0)},
+        carbon_new={"C_fol": jnp.full(_N, 101.0), "C_root": jnp.full(_N, 5.0)},
+        fallback_ok=True)
+    st, _r, _c, held, n_held, fb, n_fb, rej, n_rej = out
+    assert int(n_fb) == 0 and bool(held[1]) and bool(rej[1]) and int(n_rej) == 1
     assert float(st.T_soil[1, 0]) == 300.0
 
 
@@ -200,16 +220,20 @@ def test_a_clipped_fallback_is_energy_closed_and_the_column_advances(
         forced_unsolved, monkeypatch):
     """Hot soil (340 K) under 301 K air at night: the cold-state ground flux is
     clipped to -500 W/m2, so the fallback fluxes do not close by themselves.
-    The fold must put the clipped remainder into sensible heat (|fold| ~ 3.9e3
-    W/m2 here, measured) so Rn_ext = SH + LE + G for the column, and the column
-    must ADVANCE over four steps.  Reverted (old hold): T_soil frozen, n_held=1."""
+    The fold must put the clipped remainder into sensible heat so Rn_ext =
+    SH + LE + G for the column (measured: the unclipped cold-state SH is ~4.2e3
+    W/m2 and the fold, ~-3.9e3, brings the EXPORTED SH to ~270 W/m2, inside the
+    1000 W/m2 guard), and the column must ADVANCE over four steps.  Reverted
+    (old hold): T_soil frozen, n_held = 1 per step."""
     cfg, st = _setup(340.0)
     f = _forcing2(sw=0.0)
     calls = []
     real = ml.solve_soil_thermal
 
+    sig = inspect.signature(real)
+
     def spy(*a, **k):
-        calls.append(a[5])
+        calls.append(sig.bind(*a, **k).arguments["G_surface"])
         return real(*a, **k)
 
     monkeypatch.setattr(ml, "solve_soil_thermal", spy)

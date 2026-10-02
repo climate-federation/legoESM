@@ -177,9 +177,11 @@ class SurfaceFluxOutput(NamedTuple):
     n_held: jax.Array | None = None
     # Unsolved-but-finite columns ACCEPTED with energy-closed fallback fluxes
     # (``fallback`` mask, ``n_fallback`` count), and unsolved finite columns the
-    # fallback guards rejected and reverted instead (``n_fallback_rejected``,
-    # already included in ``n_held``).  Filled in by the land step.
+    # fallback guards rejected and reverted instead (``fallback_rejected`` mask,
+    # ``n_fallback_rejected`` count; already included in ``held``/``n_held``).
+    # Filled in by the land step.
     fallback: jax.Array | None = None
     n_fallback: jax.Array | None = None
+    fallback_rejected: jax.Array | None = None
     n_fallback_rejected: jax.Array | None = None
 

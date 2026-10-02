@@ -17,6 +17,8 @@ then carries X and the exported sensible heat does not.  float64.
 """
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -63,8 +65,10 @@ def _step(monkeypatch, scheme, top, T_init=305.0, snow=None, forcing=None):
     calls = []
     real = ml.solve_soil_thermal
 
+    sig = inspect.signature(real)
+
     def spy(*a, **k):
-        calls.append(a[5])
+        calls.append(sig.bind(*a, **k).arguments["G_surface"])
         return real(*a, **k)
 
     monkeypatch.setattr(ml, "solve_soil_thermal", spy)
