@@ -137,6 +137,12 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "traadv.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/tramle.f90": (
         _ORCA2_R69SURFACE_COMPILED / "tramle.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/nemogcm.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "nemogcm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbl.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "trabbl.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "trabbc.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90": (
         _ORCA2_R69SURFACE_COMPILED / "zdfphy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdf_oce.f90": (
@@ -1384,8 +1390,8 @@ CITATION_MAP = {
         'NAMELIST/nambbc/ln_trabbc',
         "IF(lwp) WRITE(numout,*) '   ==>>>   no geothermal heat flux'", 53],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:430-458': [
-        '!* Update or Compute (VIF) advective transport',
-        'IF( kstg == 3 .AND. ln_trabbl )   CALL bbl', 29],
+        ('!* Update or Compute (VIF) advective transport', 1),
+        ('IF( kstg == 3 .AND. ln_trabbl )   CALL bbl', 2), 29],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:523-529': [
         '!==  complete the tracers RHS  ==!   except ZDF (implicit)',
         'IF( ln_tradmp  )   CALL tra_dmp', 7],
