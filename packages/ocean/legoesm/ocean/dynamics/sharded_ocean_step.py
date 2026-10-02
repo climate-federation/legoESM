@@ -48,7 +48,7 @@ import numpy as np
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, addressable_shard_put, assert_flags_agree,
     assert_pytree_bytes_equal, assert_schema_agrees, checked_shard_put,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
@@ -261,22 +261,6 @@ _OCEAN_MESH_ENTRY_FLAGS = (
 )
 
 
-def _ocean_mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists; never raises."""
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
-
-
 def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
     """Agree the mesh AND a pytree LEAF SCHEMA before a scatter/gather.
 
@@ -289,7 +273,7 @@ def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
     One collective runs PER LEAF, so the leaf schedule (optional fields,
     dtypes, shapes) is rank-local data and is folded into one digest.
     """
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OCEAN_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -646,7 +630,7 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     problems = []
 
     def _count(value, label, absent=FLAG_ABSENT):
@@ -711,7 +695,7 @@ def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str,
     process.  See the atmosphere twin ``_agree_spmd_call`` for why gating only
     on cache misses is NOT a valid optimisation.
     """
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OCEAN_CALL_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),

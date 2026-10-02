@@ -83,7 +83,6 @@ import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
-from legoesm.grids.halo import pad_halo, pad_halo_4d
 from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -889,70 +888,6 @@ def sharded_step_with_halo(
 # ======================================================================
 # Halo exchange utilities for cubed-sphere face boundaries
 # ======================================================================
-
-def make_face_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange function for cubed-sphere face boundaries.
-
-    The returned function operates on a full model state pytree and
-    applies halo exchange to all face-dimensioned arrays.
-
-    For face-only sharding (<=6 devices), this function is typically
-    not needed because the built-in ``pad_halo`` already handles
-    cross-face communication within the JIT'd step function.  It is
-    provided for explicit control when needed (e.g., in custom
-    time-stepping loops).
-
-    For sub-face tiling (>6 devices), this additionally exchanges
-    tile boundary data within each face.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid (provides connectivity and metric info).
-    config : DeviceConfig
-        Device configuration.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state`` that applies halo exchange to
-        all face-dimensioned fields in the state pytree.
-    """
-    def _exchange(state):
-        """Apply halo exchange to face-dimensioned arrays.
-
-        This function pads each 2D face field ``(6, n, n)`` with halo
-        data from neighbors, then strips the halos back to ``(6, n, n)``.
-        This ensures boundary values are fresh after a dynamics step.
-
-        For 3D fields ``(6, n, n, nlev)`` the exchange uses the native
-        4D halo path (``pad_halo_4d``) which fetches halos for every
-        level in one MPI message — see CLAUDE.md ``Parallel and HPC
-        Rules``.  The previous ``vmap(pad_halo)`` per level pattern is
-        forbidden because it issues ``nlev`` separate messages.
-        """
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-
-            if leaf.ndim == 3:
-                # 2D field: (6, n, n)
-                padded = pad_halo(leaf)
-                return padded[:, 1:-1, 1:-1]
-
-            elif leaf.ndim == 4:
-                # 3D field: (6, n, n, nlev) — single 4D halo exchange.
-                padded = pad_halo_4d(leaf)
-                return padded[:, 1:-1, 1:-1, :]
-
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
 
 # ======================================================================
 # Multi-step integration with sharding
