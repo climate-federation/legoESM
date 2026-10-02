@@ -251,7 +251,7 @@ def stage_deck(root: Path) -> None:
 def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     surface_plant = plant if plant in set(legacy.RECORD_PLANTS) else "none"
     upper_plant = plant if plant in set(upper.RECORD_PLANTS) else "none"
-    surface = legacy.validate_resolved(root, plant=surface_plant)
+    surface = legacy.validate_surface_resolved(root, plant=surface_plant)
     inherited = upper.validate_resolved(root, plant=upper_plant)
     return {
         "status": "PASS_RUNG3_HAVTB0_RESOLVED",

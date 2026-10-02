@@ -338,9 +338,8 @@ def _validate_zero_flux(root: Path, *, plant: str) -> dict[str, object]:
     return {"sha256": sha256(root / ZERO_FILE), "fields": fields}
 
 
-def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
-    inherited_plant = plant if plant in set(rung4.RECORD_PLANTS) else "none"
-    inherited = rung4.validate_resolved(root, plant=inherited_plant)
+def validate_surface_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    """Validate only rung 3's surface-forcing consequences."""
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
         "ln_usr_false": re.search(
@@ -359,7 +358,18 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     if plant == "surface-consequence":
         checks["ln_flx_true"] = False
     require(all(checks.values()), f"resolved rung-3 checks failed: {checks}")
-    return {"status": "PASS_RUNG3_RESOLVED", "upper_rung": inherited, **checks}
+    return {"status": "PASS_RUNG3_SURFACE_RESOLVED", **checks}
+
+
+def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    inherited_plant = plant if plant in set(rung4.RECORD_PLANTS) else "none"
+    inherited = rung4.validate_resolved(root, plant=inherited_plant)
+    surface = validate_surface_resolved(root, plant=plant)
+    return {
+        "status": "PASS_RUNG3_RESOLVED",
+        "upper_rung": inherited,
+        **{key: value for key, value in surface.items() if key != "status"},
+    }
 
 
 def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> dict[str, object]:

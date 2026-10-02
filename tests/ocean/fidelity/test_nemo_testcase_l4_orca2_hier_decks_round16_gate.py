@@ -47,8 +47,16 @@ def test_resolved_routes_uniform_background_plant(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         gate.legacy,
+        "validate_surface_resolved",
+        lambda root, plant="none": {
+            "status": "PASS_RUNG3_SURFACE_RESOLVED",
+            "plant": plant,
+        },
+    )
+    monkeypatch.setattr(
+        gate.legacy,
         "validate_resolved",
-        lambda root, plant="none": {"status": "PASS_RUNG3_RESOLVED", "plant": plant},
+        lambda *args, **kwargs: pytest.fail("superseded inherited chain was called"),
     )
 
     def upper(root, plant="none"):
