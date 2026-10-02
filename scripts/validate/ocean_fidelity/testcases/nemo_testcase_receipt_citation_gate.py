@@ -71,6 +71,8 @@ _ORCA2_R96SPG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
+_ORCA2_R105EENACC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -178,6 +180,8 @@ FILES = {
         _ORCA2_R104EENACC_COMPILED / "dynspg.f90"),
     "ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R104EENACC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R105EENACC_COMPILED / "dynspg_ts.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1251,6 +1255,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 106: admitted live EEN accumulator/scale producer ---
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1231-1244': [
+        'zpvo_nw = ff_f(ji-1,jj  )',
+        'ffu_nw(ji,jj) = ffu_nw(ji,jj) +', 14],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1277-1278': [
+        'ffv_nw(ji,jj) = ffv_nw(ji,jj) +',
+        'ffv_ne(ji,jj) = ffv_ne(ji,jj) +', 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1288-1289': [
+        'ffv_nw(ji,jj) = r1_12 * r1_e2v',
+        'ffv_ne(ji,jj) = r1_12 * r1_e2v', 2],
     # --- ORCA2 round 105: failed recorder and compiled call frequency ---
     'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg.f90:300-303': [
         'SELECT CASE( nspg )',

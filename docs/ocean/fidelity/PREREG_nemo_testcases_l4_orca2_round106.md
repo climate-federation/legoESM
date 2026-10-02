@@ -79,3 +79,13 @@ instrumentation, not a candidate landing.
 | R106-P9 | The current northwest/northeast V accumulators carry a second northern-fold magnitude difference. | Direct internal comparison finds magnitude differences on the same fold support while all non-fold accumulator magnitudes are exact. | No fold accumulator magnitude difference: reconcile why the scale-only production arm failed before any new claim. |
 | R106-P10 | Fold accumulation and final scale form a cancelling pair. | Substituting only NEMO's accumulator leaves the scale debt; substituting only NEMO's scale leaves the accumulator debt; substituting both makes both final coefficients magnitude-exact. | Either one-variable substitution alone closes the magnitude, or the pair remains non-exact: **REFUTED** and continue operand order. |
 | R106-P11 | The first fold magnitude statement is in the vertical recurrence, before final scaling. | The first direct accumulator mismatch is mapped to the compiled `ffv_nw/ne` recurrence operands at `dynspg_ts.f90:1276-1277`. | Accumulators are exact: the final scale at `:1282-1283` remains first. |
+
+## Citation correction after direct trace
+
+The two line spans in R106-P11 above were copied from a diagnostic insertion
+layout rather than from the compiled record producer. They are retained above
+as the frozen preregistration and corrected loudly here: in the compiled
+`ORCA2_OMIP_L4_R105EENACC` producer, the northwest/northeast V recurrences are
+at `dynspg_ts.f90:1277-1278` and their final coefficient scales are at
+`dynspg_ts.f90:1288-1289`. The result classification uses these corrected
+compiled lines.
