@@ -126,6 +126,7 @@ from jax import lax
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
+    half_to_full,
     virtual_temperature,
 )
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
@@ -6124,11 +6125,7 @@ def clubb_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    def _half_to_full(field_half):
-        mid = 0.5 * (field_half[:, :-1] + field_half[:, 1:])
-        return jnp.concatenate([field_half[:, :1], mid, field_half[:, -1:]], axis=1)
-
-    S2 = _half_to_full(S2_half)
+    S2 = half_to_full(S2_half)
 
     # ---- wp2 budget (production - dissipation + diffusion); tau = Lscale/sqrt(wp2) ----
     # Production carries the troposphere-top taper (Km_full already does, and

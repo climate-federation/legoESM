@@ -66,43 +66,6 @@ def aggregate_long_records(
     return aggregated
 
 
-def compute_skill_score_records(
-    records: Sequence[Mapping[str, Any]],
-    *,
-    group_keys: Sequence[str],
-    reference_experiment: str,
-    experiment_key: str = "experiment",
-    metric_key: str = "metric",
-    metric_name: str = "crpss",
-    value_key: str = "value",
-) -> list[dict[str, object]]:
-    grouped: dict[tuple[object, ...], dict[str, float]] = {}
-    for record in records:
-        group = tuple(record[name] for name in group_keys)
-        experiment = str(record[experiment_key])
-        grouped.setdefault(group, {})[experiment] = float(record[value_key])
-
-    skill_records: list[dict[str, object]] = []
-    for group in sorted(grouped):
-        experiment_values = grouped[group]
-        if reference_experiment not in experiment_values:
-            raise ValueError(
-                f"Missing reference experiment {reference_experiment!r} for group {group!r}"
-            )
-        reference_value = experiment_values[reference_experiment]
-        for experiment, value in sorted(experiment_values.items()):
-            row = {name: item for name, item in zip(group_keys, group, strict=True)}
-            row[experiment_key] = experiment
-            row[metric_key] = metric_name
-            row[value_key] = (
-                float(np.nan)
-                if reference_value == 0.0
-                else float(1.0 - value / reference_value)
-            )
-            skill_records.append(row)
-    return skill_records
-
-
 def aggregate_metric_table(
     metric_table: Mapping[str, Sequence[float]],
     *,
@@ -171,33 +134,13 @@ def summarize_metric_csv(
     return save_metric_summary_csv(summary, target)
 
 
-def summarize_metric_directory(
-    input_dir: str | Path,
-    output_dir: str | Path | None,
-    *,
-    windows: Sequence[LeadTimeWindow],
-) -> list[Path]:
-    input_dir = Path(input_dir)
-    target_dir = Path(output_dir) if output_dir is not None else input_dir
-    target_dir.mkdir(parents=True, exist_ok=True)
-    outputs: list[Path] = []
-    for csv_path in sorted(input_dir.glob("*.csv")):
-        target = target_dir / f"{csv_path.stem}_summary.csv"
-        outputs.append(
-            summarize_metric_csv(csv_path, target, lead_days=None, windows=windows)
-        )
-    return outputs
-
-
 __all__ = [
     "DEFAULT_S2S_WINDOWS",
     "LeadTimeWindow",
     "aggregate_long_records",
     "aggregate_metric_table",
-    "compute_skill_score_records",
     "load_long_record_csv",
     "load_metric_csv",
     "save_metric_summary_csv",
     "summarize_metric_csv",
-    "summarize_metric_directory",
 ]

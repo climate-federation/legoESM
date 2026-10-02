@@ -26,7 +26,6 @@ from legoesm.da.control_vector import (
 from legoesm.da.background_error import (
     DiagonalB,
     DiffusionB,
-    SpectralB,
     HybridB,
 )
 from legoesm.da.observation import (
@@ -68,7 +67,6 @@ __all__ = [
     # background_error
     "DiagonalB",
     "DiffusionB",
-    "SpectralB",
     "HybridB",
     # observation
     "Observation",
