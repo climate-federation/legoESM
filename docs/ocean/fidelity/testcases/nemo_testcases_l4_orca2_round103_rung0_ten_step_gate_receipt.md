@@ -4,7 +4,7 @@
 **Base:** `04396546bc37aea5346fb621509a7b8a0f00d793`  
 **Preregistration:** `d2412d9aa`  
 **Measurement commit:** `2e98c69a46ba1cd77ec0826dae9e66206b853331`  
-**Disposition:** **LANDED — rung-0 kt=1..10 gate; rung-7 replay remains OPEN**
+**Disposition:** **LANDED — rung-0 gate and rung-7 kt=1..10 replay complete**
 
 ## Claim boundary
 
@@ -86,15 +86,37 @@ phase-2x root used by round 102's aborted command. Its admission is PASS:
 20/20 surface frames, 20/20 full-rank entry frames, 30/30 manifest rows
 hash-verified, and no missing stream. Therefore no acquisition is needed.
 
-Two clean-tree full replay attempts, followed by a two-step discriminator,
-were terminated externally before Python emitted JSON and before the shell
-wrote its exit marker. The zero-byte logs are retained. This reproduces round
-102's full-replay cutoff but is not a scientific refusal and provides no
-ten-step row. R103-P5 is **UNMEASURED**, not refuted.
+The initial diagnosis that the replay had been externally killed is
+**RETRACTED**. The wrapper session returned before the background process, but
+both the two-step discriminator and the clean-tree ten-step process continued
+and later wrote valid exit-0 artifacts. The tool output, not the transient
+session view, governs the verdict.
+
+The ten-step gate reports `LADDER_MEASURED` at clean commit `2e98c69a4`. The
+kt=1 entry is bit-exact in T, S, u, v, and ssh. It emits 40 checkpoints / 200
+field rows. The first non-bit checkpoint is kt=1 stage-1 T; its source remains
+`UNATTRIBUTED`, with the runoff-tracer statement mechanically ruled out because
+231,291 of 233,341 unequal T cells lie outside that statement's support.
+
+At kt=10, the given-entry end-of-step rows are:
+
+| field | unequal / compared | max abs | rms |
+|---|---:|---:|---:|
+| T | 233,341 / 399,600 | `1.2418085267426164 K` | `0.010203358679641124 K` |
+| S | 233,341 / 399,600 | `0.28802595721631974 PSU` | `0.002805115370263332 PSU` |
+| u | 240,230 / 399,600 | `0.3076159482679226 m/s` | `0.005748711510742764 m/s` |
+| v | 243,037 / 399,600 | `0.5378473427951197 m/s` | `0.005767169532357182 m/s` |
+| ssh | 8,794 / 13,320 | `0.30405069937287454 m` | `0.027579326439968365 m` |
+
+The complete artifact is `round103/rung7_ladder.json`, SHA-256
+`867419fceebbed8efee03776248e0f5ce61146320961d2d4f073694e8b2424ec`.
+R103-P5 is **CONFIRMED**.
 
 ## Validation and review
 
 - Final committed-tree rung-0 gate: PASS, 40 checkpoints / 200 rows, exit 0.
+- Final committed-tree rung-7 replay: `LADDER_MEASURED`, 40 checkpoints /
+  200 rows, exit 0.
 - Final one-bit real-record plant: `STATUS PLANT-FIRED`, exit 2.
 - Focused frame/card/ladder tests: 30 passed.
 - Receipt citation gate: PASS with zero unmapped citations; the shifted
@@ -113,19 +135,14 @@ ten-step row. R103-P5 is **UNMEASURED**, not refuted.
 
 ## OPEN
 
-1. Split the shipped rung-7 replay into bounded clean processes without
-   changing its state, forcing, precision, checkpoint definitions, or row
-   predicates; then emit the missing 200-row given-entry table. The record is
-   complete, so this is not an acquisition item.
-2. Resume the rung-0 barotropic source-order walk from round 99: coefficient
+1. Resume the rung-0 barotropic source-order walk from round 99: coefficient
    zero signs, accumulation/final scale, the independent fold-row
    `ffv_nw`/`ffv_ne` debt, and the 68-cell substep-2 U residual.
-3. The package-exposed rung-0 card and independent 240-step month remain
+2. The package-exposed rung-0 card and independent 240-step month remain
    unmeasured; neither is implied by this gate-only landing.
 
 ## UNVERIFIED
 
-- Rung-7 kt=1..10 rows on the merged tree.
 - Rung-0 independent month and a production-selectable rung-0 card.
 - No NEMO acquisition was run or requested.
 
