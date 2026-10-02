@@ -1326,6 +1326,10 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/EXP00/namelist_ref:424-431': [
         'ln_qsr_rgb  = .false.',
         'nn_chldta   =      0', 8],
+    # --- ORCA2 hierarchy decks round 12: reference-default ZDF selectors ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/EXP00/namelist_ref:1180-1201': [
+        'ln_zdfcst   = .false.',
+        'ln_zdfswm   = .false.', 22],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traqsr.f90:1101-1103': [
         'READ(numnam_ref',
         'IF(lwm) WRITE ( numond, namtra_qsr )', 3],
