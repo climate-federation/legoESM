@@ -33,8 +33,16 @@ MANIFEST = ACQUISITION / "rung3_manifest.json"
 RUNG4_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung4"
 )
-RUNG4_RECORD = RUNG4_ROOT / "record"
-RUNG4_ADMISSION = RUNG4_ROOT / "rung4_admission.json"
+RUNG4_RECORD = (
+    RUNG4_ROOT / "record_havtb1_superseded"
+    if (RUNG4_ROOT / "record_havtb1_superseded").exists()
+    else RUNG4_ROOT / "record"
+)
+RUNG4_ADMISSION = (
+    RUNG4_ROOT / "rung4_admission_havtb1_superseded.json"
+    if (RUNG4_ROOT / "rung4_admission_havtb1_superseded.json").exists()
+    else RUNG4_ROOT / "rung4_admission.json"
+)
 COMPILED = rung4.COMPILED
 ZERO_FILE = "rung3_zero_flux.nc"
 

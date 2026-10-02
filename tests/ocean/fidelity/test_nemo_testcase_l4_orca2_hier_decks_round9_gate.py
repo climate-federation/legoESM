@@ -20,6 +20,11 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
+def test_historical_gate_follows_preserved_value_one_rung4():
+    assert gate.RUNG4_RECORD.name == "record_havtb1_superseded"
+    assert gate.RUNG4_ADMISSION.name == "rung4_admission_havtb1_superseded.json"
+
+
 def test_real_preflight_selects_exact_zero_flux_arm_only():
     report = gate.preflight()
     assert report["status"] == "PREFLIGHT_PASS_RUNG3"
