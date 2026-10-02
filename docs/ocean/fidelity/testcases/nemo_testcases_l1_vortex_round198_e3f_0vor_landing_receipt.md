@@ -285,7 +285,29 @@ verdict's conditions are met.
 
 Nothing on the UNASKED list.
 
-## Landing verdict: LANDED
+## The push gate, and the one card that moved besides VORTEX
+
+```
+135 passed in 1089.92s (0:18:09)
+DINO month gate: day-30 wet 3-D T rms vs NEMO kt=960: 2.053801168e-03 K
+  against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS
+PUSHED dcf54c99a7bf
+```
+
+**REGISTERED, not hidden: DINO's certified from-rest month moved.**  The
+DINO card also selects the literal barotropic coefficient builder, so it also
+now divides by `e3f_0vor`, and its day-30 wet 3-D temperature r.m.s. against
+NEMO's `kt=960` goes `2.040288765e-03` to `2.053801168e-03` K — **0.66%
+worse**, and comfortably inside the gate's bar of `2.244317642e-03` K, which
+is why the gate passes.  This is round 197's OPEN item 2 arriving: the other
+cards carry the same operand and their coastlines decide whether it moves
+them.  It is reported here as a finding the moment it was seen.  Two things
+follow and neither is decided in this round: the DINO month gate's pinned
+certified value should be re-pinned to the new number, and the 0.66% is a
+MOVE AWAY from NEMO on a card whose own statement was not under test here, so
+it deserves its own measurement before anyone calls it acceptable.
+
+## Landing verdict: LANDED and PUSHED at `dcf54c99a7bf`
 
 ## OPEN — round 199
 
