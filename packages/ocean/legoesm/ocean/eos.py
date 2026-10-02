@@ -960,40 +960,6 @@ def nemo_r3t_stretch(
     return jnp.maximum(1.0 + r3t, 1.0e-6)
 
 
-def nemo_r3t_rk3_stage1_stretch(
-    z_coord, eta_before: jnp.ndarray, eta_after: jnp.ndarray,
-    H_bathy: jnp.ndarray,
-) -> jnp.ndarray:
-    """NEMO RK3 stage-1 ``(1 + r3t(Kaa))`` source association.
-
-    ``stprk3_stg.f90:160-179`` first forms the Kbb and after-level ``r3t``
-    ratios, then assigns ``Kaa = (2/3)*Kbb + (1/3)*after``.  Interpolating
-    SSH before forming its ratio is real-equivalent but not bit-identical.
-    """
-    eta_before = jnp.asarray(eta_before)
-    eta_after = jnp.asarray(eta_after, dtype=eta_before.dtype)
-    if getattr(z_coord, "linear_free_surface", False):
-        return jnp.ones_like(eta_before)
-    depth = jnp.asarray(H_bathy, dtype=eta_before.dtype)
-    wet = depth > 0.0
-    one = jnp.asarray(1.0, dtype=eta_before.dtype)
-    safe_depth = jnp.where(wet, depth, one)
-    r1_depth = nemo_source_round(one / safe_depth)
-    r3_before = jnp.where(
-        wet, nemo_source_round(eta_before * r1_depth), 0.0)
-    r3_after = jnp.where(
-        wet, nemo_source_round(eta_after * r1_depth), 0.0)
-    one_third = nemo_source_round(
-        one / jnp.asarray(3.0, dtype=eta_before.dtype))
-    two_thirds = nemo_source_round(
-        jnp.asarray(2.0, dtype=eta_before.dtype)
-        / jnp.asarray(3.0, dtype=eta_before.dtype))
-    r3_stage = nemo_source_round(
-        nemo_source_round(two_thirds * r3_before)
-        + nemo_source_round(one_third * r3_after))
-    return jnp.where(wet, nemo_source_round(one + r3_stage), one)
-
-
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
     *, r3t_evaluation: str = "quotient",
