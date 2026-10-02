@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -105,8 +104,6 @@ def parse_source_files(repo: Path, value: str) -> tuple[str, ...]:
 
 def build_overlay(repo: Path, target: Path, selected: tuple[str, ...]) -> dict:
     require(not target.exists(), f"refusing existing overlay {target}")
-    current = repo / "packages/ocean/legoesm/ocean"
-    require(current.is_dir(), f"missing current ocean package {current}")
     unchanged = subprocess.run(
         ("git", "-C", str(repo), "diff", "--quiet", COMBINED, "--",
          "packages/ocean"),
@@ -116,15 +113,17 @@ def build_overlay(repo: Path, target: Path, selected: tuple[str, ...]) -> dict:
         unchanged.returncode == 0,
         "current ocean package differs from round-100 combined tree",
     )
-    package = target / "packages/ocean/legoesm/ocean"
-    package.parent.mkdir(parents=True)
-    shutil.copytree(current, package)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ("git", "clone", "-q", "--shared", str(repo), str(target)),
+        check=True,
+    )
     records = []
     for relative in differing_files(repo):
         path = f"{OCEAN_PREFIX}{relative}"
         combined_payload = _git(repo, "show", f"{COMBINED}:{path}")
         source_payload = _git(repo, "show", f"{SOURCE}:{path}")
-        destination = package / relative
+        destination = target / path
         if relative in selected:
             destination.write_bytes(source_payload)
         records.append({
@@ -228,15 +227,17 @@ def run_candidate(args, repo: Path) -> dict:
     overlay = args.output / "overlays" / args.tag
     require(not root.exists(), f"refusing existing candidate output {root}")
     manifest = build_overlay(repo, overlay, selected)
-    harness = repo / (
+    harness = overlay / (
         "scripts/validate/ocean_fidelity/testcases/"
         "nemo_testcase_l2_gyre_year_fromrest.py"
     )
     env = dict(os.environ)
-    inherited = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(overlay / "packages/ocean") + (
-        os.pathsep + inherited if inherited else ""
-    )
+    env["LEGOESM_GATE_ALLOW_DIRTY"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(str(overlay / path) for path in (
+        "packages/core", "packages/ocean", "packages/atmosphere",
+        "packages/coupler", "packages/ice", "packages/land", "packages/ml",
+        "packages/tools", "src",
+    ))
     command = (
         sys.executable, str(harness), "--member", "0", "--days", "17",
         "--snap-steps", "6", "--tag", args.tag, "--root", str(root),
@@ -245,7 +246,7 @@ def run_candidate(args, repo: Path) -> dict:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("wb") as log:
         completed = subprocess.run(
-            command, cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT,
+            command, cwd=overlay, env=env, stdout=log, stderr=subprocess.STDOUT,
             check=False,
         )
     require(completed.returncode == 0,
