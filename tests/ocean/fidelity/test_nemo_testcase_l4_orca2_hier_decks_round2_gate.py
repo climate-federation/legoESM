@@ -157,7 +157,7 @@ HIERARCHY_GATES = tuple(
         "scripts.validate.ocean_fidelity.orca2_l4."
         f"nemo_testcase_l4_orca2_hier_decks_round{round_number}_gate"
     )
-    for round_number in range(1, 15)
+    for round_number in range(1, 16)
 )
 HIERARCHY_PLANTS = tuple(
     (module, plant)
