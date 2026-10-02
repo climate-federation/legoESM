@@ -676,6 +676,21 @@ class LatLonCGridOceanState(NamedTuple):
     # equal histories", silently skipping the cold-start ramp) — nemo_ab3am4
     # runs are step-1-eager, then scan.
     bt_hist: object = None
+    # NEMO's RK3 after-SSH slot, the ``ssha`` its own restart file carries
+    # (restart.F90:184 writes it, restart.F90:362-370 reads it back).  At the
+    # END of every RK3 step, after the Nbb<==>Naa rotation, NEMO leaves the
+    # NEXT step's after-SSH guess in the slot the step entered with:
+    # ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)`` (stprk3.F90:225), i.e.
+    # twice the end-of-step height minus the height the step entered with.
+    # ``stp_2D`` turns that into ``r3t(:,:,Kaa)`` (stp2d.F90:149) immediately
+    # before the first ``CALL wzv`` (stp2d.F90:153), so it is live input to the
+    # next step's vertical velocity -- carried state, not a diagnostic.
+    # ``None`` (default) reproduces NEMO's own no-previous-step case: the slot
+    # holds the step-entry height (restart.F90:370, "no ssh variation in ww
+    # computation"), which is exactly what every RK3 card did before this slot
+    # existed.  Read ONLY when the card states
+    # ``nemo_first_wzv_after_ssh="rk3_extrapolated_carried"``.
+    eta_rk3_after: object = None
     # NEMO ln_bt_fw=.FALSE. CENTRED barotropic slow forcing (#1226 item 3;
     # dynspg_ts.F90:392-421): under the centred (non-forward) split-explicit
     # integration NEMO forces zu_frc/ssh_frc with the TIME-AVERAGE

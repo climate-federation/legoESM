@@ -853,20 +853,29 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
         _nemo_literal_een_coefficients,
         een_barotropic_coriolis,
     )
-    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+    from legoesm.ocean.vertical import (
+        NemoEENBarotropicOperands,
+        nemo_e3f_0vor_from_tmask,
+    )
 
     rng = np.random.default_rng(122628)
     ny, nx, nz = 5, 8, 6
     shape2, shape3 = (ny, nx), (ny, nx, nz)
     e3u = 5.0 + rng.random(shape3)
     e3v = 6.0 + rng.random(shape3)
-    e3f = 7.0 + rng.random(shape3)
     ones3 = np.ones(shape3)
+    # dyn_cor_2D_init divides by dyn_vor_init's e3f_0vor, which the shared
+    # builder now derives from the mesh (dynvor.f90:897); hand it the mesh
+    # and take the frozen array it builds, so this test still pins the
+    # coefficient arithmetic and not a stand-in for that array.
+    e3t0 = 7.0 + rng.random(shape3)
+    e3f = np.asarray(nemo_e3f_0vor_from_tmask(
+        jnp.asarray(e3t0), jnp.asarray(ones3), jnp.asarray(e3t0)))
     metric = lambda offset: offset + rng.random(shape2)
     raw = NemoEENBarotropicOperands(
         ff_f=jnp.asarray(1.0e-4 * rng.normal(size=shape2)),
         e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
-        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        e3f_0=jnp.asarray(e3t0), umask=jnp.asarray(ones3),
         vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
         fe3mask=jnp.asarray(ones3),
         hu_0=jnp.asarray(e3u.sum(axis=-1)),
@@ -877,7 +886,9 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
         e1v=jnp.asarray(metric(50.0)), e2v=jnp.asarray(metric(60.0)),
         e1f=jnp.asarray(metric(70.0)), e2f=jnp.asarray(metric(80.0)),
     )
-    z = SimpleNamespace(nemo_een_barotropic=raw)
+    z = SimpleNamespace(nemo_een_barotropic=raw,
+                        nemo_e3t_0=jnp.asarray(e3t0),
+                        is_active=jnp.asarray(ones3))
     eta = jnp.asarray(0.1 * rng.normal(size=shape2))
     ua_native = jnp.asarray(rng.normal(size=shape2))
     va_native = jnp.asarray(rng.normal(size=shape2))
@@ -941,24 +952,30 @@ def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         _nemo_literal_een_coefficients,
     )
-    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+    from legoesm.ocean.vertical import (
+        NemoEENBarotropicOperands,
+        nemo_e3f_0vor_from_tmask,
+    )
 
     rng = np.random.default_rng(169902)
     ny, nx, nz = 4, 7, 5
     shape2, shape3 = (ny, nx), (ny, nx, nz)
     e3u = 2.0 + rng.random(shape3)
     e3v = 3.0 + rng.random(shape3)
-    e3f = 4.0 + rng.random(shape3)
+    ones3 = np.ones(shape3)
+    e3t0 = 4.0 + rng.random(shape3)
+    # Same as above: e3f here is dyn_vor_init's frozen e3f_0vor.
+    e3f = np.asarray(nemo_e3f_0vor_from_tmask(
+        jnp.asarray(e3t0), jnp.asarray(ones3), jnp.asarray(e3t0)))
     ff = 1.0e-4 * rng.normal(size=shape2)
     e1u = 10.0 + rng.random(shape2)
     e1v = 11.0 + rng.random(shape2)
     e2u = 12.0 + rng.random(shape2)
     e2v = 13.0 + rng.random(shape2)
-    ones3 = np.ones(shape3)
     raw = NemoEENBarotropicOperands(
         ff_f=jnp.asarray(ff),
         e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
-        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        e3f_0=jnp.asarray(e3t0), umask=jnp.asarray(ones3),
         vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
         fe3mask=jnp.asarray(ones3),
         hu_0=jnp.asarray(e3u.sum(axis=-1)),
@@ -969,7 +986,9 @@ def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
         e1v=jnp.asarray(e1v), e2v=jnp.asarray(e2v),
         e1f=jnp.ones(shape2), e2f=jnp.ones(shape2),
     )
-    z = SimpleNamespace(nemo_een_barotropic=raw)
+    z = SimpleNamespace(nemo_een_barotropic=raw,
+                        nemo_e3t_0=jnp.asarray(e3t0),
+                        is_active=jnp.asarray(ones3))
     actual = {
         name: np.asarray(value)
         for name, value in _nemo_literal_een_coefficients(

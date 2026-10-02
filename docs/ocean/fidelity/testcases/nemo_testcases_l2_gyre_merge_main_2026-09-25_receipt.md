@@ -158,7 +158,7 @@ the cited lines:
 | | +30 | 5 |
 
 **One citation is NOT a rigid shift and is recorded as such.**
-`ocean_model_latlon_cgrid.py:7827-8259` → `:7834-8267`: main inserted one line
+`ocean_model_latlon_cgrid.py:7861-8293` → `:7834-8267`: main inserted one line
 (`omega=_cfg_b.omega,` on the isoneutral K33 call) INSIDE the cited span, so
 the first endpoint moves +7 and the last +8, and the map's pinned extent goes
 from 433 to 434 lines.  Both pinned endpoint statements are unchanged, and the

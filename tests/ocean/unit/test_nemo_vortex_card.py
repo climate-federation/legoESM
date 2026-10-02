@@ -584,6 +584,9 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
     "LOCK_EXCHANGE-zco": "d794c4c5cb3dd880",
     "OVERFLOW-zps": "2bb9d9be75fd924d",
 }
+# Round 191 / Decision 78 changes GYRE's explicit value from the uncarried to
+# the carried form after round 6 measured the latter.  The ORCA2 fold-in below
+# then adds one inert shared configuration field to all three card digests.
 # The ORCA2 lane's 2026-09-30 fold-in moves all three again, for ONE reason,
 # measured field by field on the resolved configuration of every card rather
 # than assumed: the ORCA2 lane adds exactly one field to the shared model
@@ -597,7 +600,7 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
 # tanks and both VORTEX cards, and the companion test below asserts the added
 # field's value on each certified card.
 _CERTIFIED_CARD_DIGESTS = {                 # ORCA2 fold-in, 2026-09-30
-    "GYRE-zco": "db95b2a4d1989f93",
+    "GYRE-zco": "5850bbcfcd351c29",
     "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
     "OVERFLOW-zps": "7f1ec89b3e6578f5",
 }
@@ -850,7 +853,13 @@ def test_no_dino_nemo_card_inherits_the_explicit_cfl_cap(recipe_name):
 # call reads is therefore a field of its own, and a card that reaches the
 # branch without stating it raises.
 
-_AFTER_SSH_FORMS = {"rk3_extrapolated", "leapfrog_continuity"}
+# Read from the model, never re-listed here: a census computed from a
+# re-derived condition is how a gate came to disagree with the code it
+# gated (operator note AR finding 2).  Round 6 added a third form; Decision 78
+# selects it on GYRE and VORTEX-vector while ORCA2 waits for its own ladder.
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
+    NEMO_FIRST_WZV_AFTER_SSH_FORMS as _AFTER_SSH_FORMS,
+)
 
 
 @pytest.mark.parametrize("case", _ALL_NEMO_TESTCASE_CARDS)
@@ -884,7 +893,7 @@ def test_the_after_ssh_form_does_not_follow_the_time_integrator():
 
     vortex = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
     dino = dino_config_for_recipe("nemo_dino_kamm")
-    assert vortex.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert vortex.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
     assert dino.nemo_first_wzv_after_ssh == "leapfrog_continuity"
     # The inference this replaced read momentum_time_integrator, and on the
     # DINO card that field is not even set to the value the inference keyed

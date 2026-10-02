@@ -77,7 +77,7 @@ failed to predict state-dependent behaviour twice today (GM, PGF); it cannot clo
 (`RUN_20Y/namelist_cfg:70-72,342-346`; `dynhpg.F90:305-393`, guarded by the `ioptio/=1`
 ctl_stop at :197). armB's card selects `pgf_scheme="nemo_sco"` + `nemo_trapezoid` +
 `masked_zco` (`dino.py:1033-1035`) — a line-cited transcription of the same `zhpi`/`zuap`
-terms (`ocean_pe_latlon_cgrid.py:1620-1696`). **No scheme or coordinate DIFF exists; there is
+terms (`ocean_pe_latlon_cgrid.py:1654-1730`). **No scheme or coordinate DIFF exists; there is
 no faithful knob left to flip.** (`dyn_hpg (dv)`'s 0.999987 is the deferred v-face metric
 convention, unrelated.)
 
@@ -620,7 +620,7 @@ card:
 
 - NEMO: `dyn_cor_2D_init(Kmm)` (dynspg_ts.F90:359) + `dyn_cor_2D(puu_b(Kmm),
   pvv_b(Kmm)) → zu_frc -= zu_trd*ssumask` (:363, :366-367).
-- legoESM: `ocean_model_latlon_cgrid.py:3369-3411` subtracts
+- legoESM: `ocean_model_latlon_cgrid.py:3370-3412` subtracts
   `barotropic_coriolis_een_pre_step(state_mid.u, state_mid.v, h_k_pre)` from
   `F_slow_u`/`F_slow_v`, gated on `coriolis_scheme="explicit_ab2"` AND
   `barotropic_coriolis_split="live"` — both set by the `nemo_dino_kamm_mlf`
@@ -688,10 +688,10 @@ itself uses (`zu_frc_write_ledger.py` STEP 3, new code this session).
 (negated) convention when built from a raw NEMO-convention stress array
 (`dino.py:3383`: `tau_x=-forcing["tau_u_cell_2d"]`; sibling
 `nemo_recipe.py:768`: `tau_x=-utau`) — `surface_stress_faces` negates AGAIN
-(`ocean_pe_latlon_cgrid.py:3465-3466`) to recover the ocean-reaction stress
+(`ocean_pe_latlon_cgrid.py:3519-3520`) to recover the ocean-reaction stress
 the deposit actually uses. The `barotropic_forcing_centred` average
 (`0.5*(state.tau_x_prev + surface_forcing.tau_x)`,
-`ocean_model_latlon_cgrid.py:2859`) was therefore mixing OPPOSITE-sign
+`ocean_model_latlon_cgrid.py:2860`) was therefore mixing OPPOSITE-sign
 operands. Measured `corr(tau_x_prev, tau_x_now) = -0.98` on the DINO y5
 restart before the fix — the centred wind term collapsed to near-zero at
 2/3 of wet u-faces instead of tracking NEMO's dumped increment.

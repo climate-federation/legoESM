@@ -260,6 +260,17 @@ def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
     assert failed["criteria"]["year_day240_T_rms_admitted"] is False
 
 
+def test_decision_78_census_switches_only_gyre_and_vortex_vector():
+    module = _module()
+    cards = module._card_execution("rk3_after_ssh")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+    assert executing == {"GYRE-zco", "VORTEX_VEC-zco"}
+    assert cards["ORCA2-zps"]["after_ssh_form"] == "rk3_extrapolated"
+    assert cards["DINO:nemo_dino_kamm"]["after_ssh_form"] == (
+        "leapfrog_continuity")
+
+
 def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
     module = _module()
     cards = module._card_execution("tke_shear_step_entry_eta")

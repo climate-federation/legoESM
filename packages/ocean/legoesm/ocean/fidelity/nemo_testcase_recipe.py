@@ -166,7 +166,7 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",
@@ -474,7 +474,7 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             wzv_call2_evaluation="nemo_literal",
             # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
             # landed choice -- explicit here, not inferred from EOS or any
@@ -2531,6 +2531,36 @@ def build_nemo_testcase_card(
     return builders[case]()
 
 
+def with_first_wzv_after_ssh(model_config, form):
+    """MEASUREMENT ARM: run a card with a different after-SSH form stated.
+
+    The cards state their own form and this never changes one of them; it
+    exists so a gate can score the SAME card under both forms in one run and
+    report a before/after pair, which is what an operator decision about
+    switching a card needs.  ``None`` returns the configuration unchanged, so
+    the default arm is byte-identical to no flag at all.
+
+    Refuses a card that never reaches NEMO's own first ``wzv`` call: an arm
+    that silently does nothing would report "no change" as if it were a
+    measurement.
+    """
+    if form is None:
+        return model_config
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        NEMO_FIRST_WZV_AFTER_SSH_FORMS,
+    )
+    if form not in NEMO_FIRST_WZV_AFTER_SSH_FORMS:
+        raise ValueError(
+            f"after-SSH arm {form!r} is not one of "
+            f"{list(NEMO_FIRST_WZV_AFTER_SSH_FORMS)}")
+    if getattr(model_config, "zad_qco_evaluation", "generic") != "nemo_literal":
+        raise ValueError(
+            "this card does not resolve NEMO's own first wzv call "
+            "(zad_qco_evaluation is not 'nemo_literal'), so an after-SSH arm "
+            "on it would measure nothing")
+    return model_config._replace(nemo_first_wzv_after_ssh=form)
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -2550,4 +2580,5 @@ __all__ = (
     "vortex_initial_state_fields",
     "validate_nemo_testcase_card",
     "validate_nemo_testcase_card_for_execution",
+    "with_first_wzv_after_ssh",
 )

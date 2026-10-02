@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+refuse_unhandled() {
+  local status=$? line=${BASH_LINENO[0]:-${LINENO}}
+  trap - ERR
+  printf 'REFUSE: unhandled command failure at run.sh line %s (exit %s)\n' \
+    "$line" "$status" >&2
+  exit "$status"
+}
+trap refuse_unhandled ERR
 
 # VORTEX kt=1..10 ACQUISITION -- USER-EXECUTED ONLY.
 #
@@ -95,12 +104,21 @@ while [[ $# -gt 0 ]]; do
     --run) do_run=1 ;;
     --variant) shift; variant=${1:-} ;;
     --variant=*) variant=${1#--variant=} ;;
-    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs]\n' "$0" >&2 ; exit 64 ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs|stage23|spgts]\n' "$0" >&2 ; exit 64 ;;
   esac
   shift
 done
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+round192_repo_root=$(git -C "$here" rev-parse --show-toplevel 2>/dev/null) \
+  || { printf 'REFUSE: run.sh is not inside a git worktree\n' >&2; exit 66; }
+if [[ -n "$(git -C "$round192_repo_root" status --porcelain --untracked-files=all)" ]]; then
+  printf 'REFUSE: legoESM worktree is dirty; commit the exact acquisition tool first\n' >&2
+  exit 66
+fi
+round192_git_sha=$(git -C "$round192_repo_root" rev-parse HEAD) \
+  || { printf 'REFUSE: cannot resolve the legoESM commit stamp\n' >&2; exit 66; }
+readonly round192_repo_root round192_git_sha
 case "$variant" in
   flux)
     # Round 2 writes BESIDE round 1, never over it.  Round 1's record was
@@ -136,8 +154,30 @@ case "$variant" in
     exp_name=VORTEX_VEC_OMIP_L1
     tag=round4_vec_rhsterms
     ;;
+  stage23)
+    # Round 192 / VORTEX round 8: same vector-EEN deck, new paired build,
+    # additive stage-2/3 term writer.  The existing record stops at stage
+    # inputs/outputs and cannot split HPG, VOR/EEN, KEG, ZAD, LDF and ZDF.
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round192/oracle_stage23_terms
+    ref_name=VORTEX_VEC_R8_OMIP_L1
+    exp_name=VORTEX_VEC_OMIP_L1
+    tag=round192_stage23
+    ;;
+  spgts)
+    # Round 196 / VORTEX round 12: same vector-EEN deck, new paired build,
+    # additive per-substep writer inside the split-explicit barotropic solve.
+    # Round 195 named that solve as the owner of what the held two-solve
+    # candidate leaves behind, and no existing record carries its SUBSTEP
+    # operands -- round 192's record has the solve's OUTPUT frames only.
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round196/oracle_spgts_substeps
+    ref_name=VORTEX_VEC_R12_OMIP_L1
+    exp_name=VORTEX_VEC_OMIP_L1
+    tag=round196_spgts
+    ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec or vecrhs\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23 or spgts\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -156,6 +196,31 @@ else
 fi
 readonly RHS_INSTRUMENT
 readonly SHIPPED_STP2D=$NEMO_ROOT/src/OCE/stp2d.F90
+if [[ "$variant" == "spgts" ]]; then
+  SPGTS_INSTRUMENT=$here/dynspg_ts_substep_record.patch
+  SPGTS_MODULE=$here/vortex_r12_spgts_terms.F90
+  SPGTS_STUBS=$here/vortex_r12_spgts_terms_syntax_stubs.F90
+else
+  SPGTS_INSTRUMENT=
+  SPGTS_MODULE=
+  SPGTS_STUBS=
+fi
+readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
+readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
+if [[ "$variant" == "stage23" ]]; then
+  STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
+  DYNADV_INSTRUMENT=$here/dynadv_stage_terms_record.patch
+  STAGE_MODULE=$here/vortex_r8_stage_terms.F90
+  STAGE_STUBS=$here/vortex_r8_stage_terms_syntax_stubs.F90
+else
+  STAGE_INSTRUMENT=
+  DYNADV_INSTRUMENT=
+  STAGE_MODULE=
+  STAGE_STUBS=
+fi
+readonly STAGE_INSTRUMENT DYNADV_INSTRUMENT STAGE_MODULE STAGE_STUBS
+readonly SHIPPED_STG=$NEMO_ROOT/src/OCE/stprk3_stg.F90
+readonly SHIPPED_DYNADV=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly DECK=$here/$deck_basename
 readonly CHECKER=$here/check_records.py
 readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
@@ -181,6 +246,38 @@ if [[ -n "$RHS_INSTRUMENT" ]]; then
       "$TEST_CASE" >&2
     exit 66
   fi
+fi
+if [[ -n "$SPGTS_INSTRUMENT" ]]; then
+  for path in "$SPGTS_INSTRUMENT" "$SPGTS_MODULE" "$SPGTS_STUBS" "$SHIPPED_SPGTS"; do
+    [[ -f "$path" ]] \
+      || { printf 'REFUSE: missing barotropic-record input %s\n' "$path" >&2; exit 66; }
+  done
+  for override in dynspg_ts.F90 vortex_r12_spgts_terms.F90; do
+    if [[ -e "$SRC_CASE/MY_SRC/$override" ]]; then
+      printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
+        "$TEST_CASE" "$override" >&2
+      exit 66
+    fi
+  done
+  if [[ $(grep -c '^-' "$SPGTS_INSTRUMENT") -ne $(grep -c '^---' "$SPGTS_INSTRUMENT") ]]; then
+    printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+      "$SPGTS_INSTRUMENT" >&2
+    exit 67
+  fi
+fi
+if [[ -n "$STAGE_INSTRUMENT" ]]; then
+  for path in "$STAGE_INSTRUMENT" "$DYNADV_INSTRUMENT" "$STAGE_MODULE" \
+              "$STAGE_STUBS" "$SHIPPED_STG" "$SHIPPED_DYNADV"; do
+    [[ -f "$path" ]] \
+      || { printf 'REFUSE: missing stage-term input %s\n' "$path" >&2; exit 66; }
+  done
+  for override in stprk3_stg.F90 dynadv.F90 vortex_r8_stage_terms.F90; do
+    if [[ -e "$SRC_CASE/MY_SRC/$override" ]]; then
+      printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
+        "$TEST_CASE" "$override" >&2
+      exit 66
+    fi
+  done
 fi
 [[ -d "$SRC_CASE/MY_SRC" && -d "$SRC_CASE/EXPREF" ]] \
   || { printf 'REFUSE: %s is not the shipped test case\n' "$SRC_CASE" >&2; exit 66; }
@@ -212,6 +309,15 @@ if [[ -n "$RHS_INSTRUMENT" ]]; then
     exit 67
   fi
 fi
+if [[ -n "$STAGE_INSTRUMENT" ]]; then
+  for patch_file in "$STAGE_INSTRUMENT" "$DYNADV_INSTRUMENT"; do
+    if [[ $(grep -c '^-' "$patch_file") -ne $(grep -c '^---' "$patch_file") ]]; then
+      printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+        "$patch_file" >&2
+      exit 67
+    fi
+  done
+fi
 dry=$(mktemp -d /tmp/vortex-r1-dryrun.XXXXXX)
 cp "$SHIPPED_STP" "$dry/stprk3.F90"
 cp "$SHIPPED_CFG" "$dry/namelist_cfg"
@@ -242,6 +348,57 @@ if [[ -n "$RHS_INSTRUMENT" ]]; then
              "$term" >&2
            rm -rf "$dry"; exit 67; }
   done
+fi
+if [[ -n "$SPGTS_INSTRUMENT" ]]; then
+  cp "$SHIPPED_SPGTS" "$dry/dynspg_ts.F90"
+  patch -s "$dry/dynspg_ts.F90" <"$SPGTS_INSTRUMENT" \
+    || { printf 'REFUSE: the substep instrument does not apply to the shipped dynspg_ts\n' >&2
+         rm -rf "$dry"; exit 67; }
+  grep -q 'spgts_r12_open' "$dry/dynspg_ts.F90" \
+    || { printf 'REFUSE: the patched dynspg_ts carries no substep writer\n' >&2
+         rm -rf "$dry"; exit 67; }
+  # Every boundary the record claims, in NEMO's own order inside the loop.
+  # A boundary that went missing would leave one operand unmeasured, which
+  # is the whole reason this record is being acquired.
+  for operand in ua_ext sshp2_mid zhU ssha_e un_adv sshu_a sshp2_bck \
+                 zu_spg cor_u trd_u ua_new uub_sum ssh_aa; do
+    grep -q "spgts_r12_w2( '$operand'" "$dry/dynspg_ts.F90" \
+      || { printf 'REFUSE: the substep instrument has no %s boundary\n' \
+             "$operand" >&2
+           rm -rf "$dry"; exit 67; }
+  done
+  spgts_syntax_dir=$dry/spgts_syntax
+  mkdir -p "$spgts_syntax_dir"
+  round196_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
+  [[ -x "$round196_fc" ]] \
+    || { printf 'REFUSE: gfortran syntax checker is missing at %s\n' "$round196_fc" >&2; exit 67; }
+  "$round196_fc" -J "$spgts_syntax_dir" -c "$SPGTS_STUBS" -o "$spgts_syntax_dir/stubs.o"
+  "$round196_fc" -I "$spgts_syntax_dir" -J "$spgts_syntax_dir" -fsyntax-only "$SPGTS_MODULE"
+  printf 'GFORTRAN_SYNTAX_PASS %s\n' "$SPGTS_MODULE"
+fi
+if [[ -n "$STAGE_INSTRUMENT" ]]; then
+  cp "$SHIPPED_STG" "$dry/stprk3_stg.F90"
+  cp "$SHIPPED_DYNADV" "$dry/dynadv.F90"
+  patch -s "$dry/stprk3_stg.F90" <"$STAGE_INSTRUMENT" \
+    || { printf 'REFUSE: stage-term patch does not apply to stprk3_stg.F90\n' >&2
+         exit 67; }
+  patch -s "$dry/dynadv.F90" <"$DYNADV_INSTRUMENT" \
+    || { printf 'REFUSE: stage-term patch does not apply to dynadv.F90\n' >&2
+         exit 67; }
+  for symbol in vortex_r8_stage_begin vortex_r8_stage_rhs \
+                vortex_r8_stage_state vortex_r8_stage_finish; do
+    grep -q "$symbol" "$dry/stprk3_stg.F90" "$dry/dynadv.F90" \
+      || { printf 'REFUSE: patched sources do not call %s\n' "$symbol" >&2
+           exit 67; }
+  done
+  syntax_dir=$dry/syntax
+  mkdir -p "$syntax_dir"
+  round192_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
+  [[ -x "$round192_fc" ]] \
+    || { printf 'REFUSE: gfortran syntax checker is missing at %s\n' "$round192_fc" >&2; exit 67; }
+  "$round192_fc" -J "$syntax_dir" -c "$STAGE_STUBS" -o "$syntax_dir/stubs.o"
+  "$round192_fc" -I "$syntax_dir" -J "$syntax_dir" -fsyntax-only "$STAGE_MODULE"
+  printf 'GFORTRAN_SYNTAX_PASS %s\n' "$STAGE_MODULE"
 fi
 # Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
 # of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
@@ -276,7 +433,7 @@ fi
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
   flux)          want_vec='.false.' ; want_up3='.true.'  ;;
-  vec | vecrhs)  want_vec='.true.'  ; want_up3='.false.' ;;
+  vec | vecrhs | stage23 | spgts)  want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
   printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
@@ -331,6 +488,7 @@ done
 
 manifest=$(mktemp -d /tmp/vortex-r1-provenance.XXXXXX)
 printf 'provenance directory (retained): %s\n' "$manifest"
+printf '%s\n' "$round192_git_sha" >"$manifest/legoesm_git_sha.txt"
 (
   cd "$SRC_CASE"
   find EXPREF MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
@@ -338,7 +496,15 @@ printf 'provenance directory (retained): %s\n' "$manifest"
 sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   "$SRC_CASE/cpp_${TEST_CASE}.fcm" "$SHIPPED_STP" "$SHIPPED_CFG" \
   "$INSTRUMENT" "$DECK" "$CHECKER" ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
-  ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} >"$manifest/toolchain.sha256"
+  ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} \
+  ${SPGTS_INSTRUMENT:+"$SPGTS_INSTRUMENT"} \
+  ${SPGTS_MODULE:+"$SPGTS_MODULE"} ${SPGTS_STUBS:+"$SPGTS_STUBS"} \
+  ${SPGTS_INSTRUMENT:+"$SHIPPED_SPGTS"} \
+  ${STAGE_INSTRUMENT:+"$STAGE_INSTRUMENT"} \
+  ${DYNADV_INSTRUMENT:+"$DYNADV_INSTRUMENT"} \
+  ${STAGE_MODULE:+"$STAGE_MODULE"} ${STAGE_STUBS:+"$STAGE_STUBS"} \
+  ${STAGE_INSTRUMENT:+"$SHIPPED_STG"} \
+  ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"} >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 build_one() {          # $1 = config name, $2 = 1 to apply the instrument
@@ -361,6 +527,19 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
       cp "$SHIPPED_STP2D" "$cfg/MY_SRC/stp2d.F90"
       patch "$cfg/MY_SRC/stp2d.F90" <"$RHS_INSTRUMENT"
     fi
+    if [[ -n "$SPGTS_INSTRUMENT" ]]; then
+      [[ ! -e "$cfg/MY_SRC/dynspg_ts.F90" ]]
+      cp "$SHIPPED_SPGTS" "$cfg/MY_SRC/dynspg_ts.F90"
+      cp "$SPGTS_MODULE" "$cfg/MY_SRC/vortex_r12_spgts_terms.F90"
+      patch "$cfg/MY_SRC/dynspg_ts.F90" <"$SPGTS_INSTRUMENT"
+    fi
+    if [[ -n "$STAGE_INSTRUMENT" ]]; then
+      cp "$SHIPPED_STG" "$cfg/MY_SRC/stprk3_stg.F90"
+      cp "$SHIPPED_DYNADV" "$cfg/MY_SRC/dynadv.F90"
+      cp "$STAGE_MODULE" "$cfg/MY_SRC/vortex_r8_stage_terms.F90"
+      patch "$cfg/MY_SRC/stprk3_stg.F90" <"$STAGE_INSTRUMENT"
+      patch "$cfg/MY_SRC/dynadv.F90" <"$DYNADV_INSTRUMENT"
+    fi
   fi
   touch "$cfg/MY_SRC/"*.F90
   ./makenemo -n "$name" -m conda-scalarmath
@@ -380,6 +559,16 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   elif [[ "$instrumented" -eq 1 ]]; then
     printf 'REFUSE: the writer is absent from %s ppsrc (stale build)\n' \
       "$name" >&2; exit 69
+  fi
+  if [[ -n "$SPGTS_INSTRUMENT" && "$instrumented" -eq 1 ]]; then
+    grep -q 'spgts_r12_open' "$cfg/BLD/ppsrc/nemo/dynspg_ts.f90" \
+      || { printf 'REFUSE: substep calls are absent from compiled dynspg_ts\n' >&2; exit 69; }
+  fi
+  if [[ -n "$STAGE_INSTRUMENT" && "$instrumented" -eq 1 ]]; then
+    grep -q 'vortex_r8_stage_begin' "$cfg/BLD/ppsrc/nemo/stprk3_stg.f90" \
+      || { printf 'REFUSE: stage-term calls are absent from compiled stprk3_stg\n' >&2; exit 69; }
+    grep -q 'vortex_r8_stage_rhs' "$cfg/BLD/ppsrc/nemo/dynadv.f90" \
+      || { printf 'REFUSE: stage-term calls are absent from compiled dynadv\n' >&2; exit 69; }
   fi
   # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
   # and require nm to have succeeded before believing the grep.
@@ -414,6 +603,10 @@ run_one() {            # $1 = config name, $2 = run directory
   )
   [[ -f "$dir/$RESTART" ]] \
     || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
+  if [[ "$variant" == "stage23" ]] && ! grep -q 'ln_tile    =  F' "$dir/ocean.output"; then
+    printf 'REFUSE: stage-term writer requires the resolved VORTEX non-tiled branch\n' >&2
+    exit 71
+  fi
 }
 
 build_one "$REF_CFG" 0
@@ -426,23 +619,39 @@ cmp "$ref_cfg/EXP00/namelist_cfg" "$run_cfg/EXP00/namelist_cfg"
 run_one "$REF_CFG" "$EVIDENCE/reference"
 run_one "$RUN_CFG" "$EVIDENCE"
 cp "$manifest"/*.sha256 "$EVIDENCE/"
+cp "$manifest/legoesm_git_sha.txt" "$EVIDENCE/"
 
 # ADMISSION.  The checker parses every record's own header (note BD) and
 # refuses unless the two restarts are byte-identical (note AS).  Its plant
 # MUST turn it red, or it proves nothing.
 if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
+if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=--stage-terms; else STAGE_FLAG=; fi
+if [[ -n "$SPGTS_INSTRUMENT" ]]; then SPGTS_FLAG=--spgts-terms; else SPGTS_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
+  ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
   --output "$EVIDENCE/vortex_${TAG}_admission.json"
-if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
-     --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} --plant \
-     >"$EVIDENCE/vortex_${TAG}_admission_plant.json" 2>&1; then
-  printf 'REFUSE: the planted control did not turn the checker red\n' >&2
-  exit 70
+# Every plant the checker offers must turn it red.  One plant proves one
+# guard; the record is only admissible if each guard the round relies on is
+# shown to be able to fail.
+if [[ -n "$SPGTS_INSTRUMENT" ]]; then
+  plants=(header field-name truncated missing-frame)
+else
+  plants=(header)
 fi
+for plant in "${plants[@]}"; do
+  if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
+       --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
+       ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} --plant "$plant" \
+       >"$EVIDENCE/vortex_${TAG}_admission_plant_${plant}.json" 2>&1; then
+    printf 'REFUSE: the %s plant did not turn the checker red\n' "$plant" >&2
+    exit 70
+  fi
+  printf 'PLANT_FIRED %s\n' "$plant"
+done
 (
   cd "$EVIDENCE"
   sha256sum oracle_*.bin vortex_${TAG}_admission.json "$RESTART" mesh_mask.nc \
-    >vortex_${TAG}_outputs.sha256
+    legoesm_git_sha.txt >vortex_${TAG}_outputs.sha256
 )
 printf 'VORTEX_%s_KT1_10_ORACLE_READY %s\n' "$TAG" "$EVIDENCE"

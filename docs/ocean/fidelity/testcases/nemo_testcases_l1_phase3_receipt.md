@@ -894,7 +894,7 @@ stage weighting, predicted to 0.05% before the arm ran.
 
 | term | NEMO 5.0.2 | legoESM before | legoESM now |
 |---|---|---|---|
-| stage face thickness | `e3u(Kmm) = e3u_0*(1 + r3u(Kmm)*umask)`, `domzgr_substitute.h90:127`, consumed at `stprk3_stg.F90:272-273`; `r3u = 0.5*(e1e2t_i*ssh_i + e1e2t_{i+1}*ssh_{i+1}) * r1_hu_0 * r1_e1e2u`, `domqco.F90:219-222` | `min_cell_to_uface(h_stage)` = min of the two STRETCHED T thicknesses (`ocean_model_latlon_cgrid.py:1063`) | the NEMO rule, built by `_nemo_ws_qco_stage_faces` |
+| stage face thickness | `e3u(Kmm) = e3u_0*(1 + r3u(Kmm)*umask)`, `domzgr_substitute.h90:127`, consumed at `stprk3_stg.F90:272-273`; `r3u = 0.5*(e1e2t_i*ssh_i + e1e2t_{i+1}*ssh_{i+1}) * r1_hu_0 * r1_e1e2u`, `domqco.F90:219-222` | `min_cell_to_uface(h_stage)` = min of the two STRETCHED T thicknesses (`ocean_model_latlon_cgrid.py:1064`) | the NEMO rule, built by `_nemo_ws_qco_stage_faces` |
 | reference face | `pe3u(:,:,:) = pe3t(:,:,:)`, `tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:184` | `min(e3t_0_i, e3t_0_{i+1})` | unchanged |
 | stage velocity | `uu(Kaa) = ((1+r3u(Kbb))*uu(Kbb) + rDt*(1+r3u(Kmm))*uu(Krhs)) / (1+r3u(Kaa))`, `stprk3_stg.F90:373-378` and `dynzdf.F90`'s `key_qco` branch | `u_raw = u0 + stage_dt*RHS` | the NEMO weighting |
 | stage tracer | `ts(Kaa) = ((1+r3t(Kbb))*ts(Kbb) + rDt*(1+r3t(Kmm))*ts(Krhs)) / (1+r3t(Kaa))`, `:552-554` | already faithful (`_stage` divides by `h_stage`) | unchanged |
@@ -920,7 +920,7 @@ found `vertical.py:140 nemo_qco_live_face_geometry_from_operands` and
 `vertical.py:197 nemo_qco_live_face_thicknesses`, the shared canonical
 `dom_qco_r3c` builders already used by the DINO ldfslp/dynzad path and by the
 `wzv_call2_evaluation="nemo_literal"` tracer path
-(`ocean_model_latlon_cgrid.py:5233`).  `_nemo_ws_qco_stage_faces` calls the
+(`ocean_model_latlon_cgrid.py:5267`).  `_nemo_ws_qco_stage_faces` calls the
 `_from_operands` primitive and only maps its native east/north extent onto
 legoESM's redundant west/south layout; the wrapper was not usable directly
 because it reads operands from `z_coord.nemo_*` fields the L1 testcase cards
@@ -951,7 +951,7 @@ can move.
 fixed here.**  NEMO's MLF `dom_qco_r3c` (`domqco.F90:166-169`) uses the
 IDENTICAL `r3u` formula as the RK3 variant (`:219-222`) — both were read.
 legoESM's MLF transport face thickness is still
-`min_cell_to_uface(h_k)` (`ocean_model_latlon_cgrid.py:9389`), and main's
+`min_cell_to_uface(h_k)` (`ocean_model_latlon_cgrid.py:9423`), and main's
 PR #1642 separately moved the MLF *vertical-mixing* face control volume to a
 masked average (`:8130-8160`), which is a third rule again.  Changing the MLF
 transport face would move every DINO number and is a different one-variable
@@ -963,7 +963,7 @@ round; recorded here as open debt.
 does not follow.**  Retracted here rather than quietly corrected, because a
 stale confident pointer gets built on.
 
-`ocean_model_latlon_cgrid.py:9389` at this round's base `28d166428` is
+`ocean_model_latlon_cgrid.py:9423` at this round's base `28d166428` is
 `h_u = min_cell_to_uface(h_k)` whose ENCLOSING function is `_ab2_step`
 (`def` at `:9108`) — the Veros Adams-Bashforth-2 outer integrator, which is
 not the MLF lane at all — and that line is a barotropic/baroclinic DEPTH-MEAN
@@ -989,7 +989,7 @@ number could have moved by adopting it.  The `generic` arm's `min` rule is a
 REAL legoESM scheme selection, not a defective transcription of NEMO, and it
 is left alone.  Its in-place citation (the MOM6/MITgcm `hFacW` convention,
 Adcroft–Hill–Marshall 1997 eq. 11–13, at
-`ocean_model_latlon_cgrid.py:1400-1405`) covers only the REFERENCE part:
+`ocean_model_latlon_cgrid.py:1401-1406`) covers only the REFERENCE part:
 AHM97's `hFacW` is a FIXED fraction, and taking the min of the two STRETCHED
 thicknesses is a nonlinear-free-surface extension that postdates that paper.
 The check that would settle whether the extension is a scheme or a defect is
@@ -1280,7 +1280,7 @@ model's output.  The statistics runs stamp `7fc887dd93c1bc38c60c16b0faba1da4b7c3
 
 All five reach-table rows were settled structurally as well as by
 instantiation: `_nemo_ws_qco_stage_faces` and `_nemo_ws_stage_transport` are
-called from exactly five sites (`ocean_model_latlon_cgrid.py:1141` inside the
+called from exactly five sites (`ocean_model_latlon_cgrid.py:1142` inside the
 transport itself, and `:4874,4936,4954,4972,5361`), every one of them inside
 `_step_impl`'s `momentum_time_integrator == "rk3_ws"` block.  DINO's card
 resolves that selector to `"rk3"`, so the changed lines cannot execute on the
@@ -1297,7 +1297,7 @@ MLF lane and its short-run gates were not run.
 - `_replace_stage_mean` still weights with `min_cell_to_uface(h_k_pre)` where
   `stprk3_stg.F90:438` uses `e3u_0` and `r1_hu_0`.  These agree exactly at
   kt=1 (ssh = 0 at Kbb) and drift apart afterwards; not touched this round;
-- ~~the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9389`), which
+- ~~the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9423`), which
   has the same defect against the identical `domqco.F90:166-169` formula~~ —
   RETRACTED, see the retraction block above: that line is in `_ab2_step`, and
   the DINO MLF cards were already on NEMO's rule;
@@ -1873,7 +1873,7 @@ with `pUe`/`pVe` and so writes only the 2-D barotropic seed
 (`dynadv_up3.F90:158-202`).
 
 legoESM's stage 1 steps with the step-entry `tendencies()` result
-(`ocean_model_latlon_cgrid.py:4192-4198`, then `:5011-5017`), which is
+(`ocean_model_latlon_cgrid.py:4193-4199`, then `:5011-5017`), which is
 evaluated BEFORE the barotropic solve at `:4826` produces `Hu_avg` and
 therefore advects with `Q = h u(Kbb)`, i.e. `zub = 0`; stages 2-3 do carry it
 through `_mom_pert_ws` (`:4439-4454`).  Difference, per unit `e2u`:

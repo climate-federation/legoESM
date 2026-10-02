@@ -335,7 +335,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     coefficient_eta = jnp.asarray(state.eta.data, dtype=jnp.float64)
     source_coeff = jax.device_get(jax.jit(
         lambda eta: _nemo_literal_een_coefficients(
-            eta, source_z, jnp.float64, scheme="een"),
+            eta, source_z, jnp.float64, scheme="een",
+            grid=card.recipe.grid),
     )(coefficient_eta))
     coefficient_seed = {
         name: rhs_walk.score(np.asarray(source_coeff[name]),

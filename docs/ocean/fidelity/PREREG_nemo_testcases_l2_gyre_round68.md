@@ -24,7 +24,7 @@ Kmm-metric fluxes at `:227-246`, and adds their divergence to `Krhs` at
 
 legoESM's production WS helper already materializes its exact stage-3 FCT
 advection content as `h(Kbb)*T(Kbb)-dt*flux_div` and then adds the source
-content at `ocean_model_latlon_cgrid.py:1991-1997`. It returns both arrays at
+content at `ocean_model_latlon_cgrid.py:1992-1998`. It returns both arrays at
 `:1918-1922`, and the production step retains them at `:7635-7683`. The
 existing WRITE-only `expose_stage3_advection_content` seam at `:1273-1283` and
 `:8031-8040` proves that this is the production array; no recomputed FCT

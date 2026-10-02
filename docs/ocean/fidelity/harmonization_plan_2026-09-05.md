@@ -64,7 +64,7 @@ column; P3: a 1 m top cell at dt 1800 is a vertical-advective-CFL risk (w~1e-3 -
 CFL census from baseline w before any arm; reproducing node counts validates the counter, not the
 depth rule -> also check reconstructed bottom depths.
 codex: --A-h-profile-file is a surface zonal-median, depth-invariant, latitude-only proxy applied
-as a multiplier after the operator (run_omip_core2.py:942, ocean_pe_latlon_cgrid.py:3247) -> NOT
+as a multiplier after the operator (run_omip_core2.py:942, ocean_pe_latlon_cgrid.py:3301) -> NOT
 NEMO's 3-D coefficient in flux form; faithful option needs a prescribed 2-D/3-D field inside the
 Laplacian flux. Ladder: profile-only atop the unchanged schedule -> Smag off -> 2e4 endpoint;
 drop the biharmonic arm. P2 harness frozen_column_tke_twin.py has only control|nemo modes and no

@@ -63,6 +63,7 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
     compute_layer_thickness,
+    nemo_e3f_0vor_from_tmask,
     nemo_qco_card_mesh_operands,
     nemo_qco_live_face_geometry_from_operands,
 )
@@ -900,7 +901,8 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
-def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
+def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
+                                   *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
 
     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
@@ -933,7 +935,25 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
     ff = jnp.asarray(raw.ff_f, dtype=dtype)
     e3u0 = jnp.asarray(raw.e3u_0, dtype=dtype)
     e3v0 = jnp.asarray(raw.e3v_0, dtype=dtype)
-    e3f0 = jnp.asarray(raw.e3f_0, dtype=dtype)
+    # dyn_cor_2D_init divides ff_f by ``e3f_0vor``, NOT by ``e3f_0``, in
+    # EVERY curl-point branch: EEN at dynspg_ts.f90:960, ENE/MIX at
+    # dynspg_ts.f90:1016, ENS at dynspg_ts.f90:1046 (lines of
+    # VORTEX_VEC_R8_OMIP_L1_P3).  dyn_vor_init freezes that array as the
+    # masked four-T-cell reference thickness over FOUR at the decks'
+    # resolved nn_e3f_typ = 0 (dynvor.f90:897), with the fully-dry-vertex
+    # restore at dynvor.f90:920 whose operand is this card's own e3f_0.
+    # Carrying the plain reference thickness here put every vertex with a
+    # dry neighbour at the wrong coefficient (round 197's measured owner).
+    _e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
+    _tmask = getattr(z_coord, "is_active", None)
+    if _e3t_0 is None or _tmask is None:
+        raise ValueError(
+            "literal NEMO barotropic coefficients require nemo_e3t_0 and "
+            "is_active on the vertical coordinate to build dyn_vor_init's "
+            "e3f_0vor (dynvor.f90:890-920)")
+    e3f0 = b(nemo_e3f_0vor_from_tmask(
+        jnp.asarray(_e3t_0, dtype=dtype), _tmask,
+        jnp.asarray(raw.e3f_0, dtype=dtype), nn_e3f_typ=0, grid=grid))
     umask = jnp.asarray(raw.umask, dtype=dtype)
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
     fmask = jnp.asarray(raw.fmask, dtype=dtype)
@@ -1186,7 +1206,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                    e2u=geom.dy_u.astype(dtype), e2v=geom.dy_v.astype(dtype))
     if coefficient_evaluation == "nemo_literal":
         out["literal_coefficients"] = _nemo_literal_een_coefficients(
-            eta, z_coord, dtype, scheme=scheme)
+            eta, z_coord, dtype, scheme=scheme, grid=grid)
     out["coefficient_evaluation"] = coefficient_evaluation
     return out
 
@@ -1440,6 +1460,8 @@ def _run_substep_loop(
     return_trace=False,
     nemo_flux_form_update_test_override=None,
     nemo_continuity_update_test_override=None,
+    nemo_substep_coriolis_override=None,
+    nemo_substep_pgf_override=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1762,6 +1784,14 @@ def _run_substep_loop(
             raise ValueError(
                 "unknown barotropic_pgf_evaluation scheme "
                 f"{_pgf_eval!r}: must be one of ('generic', 'nemo_literal').")
+        if nemo_substep_pgf_override is not None:
+            # Round-197 per-substep substitution of NEMO's own surface
+            # pressure gradient (dynspg_ts.f90:498), the velocity update's
+            # other operand.  Same static gate and same substep index.
+            _pgf_u = jnp.asarray(
+                nemo_substep_pgf_override[0], dtype=dtype)[substep_index]
+            _pgf_v = jnp.asarray(
+                nemo_substep_pgf_override[1], dtype=dtype)[substep_index]
 
         # Average V to u-points for Coriolis.  In ab3am4 mode NEMO applies
         # the 2D Coriolis to the EXTRAPOLATED mid-step velocities (both
@@ -1794,6 +1824,15 @@ def _run_substep_loop(
             _cor_u = _cor_u_een
         else:
             _cor_u = f_u * V_at_u
+        if nemo_substep_coriolis_override is not None:
+            # Round-197 per-substep substitution of NEMO's own dyn_cor_2D
+            # output (dynspg_ts.f90:503), taken at THIS substep.  The gate is
+            # a Python ``if`` on a closure-captured static, so the production
+            # program never sees it; the index is the scan's own substep
+            # counter, so the arm cannot silently use one frame for all
+            # substeps.
+            _cor_u = jnp.asarray(
+                nemo_substep_coriolis_override[0], dtype=dtype)[substep_index]
         # NEMO dyn_drg in-subcycle explicit bottom stress (#1226;
         # dynspg_ts.F90:701-705, the .NOT.ll_wd branch — DINO's active path;
         # the implicit division at :764-768 is wetting-drying-only, ll_wd=F
@@ -1863,6 +1902,9 @@ def _run_substep_loop(
             _cor_v = _cor_v_een
         else:
             _cor_v = -f_v * U_new_at_v
+        if nemo_substep_coriolis_override is not None:
+            _cor_v = jnp.asarray(
+                nemo_substep_coriolis_override[1], dtype=dtype)[substep_index]
         # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
         # substep-START velocity + carry-eta face depth as the u-drag above.
         if drag_r_v is not None:
@@ -2458,6 +2500,8 @@ def barotropic_substeps_latlon_cgrid(
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
     _nemo_substep_trace_test_hook=False,
+    _nemo_substep_coriolis_test_override=None,
+    _nemo_substep_pgf_test_override=None,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -2945,6 +2989,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_flux_form_update_test_override),
         nemo_continuity_update_test_override=(
             _nemo_continuity_update_test_override),
+        nemo_substep_coriolis_override=_nemo_substep_coriolis_test_override,
+        nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
     )
     if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result

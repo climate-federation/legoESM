@@ -108,9 +108,9 @@ horizontal divergence is divided by the live thickness at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:126-130` and the same
 live thickness multiplies the divergence back at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/divhor.f90:153`; legoESM forms the
-ratio at `ocean_pe_latlon_cgrid.py:1688`, the thickness at
-`ocean_pe_latlon_cgrid.py:1689` and hands it to the divergence block at
-`ocean_pe_latlon_cgrid.py:1713`.  The substitution replaces that ONE operand,
+ratio at `ocean_pe_latlon_cgrid.py:1739`, the thickness at
+`ocean_pe_latlon_cgrid.py:1740` and hands it to the divergence block at
+`ocean_pe_latlon_cgrid.py:1764`.  The substitution replaces that ONE operand,
 for exactly one velocity-indicator call, by an observer that restores the
 producer immediately — the technique rounds 152 and 161 already use, so no
 production line changes and no card can reach it.
@@ -120,7 +120,7 @@ this round named the stretching term at
 `GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:297-298` as a second
 place the ratio at the now level appears.  It does not: that statement reads
 the ratio at the AFTER and BEFORE levels, not the now level, and legoESM's
-answering pair is `ocean_pe_latlon_cgrid.py:1731-1732`.  Round 160 already
+answering pair is `ocean_pe_latlon_cgrid.py:1835-1836`.  Round 160 already
 measured the after-level pair inert, and the before level is the entry state's
 own sea surface height, which this round's entry bridge loads bit-identically
 from NEMO's restart.  So the stretching term is accounted for and Order B is

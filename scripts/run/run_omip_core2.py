@@ -4495,6 +4495,14 @@ def _restart_env_items(environ=None) -> list[tuple[str, str]]:
     )
 
 
+def _restart_reads_rk3_after_ssh(model_config) -> bool:
+    """Use the model's own predicate for the restart slot requirement."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_rk3_after_ssh_is_carried,
+    )
+    return nemo_rk3_after_ssh_is_carried(model_config)
+
+
 def _source_revision(start_dir=None) -> str:
     """Git revision of the checkout this driver is RUNNING FROM.
 
@@ -9326,6 +9334,7 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec,
+            carries_rk3_after_ssh=_restart_reads_rk3_after_ssh(model.config),
             config_fingerprint=(None if args.restart_branch_from_different_config
                                 else _restart_cfg_fp))
         if args.restart_branch_from_different_config:

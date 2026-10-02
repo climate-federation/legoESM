@@ -387,6 +387,72 @@ def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
     return b(one / area_f)
 
 
+def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
+                             nn_e3f_typ=0, grid=None):
+    """Return NEMO's frozen vorticity thickness ``e3f_0vor`` at native F points.
+
+    ``dyn_vor_init`` allocates and freezes this array for EVERY curl-point
+    vorticity scheme -- ENS, ENE, EEN and MIX share one ``SELECT CASE`` arm
+    (``dynvor.f90:890``) -- and ``dyn_cor_2D_init`` divides ``ff_f`` by
+    it in every one of its branches: EEN at ``dynspg_ts.f90:960``, ENE/MIX
+    at ``dynspg_ts.f90:1016``, ENS at ``dynspg_ts.f90:1046``.  It is NOT the
+    F-point reference thickness ``e3f_0``.
+
+    At ``nn_e3f_typ = 0`` (the shipped ``namelist_ref`` value for every card
+    on this lane) it is the four surrounding T cells' MASKED reference
+    thickness divided by FOUR -- by four, not by the number of wet cells,
+    which is the ``nn_e3f_typ = 1`` branch (``dynvor.f90:897`` against
+    ``dynvor.f90:905``).  NEMO's own ``((N + NE) + (C + E))`` association is
+    kept: the compiled source brackets the north pair first "for
+    reproducibility around NP".  The lateral boundary condition runs before
+    the "insure e3f_0vor /= 0" sweep, which restores ``dry_vertex_fill`` at a
+    fully dry vertex.  The unpreprocessed ``dynvor.F90:945-951`` restores
+    ``e3f_0`` in BOTH ``nn_e3f_typ`` arms; ``domzgr_substitute.h90`` then
+    expands that name to ``e3t_1d(jk)`` under key_vco_1d (the VORTEX build's
+    ``dynvor.f90:920``) and to ``e3f_3d`` under key_vco_3d (GYRE's
+    ``dynvor.f90:936``), so the caller passes its own card's array.
+
+    Sibling implementations of the same NEMO statement, both in a DIFFERENT
+    layout and neither interchangeable with this one: the live baroclinic
+    ``nemo_qco_live_vorticity_e3f_cgrid`` below (padded F storage, and it
+    brackets ``((C + E) + (N + NE))`` -- the opposite association, an
+    unmeasured finding), and ``een_e3f_h_vtx``'s ``nemo_avg4`` arm (halo-
+    padded live thicknesses).  This one is the native-A2D frozen operand the
+    split-explicit coefficient builder needs.
+    """
+    if nn_e3f_typ not in (0, 1):
+        raise ValueError("nn_e3f_typ must be 0 or 1")
+    e3t0 = jnp.asarray(e3t_0)
+    dtype = e3t0.dtype
+    active = jnp.asarray(tmask, dtype=dtype)
+    # A bare optimization_barrier is stripped from optimized HLO, so the
+    # bracketing above would not survive JIT on a card whose e3t_0 varies
+    # horizontally.  Hold every written binary64 result the way the literal
+    # coefficient builder does.
+    b = nemo_source_round
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        # Closed north wall; an ORCA T fold is applied below instead.
+        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+    masked = b(e3t0 * active)
+    masked_n = north(masked)
+    ref_sum = b(b(masked_n + east(masked_n)) + b(masked + east(masked)))
+    if nn_e3f_typ == 0:
+        e3f0vor = b(ref_sum * jnp.asarray(0.25, dtype=dtype))
+    else:
+        active_n = north(active)
+        wet = b(b(active_n + east(active_n)) + b(active + east(active)))
+        e3f0vor = jnp.where(
+            wet != 0.0, b(ref_sum / jnp.where(wet == 0.0, 1.0, wet)), 0.0)
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
+    fill = jnp.asarray(dry_vertex_fill, dtype=dtype)
+    return jnp.where(e3f0vor == 0.0, fill, e3f0vor)
+
+
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
     reference_e3f=None,

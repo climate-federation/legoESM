@@ -15,7 +15,7 @@ writing one: `grep -rn "r3u\|qco" packages/ocean/legoesm/ocean/` found
 `vertical.py:197 nemo_qco_live_face_thicknesses`, the shared canonical
 `dom_qco_r3c` operand builders already used by the DINO ldfslp/dynzad and the
 `wzv_call2_evaluation="nemo_literal"` tracer path
-(`ocean_model_latlon_cgrid.py:5233`).  **Both arms reuse that helper; no
+(`ocean_model_latlon_cgrid.py:5267`).  **Both arms reuse that helper; no
 second implementation of the rule is written.**  The wrapper
 `nemo_qco_live_face_thicknesses` pulls its operands off `z_coord.nemo_*`
 fields the L1 testcase cards do not carry, so the arms call the
@@ -36,7 +36,7 @@ own grid and reference thicknesses.
   Measured on the card's own `mesh_mask.nc`: on every wet U face,
   `e3u_0 == min(e3t_0_i, e3t_0_{i+1})` **exactly** (0 of 16900 faces differ).
   So the reference thickness is already faithful; only the STRETCHING differs.
-* `ocean_model_latlon_cgrid.py:1063` (`_nemo_ws_stage_transport`, reached from
+* `ocean_model_latlon_cgrid.py:1064` (`_nemo_ws_stage_transport`, reached from
   `:4830,:4844,:4862` on both cards because
   `momentum_time_integrator == tracer_time_integrator == "rk3_ws"`):
   `hu_stage = min_cell_to_uface(h_stage)` with
@@ -47,7 +47,7 @@ own grid and reference thicknesses.
   `ln_dynadv_vec=.false.` and `key_qco` is set, so `lk_linssh` is false):
   `uu(Kaa) = ( (1+r3u(Kbb))*uu(Kbb) + rDt*(1+r3u(Kmm))*uu(Krhs) ) / (1+r3u(Kaa)) * umask`,
   and `dynzdf.F90` (`dyn_zdf` body lines 80-85) applies the identical factor at
-  stage 3.  `ocean_model_latlon_cgrid.py:4939-4943,4851-4856,4868-4871` writes
+  stage 3.  `ocean_model_latlon_cgrid.py:4973-4977,4851-4856,4868-4871` writes
   `u_raw = u0 + stage_dt * RHS` with no factor.  The TRACER analogue is already
   faithful (`:1215 _stage` divides `h_k_old*base - dt*flux_div` by `h_stage`,
   which is exactly NEMO `:552-554`), which is why the stage-1 tracer operand

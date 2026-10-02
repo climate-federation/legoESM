@@ -228,6 +228,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
         "tke_shear_step_entry_eta", "stage1_r3t_ratio",
         "mld_carried_step_entry_n2",
+        "rk3_after_ssh",
     },
             f"unknown Decision-43 source route {route!r}")
 
@@ -324,6 +325,13 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                 and getattr(
                     config.gm_redi, "slope_n2_evaluation", "recompute")
                 == "carried_step_entry")
+        elif route == "rk3_after_ssh":
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_rk3_after_ssh_is_carried,
+            )
+            values["after_ssh_form"] = getattr(
+                config, "nemo_first_wzv_after_ssh", "")
+            executes = nemo_rk3_after_ssh_is_carried(config)
         else:
             executes = (
                 config.momentum_time_integrator == "rk3_ws"
@@ -333,7 +341,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
         return values
 
     rows = {}
-    for case in ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
+    cases = ["GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"]
+    if route == "rk3_after_ssh":
+        cases.extend(("VORTEX-zco", "VORTEX_VEC-zco"))
+    for case in cases:
         card = build_nemo_testcase_card(case)
         config = card.recipe.model_config
         rows[case] = row(

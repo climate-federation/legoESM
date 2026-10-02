@@ -257,7 +257,7 @@ The ocean card must explicitly set
 `"virtual_salt_flux"` (`packages/ocean/legoesm/ocean/state.py:1879-1886`).
 The selected real-volume arm preserves salt content during z-star dilution and
 skips the extra virtual-salt source
-(`ocean_model_latlon_cgrid.py:6002-6018`).  Normalization is off because NEMO's
+(`ocean_model_latlon_cgrid.py:6036-6052`).  Normalization is off because NEMO's
 registered `sbc_fwb` output already includes `emp_corr`; applying legoESM's
 generic mean removal would be a second freshwater-budget correction.  The
 construction gate and continuous-run gate must reject either other value.
@@ -267,16 +267,16 @@ knobs explicitly; defaults are not accepted as evidence:
 
 | legoESM row | selected value | status / source |
 |---|---|---|
-| free surface | `barotropic_solver="explicit_substep"` | existing solver, `state.py:1397-1403` |
-| NEMO filter | `barotropic_time_filter="nemo_boxcar1_ab3"` | existing forward `nn_bt_flt=1` identity, `state.py:1082-1088` |
+| free surface | `barotropic_solver="explicit_substep"` | existing solver, `state.py:1412-1418` |
+| NEMO filter | `barotropic_time_filter="nemo_boxcar1_ab3"` | existing forward `nn_bt_flt=1` identity, `state.py:1097-1103` |
 | substeps | exact NEMO `icycle` and `rDt_e` | source-replayed for exact-entry gates; continuous card must reproduce `ln_bt_auto=T,rn_bt_cmax=0.8` and hard-stop if its per-step values differ |
-| coupled time step | `tracer_time_integrator="rk3_ws"`, `momentum_time_integrator="rk3_ws"`, `outer_integrator="forward_euler"` | existing coupled validator, `state.py:2071-2077,2332`; `ocean_model_latlon_cgrid.py:3175-3205` |
-| stage mean | `nemo_stage_mean_imposition=True` | existing NEMO RK3 reconciliation, `state.py:1256-1265` |
-| vertical solve | `implicit_vertical_mixing=True` | existing shared solve, `state.py:2158`; one wet layer has no interior interface, but the registered surface stress and top/bottom drag still alter its RHS/diagonal |
-| stress placement | `surface_stress_implicit=True` | existing NEMO `dynzdf` surface-BC path; withholds the ordinary explicit kick, adds its depth mean to split-explicit forcing, and inserts the top-cell implicit RHS (`state.py:2290-2300`; executing `ocean_pe_latlon_cgrid.py:3937-3960`, `ocean_model_latlon_cgrid.py:4041-4065,7842-7863`) |
-| forcing time level | `barotropic_forcing_centred=False` | NEMO inherits `ln_bt_fw=T`; existing selector and source map at `state.py:2759-2785` |
-| freshwater | `freshwater_closure="real_freshwater"`, `normalize_freshwater=False`, `fix_eta_drift=True`, `use_conservation_fixer=False` | existing real-volume path and safety checks, `ocean_model_latlon_cgrid.py:2191-2268,5896-5912` |
-| implicit bottom drag | `bottom_drag_scheme="nemo_quadratic"`, `zdf_drag_in_matrix=True`, `zdf_baroclinic_only=True`, `barotropic_drag_substep=True` | existing shared NEMO composition, `state.py:2671-2758` |
+| coupled time step | `tracer_time_integrator="rk3_ws"`, `momentum_time_integrator="rk3_ws"`, `outer_integrator="forward_euler"` | existing coupled validator, `state.py:2086-2092,2332`; `ocean_model_latlon_cgrid.py:3176-3206` |
+| stage mean | `nemo_stage_mean_imposition=True` | existing NEMO RK3 reconciliation, `state.py:1271-1280` |
+| vertical solve | `implicit_vertical_mixing=True` | existing shared solve, `state.py:2173`; one wet layer has no interior interface, but the registered surface stress and top/bottom drag still alter its RHS/diagonal |
+| stress placement | `surface_stress_implicit=True` | existing NEMO `dynzdf` surface-BC path; withholds the ordinary explicit kick, adds its depth mean to split-explicit forcing, and inserts the top-cell implicit RHS (`state.py:2305-2315`; executing `ocean_pe_latlon_cgrid.py:3991-4014`, `ocean_model_latlon_cgrid.py:4042-4066,7842-7863`) |
+| forcing time level | `barotropic_forcing_centred=False` | NEMO inherits `ln_bt_fw=T`; existing selector and source map at `state.py:2774-2800` |
+| freshwater | `freshwater_closure="real_freshwater"`, `normalize_freshwater=False`, `fix_eta_drift=True`, `use_conservation_fixer=False` | existing real-volume path and safety checks, `ocean_model_latlon_cgrid.py:2192-2269,5896-5912` |
+| implicit bottom drag | `bottom_drag_scheme="nemo_quadratic"`, `zdf_drag_in_matrix=True`, `zdf_baroclinic_only=True`, `barotropic_drag_substep=True` | existing shared NEMO composition, `state.py:2686-2773` |
 | implicit top drag | raw `rCdU_top` plus a new top-coefficient extension of those same shared paths | **NEW prerequisite**, source identity registered above; no private or duplicate solver |
 
 There is one explicit construction gap.  The existing `rk3_ws` validator
@@ -317,8 +317,8 @@ measured agreements.
 
 The sign conversion mirrors the existing bottom-drag convention: NEMO's raw
 `rCdU_bot<=0` becomes legoESM's positive `r_eff=-rCdU_bot` before the diagonal
-gain (`state.py:2678-2686`; executing use
-`ocean_model_latlon_cgrid.py:8119-8130,8075-8098`).  The new top extension must
+gain (`state.py:2693-2701`; executing use
+`ocean_model_latlon_cgrid.py:8153-8164,8075-8098`).  The new top extension must
 call the same conversion/assembly owner.  A separate implementation or direct
 use of the negative raw value would create anti-drag and is a construction
 error.

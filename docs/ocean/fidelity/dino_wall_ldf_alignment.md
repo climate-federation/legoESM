@@ -89,17 +89,17 @@ paths are relative to the repository root.
 |---|---|---|---|---|
 | 1 | operator the configuration selects | `ln_dynldf_lap=.true.`, `ln_dynldf_lev=.true.` (`RUN_VERDICT360_M0/namelist_cfg:365-366`) → `dynldf_lev.F90:45` `dynldf_lev_lap` | `"lateral_viscosity_operator": "nemo_div_curl"` (`dino.py:1324`) → `latlon_cgrid_operators.py:1299` | **MATCH** — harmonic, iso-level |
 | 2 | operator form | vorticity–divergence, `grad(ahmt·div) − curl(ahmf·curl)`. `nn_dynldf_typ=0` is the default (`namelist_ref:1108`) and DINO does not override it; branch at `dynldf_lev.F90:86` | same form and same signs, `latlon_cgrid_operators.py:1390-1391` | **MATCH** |
-| 3 | the coefficient | `ahmt = ½·rn_Uv·max(e1t,e2t)`, `ahmf = ½·rn_Uv·max(e1f,e2f)` (`ldfdyn.F90:251`, `:286`; `ldfc1d_c2d.F90:138-139`), `rn_Uv=0.27` (`namelist_cfg:369`) | same formula, `latlon_cgrid_operators.py:1237`; `½·rn_Uv` recovered as `A_h/(R·Δλ)` at `ocean_pe_latlon_cgrid.py:2750` from `dino.py:3020` with `U_M=0.27` (`dino.py:665`) | **MATCH** — T-points bit-identical at the surface, F-points to 1.5e-5 (the discrete `max(e1,e2)` convention, already documented) |
+| 3 | the coefficient | `ahmt = ½·rn_Uv·max(e1t,e2t)`, `ahmf = ½·rn_Uv·max(e1f,e2f)` (`ldfdyn.F90:251`, `:286`; `ldfc1d_c2d.F90:138-139`), `rn_Uv=0.27` (`namelist_cfg:369`) | same formula, `latlon_cgrid_operators.py:1237`; `½·rn_Uv` recovered as `A_h/(R·Δλ)` at `ocean_pe_latlon_cgrid.py:2804` from `dino.py:3020` with `U_M=0.27` (`dino.py:665`) | **MATCH** — T-points bit-identical at the surface, F-points to 1.5e-5 (the discrete `max(e1,e2)` convention, already documented) |
 | 4 | what the wall corner sees | the circulation `δi(e2v·v) − δj(e1u·u)` at the f-point (`dynldf_lev_rot_scheme.h90:23-25`) | the same circulation, `curl_vertex_cgrid` (`latlon_cgrid_operators.py:1380`) | **MATCH** — both impose free slip as **zero relative vorticity at the coastal corner** |
 | 5 | how free slip is imposed | `rn_shlat=0` (`namelist_cfg:198`). `fmask` = product of the four surrounding `tmask` (`dommsk.F90:152`), zero at every corner touching land; the block that would raise it (`dommsk.F90:209-217`) does not run. Folded into the coefficient once at init: `ahmf *= fmask` (`ldfdyn.F90:330`) | the same four-cell product (`operators_latlon_cgrid.py:1570`), applied to the vorticity inside the operator (`latlon_cgrid_operators.py:1384`) instead of folded into the coefficient | **MATCH — 0 disagreements out of 372528 corner points, on every one of the 36 levels.** An off-by-one in either index would have shown 3718 (row shift) or 11584 (column shift), so the check discriminates |
-| 6 | staircase corners below the sea floor | `fmask` is genuinely 3-D (`ldfdyn.F90:330` multiplies level by level) | a 3-D corner mask built per level from the coordinate's activity flag (`ocean_pe_latlon_cgrid.py:2753-2769`) | **MATCH** — included in the count above |
+| 6 | staircase corners below the sea floor | `fmask` is genuinely 3-D (`ldfdyn.F90:330` multiplies level by level) | a 3-D corner mask built per level from the coordinate's activity flag (`ocean_pe_latlon_cgrid.py:2807-2823`) | **MATCH** — included in the count above |
 | 7 | viscous stress crossing the wall face | zero: the wall corner's coefficient is zero, so the curl term at the first wet row (`dynldf_lev_rot_scheme.h90:41`) draws nothing from the wall side | zero by the same construction | **MATCH — measured exactly 0.0 on both sides**, as the coefficient *and* as the stress the operator forms on the real state |
 | 8 | the divergence term at the wall | `ahmt` carries `tmask` (`ldfdyn.F90:329`) | the divergence is masked before the coefficient (`latlon_cgrid_operators.py:1374`) | **MATCH** in form |
-| 9 | mask dimensionality | 3-D on every leg | the production call hands the operator the **2-D** cell and face masks (`ocean_pe_latlon_cgrid.py:4246-4247`) where every other momentum term in the same routine gets the 3-D ones | **DIFF in the wiring, ZERO in the answer — see the control below** |
+| 9 | mask dimensionality | 3-D on every leg | the production call hands the operator the **2-D** cell and face masks (`ocean_pe_latlon_cgrid.py:4300-4301`) where every other momentum term in the same routine gets the 3-D ones | **DIFF in the wiring, ZERO in the answer — see the control below** |
 | 10 | layer-thickness (e3) weighting | present: `e3f` on the corner vorticity (`dynldf_lev_rot_scheme.h90:23`), `e3t`/`e3u`/`e3v` inside the divergence (`:27-29`), divided out by `e3u`/`e3v` (`:41,:51`) | absent on the card: `lateral_viscosity_e3_weighting="off"` (`dino.py:834`) | **DIFF in the code, provably near-inert on this grid — see below** |
 | 11 | metrics the operator divides by | `e1e2f` on the vorticity (`h90:23`), `e1e2t` on the divergence (`:27`), `e2u`/`e1u` and `e1v`/`e2v` on the two tendencies (`:41-42,:51-52`) | the geometry's own dual-cell area, cell area and four face lengths | **MATCH** — T-cell area and all four face lengths bit-identical; F-cell area and v-face width to 4.2e-5, at the wall rows and everywhere but the two polar end rows, where legoESM deliberately zeroes the dual-cell metric as a wall boundary condition |
 | 12 | the outer face mask | `umask`/`vmask` multiply the result (`h90:40,50`) | the same (`latlon_cgrid_operators.py:1393-1395`) | **MATCH** |
-| 13 | any extra wall or slope term | none | a slope-foot viscosity enhancement exists but its coefficient defaults to 0 (`state.py:1779`) and the card never sets it, so it is a multiply by 1.0 | **MATCH** — nothing extra runs |
+| 13 | any extra wall or slope term | none | a slope-foot viscosity enhancement exists but its coefficient defaults to 0 (`state.py:1794`) and the card never sets it, so it is a multiply by 1.0 | **MATCH** — nothing extra runs |
 
 ### Row 9, and the control that makes its zero mean something
 
@@ -258,11 +258,11 @@ Probe: `friction_timestep_check.py`.
 
 | | NEMO 5.0.2 (DINO) | legoESM (`nemo_dino_kamm_mlf`) |
 |---|---|---|
-| which velocity the operator reads | the **before** level: `dyn_ldf(kstp, Nbb, Nnn, uu, vv, Nrhs)` (`stpmlf.F90:319`), and the scheme takes `pu_in(...,Kbb)` (`dynldf_lev_rot_scheme.h90:24-25,28-29`) | the **before** level: `_ldf_state=(T_before, S_before, u_before, v_before)` (`ocean_model_latlon_cgrid.py:8656-8658`), routed onto the friction call alone (`ocean_pe_latlon_cgrid.py:4241-4242`) |
+| which velocity the operator reads | the **before** level: `dyn_ldf(kstp, Nbb, Nnn, uu, vv, Nrhs)` (`stpmlf.F90:319`), and the scheme takes `pu_in(...,Kbb)` (`dynldf_lev_rot_scheme.h90:24-25,28-29`) | the **before** level: `_ldf_state=(T_before, S_before, u_before, v_before)` (`ocean_model_latlon_cgrid.py:8690-8692`), routed onto the friction call alone (`ocean_pe_latlon_cgrid.py:4295-4296`) |
 | where it accumulates | `Krhs` | the withheld dissipative increment (`ab2_scope="advective"`) |
-| the timestep | `rDt = 2·rn_Dt = 5400 s` from the second step on (`stpmlf.F90:686`; `:135-136` is the single Euler start), `rn_Dt=2700` (`namelist_cfg:116`) | `rdt = 2.0·dt = 5400 s` (`ocean_model_latlon_cgrid.py:8618`), and the increment is `dt_mom · du_diss` with `dt_mom = dt/dt_mom_ratio` (`:3478`, `:3424`), `dt_mom_ratio` **measured = 1.0** on this card |
+| the timestep | `rDt = 2·rn_Dt = 5400 s` from the second step on (`stpmlf.F90:686`; `:135-136` is the single Euler start), `rn_Dt=2700` (`namelist_cfg:116`) | `rdt = 2.0·dt = 5400 s` (`ocean_model_latlon_cgrid.py:8652`), and the increment is `dt_mom · du_diss` with `dt_mom = dt/dt_mom_ratio` (`:3478`, `:3424`), `dt_mom_ratio` **measured = 1.0** on this card |
 | what it is added to | the **before** velocity: `puu(Kaa) = (puu(Kbb) + rDt·puu(Krhs))·umask` (`dynzdf.F90:137-142`), with **no** thickness weighting — DINO sets `ln_dynadv_vec = .true.` (`namelist_cfg:321`) | the **before** velocity: `u_naa = (ubc_bef + (ubc_exp − ubc_now)) + du_diss_bc + btu_exp` (`:8548`), the depth mean travelling separately (`:3905-3911`) |
-| the time filter | the **plain** `puu(Kmm) + rn_atfp·(puu(Kbb) − 2·puu(Kmm) + puu(Kaa))` (`dynatf_qco.F90:165-166`, the `ln_dynadv_vec` arm selected at `:162`), `rn_atfp = 0.1` (`namelist_ref:73`) | the identical expression (`ocean_model_latlon_cgrid.py:8462-8464`), `asselin_gamma = 0.1` (`dino.py:1490`) |
+| the time filter | the **plain** `puu(Kmm) + rn_atfp·(puu(Kbb) − 2·puu(Kmm) + puu(Kaa))` (`dynatf_qco.F90:165-166`, the `ln_dynadv_vec` arm selected at `:162`), `rn_atfp = 0.1` (`namelist_ref:73`) | the identical expression (`ocean_model_latlon_cgrid.py:8496-8498`), `asselin_gamma = 0.1` (`dino.py:1490`) |
 
 ### Measured, not read
 
@@ -282,7 +282,7 @@ that — those are cells where the probe's re-derivation of the operator and the
 model's own output disagree slightly, not cells running a different timestep.
 Separately, `dt_mom_ratio` **cannot** be anything but 1 on this card: the model
 refuses it unless the barotropic solver is the rigid lid
-(`ocean_model_latlon_cgrid.py:2710`), and this card runs the split-explicit
+(`ocean_model_latlon_cgrid.py:2711`), and this card runs the split-explicit
 solver. That half of the question is closed by construction.
 
 **The composition**, which is the question actually posed: does one operator's
@@ -304,7 +304,7 @@ changed viscosity, which is expected and is not a discrepancy in the slope.
 **The depth mean matters more than the deviation here, and it was nearly
 missed.** legoESM adds only the *baroclinic* part of the friction increment at
 the momentum update and routes the depth mean through the barotropic solver's
-slow forcing (`ocean_model_latlon_cgrid.py:8681-8688`), where NEMO applies the
+slow forcing (`ocean_model_latlon_cgrid.py:8715-8722`), where NEMO applies the
 whole increment in `dyn_zdf` and lets the split-explicit solver divide it. Review
 flagged that as the one place a fraction of the depth-mean friction could go
 missing — which would be a depth-uniform, wall-concentrated loss, i.e. exactly
@@ -346,7 +346,7 @@ the raw leap-frog depth mean. Two models agreeing on multiplier, time level and
 filter coefficient but disagreeing on whether that overwrite runs would deliver
 different effective damping of the depth-mean friction. This card runs it, at
 NEMO's position in the step (`dino.py:1714-1715`,
-`ocean_model_latlon_cgrid.py:8443`).
+`ocean_model_latlon_cgrid.py:8477`).
 
 ---
 
@@ -552,7 +552,7 @@ solve" and is already fenced by three roundoff-level numbers.
 
 **Also closed by measurement, not by argument.** The route by which the depth
 mean of the friction reaches the state. legoESM folds it into the barotropic
-forcing (`ocean_model_latlon_cgrid.py:4010-4016`) with the *same* thickness
+forcing (`ocean_model_latlon_cgrid.py:4011-4017`) with the *same* thickness
 weight the 3-D combine removes it with (`:8543-8548`), so nothing is lost or
 double-counted by construction; and Part 3 measures it arriving at the wall rows
 with slope 0.9987. The campaign's earlier `F_slow == zu_frc` to roundoff is the

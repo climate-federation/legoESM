@@ -65,6 +65,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     compute_frozen_geom_density,
     nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
+    nemo_rk3_after_ssh_is_carried,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -1072,6 +1073,17 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # solver boundary.  Private fidelity measurement only: NEMO has no
     # selector for these coefficients and no public config can reach this.
     barotropic_drag_rate_override: object = None
+    # Private round-197 per-substep discriminator for the compiled barotropic
+    # sub-time-step loop: a pair of (n_substeps, ...) stacks that replace the
+    # 2-D Coriolis trend (NEMO dyn_cor_2D, dynspg_ts.f90:503) at the substep
+    # the scan is on, keyed by the scan's own substep index.  ``None`` is the
+    # production value and is resolved at trace time, so the unset hook leaves
+    # the jaxpr unchanged; no constructible model configuration can select it.
+    barotropic_substep_coriolis_override: object = None
+    # Same instrument for the substep surface-pressure gradient
+    # (dynspg_ts.f90:498), so the two operands of the velocity update at
+    # dynspg_ts.f90:535 can be substituted one at a time.
+    barotropic_substep_pgf_override: object = None
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -1314,18 +1326,18 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the ZAD call boundary.  No card constructs either private control.
     # ``True`` retains the stage-2/3 association discriminator.
     stage1_zad_w_override: object = None
-    # Round 5 (VORTEX) WRITE-only companion to the override above: report
-    # the vertical velocity and face thicknesses dyn_zad is handed, so the
-    # operand can be scored against the oracle's own recorded ``ww``
-    # instead of only being replaced by it.  None is the production value.
+    # WRITE-only callbacks report the W/thickness operands handed to dyn_zad.
+    # None is the production value; no card constructs these diagnostics.
     stage1_zad_operand_observer: object = None
-    # Round 158: the same per-slot substitution at the STAGE-2 dyn_zad call.
-    # A ``(w, h_u, h_v)`` triple whose ``None`` slots keep the live stage
-    # operand, so one operand at a time can be replaced by NEMO's recorded
-    # value while every other stage input stays legoESM's.  It feeds the SAME
-    # ``nemo_stage_zad_operands`` seam stage 1 uses and reaches nothing else;
-    # no card constructs it.
+    stage2_zad_operand_observer: object = None
+    stage3_zad_operand_observer: object = None
+    # Rounds 158/194: per-slot substitution at the STAGE-2/3 dyn_zad calls.
+    # Each ``(w, h_u, h_v)`` triple uses ``None`` to keep the live operand,
+    # so one slot can be replaced by NEMO's recorded stage value while every
+    # other input stays legoESM's.  Both feed the existing tendency seam; no
+    # card constructs either diagnostic control.
     stage2_zad_operand_override: object = None
+    stage3_zad_operand_override: object = None
     # Round 159: private ONE-VARIABLE arm for the stage-2 continuity
     # solve.  NEMO's vector-invariant deck solves it on the RAW stage
     # velocity (``stprk3_stg.f90:360``, velocity indicator) while the
@@ -2748,18 +2760,18 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_momentum_operator_stage must be 2 or 3; stages 1 and "
                 "3-with-lateral-mixing are served by other hooks")
-        # At CONSTRUCTION, not at trace time.  The inner guard raises only
-        # once the stage is reached, so a gate asking for a bucket that does
-        # not exist would compile and score whatever the returned slots held.
-        _zad2 = self._nemo_ws_test_hooks.stage2_zad_operand_override
-        if _zad2 is not None and (
-                not isinstance(_zad2, tuple) or len(_zad2) != 3):
-            # At CONSTRUCTION, like the other momentum seams: a pair or a bare
-            # array would substitute the wrong dyn_zad operand and the step
-            # would score a field under another field's name.
-            raise ValueError(
-                "stage2_zad_operand_override must be a (w, h_u, h_v) tuple; "
-                "a None slot keeps the live stage operand")
+        # At CONSTRUCTION: otherwise a missing stage bucket can compile and
+        # score whatever the returned slots happened to hold.
+        for _zad_stage, _zad_override in enumerate((
+                self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                self._nemo_ws_test_hooks.stage3_zad_operand_override), 2):
+            if _zad_override is not None and (
+                    not isinstance(_zad_override, tuple)
+                    or len(_zad_override) != 3):
+                # A pair or bare array would score under another field's name.
+                raise ValueError(
+                    f"stage{_zad_stage}_zad_operand_override must be a "
+                    "(w, h_u, h_v) tuple; a None slot keeps the live operand")
         _face_r3_stage = self._nemo_ws_test_hooks.expose_stage_face_r3
         if (not isinstance(_face_r3_stage, int)
                 or isinstance(_face_r3_stage, bool)
@@ -2788,10 +2800,10 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "stage2_wzv_velocity_form must be a bool")
         if self._nemo_ws_test_hooks.expose_momentum_operator not in (
-                "", "hpg", "vorticity", "advection", "keg", "zad"):
+                "", "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
             raise ValueError(
-                "expose_momentum_operator must be empty, hpg, vorticity, "
-                "advection, keg, or zad; got "
+                "expose_momentum_operator must name a component or after_* "
+                "accumulator boundary; got "
                 f"{self._nemo_ws_test_hooks.expose_momentum_operator!r}")
         if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
                 "", "after_advection", "after_sbc"):
@@ -4607,6 +4619,39 @@ class LatLonCGridOceanModel:
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
         _mom_ti_for_ws = getattr(config, "momentum_time_integrator", "euler")
+        # NEMO's carried after-SSH slot belongs to the RK3 stage program: it is
+        # written by that program's end-of-step time-level rotation
+        # (stprk3.F90:217, raw source) and the leapfrog fills the same slot from
+        # continuity instead.  This is NOT an inference about which form a card
+        # should take -- the card STATES that -- it is a CONSISTENCY CHECK
+        # between two fields the card states, in the same shape as the rk3_ws
+        # pairing check immediately below, and it raises rather than quietly
+        # running a program that would read the slot without ever writing it.
+        if (getattr(config, "nemo_first_wzv_after_ssh", "")
+                == "rk3_extrapolated_carried"):
+            if _mom_ti_for_ws != "rk3_ws":
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' is "
+                    "NEMO's RK3 end-of-step extrapolation and only the RK3 "
+                    "stage program writes that slot; this card states "
+                    f"momentum_time_integrator={_mom_ti_for_ws!r}. Select "
+                    "rk3_ws, or state the after-SSH form that card's own "
+                    "time-stepping program leaves behind")
+            _post = [name for name, on in (
+                ("polar_filter.use_polar_filter",
+                 config.polar_filter.use_polar_filter),
+                ("freeze_floor", config.freeze_floor),
+                ("ew_cyclic_overlap",
+                 getattr(config, "ew_cyclic_overlap", False)),
+            ) if on]
+            if _post:
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' "
+                    "carries NEMO's own after-SSH slot, built from the sea "
+                    "surface the step produced; "
+                    f"{_post} rewrite that sea surface AFTER the step, so the "
+                    "slot the next step reads would not match the height it "
+                    "enters with. NEMO applies none of these")
         if ((config.tracer_time_integrator == "rk3_ws")
                 != (_mom_ti_for_ws == "rk3_ws")):
             raise ValueError(
@@ -6070,17 +6115,12 @@ class LatLonCGridOceanModel:
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
         elif getattr(_cfg_b, "momentum_time_integrator",
                      "euler") == "rk3_ws":
-            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
-            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
-            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
-            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
-            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
-            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
-            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
-            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
-            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
-            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
-            # sqrt(3)) carries over.
+            # NEMO WS-RK3 restarts each stage from u0 with the prior stage RHS
+            # and dt/3, dt/2, dt (not Shu-Osher combinations). Stage 1 carries
+            # the full stp2d RHS, stage 2 hpg+vor+adv, and stage 3 the full RHS
+            # plus its only implicit ZDF solve. Its stability polynomial is
+            # unchanged from the equivalent three-stage polynomial used here:
+            # SSP-RK3's, so the explicit Coriolis bound still applies.
             u0 = state.u.data
             v0 = state.v.data
 
@@ -6131,6 +6171,9 @@ class LatLonCGridOceanModel:
                     and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
                 _return_components = (
                     _expose_operator or _return_live_stage_operands)
+                _zad_observers = (None,
+                    self._nemo_ws_test_hooks.stage2_zad_operand_observer,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_observer)
                 _stage_ldf_thickness = None
                 if (not skip_ldf and _ws_uses_nemo_ldf_e3
                         and stage_face_thickness is not None):
@@ -6205,6 +6248,8 @@ class LatLonCGridOceanModel:
                                          self._nemo_ws_test_hooks
                                          .nemo_stage_rhs_accumulation_order_arm is True),
                                      nemo_stage_zad_operands=stage_zad_operands,
+                                     nemo_stage_zad_operand_observer=(
+                                         _zad_observers[stage_index - 1]),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:
@@ -6219,12 +6264,12 @@ class LatLonCGridOceanModel:
                     _operator_name = (
                         self._nemo_ws_test_hooks.expose_momentum_operator)
                     if _operator_name not in (
-                            "hpg", "vorticity", "advection", "keg", "zad"):
+                            "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
                         raise ValueError(
-                            "expose_momentum_operator must be empty, hpg, "
-                            "vorticity, advection, keg, or zad")
-                    _op_u = _operator_components[f"{_operator_name}_u"].data
-                    _op_v = _operator_components[f"{_operator_name}_v"].data
+                            "expose_momentum_operator must name a component "
+                            "or after_* accumulator boundary")
+                    _op_u = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_u"].data
+                    _op_v = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_v"].data
                     if (_operator_name in ("keg", "zad")
                             and extra_rhs is not None):
                         # The two halves are the VECTOR form's routines.  A
@@ -6674,6 +6719,20 @@ class LatLonCGridOceanModel:
                             _baro_seed,
                             _nemo_flux_form_update_test_override=(
                                 _flux_update_override))
+                _cor_sub_override = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_substep_coriolis_override)
+                if _cor_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_coriolis_test_override=(
+                            _cor_sub_override))
+                _pgf_sub_override = (
+                    self._nemo_ws_test_hooks.barotropic_substep_pgf_override)
+                if _pgf_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_pgf_test_override=_pgf_sub_override)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,
@@ -7478,14 +7537,14 @@ class LatLonCGridOceanModel:
                 return _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
 
-            def _stage2_zad_operands(live):
-                # Round 158.  Replace only the slots the private hook names,
-                # so one dyn_zad operand at a time can come from NEMO's
-                # recorded stage while every other stage input stays
-                # legoESM's.  ``None`` slots keep the live operand, which is
-                # the same contract the stage-1 W substitution already uses.
-                override = (
-                    self._nemo_ws_test_hooks.stage2_zad_operand_override)
+            def _stage_zad_operands(stage, live):
+                # Rounds 158/194.  Replace only the slots the private hook
+                # names, so one dyn_zad operand at a time can come from NEMO's
+                # recorded stage while all other stage inputs stay legoESM's.
+                overrides = (
+                    self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_override)
+                override = overrides[stage - 2]
                 if override is None:
                     return live
                 return tuple(
@@ -7596,7 +7655,7 @@ class LatLonCGridOceanModel:
                     _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
-                stage_zad_operands=_stage2_zad_operands(
+                stage_zad_operands=_stage_zad_operands(2,
                     (_momentum_stage_w(_g1), _g1[4], _g1[5])),
                 stage_index=2)
             _stage2_rhs_production = (p1u_corr, p1v_corr)
@@ -7660,8 +7719,8 @@ class LatLonCGridOceanModel:
                 _stage3_hpg_operands,
                 _stage3_vertical_up3,
                 stage_face_thickness=_stage3_face_thickness,
-                stage_zad_operands=(
-                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
+                stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
                 stage_index=3)
             _expose_stage3_rhs = (
                 self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
@@ -7677,8 +7736,8 @@ class LatLonCGridOceanModel:
                     _stage3_hpg_operands,
                     _stage3_vertical_up3,
                     stage_face_thickness=_stage3_face_thickness,
-                    stage_zad_operands=(
-                    _momentum_stage_w(_g2), _g2[4], _g2[5]),
+                    stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
                     stage_index=3)
             elif _expose_stage3_rhs:
                 raise ValueError(
@@ -9673,6 +9732,15 @@ class LatLonCGridOceanModel:
             # checks have completed, preserving a WRITE-only diagnostic.
             state_new = _nemo_ws_pre_implicit_state
 
+        # NEMO's after-SSH slot is written HERE, not in the compiled step
+        # wrapper, because the wrapper is not the only way in: the OMIP scan
+        # driver, the SPMD lane and the OMIP2 applicator all call _step_impl
+        # directly, and the READ (in the wzv call below the tendency) fires on
+        # every one of them.  A write that reached fewer callers than the read
+        # would hand those drivers a frozen slot with no error.  Before the
+        # storage cast, so the slot is cast with every other leaf and a scan
+        # carry's dtypes stay stable.
+        state_new = self._carry_nemo_rk3_after_ssh(state, state_new)
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
@@ -12661,6 +12729,29 @@ class LatLonCGridOceanModel:
             new_state = self._apply_ew_cyclic_overlap(new_state)
         return new_state
 
+    def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):
+        """Leave NEMO's next-step after-SSH guess in the state it hands on.
+
+        At the end of every RK3 step, after the Nbb<==>Naa rotation
+        (stprk3.F90:221), NEMO assigns
+        ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)`` (stprk3.F90:225),
+        where Nbb now holds the height this step PRODUCED and Naa still holds
+        the height it ENTERED with (Nbb is untouched across the three stages).
+        The next step reads that slot as ``r3t(:,:,Kaa)`` (stp2d.F90:149)
+        immediately before its first ``CALL wzv`` (stp2d.F90:153), and NEMO
+        carries it across a restart as ``ssha`` (restart.F90:184).
+
+        ``2*a`` is exact in binary floating point, so the subtraction is the
+        only rounding here and it is the one NEMO performs.  Inert unless the
+        card STATES the carried form -- the same predicate the ``wzv`` call
+        reads the slot with, so the writer and the reader cannot disagree.
+        """
+        if not nemo_rk3_after_ssh_is_carried(self.config):
+            return new_state
+        return new_state._replace(
+            eta_rk3_after=new_state.eta.replace(
+                data=2.0 * new_state.eta.data - entry_state.eta.data))
+
     def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float,
                             *, grid=None) -> LatLonCGridOceanState:
         """Apply the mask-aware Fourier polar filter to the prognostic fields.
@@ -14803,6 +14894,14 @@ class LatLonCGridOceanModel:
         # Prime build-once caches from the CONCRETE input state before
         # the scan traces step() with tracers (codex round-2 MINOR).
         self.prime_step_caches(state)
+        # NEMO's carried after-SSH slot: the step writes it every iteration,
+        # so an unseeded None->Field transition would crash the scan on the
+        # first one.  The seed is NEMO's OWN value before any step has run --
+        # ssh(:,:,Kaa) = ssh(:,:,Kbb) (restart.F90:370) -- so seeding changes
+        # no number: the wzv branch reads the step-entry height either way.
+        if (nemo_rk3_after_ssh_is_carried(self.config)
+                and state.eta_rk3_after is None):
+            state = state._replace(eta_rk3_after=state.eta)
         # Pre-initialize AB2 carry fields so the pytree structure
         # is stable across scan iterations (None → Field transition
         # would crash jax.lax.scan).

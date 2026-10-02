@@ -34,12 +34,12 @@ quarter sum, with dry F points replaced by `e3f_3d`, at
 
 The shared transcription now accepts the card's own grid, reference T
 thickness, and T mask and rebuilds the compiled F reference/live fields at
-`vertical.py:390-488`.  It deliberately materialises the stored F-cell area
+`vertical.py:456-554`.  It deliberately materialises the stored F-cell area
 before the final division, preserving the compiled association under
 production JIT.  The production route is selected only by the complete source
-condition at `ocean_model_latlon_cgrid.py:5278-5280`; GYRE supplies its
-step-entry tuple at `ocean_model_latlon_cgrid.py:5327-5362` and its stage tuple
-at `ocean_model_latlon_cgrid.py:5862-5921`.  Recorded bridge fields remain an
+condition at `ocean_model_latlon_cgrid.py:5312-5314`; GYRE supplies its
+step-entry tuple at `ocean_model_latlon_cgrid.py:5361-5396` and its stage tuple
+at `ocean_model_latlon_cgrid.py:5896-5955`.  Recorded bridge fields remain an
 oracle check in the developed-state walk, not a production dependency.  No
 state field, stabiliser, carried state, or selector was added.
 
