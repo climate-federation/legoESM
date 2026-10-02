@@ -70,6 +70,28 @@ def test_dispatch_resolves_the_card_by_name():
         build_nemo_testcase_card("VORTEX")
 
 
+def test_the_vector_card_states_nemos_two_continuity_solves():
+    """stprk3_stg.f90:289-300 / sshwzv.f90:271-299 / traadv.f90:274.
+
+    DECISION 85.  In the vector-invariant stage NEMO solves continuity twice
+    and hands the momentum program the RAW stage velocity, so the vector card
+    states the split and the literal second solve.  The flux card runs the
+    transport form and states neither.  Both are card lines, never inferred.
+    """
+    vec = build_nemo_testcase_card("VORTEX_VEC-zco").recipe.model_config
+    assert vec.wzv_call2_evaluation == "nemo_literal"
+    assert vec.nemo_stage_momentum_wzv_split is True
+    flux = build_nemo_testcase_card("VORTEX-zco").recipe.model_config
+    assert flux.wzv_call2_evaluation == "generic"
+    assert flux.nemo_stage_momentum_wzv_split is None
+    # The stated line must also be the line the stepper resolves, or a future
+    # edit to the predicate could leave the card's statement inert.
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        nemo_stage_momentum_wzv_executes)
+    assert nemo_stage_momentum_wzv_executes(vec) is True
+    assert nemo_stage_momentum_wzv_executes(flux) is False
+
+
 def test_card_resolves_the_shipped_namelist(card):
     """namelist_cfg:19-24,32,41,204-216,252-260 and usrdef_nam.F90:96-121."""
     grid = card.recipe.grid

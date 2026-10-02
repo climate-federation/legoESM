@@ -1,13 +1,22 @@
-Status: HELD — do not apply without a new trajectory measurement.
-Reason: The candidate makes the stage-2/3 ZAD accumulator exact to 2.71e-20,
-but the 50-row VORTEX trajectory comparison FAILS.  kt=2 U/V improve from
-3.3693297863401916e-06 / 3.337024e-06 to 1.2462615108344623e-08 /
-1.0562745593834697e-08, while kt5 S leaves AT-BAR and later debt rows worsen.
-The first-over-bar step remains kt=2.  Round 194 restored production.
+Status: LANDED in round 199 (lane round 199 / VORTEX round 15), Decision 85.
+This manifest is retired and kept for provenance only; do NOT apply it.
+
+The candidate was held from round 194 to round 198 because on the OLD
+reference it cost kt=5 salinity its AT-BAR status and the cellwise ratchet
+read in the billions.  Round 198's barotropic-Coriolis landing removed that
+trade: re-measured on the new reference the candidate moves 40 of 50 rows,
+all toward NEMO, takes kt=2 u/v from 3.3693297862846805e-06 /
+3.3370236514063123e-06 to 1.3044375150352006e-15 / 1.3356828663935172e-15,
+brings six rows DEBT -> AT-BAR (kt2-kt5 T, kt6/kt7 S) and leaves the ratchet
+at six ULPs.  Round 199 landed it as two explicit lines on the
+VORTEX_VEC-zco card instead of this patch; see
+docs/ocean/fidelity/testcases/nemo_testcases_l1_vortex_round199_wzv_landing_receipt.md
+and phase3/round199/.
 
 Compiled source: VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:
-289-300 calls WZV on raw stage velocity in the vector arm and the transport
-form in the flux arm; traadv.f90:274 performs the vector tracer re-solve.
+289-300 calls WZV on raw stage velocity in the vector arm (:293) and the
+transport form in the flux arm (:300); traadv.f90:268 performs the vector
+tracer re-solve; sshwzv.f90:236-311 is the solve.
 
 diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
 --- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py

@@ -1460,12 +1460,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:2292':
+    'nemo_testcase_recipe.py:2303':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5360': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5378': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:2295':
+    'nemo_testcase_recipe.py:2306':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -3388,7 +3388,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:8860-8868': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:576-663': [
+    'nemo_testcase_recipe.py:587-674': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 88],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -3641,7 +3641,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:426-428': [
+    'nemo_testcase_recipe.py:437-439': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:10459-10476': [
@@ -4720,7 +4720,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:644': [
+    'nemo_testcase_recipe.py:655': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -4765,8 +4765,9 @@ CITATION_MAP = {
     # 36 added fifteen more, so the current lines are 314 and 971.  The first
     # (92) is above both edits and remains unmoved.  Round 7 of the ORCA2 lane
     # inserted the initial-state helper above the THIRD anchor only, moving it
-    # 1411 -> 1493; the anchor text is unchanged, so this is a rigid re-anchor.
-    'nemo_testcase_recipe.py:359,604,2276': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    # 1411 -> 1493; later card additions moved all three to their current
+    # merged locations without changing the anchor text.
+    'nemo_testcase_recipe.py:370,615,2287': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
