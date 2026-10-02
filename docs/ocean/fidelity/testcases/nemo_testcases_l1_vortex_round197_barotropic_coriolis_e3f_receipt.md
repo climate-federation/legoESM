@@ -117,8 +117,9 @@ bit for bit.  It does, at all 48 substeps, `selfcheck_max_abs = 0.0`, and
 the probe refuses rather than reporting if it does not.
 
 With the card as it ships, the cross term is NOT equal to NEMO's.  The
-disagreement is on exactly **238 faces** — `2x61 + 2x60 - 4`, the boundary
-ring of the 63x63 closed box — at every substep, with a relative error that
+disagreement is on exactly **238 faces** — `2x61 + 2x60 - 4`, the perimeter
+of the 61x60 wet u-face window inside the 63x63 closed box — at every
+substep, with a relative error that
 agrees to fifteen digits at the worst face of every substep sampled
 (`0.2506283612741221`, `...219`, `...186`), although the worst face moves (`[61,28]` at substep 1,
 `[61,36]` at substep 48).  A fixed relative error at a fixed set of faces is
