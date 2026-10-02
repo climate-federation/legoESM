@@ -61,6 +61,8 @@ _ORCA2_R87FRAMES_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo")
 _ORCA2_R88FRAMEDEBUG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo")
+_ORCA2_R90FRAMES_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -140,6 +142,8 @@ FILES = {
         _ORCA2_R88FRAMEDEBUG_COMPILED / "sbc_oce.f90"),
     "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R88FRAMEDEBUG_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "stprk3.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
