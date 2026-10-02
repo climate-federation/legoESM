@@ -7462,11 +7462,14 @@ class LatLonCGridOceanModel:
                     _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
                 else:
                     # ``_stage1_rhs_base`` is the stage-1 right-hand side
-                    # before the two increments added below it, and BOTH of
-                    # those increments are pure advection (the zub transport
-                    # operand and the stage ZAD operand), so removing the
-                    # step-level advection component here leaves exactly the
-                    # non-advective right-hand side -- NEMO's
+                    # before the three addends that follow it, and ALL THREE
+                    # are pure advection: the zub transport operand, the
+                    # stage ZAD operand, and the explicit vertical UP3 term
+                    # ``_vert0`` -- which is None here because the guard
+                    # above refuses this hook whenever the adaptive implicit
+                    # vertical advection that would make it non-None is on.
+                    # So removing the step-level advection component leaves
+                    # exactly the non-advective right-hand side: NEMO's
                     # ``Krhs`` as ``stp_2D`` hands it to stage 1.
                     _nemo_ws_exposed_stage1_rhs = (
                         _stage1_rhs_base[0]

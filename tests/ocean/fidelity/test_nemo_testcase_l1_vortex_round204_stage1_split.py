@@ -111,6 +111,16 @@ def _depth_split(delta):
 
 
 def test_the_split_hook_at_its_default_changes_nothing(steps):
+    """Constructing the hook bundle with the new field at its default is
+    identical to passing no hook bundle at all.
+
+    SCOPE, said rather than implied: this covers the field's presence, not
+    the new code behind it -- at the default neither the extra operator
+    component nor the widened decomposition request runs.  That the round
+    changed no production number is carried by the external certified
+    registries (both VORTEX cards 0/50, the GYRE ladder and the 360-day
+    year), not by this test.
+    """
     _assert_identical(steps["defaults"], steps["plain"])
 
 
@@ -164,7 +174,14 @@ def test_what_the_split_removes_has_depth_structure(steps):
 
 
 def test_an_advection_only_perturbation_misses_the_pre_advection_frame(steps):
-    """The decisive control: the published frame really excludes advection.
+    """The decisive control FOR THE HORIZONTAL TREND.
+
+    Scope: ``legacy_up3_transport_sign_selector`` reaches only the flux-form
+    horizontal advection, so this proves the published frame excludes THAT
+    term -- the one the first draft of the seam left in.  The vertical flux,
+    the D-term and the two stage increments are covered by the depth-structure
+    control above and by the walk's own scored rows, not here.
+
 
     Bending an advection-only operand must move the completed right-hand
     side WITH depth structure.  It also moves the depth mean that the stage

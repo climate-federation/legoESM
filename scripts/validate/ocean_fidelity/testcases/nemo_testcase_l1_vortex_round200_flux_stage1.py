@@ -406,10 +406,19 @@ def run(root: Path, *, plant: str | None = None,
         _require_live("base_noadv." + face, face,
                       np.asarray(fields[face])[..., :nlev])
         noadv = np.asarray(fields[face])[..., :nlev]
+        # CONVENTION-SENSITIVE, like the unsplit ``base`` row and for the
+        # same reason: legoESM's stage array has the full right-hand side's
+        # depth mean removed (``du_dt_pert = du_dt - F_slow``) and NEMO's
+        # does not (stp2d.f90:176-186 cumulates the mean into Ue_rhs, it does
+        # not subtract it), so this row's max_abs is 8.1e-05 of pure column
+        # constant.  The claim it carries lives in ``structure``'s
+        # depth-varying number, never in max_abs, and the row must therefore
+        # never be eligible to be named owner.
         _row(f"base_noadv.{face}", groups[f"base_{face}"][..., :nlev], noadv,
              masks[face],
              "Krhs as stp_2D leaves it, before dyn_adv "
-             "(stp2d.f90:137-144,169-170)", plant == f"base_noadv.{face}")
+             "(stp2d.f90:137-144,169-170)", plant == f"base_noadv.{face}",
+             convention_sensitive=True)
         _row(f"advtrend.{face}",
              (groups[f"adv_{face}"][..., :nlev]
               - groups[f"base_{face}"][..., :nlev]),
