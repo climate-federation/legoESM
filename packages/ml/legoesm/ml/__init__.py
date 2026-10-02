@@ -55,8 +55,7 @@ from legoesm.ml.conservation import (
     correct_moisture,
     clip_humidity,
     correct_ocean_volume,
-    correct_ocean_heat,
-    correct_ocean_salt,
+    correct_ocean_tracer,
 )
 
 

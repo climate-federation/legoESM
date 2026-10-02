@@ -52,8 +52,7 @@ from legoesm.ocean.dynamics.channel_packing import (
 )
 from legoesm.ml.conservation import (
     correct_ocean_volume,
-    correct_ocean_heat,
-    correct_ocean_salt,
+    correct_ocean_tracer,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 
@@ -267,7 +266,7 @@ class SFNOOceanModel:
             S_new = sh_synthesis_3d(grid, new_state.S_hat.data).real
 
             if self.config.correct_heat:
-                T_new = correct_ocean_heat(
+                T_new = correct_ocean_tracer(
                     T_new, T_old, h_k_new, h_k_old, grid, mask,
                 )
                 T_hat = sh_analysis_3d(grid, T_new.astype(jnp.float64))
@@ -276,7 +275,7 @@ class SFNOOceanModel:
                 )
 
             if self.config.correct_salt:
-                S_new = correct_ocean_salt(
+                S_new = correct_ocean_tracer(
                     S_new, S_old, h_k_new, h_k_old, grid, mask,
                 )
                 S_hat = sh_analysis_3d(grid, S_new.astype(jnp.float64))
