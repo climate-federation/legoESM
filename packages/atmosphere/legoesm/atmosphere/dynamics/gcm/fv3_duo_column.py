@@ -24,7 +24,7 @@ Six faces only; the window (SPMD) layout is certification rung 7.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -71,6 +71,10 @@ class DuoColumnMesh(NamedTuple):
     #: cell in ring order: the terrain product's exact quad ownership
     cornerLat: jax.Array
     cornerLon: jax.Array
+    #: per-column subgrid orographic stddev [m] for the orographic GWD launch,
+    #: attached by the driver (``grid._replace``) like the Voronoi mesh's;
+    #: None = the scheme's scalar fallback
+    subgrid_topo_stddev: Any = None
 
     # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
     # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the

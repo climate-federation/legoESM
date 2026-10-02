@@ -1216,3 +1216,31 @@ def test_restart_terrain_check_covers_spectral_phis_hat():
                               data=sh_analysis(grid, 0.5 * phis))))
     with pytest.raises(RuntimeError, match="terrain differs"):
         ModelDriver._check_restart_terrain(bad)
+
+
+def test_column_lane_carries_the_subgrid_orography_through_the_grid_rebuild(tmp_path):
+    """The driver attaches the per-column SSO stddev to the grid at
+    _create_topography; the column lane then REBUILDS its mesh (terrain in
+    the grid) in _init_state, BEFORE _create_physics reads the field.  The
+    rebuilt mesh must carry it: the orographic GWD gets the 800 m box, not
+    its scalar fallback (the test fails if the rebuild drops the field)."""
+    import xarray as xr
+    from legoesm.driver.model_driver import ModelDriver
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(1.0, 360.0, 2.0)
+    box = ((lat[:, None] >= 25) & (lat[:, None] <= 45)
+           & (lon[None, :] >= 70) & (lon[None, :] <= 100))
+    path = tmp_path / "sso_stdh_2deg.nc"
+    xr.Dataset({"SSO_STDH": (("lat", "lon"), np.where(box, 800.0, 0.0))},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+    cfg = _driver_cfg(tmp_path, gravity_wave_drag="mcfarlane",
+                      subgrid_orography_path=str(path))
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    sso_grid = drv.grid.subgrid_topo_stddev
+    sso_phys = drv.physics.subgrid_topo_stddev
+    assert sso_grid is not None and sso_phys is not None
+    assert np.asarray(sso_phys).shape == (drv.grid.nCells,)
+    assert np.array_equal(np.asarray(sso_grid), np.asarray(sso_phys))
+    assert 700.0 < float(np.asarray(sso_phys).max()) <= 800.0
+    assert float(np.asarray(sso_phys).min()) == 0.0

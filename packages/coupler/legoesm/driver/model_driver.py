@@ -2157,7 +2157,7 @@ class ModelDriver:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                        f"field (supported: CubedSphereGrid, GaussianGrid, "
+                        f"field (supported: CubedSphereGrid, GaussianGrid, DuoColumnMesh, "
                         f"VoronoiMesh)"
                     ) from e
                 # The compiled MPI step closes over the layout's local mesh
@@ -2277,7 +2277,11 @@ class ModelDriver:
                     raise AssertionError(
                         f"fv3_duo column lane: model mesh {k} differs from "
                         "the grid the forcings were regridded onto")
-            self.grid = m
+            # _create_topography attached the per-column SSO stddev to the
+            # driver's grid; the model's mesh must carry it, or the
+            # orographic GWD silently falls back to its scalar mountain
+            _sso = getattr(self.grid, "subgrid_topo_stddev", None)
+            self.grid = m if _sso is None else m._replace(subgrid_topo_stddev=_sso)
             self.sigma = self.model.sigma_coord
             self._grid_lat = self.grid.grid_lat
             self._grid_lon = self.grid.grid_lon
@@ -9509,6 +9513,7 @@ class ModelDriver:
             FV3DuoDynamicsModel,
         )
         old = self.model
+        old_grid = self.grid
         self.model = FV3DuoColumnModel(
             FV3DuoDynamicsModel(grid, old.dyn.config),
             tracer_names=old.tracer_names)
@@ -9522,6 +9527,13 @@ class ModelDriver:
                     "forcings regridded at setup no longer sit on the "
                     "model's columns")
         self.grid = self.model.mesh
+        # the driver attaches the per-column SSO stddev to the grid at
+        # _create_topography, BEFORE this rebuild (setup: _init_state runs
+        # before _create_physics reads it): carry it, or the orographic GWD
+        # would silently fall back to its scalar mountain
+        _sso = getattr(old_grid, "subgrid_topo_stddev", None)
+        if _sso is not None:
+            self.grid = self.grid._replace(subgrid_topo_stddev=_sso)
         self.sigma = self.model.sigma_coord
         self._grid_lat = self.grid.grid_lat
         self._grid_lon = self.grid.grid_lon
