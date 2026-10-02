@@ -11,6 +11,10 @@ ACQ = Path(
     "scripts/validate/ocean_fidelity/orca2_l4/"
     "nemo_testcase_l4_orca2_round107_een_step_acquisition"
 )
+RESUME = Path(
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round108_een_step_resume/run.sh"
+)
 
 
 def _record() -> bytes:
@@ -59,4 +63,13 @@ def test_patch_is_additions_only_and_launcher_is_fail_closed():
     assert "ORCA2_R107_EEN_STEP_DIR" in launcher
     assert "oracle_r107_een_step_rank????_kt00000001.bin" in launcher
     assert "--source-root" in launcher
+    assert "/usr/bin/time" not in launcher
+
+
+def test_resume_launcher_exports_both_inherited_recorder_directories():
+    launcher = RESUME.read_text(encoding="utf-8")
+    assert "export ORCA2_R105_EEN_ACCUM_DIR=$TARGET_RUN" in launcher
+    assert "export ORCA2_R107_EEN_STEP_DIR=$TARGET_RUN" in launcher
+    assert "orca2_rung0_een_step_ranked_resume_10step_np2" in launcher
+    assert "mpirun -np 2 --oversubscribe ./nemo" in launcher
     assert "/usr/bin/time" not in launcher
