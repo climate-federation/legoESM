@@ -999,13 +999,16 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                     neighbor_metric, local_metric, r1_h):
         term = b(b(b(face * neighbor) * neighbor_mask) * q_factor)
         acc = jnp.zeros_like(r1_h)
+        local_loop = local_mask != 0
+        local_loop = local_loop.at[..., 0].set(
+            local_loop[..., 0] | ~jnp.any(local_loop, axis=-1))
         for jk in range(term.shape[-1]):
-            # dynspg_ts.f90:1216,1243 loops only through mbku/mbkv.
-            # Selecting the prior accumulator outside the local column keeps
-            # the initialized +0 instead of manufacturing a signed zero by
-            # evaluating a masked term for a level NEMO never visits.
+            # dynspg_ts.f90:1216,1243 loops through mbku/mbkv.  domzgr.f90:
+            # 625,631 forces those bottoms to at least one even where
+            # dommsk.f90:224-225 clears the whole face mask, so a fully dry
+            # face executes jk=1 once; deeper out-of-column levels are skipped.
             acc = jnp.where(
-                local_mask[..., jk] != 0,
+                local_loop[..., jk],
                 b(acc + term[..., jk]),
                 acc,
             )
@@ -1025,9 +1028,12 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         term = b(term * neighbor_mask)
         term = b(term / e3f_divisor)
         acc = jnp.zeros_like(r1_h)
+        local_loop = local_mask != 0
+        local_loop = local_loop.at[..., 0].set(
+            local_loop[..., 0] | ~jnp.any(local_loop, axis=-1))
         for jk in range(term.shape[-1]):
             acc = jnp.where(
-                local_mask[..., jk] != 0,
+                local_loop[..., jk],
                 b(acc + term[..., jk]),
                 acc,
             )
