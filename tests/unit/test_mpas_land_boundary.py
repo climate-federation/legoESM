@@ -506,6 +506,8 @@ def test_land_stress_ustar_bulk_off_land_rebuilt_on_land():
     np.testing.assert_allclose(us[0], np.sqrt(0.5 / 1.25), rtol=1e-9)
     np.testing.assert_allclose(us[3], np.sqrt(0.5 * (0.05 + 0.5) / 1.25),
                                rtol=1e-9)
+    np.testing.assert_allclose([float(out[0][3]), float(out[1][3])],
+                               [-0.165, -0.22], rtol=1e-12)
     np.testing.assert_array_equal(np.asarray(out[2]), np.asarray(sh))
     np.testing.assert_array_equal(np.asarray(out[3]), np.asarray(lh))
 

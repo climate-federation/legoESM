@@ -11265,7 +11265,8 @@ class ModelDriver:
                 # The land's solved stress magnitude rho*u*^2 [Pa] (its canopy
                 # roughness and stability); 0 on a held column.  Consumed only
                 # under mpas_land_stress_from_land.
-                # (sqrt guarded so a zeroed column has a finite derivative.)
+                # (sqrt guarded so a zeroed column has a finite derivative; a
+                # non-finite land stress also maps to 0, i.e. the bulk stress.)
                 _tau2 = resp.tau_x ** 2 + resp.tau_y ** 2
                 _taumag = jnp.where(
                     _tau2 > 0.0, jnp.sqrt(jnp.where(_tau2 > 0.0, _tau2, 1.0)),
