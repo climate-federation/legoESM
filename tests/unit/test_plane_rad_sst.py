@@ -178,3 +178,12 @@ def test_cfl_guard_warns_at_fine_dx_not_smoke():
         warnings.simplefilter("always")
         rcp.cfl_guard(1.0, 100.0, 50.0, label="t")       # dx=100 m fine config
     assert any("acoustic CFL" in str(x.message) for x in w)
+
+
+def test_land_radiation_refresh_builds():
+    """Land-mode plane radiation imports the shared lat/lon helper when it is
+    built; a stale import name fails here, not at the first land run."""
+    cfg = rcp._build_radiation_config(
+        "gray", update_interval_steps=1, clouds=True,
+        insolation="off", t_sfc=300.0)
+    assert callable(rcp._make_land_radiation_refresh_fn(cfg, 0.1, 1.0))

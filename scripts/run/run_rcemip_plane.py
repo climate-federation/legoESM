@@ -316,10 +316,10 @@ def _make_land_radiation_refresh_fn(
     if radiation_config is None:
         return None
 
+    from legoesm.atmosphere.physics._shared import grid_lat_lon
     from legoesm.atmosphere.physics.radiation.integration import (
         _call_radiation_backend,
         _compute_insolation,
-        _get_grid_lat_lon,
         _validate_cloud_gate,
     )
     from legoesm.atmosphere.physics.thermodynamics import (
@@ -379,7 +379,7 @@ def _make_land_radiation_refresh_fn(
                 f"land T_sfc shape {T_sfc.shape!r} must match {shape_2d!r}"
             )
 
-        lat, lon = _get_grid_lat_lon(grid, shape_2d)
+        lat, lon = grid_lat_lon(grid, shape_2d)
         insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
         )
