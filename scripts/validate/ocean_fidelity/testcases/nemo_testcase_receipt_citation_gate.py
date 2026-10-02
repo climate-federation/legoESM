@@ -131,6 +131,12 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "zdfdrg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90": (
         _ORCA2_R69SURFACE_COMPILED / "sbcfwb.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/ldftra.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "ldftra.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/tramle.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "tramle.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdfphy.f90": (
         _ORCA2_R69SURFACE_COMPILED / "zdfphy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/zdf_oce.f90": (
