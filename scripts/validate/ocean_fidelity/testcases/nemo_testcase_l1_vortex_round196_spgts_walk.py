@@ -155,7 +155,8 @@ def _lego_plane(values, stagger):
 
 def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         plant: str | None = None, substeps: int | None = None,
-        nemo_entry_forcing: bool = False) -> dict:
+        nemo_entry_forcing: bool = False,
+        nemo_entry_velocity: bool = False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -201,6 +202,18 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         import jax.numpy as jnp
         override = (jnp.asarray(_u_full(groups["i000_zu_frc"][..., None])[..., 0]),
                     jnp.asarray(_v_full(groups["i000_zv_frc"][..., None])[..., 0]))
+    if nemo_entry_velocity:
+        # The other half of the loop-entry pair: replace the carried
+        # barotropic velocity the loop starts from with NEMO's own recorded
+        # un_e/vn_e.  Self-checking -- if the substitution does not bind,
+        # the first substep's entry rows do not become bit-exact and the arm
+        # says so instead of reporting a null.
+        import jax.numpy as jnp
+        seed = seed._replace(
+            uu_b=seed.uu_b.replace(data=jnp.asarray(
+                _u_full(groups["i000_un_e"][..., None])[..., 0])),
+            vv_b=seed.vv_b.replace(data=jnp.asarray(
+                _v_full(groups["i000_vn_e"][..., None])[..., 0])))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
@@ -317,6 +330,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         "substeps_walked": n_loop,
         "entry_forcing_arm": ("nemo_recorded" if nemo_entry_forcing
                               else "legoesm_production"),
+        "entry_velocity_arm": ("nemo_recorded" if nemo_entry_velocity
+                               else "legoesm_production"),
         "plant": plant,
         "scalar_rows": len(scalars),
         "scalar_non_bit": bad_scalars[:8],
@@ -433,6 +448,9 @@ def main(argv=None) -> int:
     parser.add_argument("--nemo-entry-forcing", action="store_true",
                         help="one-variable arm: hand the loop NEMO's recorded "
                              "slow forcing instead of legoESM's own")
+    parser.add_argument("--nemo-entry-velocity", action="store_true",
+                        help="one-variable arm: start the loop from NEMO's "
+                             "recorded barotropic entry velocity")
     parser.add_argument("--one-ulp-entry-probe", action="store_true",
                         help="legoESM-vs-legoESM conditioning arm: perturb the "
                              "barotropic entry velocity by one ULP and report "
@@ -452,7 +470,8 @@ def main(argv=None) -> int:
     try:
         report = run(args.oracle_root, kt=args.kt, allow_dirty=args.allow_dirty,
                      plant=args.plant, substeps=args.substeps,
-                     nemo_entry_forcing=args.nemo_entry_forcing)
+                     nemo_entry_forcing=args.nemo_entry_forcing,
+                     nemo_entry_velocity=args.nemo_entry_velocity)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
