@@ -121,11 +121,26 @@ The following negative or non-scientific arms are retained:
 
 ## Validation and review
 
-The focused probe suite passes five tests, including the bit-flip,
-signed-zero, frozen file-census, reverse-commit, and 49-edit-block controls.
-The citation and broader fidelity results are recorded in the final committed
-version of this section after running them. A separate `codex exec --sandbox
-read-only` review is likewise quoted there; unavailable review is not approval.
+The final clean-tree focused battery passes **22/22** tests. It includes the
+five probe tests (bit flip, signed zero, frozen file census, reverse commit,
+and 49-edit-block controls) and all 17 citation-gate tests. The default
+cumulative receipt and this receipt both pass with zero failures and zero
+unmapped citations. Shifting
+`ocean_model_latlon_cgrid.py:7054-7064` by two lines makes the citation gate
+fail, so the receipt control fires.
+
+The one required `tests/ocean/fidelity -n 12` battery reached 99%, emitted 33
+preliminary FAILED node progress lines, and then repeated the documented
+xdist-controller stall. It was interrupted after bounded silent waits. Because
+pytest never printed its terminal tracebacks or summary, those preliminary
+lines are not classified here; the battery is **incomplete, not PASS**. The
+round-101 probe and citation suites were subsequently rerun serially from the
+committed tree and are the 22/22 result above.
+
+The required separate `codex exec --sandbox read-only` review did not reach
+the diff. Its terminal verdict is **independent review unavailable
+in-sandbox**: `failed to initialize in-process app-server client: Read-only
+file system (os error 30)`. Unavailable review is not approval.
 
 ## OPEN
 
