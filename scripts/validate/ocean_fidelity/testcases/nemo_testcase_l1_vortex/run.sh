@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# VORTEX kt=1..10 ACQUISITION -- USER-EXECUTED ONLY.
+#
+#   preflight (default):  run.sh
+#   acquire:              run.sh --run
+#
+# The agent that wrote this file did not run NEMO: MPI is refused in its
+# sandbox.  Without --run the script only CHECKS its inputs and prints the
+# commands it would issue; nothing is built, nothing is written outside /tmp.
+#
+# WHAT THIS ACQUIRES.  tests/VORTEX is the baroclinic vortex on a beta-plane.
+# Its namelist selects exactly the switch set already certified for
+# LOCK_EXCHANGE and OVERFLOW -- flux-form UP3 momentum, FCT2 tracers, hpg_sco,
+# split-explicit dynspg_ts with nn_bt_flt=3, constant zdf -- plus ONE thing the
+# tanks structurally cannot exercise: a LIVE beta-plane Coriolis with
+# ln_dynvor_een=.true.  The tanks have f=0 and one wet row, so their vorticity
+# operator is dead.
+#
+# READ THIS BEFORE YOU RUN IT.  That last switch is why this case needed its own
+# operator.  Under flux-form momentum NEMO hands the energy-and-enstrophy scheme
+# Coriolis plus a metric term, and that metric term is built from differences of
+# the mesh's scale factors -- which this Cartesian mesh makes exactly zero, so
+# the scheme IS the Coriolis operator here.  Round 1 declared that as a gap and
+# fixed the card closed; round 2 transcribed it, and the card now executes.
+#
+# Round 2 also re-acquires: the deck below no longer overrides the shipped
+# equation of state (decision 69), so round 1's record is superseded from step 1
+# onward.  The INITIAL STATE is unaffected -- nothing in it reads the equation of
+# state -- so this run must reproduce round 1's initial-state comparison exactly,
+# and a difference there is the finding rather than the ladder.
+#
+# TWO CONFIGURATIONS, DELIBERATELY.  A brand-new card has no un-instrumented
+# reference to judge its writer against, so this script builds BOTH:
+#
+#   VORTEX_OMIP_L1       shipped MY_SRC only        -> the reference restart
+#   VORTEX_OMIP_L1_P3    + the step-record writer   -> the kt=1..10 records
+#
+# and refuses unless the two restarts at step 10 are byte-identical.  That is
+# the passivity criterion note AS makes binding; a stream-to-stream comparison
+# between two differently instrumented builds is NOT a refusal criterion.
+#
+# THE ZOOM IS OUT OF SCOPE.  cpp_VORTEX.fcm compiles key_agrif for a 1:3 nest.
+# legoESM has no nesting machinery, so both builds DROP key_agrif and the run
+# is the PARENT grid alone.  The child deck files are removed from EXP00 below
+# so nothing can silently pick them up.
+#
+# DELIBERATE DECK DEVIATIONS, all in the committed namelist patch and all
+# visible in the diff it prints:
+#   * nn_itend = nn_stock = 10 (the tanks' own kt1_10 cadence) instead of 3000.
+#   * ln_meshmask = .true., so the geometry receipt is written.
+#
+# PATH.  FCM's extract step needs perl's Text::Balanced, which the system perl
+# lacks; the conda build environment must come first, exactly as the tanks'
+# round-33 acquisition documents.
+export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
+
+readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
+readonly TEST_CASE=VORTEX
+readonly STEPS=10
+
+# TWO CARDS, ONE SCRIPT (decision 73, operator note BJ).  The vector-EEN card is
+# the SAME experiment -- same geometry, same simplified equation of state, same
+# eddy, no forcing, no implicit vertical advection -- with ONE thing changed:
+# the momentum scheme set becomes ORCA2's and GYRE's, vector-invariant advection
+# with the energy-and-enstrophy vorticity.  Everything else in this script is
+# shared deliberately, so the two records differ by exactly that one deck hunk
+# and nothing about the build, the writer or the admission can drift between
+# them.
+#
+#   --variant flux (default)  the round-2 card: flux-form UP3, EEN on Coriolis
+#                             plus the (bitwise zero) metric term
+#   --variant vec             the round-3 card: vector-invariant, EEN on
+#                             Coriolis plus RELATIVE vorticity
+#   --variant vecrhs          the round-4 acquisition: the SAME vector-EEN
+#                             deck, with one EXTRA read-only writer that dumps
+#                             the momentum right-hand side after each routine
+#                             that contributes to it inside stp_2D.  Round 4
+#                             proved, by substitution, that the whole of this
+#                             card's stage-1 momentum error lives in that
+#                             completed right-hand side (handing legoESM
+#                             NEMO's own copy puts stage 1 at 1.1e-16, from
+#                             1.7e-05); naming WHICH TERM needs the split,
+#                             and no existing record carries it.
+#
+# Each variant writes its OWN evidence directory beside the other and builds its
+# OWN pair of NEMO configurations.  Nothing is ever overwritten: the acquire arm
+# refuses a target that already exists, and moving an old build aside is the
+# operator's call, never this script's.
+variant=flux
+do_run=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run) do_run=1 ;;
+    --variant) shift; variant=${1:-} ;;
+    --variant=*) variant=${1#--variant=} ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs]\n' "$0" >&2 ; exit 64 ;;
+  esac
+  shift
+done
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+case "$variant" in
+  flux)
+    # Round 2 writes BESIDE round 1, never over it.  Round 1's record was
+    # produced on a deck that selected a different equation of state, so it is
+    # superseded from step 1 onward -- but its INITIAL STATE is the reference
+    # the round-2 gate compares against, and overwriting it would destroy the
+    # only control that can tell a deck change from a transcription defect.
+    deck_basename=namelist_cfg_omip_l1.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2
+    ref_name=VORTEX_OMIP_L1
+    exp_name=VORTEX_OMIP_L1
+    tag=round2
+    ;;
+  vec)
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3
+    ref_name=VORTEX_VEC_OMIP_L1
+    exp_name=VORTEX_VEC_OMIP_L1
+    tag=round3_vec
+    ;;
+  vecrhs)
+    # The SAME deck as the vec variant -- one hunk apart from the shipped
+    # namelist, exactly as decision 73 requires -- with a SECOND instrument.
+    # New target names, new evidence directory: nothing round 3 produced is
+    # touched, and the acquire arm below refuses any target that exists.
+    deck_basename=namelist_cfg_vec_een.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round4_rhsterms
+    ref_name=VORTEX_VEC_R4_OMIP_L1
+    # The build name is new so nothing round 3 produced can be overwritten,
+    # but the RUN's experiment name comes from the SHARED deck, so the file
+    # NEMO writes still carries round 3's cn_exp.  Keep the two apart here
+    # rather than have the admission look for a file that is never written.
+    exp_name=VORTEX_VEC_OMIP_L1
+    tag=round4_vec_rhsterms
+    ;;
+  *)
+    printf 'REFUSE: unknown variant %s; expected flux, vec or vecrhs\n' \
+      "$variant" >&2
+    exit 64
+    ;;
+esac
+readonly EVIDENCE=${EVIDENCE:-$default_evidence}
+readonly REF_CFG=$ref_name
+readonly RUN_CFG=${ref_name}_P3
+readonly RESTART=${exp_name}_ZCO_00000010_restart.nc
+readonly TAG=$tag
+readonly INSTRUMENT=$here/stprk3_step_record.patch
+# The second, round-4 instrument.  Empty for every variant but vecrhs.
+if [[ "$variant" == "vecrhs" ]]; then
+  RHS_INSTRUMENT=$here/stp2d_rhs_terms_record.patch
+else
+  RHS_INSTRUMENT=
+fi
+readonly RHS_INSTRUMENT
+readonly SHIPPED_STP2D=$NEMO_ROOT/src/OCE/stp2d.F90
+readonly DECK=$here/$deck_basename
+readonly CHECKER=$here/check_records.py
+readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
+readonly SHIPPED_CFG=$NEMO_ROOT/tests/$TEST_CASE/EXPREF/namelist_cfg
+readonly SRC_CASE=$NEMO_ROOT/tests/$TEST_CASE
+
+ref_cfg=$NEMO_ROOT/tests/$REF_CFG
+run_cfg=$NEMO_ROOT/tests/$RUN_CFG
+
+# ---------------------------------------------------------------- preflight
+for path in "$INSTRUMENT" "$DECK" "$CHECKER" "$SHIPPED_STP" "$SHIPPED_CFG"; do
+  [[ -f "$path" ]] || { printf 'REFUSE: missing %s\n' "$path" >&2; exit 66; }
+done
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  [[ -f "$RHS_INSTRUMENT" ]] \
+    || { printf 'REFUSE: missing %s\n' "$RHS_INSTRUMENT" >&2; exit 66; }
+  [[ -f "$SHIPPED_STP2D" ]] \
+    || { printf 'REFUSE: missing %s\n' "$SHIPPED_STP2D" >&2; exit 66; }
+  # Same premise as the stprk3 writer: this case must not already override
+  # the file the instrument patches.
+  if [[ -e "$SRC_CASE/MY_SRC/stp2d.F90" ]]; then
+    printf 'REFUSE: %s overrides stp2d.F90; the shared-writer premise is false\n' \
+      "$TEST_CASE" >&2
+    exit 66
+  fi
+fi
+[[ -d "$SRC_CASE/MY_SRC" && -d "$SRC_CASE/EXPREF" ]] \
+  || { printf 'REFUSE: %s is not the shipped test case\n' "$SRC_CASE" >&2; exit 66; }
+# The card is the PARENT grid; refuse if the shipped case stopped being the
+# AGRIF one this script was written against (its assumptions would be stale).
+if ! grep -q 'key_agrif' "$SRC_CASE/cpp_${TEST_CASE}.fcm"; then
+  printf 'REFUSE: cpp_%s.fcm no longer compiles key_agrif; re-read the case\n' \
+    "$TEST_CASE" >&2
+  exit 66
+fi
+# The writer premise: this case must NOT override stprk3 in its own MY_SRC.
+if [[ -e "$SRC_CASE/MY_SRC/stprk3.F90" ]]; then
+  printf 'REFUSE: %s overrides stprk3.F90; the shared-writer premise is false\n' \
+    "$TEST_CASE" >&2
+  exit 66
+fi
+# A WRITE-only instrument may ADD lines; it may not delete or change one.
+# '^-[^-]' would miss a deleted BLANK line, so count every removal line and
+# subtract only the '---' file header.
+if [[ $(grep -c '^-' "$INSTRUMENT") -ne $(grep -c '^---' "$INSTRUMENT") ]]; then
+  printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+    "$INSTRUMENT" >&2
+  exit 67
+fi
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  if [[ $(grep -c '^-' "$RHS_INSTRUMENT") -ne $(grep -c '^---' "$RHS_INSTRUMENT") ]]; then
+    printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+      "$RHS_INSTRUMENT" >&2
+    exit 67
+  fi
+fi
+dry=$(mktemp -d /tmp/vortex-r1-dryrun.XXXXXX)
+cp "$SHIPPED_STP" "$dry/stprk3.F90"
+cp "$SHIPPED_CFG" "$dry/namelist_cfg"
+patch -s "$dry/stprk3.F90" <"$INSTRUMENT" \
+  || { printf 'REFUSE: the step-record instrument does not apply to the shipped stprk3\n' >&2
+       rm -rf "$dry"; exit 67; }
+patch -s "$dry/namelist_cfg" <"$DECK" \
+  || { printf 'REFUSE: the deck patch does not apply to the shipped namelist_cfg\n' >&2
+       rm -rf "$dry"; exit 67; }
+grep -q 'NEMO_L1_ENTRY_1' "$dry/stprk3.F90" \
+  || { printf 'REFUSE: the patched stprk3 carries no step-record writer\n' >&2
+       rm -rf "$dry"; exit 67; }
+if [[ -n "$RHS_INSTRUMENT" ]]; then
+  cp "$SHIPPED_STP2D" "$dry/stp2d.F90"
+  patch -s "$dry/stp2d.F90" <"$RHS_INSTRUMENT" \
+    || { printf 'REFUSE: the per-term instrument does not apply to the shipped stp2d\n' >&2
+         rm -rf "$dry"; exit 67; }
+  grep -q 'NEMO_L1_RHSTRM1' "$dry/stp2d.F90" \
+    || { printf 'REFUSE: the patched stp2d carries no per-term writer\n' >&2
+         rm -rf "$dry"; exit 67; }
+  # One dump per contributing routine, in NEMO's own order.  A boundary that
+  # went missing would leave one term silently unmeasured, which is the whole
+  # reason this record is being acquired.
+  for term in hpg ldf vor wzv keg zad; do
+    grep -q "l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, '$term' )" \
+      "$dry/stp2d.F90" \
+      || { printf 'REFUSE: the per-term instrument has no %s boundary\n' \
+             "$term" >&2
+           rm -rf "$dry"; exit 67; }
+  done
+fi
+# Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
+# of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
+# temperature is defined by inverting this law (usrdef_istate.F90:83-88), so a
+# deck that switched it would not be this experiment.  Refuse any deck that
+# leaves the shipped selection or its coefficients behind.
+grep -q 'ln_seos     = .true.' "$dry/namelist_cfg" \
+  || { printf 'REFUSE: the patched deck does not select S-EOS (decision 69)\n' >&2
+       rm -rf "$dry"; exit 67; }
+if grep -qE 'ln_teos10|ln_eos80' "$dry/namelist_cfg"; then
+  printf 'REFUSE: the deck selects a second equation of state alongside S-EOS\n' >&2
+  rm -rf "$dry"; exit 67
+fi
+grep -q 'rn_a0       =  0.28' "$dry/namelist_cfg" \
+  || { printf 'REFUSE: rn_a0 was dropped; usrdef_istate and the S-EOS need it\n' >&2
+       rm -rf "$dry"; exit 67; }
+# The card transcribes ln_zad_Aimp = .false., which this deck gets by LEAVING
+# IT UNSET.  The tanks' own campaign decks set it .true.; if anyone copies that
+# line in here the card and the oracle stop agreeing on the vertical momentum
+# scheme, silently.  Refuse instead.
+if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
+  printf 'REFUSE: the deck now sets ln_zad_Aimp; the card transcribes the unset default\n' >&2
+  rm -rf "$dry"; exit 67
+fi
+# THE ONE THING THE TWO CARDS DISAGREE ON (decision 73).  NEMO counts the
+# advection-form switches and stops unless EXACTLY ONE is true
+# (dynadv.F90:184-190), and the vorticity routine reads that count to decide
+# what the vorticity operator is handed: flux form gets Coriolis plus the metric
+# term, vector form gets Coriolis plus the RELATIVE vorticity
+# (dynvor.F90:855-868).  So this pair of lines IS the experiment's identity, and
+# a deck that silently carried the other card's pair would run the other card
+# under this card's name.  Refuse rather than discover it in the ladder.
+case "$variant" in
+  flux)          want_vec='.false.' ; want_up3='.true.'  ;;
+  vec | vecrhs)  want_vec='.true.'  ; want_up3='.false.' ;;
+esac
+if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
+  printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
+  rm -rf "$dry"; exit 67
+fi
+if ! grep -qE "^ *ln_dynadv_up3 *= *${want_up3//./\.}" "$dry/namelist_cfg"; then
+  printf 'REFUSE: variant %s needs ln_dynadv_up3 = %s\n' "$variant" "$want_up3" >&2
+  rm -rf "$dry"; exit 67
+fi
+# NEMO's own rule, applied here so a two-form deck is refused before makenemo:
+# count the advection forms the deck leaves true.
+forms=$(grep -cE "^ *ln_dynadv_(vec|cen2|up3) *= *\.true\." "$dry/namelist_cfg")
+if [[ "$forms" -ne 1 ]]; then
+  printf 'REFUSE: the deck selects %s momentum advection forms; NEMO needs exactly one\n' \
+    "$forms" >&2
+  rm -rf "$dry"; exit 67
+fi
+# Both cards run the energy-and-enstrophy vorticity; only what it is HANDED
+# differs.  A deck that changed the scheme would be a third card.
+if ! grep -qE "^ *ln_dynvor_een *= *\.true\." "$dry/namelist_cfg"; then
+  printf 'REFUSE: both VORTEX cards require ln_dynvor_een = .true.\n' >&2
+  rm -rf "$dry"; exit 67
+fi
+rm -rf "$dry"
+python "$CHECKER" --help >/dev/null \
+  || { printf 'REFUSE: the record checker does not run\n' >&2; exit 67; }
+printf 'PREFLIGHT_OK  variant %s: instrument and deck patches apply to the shipped sources\n' "$variant"
+printf '  reference config : %s\n  instrumented cfg : %s\n  evidence         : %s\n' \
+  "$ref_cfg" "$run_cfg" "$EVIDENCE"
+printf '  deck deviations  :\n'
+sed -n 's/^/    /p' "$DECK" | grep -E '^\s+[-+][^-+]' || true
+
+if [[ "$do_run" -eq 0 ]]; then
+  printf '\nDRY RUN.  Re-run with --run to build and acquire.\n'
+  exit 0
+fi
+
+# ------------------------------------------------------------------ acquire
+for target in "$ref_cfg" "$run_cfg" "$EVIDENCE"; do
+  if [[ -e "$target" ]]; then
+    printf 'REFUSE: target already exists: %s\n' "$target" >&2
+    exit 64
+  fi
+done
+for mount in /tmp "$(dirname "$EVIDENCE")" "$NEMO_ROOT"; do
+  free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
+  if [[ "$free_kb" -lt 2097152 ]]; then
+    printf 'REFUSE: %s has %s kB free, under the 2 GB floor\n' "$mount" "$free_kb" >&2
+    exit 68
+  fi
+done
+
+manifest=$(mktemp -d /tmp/vortex-r1-provenance.XXXXXX)
+printf 'provenance directory (retained): %s\n' "$manifest"
+(
+  cd "$SRC_CASE"
+  find EXPREF MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum
+) >"$manifest/shipped_case.sha256"
+sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
+  "$SRC_CASE/cpp_${TEST_CASE}.fcm" "$SHIPPED_STP" "$SHIPPED_CFG" \
+  "$INSTRUMENT" "$DECK" "$CHECKER" ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
+  ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} >"$manifest/toolchain.sha256"
+
+cd "$NEMO_ROOT"
+build_one() {          # $1 = config name, $2 = 1 to apply the instrument
+  local name=$1 instrumented=$2 cfg=$NEMO_ROOT/tests/$1
+  ./makenemo -a "$TEST_CASE" -n "$name" -m conda-scalarmath \
+    del_key 'key_xios key_agrif'
+  # cp -r, NOT cp -a: preserved mtimes let fcm skip a patched file.
+  cp -r "$SRC_CASE/EXPREF/." "$cfg/EXP00/"
+  cp -r "$SRC_CASE/MY_SRC/." "$cfg/MY_SRC/"
+  # The AGRIF child deck is meaningless without key_agrif; remove it so it
+  # cannot be read by accident.
+  rm -f "$cfg/EXP00/1_"* "$cfg/EXP00/AGRIF_FixedGrids.in"
+  patch "$cfg/EXP00/namelist_cfg" <"$DECK"
+  if [[ "$instrumented" -eq 1 ]]; then
+    [[ ! -e "$cfg/MY_SRC/stprk3.F90" ]]
+    cp "$SHIPPED_STP" "$cfg/MY_SRC/stprk3.F90"
+    patch "$cfg/MY_SRC/stprk3.F90" <"$INSTRUMENT"
+    if [[ -n "$RHS_INSTRUMENT" ]]; then
+      [[ ! -e "$cfg/MY_SRC/stp2d.F90" ]]
+      cp "$SHIPPED_STP2D" "$cfg/MY_SRC/stp2d.F90"
+      patch "$cfg/MY_SRC/stp2d.F90" <"$RHS_INSTRUMENT"
+    fi
+  fi
+  touch "$cfg/MY_SRC/"*.F90
+  ./makenemo -n "$name" -m conda-scalarmath
+  [[ -x "$cfg/BLD/bin/nemo.exe" ]]
+  # The AGRIF root arm must be the compiled one, and the usrdef routines must
+  # have been carried (a stale object would silently reuse another case's).
+  if grep -q 'Agrif_Root' "$cfg/BLD/ppsrc/nemo/usrdef_nam.f90"; then
+    printf 'REFUSE: %s still compiles an AGRIF branch\n' "$name" >&2; exit 69
+  fi
+  if ! grep -q 'VORTEX' "$cfg/BLD/ppsrc/nemo/usrdef_hgr.f90"; then
+    printf 'REFUSE: %s did not compile the VORTEX usrdef_hgr\n' "$name" >&2; exit 69
+  fi
+  if grep -q 'NEMO_L1_ENTRY_1' "$cfg/BLD/ppsrc/nemo/stprk3.f90"; then
+    if [[ "$instrumented" -ne 1 ]]; then
+      printf 'REFUSE: the REFERENCE build carries the writer\n' >&2; exit 69
+    fi
+  elif [[ "$instrumented" -eq 1 ]]; then
+    printf 'REFUSE: the writer is absent from %s ppsrc (stale build)\n' \
+      "$name" >&2; exit 69
+  fi
+  # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
+  # and require nm to have succeeded before believing the grep.
+  local symbols
+  symbols=$(nm -D "$cfg/BLD/bin/nemo.exe") || {
+    printf 'REFUSE: cannot read symbols from %s\n' "$name" >&2; exit 65; }
+  if printf '%s' "$symbols" | grep -q '_ZGV'; then
+    printf 'REFUSE: vector-math symbol present in %s\n' "$name" >&2
+    exit 65
+  fi
+}
+
+run_one() {            # $1 = config name, $2 = run directory
+  local cfg=$NEMO_ROOT/tests/$1 dir=$2
+  mkdir -p "$dir"
+  cp -L "$cfg/EXP00/namelist_cfg" "$cfg/EXP00/namelist_ref" "$dir/"
+  for xml in "$cfg"/EXP00/*.xml; do
+    [[ -e "$xml" ]] && cp -L "$xml" "$dir/"
+  done
+  cp "$cfg/BLD/bin/nemo.exe" "$dir/nemo"
+  (
+    cd "$dir"
+    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+    printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.log
+    # No pipe: under `set -o pipefail` a failing mpirun aborts the script
+    # before any ${PIPESTATUS} line could be read, so such a guard would be
+    # unreachable and would prove nothing.  Redirect, then show the tail.
+    mpirun -np 1 --oversubscribe ./nemo >>run.user.log 2>&1
+    tail -n 20 run.user.log
+    printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      >>run.user.log
+  )
+  [[ -f "$dir/$RESTART" ]] \
+    || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
+}
+
+build_one "$REF_CFG" 0
+build_one "$RUN_CFG" 1
+sha256sum "$ref_cfg/BLD/bin/nemo.exe" "$run_cfg/BLD/bin/nemo.exe" \
+  >"$manifest/binaries.sha256"
+# The two decks must be the SAME deck; only the compiled writer may differ.
+cmp "$ref_cfg/EXP00/namelist_cfg" "$run_cfg/EXP00/namelist_cfg"
+
+run_one "$REF_CFG" "$EVIDENCE/reference"
+run_one "$RUN_CFG" "$EVIDENCE"
+cp "$manifest"/*.sha256 "$EVIDENCE/"
+
+# ADMISSION.  The checker parses every record's own header (note BD) and
+# refuses unless the two restarts are byte-identical (note AS).  Its plant
+# MUST turn it red, or it proves nothing.
+if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
+python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
+  --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
+  --output "$EVIDENCE/vortex_${TAG}_admission.json"
+if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
+     --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} --plant \
+     >"$EVIDENCE/vortex_${TAG}_admission_plant.json" 2>&1; then
+  printf 'REFUSE: the planted control did not turn the checker red\n' >&2
+  exit 70
+fi
+(
+  cd "$EVIDENCE"
+  sha256sum oracle_*.bin vortex_${TAG}_admission.json "$RESTART" mesh_mask.nc \
+    >vortex_${TAG}_outputs.sha256
+)
+printf 'VORTEX_%s_KT1_10_ORACLE_READY %s\n' "$TAG" "$EVIDENCE"

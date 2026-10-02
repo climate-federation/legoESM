@@ -65,7 +65,7 @@ def _patch_land_loaders(monkeypatch):
 
 def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
                   beta_soil: bool = False,
-                  use_multilayer: bool = True) -> ModelDriver:
+                  use_multilayer: bool = True, **extra) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
                         nlev=MPAS_NLEV, vertical_coord="hybrid"),
@@ -78,6 +78,7 @@ def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
         use_multilayer_land=use_multilayer,
         multilayer_n_layers=4, multilayer_soil_depth=2.0,
         mpas_land_beta_soil=beta_soil,
+        **extra,
     )
     d = ModelDriver(cfg, output_dir=tmpdir)
     d.setup()
@@ -199,3 +200,61 @@ def test_checkpoint_roundtrips_land_state(monkeypatch, tmp_path):
         np.testing.assert_array_equal(
             np.asarray(a), np.asarray(b),
             err_msg=f"land_ml.{f}: checkpoint round-trip not bit-exact")
+
+
+def test_params_refresh_with_a_non_canopy_scheme_is_refused(monkeypatch, tmp_path):
+    """The per-step rebuild is two-leaf only; asking for it with another land
+    scheme is refused at config validation, never skipped silently."""
+    _patch_land_loaders(monkeypatch)
+    with pytest.raises(ValueError, match="mpas_land_params_refresh"):
+        _build_driver(str(tmp_path), FOUR_STEPS_DAYS,
+                      land_surface_scheme="simple_seb")
+    _build_driver(str(tmp_path), FOUR_STEPS_DAYS,
+                  land_surface_scheme="simple_seb",
+                  mpas_land_params_refresh=False)
+
+
+def _run_with_updater(tmp_path, monkeypatch, name, transform):
+    """Short run whose land step takes its params from a stand-in updater
+    returning ``transform(setup params)``; records (lai_doy, year) per call.
+    The fixture has no canopy surfdata, so it runs the bulk scheme with the
+    refresh switched on AFTER validation (which refuses it for that scheme)."""
+    import jax
+    _patch_land_loaders(monkeypatch)
+    d = _build_driver(str(tmp_path / name), FOUR_STEPS_DAYS, start_year=2001,
+                      land_surface_scheme="simple_seb",
+                      mpas_land_params_refresh=False)
+    d.config = d.config._replace(mpas_land_params_refresh=True)
+    base = d.physics.land_ml_params
+    traced, seen = [], []
+
+    def updater(theta_top, doy, year):
+        traced.append(1)
+        jax.debug.callback(
+            lambda a, b: seen.append((float(a), float(b))), doy, year)
+        return transform(base), None
+
+    d.physics.land_ml_params_update = updater
+    assert d.run() == "COMPLETED"
+    return d, traced, seen
+
+
+def test_land_step_rebuilds_params_every_call(monkeypatch, tmp_path):
+    """The compiled land step takes its params from the per-step updater on
+    EVERY land call (a changed updater output changes the land solution), with
+    the calibration's clock (0-based days since Jan 1) and the cover year, and
+    is compiled once per step variant, not once per call."""
+    d0, traced, seen = _run_with_updater(tmp_path, monkeypatch, "same",
+                                         lambda p: p)
+    d1, _, _ = _run_with_updater(
+        tmp_path, monkeypatch, "bright",
+        lambda p: p._replace(albedo_veg=jnp.minimum(p.albedo_veg + 0.3, 0.9)))
+    assert not np.allclose(np.asarray(d1._land_ml_state.T_soil),
+                           np.asarray(d0._land_ml_state.T_soil))
+    assert len(seen) >= 3, seen
+    days = [a for a, _ in seen]
+    assert days == sorted(days) and days[-1] > days[0]
+    assert all(0.0 <= a <= FOUR_STEPS_DAYS for a in days), days
+    for a, y in seen:
+        assert abs(y - (2001.0 + a / 365.0)) < 1e-6, (a, y)
+    assert len(traced) <= 2, len(traced)   # step + bootstrap variants only

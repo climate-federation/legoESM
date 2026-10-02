@@ -657,9 +657,27 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     return C
 
 
-def interblock_K(K_above: jnp.ndarray, K_below: jnp.ndarray) -> jnp.ndarray:
-    """Geometric mean of hydraulic conductivity between adjacent layers."""
-    return jnp.sqrt(jnp.clip(K_above, 1e-20, None) * jnp.clip(K_below, 1e-20, None))
+def interblock_K(
+    K_above: jnp.ndarray,
+    K_below: jnp.ndarray,
+    log_f_above: jnp.ndarray | None = None,
+    log_f_below: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Geometric mean of hydraulic conductivity between adjacent layers.
+
+    Optional per-layer log multipliers (e.g. the frozen-soil ice impedance) are
+    folded in log space, ``exp(0.5*(ln Ka + ln Kb + log_fa + log_fb))``, so a
+    strongly impeded pair never forms the float32-subnormal product 1e-20*1e-20
+    and reverse mode never differentiates sqrt at 0.  Without them the original
+    sqrt(Ka*Kb) path runs unchanged.
+    """
+    Ka = jnp.clip(K_above, 1e-20, None)
+    Kb = jnp.clip(K_below, 1e-20, None)
+    if log_f_above is None and log_f_below is None:
+        return jnp.sqrt(Ka * Kb)
+    if log_f_above is None or log_f_below is None:
+        raise ValueError("interblock_K: pass both log multipliers or neither.")
+    return jnp.exp(0.5 * (jnp.log(Ka) + jnp.log(Kb) + log_f_above + log_f_below))
 
 
 # ==========================================================================

@@ -17,6 +17,7 @@ import pytest
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _mixing_length_floor,
+    _mxl0_anchor_floor,
     _mxl0_surface_anchor,
     nemo_tke_effective_ice_fraction,
 )
@@ -109,9 +110,136 @@ def test_nemo_card_requires_the_masked_statement():
     masked = _mxl0_surface_anchor(
         cfg, jnp.asarray([0.07, 0.07]), 1026.0, 9.80665,
         jnp.asarray([1.0, 0.0]))
-    floor = float(_mixing_length_floor(cfg))
+    floor = float(_mxl0_anchor_floor(cfg))
     assert float(np.asarray(masked)[1]) == pytest.approx(floor)
     assert float(np.asarray(masked)[0]) > floor
+
+
+# --------------------------------------------------------------------------
+# D66 — the ORCA1 OMIP card keeps its unmasked ln_mxl0 anchor
+# --------------------------------------------------------------------------
+
+def _orca1_tke_config(iwm_enabled):
+    """Resolve the ORCA1 OMIP card's TKE config from its own builder."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    path = root / "scripts" / "run" / "run_omip_core2.py"
+    spec = importlib.util.spec_from_file_location("_omip_core2_card", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.orca1_zdftke_config(iwm_enabled=iwm_enabled)
+
+
+@pytest.mark.parametrize("iwm_enabled", [False, True])
+def test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor(iwm_enabled):
+    """Decision 66: the ORCA1 card must NOT take NEMO's masked anchor.
+
+    NEMO's compiled statement multiplies the surface stress by tmask(:,:,1)
+    (zdftke.F90:602), which collapses the anchor to the mixing-length
+    floor on LAND columns.  That transcription belongs to the NEMO-literal
+    cards; this card keeps the behaviour it had before the branch.  The test
+    fails both ways: if the card re-selects the mask, and if the library
+    default stops being the unmasked arm.
+    """
+    cfg = _orca1_tke_config(iwm_enabled)
+    assert cfg.nemo_mxl0_surface_tmask is False
+    assert TKEConfig().nemo_mxl0_surface_tmask is False
+    # ... and the resolved anchor is the unmasked one: a LAND column (mask 0)
+    # still sees its own wind stress, exactly as it did before the branch.
+    taum = jnp.asarray([0.07, 0.07])
+    unmasked = _mxl0_surface_anchor(cfg, taum, 1026.0, 9.80665,
+                                    jnp.asarray([1.0, 0.0]))
+    assert float(np.asarray(unmasked)[1]) == float(np.asarray(unmasked)[0])
+    assert float(np.asarray(unmasked)[0]) > float(_mxl0_anchor_floor(cfg))
+
+
+# --------------------------------------------------------------------------
+# D72 — the ORCA1 OMIP card keeps MAIN's calm-column ln_mxl0 floor (0.04 m)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("iwm_enabled", [False, True])
+def test_orca1_card_keeps_mains_rn_mxl0_surface_floor(iwm_enabled):
+    """Decision 72: the ORCA1 card's CALM surface anchor stays 0.04 m.
+
+    NEMO floors the ln_mxl0 wind anchor at ``rn_mxl0``
+    (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
+    zdftke.f90:610), and ``zdf_tke_init`` has already OVERWRITTEN that
+    namelist ``rn_mxl0`` with the active mixing-length floor because
+    ``ln_mxl0`` is true (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) —
+    1.0e-3 m on this ORCA1 arm, since ``ln_zdfiwm`` forces rmxl_min = 1.0e-3
+    (shipped zdftke.F90:841-843).  The user's decision is that Pierre's card
+    keeps the namelist value main used, and NEMO's overwrite stays behind the
+    NEMO-literal cards' flag.
+
+    Fails both ways: if the card takes the overwrite, and if the library
+    default stops being main's no-overwrite arm.
+    """
+    cfg = _orca1_tke_config(iwm_enabled)
+    assert cfg.nemo_mxl0_rmxl_min_overwrite is False
+    assert TKEConfig().nemo_mxl0_rmxl_min_overwrite is False
+    assert cfg.mxl0_min_m == 0.04
+    # By VALUE, on the three columns the decision is about.  The calm column
+    # is the one that moves; the windy and land columns must not.
+    anchor = np.asarray(_mxl0_surface_anchor(
+        cfg, jnp.asarray([0.10, 0.0, 0.07]), 1026.0, 9.80665,
+        jnp.asarray([1.0, 1.0, 0.0])))
+    assert float(anchor[1]) == 0.04
+    assert float(anchor[0]) == 0.7951003609964353      # wet, 0.10 Pa
+    assert float(anchor[2]) == 0.5565702526975047      # land, 0.07 Pa
+    # and the overwrite arm — what the card must NOT take — is NEMO's value.
+    overwritten = np.asarray(_mxl0_surface_anchor(
+        cfg._replace(nemo_mxl0_rmxl_min_overwrite=True),
+        jnp.asarray([0.0]), 1026.0, 9.80665, jnp.asarray([1.0])))
+    assert float(overwritten[0]) == (1.0e-3 if iwm_enabled else 1.0e-8)
+
+
+def test_nemo_literal_cards_take_the_rn_mxl0_overwrite():
+    """The other half: GYRE and the two NEMO DINO cards DO select it.
+
+    Their certified trajectories are pinned to the overwrite arm, so this is
+    what keeps decision 72 from moving them.  ORCA2 is a separate test below,
+    because building it needs its external deck.
+    """
+    from legoesm.ocean.experiments.dino import DINO_RECIPES
+    from legoesm.ocean.fidelity.nemo_recipe import _nemo_tke_config
+
+    gyre = _nemo_tke_config()
+    assert gyre.nemo_mxl0_rmxl_min_overwrite is True
+    # GYRE runs ln_zdfiwm=.FALSE., so the overwrite value is the DERIVED
+    # rmxl_min = 1e-6/(c_k*sqrt(rn_emin)) = 1e-2 m, not rn_mxl0.
+    assert float(_mxl0_anchor_floor(gyre)) == pytest.approx(1.0e-2, rel=1e-12)
+    assert float(_mxl0_anchor_floor(gyre)) != gyre.mxl0_min_m
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        assert DINO_RECIPES[recipe]["tke_nemo_mxl0_rmxl_min_overwrite"] is True
+
+
+def test_orca2_card_inherits_the_rn_mxl0_overwrite():
+    """ORCA2 takes the overwrite by inheriting the GYRE identity it specialises.
+
+    It is asserted on the RESOLVED card rather than on the source, because the
+    inheritance is the whole claim: the ORCA2 builder replaces several TKE
+    fields and must not disturb this one.  Its floor is NEMO's forced
+    rmxl_min = 1e-3 (ln_zdfiwm true on that deck), not rn_mxl0.  The external
+    deck is a campaign input; skip where it is absent, as the neighbouring
+    ORCA2 card test does.
+    """
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    tke = (build_orca2_zps_card(deck)
+           .recipe.model_config.physics.vertical_mixing.tke)
+    assert tke.nemo_mxl0_rmxl_min_overwrite is True
+    assert float(_mxl0_anchor_floor(tke)) == 1.0e-3
+    assert float(_mxl0_anchor_floor(tke)) != tke.mxl0_min_m
 
 
 # --------------------------------------------------------------------------
@@ -210,10 +338,22 @@ def test_carried_seed_is_selected_by_config_not_by_state_presence():
         _carried_nemo_depth_mean(bare, jnp.float64, nemo)
 
 
-def test_non_nemo_dino_recipes_allocate_no_new_prognostic_state():
-    """Resolved state and resolved config, not dictionary keys."""
+def test_no_dino_recipe_allocates_the_rk3_carried_barotropic_pair():
+    """Resolved state and resolved config, not dictionary keys.
+
+    The carried external-mode pair is the RK3 stepper's storage contract: one
+    slot, committed at the end of a step and read at the start of the next,
+    which is only the window seed's level because ``stprk3.F90:213`` swaps the
+    slot.  DINO compiles no ``key_RK3`` and runs ``stp_MLF``, whose rotation
+    puts that value one level too new for its ``ln_bt_fw = .false.`` seed.
+    Selecting it on the DINO cards cost a measured 3.42x on the certified
+    from-rest month; see
+    ``docs/ocean/fidelity/testcases/
+    nemo_testcases_l2_gyre_dino_month_regression_receipt.md``.
+    """
     from legoesm.ocean.experiments.dino import (
         DINOConfig,
+        DINO_RECIPES,
         dino_config_for_recipe,
         dino_lat_lon_grid,
         dino_lat_lon_state,
@@ -221,15 +361,52 @@ def test_non_nemo_dino_recipes_allocate_no_new_prognostic_state():
     from legoesm.ocean.vertical import create_ocean_z_star
 
     assert DINOConfig().nemo_prognostic_barotropic_state is False
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        # Written down in the card, not merely left at the library default, so
+        # that re-selecting it is a visible edit and this row goes red.
+        assert DINO_RECIPES[recipe]["nemo_prognostic_barotropic_state"] is False
+        assert dino_config_for_recipe(
+            recipe).nemo_prognostic_barotropic_state is False
+
     plain = dino_config_for_recipe("legoesm_default")
-    nemo = dino_config_for_recipe("nemo_dino_kamm")
     assert plain.nemo_prognostic_barotropic_state is False
-    assert nemo.nemo_prognostic_barotropic_state is True
 
     grid = dino_lat_lon_grid(plain, n_lon=6)
     z = create_ocean_z_star(n_levels=3, H_max=float(plain.H_deep))
-    state = dino_lat_lon_state(grid, z, plain)
-    assert state.uu_b is None and state.vv_b is None
+    for cfg in (plain, dino_config_for_recipe("nemo_dino_kamm_mlf")):
+        state = dino_lat_lon_state(grid, z, cfg)
+        assert state.uu_b is None and state.vv_b is None
+
+
+def test_the_nemo_testcase_cards_still_require_the_carried_pair():
+    """The other half, so the DINO row above cannot pass by deleting it.
+
+    GYRE and both tanks compile ``key_RK3`` (their ``cpp_*.fcm`` files), so
+    for them the one-slot carry IS the window seed's level and the identity
+    stays required.
+    """
+    import pytest
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        validate_nemo_testcase_card,
+    )
+
+    card = build_gyre_zco_card()
+    validate_nemo_testcase_card(card)
+    cfg = card.recipe.model_config
+    assert cfg.barotropic.nemo_prognostic_barotropic_state is True
+
+    # Non-vacuity: the validator, not a source string, is what refuses the
+    # DINO arrangement on a key_RK3 card.
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=cfg._replace(
+                barotropic=cfg.barotropic._replace(
+                    nemo_prognostic_barotropic_state=False))))
+    with pytest.raises(ValueError,
+                       match="nemo_prognostic_barotropic_state"):
+        validate_nemo_testcase_card(planted)
 
 
 # --------------------------------------------------------------------------

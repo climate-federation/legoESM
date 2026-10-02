@@ -103,3 +103,21 @@ def test_the_timed_blocks_are_not_gated_on_the_rank():
                and any(isinstance(n, ast.Name) and n.id == "trace_dir"
                        for n in ast.walk(g))
                for g in guards), "the trace directory is no longer rank-local"
+
+
+def test_gpoly_flag_and_halo_depth_default():
+    """--pcg-precond gpoly reaches the config; --halo-depth is unset by
+    default so the layout depth comes from the config's own requirement."""
+    from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
+    assert _resolved(["--pcg-precond", "gpoly"])[
+        "barotropic_implicit_pcg_precond"] == "gpoly"
+    args = mod.build_parser().parse_args(["--n-devices", "1"])
+    assert args.halo_depth is None
+    assert mod.build_parser().parse_args(
+        ["--n-devices", "1", "--halo-depth", "4"]).halo_depth == 4
+    cfg = MPASOceanConfig()
+    assert halo_depth_for_config(cfg) == 2
+    for k, need in ((2, 2), (4, 2), (6, 4), (8, 6)):
+        g = cfg._replace(barotropic_implicit_pcg_precond="gpoly",
+                         barotropic_implicit_pcg_poly_sweeps=k)
+        assert halo_depth_for_config(g) == need

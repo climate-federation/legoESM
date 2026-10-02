@@ -19,7 +19,7 @@ repository-code: "https://github.com/climate-federation/legoESM"
 url: "https://github.com/climate-federation/legoESM"
 # NOTE: `version` is single-sourced from pyproject.toml; the test
 # tests/test_version_single_source.py asserts this string stays in sync.
-version: 0.1.0
+version: 1.0.0
 # doi: 10.5281/zenodo.XXXXXXX  # TODO: mint a concept DOI via Zenodo on first Release (Stage D)
 keywords:
   - earth-system-model

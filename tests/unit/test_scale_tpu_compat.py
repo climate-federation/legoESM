@@ -54,6 +54,7 @@ class TestSegmentCarryPytree:
             precip_accum=jnp.zeros(shape2d),
             shflx_accum=jnp.zeros(shape2d),
             lhflx_accum=jnp.zeros(shape2d),
+            evap_accum=jnp.zeros(shape2d),
             sw_up_toa_accum=jnp.zeros(shape2d),
             lw_up_toa_accum=jnp.zeros(shape2d),
             sw_up_toa_clr_accum=jnp.zeros(shape2d),

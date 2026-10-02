@@ -150,6 +150,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        soil_ice_impedance_exponent=cfg.physics.get("soil_ice_impedance_exponent"),
         albedo=cfg.physics.get("albedo") or {},
         glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
         glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
@@ -508,6 +509,10 @@ def run(args) -> int:
         if getattr(args, "carbon_prognostic", False):
             base_cfg = base_cfg._replace(
                 carbon=base_cfg.carbon._replace(scheme="differland"))
+        _e_ice = getattr(args, "soil_ice_impedance_exponent", None)
+        if _e_ice is not None:
+            base_cfg = base_cfg._replace(richards=base_cfg.richards._replace(
+                ice_impedance_exponent=float(_e_ice)))
         # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
@@ -849,7 +854,7 @@ def run(args) -> int:
             gpp_day = surf_out.gpp * _SEC_PER_DAY
         else:
             gpp_day = _ZEROS
-        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        et_mmday = resp.surface_mass_flux * _SEC_PER_DAY   # the land's own water flux
         # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
         # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
         # evaporation), converted to a water flux.  None for simple_seb (single skin,
@@ -858,8 +863,13 @@ def run(args) -> int:
         # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
         # reported albedo/lw_up already reflect the canopy RT).
         if surf_out is not None and surf_out.LE_canopy is not None:
-            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
-            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+            # Inverse of the L_v(T) the canopy charged: two_leaf_canopy's lam is
+            # L_v(T_soil_top), the PRE-step top-soil temperature (resp.T_sfc is
+            # the canopy-air temperature, a different number).
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _L_charge = _lv_T(state.T_soil[:, 0])
+            transp = surf_out.LE_canopy / _L_charge * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / _L_charge * _SEC_PER_DAY
         else:
             transp = _ZEROS
             soil_evap = _ZEROS
@@ -1066,6 +1076,8 @@ def run(args) -> int:
                 # Sourced from the CONSTRUCTED config (not args) so provenance
                 # reflects the physics actually run.
                 "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "soil_ice_impedance_exponent": float(
+                    config.richards.ice_impedance_exponent),
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),

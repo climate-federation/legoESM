@@ -141,6 +141,7 @@ class TestEnsembleDiagnosticCollector:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            evap_accum=jnp.zeros(s2),
             sw_up_toa_accum=jnp.zeros(s2),
             lw_up_toa_accum=jnp.zeros(s2),
             sw_up_toa_clr_accum=jnp.zeros(s2),
