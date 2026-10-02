@@ -22,6 +22,7 @@
 # a default. B vs A prices the extra local sweeps on the halo.
 #   sbatch -N 8  ... (d8, d32)     sbatch -N 32 ... (adds d128)
 # Submit from the worktree:  sbatch --export=ALL,LEGOESM_REPO=$PWD -N <n> <this>
+# PCG_VARIANT=standard|single_reduce (default standard = production since 2026-10-02).
 # ===========================================================================
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
@@ -60,10 +61,13 @@ arm() {  # arm <tag> <nd> <rep> <extra bench flags...>
   grep -oE "[0-9.]+ ms/step.*" "$out.log" | tail -1
 }
 
+# Every arm names its solver: since 2026-10-02 the config default IS gpoly
+# M15, so an arm without flags would silently become arm C.
+VARIANT="${PCG_VARIANT:-standard}"   # production recurrence (owner 2026-10-02); job 2780587x ran standard
 ARMS=(
-  "A_poly_M20|"
-  "B_gpoly_M20|--pcg-precond gpoly --pcg-fixed-iters 20"
-  "C_gpoly_M15|--pcg-precond gpoly --pcg-fixed-iters 15"
+  "A_poly_M20_${VARIANT}|--pcg-precond poly --pcg-fixed-iters 20 --pcg-variant ${VARIANT}"
+  "B_gpoly_M20_${VARIANT}|--pcg-precond gpoly --pcg-fixed-iters 20 --pcg-variant ${VARIANT}"
+  "C_gpoly_M15_${VARIANT}|--pcg-precond gpoly --pcg-fixed-iters 15 --pcg-variant ${VARIANT}"
 )
 for nd in 8 32 128; do
   for rep in 1 2; do
