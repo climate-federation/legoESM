@@ -381,7 +381,7 @@ class MPASOceanConfig(NamedTuple):
     # Each PCG iteration still costs one cell-halo exchange plus two
     # allreduces; the win is reaching the target residual at a smaller
     # ``fixed_iters`` (30 -> 20 at poly4).
-    # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
+    # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above); "jacobi"
     # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
     # residual.
     # Default "gpoly" since 2026-10-02 (owner decision; see fixed_iters for

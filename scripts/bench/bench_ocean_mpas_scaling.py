@@ -947,6 +947,8 @@ def main() -> int:
             "halo_refresh": halo_refresh,
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
+            "pcg_precond": config.barotropic_implicit_pcg_precond,
+            "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
             "n_barotropic_substeps": args.n_substeps,
             "conservation_fixer": args.conservation_fixer,
             "eta_floor_clamp_iters": args.eta_floor_iters,

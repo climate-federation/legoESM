@@ -396,7 +396,7 @@ def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
     return _compare(ref, got, n_real, mesh), layout
 
 
-@pytest.mark.parametrize("n_dev", [4])
+@pytest.mark.parametrize("n_dev", [3, 4])
 def test_gpoly_spmd_partition_independent_at_small_m(n_dev):
     _need_devices(n_dev)
     worst, layout = _gpoly_pair(n_dev)

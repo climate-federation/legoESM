@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
                    default=None,
                    help="unset = MPASOceanConfig default (single_reduce)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 20); "
+                   help="distributed PCG iteration count (config default 15); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,

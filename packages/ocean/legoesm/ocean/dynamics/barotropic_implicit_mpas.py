@@ -478,7 +478,8 @@ def barotropic_implicit_mpas(
             "barotropic_implicit_pcg_precond='gpoly' is implemented on the "
             "SPMD (shard_map) lane only (a single device keeps the stock "
             "CG solve to tolerance); the MPI Voronoi layout cannot run it — "
-            "select 'poly' there.")
+            "select 'poly' there (with barotropic_implicit_pcg_fixed_iters=20, "
+            "the count poly was validated at).")
     if _gpoly and _hr_owned is not None:
         _hd = getattr(halo_refresh, "halo_depth", None)
         _k = int(config.barotropic_implicit_pcg_poly_sweeps)
