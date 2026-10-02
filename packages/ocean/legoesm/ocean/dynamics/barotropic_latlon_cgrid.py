@@ -900,7 +900,9 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
-def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
+def _nemo_literal_een_coefficients(
+    eta, z_coord, dtype, scheme="een", *, _e3f_test_override=None,
+):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
 
     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
@@ -966,6 +968,13 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
     e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
     e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
+    if _e3f_test_override is not None:
+        candidate = jnp.asarray(_e3f_test_override, dtype=dtype)
+        if candidate.shape != e3f.shape:
+            raise ValueError(
+                "literal EEN test e3f override must match the native A2D "
+                f"coefficient divisor shape {e3f.shape}; got {candidate.shape}")
+        e3f = candidate
     q = b(ff[..., None] / e3f)
 
     def shift(value, di=0, dj=0):

@@ -14,6 +14,9 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round95_spg
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round97_spgts_walk as walk,
 )
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round98_coriolis_residual as residual,
+)
 
 
 def write_group(payload: bytearray, name: str, rank: int) -> None:
@@ -122,3 +125,42 @@ def test_round97_walk_accepts_owned_only_and_haloed_groups() -> None:
         walk._owned_block(haloed, 3, 3, 5, 4), owned.T)
     with pytest.raises(walk.GateError, match="neither owned"):
         walk._owned_block(np.zeros((4, 2)), 3, 3, 5, 4)
+
+
+def test_round98_strict_application_keeps_written_pair_order() -> None:
+    u = np.zeros((3, 4), dtype=np.float64)
+    v = np.zeros((4, 3), dtype=np.float64)
+    u[1, 2] = 2.0
+    v[2, 1] = -3.0
+    coefficients = {
+        name: np.full((3, 3), index + 1.0, dtype=np.float64)
+        for index, name in enumerate(residual.COEFFICIENTS)
+    }
+    cor_u, cor_v, products = residual.strict_application(u, v, coefficients)
+    np.testing.assert_array_equal(
+        cor_u,
+        (products["u_nw"] + products["u_ne"])
+        + (products["u_sw"] + products["u_se"]),
+    )
+    np.testing.assert_array_equal(
+        cor_v,
+        -((products["v_sw"] + products["v_se"])
+          + (products["v_nw"] + products["v_ne"])),
+    )
+
+
+def test_round98_coefficient_movement_separates_fold_support() -> None:
+    base = {name: np.zeros((3, 4), dtype=np.float64)
+            for name in residual.COEFFICIENTS}
+    candidate = {name: np.array(value, copy=True)
+                 for name, value in base.items()}
+    candidate["ffu_nw"][-1, 2] = 1.0
+    movement = residual.coefficient_movement(base, candidate)
+    assert movement["ffu_nw"] == {
+        "differing_cells": 1,
+        "non_fold_differing_cells": 0,
+        "fold_differing_cells": 1,
+        "maximum_absolute": 1.0,
+    }
+    assert all(movement[name]["differing_cells"] == 0
+               for name in residual.COEFFICIENTS if name != "ffu_nw")
