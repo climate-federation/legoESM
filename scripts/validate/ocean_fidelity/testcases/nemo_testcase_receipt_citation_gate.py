@@ -1201,12 +1201,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:580-666': [
         '!     Compute Sea Level at step jit+1',
         "CALL r95_spg_w2('cor_v', zv_trd)", 87],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1267': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
         'CASE( np_EEN )',
-        ('END DO   ;   END DO', 2), 55],
+        'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1369-1392': [
         'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
-        'END SUBROUTINE dyn_cor_2D', 24],
+        ('END SUBROUTINE dyn_cor_2D', 2), 24],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90:912-937': [
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 26],

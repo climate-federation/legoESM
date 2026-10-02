@@ -90,7 +90,7 @@ The full result is
 
 The compiled EEN coefficient program divides each potential-vorticity term by
 `e3f_0vor * (1 + r3f*fe3mask)` in
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1267`.
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265`.
 For `nn_e3f_typ=0`, NEMO constructs `e3f_0vor` as the four surrounding masked
 T-cell reference thicknesses divided by four, exchanges the F-point fold, then
 replaces remaining zeros from the mesh F thickness in
