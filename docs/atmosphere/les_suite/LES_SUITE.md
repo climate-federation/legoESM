@@ -79,7 +79,7 @@ pre-impl-search + shared-utilities doctrine).
 ### SGS closures (LES side, plane cores)
 Smagorinsky-Lilly, dynamic Smagorinsky, scale-dependent dynamic (LASD, `turbulence/lasd_core.py`),
 Vreman (`turbulence/vreman.py`), AMD (`turbulence/amd.py`), Deardorff 1.5-order TKE
-(`dynamics/tke_sgs_plane.py` — **math present, prognostic-`e` carry into the plane time loop
+(`_future/tke_sgs_plane.py`, parked 2026-10-02 — **math present, prognostic-`e` carry into the plane time loop
 flagged as not fully wired; must verify before use**).
 
 ### Forcing primitives (already present — reuse verbatim) — now under `atmosphere/forcing/`
