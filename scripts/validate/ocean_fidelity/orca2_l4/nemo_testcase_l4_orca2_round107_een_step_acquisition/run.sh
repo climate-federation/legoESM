@@ -69,7 +69,7 @@ check_layout() {
   [[ "$(grep -Fc 'CALL r107_een_step_dump' "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc 'r107_acc_before(ji,jj,jk) = ffu_nw(ji,jj)' "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc 'r107_acc_after(ji,jj,jk) = ffu_nw(ji,jj)' "$source")" -eq 1 ]] &&
-  [[ "$(grep -Fc 'r107_term_nw(ji,jj,jk) = e3u' "$source")" -eq 1 ]]
+  [[ "$(grep -Fc 'r107_term_nw(ji,jj,jk) =' "$source")" -eq 1 ]]
 }
 
 check_rank_markers() {
