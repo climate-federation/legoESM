@@ -341,6 +341,14 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # it selects are dual-reviewed and parity-gated (PR #1656).
     "distributed", "distributed_mode",
     "dycore.fv3_duo_windows", "dycore.fv3_duo_window_pad",
+    # The damping deck (user decision 1a, 2026-10-02): the d_sw5
+    # divergence damping and the B1 top del-2 sponge are CONSUMED by this
+    # lane (FV3DuoConfig nord/d4_bg/sponge_*), so an oracle-deck
+    # Held-Suarez run (--fv3-duo-nord 2 --fv3-duo-d4-bg 0.12
+    # --fv3-duo-sponge-layers 0) stays launchable for parity debugging.
+    "dycore.fv3_duo_nord", "dycore.fv3_duo_d4_bg",
+    "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
+    "dycore.fv3_duo_sponge_d2_top",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).

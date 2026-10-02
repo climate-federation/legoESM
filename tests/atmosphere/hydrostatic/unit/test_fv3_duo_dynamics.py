@@ -523,6 +523,39 @@ class TestComponentFactoryDispatch:
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
 
+    def test_wall_admits_the_oracle_damping_deck(self):
+        """User decision 1a (2026-10-02): the five damping fields the lane
+        consumes pass the wall and the built model carries them -- the
+        ORACLE deck (an oracle-deck Held-Suarez run is launchable) and a
+        non-default sponge with layers > 0 (no inert field set); an
+        unconsumed field is still refused BY THE WALL (its own message,
+        not an earlier guard)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            ORACLE_DAMPING,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        base = _fv3_duo_config()
+        oracle = base._replace(dycore=base.dycore._replace(
+            fv3_duo_nord=2, fv3_duo_d4_bg=0.12, fv3_duo_sponge_layers=0))
+        oracle.validate_strict()
+        model = create_atmosphere_dycore(oracle, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert {k: getattr(model.config, k) for k in ORACLE_DAMPING} == ORACLE_DAMPING
+        sponge = base._replace(dycore=base.dycore._replace(
+            fv3_duo_sponge_layers=1, fv3_duo_sponge_factor=4.0,
+            fv3_duo_sponge_d2_top=0.01))
+        sponge.validate_strict()
+        model = create_atmosphere_dycore(sponge, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert (model.config.sponge_del2_top_layers, model.config.sponge_del2_top_factor,
+                model.config.sponge_d2_top) == (1, 4.0, 0.01)
+        with pytest.raises(ValueError, match=r"Non-default unsupported fields.*hyperdiff_scale"):
+            create_atmosphere_dycore(
+                base._replace(dycore=base.dycore._replace(hyperdiff_scale=2.0)),
+                create_cubed_sphere(N), create_sigma_coordinate(KM))
+
     def test_kessler_hydrostatic_constructs(self):
         """hydro + microphysics='kessler' (alone) passes the wall and
         the specific guards: the one routed scheme on this lane."""
