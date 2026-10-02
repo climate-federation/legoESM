@@ -865,3 +865,24 @@ def test_sfno_slab_forcing_missing_channel_raises(missing):
         s2s_coupling._build_atm_to_surface(
             pred, aux, channel_labels=labels, pressure_levels=(1000, 850),
             config=s2s_coupling.S2SSlabCouplingConfig())
+
+
+def test_sfno_slab_forcing_passthrough_and_nonfinite_raises():
+    pred, aux, labels = _sfno_lowest_level_inputs()
+    kw = dict(channel_labels=labels, pressure_levels=(1000, 850),
+              config=s2s_coupling.S2SSlabCouplingConfig())
+    forcing = s2s_coupling._build_atm_to_surface(pred, aux, **kw)
+    np.testing.assert_allclose(np.asarray(forcing.T_lowest), pred[..., 0])
+    np.testing.assert_allclose(np.asarray(forcing.u_lowest), pred[..., 2])
+    np.testing.assert_allclose(np.asarray(forcing.v_lowest), pred[..., 3])
+    np.testing.assert_allclose(np.asarray(forcing.sw_down), 200.0)
+    np.testing.assert_allclose(np.asarray(forcing.lw_down), 350.0)
+    np.testing.assert_allclose(np.asarray(forcing.cos_zenith), 1.0)
+    bad_pred = pred.copy()
+    bad_pred[1, 2, 1] = np.nan
+    with pytest.raises(ValueError, match="non-finite lowest-level"):
+        s2s_coupling._build_atm_to_surface(bad_pred, aux, **kw)
+    bad_aux = dict(aux, lw_down=aux["lw_down"].copy())
+    bad_aux["lw_down"][0, 0] = np.nan
+    with pytest.raises(ValueError, match="lw_down"):
+        s2s_coupling._build_atm_to_surface(pred, bad_aux, **kw)

@@ -116,9 +116,14 @@ def _build_atm_to_surface(
     Packs the lowest-level T/q/u/v channels and the surface fields into the
     datasets :func:`extract_surface_forcing_from_dataset` (the NeuralGCM-slab
     builder) consumes: density from the virtual temperature at the model-level
-    pressure.  A missing channel or surface field raises; nothing is filled.
+    pressure.  A missing channel or surface field, or a non-finite value in
+    one, raises; nothing is filled.  Precipitation is not an SFNO output, so the
+    builder reports none (has_precipitation=0); the slab ocean does not read it.
     """
     level = min(pressure_levels, key=lambda lev: abs(lev - config.lowest_level_hpa))
+    for name in ("sp", "sw_down", "lw_down"):
+        if not np.isfinite(aux_surface[name]).all():
+            raise ValueError(f"non-finite surface field {name!r} in SFNO slab forcing")
     shape = prediction_physical.shape[:-1]
     coords = {"latitude": np.arange(shape[0]), "longitude": np.arange(shape[1])}
     names = SlabCouplingConfig().field_names
@@ -135,6 +140,8 @@ def _build_atm_to_surface(
         },
         coords={"level": [level], **coords},
     )
+    if not all(np.isfinite(da.values).all() for da in atmosphere.data_vars.values()):
+        raise ValueError(f"non-finite lowest-level channel (level {level}) in SFNO slab forcing")
     radiation = xr.Dataset(
         {
             names.sw_down: (("latitude", "longitude"), aux_surface["sw_down"]),
