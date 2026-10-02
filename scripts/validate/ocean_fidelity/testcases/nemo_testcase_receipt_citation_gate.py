@@ -160,6 +160,8 @@ FILES = {
         _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R93SLOW_COMPILED / "dynspg_ts.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1189,6 +1191,36 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 95: independent rung-0 split-explicit substeps ---
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:301-316': [
+        '! Lane-2 GYRE ENE operand instrument: write the eight frozen coefficient',
+        'CLOSE(l2_unit)', 16],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:390-442': [
+        '! Lane-2 GYRE causal instrument: open one write-only stream for the',
+        'WRITE(l2_ord_unit) l2_magic, 2, kt, 2, jpi, jpj, STORAGE_SIZE(1._wp), rDt_e', 53],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:287-320': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )', 34],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:339-381': [
+        '! Initialize barotropic variables:',
+        'vn_adv(:,:)     = 0._wp', 43],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:446': (
+        'DO jn = 1, icycle', 1),
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:460-519': [
+        '!* Set extrapolation coefficients for predictor step:',
+        '+ e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)', 60],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:530-557': [
+        '! resulting flux at mid-step (not over the full domain)',
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 28],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:601-616': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        'zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)', 16],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:618-652': [
+        '! Add Coriolis trend:',
+        "& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')", 35],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:655-708': [
+        '! Set next velocities:',
+        'va_e(ji,jj) =  va_e(ji,jj) / ( 1._wp - rDt_e * zCdU_v(ji,jj) * hvr_e(ji,jj) )', 54],
     # --- ORCA2 round 94: independent rung-0 slow/external boundary walk ---
     'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:206-219': [
         '!*  vertical averaging  *!',
