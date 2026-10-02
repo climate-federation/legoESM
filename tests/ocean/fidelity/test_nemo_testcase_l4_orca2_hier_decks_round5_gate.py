@@ -79,6 +79,7 @@ def _resolved_record(root: Path) -> None:
         "restart logical ln_rstart = F\n"
         "ice management in the sbc nn_ice = 0\n"
         "implicit ice-ocean drag ln_drgice_imp = F\n"
+        "FreshWater Budget control nn_fwb = 2\n"
         "nn_fwb_voltype = 2: Control OCEAN volume\n"
         "constant vertical mixing coefficient ln_zdfcst = T\n"
         "Turbulent Kinetic Energy closure (TKE) ln_zdftke = F\n"

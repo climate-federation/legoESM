@@ -70,6 +70,7 @@ def _resolved_record(root: Path) -> None:
         "ice management in the sbc nn_ice = 0\n"
         "type of scaling under sea-ice nn_mxlice = 0\n"
         "implicit ice-ocean drag ln_drgice_imp = F\n"
+        "FreshWater Budget control nn_fwb = 2\n"
         "nn_fwb_voltype = 2: Control OCEAN volume\n"
         "specific river mouths treatment ln_rnf_mouth = F\n"
         "No specific treatment at river mouths\n"
