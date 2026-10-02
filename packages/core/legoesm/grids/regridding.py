@@ -19,7 +19,6 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.gaussian import GaussianGrid
 
 
 class RegridWeights(NamedTuple):
