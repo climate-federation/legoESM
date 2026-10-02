@@ -16,4 +16,4 @@ def test_score_separates_signed_zero_from_magnitude():
 
 def test_source_order_starts_at_compiled_zpvo_assignment():
     assert gate.SOURCE_ORDER == (
-        "zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw")
+        "mbku", "zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw")

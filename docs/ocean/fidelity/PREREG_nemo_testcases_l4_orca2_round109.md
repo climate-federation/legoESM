@@ -60,3 +60,14 @@ neighbor V mask, stored product, accumulator before, accumulator after.
 | R109-P6 | The first remaining signed-zero difference is already in NEMO's three-term `zpvo_nw` sum. | `zpvo_nw` has at least one unequal bit against the literal legoESM replay; report signed-zero and magnitude counts before inspecting later fields. | If `zpvo_nw` is bit-exact, mark **REFUTED** and advance to the first later unequal operand without skipping fields. |
 | R109-P7 | Both live thickness operands and the neighboring V mask are bit-exact. | Zero unequal bits for `e3u_live`, `e3v_live`, and `neighbor_mask` over the rank-complete owned domain. | The first unequal one owns the walk; stop there and do not attribute the product or accumulator. |
 | R109-P8 | NEMO's recorded `acc_after` is bitwise equal to recorded `acc_before + term_nw` at every executed level. | Zero recurrence-bit differences on both ranks. | Any difference makes the instrument or arithmetic association insufficient; stop without a model statement. |
+
+### Pre-measurement correction after a refused probe
+
+The first attempted per-level invocation was invalid and is not admitted: it
+compared legoESM's constructed operands at all 30 physical levels against
+NEMO recording arrays initialized to zero and written only inside
+`DO jk=1,mbku`. Its large counts are retracted before interpretation. The
+correct source order begins with the loop bound `mbku`, which is predicted
+bit-exact, and all later fields are compared only on executed levels; both
+arms are explicitly zero outside the loop. A non-bit `mbku` refutes this
+correction and owns the walk before `zpvo_nw`.

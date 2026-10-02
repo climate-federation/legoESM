@@ -28,7 +28,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round107_ee
 
 
 PLANTS = ("none", "oracle-bit", "model-bit")
-SOURCE_ORDER = ("zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw")
+SOURCE_ORDER = ("mbku", "zpvo_nw", "e3u_live", "e3v_live", "neighbor_mask", "term_nw")
 
 
 class GateError(RuntimeError):
@@ -65,6 +65,7 @@ def assemble_record(root: Path, plant: str) -> tuple[dict[str, np.ndarray], dict
         for name in record_gate.FIELDS[:-1]
     }
     coverage = np.zeros((148, 180), dtype=np.int8)
+    assembled["mbku"] = np.zeros((148, 180), dtype=np.float64)
     recurrence_bits = 0
     rows = []
     for rank in range(2):
@@ -83,7 +84,10 @@ def assemble_record(root: Path, plant: str) -> tuple[dict[str, np.ndarray], dict
             groups["acc_after"][executed].view(np.uint64)
             != (groups["acc_before"] + groups["term_nw"])[executed].view(np.uint64)
         ))
+        assembled["mbku"][j0:j1, i0:i1] = bottom.T
         for name in assembled:
+            if name == "mbku":
+                continue
             values = groups[name]
             require(bool(np.all(values[..., 30] == 0.0)),
                     f"{name} writes NEMO's dummy jpk level")
@@ -140,13 +144,18 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
             value, source_z, jnp.float64, grid=card.recipe.grid,
             source_face_thickness=True, literal_bottom_loop=True),
     )(jnp.asarray(state.eta.data, dtype=jnp.float64)))
+    mbku = np.asarray(parts["mbku"], dtype=np.float64)
+    executed = np.arange(1, 31)[None, None, :] <= mbku[..., None]
     model = {
+        "mbku": mbku,
         "zpvo_nw": np.asarray(parts["zpvo_u_nw"]),
         "e3u_live": np.asarray(parts["source_e3u"]),
         "e3v_live": np.asarray(parts["source_e3v"]),
         "neighbor_mask": np.asarray(raw.vmask, dtype=np.float64),
         "term_nw": np.asarray(parts["term_u_nw"]),
     }
+    for name in SOURCE_ORDER[1:]:
+        model[name] = np.where(executed, model[name], np.float64(0.0))
     if plant == "model-bit":
         changed = np.array(model["zpvo_nw"], copy=True)
         changed.view(np.uint64)[0, 0, 0] ^= np.uint64(1)
