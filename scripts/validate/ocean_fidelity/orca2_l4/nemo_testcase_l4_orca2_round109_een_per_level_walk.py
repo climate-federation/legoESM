@@ -43,7 +43,8 @@ def require(condition: bool, message: str) -> None:
 def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
     candidate = np.ascontiguousarray(candidate, dtype=np.float64)
     reference = np.ascontiguousarray(reference, dtype=np.float64)
-    require(candidate.shape == reference.shape, "operand score shape moved")
+    require(candidate.shape == reference.shape,
+            f"operand score shape moved: {candidate.shape} != {reference.shape}")
     unequal = candidate.view(np.uint64) != reference.view(np.uint64)
     magnitude = candidate != reference
     signed_zero = unequal & ~magnitude
