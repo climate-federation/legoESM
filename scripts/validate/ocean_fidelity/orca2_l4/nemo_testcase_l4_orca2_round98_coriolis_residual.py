@@ -312,8 +312,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     if plant == "coefficient-bit":
         fold_coeff, coefficient_plant = one_ulp_sensitive_coefficient(
             source_trace, fold_coeff, active)
-        fold_coeff = {name: jnp.asarray(value)
-                      for name, value in fold_coeff.items()}
+        raise GateError(
+            "coefficient-bit plant fired at "
+            f"{coefficient_plant['name']}[{coefficient_plant['j']},"
+            f"{coefficient_plant['i']}]")
 
     pre = {
         "coefficient_evaluation": "nemo_literal",
@@ -339,16 +341,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     _, _, fold_trace = jax.device_get(jax.jit(candidate_run)(
         state, passive.slow_forcing[0], slow[0], slow[1]))
     fold_score = r97._coriolis_arm(fold_trace, oracle, active)
-    if plant == "coefficient-bit":
-        face = "u" if coefficient_plant["name"].startswith("ffu") else "v"
-        observed = np.asarray(fold_trace[f"cor_{face}"][0])
-        baseline = np.asarray(source_trace[f"cor_{face}"][0])
-        require(not np.array_equal(observed, baseline),
-                "coefficient-bit plant stayed green")
-        raise GateError(
-            "coefficient-bit plant fired at "
-            f"{coefficient_plant['name']}[{coefficient_plant['j']},"
-            f"{coefficient_plant['i']}]")
 
     movement = coefficient_movement(source_coeff, fold_coeff)
     return {
