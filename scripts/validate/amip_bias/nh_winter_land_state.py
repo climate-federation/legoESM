@@ -94,6 +94,9 @@ def main(argv=None):
     ap.add_argument("--every", type=int, default=1)
     ap.add_argument("--series", action="store_true",
                     help="also print one row per checkpoint day per region")
+    ap.add_argument("--surfdata", default=None,
+                    help="CLM surfdata (PCT_NATVEG, PCT_NAT_PFT): adds a 45-70N region of "
+                         "cells whose nearest surfdata cell is >50%% trees (PFTs 1-8)")
     a = ap.parse_args(argv)
     import jax.numpy as jnp
     from legoesm.land.canopy.radiative_transfer import broadband_albedo
@@ -132,6 +135,16 @@ def main(argv=None):
                                  & (lon >= r[2]) & (lon <= r[3]))
              for k, r in REGIONS.items()}
 
+    if a.surfdata:
+        sd = xr.open_dataset(a.surfdata)
+        tree = (sd["PCT_NATVEG"].values / 100.0
+                * sd["PCT_NAT_PFT"].values[1:9].sum(0) / 100.0)
+        si = np.abs(sd["LATIXY"].values[:, 0][None, :] - lat[:, None]).argmin(1)
+        sj = np.abs(((sd["LONGXY"].values[0][None, :] - lon[:, None] + 180) % 360)
+                    - 180).argmin(1)
+        tf = tree[si, sj]
+        w_reg["forest>50%"] = area * f_land * (land & (lat >= 45) & (lat <= 70) & (tf > 0.5))
+        w_reg["nonforest<10%"] = area * f_land * (land & (lat >= 45) & (lat <= 70) & (tf < 0.1))
     lai = np.asarray(p.LAI)
     sai = (np.asarray(p.SAI) if getattr(p, "SAI", None) is not None
            else np.zeros_like(lai))
