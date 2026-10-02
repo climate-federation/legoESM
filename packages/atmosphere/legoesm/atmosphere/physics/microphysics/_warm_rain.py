@@ -801,7 +801,8 @@ _MG2_QRIC_MAX = 0.01       # micro_mg2_0.F90:1316 in-precip rain cap [kg/kg]
 def mg2_incloud_warm_rain_inputs(q_c, q_r, N_c, cloud_fraction, rescale_nc):
     """CAM6 MG2 in-cloud warm-rain inputs ``(q_c_ic, q_r_ic, N_c_ic, lcldm)``.
 
-    ``cloud_fraction`` is MG2's ``liqcldf`` (= ``cldn``), shape ``(ncol, nlev)``.
+    ``cloud_fraction`` is MG2's ``liqcldf`` (= ``cldn`` = CAM6 ``ast`` =
+    max(alst, aist) under CLUBB), shape ``(ncol, nlev)``.
     Rates evaluated on these inputs are multiplied back by ``lcldm`` to give
     grid-mean tendencies (micro_mg2_0.F90:1666, :1890, :1949, :1966).
     ``rescale_nc`` divides ``N_c`` by ``lcldm`` (a grid-mean prognostic

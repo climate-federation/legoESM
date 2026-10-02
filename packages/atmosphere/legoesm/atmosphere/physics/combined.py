@@ -747,8 +747,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _turb_field,
         ))
     if config.microphysics.scheme != "none":
+        # The run's BUILT cloud config (MPAS lane: _standalone_cloud_config),
+        # never a default one: the aist rh ramps are run parameters.
         tagged_fns.append((
-            make_microphysics_physics(config.microphysics, model_type, _dt_sub),
+            make_microphysics_physics(
+                config.microphysics, model_type, _dt_sub,
+                cloud_config=config.radiation.cloud_config),
             False, None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
