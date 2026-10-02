@@ -5109,6 +5109,13 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:7343-7391': [
         ('if _return_tracer_process_trace:', 1),
         'process_qsr_rate=_nemo_ws_process_qsr_rate,', 49],
+    # --- ORCA2 round 101: sufficient owner of the merged GYRE year move ---
+    'ocean_model_latlon_cgrid.py:7054-7064': [
+        'nemo_r3t_rk3_stage1_stretch,',
+        '_qt_13 = nemo_r3t_rk3_stage1_stretch(', 11],
+    'eos.py:970-1001': [
+        'def nemo_r3t_rk3_stage1_stretch(',
+        'return jnp.where(wet, nemo_source_round(one + r3_stage), one)', 32],
     # --- restored from the lane tip (980cc6369) after the merge conflict on
     # this file was resolved to HEAD's side, which silently dropped every
     # entry the VORTEX-card rounds had added.  None of these NEMO/VORTEX
