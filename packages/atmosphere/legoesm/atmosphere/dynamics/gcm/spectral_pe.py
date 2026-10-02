@@ -446,7 +446,7 @@ def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
     supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
 
     Measured motivation: the legacy first-order UPWIND advective form
-    (:func:`vertical_advection`) carries a systematic
+    (:func:`legoesm.grids.vertical.vertical_advection`) carries a systematic
     -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
     weighted temperature sink at T63L8 — the dominant term of the dycore's
     measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
