@@ -55,7 +55,7 @@ def test_source_depth_mean_is_literal_left_associated_under_jit() -> None:
         expected = expected + (thickness[..., level] * field[..., level]) \
             * mask3[..., level]
     expected = expected * reciprocal * mask2
-    actual = jax.device_get(jax.jit(gate.source_depth_mean)(
-        jnp.asarray(field), jnp.asarray(thickness), jnp.asarray(mask3),
-        jnp.asarray(reciprocal), jnp.asarray(mask2)))
+    actual = jax.device_get(jax.jit(gate.nemo_literal_depth_mean)(
+        jnp.asarray(field), jnp.asarray(thickness), jnp.asarray(mask2),
+        jnp.asarray(reciprocal), level_mask=jnp.asarray(mask3)))
     assert np.array_equal(actual, expected)

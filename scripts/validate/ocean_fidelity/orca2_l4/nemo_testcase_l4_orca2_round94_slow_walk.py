@@ -15,6 +15,9 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
     if str(package) not in sys.path:
         sys.path.insert(0, str(package))
 
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    nemo_literal_depth_mean,
+)
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
@@ -100,21 +103,6 @@ def first_nonbit(rows: dict[str, dict]) -> dict | None:
         if not rows[name]["bit_exact"]:
             return {"boundary": name, **rows[name]}
     return None
-
-
-def source_depth_mean(field, thickness, mask3, reciprocal, mask2):
-    """NEMO ``SUM(e3*rhs*mask) * r1_h`` in scalar source association."""
-
-    import jax.numpy as jnp
-
-    from legoesm.core.source_rounding import nemo_source_round as b
-
-    acc = jnp.zeros_like(field[..., 0])
-    for level in range(field.shape[-1]):
-        product = b(b(thickness[..., level] * field[..., level])
-                    * mask3[..., level])
-        acc = b(acc + product)
-    return b(b(acc * reciprocal) * mask2)
 
 
 def operand_walk(
@@ -300,10 +288,10 @@ def measure(
     }
     barrier_u, barrier_v = jax.device_get(jax.jit(
         lambda du, dv, hu, hv, Hu, Hv, m3u, m3v, m2u, m2v: (
-            source_depth_mean(
-                du, hu, m3u, np.float64(1.0) / Hu, m2u),
-            source_depth_mean(
-                dv, hv, m3v, np.float64(1.0) / Hv, m2v),
+            nemo_literal_depth_mean(
+                du, hu, m2u, np.float64(1.0) / Hu, level_mask=m3u),
+            nemo_literal_depth_mean(
+                dv, hv, m2v, np.float64(1.0) / Hv, level_mask=m3v),
         )
     )(
         operands["du_dt"], operands["dv_dt"],

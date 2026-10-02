@@ -89,7 +89,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     validate_after_reconcile,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-    barotropic_substeps_latlon_cgrid,
+    barotropic_substeps_latlon_cgrid, nemo_literal_slow_forcing as _literal_slow,
 )
 from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
     barotropic_implicit_latlon_cgrid,
@@ -5737,14 +5737,15 @@ class LatLonCGridOceanModel:
         # h at v-faces — same min-rule for meridional direction.
         h_v_pre = min_cell_to_vface(h_k_pre, _grid)
 
-        # H + F_slow share the per-face h weight on the level axis —
-        # fuse the two reductions per face into one stacked sum.
         _u_pair = jnp.sum(jnp.stack([h_u_pre, du_dt * h_u_pre], axis=-1), axis=-2)
         H_u_pre = jnp.maximum(_u_pair[..., 0], 1e-10)
         F_slow_u = _u_pair[..., 1] / H_u_pre * state.u_mask.data
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        F_slow_u, F_slow_v = _literal_slow(
+            F_slow_u, F_slow_v,
+            (du_dt, dv_dt, h_u_pre, h_v_pre, H_u_pre, H_v_pre), state, _cfg_b)
         _slow_depth_override = (
             self._nemo_ws_test_hooks.slow_forcing_depth_override)
         if _slow_depth_override is not None:
@@ -5753,7 +5754,6 @@ class LatLonCGridOceanModel:
             F_slow_v = F_slow_v.at[1:, :].set(_slow_depth_v)
         _F_slow_depth_u = F_slow_u
         _F_slow_depth_v = F_slow_v
-
         _wind_tau_i_u = jnp.zeros_like(F_slow_u)
         _wind_tau_j_v = jnp.zeros_like(F_slow_v)
         _wind_r1_rho0 = jnp.asarray(0.0, dtype=du_dt.dtype)
