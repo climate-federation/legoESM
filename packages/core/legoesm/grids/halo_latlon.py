@@ -218,6 +218,42 @@ def _dispatch_latlon_2d_fold(data, topology, halo, *, is_vector_v):
     return pad_halo_latlon_2d(data, topology, halo=halo, pole_bc="wall")
 
 
+def _dispatch_pad(data, halo, *, is_vector_v, local_fn):
+    """Backend dispatch shared by the four lat-lon pad entry points.
+
+    ``"mpi"`` with a lat-lon topology routes through
+    :func:`legoesm.parallel.latlon_mpi.pad_halo_latlon_mpi` (band) or the
+    2-D fold; ``"spmd"`` through :func:`_try_spmd_latlon_pad`; otherwise
+    (or for an MPI topology of a different grid type) ``local_fn``.
+    """
+    # Local import to avoid a module-import cycle: halo.py is
+    # imported by many low-level modules, and the dispatch only
+    # needs ``halo`` when the backend is non-local.
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() == "mpi":
+        topology = get_mpi_topology()
+        # Lat-lon topology = LatLonBandLayout.  Anything else means
+        # an MPI run was activated for a different grid type (e.g.
+        # cubed-sphere) and a lat-lon op was called by mistake; fall
+        # back to the local serial path rather than crashing in the
+        # MPI dispatch with an opaque error.
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
+        )
+        if isinstance(topology, LatLonBandLayout):
+            return pad_halo_latlon_mpi(
+                data, topology, halo=halo, is_vector_v=is_vector_v,
+            )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=is_vector_v,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=is_vector_v)
+    if _spmd is not None:
+        return _spmd
+    return local_fn(data, halo)
+
+
 def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar field with halo cells using pole-folding.
 
@@ -245,32 +281,9 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape ``(n_lat_local + 2*halo, n_lon + 2*halo[, nlev])``.
     """
-    # Local import to avoid a module-import cycle: halo.py is
-    # imported by many low-level modules, and the dispatch only
-    # needs ``halo`` when the backend is non-local.
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        # Lat-lon topology = LatLonBandLayout.  Anything else means
-        # an MPI run was activated for a different grid type (e.g.
-        # cubed-sphere) and a lat-lon op was called by mistake; fall
-        # back to the local serial path rather than crashing in the
-        # MPI dispatch with an opaque error.
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=False,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=False,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=False, local_fn=pad_halo_latlon_local,
+    )
 
 
 def pad_halo_latlon_vector_local(
@@ -307,24 +320,9 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape ``(n_lat_local + 2*halo, n_lon + 2*halo[, nlev])``.
     """
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=True,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=True,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_vector_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=True, local_fn=pad_halo_latlon_vector_local,
+    )
 
 
 def pad_halo_vector_latlon(
@@ -353,23 +351,6 @@ def pad_halo_vector_latlon(
 # ==============================================================================
 
 
-def fold_pole_rows_3d(
-    data: jnp.ndarray,
-    halo: int,
-    negate: bool,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Pole-fold for 3D arrays, shape (n_lat, n_lon_padded, nlev).
-
-    Same logic as fold_pole_rows but keeps the level axis intact.
-    """
-    half = data.shape[1] // 2
-    sign = -1.0 if negate else 1.0
-
-    south = sign * jnp.roll(data[:halo][::-1], half, axis=1)
-    north = sign * jnp.roll(data[-halo:][::-1], half, axis=1)
-    return south, north
-
-
 def pad_halo_latlon_3d_local(
     data: jnp.ndarray, halo: int = 1,
 ) -> jnp.ndarray:
@@ -377,30 +358,15 @@ def pad_halo_latlon_3d_local(
     # Longitude: periodic wrap via single Pad HLO (axis 1).
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
     # Latitude: pole-folding (scalar — no sign change)
-    south, north = fold_pole_rows_3d(data_lon, halo, negate=False)
+    south, north = fold_pole_rows(data_lon, halo, negate=False)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
 def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar 3D field with halo cells.  Backend-dispatched."""
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=False,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=False,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_3d_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=False, local_fn=pad_halo_latlon_3d_local,
+    )
 
 
 def pad_halo_latlon_vector_3d_local(
@@ -408,7 +374,7 @@ def pad_halo_latlon_vector_3d_local(
 ) -> jnp.ndarray:
     """Local 3-D vector halo: lon-wrap + pole-fold with sign reversal."""
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
-    south, north = fold_pole_rows_3d(data_lon, halo, negate=True)
+    south, north = fold_pole_rows(data_lon, halo, negate=True)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
@@ -416,24 +382,9 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a 3D vector component with pole-folding + sign reversal.
 
     Backend-dispatched."""
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=True,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=True,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_vector_3d_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=True, local_fn=pad_halo_latlon_vector_3d_local,
+    )
 
 
 def pad_halo_vector_latlon_3d(
