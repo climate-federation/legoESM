@@ -1260,10 +1260,10 @@ CITATION_MAP = {
     # --- ORCA2 round 107: literal EEN vertical loop bounds ---
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1229-1230': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
-        'DO jk = 1, mbku(ji,jj)', 2],
+        ('DO jk = 1, mbku(ji,jj)', 1), 2],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1262-1263': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 2),
-        'DO jk = 1, mbkv(ji,jj)', 2],
+        ('DO jk = 1, mbkv(ji,jj)', 1), 2],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90:223-230': [
         'IF (jpk>2) THEN',
         'IF ( MAXVAL(fmask(ji,jj,:))/=0._wp )', 8],
