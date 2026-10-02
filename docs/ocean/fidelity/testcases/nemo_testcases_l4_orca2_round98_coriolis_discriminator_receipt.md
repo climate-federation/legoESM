@@ -96,9 +96,9 @@ precision, field count, and each field's name/rank/dimensions/payload.
 Preflight reports `SYNTAX_PROOF_PASS` and
 `ORCA2_ROUND98_EEN_COEFF_PREFLIGHT_READY`. The layout and producer-content
 plants both fire with exit 69. The record checker additionally carries header,
-field-name, field-dimension, truncation, missing-field, swapped-rank, and
-restart-byte plants; they will run during admission because no record exists
-yet.
+field-name, field-dimension, truncation, missing-field, all-zero payload,
+swapped-rank, and restart-byte plants; they will run during admission because
+no record exists yet.
 
 The measurement's one-ULP application plant fires. Its first coefficient
 plant was **RETRACTED** because the chosen coefficient multiplied an operand
@@ -110,8 +110,30 @@ control remains documented rather than being counted as evidence.
 ## Tests, citation gate, and review
 
 The focused round-95/97/98 record, walker, acquisition, and plant tests pass
-21/21. The repository-wide fidelity battery and citation/review results are
-recorded in the final commit below.
+22/22. The single `tests/ocean/fidelity -n 12` battery reached 98%, printed
+seven failure markers, and then ended without a terminal summary or a live
+pytest process. It is recorded as **incomplete**, not PASS. An allowed
+isolation run confirms the same six established failures as round 97:
+
+- `test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`;
+- `test_nemo_testcase_l2_gyre_round51_live_operands.py::test_live_trace_and_raw_history_arms_are_private_and_off_by_default`;
+- `test_nemo_testcase_round35_stamp_scope.py::test_every_driver_that_arms_the_escape_scopes_it`;
+- `test_recipe_case_board.py::test_every_oracle_comparison_has_a_row`;
+- `test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree`;
+- `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants`.
+
+The summary-less seventh marker cannot be assigned to a test ID; no failing
+round-98 focused test exists. The wide-run log is retained in the external
+round evidence rather than being promoted to a passing claim.
+
+The default citation receipt passes with 274 citations, zero failures, and
+zero unmapped citations. This receipt passes with three citations and the
+same zero-failure result. A rigid +2 shift of the `dyn_cor_2D` application
+citation is rejected by the plant.
+
+The required separate `codex exec --sandbox read-only` review did not reach
+the diff: `failed to initialize in-process app-server client: Read-only file
+system`. Verdict: **independent review unavailable in-sandbox**.
 
 ## OPEN
 

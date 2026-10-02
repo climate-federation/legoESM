@@ -17,7 +17,7 @@ GROUP = struct.Struct("=4i")
 FIELDS = ("ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
           "ffv_sw", "ffv_se", "ffv_nw", "ffv_ne")
 PLANTS = ("none", "header", "field-name", "field-dims", "truncation",
-          "missing-field", "swapped-rank", "restart-byte")
+          "missing-field", "zero-payload", "swapped-rank", "restart-byte")
 
 
 class Refusal(RuntimeError):
@@ -69,8 +69,12 @@ def read_record(path: Path, plant: str = "none") -> dict:
         end = offset + 8 * n1 * n2
         require(end <= len(raw), f"{path.name}: truncated payload {name!r}")
         values = np.frombuffer(raw, dtype="=f8", count=n1 * n2, offset=offset)
+        if plant == "zero-payload" and index == 0:
+            values = np.zeros_like(values)
         require(bool(np.isfinite(values).all()), f"{path.name}: nonfinite {name!r}")
-        groups[name] = [n1, n2]
+        nonzero = int(np.count_nonzero(values))
+        require(nonzero > 0, f"{path.name}: implausible all-zero {name!r}")
+        groups[name] = {"shape": [n1, n2], "nonzero": nonzero}
         offset = end
     require(offset == len(raw), f"{path.name}: trailing bytes")
     if plant == "missing-field":

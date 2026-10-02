@@ -191,8 +191,8 @@ def synthetic_r98_coefficient_record(path: Path, rank: int) -> None:
         "=16i", 1, 1, 3, 3, rank, 94, 152, 31,
         1 + 90 * rank, 1, 3, 3, 92, 150, 64, 8,
     ))
-    values = np.zeros((94, 152), dtype=np.float64)
-    for name in r98_record.FIELDS:
+    for index, name in enumerate(r98_record.FIELDS):
+        values = np.full((94, 152), index + 1.0, dtype=np.float64)
         payload.extend(name.encode("ascii").ljust(16, b" "))
         payload.extend(struct.pack("=4i", 2, 94, 152, 1))
         payload.extend(values.tobytes(order="F"))
@@ -200,7 +200,8 @@ def synthetic_r98_coefficient_record(path: Path, rank: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "plant", ("header", "field-name", "field-dims", "truncation", "missing-field"),
+    "plant", ("header", "field-name", "field-dims", "truncation",
+              "missing-field", "zero-payload"),
 )
 def test_round98_ranked_coefficient_record_plants_refuse(
     tmp_path: Path, plant: str,
