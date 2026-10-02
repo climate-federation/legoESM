@@ -63,6 +63,8 @@ _ORCA2_R88FRAMEDEBUG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo")
 _ORCA2_R90FRAMES_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R92RHS_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -152,6 +154,8 @@ FILES = {
         _ORCA2_R90FRAMES_COMPILED / "zdfdrg.f90"),
     "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/istate.f90": (
         _ORCA2_R90FRAMES_COMPILED / "istate.f90"),
+    "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1181,6 +1185,28 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 93: independent rung-0 stage-1 RHS walk ---
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:141-175': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        'CALL r92_rhs_finish( kt )', 35],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
+        '!*  vertical averaging  *!',
+        'END SELECT', 13],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:227-230': [
+        '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
+        "l4_canon_2d(Ve_rhs,'V'), l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:232-245': [
+        '!* wind forcing *!',
+        'ENDIF', 14],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:247-277': [
+        '!* atmospheric pressure forcing *!',
+        'ENDIF', 31],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:283-300': [
+        '!==   2D sea surface height forcing   ==!',
+        'ENDIF', 18],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:304-315': [
+        'Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 12],
     # --- ORCA2 round 92: rung-0 card and source-order RHS acquisition ---
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:148-217': [
         '! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)',
