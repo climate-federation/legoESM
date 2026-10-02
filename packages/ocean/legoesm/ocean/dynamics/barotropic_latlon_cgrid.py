@@ -956,7 +956,9 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         jnp.asarray(raw.e3f_0, dtype=dtype), nn_e3f_typ=0, grid=grid))
     umask = jnp.asarray(raw.umask, dtype=dtype)
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
-    fmask = jnp.asarray(raw.fmask, dtype=dtype)
+    # dommsk.f90:258 freezes fe3mask before rn_shlat and strait edits fmask;
+    # dynspg_ts.f90:1241-1245 stretches e3f_0vor with that frozen mask.
+    fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
 
     def recip(depth, wet):
         return b(wet / b(depth + one - wet))

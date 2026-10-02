@@ -87,7 +87,7 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
     ff = jnp.asarray(raw.ff_f, dtype=dtype)
     umask = jnp.asarray(raw.umask, dtype=dtype)
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
-    fmask = jnp.asarray(raw.fmask, dtype=dtype)
+    fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
     e3u0 = jnp.asarray(raw.e3u_0, dtype=dtype)
     e3v0 = jnp.asarray(raw.e3v_0, dtype=dtype)
     e3f0 = b(nemo_e3f_0vor_from_tmask(
