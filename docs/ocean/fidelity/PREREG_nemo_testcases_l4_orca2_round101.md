@@ -17,9 +17,13 @@ between the two endpoint versions.
 Every candidate records both endpoint SHAs, the exact selected file list,
 and SHA-256 for every overlaid file. `SOURCE` means the selected files come
 from the live GYRE tip while all unselected files stay at the combined tree.
-The predicate is `np.array_equal` over every array in every day-1..17
-snapshot against the certified live-source member; printed norms are never
-the predicate.
+**Pre-measurement correction (instrument control):** the first synthetic
+signed-zero control refuted `np.array_equal` as a sufficient bit predicate:
+NumPy deliberately treats `+0.0 == -0.0`. The frozen predicate is therefore
+`np.array_equal` on values **and** `np.array_equal` on the arrays viewed as
+same-width unsigned integers, over every array in every day-1..17 snapshot
+against the certified live-source member. Printed norms are never the
+predicate. This correction was committed before any candidate model run.
 
 ## Frozen predictions and falsifiers
 
