@@ -201,8 +201,9 @@ for a later round to rediscover.
 | cellwise two-ULP ratchet plants (flux card) | `worsen-3ulp` exit 1 (`max_worsening_ulps=3`), `at-bar-to-debt` exit 1 (`kt1.before.S` crossed) — both red on the same inert pair the unplanted run passes |
 | GYRE certified kt=1..10 ladder vs round 199 | **PASS**, **954 rows, 0 move, 0 ULP**, `first_over_bar` unchanged `{T,S,u,v,ssh} kt=3` |
 | GYRE 360-day from-rest year | **byte-identical**, 360 of 360 snapshot files equal to the certified carried arm, 0 differing, 0 missing |
-| citation gate, `DEFAULT_RECEIPT` | **PASS**, 274 citations, `unmapped_citations []` |
-| generic NEMO-GYRE recipe gate + focused battery | see below |
+| citation gate, `DEFAULT_RECEIPT` | **PASS** exit 0, 274 citations, `unmapped_citations []`, self-test OK; the shifted-citation plant exits 1 |
+| focused battery | **38 passed in 110.21s** (`test_nemo_testcase_l1_vortex_round201_stage1_seam.py`, `..._round200_flux_stage1.py`, `test_nemo_testcase_receipt_citation_gate.py`) |
+| generic NEMO-GYRE recipe gate | run by `land.sh` with the push gate |
 | DINO month gate (`land.sh`, reference `2.053801168e-03` K, bar `2.244317642e-03`) | see below |
 
 ```
@@ -265,6 +266,17 @@ Evidence: `phase3/round201/traj_VORTEX{,_VEC}-zco_after.{json,log}`,
 | Re-anchor 226 citation spans by the difflib map | the standing brief's CITATION RE-ANCHOR RULE |
 | Widen the construction guard after review to cover the transport exposures and the override | fail-closed; no card or gate selects any of those combinations |
 | Run the 360-day GYRE year although the diff is a private hook | the round brief requires it when production code changes; it was run, not argued away |
+
+**A machine note for the next round, because it cost most of this one's wall
+clock.** The standing brief's battery check (`pgrep -af "[p]ython -m pytest"`,
+or `ps -eo args | grep '[v]env/bin/python -m pytest'`) reports a battery that
+is not there: other sessions leave WAITER SHELLS whose own command line
+contains that pattern, and three of them on this host were 3 days old.  The
+check that works adds `| grep -v '/bin/bash -c'`, i.e.
+
+```
+ps -eo args | grep '[v]env/bin/python -m pytest' | grep -vc '/bin/bash -c'
+```
 
 ## Independent review
 
