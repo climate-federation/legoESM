@@ -158,8 +158,12 @@ round did not build.
   the new record's post-correction group is identical, cell for cell, to the
   older stage-1 output record — a writer placed at the wrong boundary cannot be
   believed.  It passes.
+* **The seam control itself is shown to fail.**  It is a module-level
+  function, and a unit control feeds it exactly what it guards against — an
+  exposed slot identical to the ordinary step output in every cell — and
+  requires it to refuse, then requires it to stay silent on a live seam.
 * **Unit controls** (`tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round200_flux_stage1.py`,
-  6 passed): a synthetic record on a deliberately non-square plane; the checker
+  7 passed): a synthetic record on a deliberately non-square plane; the checker
   admits a well-formed record, refuses a missing operand, refuses an unknown
   stage, refuses a disagreeing group count; the reader strips NEMO's halo and
   transposes rather than taking the first interior-sized block.
