@@ -1357,6 +1357,16 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90:149-177': [
         'NAMELIST/namsbc_fwb/rn_fwb0',
         ("CALL ctl_stop( 'sbc_fwb : wrong nn_fwb value", 1), 29],
+    # --- ORCA2 hierarchy decks round 10: rung-2 GM/MLE boundary ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/ldftra.f90:572-615': [
+        'NAMELIST/namtra_eiv/ ln_ldfeiv',
+        'ALLOCATE( aeiu(jpi,jpj,jpk), aeiv(jpi,jpj,jpk), STAT=ierr )', 44],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traadv.f90:253-263': [
+        'IF( kstg == 3 ) THEN',
+        'CALL tra_mle_trp( kt, pFu, pFv, pFw, Kmm )', 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/tramle.f90:643-684': [
+        'NAMELIST/namtra_mle/ ln_mle',
+        'IF( nn_mle == 0 ) THEN', 42],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288': [
         ('IF( ln_zdftke ) THEN', 4),
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],
