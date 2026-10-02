@@ -24,8 +24,9 @@ stdout and debug binary are both SHA-pinned by the replacement launcher.
 
 NEMO's stage program calls tracer transport at
 `ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90:555`. Inside the
-inherited Lane-4 recorder, `traadv.f90:287` passes `rnf` to the canonicalizer;
-the backtrace names its dereference at `:357`. The allocator proves ownership:
+inherited Lane-4 recorder,
+`ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:287` passes `rnf` to the
+canonicalizer; the backtrace names its dereference at `:357`. The allocator proves ownership:
 `ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90:201` allocates `rnf`
 only under `ln_rnf`, while the pinned rung-0 output resolves that switch false.
 Thus R90-P2 and R90-P3 are **CONFIRMED** and round 88's deliberately retracted
@@ -94,4 +95,3 @@ Acquisition launcher:
   do not exist yet.
 - Stage 1 through stage 3, the first model boundary, the rung-0 card ladders,
   and the month score remain unmeasured.
-

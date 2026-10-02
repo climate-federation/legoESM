@@ -1177,7 +1177,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90:201':
         'IF(ln_rnf)   ALLOCATE( rnf(jpi,jpj), rnf_b(jpi,jpj), STAT=ierr(3) )',
     'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90:555':
-        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
     # --- ORCA2 round 88: exact optimized branch and unresolved crash ---
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90:90-108': [
         "IF( ln_timing )   CALL timing_start('stp_RK3')",
