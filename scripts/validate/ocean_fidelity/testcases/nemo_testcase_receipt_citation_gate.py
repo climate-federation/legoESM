@@ -4146,6 +4146,8 @@ CITATION_MAP = {
         ('integrate from the bottom the hor. divergence', 4),
         ('r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )', 2), 4],
     # --- round 202: shared stage-one tracer-thickness ratio order ---
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:53-54': [
+        'r1_3 = 1._wp / 3._wp', 'r2_3 = 2._wp / 3._wp', 2],
     'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
         '!==  ssh/h0 ratio at Kaa  ==!',
         'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 20],

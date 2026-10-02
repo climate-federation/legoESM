@@ -212,7 +212,8 @@ because they are real:
    plausibly inert on this lane, but the commit message did not say so.
 
 It re-derived the association against the compiled source (including that
-NEMO's `r1_3`/`r2_3` are divisions, `stprk3_stg.f90:53-54`), confirmed the
+NEMO's `r1_3`/`r2_3` are divisions and not literal fractions,
+`GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:53-54`), confirmed the
 single production caller and the three untouched weights, and ran the unit
 battery itself: **32 passed in 1754.39s**, exit 0.
 
