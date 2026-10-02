@@ -102,6 +102,21 @@ def first_nonbit(rows: dict[str, dict]) -> dict | None:
     return None
 
 
+def source_depth_mean(field, thickness, mask3, reciprocal, mask2):
+    """NEMO ``SUM(e3*rhs*mask) * r1_h`` in scalar source association."""
+
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round as b
+
+    acc = jnp.zeros_like(field[..., 0])
+    for level in range(field.shape[-1]):
+        product = b(b(thickness[..., level] * field[..., level])
+                    * mask3[..., level])
+        acc = b(acc + product)
+    return b(b(acc * reciprocal) * mask2)
+
+
 def operand_walk(
     root: Path, operands: dict, oracle: dict[str, np.ndarray], masks: dict,
 ) -> dict:
@@ -283,6 +298,29 @@ def measure(
             round83.native_v(np.asarray(literal_v)),
             oracle["depth_v"], active["v"]),
     }
+    barrier_u, barrier_v = jax.device_get(jax.jit(
+        lambda du, dv, hu, hv, Hu, Hv, m3u, m3v, m2u, m2v: (
+            source_depth_mean(
+                du, hu, m3u, np.float64(1.0) / Hu, m2u),
+            source_depth_mean(
+                dv, hv, m3v, np.float64(1.0) / Hv, m2v),
+        )
+    )(
+        operands["du_dt"], operands["dv_dt"],
+        operands["h_u"], operands["h_v"],
+        operands["H_u"], operands["H_v"],
+        (operands["h_u"] > 0.0).astype(operands["h_u"].dtype),
+        (operands["h_v"] > 0.0).astype(operands["h_v"].dtype),
+        state.u_mask.data, state.v_mask.data,
+    ))
+    barrier_literal_arm = {
+        "u": rhs_walk.score(
+            round83.native_u(np.asarray(barrier_u)),
+            oracle["depth_u"], active["u"]),
+        "v": rhs_walk.score(
+            round83.native_v(np.asarray(barrier_v)),
+            oracle["depth_v"], active["v"]),
+    }
 
     state_after = trace.state_after_barotropic
     live = {
@@ -328,6 +366,7 @@ def measure(
         "observer_passivity": passivity,
         "rhs_trace_calibration": rhs_calibration,
         "source_literal_jit_arm": literal_arm,
+        "barrier_literal_jit_arm": barrier_literal_arm,
         "source_order": list(SOURCE_ORDER),
         "rows": rows,
         "depth_operand_walk_rank0": depth_operands,

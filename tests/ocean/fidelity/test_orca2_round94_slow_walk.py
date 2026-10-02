@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -39,3 +42,20 @@ def test_rank_complete_slow_record_assembles_and_layout_plant_fires() -> None:
 
 def test_source_order_covers_every_recorded_scientific_boundary() -> None:
     assert set(gate.SOURCE_ORDER) == set(gate.check_record.NAMES) - {"cd_u", "cd_v"}
+
+
+def test_source_depth_mean_is_literal_left_associated_under_jit() -> None:
+    field = np.array([[[1.0, 2.0, 3.0]]], dtype=np.float64)
+    thickness = np.array([[[0.1, 0.2, 0.3]]], dtype=np.float64)
+    mask3 = np.ones_like(field)
+    reciprocal = np.array([[0.25]], dtype=np.float64)
+    mask2 = np.ones((1, 1), dtype=np.float64)
+    expected = np.zeros((1, 1), dtype=np.float64)
+    for level in range(3):
+        expected = expected + (thickness[..., level] * field[..., level]) \
+            * mask3[..., level]
+    expected = expected * reciprocal * mask2
+    actual = jax.device_get(jax.jit(gate.source_depth_mean)(
+        jnp.asarray(field), jnp.asarray(thickness), jnp.asarray(mask3),
+        jnp.asarray(reciprocal), jnp.asarray(mask2)))
+    assert np.array_equal(actual, expected)
