@@ -1166,7 +1166,7 @@ CITATION_MAP = {
         "IF( ln_timing )   CALL timing_start('stp_RK3')",
         'CALL r84_dump_frame( kstp, 0, Nbb )', 19],
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-287': [
-        'IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN',
+        ('IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN', 1),
         "&       l4_canon_2d(rnf,'T')", 15],
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
         'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj) , &',
