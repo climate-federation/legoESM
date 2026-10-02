@@ -106,7 +106,7 @@ def test_terminal_is_ocean_only_and_plants_refuse(tmp_path):
         gate.validate_terminal(tmp_path)
 
 
-def _resolved_record(root: Path) -> None:
+def _resolved_record(root: Path, *, fwb_active: bool = True) -> None:
     (root / "namelist_ice_cfg").write_bytes(gate.SENTINEL.read_bytes())
     (root / "ocean.output").write_text(
         "number of the last time step nn_itend = 240\n"
@@ -115,7 +115,8 @@ def _resolved_record(root: Path) -> None:
         "ice management in the sbc nn_ice = 0\n"
         "type of scaling under sea-ice nn_mxlice = 0\n"
         "implicit ice-ocean drag ln_drgice_imp = F\n"
-        "nn_fwb_voltype = 2: Control OCEAN volume\n"
+        f"FreshWater Budget control nn_fwb = {2 if fwb_active else 0}\n"
+        + ("nn_fwb_voltype = 2: Control OCEAN volume\n" if fwb_active else "")
     )
     (root / "run.user.stdout.log").write_text("STOP 0\n")
     (root / "run.user.time.log").write_text("RUN_DONE\n")
@@ -127,6 +128,17 @@ def test_unread_sentinel_and_resolved_consequence_plants_refuse(tmp_path):
     for plant in ("ice-sentinel-read", "resolved-consequence"):
         with pytest.raises(gate.GateError):
             gate.validate_resolved(tmp_path, plant=plant)
+
+
+def test_inactive_freshwater_budget_requires_volume_print_absent(tmp_path):
+    _resolved_record(tmp_path, fwb_active=False)
+    report = gate.validate_resolved(tmp_path)
+    assert report["freshwater_budget_print_matches_activity"] is True
+
+    with (tmp_path / "ocean.output").open("a") as stream:
+        stream.write("nn_fwb_voltype = 2: Control OCEAN volume\n")
+    with pytest.raises(gate.GateError, match="resolved no-ice checks failed"):
+        gate.validate_resolved(tmp_path)
 
 
 def test_runner_stages_committed_unread_sentinel():

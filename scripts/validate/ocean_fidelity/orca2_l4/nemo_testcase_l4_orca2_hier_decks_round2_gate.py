@@ -283,6 +283,12 @@ def validate_resolved(
     nn_mxlice_print = re.search(
         r"type of scaling under sea-ice\s+nn_mxlice\s*=\s*0\b", ocean
     )
+    fwb_match = re.search(
+        r"FreshWater Budget control.*nn_fwb\s*=\s*([0-4])\b", ocean
+    )
+    require(fwb_match is not None, "resolved nn_fwb print is absent")
+    fwb_active = fwb_match.group(1) != "0"
+    fwb_voltype_print = "nn_fwb_voltype = 2: Control OCEAN volume" in ocean
     checks = {
         "stop_0": "STOP 0" in stdout,
         "run_done": "RUN_DONE" in timing,
@@ -295,7 +301,7 @@ def validate_resolved(
         "sentinel_unread": SENTINEL.read_text().strip() not in ocean + stdout,
         "nn_mxlice_0": nn_mxlice_print is not None if tke_active else nn_mxlice_print is None,
         "ln_drgice_imp_false": re.search(r"implicit ice-ocean drag\s+ln_drgice_imp\s*=\s*F\b", ocean) is not None,
-        "nn_fwb_voltype_2": "nn_fwb_voltype = 2: Control OCEAN volume" in ocean,
+        "freshwater_budget_print_matches_activity": fwb_voltype_print == fwb_active,
     }
     require((root / "namelist_ice_cfg").read_bytes() == SENTINEL.read_bytes(), "execution ice sentinel differs")
     if plant == "ice-sentinel-read":
