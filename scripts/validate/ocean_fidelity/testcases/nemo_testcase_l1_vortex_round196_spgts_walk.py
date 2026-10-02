@@ -281,6 +281,33 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
                           "nemo_max_abs": float(np.max(np.abs(
                               groups[f"o000_{group}"])))})
 
+    # Per-CELL Coriolis check.  The receipt's trend-to-velocity ratio is a
+    # ratio of two field maxima that need not sit at the same cell, so it is
+    # only suggestive.  This is the same quantity cell by cell: at each
+    # substep, over the faces where the entering velocity differs, the ratio
+    # of the Coriolis-trend difference to the velocity difference.  A
+    # faithful operator gives the Coriolis parameter; the measured median is
+    # what decides whether the operator or its operand is in question.
+    coriolis = []
+    for jn in (1, 8, 16, 24, 28, 32, 40, n_loop):
+        if jn > n_loop:
+            continue
+        prefix = f"j{jn:03d}_"
+        du = np.abs(_lego_plane(trace["u_entry"][jn - 1], "u")
+                    - groups[prefix + "un_e_eff"])
+        dt_ = np.abs(_lego_plane(trace["cor_u"][jn - 1], "u")
+                     - groups[prefix + "cor_u"])
+        active = np.asarray(masks["u"], dtype=bool) & (du > 0.0)
+        if not active.any():
+            continue
+        ratio = dt_[active] / du[active]
+        coriolis.append({
+            "substep": jn, "faces": int(active.sum()),
+            "median_ratio": float(np.median(ratio)),
+            "p95_ratio": float(np.percentile(ratio, 95)),
+            "max_ratio": float(np.max(ratio)),
+        })
+
     bad_scalars = [s for s in scalars if not s["bit_exact"]]
     report = {
         "case": CASE, "kt": kt, "git_sha": sha, "oracle_root": str(root),
@@ -293,6 +320,7 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         "plant": plant,
         "scalar_rows": len(scalars),
         "scalar_non_bit": bad_scalars[:8],
+        "coriolis_per_cell_ratio": coriolis,
         "first_non_bit_boundary": first,
         "rows": rows,
         "exit_frame": exit_rows,
@@ -438,6 +466,10 @@ def main(argv=None) -> int:
         print(f"{row['name']:<48} unequal={row['cells_unequal']:<6d} "
               f"max={row['max_abs']:.17e} exact={row['bit_exact']}")
     print("scalar_non_bit:", report["scalar_non_bit"])
+    for row in report["coriolis_per_cell_ratio"]:
+        print(f"coriolis j{row['substep']:03d} faces={row['faces']:<5d} "
+              f"median={row['median_ratio']:.3e} p95={row['p95_ratio']:.3e} "
+              f"max={row['max_ratio']:.3e}")
     print("first_non_bit_boundary:", report["first_non_bit_boundary"])
     print("STATUS", report["status"])
     return 1 if report["status"] != "BIT" else 0

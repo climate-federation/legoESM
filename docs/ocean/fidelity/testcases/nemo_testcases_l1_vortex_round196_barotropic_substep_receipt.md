@@ -181,7 +181,7 @@ itself is faithful and the growth is in a term it reads. That term is the
 stress at `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517` adds exactly nothing on this card — the
 Coriolis and the post-stress trend rows are identical to the last bit at
 every substep). At the last substep it supplies `4.34e-09` of the
-`4.70e-09` injected per substep, 92% of it, against the surface-pressure
+`4.71e-09` injected per substep, 92% of it, against the surface-pressure
 gradient's `3.64e-10`.
 
 The quantitative signature, and the reason the Coriolis trend rather than
