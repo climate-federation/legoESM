@@ -11,6 +11,9 @@ import pytest
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round95_spgts_acquisition import (
     check_record as record,
 )
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round97_spgts_walk as walk,
+)
 
 
 def write_group(payload: bytearray, name: str, rank: int) -> None:
@@ -88,3 +91,22 @@ def test_round97_launcher_pins_producer_content_not_commit_object() -> None:
     assert "git cat-file" not in verifier
     assert "git show" not in verifier
     assert "STATUS PLANT-FIRED toolchain" in launcher
+
+
+def test_round97_walk_extracts_validated_self_describing_payload(tmp_path: Path) -> None:
+    path = tmp_path / "oracle_r95_spg_rank0000_kt00000001.bin"
+    synthetic_record(path)
+    metadata, values = walk._payload(path)
+    assert metadata["icycle"] == 2
+    assert set(values) == record.required_names(2)
+    assert values["i000_ssh_frc"].shape == (3, 2)
+    assert values["i000_wgtbtp1"].shape == (4,)
+
+
+def test_round97_walk_first_nonbit_uses_compiled_order() -> None:
+    rows = {name: {"bit_exact": True} for name in walk.SOURCE_ORDER}
+    rows["transport_u"] = {"bit_exact": False, "differing_cells": 1}
+    rows["after_ssh"] = {"bit_exact": False, "differing_cells": 2}
+    assert walk._first_nonbit(rows) == {
+        "boundary": "transport_u", "bit_exact": False, "differing_cells": 1,
+    }
