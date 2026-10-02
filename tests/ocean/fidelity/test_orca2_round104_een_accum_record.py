@@ -80,6 +80,14 @@ def test_synthetic_record_passes_and_every_plant_fires(tmp_path):
         with pytest.raises(gate.Refusal, match="."):
             gate.run(tmp_path, tmp_path, tmp_path, plant)
 
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round98_coriolis_residual as residual,
+    )
+    assembled, census = residual.assemble_oracle_accumulators(tmp_path)
+    assert census["coverage"] == "exactly-once"
+    assert set(assembled) == set(gate.FIELDS)
+    assert all(value.shape == (148, 180) for value in assembled.values())
+
 
 def test_patch_is_additions_only_and_launcher_is_fail_closed():
     patch = (ACQ / "dynspg_ts_round104.patch").read_text(encoding="utf-8").splitlines()

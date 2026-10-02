@@ -28,12 +28,15 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round98_een_coeff_acquisition import (
     check_record as coefficient_record,
 )
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round104_een_accum_acquisition import (
+    check_record as accumulator_record,
+)
 from scripts.validate.ocean_fidelity.testcases import (
     nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
 )
 
 
-PLANTS = ("none", "coefficient-bit", "application-bit")
+PLANTS = ("none", "coefficient-bit", "application-bit", "scale-bit")
 COEFFICIENTS = (
     "ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
     "ffv_sw", "ffv_se", "ffv_nw", "ffv_ne",
@@ -245,9 +248,96 @@ def assemble_oracle_coefficients(root: Path) -> tuple[dict[str, np.ndarray], dic
     return assembled, {"coverage": "exactly-once", "records": records}
 
 
+def assemble_oracle_accumulators(root: Path) -> tuple[dict[str, np.ndarray], dict]:
+    """Assemble admitted pre-scale accumulators and scales over both ranks."""
+
+    assembled = {
+        name: np.empty((148, 180), dtype=np.float64)
+        for name in accumulator_record.FIELDS
+    }
+    coverage = np.zeros((148, 180), dtype=np.int8)
+    records = []
+    for expected_rank in (0, 1):
+        path = root / (
+            f"oracle_r104_een_accum_rank{expected_rank:04d}_kt00000001.bin"
+        )
+        row = accumulator_record.read_operand(path)
+        require(row["rank"] == expected_rank, f"{path.name}: rank moved")
+        nimpp, njmpp = row["origin"]
+        ntsi, ntsj, ntei, ntej = row["owned"]
+        i0, j0 = nimpp + ntsi - 4, njmpp + ntsj - 4
+        i1, j1 = i0 + ntei - ntsi + 1, j0 + ntej - ntsj + 1
+        require((j0, j1) == (0, 148) and 0 <= i0 < i1 <= 180,
+                f"{path.name}: owned placement moved")
+        coverage[j0:j1, i0:i1] += 1
+        for name, value in row["groups"].items():
+            assembled[name][j0:j1, i0:i1] = r97._owned_block(
+                value, ntsi, ntsj, ntei, ntej)
+        records.append({key: row[key] for key in (
+            "rank", "sha256", "bytes", "origin", "owned")})
+    require(bool(np.all(coverage == 1)),
+            "rank-owned accumulator slabs do not cover the domain exactly once")
+    return assembled, {"coverage": "exactly-once", "records": records}
+
+
+def literal_een_scales(eta, z_coord, dtype):
+    """Evaluate only dynspg_ts' eight final EEN scale statements."""
+
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    raw = z_coord.nemo_een_barotropic
+    require(raw is not None, "literal EEN scale path has no carried operands")
+    b = nemo_source_round
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    leading = jnp.asarray(1.0 / 12.0, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    hu0 = jnp.asarray(raw.hu_0, dtype=dtype)
+    hv0 = jnp.asarray(raw.hv_0, dtype=dtype)
+    wet_u = (hu0 > 0.0).astype(dtype)
+    wet_v = (hv0 > 0.0).astype(dtype)
+    r1_hu0 = b(wet_u / b(hu0 + one - wet_u))
+    r1_hv0 = b(wet_v / b(hv0 + one - wet_v))
+    e1t = jnp.asarray(raw.e1t, dtype=dtype)
+    e2t = jnp.asarray(raw.e2t, dtype=dtype)
+    e1u = jnp.asarray(raw.e1u, dtype=dtype)
+    e2u = jnp.asarray(raw.e2u, dtype=dtype)
+    e1v = jnp.asarray(raw.e1v, dtype=dtype)
+    e2v = jnp.asarray(raw.e2v, dtype=dtype)
+    area_eta = b(b(e1t * e2t) * eta)
+    east = jnp.roll(area_eta, -1, axis=1)
+    north = jnp.roll(area_eta, -1, axis=0)
+    r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
+    r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
+    r1_hu = b(r1_hu0 / b(one + r3u))
+    r1_hv = b(r1_hv0 / b(one + r3v))
+
+    def shift(value, di=0, dj=0):
+        out = jnp.roll(value, di, axis=1) if di else value
+        return jnp.roll(out, dj, axis=0) if dj else out
+
+    def scale(local_metric, reciprocal_depth, neighbor_metric):
+        return b(b(b(leading * b(one / local_metric)) * reciprocal_depth)
+                 * neighbor_metric)
+
+    return {
+        "scl_u_nw": scale(e1u, r1_hu, e1v),
+        "scl_u_ne": scale(e1u, r1_hu, shift(e1v, -1, 0)),
+        "scl_u_sw": scale(e1u, r1_hu, shift(e1v, 0, 1)),
+        "scl_u_se": scale(e1u, r1_hu, shift(e1v, -1, 1)),
+        "scl_v_nw": scale(e2v, r1_hv, shift(e2u, 1, -1)),
+        "scl_v_ne": scale(e2v, r1_hv, shift(e2u, 0, -1)),
+        "scl_v_sw": scale(e2v, r1_hv, shift(e2u, 1, 0)),
+        "scl_v_se": scale(e2v, r1_hv, e2u),
+    }
+
+
 def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             expect_commit: str, *, plant: str,
-            coefficient_root: Path | None = None) -> dict:
+            coefficient_root: Path | None = None,
+            accumulator_root: Path | None = None) -> dict:
     import jax
     import jax.numpy as jnp
 
@@ -347,6 +437,62 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     require(all(row["bit_exact"] for row in coefficient_seed.values()),
             "external literal coefficient seed is not the production Kmm seed: "
             + json.dumps(coefficient_seed, sort_keys=True))
+
+    operand_discrimination = None
+    accumulator_census = None
+    if accumulator_root is not None:
+        require(coefficient_root is not None,
+                "accumulator discrimination requires final coefficients")
+        oracle_operands, accumulator_census = assemble_oracle_accumulators(
+            accumulator_root)
+        current_scales = jax.device_get(jax.jit(
+            lambda value: literal_een_scales(value, source_z, jnp.float64),
+        )(coefficient_eta))
+        if plant == "scale-bit":
+            planted = np.array(current_scales["scl_u_nw"], copy=True)
+            planted[1, 49] = np.nextafter(
+                planted[1, 49], np.float64(np.inf))
+            current_scales = dict(current_scales, scl_u_nw=planted)
+
+        oracle_coeff, _ = assemble_oracle_coefficients(coefficient_root)
+        operand_discrimination = {}
+        for acc_name, scl_name, final_name in zip(
+                accumulator_record.ACC, accumulator_record.SCL,
+                accumulator_record.FINAL):
+            scale = np.asarray(current_scales[scl_name])
+            oracle_scale = oracle_operands[scl_name]
+            oracle_acc = oracle_operands[acc_name]
+            current_final = np.asarray(source_coeff[final_name])
+            final_reference = oracle_coeff[final_name]
+            final_bits = current_final.view(np.uint64) != final_reference.view(np.uint64)
+            nonfold_final_bits = final_bits.copy()
+            nonfold_final_bits[-1] = False
+            scale_bits = scale.view(np.uint64) != oracle_scale.view(np.uint64)
+            rebuilt = scale * oracle_acc
+            rebuilt_bits = rebuilt.view(np.uint64) != final_reference.view(np.uint64)
+            operand_discrimination[final_name] = {
+                "current_scale_bit_unequal": int(np.count_nonzero(scale_bits)),
+                "current_scale_nonfold_bit_unequal": int(
+                    np.count_nonzero(scale_bits[:-1])),
+                "scale_bit_unequal_at_nonfold_final_mismatch": int(
+                    np.count_nonzero(scale_bits & nonfold_final_bits)),
+                "nonfold_final_bit_unequal": int(
+                    np.count_nonzero(nonfold_final_bits)),
+                "rebuilt_with_nemo_acc_bit_unequal": int(
+                    np.count_nonzero(rebuilt_bits)),
+                "rebuilt_with_nemo_acc_nonfold_bit_unequal": int(
+                    np.count_nonzero(rebuilt_bits[:-1])),
+                "nemo_acc_negative_zero_at_nonfold_final_mismatch": int(
+                    np.count_nonzero(
+                        nonfold_final_bits
+                        & (oracle_acc.view(np.uint64)
+                           == np.uint64(0x8000000000000000)))),
+            }
+        if plant == "scale-bit":
+            require(any(row["current_scale_bit_unequal"] > 0
+                        for row in operand_discrimination.values()),
+                    "scale-bit plant stayed green")
+            raise GateError("scale-bit plant fired")
 
     oracle_coefficient_census = None
     oracle_coefficient_identity = None
@@ -497,6 +643,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "fold_active": bool(card.recipe.grid.fold.is_active),
         },
         "coefficient_seed_identity": coefficient_seed,
+        "accumulator_census": accumulator_census,
+        "operand_discrimination": operand_discrimination,
         "oracle_coefficient_census": oracle_coefficient_census,
         "oracle_coefficient_identity": oracle_coefficient_identity,
         "oracle_coefficient_difference_census": (
@@ -521,6 +669,7 @@ def main() -> int:
     parser.add_argument("--frame-root", type=Path, required=True)
     parser.add_argument("--spg-root", type=Path, required=True)
     parser.add_argument("--coefficient-root", type=Path)
+    parser.add_argument("--accumulator-root", type=Path)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
@@ -528,7 +677,8 @@ def main() -> int:
     try:
         result = measure(args.deck_root, args.frame_root, args.spg_root,
                          args.expect_commit, plant=args.plant,
-                         coefficient_root=args.coefficient_root)
+                         coefficient_root=args.coefficient_root,
+                         accumulator_root=args.accumulator_root)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, ValueError, GateError, rhs_walk.GateError) as error:
         if args.plant != "none":
