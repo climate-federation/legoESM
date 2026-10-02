@@ -2281,7 +2281,10 @@ class ModelDriver:
             # driver's grid; the model's mesh must carry it, or the
             # orographic GWD silently falls back to its scalar mountain
             _sso = getattr(self.grid, "subgrid_topo_stddev", None)
-            self.grid = m if _sso is None else m._replace(subgrid_topo_stddev=_sso)
+            if _sso is not None:
+                # on the MODEL's mesh: the lane asserts grid IS model.mesh
+                self.model.mesh = m._replace(subgrid_topo_stddev=_sso)
+            self.grid = self.model.mesh
             self.sigma = self.model.sigma_coord
             self._grid_lat = self.grid.grid_lat
             self._grid_lon = self.grid.grid_lon
@@ -9533,7 +9536,8 @@ class ModelDriver:
         # would silently fall back to its scalar mountain
         _sso = getattr(old_grid, "subgrid_topo_stddev", None)
         if _sso is not None:
-            self.grid = self.grid._replace(subgrid_topo_stddev=_sso)
+            self.model.mesh = self.model.mesh._replace(subgrid_topo_stddev=_sso)
+            self.grid = self.model.mesh
         self.sigma = self.model.sigma_coord
         self._grid_lat = self.grid.grid_lat
         self._grid_lon = self.grid.grid_lon

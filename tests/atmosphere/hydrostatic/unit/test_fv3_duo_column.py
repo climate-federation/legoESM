@@ -1237,6 +1237,7 @@ def test_column_lane_carries_the_subgrid_orography_through_the_grid_rebuild(tmp_
                       subgrid_orography_path=str(path))
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
+    assert drv.grid is drv.model.mesh          # the lane's identity contract
     sso_grid = drv.grid.subgrid_topo_stddev
     sso_phys = drv.physics.subgrid_topo_stddev
     assert sso_grid is not None and sso_phys is not None
