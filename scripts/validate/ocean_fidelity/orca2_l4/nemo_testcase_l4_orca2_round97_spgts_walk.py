@@ -297,7 +297,7 @@ def measure(
         return rhs_walk.score(_native_v(candidate), oracle[name], active["v"])
 
     rows = {
-        "entry_ssh_forcing": score_t(-observed.slow_forcing[0], "i000_ssh_frc"),
+        "entry_ssh_forcing": score_t(observed.slow_forcing[0], "i000_ssh_frc"),
         "entry_u_forcing": score_u(observed.slow_forcing[1], "i000_zu_frc"),
         "entry_v_forcing": score_v(observed.slow_forcing[2], "i000_zv_frc"),
         "entry_u": score_u(trace["u_entry"][0], "i000_un_e"),
