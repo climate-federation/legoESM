@@ -65,6 +65,8 @@ _ORCA2_R90FRAMES_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo")
 _ORCA2_R92RHS_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo")
+_ORCA2_R93SLOW_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -156,6 +158,8 @@ FILES = {
         _ORCA2_R90FRAMES_COMPILED / "istate.f90"),
     "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1185,6 +1189,21 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 94: independent rung-0 slow/external boundary walk ---
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:206-219': [
+        '!*  vertical averaging  *!',
+        "CALL r93_slow_put_pair( kt, 'depth', Ue_rhs, Ve_rhs )", 14],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:231-250': [
+        '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
+        'CLOSE(l2_slow_unit)', 20],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:285': (
+        "CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )", 1),
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:290-312': [
+        '!==   2D sea surface height forcing   ==!',
+        "IF( kt == nit000 ) CALL r93_slow_put2( 'ssh_rhs', sshe_rhs )", 23],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:317-326': [
+        '!    using a split-explicit time integration in forward mode',
+        'CALL r93_slow_finish( kt )', 10],
     # --- ORCA2 round 93: independent rung-0 stage-1 RHS walk ---
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:141-175': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
