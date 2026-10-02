@@ -292,6 +292,7 @@ REG = {"45-70N": (45, 70, 0, 360), "Siberia": (50, 70, 60, 140),
 # standard atmosphere).  ponytail: fixed table, use per-column geopotential if the
 # lowest-level wind ever becomes the deciding number.
 _REF: dict = {}
+H_ROOT = "/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs"
 ML_Z = np.array([106.54, 79.30, 53.92, 30.96, 10.00])
 
 
@@ -417,6 +418,26 @@ def score(a):
                 float(np.median(np.sqrt(r_))))
             rows.setdefault((rn, "m", "bulk_tau_ge_land_frac"), []).append(
                 float(np.mean(tb[rm] >= tl[rm])))
+    # CONTROL (regime): replay OLR vs the run's published December rlut over the
+    # same 45-70N land box (sftlf >= 50 on the CMOR grid; centre-registered files).
+    import glob
+    fr = sorted(glob.glob(f"{H_ROOT}/{a.run}/cmor/Amon/rlut_*_200112-200112.nc"))
+    fs = sorted(glob.glob(f"{H_ROOT}/{a.run}/cmor/fx/sftlf_*.nc"))
+    if fr and fs:
+        r_ = xr.open_dataset(fr[0])["rlut"].isel(time=0)
+        s_ = xr.open_dataset(fs[0])["sftlf"]
+        mk = ((r_.lat >= 45) & (r_.lat <= 70) & (s_ >= 50)).values
+        w_ = np.broadcast_to(np.cos(np.deg2rad(r_.lat.values))[:, None], mk.shape) * mk
+        pub = float((r_.values * w_).sum() / w_.sum())
+        rep = float(np.mean(rows[("45-70N", "m", "olr")]))
+        print(f"control OLR 45-70N land: replay 00Z {rep:.1f} vs published Dec-mean rlut "
+              f"{pub:.1f} W/m2 (diff {rep - pub:+.1f}; regime check, tolerance 15)")
+        if abs(rep - pub) > 15:
+            raise SystemExit("FATAL: replay radiation is not in the run's regime")
+    lw_f = np.mean(rows[("45-70N", "m", "lw_dn_landforcing")])
+    lw_r = np.mean(rows[("45-70N", "m", "lw_dn_inst")])
+    print(f"control DLW 45-70N land: the run's own in-loop step-0 radiation (land forcing) "
+          f"{lw_f:.1f} vs replay step-1 re-solve {lw_r:.1f} W/m2")
     print(f"{a.run} days {a.days} (00Z-state replays; '_d' = daily-mean insolation on the "
           f"00Z clouds vs ERA5 daily mean; others 00Z instants vs ERA5 00Z / the hour ending 00Z)")
     for rn in list(REG) + ["forest>50%", "open<10%"]:
