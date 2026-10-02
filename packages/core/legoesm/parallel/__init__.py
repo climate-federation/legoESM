@@ -52,8 +52,7 @@ Parallelism strategies
    halo communication scheduling.
 
 11. **Device configuration and hardware-aware optimization**:
-    ``detect_devices()`` auto-detects hardware (CPU/GPU/TPU/Metal),
-    ``configure_jax_for_device()`` applies backend-specific XLA flags,
+    ``detect_devices()`` auto-detects hardware (CPU/GPU/TPU/Metal)
     and ``mixed_precision_policy()`` returns optimal dtype policies.
 """
 
@@ -73,10 +72,7 @@ from legoesm.parallel.async_halo import (
 from legoesm.parallel.device_config import (
     HardwareConfig,
     MixedPrecisionPolicy,
-    cast_for_device,
-    configure_jax_for_device,
     get_optimal_dtype,
-    get_optimal_mesh,
     mixed_precision_policy,
 )
 from legoesm.parallel.device_config import (
@@ -281,10 +277,7 @@ __all__ = [
     # Device configuration and hardware-aware optimization
     "HardwareConfig",
     "detect_hardware",
-    "configure_jax_for_device",
     "get_optimal_dtype",
-    "get_optimal_mesh",
     "MixedPrecisionPolicy",
     "mixed_precision_policy",
-    "cast_for_device",
 ]

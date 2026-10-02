@@ -729,7 +729,7 @@ Read `src/legoesm/parallel/async_halo.py` first.
 - Assert: `config.total_memory_gb >= config.device_memory_gb`.
 
 **14e) XLA flag configuration**
-- `configure_jax_for_device(config)` should set appropriate XLA flags.
+- `legoesm.runtime.configure_backend()` should set appropriate XLA flags.
 - On GPU: verify CUDA-specific flags (if applicable).
 - On TPU: verify TPU-specific flags.
 - Assert: function does not crash on any backend.
@@ -748,7 +748,8 @@ Read `src/legoesm/parallel/async_halo.py` first.
 **Key imports:**
 ```python
 from legoesm.parallel.runtime import ParallelRuntime, validate_device_count, HaloBackend, ReductionBackend
-from legoesm.parallel.device_config import detect_hardware, configure_jax_for_device, HardwareConfig, mixed_precision_policy
+from legoesm.parallel.device_config import detect_hardware, HardwareConfig, mixed_precision_policy
+from legoesm.runtime import configure_backend
 ```
 
 ---
