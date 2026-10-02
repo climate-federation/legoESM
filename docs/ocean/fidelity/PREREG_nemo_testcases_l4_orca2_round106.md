@@ -59,3 +59,23 @@ U-stagger fold permutation; all other scale operands and rows remain fixed.
 | R106-P6 | The U-stagger fold-halo metric is the sole owner of both northern V-scale debts. | The arm makes all eight recorded scales bit-exact, with zero non-fold or other-scale movement. | Any scale bit remains or any previously exact scale moves: **REFUTED**; hold and continue operand association. |
 | R106-P7 | Exact fold scales close the 66/67 `ffv_nw/ne` coefficient magnitudes without changing their recorded accumulators or any other coefficient magnitude. | All eight final coefficients become magnitude-exact; only the already-registered accumulation zero signs remain. | Any magnitude remains or any new magnitude appears: hold without a production change. |
 | R106-P8 | The independent 68-cell substep-2 U residual survives exact coefficients. | Exact NEMO coefficients still leave 68 active U cells, maximum `2.9617669311254642e-8`, while substep-2 V remains active-bit-exact. | Any different support/value: stop and name the moved consumer statement before landing. |
+
+## Post-arm correction — measure the live accumulator directly
+
+Committed after the production one-variable fold-scale arm. R106-P6 and P7
+are **REFUTED**: the arm leaves the registered 66/67 fold coefficient
+magnitudes. The offline arm that appeared exact had combined NEMO's recorded
+accumulator with the fold-correct scale, violating the one-variable rule. The
+production commit is retained in history and reverted; no physics lands from
+that result.
+
+The next discriminator exposes the current literal builder's accumulator and
+scale without changing its default return or arithmetic, compares both against
+the admitted record, and is reverted after measurement. This is
+instrumentation, not a candidate landing.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R106-P9 | The current northwest/northeast V accumulators carry a second northern-fold magnitude difference. | Direct internal comparison finds magnitude differences on the same fold support while all non-fold accumulator magnitudes are exact. | No fold accumulator magnitude difference: reconcile why the scale-only production arm failed before any new claim. |
+| R106-P10 | Fold accumulation and final scale form a cancelling pair. | Substituting only NEMO's accumulator leaves the scale debt; substituting only NEMO's scale leaves the accumulator debt; substituting both makes both final coefficients magnitude-exact. | Either one-variable substitution alone closes the magnitude, or the pair remains non-exact: **REFUTED** and continue operand order. |
+| R106-P11 | The first fold magnitude statement is in the vertical recurrence, before final scaling. | The first direct accumulator mismatch is mapped to the compiled `ffv_nw/ne` recurrence operands at `dynspg_ts.f90:1276-1277`. | Accumulators are exact: the final scale at `:1282-1283` remains first. |
