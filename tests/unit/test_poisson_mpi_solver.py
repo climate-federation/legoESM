@@ -29,7 +29,7 @@ pytest.importorskip("mpi4jax")
 from legoesm.atmosphere.dynamics.les import (  # noqa: E402
     pseudo_incompressible_poisson as ser,
 )
-from legoesm.atmosphere.dynamics.les import (  # noqa: E402
+from legoesm.atmosphere._future import (  # noqa: E402
     pseudo_incompressible_poisson_mpi as mpi,
 )
 from mpi4py import MPI  # noqa: E402
@@ -198,3 +198,8 @@ def test_halo_wider_than_slab_refused():
     f = jnp.zeros((4, 3, 2))
     with pytest.raises(ValueError, match="halo width"):
         mpi.halo_y(f, 5, _FakeComm())
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail item poisson_mpi)")
