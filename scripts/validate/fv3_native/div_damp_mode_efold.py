@@ -163,15 +163,16 @@ def duo_project(dyn, bundle, mode, level=None, template_level=None):
     return float(num / den)
 
 
-def _duo_model(grid, cfg, damp_v=None):
-    """A duo model; ``damp_v`` (vorticity/delp del-6 coefficient, NOT a
-    model knob) overrides the deck through the model's own deck builder --
-    instrument-only, for the rotational positive control."""
+def _duo_model(grid, cfg, **deck):
+    """A duo model; ``deck`` overrides SWConfig fields through the model's
+    own deck builder -- instrument-only (``damp_v``, the vorticity/delp
+    del-6 coefficient, for the rotational positive control; the B1 top
+    sponge ``sponge_*`` fields for the sponge scan)."""
     import legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics as m
-    if damp_v is None:
+    if not deck:
         return m.FV3DuoDynamicsModel(grid, cfg)
     base = m.duo_sw_deck
-    m.duo_sw_deck = lambda **kw: base(**kw)._replace(damp_v=float(damp_v))
+    m.duo_sw_deck = lambda **kw: base(**kw)._replace(**deck)
     try:
         return m.FV3DuoDynamicsModel(grid, cfg)
     finally:
@@ -180,10 +181,18 @@ def _duo_model(grid, cfg, damp_v=None):
 
 def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
             d4_bg_list, cells_per_wave, steps: int, amp: float,
-            mode: str = "div", levels=None, damp_v_list=None):
+            mode: str = "div", levels=None, damp_v_list=None,
+            sponge_d2_list=None, sponge_layers: int = 2,
+            sponge_factor: float = 8.0):
     """``damp_v_list`` given: the arms vary the VORTICITY damping
     coefficient instead (control damp_v=0, d4_bg fixed at d4_bg_list[0])
-    -- the positive control that the rotational projection sees damping."""
+    -- the positive control that the rotational projection sees damping.
+    ``sponge_d2_list`` given (decision B1): the arms vary the top del-2
+    sponge coefficient ``sponge_d2_top`` (control 0.0 = bitwise the
+    sponge-off step, d4_bg fixed at d4_bg_list[0], ``sponge_layers`` /
+    ``sponge_factor`` fixed); the planted mode's retention per level then
+    reads the sponge's increment in the top layers."""
+    assert damp_v_list is None or sponge_d2_list is None
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
     from legoesm.grids.factory import create_fv3_duo_grid
     grid = create_fv3_duo_grid(n, 3)
@@ -195,9 +204,24 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
     for cpw in cells_per_wave:
         deg = legendre_degree_for(delta, cpw)
         vary_damp_v = damp_v_list is not None
-        d4_fixed = float(d4_bg_list[0]) if vary_damp_v else 0.0
-        cfg_ctrl = FV3DuoConfig(km=km, n_split=n_split, nord=nord, d4_bg=d4_fixed)
-        dyn_c = _duo_model(grid, cfg_ctrl, damp_v=0.0 if vary_damp_v else None)
+        vary_sponge = sponge_d2_list is not None
+        vary = vary_damp_v or vary_sponge
+        d4_fixed = float(d4_bg_list[0]) if vary else 0.0
+        # the production default carries the B1 sponge: every arm here pins
+        # it OFF so the d4_bg / damp_v scans keep their recorded baseline;
+        # the sponge scan switches it on through the deck override
+        cfg_ctrl = FV3DuoConfig(km=km, n_split=n_split, nord=nord, d4_bg=d4_fixed,
+                                sponge_del2_top_layers=0)
+        sponge_fixed = dict(sponge_del2_top_layers=int(sponge_layers),
+                            sponge_del2_top_factor=float(sponge_factor))
+
+        def _arm_deck(val):
+            if vary_damp_v:
+                return dict(damp_v=float(val))
+            if vary_sponge:
+                return dict(sponge_d2_top=float(val), **sponge_fixed)
+            return {}
+        dyn_c = _duo_model(grid, cfg_ctrl, **_arm_deck(0.0))
         rest = duo_rest_bundle(dyn_c, t_k=300.0, ps=1.0e5)
         ic, planted = duo_plant(dyn_c, rest, degree=deg, amp=amp,
                                 mode=mode_name, levels=levels)
@@ -211,12 +235,14 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
             for k in lv:
                 ctrl_k[k].append(duo_project(dyn_c, b, planted, level=k))
         b_ctrl = b
-        for d4 in (damp_v_list if vary_damp_v else d4_bg_list):
-            if vary_damp_v:
-                dyn_a = _duo_model(grid, cfg_ctrl, damp_v=d4)
+        for d4 in (damp_v_list if vary_damp_v else
+                   sponge_d2_list if vary_sponge else d4_bg_list):
+            if vary:
+                dyn_a = _duo_model(grid, cfg_ctrl, **_arm_deck(d4))
             else:
                 dyn_a = _duo_model(grid, FV3DuoConfig(
-                    km=km, n_split=n_split, nord=nord, d4_bg=d4))
+                    km=km, n_split=n_split, nord=nord, d4_bg=d4,
+                    sponge_del2_top_layers=0))
             arm, arm_k, b = [], {k: [] for k in lv}, ic
             for _ in range(steps):
                 b = dyn_a.step(b, dt)
@@ -238,15 +264,17 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
                 la = jax.tree_util.tree_leaves(b)
                 lb = jax.tree_util.tree_leaves(b_ctrl)
                 bitwise = bool(len(la) == len(lb) and all(
-                    np.array_equal(np.asarray(x), np.asarray(y))
+                    np.asarray(x).tobytes() == np.asarray(y).tobytes()
                     for x, y in zip(la, lb)))
                 r, dev = 1.0, float(np.max(np.abs(np.array(arm) / np.array(ctrl) - 1.0)))
             else:
                 r, dev = _fit_retention(arm, ctrl)
             ef_steps, ef_s = _efold(r, dt)
             rows.append(dict(lane="duo", n=n, km=km, dt=dt, n_split=n_split,
-                             nord=nord, d4_bg=(d4_fixed if vary_damp_v else d4),
+                             nord=nord, d4_bg=(d4_fixed if vary else d4),
                              damp_v=(d4 if vary_damp_v else None),
+                             sponge_d2_top=(d4 if vary_sponge else None),
+                             sponge=(sponge_fixed if vary_sponge else "off"),
                              cells_per_wave=cpw, amp=amp,
                              mode=mode_name, levels=lv, retention_per_level=per_level,
                              leakage_unplanted_arm_ctrl=leak,
@@ -259,13 +287,16 @@ def run_duo(*, n: int, km: int, dt: float, n_split: int, nord: int,
                              wall_s=time.time() - t0))
             pl = {k: round(v, 6) for k, v in per_level.items()}
             lk = {k: [round(x, 5) for x in v] for k, v in leak.items()}
-            knob = f"damp_v={d4} d4_bg={d4_fixed}" if vary_damp_v else f"d4_bg={d4}"
+            knob = (f"damp_v={d4} d4_bg={d4_fixed}" if vary_damp_v else
+                    f"sponge_d2={d4} layers={sponge_layers} factor={sponge_factor} "
+                    f"d4_bg={d4_fixed}" if vary_sponge else f"d4_bg={d4}")
             print(f"duo C{n} {mode_name} lv={lv} dt={dt} n_split={n_split} "
                   f"nord={nord} {knob} {cpw}dx(l={deg}) r={r:.6f} "
                   f"per_level={pl} leak={lk} dev={dev:.2e} "
                   f"efold={ef_steps:.2f} steps = {ef_s:.0f} s  ctrl[-1]="
                   f"{ctrl[-1] / a0:.4f} bitwise_vs_ctrl={bitwise}", flush=True)
-    n_arms = len(damp_v_list if vary_damp_v else d4_bg_list)
+    n_arms = len(damp_v_list if vary_damp_v else
+                 sponge_d2_list if vary_sponge else d4_bg_list)
     assert len(rows) == len(cells_per_wave) * n_arms, (len(rows), n_arms)
     return rows
 
@@ -434,6 +465,10 @@ def main(argv=None):
     ap.add_argument("--damp-v", type=float, nargs="+", default=None,
                     help="duo: vary the vorticity del-6 coefficient instead of "
                          "d4_bg (positive control for --mode rot)")
+    ap.add_argument("--sponge-d2", type=float, nargs="+", default=None,
+                    help="duo: scan the B1 top del-2 sponge coefficient "
+                         "(control 0.0 bitwise; --sponge-layers/--sponge-factor "
+                         "fixed; d4_bg fixed at the first --d4-bg)")
     ap.add_argument("--mpas-sponge", action="store_true",
                     help="B1: del2 top-sponge arms instead of ldiv4 arms")
     ap.add_argument("--a-h-scale", type=float, default=0.375)
@@ -461,7 +496,10 @@ def main(argv=None):
                             nord=args.nord, d4_bg_list=args.d4_bg,
                             cells_per_wave=args.cells_per_wave,
                             steps=args.steps, amp=args.amp, mode=args.mode,
-                            levels=args.levels, damp_v_list=args.damp_v)
+                            levels=args.levels, damp_v_list=args.damp_v,
+                            sponge_d2_list=args.sponge_d2,
+                            sponge_layers=args.sponge_layers,
+                            sponge_factor=args.sponge_factor)
     else:
         rows = run_mpas(level=args.level, nlev=args.nlev, dt_list=args.dt,
                         scale=args.scale, cells_per_wave=args.cells_per_wave,

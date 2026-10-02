@@ -392,6 +392,7 @@ class TestFV3DuoDynamicsModel:
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
             FV3DuoDynamicsModel,
+            duo_sw_deck,
         )
         from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
         from legoesm.grids.fv3_native_gridstruct import (
@@ -416,6 +417,11 @@ class TestFV3DuoDynamicsModel:
             kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
             w_limiter=None, out_shardings=None,
             batched=wet.step_face_batched,   # same arm as the model
+            # the model's own deck (production damping since decision 1b;
+            # cfg=None would be the oracle deck and a different step)
+            cfg=duo_sw_deck(**{k: getattr(wet.config, k) for k in (
+                "nord", "d4_bg", "sponge_del2_top_layers",
+                "sponge_del2_top_factor", "sponge_d2_top")}),
             zvir=wet.zvir, sphum_index=0)
         ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
                    ic_w["omga"], ic_w["nh"])
@@ -1235,7 +1241,7 @@ def test_wall_default_surface_is_frozen():
 # 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
 # loop never evaluates (the cloud_scheme allow-list entry's own argument);
 # non-default values stay refused, so the allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "95569efd839eee0287c4980fdff33981403573022936c7ccc6e4067d808ed709"
+_WALL_SURFACE_SHA256 = "3653ded4c18599f3b5ededa5350f1d3d8e75648c12468b7efe6ef92875c9e043"
 
 
 def test_wall_leaf_types_are_scalar():

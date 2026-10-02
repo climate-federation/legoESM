@@ -4500,11 +4500,13 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
 
 def test_fv3_duo_div_damp_flags_round_trip_and_validate():
     """--fv3-duo-nord / --fv3-duo-d4-bg reach DycoreConfig (defaults = the
-    oracle deck nord=2, d4_bg=0.12); validate_strict refuses an order
-    outside 0..3, a negative coefficient, and a non-deck value off the
-    fv3_duo discretization (decision B2)."""
+    PRODUCTION values nord=1, d4_bg=0.05, user decision 1b 2026-10-02);
+    validate_strict refuses an order outside 0..3, a negative coefficient,
+    and a non-default value off the fv3_duo discretization (decision B2)."""
     cfg = _fv3_duo_cfg([])
-    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (2, 0.12)
+    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (1, 0.05)
+    assert (_fv3_duo_cfg(["--fv3-duo-nord", "2", "--fv3-duo-d4-bg", "0.12"])
+            .dycore.fv3_duo_nord) == 2
     cfg = _fv3_duo_cfg(["--fv3-duo-nord", "1", "--fv3-duo-d4-bg", "0.07"])
     assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (1, 0.07)
     cfg.validate_strict()
@@ -4515,3 +4517,29 @@ def test_fv3_duo_div_damp_flags_round_trip_and_validate():
     with pytest.raises(ValueError, match="fv3_duo_nord/fv3_duo_d4_bg"):
         cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
     _fv3_duo_cfg([]).validate_strict()
+
+
+def test_fv3_duo_sponge_flags_round_trip_and_validate():
+    """--fv3-duo-sponge-{layers,factor,d2-top} reach DycoreConfig (defaults
+    = production: 2 layers, factor 8, the measured coefficient; decision
+    B1); validate_strict refuses a negative depth, a factor < 1, a
+    negative/non-finite coefficient, and a non-default sponge off the
+    fv3_duo discretization."""
+    from legoesm.driver.config import DycoreConfig
+    cfg = _fv3_duo_cfg([])
+    d = cfg.dycore
+    assert (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor) == (2, 8.0)
+    assert d.fv3_duo_sponge_d2_top == DycoreConfig().fv3_duo_sponge_d2_top > 0.0
+    cfg = _fv3_duo_cfg(["--fv3-duo-sponge-layers", "0", "--fv3-duo-sponge-factor",
+                        "4", "--fv3-duo-sponge-d2-top", "0.01"])
+    d = cfg.dycore
+    assert (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor,
+            d.fv3_duo_sponge_d2_top) == (0, 4.0, 0.01)
+    cfg.validate_strict()
+    for field, bad in (("fv3_duo_sponge_layers", -1), ("fv3_duo_sponge_factor", 0.5),
+                       ("fv3_duo_sponge_d2_top", -0.1),
+                       ("fv3_duo_sponge_d2_top", float("nan"))):
+        with pytest.raises(ValueError, match=field):
+            cfg._replace(dycore=cfg.dycore._replace(**{field: bad})).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_sponge_"):
+        cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()

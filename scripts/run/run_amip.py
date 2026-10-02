@@ -1024,17 +1024,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "(fv_mapz fill -> fillz column borrow). Default off = the "
               "certified oracle deck; the CAM6 deck sets it."))
     parser.add_argument(
-        "--fv3-duo-nord", type=int, default=2, choices=(0, 1, 2, 3),
+        "--fv3-duo-nord", type=int, default=1, choices=(0, 1, 2, 3),
         help=("fv3_duo: d_sw5 divergence-damping order (1 = del-4, the CAM6 "
               "ldiv4 class and FV3's default; 2 = del-6, the certified "
-              "oracle deck). Default 2 = the oracle deck; the CAM6 deck "
-              "sets 1 (decision B2)."))
+              "oracle deck). Default 1 = production (decision B2); oracle-"
+              "parity runs pass 2 with --fv3-duo-d4-bg 0.12."))
     parser.add_argument(
-        "--fv3-duo-d4-bg", type=float, default=0.12,
+        "--fv3-duo-d4-bg", type=float, default=0.05,
         help=("fv3_duo: d_sw5 divergence-damping coefficient d4_bg "
-              "(sw_core dd8 = (da_min_c*d4_bg)**(nord+1)). Default 0.12 = "
-              "the oracle deck; the CAM6 deck's value is MATCHED to MPAS "
-              "ldiv4 by measurement (decision B2)."))
+              "(sw_core dd8 = (da_min_c*d4_bg)**(nord+1)). Default 0.05 = "
+              "MATCHED to MPAS ldiv4 by measurement (decision B2); the "
+              "oracle deck is 0.12."))
+    parser.add_argument(
+        "--fv3-duo-sponge-layers", type=int, default=2,
+        help=("fv3_duo: top-of-model del-2 momentum sponge depth in levels "
+              "(decision B1: the MPAS/CAM top sponge, additive del-2 on "
+              "divergence + vorticity). Default 2 = production; 0 = off "
+              "(the oracle deck)."))
+    parser.add_argument(
+        "--fv3-duo-sponge-factor", type=float, default=8.0,
+        help=("fv3_duo: sponge coefficient decay per layer, "
+              "coef_k = d2_top * factor**(-k/layers). Default 8 (MPAS: x8, "
+              "xsqrt8 on its two layers)."))
+    parser.add_argument(
+        "--fv3-duo-sponge-d2-top", type=float, default=0.0016,
+        help=("fv3_duo: top-layer sponge del-2 coefficient (dimensionless, "
+              "times da_min_c as d2_bg). Default MATCHED to MPAS's total "
+              "top-layer del-2 at 8dx by measurement (decision B1)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -2249,6 +2265,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_fill=args.fv3_duo_fill,
         fv3_duo_nord=args.fv3_duo_nord,
         fv3_duo_d4_bg=args.fv3_duo_d4_bg,
+        fv3_duo_sponge_layers=args.fv3_duo_sponge_layers,
+        fv3_duo_sponge_factor=args.fv3_duo_sponge_factor,
+        fv3_duo_sponge_d2_top=args.fv3_duo_sponge_d2_top,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,

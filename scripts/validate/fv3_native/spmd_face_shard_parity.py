@@ -128,13 +128,16 @@ def main(argv=None):
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.grids.factory import create_fv3_duo_grid
 
     bundle_grid = create_fv3_duo_grid(args.resolution)
     # arm A reference: the certified loop trace (pinned: the model
     # default is the batched arm since 2026-09-30)
-    model = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
+    model = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(**ORACLE_DAMPING, km=args.km),
                                 step_face_batched=False)
     ic = model.dcmip16_initial_state(do_pert=True)
 
@@ -156,7 +159,7 @@ def main(argv=None):
     # certified unconstrained jit.
     mesh = Mesh(np.array(devs[:args.n_shards]), ("face",))
     shard = NamedSharding(mesh, P("face"))
-    model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
+    model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(**ORACLE_DAMPING, km=args.km),
                                    step_out_shardings=shard,
                                    step_spmd_mesh=(mesh if args.ring
                                                    else None),

@@ -459,8 +459,9 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
         listing = ", ".join(f"{p}={v!r}" for p, v in offending)
         raise ValueError(
             f"fv3_duo (slice 1) runs ONLY the certified dry-dynamics deck; "
-            f"the driver lane consumes no other configuration, so each field "
-            f"below would be SILENTLY inert -- a successful wrong experiment. "
+            f"the driver lane holds every other field at its default (most are "
+            f"inert here; the d_sw5 damping knobs are consumed but pinned to the "
+            f"production deck) -- a successful wrong experiment otherwise. "
             f"Non-default unsupported fields ({len(offending)}): {listing}. "
             f"Allowed non-default fields: "
             f"{sorted(_FV3_DUO_ALLOWED_NONDEFAULT)}. Reset the offenders or "
@@ -591,7 +592,10 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
                              storage_dtype="float64", moist=moist, eta=eta,
                              fill=config.dycore.fv3_duo_fill,
                              nord=config.dycore.fv3_duo_nord,
-                             d4_bg=config.dycore.fv3_duo_d4_bg))
+                             d4_bg=config.dycore.fv3_duo_d4_bg,
+                             sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
+                             sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
+                             sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top))
     return FV3DuoColumnModel(
         dyn, tracer_names=registry.names,
         conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
@@ -1118,6 +1122,11 @@ def create_atmosphere_dycore(
             # on the adiabatic core is the misleading configuration GLM
             # flagged, so the coupling follows the scheme, never a knob.
             moist=(config.microphysics == "kessler"),
+            nord=config.dycore.fv3_duo_nord,
+            d4_bg=config.dycore.fv3_duo_d4_bg,
+            sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
+            sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
+            sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top,
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").

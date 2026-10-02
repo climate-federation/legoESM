@@ -159,6 +159,12 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     require_bool(fname, "batched", batched)
     require_no_remap_needed(km, remap_follows=remap_follows)
     deck = _TAIL_DECK if cfg is None else cfg
+    # decision B1: per-level additive del-2 sponge coefficient (static
+    # floats; exactly 0.0 below the sponge; layers = 0 -> all zero, OFF)
+    from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+    d2k = sponge_d2_profile(km, deck.sponge_del2_top_layers,
+                            deck.sponge_del2_top_factor, deck.sponge_d2_top)
+    sponge_on = bool(deck.sponge_del2_top_layers > 0 and deck.sponge_d2_top > 0.0)
     if not isinstance(deck, SWConfig):
         raise TypeError(
             f"{fname}: cfg must be an SWConfig or None, got {type(deck)!r}")
@@ -228,6 +234,7 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     if batched:
         return _dsw_tail_phase_3d_batched(
             ctx, state, csw_outs, dsw_outs, dt, km, deck=deck,
+            d2k=d2k, sponge_on=sponge_on,
             hydrostatic=hydrostatic, nh_damp_w=nh_damp_w)
 
     # --- d_sw3 at every level, all faces (needed before barrier 2) -------
@@ -317,7 +324,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                 dsw_outs["ra_y"][t][..., k],
                 s4["ke"], gs_t, fl_t, bd, npx, npx, dt=dt,
                 hord_vt=deck.hord_vt, nord=deck.nord,
-                dddmp=deck.dddmp, d2_bg=deck.d2_bg, d4_bg=deck.d4_bg,
+                dddmp=deck.dddmp, d2_bg=deck.d2_bg + d2k[k],
+                d4_bg=deck.d4_bg,
                 d_con=0.0, hydrostatic=hydrostatic,
                 w=None if hydrostatic else dsw_outs["w"][t][..., k],
                 dw=None if hydrostatic else dsw_outs["dw"][t][..., k],
@@ -326,7 +334,12 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                            s5["wk"], s5["vortfluxx"], s5["vortfluxy"],
                            gs_t, fl_t, bd, npx, npx,
                            nord_v=deck.nord_v, damp_v=deck.damp_v,
-                           d_con=0.0)
+                           # per-level STATIC gate on the loop path: levels
+                           # below the sponge trace no del-2 chain at all
+                           # (bitwise the pre-B1 step there; the batched arm
+                           # adds an exact 0.0 flux instead)
+                           d_con=0.0, sponge_on=bool(sponge_on and d2k[k] > 0.0),
+                           d2_sponge=d2k[k])
             u_lv.append(s6["u"])
             v_lv.append(s6["v"])
             if not hydrostatic:
@@ -365,7 +378,7 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
 
 
 def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
-                               *, deck, hydrostatic, nh_damp_w) -> dict:
+                               *, deck, hydrostatic, nh_damp_w, d2k=None, sponge_on=False) -> dict:
     """The vmap-over-faces arm of :func:`dsw_tail_phase_3d` (C2a).
 
     Entry gates already ran in the caller.  The ``d_sw3`` and
@@ -440,7 +453,7 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
     def one_face_tail(u_k, v_k, ut_k, vt_k, delp_k, uc_k, vc_k, ua_k,
                       va_k, dg_k, crx_k, cry_k, xfx_k, yfx_k, rax_k,
                       ray_k, ubbtemp_k, vbb_k, ubb_b, vbbtemp_b, w_k,
-                      dw_k, gs_t, da_t, dac_t):
+                      dw_k, d2_k, gs_t, da_t, dac_t):
         fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
         # S12 (dyn_core.F90:1015-1020): pre- x post-barrier product,
         # identical formula and window to the loop path.
@@ -453,14 +466,15 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
                        crx_k, cry_k, xfx_k, yfx_k, rax_k, ray_k,
                        s4["ke"], gs_t, fl, bd, npx, npx, dt=dt,
                        hord_vt=deck.hord_vt, nord=deck.nord,
-                       dddmp=deck.dddmp, d2_bg=deck.d2_bg,
+                       dddmp=deck.dddmp, d2_bg=deck.d2_bg + d2_k,
                        d4_bg=deck.d4_bg, d_con=0.0,
                        hydrostatic=hydrostatic, w=w_k, dw=dw_k,
                        damp_w=nh_damp_w)
         s6 = d_sw6_duo(u_k, v_k, s5["ut"], s5["vt"], s5["ke"],
                        s5["wk"], s5["vortfluxx"], s5["vortfluxy"],
                        gs_t, fl, bd, npx, npx, nord_v=deck.nord_v,
-                       damp_v=deck.damp_v, d_con=0.0)
+                       damp_v=deck.damp_v, d_con=0.0,
+                       sponge_on=sponge_on, d2_sponge=d2_k)
         face = {"u": s6["u"], "v": s6["v"], "ke_corner": ke,
                 "ke": s5["ke"], "wk": s5["wk"],
                 "divg_d": s5["divg_d"], "delpc": s5["delpc"]}
@@ -468,13 +482,17 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
             face["w"] = s5["w"]
         return face
 
-    vft = jax.vmap(one_face_tail, in_axes=(0,) * 25)
+    # d2_k (the per-level sponge coefficient) is one scalar per LEVEL:
+    # shared across faces (None here), mapped over its own axis 0 in the
+    # level vmap below.
+    vft = jax.vmap(one_face_tail, in_axes=(0,) * 22 + (None, 0, 0, 0))
     # w/dw are None in the hydrostatic arm: a None operand has no
     # leaves, so its in_axes entry is irrelevant (same as on the face
     # vmap above); every array operand carries its level axis at 3.
     w_ax = None if hydrostatic else 3
-    vfkt = jax.vmap(vft, in_axes=(3,) * 20 + (w_ax, w_ax, None, None, None),
+    vfkt = jax.vmap(vft, in_axes=(3,) * 20 + (w_ax, w_ax, 0, None, None, None),
                     out_axes=3)
+    d2k_arr = jnp.asarray(d2k if d2k is not None else (0.0,) * km, dtype=fdt)
     per = vfkt(
         state["u"], state["v"],
         dsw_outs["ut"], dsw_outs["vt"], dsw_outs["delp"],
@@ -486,6 +504,7 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
         s3["ubbtemp"], s3["vbb"], xb6, yb6,
         None if hydrostatic else dsw_outs["w"],
         None if hydrostatic else dsw_outs["dw"],
+        d2k_arr,
         bview["gs"], da6, dac6)
 
     # --- assembly: identical keys and layouts to the loop path --------

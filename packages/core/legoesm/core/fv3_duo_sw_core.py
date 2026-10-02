@@ -3016,6 +3016,7 @@ _DSW6_KEYS = ("del6_v", "del6_u", "rarea")
 def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
               flags: GridFlags, bd, npx: int, npy: int, *,
               nord_v: int = 1, damp_v: float = 0.2, d_con: float = 0.0,
+              sponge_on: bool = False, d2_sponge=0.0,
               duogrid: bool = True,
               workspace_sentinel: float = 1.0e30):
     """JAX twin of ``fv3_native_duo_sw_core.d_sw6_duo``
@@ -3109,6 +3110,24 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
                 rd(u, is_, ie, js, je + 1) + rd(vt, is_, ie, js, je + 1))
         v = _fs(v, isd, jsd, is_, ie + 1, js, je,
                 rd(v, is_, ie + 1, js, je) - rd(ut, is_, ie + 1, js, je))
+
+    # ---- decision B1: ADDITIVE del-2 sponge on the relative vorticity --
+    # Twin of the NumPy lane's second nord=0 del6_vt_flux chain.
+    # ``sponge_on`` is the STATIC gate (deck: layers > 0 and d2_top > 0);
+    # ``d2_sponge`` is the per-level coefficient and may be TRACED (the
+    # batched tail vmaps it over levels), exactly 0.0 below the sponge so
+    # the added fluxes are exactly 0.0 there.  Zero-filled seeds: the
+    # del-6 work arrays above are not reused (codex design review).
+    if sponge_on:
+        ut2, vt2 = del6_vt_flux(
+            0, npx, npy, d2_sponge * flags.da_min_c, wk, bd, g["del6_u"],
+            g["del6_v"], g["rarea"], flags.bounded_domain, flags.sw_corner,
+            flags.se_corner, flags.nw_corner, flags.ne_corner, True,
+            fx2=jnp.zeros_like(ut), fy2=jnp.zeros_like(vt))
+        u = _fs(u, isd, jsd, is_, ie, js, je + 1,
+                rd(u, is_, ie, js, je + 1) + rd(vt2, is_, ie, js, je + 1))
+        v = _fs(v, isd, jsd, is_, ie + 1, js, je,
+                rd(v, is_, ie + 1, js, je) - rd(ut2, is_, ie + 1, js, je))
 
     # dtype follows storage (fp32/fp64), from u
     ub = jnp.full((nci + 1, ncj + 1), workspace_sentinel, u.dtype)
@@ -3246,7 +3265,7 @@ def make_d_sw6_duo_jit(fn=d_sw6_duo):
     return jax.jit(
         fn, static_argnums=(9, 10, 11, 12),
         static_argnames=("nord_v", "damp_v", "d_con", "duogrid",
-                         "workspace_sentinel"))
+                         "workspace_sentinel", "sponge_on"))
 
 
 

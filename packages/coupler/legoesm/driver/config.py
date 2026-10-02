@@ -345,10 +345,21 @@ class DycoreConfig(NamedTuple):
     fv3_duo_fill: bool = False
     # fv3_duo d_sw5 divergence damping: order (1 = del-4, CAM6 ldiv4 class;
     # 2 = del-6, the oracle deck) and coefficient d4_bg (sw_core.F90:1811).
-    # Defaults = the certified oracle deck; the CAM6 deck sets nord=1 with
-    # d4_bg matched to MPAS's ldiv4 by measurement (decision B2, 2026-10-01).
-    fv3_duo_nord: int = 2
-    fv3_duo_d4_bg: float = 0.12
+    # Defaults = the PRODUCTION values, matched to MPAS's ldiv4 by
+    # measurement (decision B2 2026-10-01; default moved by user decision
+    # 1b 2026-10-02).  The oracle deck (2, 0.12) is selected explicitly by
+    # oracle-parity runs.
+    fv3_duo_nord: int = 1
+    fv3_duo_d4_bg: float = 0.05
+    # fv3_duo top-of-model del-2 momentum sponge (decision B1 / 2a, user
+    # 2026-10-02): the MPAS/CAM top sponge ported as an additive del-2 on
+    # divergence and vorticity over the top `layers` levels, coefficient
+    # sponge_d2_top * factor**(-k/layers).  Defaults = production, the
+    # coefficient MATCHED to MPAS's total top-layer del-2 by measurement;
+    # layers=0 = OFF (the oracle deck, selected by oracle-parity runs).
+    fv3_duo_sponge_layers: int = 2
+    fv3_duo_sponge_factor: float = 8.0
+    fv3_duo_sponge_d2_top: float = 0.0016
 
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
@@ -2025,12 +2036,35 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.fv3_duo_d4_bg must be a finite number >= 0, got "
                 f"{d.fv3_duo_d4_bg!r}")
-        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg) != (2, 0.12)
+        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg) != (1, 0.05)
                 and d.discretization != "fv3_duo"):
             errors.append(
                 "dycore.fv3_duo_nord/fv3_duo_d4_bg are the fv3_duo d_sw5 "
                 f"divergence damping; got dycore.discretization="
                 f"{d.discretization!r}")
+        if not (isinstance(d.fv3_duo_sponge_layers, int)
+                and d.fv3_duo_sponge_layers >= 0):
+            errors.append("dycore.fv3_duo_sponge_layers must be an int >= 0, "
+                          f"got {d.fv3_duo_sponge_layers!r}")
+        if not (isinstance(d.fv3_duo_sponge_factor, (int, float))
+                and math.isfinite(d.fv3_duo_sponge_factor)
+                and d.fv3_duo_sponge_factor >= 1):
+            errors.append("dycore.fv3_duo_sponge_factor must be finite and >= 1, "
+                          f"got {d.fv3_duo_sponge_factor!r}")
+        if not (isinstance(d.fv3_duo_sponge_d2_top, (int, float))
+                and math.isfinite(d.fv3_duo_sponge_d2_top)
+                and d.fv3_duo_sponge_d2_top >= 0):
+            errors.append("dycore.fv3_duo_sponge_d2_top must be finite and >= 0, "
+                          f"got {d.fv3_duo_sponge_d2_top!r}")
+        _sponge = (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor,
+                   d.fv3_duo_sponge_d2_top)
+        _sponge_default = (DycoreConfig().fv3_duo_sponge_layers,
+                           DycoreConfig().fv3_duo_sponge_factor,
+                           DycoreConfig().fv3_duo_sponge_d2_top)
+        if _sponge != _sponge_default and d.discretization != "fv3_duo":
+            errors.append(
+                "dycore.fv3_duo_sponge_* is the fv3_duo top del-2 sponge; got "
+                f"dycore.discretization={d.discretization!r}")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:

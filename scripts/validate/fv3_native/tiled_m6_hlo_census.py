@@ -11,13 +11,17 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 from jax.sharding import Mesh
-from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig, FV3DuoDynamicsModel
+from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
 from legoesm.grids.factory import create_fv3_duo_grid
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 48
 kt = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 grid = create_fv3_duo_grid(N)
 mesh = Mesh(np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt), ("face", "tile_i", "tile_j"))
-m = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=10, hydrostatic=True, n_split=3), step_spmd_mesh=mesh, step_windows=(kt, 11))
+m = FV3DuoDynamicsModel(grid, FV3DuoConfig(**ORACLE_DAMPING, km=10, hydrostatic=True, n_split=3), step_spmd_mesh=mesh, step_windows=(kt, 11))
 if len(sys.argv) > 3 and sys.argv[3] == "pack":
     m._window_comm.pack_pad_refresh = True
     print("M8-A packed pad refresh ON")

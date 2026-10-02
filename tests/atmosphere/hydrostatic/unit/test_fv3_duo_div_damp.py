@@ -50,12 +50,13 @@ def _bundles_equal(a, b):
     return all(np.array_equal(np.asarray(x), np.asarray(y)) for x, y in zip(la, lb))
 
 
-def test_default_config_step_is_bitwise_the_cfg_none_step(grid, monkeypatch):
-    """The model now always passes a deck; at the oracle values that deck
-    must reproduce the ``cfg=None`` step bit for bit (the certified
-    identities rest on it)."""
+def test_oracle_pinned_step_is_bitwise_the_cfg_none_step(grid, monkeypatch):
+    """The model now always passes a deck; at the ORACLE values (pinned
+    explicitly, no longer the default) that deck must reproduce the
+    ``cfg=None`` step bit for bit (the certified identities rest on it)."""
     import legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics as m
-    dyn = m.FV3DuoDynamicsModel(grid, m.FV3DuoConfig(km=KM, n_split=2))
+    dyn = m.FV3DuoDynamicsModel(
+        grid, m.FV3DuoConfig(km=KM, n_split=2, **m.ORACLE_DAMPING))
     ic = dyn.dcmip16_initial_state(n_tracers=1)
     out = dyn.step(ic, 120.0)
     monkeypatch.setattr(m, "duo_sw_deck", lambda **kw: None)
@@ -63,9 +64,28 @@ def test_default_config_step_is_bitwise_the_cfg_none_step(grid, monkeypatch):
     assert _bundles_equal(dyn_none.step(ic, 120.0), out)
 
 
+def test_default_is_the_production_deck_not_the_oracle(grid):
+    """User decision 1b (2026-10-02): the DEFAULT is the MPAS-matched
+    production damping (nord=1, d4_bg=0.05); the oracle deck is opt-in
+    and differs from it on a real step."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel, ORACLE_DAMPING)
+    assert (FV3DuoConfig().nord, FV3DuoConfig().d4_bg) == (1, 0.05)
+    assert (FV3DuoConfig().sponge_del2_top_layers,
+            FV3DuoConfig().sponge_del2_top_factor) == (2, 8.0)
+    assert FV3DuoConfig().sponge_d2_top > 0.0
+    assert ORACLE_DAMPING == {"nord": 2, "d4_bg": 0.12, "sponge_del2_top_layers": 0}
+    prod = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2))
+    ic = prod.dcmip16_initial_state(n_tracers=1)
+    oracle = FV3DuoDynamicsModel(
+        grid, FV3DuoConfig(km=KM, n_split=2, **ORACLE_DAMPING))
+    assert not _bundles_equal(prod.step(ic, 120.0), oracle.step(ic, 120.0))
+
+
 def test_nord_and_d4_bg_bind_on_the_step(grid):
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig, FV3DuoDynamicsModel
-    base = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2))
+    base = FV3DuoDynamicsModel(
+        grid, FV3DuoConfig(km=KM, n_split=2, nord=2, d4_bg=0.12))
     ic = base.dcmip16_initial_state(n_tracers=1)
     ref = base.step(ic, 120.0)
     del4 = FV3DuoDynamicsModel(
@@ -87,11 +107,16 @@ def test_factory_forwards_the_knobs_to_the_duo_config():
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
     from legoesm.driver import component_factory as cf
     from legoesm.driver.config import DycoreConfig
-    assert FV3DuoConfig()._asdict()["nord"] == DycoreConfig().fv3_duo_nord == 2
-    assert FV3DuoConfig()._asdict()["d4_bg"] == DycoreConfig().fv3_duo_d4_bg == 0.12
+    assert FV3DuoConfig()._asdict()["nord"] == DycoreConfig().fv3_duo_nord == 1
+    assert FV3DuoConfig()._asdict()["d4_bg"] == DycoreConfig().fv3_duo_d4_bg == 0.05
     src = inspect.getsource(cf._create_fv3_duo_column_model)
-    assert "nord=config.dycore.fv3_duo_nord" in src
-    assert "d4_bg=config.dycore.fv3_duo_d4_bg" in src
+    assert src.count("nord=config.dycore.fv3_duo_nord") == 1
+    assert src.count("d4_bg=config.dycore.fv3_duo_d4_bg") == 1
+    src_hs = inspect.getsource(cf.create_atmosphere_dycore)
+    assert src_hs.count("nord=config.dycore.fv3_duo_nord") >= 1
+    for name in ("layers", "factor", "d2_top"):
+        assert src.count(f"config.dycore.fv3_duo_sponge_{name}") == 1, name
+        assert src_hs.count(f"config.dycore.fv3_duo_sponge_{name}") >= 1, name
 
 
 def test_merged_deck_knobs_are_read_only_by_their_own_phase():
@@ -111,3 +136,25 @@ def test_merged_deck_knobs_are_read_only_by_their_own_phase():
     assert re.search(r"\.dddmp\b", tail)                 # tail reads it
     assert not re.search(r"\.dddmp\b", transport)
     assert not re.search(r"\.hord_tr\b", tail)
+
+
+def test_default_sponge_binds_on_the_step_and_off_is_bitwise_the_bare_deck(grid):
+    """Decision B1: the default deck carries the top del-2 sponge (the
+    step differs from layers=0), a zero coefficient under layers=2 is
+    bitwise the layers=0 step (the static gate, no dormant term), and the
+    sponge needs dddmp == 0 on the deck."""
+    import pytest
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel, duo_sw_deck)
+    on = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2))
+    off = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2, sponge_del2_top_layers=0))
+    zero = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2, sponge_d2_top=0.0))
+    ic = on.dcmip16_initial_state(n_tracers=1)
+    o_on, o_off, o_zero = on.step(ic, 120.0), off.step(ic, 120.0), zero.step(ic, 120.0)
+    assert not _bundles_equal(o_on, o_off)
+    assert _bundles_equal(o_zero, o_off)
+    with pytest.raises(ValueError, match="layers"):
+        FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2, sponge_del2_top_layers=KM + 1))
+    assert duo_sw_deck(nord=1, d4_bg=0.05).sponge_del2_top_layers == 0
+    deck = duo_sw_deck(nord=1, d4_bg=0.05, sponge_del2_top_layers=2, sponge_d2_top=0.01)
+    assert deck.dddmp == 0.0 and deck.sponge_d2_top == 0.01

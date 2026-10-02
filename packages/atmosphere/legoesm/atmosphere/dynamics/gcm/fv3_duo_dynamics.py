@@ -66,6 +66,12 @@ from legoesm.grids.fv3_native_gridstruct import (FV3_CP_AIR, FV3_KAPPA,
 FV3_DUO_STATE_KEYS = ("state", "press", "q", "omga", "nh")
 
 
+#: The certified oracle deck's damping (DUO_TAIL_CFG: del-6, 0.12; no top
+#: sponge).  Oracle-parity tooling and tests pin it: ``FV3DuoConfig(km=...,
+#: **ORACLE_DAMPING)``.  The config DEFAULTS are the production values.
+ORACLE_DAMPING = {"nord": 2, "d4_bg": 0.12, "sponge_del2_top_layers": 0}
+
+
 class FV3DuoConfig(NamedTuple):
     """Deck constants of the certified duo lane (all STATIC — baked into
     the compiled step; a new value is a new compile).
@@ -120,15 +126,33 @@ class FV3DuoConfig(NamedTuple):
     #: d_sw5 divergence-damping ORDER and coefficient (sw_core.F90:1811
     #: ``dd8 = (da_min_c*d4_bg)**(nord+1)`` on ``divg_d`` every acoustic
     #: substep): nord=1 is del-4 (CAM6's ldiv4 class, FV3's own default),
-    #: nord=2 del-6.  Defaults = the certified oracle deck (DUO_TAIL_CFG);
-    #: the CAM6 deck sets nord=1 with d4_bg MATCHED to MPAS by measurement
-    #: (decision B2, 2026-10-01).  ``nord_v``/``damp_v`` (vorticity and
-    #: delp damping) are NOT exposed: outside B2.
-    nord: int = 2
-    d4_bg: float = 0.12
+    #: nord=2 del-6.  DEFAULTS = the production values, nord=1 with d4_bg
+    #: MATCHED to MPAS's ldiv4 by measurement (3.0%/step of a 4-cell
+    #: divergent mode; decision B2 2026-10-01, default moved by user
+    #: decision 1b 2026-10-02).  The certified oracle deck is
+    #: ``ORACLE_DAMPING`` (nord=2, d4_bg=0.12): every oracle-parity
+    #: construction pins it explicitly.  ``nord_v``/``damp_v`` (vorticity
+    #: and delp damping) are NOT exposed: outside B2.
+    nord: int = 1
+    d4_bg: float = 0.05
+    #: Decision B1 (user 2026-10-02, 2a): the MPAS/CAM top-of-model
+    #: momentum del-2 sponge ported as an ADDITIVE del-2 on the
+    #: divergence (d_sw5 ``d2_bg`` increment) AND the relative vorticity
+    #: (a second nord=0 ``del6_vt_flux`` chain in d_sw6), equal
+    #: coefficients, no mass/w damping, on top of the del-4/del-6 above.
+    #: Profile ``sponge_d2_top * factor**(-k/layers)`` for the top
+    #: ``layers`` levels, exactly 0 below (MPAS ``nu_del2 *
+    #: factor**((n-k)/n)``, x8 / xsqrt8 on its two layers).  The
+    #: coefficient is MATCHED to MPAS's TOTAL top-layer del-2 at 8dx by
+    #: measurement (0.0048/step divergent, 0.0049 rotational, C24 dt=150
+    #: s; q_review/b1_measurement.md).  ``layers=0`` = OFF (the oracle deck).
+    sponge_del2_top_layers: int = 2
+    sponge_del2_top_factor: float = 8.0
+    sponge_d2_top: float = 0.0016
 
 
-def duo_sw_deck(*, nord: int, d4_bg: float):
+def duo_sw_deck(*, nord: int, d4_bg: float, sponge_del2_top_layers: int = 0,
+                sponge_del2_top_factor: float = 8.0, sponge_d2_top: float = 0.0):
     """The duo's ``SWConfig`` deck with the B2 knobs applied: the union of
     the transport deck (``DUO_DECK_CFG``) and the tail deck
     (``DUO_TAIL_CFG``) -- disjoint except for the three keys they share
@@ -147,8 +171,17 @@ def duo_sw_deck(*, nord: int, d4_bg: float):
         raise ValueError(f"nord must be in 0..3 (sw_core del-nord), got {nord}")
     if not (np.isfinite(d4_bg) and d4_bg >= 0.0):
         raise ValueError(f"d4_bg must be finite and >= 0, got {d4_bg}")
-    return SWConfig.from_mapping({**DUO_DECK_CFG, **DUO_TAIL_CFG,
-                                  "nord": int(nord), "d4_bg": float(d4_bg)})
+    deck = SWConfig.from_mapping({
+        **DUO_DECK_CFG, **DUO_TAIL_CFG, "nord": int(nord), "d4_bg": float(d4_bg),
+        "sponge_del2_top_layers": int(sponge_del2_top_layers),
+        "sponge_del2_top_factor": float(sponge_del2_top_factor),
+        "sponge_d2_top": float(sponge_d2_top)})
+    if deck.sponge_del2_top_layers > 0 and deck.sponge_d2_top > 0.0 and deck.dddmp != 0.0:
+        # d_sw5 takes max(d2_bg, dddmp*|vort|): a Smagorinsky del-2 would
+        # swallow the sponge increment unevenly; the duo deck runs dddmp=0.
+        raise ValueError("the top del-2 sponge needs dddmp == 0 on the deck, "
+                         f"got dddmp={deck.dddmp}")
+    return deck
 
 
 def duo_eta_table(eta: str, km: int):
@@ -383,10 +416,17 @@ class FV3DuoDynamicsModel:
         self._ptop = float(ptop)
         # The resolved NH deck runs W_LIMITER=T (fv_mapz.F90:368); the core
         # refuses hydrostatic=False without an explicit choice.
+        from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+        sponge_d2_profile(config.km, config.sponge_del2_top_layers,
+                          config.sponge_del2_top_factor, config.sponge_d2_top)
         self._step_fn = make_fv_dynamics_step_jit(
             self._ctx_jax, config.km,
             k_split=config.k_split, n_split=config.n_split,
-            cfg=duo_sw_deck(nord=config.nord, d4_bg=config.d4_bg),
+            cfg=duo_sw_deck(
+                nord=config.nord, d4_bg=config.d4_bg,
+                sponge_del2_top_layers=config.sponge_del2_top_layers,
+                sponge_del2_top_factor=config.sponge_del2_top_factor,
+                sponge_d2_top=config.sponge_d2_top),
             ptop=self._ptop, ak=self._ak, bk=self._bk,
             akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
             kord_mt=config.kord_mt, kord_tm=config.kord_tm,
