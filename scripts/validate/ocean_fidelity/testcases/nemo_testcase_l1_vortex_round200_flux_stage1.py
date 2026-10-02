@@ -50,7 +50,8 @@ DEFAULT_ROOT = Path(
     "oracle_stage123_flux_terms")
 # The boundaries this walk can score with an existing WRITE-only seam, in
 # NEMO's own stage-1 execution order.
-PLANTS = ("base.u", "base.v", "ww", "out.u", "out.v")
+PLANTS = ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
+          "out.u", "out.v")
 
 
 def read_flux_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
@@ -148,6 +149,11 @@ def run(root: Path, *, plant: str | None = None,
             _nemo_ws_test_hooks=hooks)
         return model.step(seed, dt=card.dt_s)
 
+    def _owned(values, face):
+        """NEMO's local interior stores one x record per T column."""
+        values = np.asarray(values)
+        return values[:, 1:, :] if face == "u" else values[1:, :, :]
+
     observed: dict[str, np.ndarray] = {}
 
     def _observe(name):
@@ -190,6 +196,7 @@ def run(root: Path, *, plant: str | None = None,
 
     # ---- 1. the completed pre-stage momentum RHS (NEMO's stage-1 `base`) --
     # stp2d.F90:126-171 builds it; stprk3_stg carries it into stage 1 as Krhs.
+    # REPORTED ONLY: see the convention note on _row.
     for face in ("u", "v"):
         hooks = _NEMOWSRK3TestHooks(
             stage_barotropic_output_override=external,
@@ -199,25 +206,42 @@ def run(root: Path, *, plant: str | None = None,
         require(f"base_{face}" in observed,
                 f"the pre-stage RHS observer never fired for face {face}")
         _row(f"base.{face}", groups[f"base_{face}"][..., :nlev],
-             observed[f"base_{face}"][..., :nlev], masks[face],
+             _owned(observed[f"base_{face}"], face)[..., :nlev], masks[face],
              "Krhs at the stage-1 boundary (stp2d.F90:126-171)",
              plant == f"base.{face}", convention_sensitive=True)
 
-    # ---- 2. the stage-1 continuity solve (NEMO's np_transport wzv) --------
-    # stprk3_stg.F90:298.  Its ww is dyn_adv's vertical operand through
-    # zFw = e1e2t*ww (stprk3_stg.F90:301).
+    # ---- 2. the stage-1 horizontal advective transports ------------------
+    # stprk3_stg.F90:276-277:
+    #   zFu = e2u*(e3t_1d*(1+r3u(Kmm)*umask)) * ( uu(Kmm) + zub*umask )
+    # These are dyn_adv's horizontal operands, and the SAME arrays the tracer
+    # transport consumes -- NEMO builds them once for both.
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
-        expose_stage1_wzv=True)
-    after = model_step(hooks)
-    lego_ww = np.asarray(lego_fields(after)["u"])
-    nemo_ww = groups["ww"]
-    nz_common = min(lego_ww.shape[-1], nemo_ww.shape[-1])
-    wmask = np.ones(lego_ww.shape[:2] + (nz_common,), dtype=bool)
-    _row("ww", nemo_ww[..., :nz_common], lego_ww[..., :nz_common], wmask,
-         "ww after wzv(np_transport) (stprk3_stg.F90:298)", plant == "ww")
+        expose_tracer_transport_stage=1)
+    fields = lego_fields(model_step(hooks))
+    for face in ("u", "v"):
+        _row(f"zf{face}", groups[f"zf{face}"][..., :nlev],
+             np.asarray(fields[face])[..., :nlev], masks[face],
+             "zFu/zFv, the stage advective transports "
+             "(stprk3_stg.F90:276-277)", plant == f"zf{face}")
+    _row("zfw", groups["zfw"][..., :nlev],
+         np.asarray(fields["T"])[..., :nlev], masks["T"],
+         "zFw = e1e2t*ww (stprk3_stg.F90:301)", plant == "zfw")
 
-    # ---- 3. the stage-1 output, after the barotropic replacement ---------
+    # ---- 3. the stage-1 continuity solve (NEMO's np_transport wzv) -------
+    # stprk3_stg.F90:298.  The same exposure, asked for ww rather than the
+    # area-weighted transport, so the solve is scored without the metric.
+    hooks = _NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external,
+        expose_tracer_transport_stage=1,
+        expose_tracer_transport_as_ww=True)
+    fields = lego_fields(model_step(hooks))
+    _row("ww", groups["ww"][..., :nlev],
+         np.asarray(fields["T"])[..., :nlev], masks["T"],
+         "ww after wzv(..., np_transport) (stprk3_stg.F90:298)",
+         plant == "ww")
+
+    # ---- 4. the stage-1 output, after the barotropic replacement ---------
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
         expose_momentum_stage=1, expose_tracer_stage=1)

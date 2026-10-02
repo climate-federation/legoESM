@@ -126,8 +126,9 @@ def test_the_reader_strips_the_halo_and_transposes(tmp_path):
 
 
 def test_the_walk_names_nemos_stage1_order():
-    # base (the RHS stp_2D completed) comes before the continuity solve's ww,
+    # the transports come before the continuity solve's ww, which comes
     # which comes before the stage output; a reordering here would report the
     # wrong statement as the first non-bit producer.
-    assert walk.PLANTS == ("base.u", "base.v", "ww", "out.u", "out.v")
+    assert walk.PLANTS == ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
+                           "out.u", "out.v")
     assert walk.CASE == "VORTEX-zco"
