@@ -280,7 +280,8 @@ def assemble_oracle_accumulators(root: Path) -> tuple[dict[str, np.ndarray], dic
     return assembled, {"coverage": "exactly-once", "records": records}
 
 
-def literal_een_scales(eta, z_coord, dtype):
+def literal_een_scales(eta, z_coord, dtype, *, grid=None,
+                       fold_metric: bool = False):
     """Evaluate only dynspg_ts' eight final EEN scale statements."""
 
     import jax.numpy as jnp
@@ -322,13 +323,29 @@ def literal_een_scales(eta, z_coord, dtype):
         return b(b(b(leading * b(one / local_metric)) * reciprocal_depth)
                  * neighbor_metric)
 
+    north_e2u = shift(e2u, 0, -1)
+    if fold_metric:
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T,
+            fold_perm_u,
+        )
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_row
+
+        fold = getattr(grid, "fold", None)
+        require(fold is not None and fold.is_active,
+                "fold-scale arm requires an active tripolar fold")
+        north = fold_row(
+            fold_ghost_source_T(e2u, fold), fold_perm_u(fold), 1.0,
+            fold.perm_T.shape[0])
+        north_e2u = north_e2u.at[-1].set(north[0])
+
     return {
         "scl_u_nw": scale(e1u, r1_hu, e1v),
         "scl_u_ne": scale(e1u, r1_hu, shift(e1v, -1, 0)),
         "scl_u_sw": scale(e1u, r1_hu, shift(e1v, 0, 1)),
         "scl_u_se": scale(e1u, r1_hu, shift(e1v, -1, 1)),
-        "scl_v_nw": scale(e2v, r1_hv, shift(e2u, 1, -1)),
-        "scl_v_ne": scale(e2v, r1_hv, shift(e2u, 0, -1)),
+        "scl_v_nw": scale(e2v, r1_hv, shift(north_e2u, 1, 0)),
+        "scl_v_ne": scale(e2v, r1_hv, north_e2u),
         "scl_v_sw": scale(e2v, r1_hv, shift(e2u, 1, 0)),
         "scl_v_se": scale(e2v, r1_hv, e2u),
     }
@@ -440,13 +457,15 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     operand_discrimination = None
     accumulator_census = None
+    fold_scale_arm = None
     if accumulator_root is not None:
         require(coefficient_root is not None,
                 "accumulator discrimination requires final coefficients")
         oracle_operands, accumulator_census = assemble_oracle_accumulators(
             accumulator_root)
         current_scales = jax.device_get(jax.jit(
-            lambda value: literal_een_scales(value, source_z, jnp.float64),
+            lambda value: literal_een_scales(
+                value, source_z, jnp.float64, grid=card.recipe.grid),
         )(coefficient_eta))
         if plant == "scale-bit":
             planted = np.array(current_scales["scl_u_nw"], copy=True)
@@ -455,6 +474,13 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             current_scales = dict(current_scales, scl_u_nw=planted)
 
         oracle_coeff, _ = assemble_oracle_coefficients(coefficient_root)
+        candidate_scales = jax.device_get(jax.jit(
+            lambda value: literal_een_scales(
+                value, source_z, jnp.float64, grid=card.recipe.grid,
+                fold_metric=True),
+        )(coefficient_eta))
+        candidate_coeff = {}
+        scale_rows = {}
         operand_discrimination = {}
         for acc_name, scl_name, final_name in zip(
                 accumulator_record.ACC, accumulator_record.SCL,
@@ -470,6 +496,19 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             scale_bits = scale.view(np.uint64) != oracle_scale.view(np.uint64)
             rebuilt = scale * oracle_acc
             rebuilt_bits = rebuilt.view(np.uint64) != final_reference.view(np.uint64)
+            candidate_scale = np.asarray(candidate_scales[scl_name])
+            candidate_scale_bits = (
+                candidate_scale.view(np.uint64)
+                != oracle_scale.view(np.uint64))
+            candidate_coeff[final_name] = candidate_scale * oracle_acc
+            candidate_coeff_bits = (
+                candidate_coeff[final_name].view(np.uint64)
+                != final_reference.view(np.uint64))
+            scale_rows[scl_name] = {
+                "bit_unequal": int(np.count_nonzero(candidate_scale_bits)),
+                "nonfold_bit_unequal": int(
+                    np.count_nonzero(candidate_scale_bits[:-1])),
+            }
             operand_discrimination[final_name] = {
                 "current_scale_bit_unequal": int(np.count_nonzero(scale_bits)),
                 "current_scale_nonfold_bit_unequal": int(
@@ -487,7 +526,17 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
                         nonfold_final_bits
                         & (oracle_acc.view(np.uint64)
                            == np.uint64(0x8000000000000000)))),
+                "fold_arm_coefficient_bit_unequal": int(
+                    np.count_nonzero(candidate_coeff_bits)),
+                "fold_arm_coefficient_magnitude_unequal": int(
+                    np.count_nonzero(candidate_coeff[final_name]
+                                     != final_reference)),
             }
+        fold_scale_arm = {
+            "scale_rows": scale_rows,
+            "application": score_application(
+                source_trace, candidate_coeff, oracle, active),
+        }
         if plant == "scale-bit":
             require(any(row["current_scale_bit_unequal"] > 0
                         for row in operand_discrimination.values()),
@@ -645,6 +694,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "coefficient_seed_identity": coefficient_seed,
         "accumulator_census": accumulator_census,
         "operand_discrimination": operand_discrimination,
+        "fold_scale_arm": fold_scale_arm,
         "oracle_coefficient_census": oracle_coefficient_census,
         "oracle_coefficient_identity": oracle_coefficient_identity,
         "oracle_coefficient_difference_census": (
