@@ -1252,12 +1252,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
         'CASE( np_EEN )',
         'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:621-631': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:625,631': [
         'mbku(:,:) = MAX( NINT( zk(:,:) ), 1 )',
-        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )', 11],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:218-229': [
+        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )'],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:224-225': [
         'IF (mbku(ji,jj)==1) umask(ji,jj,:) = 0._wp',
-        'IF ( MAXVAL(vmask(ji,jj,:))/=0._wp )', 12],
+        'IF (mbkv(ji,jj)==1) vmask(ji,jj,:) = 0._wp', 2],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1369-1392': [
         'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
         ('END SUBROUTINE dyn_cor_2D', 2), 24],

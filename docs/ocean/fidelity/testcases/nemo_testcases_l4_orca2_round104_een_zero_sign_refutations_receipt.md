@@ -27,9 +27,9 @@ through `mbku` and V through `mbkv`, then scales each accumulated coefficient
 in `ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265`.
 The loop bounds are never zero: the compiled domain setup forces `mbku` and
 `mbkv` to at least one at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:621-631`, while its mask setup
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:625,631`, while its mask setup
 clears an entire face column when that bottom index is one at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:218-229`.
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:224-225`.
 
 ORCA2 rung 0 and the shipped ORCA2 card execute the `np_EEN` statement. The
 VORTEX vector card also executes EEN. GYRE executes the sibling `np_ENE` arm
