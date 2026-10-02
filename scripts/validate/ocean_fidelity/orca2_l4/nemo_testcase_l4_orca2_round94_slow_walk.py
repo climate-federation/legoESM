@@ -144,16 +144,16 @@ def operand_walk(
             "production_depth": rhs_walk.score(
                 candidate["depth"], reference["depth"], active2),
         }
-        source_candidate = round16._source_sum(
+        source_candidate = round83._round140_source_sum(
             candidate["e3"], candidate["rhs"], candidate["mask"],
             candidate["reciprocal"])
-        source_oracle = round16._source_sum(
+        source_oracle = round83._round140_source_sum(
             reference["e3"], reference["rhs"], reference["mask"],
             reference["reciprocal"])
-        recorded_reciprocal_arm = round16._source_sum(
+        recorded_reciprocal_arm = round83._round140_source_sum(
             candidate["e3"], candidate["rhs"], candidate["mask"],
             reference["reciprocal"])
-        recorded_product_arm = round16._source_sum(
+        recorded_product_arm = round83._round140_source_sum(
             reference["e3"], reference["rhs"], reference["mask"],
             candidate["reciprocal"])
         arithmetic = {
