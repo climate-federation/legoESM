@@ -174,7 +174,6 @@ def _capture_stage1_parts(model, state, dt, freshwater, surface):
         if not capture:
             return real(self, *args, **kwargs)
         original_components = kwargs.get("return_nemo_operator_components", False)
-        kwargs["diagnose_momentum"] = True
         kwargs["return_nemo_operator_components"] = True
         result = real(self, *args, **kwargs)
         tendency, diagnostics, parts = result
