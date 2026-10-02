@@ -3198,7 +3198,7 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
 # MASS-PPM: the tiled `cgrid_mass_flux_divergence` height tendency (dh_dt) —
 # the design-doc HARDEST op.  Unlike the momentum assembly (in-stage halos on
 # intermediates), the PPM mass divergence tiles via the U3 DEEP-GLOBAL-PRE-PAD
-# pattern (cf. `tiled_transport.py` ppm_transport_1d(external_halo, rd_prepadded)):
+# pattern (ppm_transport_1d(external_halo, rd_prepadded)):
 # `h` is a STAGE INPUT (cc height), so pre-pad it GLOBALLY (face-replicated)
 # one ring deeper than the production halo=2 and slice the deep window per tile
 # -> the per-tile PPM reconstruction is LOCAL (NO in-stage ppermute).  The cc

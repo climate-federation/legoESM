@@ -2879,7 +2879,7 @@ def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     zeroing at M index 0 / -1.  ``None`` (the serial full-face default)
     applies all four — bit-identical to the previous always-on behaviour.
     A sub-face TILE passes the flags for the global edges its window
-    touches (see ``legoesm.parallel.tiled_transport``).
+    touches.
     """
     # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
