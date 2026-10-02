@@ -73,10 +73,10 @@ No record product was regenerated.  HD10-P1 through HD10-P3 are
 
 The compiled EIV initializer reads `ln_ldfeiv`; when false it takes the explicit
 not-used arm, while allocation occurs only in the true arm
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/ldftra.f90:572-615`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/ldftra.f90:572-614`).
 At stage 3, tracer advection calls the EIV transport and MLE transport under
 their two independent selectors
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traadv.f90:253-263`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traadv.f90:253-262`).
 The MLE initializer likewise reads `ln_mle`, prints the explicit not-used arm
 when false, and allocates its working arrays only in the true arm
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/tramle.f90:643-684`).
