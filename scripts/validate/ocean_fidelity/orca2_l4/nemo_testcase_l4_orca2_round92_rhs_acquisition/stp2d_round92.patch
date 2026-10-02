@@ -1,46 +1,18 @@
 --- stp2d.F90
 +++ stp2d.F90
-@@ -27,6 +27,8 @@
-    USE sbc_ice , ONLY : snwice_mass, snwice_mass_b
-    USE sbcapr         ! surface boundary condition: atmospheric pressure
-    USE sbcwave,  ONLY : bhd_wave
+@@ -29,0 +30,2 @@
 +   USE l4_r92_rhs_frames, ONLY : r92_rhs_start, r92_rhs_put_pair, &
 +      & r92_rhs_finish ! round-92 write-only accumulator frames
- #if defined key_agrif
-    USE agrif_oce_interp
-    USE agrif_oce_sponge
-@@ -127,11 +129,14 @@
-          IF( ln_tile ) CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
- 
-          !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
+@@ -129,0 +132 @@
 +         CALL r92_rhs_start( kt, Kbb, Krhs )
-          CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb
-          CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )            ! horizontal gradient of Hydrostatic pressure
+@@ -131,0 +135 @@
 +         CALL r92_rhs_put_pair( kt, 'hpg', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
-          !
-          !                             !*  lateral viscosity (LDF)  *!
-          CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )
+@@ -134,0 +139 @@
 +         CALL r92_rhs_put_pair( kt, 'ldf', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
- #if defined key_agrif
-       END DO
-       IF( ln_tile ) CALL dom_tile_stop
-@@ -147,6 +152,7 @@
-          !                             !*  COR + MET  *!   Flux Form        : Coriolis + Metric Term  
-          !                             !*     VOR     *!   Vector Inv. Form : Coriolis + relative Vorticity
-          CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )
+@@ -149,0 +155 @@
 +         CALL r92_rhs_put_pair( kt, 'vor', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
-          !
-          !                             !*  compute advection  *!   (only KEG + ZAD in Vector Inv. Form)
-          IF( .NOT.lk_linssh ) THEN
-@@ -164,8 +170,11 @@
-          CASE( np_VEC_c2  )               != 2nd order Vector Form =!                       ==>> 3D RHS
-             !
-             CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )      !- horizontal Gradient of KE
+@@ -166,0 +173 @@
 +            CALL r92_rhs_put_pair( kt, 'keg', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
-             !
-             CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection
+@@ -168,0 +176,2 @@
 +            CALL r92_rhs_put_pair( kt, 'zad', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
 +            CALL r92_rhs_finish( kt )
-             !
-          CASE( np_FLX_c2  )               !=  2n order Flux Form =!   (CEN2)                ==>> 2D RHS only
-             !
