@@ -132,6 +132,9 @@ rounds 1 through 18 and requires `STATUS PLANT-FIRED` from each.
 - Rung 2 passes all 21 real plants and clean admission.
 - Rung 1's seven preflight plants fire and clean preflight passes.
 - The complete hierarchy rounds 1 through 18 battery passes **492/492**.
+- The receipt citation gate passes all seven citations with zero failures and
+  zero unmapped citations; its shifted `zdfphy` plant fires.  The cumulative
+  default receipt gate passes with zero failures and zero unmapped citations.
 - Ruff, Python compilation, shell syntax, and diff whitespace pass.
 - The one permitted `tests/ocean/fidelity -n 12` run selected 2,669 tests and
   reached 99%.  Its only visible failure was the declared pre-existing SI3
