@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import struct
 from pathlib import Path
@@ -86,3 +87,18 @@ def test_runner_calibrates_before_rung5_and_is_fail_closed():
     assert runner.index("check_calibration") < runner.index('stage_run "$TARGET_RUN"')
     assert "cmp -s" in runner
     assert "--fuzz=0" in runner
+
+
+def test_calibration_uses_current_rung6_resolved_validator_interface():
+    tree = ast.parse(SCRIPT.read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "validate_resolved"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "rung6"
+    ]
+    assert len(calls) == 1
+    assert [keyword.arg for keyword in calls[0].keywords] == []

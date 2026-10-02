@@ -248,7 +248,7 @@ def validate_calibration(root: Path, *, plant: str = "none") -> dict[str, object
         if plant == "calibration-restart" and index == 0:
             equal = False
         require(equal, f"calibration restart differs: {name}")
-    resolved = rung5.rung6.validate_resolved(root, tke_active=False)
+    resolved = rung5.rung6.validate_resolved(root)
     return {
         "status": "BIT_IDENTICAL_RUNG6",
         "frames": 480,
