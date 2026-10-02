@@ -3966,6 +3966,21 @@ CITATION_MAP = {
         'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:892':
         'ALLOCATE( e3f_0vor(jpi,jpj,jpk) )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1016':
+        'ffu_nw(ji,jj) = ffu_nw(ji,jj) + (e3t_1d( jk) '
+        '*(1._wp+r3u(ji  ,jj, Kmm)*umask(ji  ,jj, jk))) * (e3t_1d( jk) '
+        '*(1._wp+r3v(ji  ,jj  , Kmm)*vmask(ji  ,jj  , jk))) '
+        '* vmask(ji  ,jj  ,jk) / (e3f_0vor(ji,jj  ,jk) '
+        '*(1._wp+r3f(ji,jj  )*fe3mask(ji,jj  ,jk)))',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1046':
+        'zr1_e3f = ff_f(ji,jj) / (e3f_0vor(ji,jj  ,jk) '
+        '*(1._wp+r3f(ji,jj  )*fe3mask(ji,jj  ,jk))) + ff_f(ji,jj-1) '
+        '/ (e3f_0vor(ji,jj-1,jk) '
+        '*(1._wp+r3f(ji,jj-1)*fe3mask(ji,jj-1,jk)))',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:890':
+        'CASE( np_ENS , np_ENE , np_EEN , np_MIX )',
+    'GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:167':
+        'ln_dynvor_ene = .true.  !  energy conserving scheme',
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897': (
         'e3f_0vor(ji,jj,jk) = (   ( e3t_1d(jk)*tmask(ji  ,jj+1,jk)     &   '
         '! need additional () for', 1),

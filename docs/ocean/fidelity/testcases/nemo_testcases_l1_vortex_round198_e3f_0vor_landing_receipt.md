@@ -28,18 +28,18 @@ F-point reference thickness `e3f_0`**:
 
 | NEMO branch | selected by | the statement |
 |---|---|---|
-| EEN | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:956` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:960` |
-| ENE and MIX | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1012` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1016` |
-| ENS | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1042` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1046` |
+| EEN | `CASE( np_EEN )` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:960` |
+| ENE and MIX | `CASE( np_ENE, np_MIX )` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1016` |
+| ENS | `CASE( np_ENS )` | `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1046` |
 
 `dyn_vor_init` allocates and freezes that array for all four curl-point
 schemes in ONE `SELECT CASE` arm
-(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:890`).  At the decks'
-resolved `nn_e3f_typ = 0` it is the four surrounding T cells' MASKED
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:890`).  At the decks' own
+`namelist_ref` resolved `nn_e3f_typ = 0` it is the four surrounding T cells' MASKED
 reference thickness divided by FOUR — by four, not by the number of wet
 cells, which is the `nn_e3f_typ = 1` branch
-(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897` against
-`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:905`) — and the
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897`, against the
+`nn_e3f_typ = 1` arm that divides by `zmsk` just below it) — and the
 "insure e3f_0vor /= 0" sweep then restores the card's own reference
 thickness at a fully dry vertex
 (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:920`).
@@ -235,7 +235,7 @@ root with no knowledge of how any of it was produced.  Verdict as delivered:
 verdict's conditions are met.
 
 * **DEFECT (accepted, fixed).**  The new docstring had the fully-dry-vertex
-  restore operand backwards; `dynvor.F90:945-951` restores `e3f_0` in both
+  restore operand backwards; `dynvor.F90` restores `e3f_0` in both
   arms and it is the substitution header that expands it per build.
 * **DEFECT (accepted, fixed).**  Two committed unit tests built the operand
   bundle with no mesh and so hit the new fail-closed raise.  They now hand
@@ -277,7 +277,7 @@ verdict's conditions are met.
 |---|---|---|
 | landing the `e3f_0vor` statement over the ratchet's red | ASKED | Decision 84 |
 | the fix lives in the shared builder, every card, no per-card switch | ASKED | Decision 84's wording |
-| `nn_e3f_typ = 0` | n/a | resolved by the decks' own `namelist_ref:1072`, not chosen here |
+| `nn_e3f_typ = 0` | n/a | resolved by the decks' own shared `namelist_ref`, not chosen here |
 | the fully-dry-vertex restore operand is each card's own `e3f_0` | n/a | NEMO's own operand, cited |
 | the two-solve WZV candidate stays HELD | ASKED | Decision 82 |
 | the two-ULP ratchet is unchanged | ASKED | Decision 82 |
