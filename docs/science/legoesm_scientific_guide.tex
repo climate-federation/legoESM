@@ -2567,13 +2567,15 @@ slightly past centred to suppress chequerboard noise), which reduces to a
 Helmholtz equation for $\eta$ solved by preconditioned conjugate gradients.
 On the MPAS mesh this removes the rotational null branch of the TRiSK
 barotropic operator by construction.  In distributed runs the solve uses a
-fixed number of iterations (20) so that its cost and its adjoint are
-static; the default preconditioner is a communication-free Neumann-series
-polynomial (four sweeps) in each device's block of the operator, and the
-Chronopoulos--Gear single-reduction variant batches each iteration's two
-inner products into one global reduction.  A variant that applies the same
-polynomial to the global operator, making the result independent of the
-device count, is available.
+fixed number of iterations (15) so that its cost and its adjoint are
+static; the default preconditioner is a four-sweep Neumann-series
+polynomial applied to the global operator on the existing halo, so the
+result does not depend on the device count, and the Chronopoulos--Gear
+single-reduction variant batches each iteration's two inner products into
+one global reduction.  The communication-free variant that applies the
+polynomial to each device's block of the operator (20 iterations) remains
+selectable and is the one the MPI-per-rank lane uses; a single device
+solves to tolerance with stock conjugate gradients.
 
 
 \section{Equation of State (Wright 1997)}

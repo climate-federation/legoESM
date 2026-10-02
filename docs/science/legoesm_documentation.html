@@ -1563,13 +1563,14 @@ neighbour).
                                                                                       
                                                                                       
 <!-- l. 1350 --><p class='noindent'>The distributed MPAS ocean solves the implicit free surface with a fixed-iteration preconditioned
-conjugate gradient (default 20 iterations) in its single-reduction (Chronopoulos–Gear) form, which
-batches the two inner products of each iteration into one allreduce. The default preconditioner is a
-communication-free Neumann-series polynomial in the device-local block of the operator (four
-sweeps): it needs no halo exchange and reaches a given residual in fewer iterations than Jacobi.
-An opt-in global variant (<span class='cmtt-10x-x-109'>barotropic_implicit_pcg_precond="gpoly"</span>) evaluates the
-same polynomial on the global operator using the existing halo, so the answer no longer
-depends on the number of devices. The MPAS ocean runs multi-device through <span class='cmtt-10x-x-109'>run_omip.py
+conjugate gradient (default 15 iterations) in its single-reduction (Chronopoulos–Gear) form, which
+batches the two inner products of each iteration into one allreduce. The default preconditioner
+(<span class='cmtt-10x-x-109'>barotropic_implicit_pcg_precond="gpoly"</span>) is a four-sweep Neumann-series polynomial
+evaluated on the global operator using the existing halo, so the answer does not depend on the number
+of devices; it replaced the device-local polynomial at 20 iterations
+(<span class='cmtt-10x-x-109'>"poly"</span>), which needs no halo exchange and remains selectable, and is the one the
+MPI-per-rank lane must use. A single device solves to tolerance with stock conjugate gradient
+whatever the preconditioner. The MPAS ocean runs multi-device through <span class='cmtt-10x-x-109'>run_omip.py
 --enable-mpas-spmd</span>.
    
 </p>
