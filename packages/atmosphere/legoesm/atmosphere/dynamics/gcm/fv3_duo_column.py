@@ -67,6 +67,10 @@ class DuoColumnMesh(NamedTuple):
     grid_shape_2d: tuple
     lat: jax.Array
     lon: jax.Array
+    #: cell corners ``(nCells, 4)`` [rad], the B-grid nodes of each compute
+    #: cell in ring order: the terrain product's exact quad ownership
+    cornerLat: jax.Array
+    cornerLon: jax.Array
 
     # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
     # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the
@@ -116,10 +120,23 @@ def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
                          for t in range(6)]).reshape(6 * n * n)
     lat, lon, area = cols("agrid_lat"), cols("agrid_lon"), cols("area")
     jlat, jlon = jnp.asarray(lat), jnp.asarray(lon)
+
+    def corners(key):
+        out = []
+        for t in range(6):
+            g = np.asarray(ctx_np["gs6"][t][key])
+            if g.shape != (n + 2 * ng + 1, n + 2 * ng + 1):
+                raise ValueError(f"build_duo_column_mesh: {key} has shape {g.shape}, "
+                                 f"expected the padded B lattice {(n + 2 * ng + 1,) * 2}")
+            sw, se = g[ng:ng + n, ng:ng + n], g[ng + 1:ng + n + 1, ng:ng + n]
+            ne, nw = g[ng + 1:ng + n + 1, ng + 1:ng + n + 1], g[ng:ng + n, ng + 1:ng + n + 1]
+            out.append(np.stack([sw, se, ne, nw], axis=-1))
+        return jnp.asarray(np.stack(out).reshape(6 * n * n, 4))
     return DuoColumnMesh(
         latCell=jlat, lonCell=jlon, areaCell=jnp.asarray(area),
         nCells=int(lat.shape[0]), grid_lat=jlat, grid_lon=jlon,
-        grid_shape_2d=(int(lat.shape[0]),), lat=jlat, lon=jlon)
+        grid_shape_2d=(int(lat.shape[0]),), lat=jlat, lon=jlon,
+        cornerLat=corners("grid_lat"), cornerLon=corners("grid_lon"))
 
 
 class FV3DuoColumnState(NamedTuple):

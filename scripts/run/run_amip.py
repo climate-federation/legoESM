@@ -1373,7 +1373,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Topography
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
-    parser.add_argument("--topo-edge-blend", type=float, default=0.3)
     parser.add_argument("--land-mask-file", type=str, default="",
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
                              "When set, activates the slab-land surface tile "
@@ -2457,7 +2456,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
-        topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         use_multilayer_land=args.use_multilayer_land,
         land_update_seconds=args.land_update_seconds,

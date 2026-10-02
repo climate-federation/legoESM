@@ -2067,23 +2067,35 @@ class ModelDriver:
             # coastline by any reading.
             self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         else:
+            # Decision C (2026-10-02): ONE terrain product per grid -- the
+            # cell-mean elevation and the land fraction from the same file,
+            # filtered on this grid with the zero_ocean rule; an sftlf mask
+            # replaces the land fraction BEFORE the filter and masks it.
             topo_config = TopographyConfig(
                 source="file", path=topo,
                 smoothing_passes=self.config.topo_smoothing,
-                edge_blend_strength=self.config.topo_edge_blend,
+                land_mask_path=getattr(self.config, "land_mask_path", "") or "",
             )
             self._phis_data, self._f_land = load_real_topography(
                 self.grid, config=topo_config
             )
+            if self.config.dycore.discretization == "spectral":
+                # the spectral dynamics feel the TRUNCATED field; the product
+                # (dynamics, CMOR orog, restart check) is that field, once
+                # round-tripped so the carry's own truncation is idempotent
+                from legoesm.grids.gaussian import sh_analysis, sh_synthesis
+                self._phis_data = sh_synthesis(self.grid, sh_analysis(
+                    self.grid, jnp.asarray(self._phis_data, jnp.float64)))
+            self._phis_data = self._phis_data.astype(_sd)
+            self._f_land = self._f_land.astype(_sd)
 
-        # Real land-sea mask overrides the elevation-derived land fraction
-        # (works with any ``topography`` setting, including "flat").
         land_mask_path = getattr(self.config, "land_mask_path", "")
-        if land_mask_path:
+        if land_mask_path and topo in ("flat", "gaussian"):
             from legoesm.grids.topography import load_land_fraction
             self._f_land = load_land_fraction(
                 self.grid, land_mask_path
             ).astype(_sd)
+        if land_mask_path:
             logger.info(
                 f"  Land-sea mask: {land_mask_path} "
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
@@ -2775,27 +2787,24 @@ class ModelDriver:
             )
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
 
+            # Decision C: every lane starts its dynamics ON the grid's terrain
+            # product (``_phis_data``; zeros = an explicit flat target, never
+            # a fallback to ERA5's own orography).
+            _target_phis = self._phis_data
             if cfg.grid.grid_type == "cubed_sphere":
-                _target_phis = (
-                    self._phis_data
-                    if self._phis_data is not None and jnp.any(self._phis_data != 0)
-                    else None
-                )
                 carry = era5_to_cubedsphere_carry(
                     era5_slice, self.grid, self.sigma,
                     target_phis=_target_phis,
-                    smoothing_passes=cfg.topo_smoothing,
-                    edge_blend_strength=cfg.topo_edge_blend,
                 )
             elif cfg.dycore.discretization == "spectral":
                 carry = era5_to_spectral_carry(
                     era5_slice, self.grid, self.sigma,
-                    smoothing_passes=cfg.topo_smoothing,
+                    target_phis=_target_phis,
                 )
             elif cfg.grid.grid_type == "latlon":
                 carry = era5_to_latlon_carry(
                     era5_slice, self.grid, self.sigma,
-                    smoothing_passes=cfg.topo_smoothing,
+                    target_phis=_target_phis,
                 )
             elif cfg.grid.grid_type == "mpas":
                 # MPAS carries the wind as the edge-normal component on mesh
@@ -2803,7 +2812,7 @@ class ModelDriver:
                 # to cells/edges and projects the winds via angleEdge.
                 carry = era5_to_mpas_carry(
                     era5_slice, self.grid, self.sigma,
-                    smoothing_passes=cfg.topo_smoothing,
+                    target_phis=_target_phis,
                 )
             else:
                 raise NotImplementedError(
@@ -4322,9 +4331,8 @@ class ModelDriver:
                 grid=_cmip_grid,
                 start_year=self.config.start_year,
             )
-            # Register time-invariant fields for the CMIP6 ``fx`` file.
-            # _phis_data is the ETOPO field; dynamics run with ERA5 phis but
-            # CMOR orog reports the ETOPO field (the intended mountain mask).
+            # Register time-invariant fields for the CMIP6 ``fx`` file:
+            # _phis_data IS the dynamics terrain (decision C, one product).
             self.diagnostics.set_fixed_fields(
                 phis=np.asarray(_cmip_phis),
                 land_fraction=np.asarray(_cmip_fland),
@@ -6843,6 +6851,34 @@ class ModelDriver:
 
         return jax.tree_util.tree_map(_leaf, tree)
 
+    def _check_restart_terrain(self) -> None:
+        """Decision C (majority 2026-10-02): a checkpoint stepped on another
+        terrain than this run's product is refused.  Compares the restored
+        state's ``phis`` with ``_phis_data`` where the state carries the
+        grid's own terrain (cube / lat-lon / MPAS / spectral, whose product
+        is stored truncated); the duo lane checks its padded stack in its
+        own loader."""
+        phis_data = getattr(self, "_phis_data", None)
+        state = getattr(self, "state", None)
+        st_phis = getattr(getattr(state, "phis", None), "data", None)
+        if st_phis is None and getattr(state, "phis_hat", None) is not None:
+            from legoesm.grids.gaussian import sh_synthesis
+            st_phis = sh_synthesis(self.grid, state.phis_hat.data)
+        if phis_data is None or st_phis is None:
+            return
+        a = np.asarray(st_phis, dtype=np.float64)
+        b = np.asarray(phis_data, dtype=np.float64)
+        if a.shape != b.shape:
+            raise RuntimeError(
+                f"restart: the checkpoint's terrain has shape {a.shape}, this run's "
+                f"terrain product {b.shape}")
+        d = float(np.max(np.abs(a - b)))
+        if d > 1.0e-6 * max(1.0, float(np.max(np.abs(b)))):
+            raise RuntimeError(
+                "restart: the checkpoint's terrain differs from this run's "
+                f"terrain product (max |d| {d:.3e} m2/s2); restart on the same "
+                "--topography/--topo-smoothing/--land-mask-file or start fresh")
+
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
 
@@ -6897,14 +6933,15 @@ class ModelDriver:
                             f"the D-grid state).")
                 _hs6_ck = np.asarray(d["fv3duo_hs6"], dtype=np.float64)
                 if not np.array_equal(_hs6_ck, self._fv3_duo_column_hs6(_col)):
-                    from legoesm.grids.factory import create_fv3_duo_grid
-                    _col = self._fv3_duo_column_rewrap(create_fv3_duo_grid(
-                        _col.grid.n, _col.grid.ng, phis6=_hs6_ck))
-                    if not np.array_equal(_hs6_ck,
-                                          self._fv3_duo_column_hs6(_col)):
-                        raise RuntimeError(
-                            "fv3_duo column restart: the rebuilt grid does "
-                            "not carry the checkpoint's terrain bitwise")
+                    # decision C (majority 2026-10-02): a checkpoint stepped
+                    # on another terrain than this run's product is refused,
+                    # never resumed on the checkpoint's terrain
+                    raise RuntimeError(
+                        "fv3_duo column restart: the checkpoint's terrain "
+                        "differs from this run's terrain product (max |d| "
+                        f"{float(np.max(np.abs(_hs6_ck - self._fv3_duo_column_hs6(_col)))):.3e} "
+                        "m2/s2); restart on the same --topography/"
+                        "--topo-smoothing/--land-mask-file or start fresh")
                 self.sigma = _col.sigma_coord
             # Vertical LEVEL-POSITION guard.  The shape guards below only see
             # nlev, and nlev no longer identifies the σ grid: a uniform L30 and
@@ -7212,6 +7249,7 @@ class ModelDriver:
                         + ("" if "tracer_names" not in d
                            else f", tracers={[str(n) for n in d['tracer_names']]}"))
             self._loaded_checkpoint_step_day = (step, day)
+            self._check_restart_terrain()
             return step, day
 
         # Spectral path (FIX_RESTART_TIME iteration 4): mirror of the
@@ -7248,6 +7286,7 @@ class ModelDriver:
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
+            self._check_restart_terrain()
             return step, day
 
         # Distributed path: directory with per-rank .npz files
@@ -7303,6 +7342,7 @@ class ModelDriver:
                     f"rank={topology.rank}"
                 )
                 self._loaded_checkpoint_step_day = (step, day)
+                self._check_restart_terrain()
                 return step, day
 
         # Lat-lon band MPI: rank 0 loads the global ``.npz`` against
@@ -7450,6 +7490,7 @@ class ModelDriver:
                     "single-process for stateful-physics lat-lon MPI runs."
                 )
             self._loaded_checkpoint_step_day = (step, day)
+            self._check_restart_terrain()
             return step, day
 
         # Single-process path
@@ -7472,6 +7513,7 @@ class ModelDriver:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
         self._loaded_checkpoint_step_day = (step, day)
+        self._check_restart_terrain()
         return step, day
 
     def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
@@ -9413,17 +9455,22 @@ class ModelDriver:
 
     def _fv3_duo_column_init_state(self) -> None:
         """The column lane's fresh IC at setup (M6: before land / physics
-        / diagnostics read the state, as on the MPAS lane): ERA5 on the
-        grid REBUILT with ERA5's terrain, else the closed lane's own
+        / diagnostics read the state, as on the MPAS lane): the grid is
+        REBUILT on the terrain PRODUCT first (decision C; flat topography
+        keeps the builder's zero terrain), then ERA5 through the bundle
+        builder (p_s moved to the product), else the closed lane's own
         DCMIP16 baroclinic wave through the view.  One tracer slot per
-        registered name.  ``_phis_data`` stays what ``_create_topography``
-        loaded (ETOPO: land fraction + CMOR ``orog``; zeros when flat),
-        as on the MPAS lane -- the dynamics terrain is the state's
-        ``phis`` (ERA5's, del-2 filtered)."""
+        registered name.  ``_phis_data`` IS the dynamics terrain."""
         cfg = self.config
+        if cfg.topography != "flat":
+            self._fv3_duo_column_terrain()
         if cfg.ic == "era5":
-            from legoesm.training.era5_to_state import era5_to_fv3_duo_bundle
-            era5 = self._fv3_duo_column_era5_terrain()
+            from legoesm.training.era5_to_state import (
+                era5_to_fv3_duo_bundle, load_era5_ic,
+            )
+            if not cfg.ic_path:
+                raise ValueError("ic='era5' needs ic_path")
+            era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
             bundle = era5_to_fv3_duo_bundle(
                 era5, self.model, n_tracers=len(self.model.tracer_names))
             ng = self.model.ng
@@ -9477,6 +9524,11 @@ class ModelDriver:
         self._grid_lat = self.grid.grid_lat
         self._grid_lon = self.grid.grid_lon
         self._fv3_duo_bundle = grid
+        # the terrain lives in the grid: the product the driver reports
+        # (CMOR orog, restart check) is the compute window of its stack
+        hs6 = self._fv3_duo_column_hs6(self.model)
+        ng, n = self.model.ng, self.model.n
+        self._phis_data = jnp.asarray(hs6[:, ng:ng + n, ng:ng + n].reshape(-1))
         # a state already built (M6: the IC is built at setup) belongs to
         # the OLD model by identity; re-view its bundle through the new
         # one (its phis is the new grid's terrain)
@@ -9487,30 +9539,43 @@ class ModelDriver:
             self._state_template = self.state
         return self.model
 
-    def _fv3_duo_column_era5_terrain(self):
-        """ERA5 IC (M4) on the column lane, fresh start only: the duo grid
-        is REBUILT with the ERA5 terrain (phis_fn on the padded A-grid,
-        FV3's del-2 filter ON the duo grid, cfg.topo_smoothing passes --
-        the same field the MPAS path reads for its Laplacian passes) and
-        the column model re-wrapped on it.  Runs at setup (M6, from
-        ``_init_state``) on EVERY ic='era5' run, a restarted one included
-        -- as the MPAS lane builds its ERA5 IC at setup -- so the IC file
-        is needed at setup; ``load_checkpoint`` then replaces the terrain
-        and state with the checkpoint's (``fv3duo_hs6``).  Returns the
-        loaded ERA5 dataset for the IC builder."""
+    def _fv3_duo_column_terrain(self):
+        """Decision C (2026-10-02): the column lane's grid is REBUILT on the
+        terrain PRODUCT -- ``_phis_data``/``_f_land`` (binned on the duo
+        columns, unfiltered: the column mesh has no neighbour table) padded
+        onto the six faces (halos by the builder's extended exchange), then
+        FV3's del-2 filter ON the duo grid with fv_surf_map's zero_ocean
+        rule, ``cfg.topo_smoothing`` passes.  ``_phis_data`` then becomes
+        the filtered compute window: one field for dynamics, land fraction
+        and CMOR orog.  Runs at setup on every column-lane run whose
+        topography is not flat; a restart then refuses a checkpoint stepped
+        on another terrain (``load_checkpoint``)."""
         from legoesm.grids.factory import create_fv3_duo_grid
-        from legoesm.training.era5_to_state import (
-            era5_phis_fn, load_era5_ic,
-        )
-        cfg = self.config
-        if not cfg.ic_path:
-            raise ValueError("ic='era5' needs ic_path")
-        era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+        from legoesm.grids.terrain_filter import terrain_filter_duo
         old = self.model.dyn
-        self._fv3_duo_column_rewrap(create_fv3_duo_grid(
-            old.grid.n, old.grid.ng, phis_fn=era5_phis_fn(era5),
-            phis_filter_iter=int(cfg.topo_smoothing)))
-        return era5
+        n, ng, ctx = old.grid.n, old.grid.ng, old.grid.ctx_np
+        m_a = n + 2 * ng
+
+        def padded(flat):
+            # NaN in the halo so a cell the exchange does NOT overwrite is
+            # caught (a surviving 0 would read as ocean in the filter's
+            # min-land-fraction factor); the filter reads one ring
+            a = np.full((6, m_a, m_a), np.nan, dtype=np.float64)
+            a[:, ng:ng + n, ng:ng + n] = np.asarray(flat, dtype=np.float64).reshape(6, n, n)
+            faces = [a[t] for t in range(6)]
+            ext_scalar_sixface(faces, "A", ctx["ectx"])
+            out = np.stack(faces)
+            ring = out[:, ng - 1:ng + n + 1, ng - 1:ng + n + 1]
+            if not np.isfinite(ring[:, 1:-1, :]).all() or not np.isfinite(ring[:, :, 1:-1]).all():
+                raise RuntimeError("fv3_duo column lane: the ext exchange left a halo "
+                                   "cell the terrain filter reads unfilled")
+            return np.nan_to_num(out, nan=0.0)
+
+        hs6 = np.asarray(terrain_filter_duo(
+            padded(self._phis_data), ctx["gs6"], ctx["ectx"],
+            n_iter=int(self.config.topo_smoothing), oro6=padded(self._f_land)))
+        self._fv3_duo_column_rewrap(create_fv3_duo_grid(n, ng, phis6=hs6))
 
     def _fv3_duo_checkpoint_write(self, arrays: dict, mcfg, step: int,
                                   day: float, nq: int, path: Path) -> None:

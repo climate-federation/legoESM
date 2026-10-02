@@ -3085,7 +3085,9 @@ def load_training_data(
             phis=phis_era5,
             lat=lat, lon=lon, plev_Pa=plev_Pa,
         )
-        return era5_to_spectral_carry(era5, grid, sigma)
+        from legoesm.training.era5_to_state import era5_terrain_product
+        return era5_to_spectral_carry(era5, grid, sigma,
+                                      target_phis=era5_terrain_product(era5, grid))
 
     # Load all snapshots.  Position ``j`` maps to absolute index
     # ``time_indices[j]`` in the full store; window-cache mode selects the SAME

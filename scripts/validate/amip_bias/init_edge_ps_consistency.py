@@ -12,7 +12,7 @@ sys.path[:0] = [os.getcwd() + "/src"] + glob.glob(os.getcwd() + "/packages/*") +
 import numpy as np, xarray as xr, jax.numpy as jnp
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.grids.regridding import compute_latlon_to_voronoi_weights, regrid_scalar
-from legoesm.grids.topography import smooth_phis_voronoi
+from legoesm.grids.topography import masked_diffusion
 from legoesm import constants
 
 IC = os.environ.get("ERA5_IC", "/scratch/b/b309178/era5_ic_1979-01-01.zarr")
@@ -40,9 +40,10 @@ R = lambda f, w: np.asarray(regrid_scalar(jnp.asarray(f), w), dtype=np.float64)
 p_s_cell, p_s_edge = R(p_s_ll, cw), R(p_s_ll, ew)
 phis, T_sfc = R(phis_ll, cw), R(T_sfc_ll, cw)
 
-phis_s = np.asarray(smooth_phis_voronoi(jnp.asarray(phis), mesh.cellsOnCell,
-                                        mesh.nEdgesOnCell, smoothing_passes=PASSES),
-                    dtype=np.float64)
+# decision C: the grid's masked flux-form diffusion (all-land mask here: the
+# probe asks about the p_s move, not the coastline)
+phis_s = masked_diffusion(phis, np.ones_like(phis), np.asarray(mesh.cellsOnCell),
+                          np.asarray(mesh.areaCell), passes=PASSES)
 p_s_cell_corr = p_s_cell * np.exp((phis - phis_s) / (constants.R_d * T_sfc))
 coe = np.asarray(mesh.cellsOnEdge)
 d = (p_s_edge - 0.5 * (p_s_cell_corr[coe[0]] + p_s_cell_corr[coe[1]])) / 100.0

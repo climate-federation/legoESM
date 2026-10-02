@@ -18,7 +18,6 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 from legoesm.grids.halo import pad_halo_local
 
 logger = logging.getLogger(__name__)
@@ -237,13 +236,7 @@ class TopographyConfig(NamedTuple):
     lon_var : str
         Longitude variable name in NetCDF.
     smoothing_passes : int
-        Number of Laplacian smoothing passes to apply (removes 2Δx noise).
-    edge_blend_strength : float
-        Edge blending strength at cubed-sphere face boundaries [0, 1].
-    edge_blend_width : int
-        Number of grid cells from face edge to blend.
-    clip_negative : bool
-        If True, set negative elevations (ocean floor) to 0.
+        Passes of the masked (zero_ocean) flux-form diffusion on the grid.
     land_mask_path : str
         Optional path to a separate land-sea-mask NetCDF file (e.g. CMIP6
         ``sftlf`` or an ERA5 ``lsm`` invariant).  When set, the land
@@ -261,9 +254,6 @@ class TopographyConfig(NamedTuple):
     lat_var: str = ""
     lon_var: str = ""
     smoothing_passes: int = 4
-    edge_blend_strength: float = 0.3
-    edge_blend_width: int = 2
-    clip_negative: bool = True
     land_mask_path: str = ""
     land_mask_var: str = ""
 
@@ -330,10 +320,9 @@ def _build_latlon_interpolator(
 ):
     """Bilinear interpolator with longitudinal wrap AND polar edge padding.
 
-    Shared by the elevation (:func:`_regrid_to_target`) and land-fraction
-    (:func:`_derive_land_fraction`, :func:`_load_land_fraction_file` via
-    ``_regrid_to_target``) regrid paths so both get identical boundary
-    handling:
+    Used by the land-mask-file loader (:func:`_load_land_fraction_file` via
+    ``_regrid_to_target``); the elevation product bins by cell ownership
+    (:func:`bin_latlon_to_cells`) instead.
 
     * Longitude is wrapped by one column on each side for periodicity.
     * The latitude axis is padded to exactly ±90° by EDGE REPLICATION
@@ -410,58 +399,6 @@ def _regrid_to_target(
 
     result = interp(points).reshape(target_shape)
     return result
-
-
-def _derive_land_fraction(
-    lat_src: np.ndarray,
-    lon_src: np.ndarray,
-    elev_data: np.ndarray,
-    target_lat_deg: np.ndarray,
-    target_lon_deg: np.ndarray,
-    grid_spacing_deg: float,
-) -> np.ndarray:
-    """Derive land fraction by sub-sampling the high-res elevation data.
-
-    For each target grid cell, samples the source elevation at sub-grid
-    points and computes the fraction with elevation > 0.
-
-    Parameters
-    ----------
-    lat_src, lon_src : (nlat_src,), (nlon_src,)
-        Source grid in degrees.
-    elev_data : (nlat_src, nlon_src)
-        Source elevation in meters.
-    target_lat_deg, target_lon_deg : arrays
-        Target grid centers in degrees (any shape).
-    grid_spacing_deg : float
-        Approximate target grid spacing in degrees.
-
-    Returns
-    -------
-    np.ndarray
-        Land fraction [0, 1], same shape as target_lat_deg.
-    """
-    interp = _build_latlon_interpolator(lat_src, lon_src, elev_data)
-
-    # Sample at a sub-grid of points around each target point
-    n_sub = max(3, int(np.ceil(grid_spacing_deg / 0.5)))
-    offsets = np.linspace(-0.5, 0.5, n_sub) * grid_spacing_deg
-
-    target_shape = target_lat_deg.shape
-    flat_lat = target_lat_deg.ravel()
-    flat_lon = target_lon_deg.ravel()
-    n_pts = flat_lat.size
-
-    land_frac = np.zeros(n_pts, dtype=np.float64)
-
-    for dlat in offsets:
-        for dlon in offsets:
-            pts = np.stack([flat_lat + dlat, flat_lon + dlon], axis=-1)
-            elev = interp(pts)
-            land_frac += (elev > 0.0).astype(np.float64)
-
-    land_frac /= n_sub * n_sub
-    return land_frac.reshape(target_shape)
 
 
 def _load_land_fraction_file(
@@ -560,236 +497,294 @@ def _load_land_fraction_file(
     return np.clip(f_land, 0.0, 1.0)
 
 
-def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarray:
-    """Laplacian smoothing on a cubed-sphere field (6, n, n).
+# ==============================================================================
+# ONE terrain product per grid (decision C, 2026-10-02)
+# ==============================================================================
+# GFDL fv_surf_map.F90 is the reference: cell-mean elevation and land
+# fraction from ONE dataset, then grid-native filtering with zero_ocean --
+# every diffusive edge flux multiplied by max(0, min(oro_l, oro_r)), oro the
+# fractional land cover (:768-777, :896-905).  Here the elevation is binned
+# by nearest cell centre on the unit sphere (exact Voronoi ownership on an
+# MPAS mesh, the same ownership rule conservative_regrid_cubedsphere uses),
+# with each 0.25-degree source cell weighted by its own spherical area.
 
-    Each cell becomes ``0.5*original + 0.5*smoothed`` where ``smoothed`` is the
-    5-point mean ``(self + 4 neighbours)/5``.  The neighbours at face boundaries
-    come from the cross-face HALO (``pad_halo_local``, which handles the axis
-    swaps and reversals), so the smoothing is CONTINUOUS across cube edges.
-
-    The previous implementation used one-sided boundary CLAMPING (edge cells
-    averaged only their in-face neighbours), which smoothed each face in
-    isolation and left a per-face discontinuity at the shared edges — the
-    "cube imprint" artifact.  Using the real cross-face halo removes it at the
-    source (the downstream ``blend_scalar_cube_edges_2d`` step is then a light
-    final touch, not a band-aid for a seam this function created).
-
-    NOTE: cube-imprint artifacts are confirmed VISUALLY (CLAUDE.md visual-verify
-    rule); the unit test asserts the necessary cross-face-leakage property, but
-    the nightly cube-SW visual-regression gate is the authoritative check.
-    """
-    if passes <= 0:
-        return arr
-    field = jnp.asarray(arr)
-    orig = field
-    for _ in range(passes):
-        # (6, n+2, n+2) with REAL neighbour data from adjacent faces in the halo.
-        # Use the LOCAL halo=1 fill directly (not the backend-dispatching
-        # ``pad_halo``): this is host-side topography preprocessing on the FULL
-        # global field, so it must stay deterministic and never enter the
-        # MPI/SPMD exchange path even if a distributed halo backend is active.
-        p = pad_halo_local(field, None)
-        neighbour_sum = (
-            p[:, :-2, 1:-1] + p[:, 2:, 1:-1]    # i-1, i+1
-            + p[:, 1:-1, :-2] + p[:, 1:-1, 2:]  # j-1, j+1
-        )
-        smoothed = (field + neighbour_sum) / 5.0   # self + 4 cross-face neighbours
-        field = 0.5 * orig + 0.5 * smoothed
-    return np.asarray(field)
+_SMOOTH_K_PER_PASS = 0.1   # today's per-pass strength: 0.5 blend x 1/5 mean
 
 
-def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
-    """Simple Laplacian smoothing on a Gaussian grid (n_lat, n_lon).
-
-    Uses periodic boundary in longitude, clamped at poles.
-    """
-    if passes <= 0:
-        return arr
-    result = arr.copy()
-    n_lat, n_lon = arr.shape
-    for _ in range(passes):
-        smoothed = result.copy()
-        for i in range(n_lat):
-            for j in range(n_lon):
-                vals = [result[i, j]]
-                if i > 0:
-                    vals.append(result[i - 1, j])
-                if i < n_lat - 1:
-                    vals.append(result[i + 1, j])
-                vals.append(result[i, (j - 1) % n_lon])
-                vals.append(result[i, (j + 1) % n_lon])
-                smoothed[i, j] = np.mean(vals)
-        result = 0.5 * arr + 0.5 * smoothed
-    return result
+def _source_cell_areas(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
+    """Unit-sphere area of every cell of a regular lat-lon source grid
+    (``(n_lat, n_lon)``): cell edges at the midpoints, clamped to the poles,
+    longitude periodic."""
+    lat = np.deg2rad(np.asarray(lat_deg, dtype=np.float64))
+    mid = 0.5 * (lat[1:] + lat[:-1])
+    pole_first, pole_last = (-0.5 * np.pi, 0.5 * np.pi) if lat[0] <= lat[-1] else (
+        0.5 * np.pi, -0.5 * np.pi)
+    edges = np.concatenate([[pole_first], mid, [pole_last]])
+    edges = np.clip(edges, -0.5 * np.pi, 0.5 * np.pi)
+    dlon = 2.0 * np.pi / int(np.asarray(lon_deg).shape[0])
+    return np.abs(np.sin(edges[1:]) - np.sin(edges[:-1]))[:, None] * dlon * np.ones(
+        (1, int(np.asarray(lon_deg).shape[0])))
 
 
-def smooth_phis_cubed_sphere(
-    phis: jnp.ndarray,
-    smoothing_passes: int = 4,
-    edge_blend_strength: float = 0.3,
-    edge_blend_width: int = 2,
-) -> jnp.ndarray:
-    """Apply standard cubed-sphere topography smoothing to a phis field.
-
-    Applies the same Laplacian + edge-blend pipeline used by
-    :func:`load_real_topography` so that ERA5-derived or other externally
-    regridded phis fields receive equivalent gradient reduction at face
-    boundaries before being used as model initial conditions.
-
-    Parameters
-    ----------
-    phis : (6, n, n) surface geopotential [m^2/s^2]
-    smoothing_passes : int
-        Number of Laplacian smoothing passes.  Default matches
-        ``TopographyConfig.smoothing_passes = 4``.
-    edge_blend_strength : float
-        Face-edge blend strength.  Default matches
-        ``TopographyConfig.edge_blend_strength = 0.3``.
-    edge_blend_width : int
-        Face-edge blend width in cells.  Default matches
-        ``TopographyConfig.edge_blend_width = 2`` (the static-topography
-        path); the earlier hard-coded call omitted this and silently used
-        ``blend_scalar_cube_edges_2d``'s width=1, so an ERA5 cube IC got a
-        one-cell blend despite this function claiming the same pipeline
-        (audit 2026-07-17).
-
-    Returns
-    -------
-    (6, n, n) smoothed surface geopotential [m^2/s^2]
-    """
-    phis_np = np.asarray(phis)
-    phis_np = _laplacian_smooth_cubed_sphere(phis_np, passes=smoothing_passes)
-    return blend_scalar_cube_edges_2d(
-        jnp.asarray(phis_np), strength=edge_blend_strength,
-        width=edge_blend_width)
+def _xyz(lat_rad, lon_rad):
+    lat = np.asarray(lat_rad, dtype=np.float64).ravel()
+    lon = np.asarray(lon_rad, dtype=np.float64).ravel()
+    cl = np.cos(lat)
+    return np.stack([cl * np.cos(lon), cl * np.sin(lon), np.sin(lat)], axis=-1)
 
 
-def smooth_phis_gaussian(
-    phis: jnp.ndarray,
-    smoothing_passes: int = 4,
-) -> jnp.ndarray:
-    """Apply lat-lon (Gaussian-grid) topography smoothing to a phis field.
-
-    Lat-lon analogue of :func:`smooth_phis_cubed_sphere`: applies the same
-    Laplacian smoothing used by :func:`load_real_topography` on a regular
-    lat-lon grid (periodic in longitude, clamped at the poles) so that
-    ERA5-derived or other externally regridded ``phis`` fields receive
-    equivalent gradient reduction before being used as model initial
-    conditions.  Without it, the raw regridded ERA5 orography (peaks
-    ~5.6e4 m^2/s^2) drives an unbalanced pressure-gradient force that blows
-    up the coarse lat-lon dycore at step ~0.
-
-    Parameters
-    ----------
-    phis : (n_lat, n_lon) surface geopotential [m^2/s^2]
-    smoothing_passes : int
-        Number of Laplacian smoothing passes.  Default matches
-        ``TopographyConfig.smoothing_passes = 4`` (== the cube default).
-
-    Returns
-    -------
-    (n_lat, n_lon) smoothed surface geopotential [m^2/s^2]
-    """
-    phis_np = np.asarray(phis)
-    return _laplacian_smooth_gaussian(phis_np, passes=smoothing_passes)
+_EDGE_TOL = 1e-12
 
 
-def _laplacian_smooth_voronoi(
-    arr: np.ndarray,
-    cells_on_cell: np.ndarray,
-    n_edges_on_cell: np.ndarray,
-    passes: int = 1,
-) -> np.ndarray:
-    """Laplacian smoothing of a cell-centred field on an SCVT/Voronoi mesh.
+def _inside_quads(p, quads, centres):
+    """``p`` ``(m, 3)`` points, ``quads`` ``(m, 4, 3)`` spherically convex
+    quads with great-circle edges (gnomonic cells: straight lines on the
+    face plane, any orientation), ``centres`` ``(m, 3)`` a point strictly
+    inside each: True where ``p`` is on the centre's side of all 4 edges
+    (a point on an edge belongs to both cells; the first claim wins).
+    A centre ON an edge plane would make that edge unconstrained: error."""
+    ok = np.ones(p.shape[0], dtype=bool)
+    for k in range(4):
+        nrm = np.cross(quads[:, k, :], quads[:, (k + 1) % 4, :])
+        side_c = np.einsum("ij,ij->i", nrm, centres)
+        if np.any(np.abs(side_c) <= _EDGE_TOL):
+            raise ValueError("_inside_quads: a cell centre lies on one of its edges")
+        side_p = np.einsum("ij,ij->i", nrm, p)
+        ok &= side_p * np.sign(side_c) >= -_EDGE_TOL
+    return ok
 
-    The unstructured-mesh analogue of :func:`_laplacian_smooth_cubed_sphere`:
-    each pass replaces a cell with the mean of itself and its edge-neighbours,
-    then blends the result halfway back toward the *original* field
-    (``0.5*arr + 0.5*smoothed``) so the smoothing stays anchored and cannot
-    drift far from the input.
 
-    Parameters
-    ----------
-    arr : (nCells,) cell-centred field to smooth.
-    cells_on_cell : (maxEdges, nCells) int — 0-based neighbour-cell indices per
-        edge of each cell, with ``-1`` in unused slots (rows
-        ``i >= n_edges_on_cell[c]``), matching the ``VoronoiMesh.cellsOnCell``
-        construction.
-    n_edges_on_cell : (nCells,) int — number of edges (= neighbours) per cell.
-    passes : int — number of smoothing passes (``<= 0`` is a no-op).
+def owner_by_quads(xyz_s, xyz_c, corners_xyz, nb):
+    """Exact polygon ownership for cells with great-circle edges (the
+    cubed-sphere's): the nearest centre first, then that cell's quad, then
+    its neighbours' quads (``nb`` ``(K, n)``).  Returns ``(owner,
+    n_unclaimed)``: the caller refuses any unclaimed point (the corner
+    arrays do not describe the grid, or the source is coarser than a
+    cell's corner-neighbourhood)."""
+    from scipy.spatial import cKDTree
+    owner = cKDTree(xyz_c).query(xyz_s, k=1)[1].astype(np.int64)
+    inside = _inside_quads(xyz_s, corners_xyz[owner], xyz_c[owner])
+    todo = np.nonzero(~inside)[0]
+    for k in range(nb.shape[0]):
+        if todo.size == 0:
+            break
+        cand = nb[k, owner[todo]]
+        valid = cand >= 0
+        hit = np.zeros(todo.size, dtype=bool)
+        hit[valid] = _inside_quads(xyz_s[todo[valid]], corners_xyz[cand[valid]],
+                                   xyz_c[cand[valid]])
+        owner[todo[hit]] = cand[hit]
+        todo = todo[~hit]
+    return owner, int(todo.size)
 
-    Returns
-    -------
-    (nCells,) smoothed field (same dtype as ``arr``).
-    """
-    if passes <= 0:
-        return arr
-    coc = np.asarray(cells_on_cell)
-    if coc.ndim != 2:
+
+def owner_by_boxes(lat_s, lon_s, lat_c_1d, lon_c_1d, lat_edges_1d=None):
+    """Exact ownership on a structured lat-lon grid: latitude edges
+    ``lat_edges_1d`` ``(n_lat+1,)`` when the grid defines them (Gaussian:
+    the quadrature-weight edges that make the boxes equal ``grid_area``),
+    else the midpoints of the centres; poles clamped, longitude periodic
+    with equal spacing."""
+    lat_c = np.asarray(lat_c_1d, dtype=np.float64)
+    lon_c = np.asarray(lon_c_1d, dtype=np.float64)
+    asc = lat_c[0] <= lat_c[-1]
+    la = lat_c if asc else lat_c[::-1]
+    if lat_edges_1d is None:
+        lat_e = np.concatenate([[-0.5 * np.pi], 0.5 * (la[1:] + la[:-1]), [0.5 * np.pi]])
+    else:
+        lat_e = np.asarray(lat_edges_1d, dtype=np.float64)
+        lat_e = lat_e if lat_e[0] <= lat_e[-1] else lat_e[::-1]
+        if lat_e.shape != (la.size + 1,) or not (np.diff(lat_e) > 0).all():
+            raise ValueError("owner_by_boxes: lat edges must be (n_lat+1,) and increasing")
+    dlon = 2.0 * np.pi / lon_c.size
+    # absolute tolerance: float32 grid coordinates carry ~4e-7 rad of
+    # rounding whatever the spacing (a relative test on dlon rejects fine grids)
+    if not np.allclose(lon_c, lon_c[0] + dlon * np.arange(lon_c.size), rtol=0.0, atol=1e-5):
+        raise ValueError("owner_by_boxes: longitudes must be equally spaced over 2 pi "
+                         "without a repeated end point")
+    lon_e0 = lon_c[0] - 0.5 * dlon
+    j = np.clip(np.searchsorted(lat_e, lat_s, side="right") - 1, 0, la.size - 1)
+    if not asc:
+        j = la.size - 1 - j
+    i = np.floor(np.mod(lon_s - lon_e0, 2.0 * np.pi) / dlon).astype(np.int64) % lon_c.size
+    return (j * lon_c.size + i).astype(np.int64)
+
+
+def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon_rad,
+                        cell_area=None, *, corners_xyz=None, nb=None, axes_1d=None):
+    """Area-weighted cell means of regular lat-lon ``fields`` (each
+    ``(n_lat, n_lon)``) on the cells of a grid: every source cell belongs
+    to ONE cell and contributes its own spherical area (first order in the
+    source resolution).  Ownership: ``corners_xyz`` ``(n_cells, 4, 3)`` +
+    ``nb`` -> exact spherical quads (cubed-sphere); ``axes_1d`` ``(lat_c,
+    lon_c[, lat_edges])`` radians -> exact lat-lon boxes; neither -> the NEAREST centre
+    (exact for a Voronoi mesh).  Returns a list of ``(n_cells,)`` arrays.
+    A cell no source cell lands in is an error (the source must be finer);
+    with ``cell_area`` the assigned source area is checked against the
+    cell's own area (ratio in [0.5, 2])."""
+    from scipy.spatial import cKDTree
+    lat_s = np.deg2rad(np.asarray(lat_src_deg, dtype=np.float64))
+    lon_s = np.deg2rad(np.asarray(lon_src_deg, dtype=np.float64))
+    lon2, lat2 = np.meshgrid(lon_s, lat_s)
+    xyz_s = _xyz(lat2.ravel(), lon2.ravel())
+    xyz_c = _xyz(cell_lat_rad, cell_lon_rad)
+    n = xyz_c.shape[0]
+    if corners_xyz is not None:
+        owner, n_fb = owner_by_quads(xyz_s, xyz_c, np.asarray(corners_xyz), np.asarray(nb))
+        if n_fb > 0:
+            raise ValueError(f"bin_latlon_to_cells: {n_fb} source cells inside no quad -- "
+                             "the corner arrays do not describe this grid")
+    elif axes_1d is not None:
+        owner = owner_by_boxes(lat2.ravel(), lon2.ravel(), *axes_1d)
+    else:
+        owner = cKDTree(xyz_c).query(xyz_s, k=1)[1].astype(np.int64)
+    w = _source_cell_areas(lat_src_deg, lon_src_deg).ravel()
+    denom = np.bincount(owner, weights=w, minlength=n)
+    if np.any(denom <= 0.0):
         raise ValueError(
-            "cells_on_cell must be 2-D (maxEdges, nCells); got shape "
-            f"{coc.shape}"
-        )
-    n_edges = np.asarray(n_edges_on_cell)
-    if n_edges.shape[0] != coc.shape[1] or arr.shape[0] != coc.shape[1]:
-        raise ValueError(
-            "arr, n_edges_on_cell, and cells_on_cell must agree on nCells: "
-            f"arr={arr.shape}, n_edges_on_cell={n_edges.shape}, "
-            f"cells_on_cell={coc.shape}"
-        )
-    valid = coc >= 0                       # (maxEdges, nCells)
-    safe_idx = np.where(valid, coc, 0)     # clamp -1 -> 0; masked out below
-    # self + valid neighbours; +1.0 counts the cell itself.
-    count = n_edges.astype(np.float64) + 1.0
-    arr0 = arr.astype(np.float64, copy=True)
-    result = arr0.copy()
-    for _ in range(passes):
-        neigh = result[safe_idx]                              # (maxEdges, nCells)
-        neigh_sum = np.where(valid, neigh, 0.0).sum(axis=0)   # (nCells,)
-        smoothed = (result + neigh_sum) / count
-        result = 0.5 * arr0 + 0.5 * smoothed
-    return result.astype(arr.dtype)
+            f"bin_latlon_to_cells: {int(np.sum(denom <= 0.0))} target cells received "
+            "no source cell -- the source grid is coarser than the target")
+    if cell_area is not None:
+        ca = np.asarray(cell_area, dtype=np.float64).ravel()
+        ratio = (denom / denom.sum()) / (ca / ca.sum())
+        if ratio.min() < 0.5 or ratio.max() > 2.0:
+            raise ValueError(
+                "bin_latlon_to_cells: assigned source area / cell area in "
+                f"[{ratio.min():.2f}, {ratio.max():.2f}] -- the source is too coarse "
+                "or the cell centres do not describe this grid")
+    return [np.bincount(owner, weights=w * np.asarray(f, dtype=np.float64).ravel(),
+                        minlength=n) / denom for f in fields]
 
 
-def smooth_phis_voronoi(
-    phis: jnp.ndarray,
-    cells_on_cell,
-    n_edges_on_cell,
-    smoothing_passes: int = 4,
-) -> jnp.ndarray:
-    """Laplacian-smooth an ERA5-derived phis field on an SCVT/Voronoi mesh.
+def _neighbour_table(grid):
+    """``(nb, area)`` -- ``nb`` ``(K, n_cells)`` int neighbour indices (``-1``
+    unused), ``area`` ``(n_cells,)`` -- for a cubed-sphere ``(6, n, n)`` grid
+    (cross-face halo), a structured lat-lon ``(n_lat, n_lon)`` grid
+    (periodic longitude, no neighbour across a pole) or a Voronoi mesh
+    (``cellsOnCell``); ``None`` for a mesh without neighbour information
+    (the duo column mesh: its terrain is filtered on the duo faces by
+    ``terrain_filter_duo``)."""
+    coc = getattr(grid, "cellsOnCell", None)
+    if coc is not None:
+        return np.asarray(coc, dtype=np.int64), np.asarray(grid.grid_area, dtype=np.float64)
+    lat = np.asarray(grid.grid_lat)
+    if lat.ndim == 3:
+        six, n, _ = lat.shape
+        ids = jnp.asarray(np.arange(six * n * n, dtype=np.float64).reshape(six, n, n))
+        p = np.asarray(pad_halo_local(ids, None))
+        nb = np.stack([p[:, :-2, 1:-1], p[:, 2:, 1:-1], p[:, 1:-1, :-2], p[:, 1:-1, 2:]])
+        nb = nb.reshape(4, -1)
+        # the pad must COPY ids (an interpolating pad would average two ids
+        # at a cube corner); the relation must be symmetric (conservation
+        # rests on it) and each cell must have 4 distinct neighbours
+        if not np.all(nb == np.rint(nb)):
+            raise ValueError("_neighbour_table: the cube halo pad interpolated cell ids")
+        nb = nb.astype(np.int64)
+        n_cells = six * n * n
+        pairs = {(i, int(j)) for i in range(n_cells) for j in nb[:, i]}
+        if len(pairs) != 4 * n_cells or any((j, i) not in pairs for i, j in pairs):
+            raise ValueError("_neighbour_table: cube neighbour relation is not "
+                             "symmetric / 4-regular")
+        return nb, np.asarray(grid.area, dtype=np.float64).reshape(-1)
+    if lat.ndim == 2:
+        n_lat, n_lon = lat.shape
+        ids = np.arange(n_lat * n_lon).reshape(n_lat, n_lon)
+        south = np.where(np.arange(n_lat)[:, None] > 0, np.roll(ids, 1, axis=0), -1)
+        north = np.where(np.arange(n_lat)[:, None] < n_lat - 1, np.roll(ids, -1, axis=0), -1)
+        nb = np.stack([south, north, np.roll(ids, 1, axis=1), np.roll(ids, -1, axis=1)])
+        return nb.reshape(4, -1).astype(np.int64), np.asarray(
+            grid.grid_area, dtype=np.float64).reshape(-1)
+    return None
 
-    The MPAS analogue of :func:`smooth_phis_cubed_sphere`.  Raw regridded ERA5
-    surface geopotential retains grid-scale roughness over steep terrain
-    (Himalaya/Andes/Antarctica) on a coarse Voronoi mesh; the TRiSK
-    pressure-gradient amplifies those cell-to-cell gradients to O(dx^-1)
-    spurious force, which drives a localized wind runaway / blowup within days
-    from an ERA5 initial condition.  Smoothing phis before it is used as an IC
-    reduces those gradients (the caller still applies a barometric ``p_s``
-    correction for hydrostatic consistency).  There is no cube-edge blend — a
-    Voronoi mesh has no face boundaries.
 
-    Parameters
-    ----------
-    phis : (nCells,) surface geopotential [m^2/s^2].
-    cells_on_cell : (maxEdges, nCells) ``VoronoiMesh.cellsOnCell``.
-    n_edges_on_cell : (nCells,) ``VoronoiMesh.nEdgesOnCell``.
-    smoothing_passes : int
-        Number of Laplacian passes.  Default matches
-        ``TopographyConfig.smoothing_passes = 4`` and the cubed-sphere path.
+def masked_diffusion(q, f_land, nb, area, *, passes: int = 4,
+                     k: float = _SMOOTH_K_PER_PASS):
+    """``passes`` of explicit flux-form diffusion on a cell field with the
+    zero_ocean rule: ``q_i += k * sum_j w_ij * (abar_ij / a_i) * (q_j - q_i)``
+    with ``w_ij = max(0, min(f_land_i, f_land_j))`` and ``abar_ij`` the mean
+    of the two cell areas, so the area integral ``sum_i a_i q_i`` is conserved
+    exactly (antisymmetric edge terms) and an ocean cell (``f_land == 0``)
+    never changes.  Monotone (positive weights) while ``k * K <= 1``."""
+    q = np.asarray(q, dtype=np.float64).copy()
+    f = np.asarray(f_land, dtype=np.float64)
+    a = np.asarray(area, dtype=np.float64)
+    nb = np.asarray(nb, dtype=np.int64)
+    valid = nb >= 0
+    j = np.where(valid, nb, 0)
+    w = np.where(valid, np.maximum(0.0, np.minimum(f[None, :], f[j])), 0.0)
+    coef = w * 0.5 * (a[None, :] + a[j]) / a[None, :]
+    # max principle: the self weight 1 - k*sum_j coef must stay >= 0 on
+    # every cell (the COEFFICIENT sum, not the neighbour count: a small
+    # cell beside large ones carries (a_i + a_j)/(2 a_i) > 1 per edge)
+    worst = float(np.max(k * np.sum(coef, axis=0)))
+    if worst > 1.0:
+        raise ValueError(f"masked_diffusion: k * sum_j coef = {worst:.3f} > 1 on "
+                         "some cell -- the explicit pass is not monotone")
+    for _ in range(int(passes)):
+        q = q + k * np.sum(coef * (q[j] - q[None, :]), axis=0)
+    return q
 
-    Returns
-    -------
-    (nCells,) smoothed surface geopotential [m^2/s^2].
-    """
-    smoothed = _laplacian_smooth_voronoi(
-        np.asarray(phis),
-        np.asarray(cells_on_cell),
-        np.asarray(n_edges_on_cell),
-        passes=smoothing_passes,
-    )
-    return jnp.asarray(smoothed)
+
+def _corner_neighbours(corners_xyz, k_max: int = 8):
+    """``(k_max, n)`` neighbour table from shared corners: two cells are
+    neighbours when they share a corner point (edge AND corner neighbours,
+    enough for the quad ownership search)."""
+    n = corners_xyz.shape[0]
+    key = np.round(corners_xyz.reshape(-1, 3), 9)
+    _, inv = np.unique(key, axis=0, return_inverse=True)
+    inv = inv.reshape(n, 4)
+    by_corner = {}
+    for c in range(n):
+        for v in inv[c]:
+            by_corner.setdefault(int(v), []).append(c)
+    nb = np.full((k_max, n), -1, dtype=np.int64)
+    for c in range(n):
+        s = sorted({d for v in inv[c] for d in by_corner[int(v)] if d != c})
+        nb[:min(k_max, len(s)), c] = s[:k_max]
+    return nb
+
+
+def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
+                         f_land_override=None, smoothing_passes: int = 4):
+    """THE terrain product of ``grid`` from one elevation field (metres,
+    ocean negative or 0): cell-mean elevation of ``max(elev, 0)`` and the
+    land fraction (area fraction with ``elev > 0``) from the SAME binning,
+    then the masked diffusion.  ``f_land_override`` (an sftlf-type field
+    already on the grid) replaces the land fraction BEFORE the filter and
+    masks it; where it says ocean the elevation is pinned to 0.  Returns
+    ``(z_s [m], f_land)`` flattened ``(n_cells,)``; a grid without
+    neighbour information gets the UNSMOOTHED binned elevation (the duo
+    column lane filters on its faces)."""
+    elev = np.asarray(elev_m, dtype=np.float64)
+    area = getattr(grid, "grid_area", None)
+    if area is None:
+        area = getattr(grid, "area", None)
+    own = {}
+    c_lat = getattr(grid, "cornerLat", None)
+    if c_lat is not None:
+        # cells with great-circle edges and known corners (the duo column
+        # mesh): exact quad ownership, neighbours for the boundary search
+        own["corners_xyz"] = _xyz(c_lat, grid.cornerLon).reshape(-1, 4, 3)
+        own["nb"] = _corner_neighbours(own["corners_xyz"])
+    elif np.asarray(grid.grid_lat).ndim == 2:
+        lat_v = getattr(grid, "lat_v", None)
+        own["axes_1d"] = (np.asarray(grid.lat, dtype=np.float64),
+                          np.asarray(grid.lon, dtype=np.float64),
+                          None if lat_v is None else np.asarray(lat_v, dtype=np.float64))
+    # else: nearest centre -- exact for a Voronoi mesh; the cube lane grid
+    # (no corner arrays) is served to that approximation (follow-up)
+    z_mean, f_land = bin_latlon_to_cells(
+        lat_src_deg, lon_src_deg, [np.maximum(elev, 0.0), (elev > 0.0).astype(np.float64)],
+        np.asarray(grid.grid_lat), np.asarray(grid.grid_lon),
+        cell_area=None if area is None else np.asarray(area), **own)
+    if f_land_override is not None:
+        f_land = np.clip(np.asarray(f_land_override, dtype=np.float64).ravel(), 0.0, 1.0)
+    z_s = np.where(f_land > 0.0, z_mean, 0.0)
+    table = _neighbour_table(grid)
+    if table is not None and smoothing_passes > 0:
+        z_s = masked_diffusion(z_s, f_land, table[0], table[1], passes=smoothing_passes)
+    return z_s, f_land
+
+
 
 
 def _target_grid_degrees(grid):
@@ -1277,14 +1272,13 @@ def load_real_topography(
     """Load real topography from a NetCDF file and regrid to model grid.
 
     Supports any regular lat-lon elevation dataset (ETOPO, GEBCO,
-    GMTED2010, etc.). The elevation field is bilinearly interpolated
-    to model grid centers, smoothed to remove 2Δx noise, and
-    (for cubed-sphere grids) edge-blended at face boundaries.
+    GMTED2010, etc.).  THE terrain product (decision C, 2026-10-02):
+    cell-mean of the ocean-clipped elevation and the land fraction from
+    the SAME binning (:func:`grid_terrain_product`), then the grid's
+    masked flux-form diffusion (fv_surf_map's zero_ocean rule).
 
-    Land fraction is taken from ``config.land_mask_path`` when set (a
-    true land-sea mask such as CMIP6 ``sftlf`` or ERA5 ``lsm``);
-    otherwise it is derived from sub-grid sampling of the elevation
-    field (the fraction of sub-grid points with elevation > 0).
+    Land fraction from ``config.land_mask_path`` when set (CMIP6 ``sftlf``
+    / ERA5 ``lsm``) replaces the binned one BEFORE the filter and masks it.
 
     Parameters
     ----------
@@ -1371,76 +1365,15 @@ def load_real_topography(
     if float(np.max(np.abs(elev_data))) > _MAX_PLAUSIBLE_ELEV_M:
         raise ValueError(_double_g_msg)
 
-    # Use protocol for grid detection (classification fixed in
-    # _target_grid_degrees: by coordinate rank, so the lat-lon grid is no longer
-    # mis-routed into the cubed-sphere smoother).
-    target_lat_2d, target_lon_2d, is_gaussian, grid_spacing = (
-        _target_grid_degrees(grid)
-    )
-
-    # Regrid elevation
-    z_s = _regrid_to_target(lat_src, lon_src, elev_data,
-                            target_lat_2d, target_lon_2d)
-
-    # Land fraction: prefer an explicit land-sea-mask file (true land
-    # fraction, including below-sea-level land); otherwise derive it
-    # from sub-grid elevation sampling (elevation > 0).
+    shape = tuple(np.asarray(grid.grid_lat).shape)
+    f_over = None
     if config.land_mask_path:
-        f_land = _load_land_fraction_file(
-            config.land_mask_path, config.land_mask_var,
-            target_lat_2d, target_lon_2d,
-        )
-    else:
-        f_land = _derive_land_fraction(lat_src, lon_src, elev_data,
-                                       target_lat_2d, target_lon_2d,
-                                       grid_spacing)
-
-    # Clip negative elevations if requested
-    if config.clip_negative:
-        z_s = np.maximum(z_s, 0.0)
-
-    # Smoothing.  Unstructured Voronoi/MPAS fields are rank-1 ``(nCells,)``
-    # with no structured neighbour stencil, so neither the gaussian (2-D)
-    # nor the cubed-sphere (6, n, n) smoother applies.  Use the mesh-native
-    # Laplacian (``smooth_phis_voronoi``, the same smoother the ERA5-IC MPAS
-    # path uses): raw point-sampled ETOPO on a coarse Voronoi mesh keeps
-    # cell-to-cell roughness that the TRiSK PGF amplifies to O(dx^-1)
-    # spurious force -> localized wind runaway (audit 2026-07-17). Requires
-    # the grid to expose cellsOnCell/nEdgesOnCell (a VoronoiMesh); a rank-1
-    # field on a grid without them is left as-is with a warning.
-    is_unstructured = np.asarray(z_s).ndim == 1
-    if is_unstructured:
-        coc = getattr(grid, "cellsOnCell", None)
-        neoc = getattr(grid, "nEdgesOnCell", None)
-        if config.smoothing_passes > 0 and coc is not None and neoc is not None:
-            z_s = np.asarray(smooth_phis_voronoi(
-                jnp.asarray(z_s), coc, neoc,
-                smoothing_passes=config.smoothing_passes,
-            ))
-        elif config.smoothing_passes > 0:
-            logger.warning(
-                "load_real_topography: unstructured grid %s lacks "
-                "cellsOnCell/nEdgesOnCell; leaving point-sampled topography "
-                "unsmoothed (TRiSK-PGF blowup risk over steep terrain).",
-                type(grid).__name__,
-            )
-    elif is_gaussian:
-        z_s = _laplacian_smooth_gaussian(z_s, passes=config.smoothing_passes)
-    else:
-        z_s = _laplacian_smooth_cubed_sphere(z_s, passes=config.smoothing_passes)
-
-    # Edge blending for cubed-sphere
-    if not is_gaussian and not is_unstructured and config.edge_blend_strength > 0:
-        z_s_jax = jnp.array(z_s)
-        z_s_jax = blend_scalar_cube_edges_2d(
-            z_s_jax,
-            strength=config.edge_blend_strength,
-            width=config.edge_blend_width,
-        )
-        z_s = np.asarray(z_s_jax)
-
-    # Convert to JAX arrays
-    phis = jnp.array(constants.g * z_s)
-    f_land = jnp.array(np.clip(f_land, 0.0, 1.0))
-
+        target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
+        f_over = _load_land_fraction_file(
+            config.land_mask_path, config.land_mask_var, target_lat_2d, target_lon_2d)
+    z_s, f_land = grid_terrain_product(
+        grid, lat_src, lon_src, elev_data, f_land_override=f_over,
+        smoothing_passes=config.smoothing_passes)
+    phis = jnp.asarray(constants.g * z_s.reshape(shape))
+    f_land = jnp.asarray(np.clip(f_land, 0.0, 1.0).reshape(shape))
     return phis, f_land

@@ -51,7 +51,8 @@ def test_latlon_carry_shapes_and_physical():
     grid = create_grid("latlon", 24)
     from legoesm.grids.vertical import create_sigma_coordinate
     sigma = create_sigma_coordinate(30)
-    carry = era5_to_latlon_carry(_synthetic_era5(), grid, sigma)
+    carry = era5_to_latlon_carry(_synthetic_era5(), grid, sigma,
+                                 target_phis=jnp.zeros(np.shape(grid.grid_lat)))
     # SegmentCarry exposes T/u/v/p_s and q_v via the packed layout.
     T = np.asarray(carry.T.data if hasattr(carry.T, "data") else carry.T)
     u = np.asarray(carry.u.data if hasattr(carry.u, "data") else carry.u)
@@ -74,7 +75,8 @@ def test_latlon_carry_loads_q_as_specific_humidity():
     grid = create_grid("latlon", 12)
     from legoesm.grids.vertical import create_sigma_coordinate
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_latlon_carry(era5, grid, sigma)
+    carry = era5_to_latlon_carry(era5, grid, sigma,
+                                 target_phis=jnp.zeros(np.shape(grid.grid_lat)))
     qv = np.asarray(getattr(carry, "q_v").data
                     if hasattr(getattr(carry, "q_v"), "data") else getattr(carry, "q_v"))
     # Near the surface (sigma~1) where interpolation is well-posed.
@@ -127,9 +129,10 @@ def test_phis_adjust_lowering_terrain_raises_ps_sign():
     np.testing.assert_allclose(float(p_s_adj[0, 0]), expect, rtol=1e-6)
 
 
-def test_phis_adjust_hybrid_floor_raises_ps_and_lowers_phis():
-    # A p_s well below the degenerate-layer floor must be raised to the floor,
-    # and phis lowered by the barometric equivalent (split-PGF consistency).
+def test_phis_adjust_hybrid_floor_refuses_the_column():
+    # Decision C: a p_s below the degenerate-layer floor is REFUSED (the
+    # terrain product is never lowered); at the floor it passes untouched.
+    import pytest
     from legoesm.training.era5_to_state import (
         _apply_phis_hydrostatic_adjustment, _hybrid_p_s_floor)
     from legoesm.grids.vertical import make_hybrid_levels
@@ -138,28 +141,43 @@ def test_phis_adjust_hybrid_floor_raises_ps_and_lowers_phis():
     phis_s = jnp.asarray(np.full((3, 3), 4.0e4))
     p_s = jnp.asarray(np.full((3, 3), floor * 0.5))   # below the floor
     T_sfc = jnp.asarray(np.full((3, 3), 260.0))
+    with pytest.raises(ValueError, match="positive-thickness floor"):
+        _apply_phis_hydrostatic_adjustment(
+            phis_s, phis_s, p_s, T_sfc, sigma=sigma, is_hybrid=True)
     phis_adj, p_s_adj = _apply_phis_hydrostatic_adjustment(
-        phis_s, phis_s, p_s, T_sfc, sigma=sigma, is_hybrid=True)
-    assert np.all(np.asarray(p_s_adj) >= floor - 1.0), "p_s not raised to floor"
-    assert np.all(np.asarray(phis_adj) < np.asarray(phis_s)), "phis not lowered to match"
+        phis_s, phis_s, jnp.full((3, 3), floor * 1.5), T_sfc, sigma=sigma, is_hybrid=True)
+    np.testing.assert_array_equal(np.asarray(phis_adj), np.asarray(phis_s))
+    np.testing.assert_allclose(np.asarray(p_s_adj), floor * 1.5)
 
 
 # --- T3.2: lat-lon carry with real (non-flat) orography ----------------------
 
-def test_latlon_carry_smooths_orography_and_stays_finite():
-    # With a steep ERA5 peak, the carry's phis must be SMOOTHER (smaller max
-    # gradient) than the raw regridded orography — the fix for the blow-up.
+def _product_from_raw(grid, raw, passes=4):
+    """The grid's terrain product stand-in: the masked diffusion of a raw
+    field with an all-land mask (what load_real_topography does to the binned
+    elevation), so carry tests exercise the real target path."""
+    from legoesm.grids.topography import _neighbour_table, masked_diffusion
+    nb, area = _neighbour_table(grid)
+    return jnp.asarray(masked_diffusion(np.asarray(raw).ravel(), np.ones(area.shape),
+                                        nb, area, passes=passes).reshape(np.shape(raw)))
+
+
+def test_latlon_carry_starts_on_the_target_and_stays_finite():
+    # Decision C: the carry's phis IS the target product (smoother than the
+    # raw regridded ERA5 orography), p_s moved to it, everything finite.
     from legoesm.training.era5_to_state import era5_to_latlon_carry, regrid_2d_to_gaussian
     from legoesm.grids.vertical import create_sigma_coordinate
     era5 = _mountain_era5()
     grid = create_grid("latlon", 24)
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_latlon_carry(era5, grid, sigma)
     raw = np.asarray(regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid))
+    target = _product_from_raw(grid, raw)
+    carry = era5_to_latlon_carry(era5, grid, sigma, target_phis=target)
     phis = np.asarray(carry.phis)
+    np.testing.assert_array_equal(phis, np.asarray(target))
     assert np.all(np.isfinite(phis)) and np.all(np.isfinite(np.asarray(carry.p_s)))
-    assert _max_abs_grad(phis) < _max_abs_grad(raw), "carry did not smooth phis"
-    assert phis.max() <= raw.max() + 1e-6, "smoothing must not amplify the peak"
+    assert _max_abs_grad(phis) < _max_abs_grad(raw), "the product is not smoother than raw"
+    assert phis.max() <= raw.max() + 1e-6, "the product must not amplify the peak"
     T = np.asarray(carry.T)
     assert np.all(np.isfinite(T)) and 150.0 < T.min() and T.max() < 340.0
 
@@ -170,7 +188,10 @@ def test_latlon_carry_hybrid_orography_respects_ps_floor():
     era5 = _mountain_era5()
     grid = create_grid("latlon", 24)
     sigma = make_hybrid_levels(20)
-    carry = era5_to_latlon_carry(era5, grid, sigma)
+    # a flat target: p_s only ever moves UP from the raw mountain, so the
+    # floor never binds (the refusal itself is gated in the helper test)
+    carry = era5_to_latlon_carry(era5, grid, sigma,
+                                 target_phis=jnp.zeros(np.shape(grid.grid_lat)))
     floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
     p_s = np.asarray(carry.p_s)
     assert np.all(np.isfinite(np.asarray(carry.T)))
@@ -185,7 +206,8 @@ def test_latlon_carry_analytic_temperature_value():
     grid = create_grid("latlon", 24)
     from legoesm.grids.vertical import create_sigma_coordinate
     sigma = create_sigma_coordinate(30)
-    carry = era5_to_latlon_carry(era5, grid, sigma)
+    carry = era5_to_latlon_carry(era5, grid, sigma,
+                                 target_phis=jnp.zeros(np.shape(grid.grid_lat)))
     T = np.asarray(carry.T.data if hasattr(carry.T, "data") else carry.T)
     lat = np.asarray(grid.lat)
     i_eq = int(np.argmin(np.abs(lat)))
@@ -202,10 +224,9 @@ def test_latlon_carry_analytic_temperature_value():
 # (smooth_phis_gaussian + shared _apply_phis_hydrostatic_adjustment; it was the
 #  odd grid out — raw phis, no barometric p_s reconciliation, no hybrid floor)
 
-def test_spectral_carry_smooths_phis_and_reconciles_ps():
+def test_spectral_carry_truncates_the_target_and_reconciles_ps():
     from legoesm import constants
     from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.topography import smooth_phis_gaussian
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
@@ -215,14 +236,12 @@ def test_spectral_carry_smooths_phis_and_reconciles_ps():
     era5 = _mountain_era5()
     grid = create_gaussian_grid(21)
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_spectral_carry(era5, grid, sigma)
     raw = np.asarray(regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid))
+    target = _product_from_raw(grid, raw)
+    carry = era5_to_spectral_carry(era5, grid, sigma, target_phis=target)
     phis = np.asarray(carry.phis)
     assert np.all(np.isfinite(phis)) and np.all(np.isfinite(np.asarray(carry.p_s)))
-    # phis is SMOOTHED: it actually changed, gradients reduced, ridge amplitude cut.
-    assert np.abs(phis - raw).max() > 0.0, "spectral carry left phis raw"
-    assert _max_abs_grad(phis) < _max_abs_grad(raw), "carry did not smooth phis"
-    assert phis.max() < raw.max(), "smoothing must reduce the ridge amplitude"
+    assert _max_abs_grad(phis) < _max_abs_grad(raw), "the product is not smoother than raw"
     # p_s is RECONCILED to the terrain the SPECTRAL DYNAMICS feel — the
     # ROUND-TRIPPED smoothed phis (Gibbs ringing included), not the
     # grid-space smoothed field.  Reconciling to the grid-space field left
@@ -232,9 +251,8 @@ def test_spectral_carry_smooths_phis_and_reconciles_ps():
     # loss.  Non-hybrid: p_s_adj = p_s * exp((phis_raw - phis_rt)/(R_d T)).
     from legoesm.grids.gaussian import sh_analysis, sh_synthesis
     T_ll, _, _, _, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
-    smooth = np.asarray(smooth_phis_gaussian(raw))
     smooth_rt = np.asarray(sh_synthesis(grid, sh_analysis(
-        grid, jnp.asarray(smooth, jnp.float64))))
+        grid, jnp.asarray(target, jnp.float64))))
     T_sfc = np.asarray(T_ll)[..., -1]
     expected_ps = np.asarray(p_s_ll) * np.exp(
         (raw - smooth_rt) / (constants.R_d * T_sfc))
@@ -258,7 +276,8 @@ def test_spectral_carry_hybrid_orography_respects_ps_floor():
     era5 = _mountain_era5()
     grid = create_gaussian_grid(21)
     sigma = make_hybrid_levels(20)
-    carry = era5_to_spectral_carry(era5, grid, sigma)
+    carry = era5_to_spectral_carry(era5, grid, sigma,
+                                   target_phis=jnp.zeros(np.shape(grid.grid_lat)))
     floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
     p_s = np.asarray(carry.p_s)
     assert np.all(np.isfinite(np.asarray(carry.T)))
@@ -275,6 +294,7 @@ def _latlon_carry(microphysics, turbulence, n=12, nlev=20):
     sigma = create_sigma_coordinate(nlev)
     return era5_to_latlon_carry(
         _synthetic_era5(), grid, sigma,
+        target_phis=jnp.zeros(np.shape(grid.grid_lat)),
         microphysics=microphysics, turbulence=turbulence,
     )
 
@@ -364,52 +384,14 @@ def test_prognostic_carry_seeds_helper_double_moment_and_stateful():
     assert "qke" not in seeds  # tke scheme uses the tke slot
 
 
-# --- audit 2026-07-17 T5: carry smoothing params are driver-tunable ----------
-
-def test_latlon_carry_smoothing_passes_take_effect():
-    """More Laplacian passes → smoother carry phis (the driver now threads
-    cfg.topo_smoothing; the value was previously hard-coded)."""
-    from legoesm.training.era5_to_state import era5_to_latlon_carry
-    from legoesm.grids.vertical import create_sigma_coordinate
-    era5 = _mountain_era5()
-    grid = create_grid("latlon", 24)
-    sigma = create_sigma_coordinate(20)
-    few = np.asarray(era5_to_latlon_carry(
-        era5, grid, sigma, smoothing_passes=1).phis)
-    many = np.asarray(era5_to_latlon_carry(
-        era5, grid, sigma, smoothing_passes=8).phis)
-    assert _max_abs_grad(many) < _max_abs_grad(few), (
-        "more passes must reduce the phis gradient")
 
 
-def test_spectral_carry_smoothing_passes_take_effect():
-    from legoesm.training.era5_to_state import era5_to_spectral_carry
-    from legoesm.grids.vertical import create_sigma_coordinate
-    era5 = _mountain_era5()
-    grid = create_grid("gaussian", 21)
-    sigma = create_sigma_coordinate(20)
-    few = np.asarray(era5_to_spectral_carry(
-        era5, grid, sigma, smoothing_passes=1).phis)
-    many = np.asarray(era5_to_spectral_carry(
-        era5, grid, sigma, smoothing_passes=8).phis)
-    assert _max_abs_grad(many) < _max_abs_grad(few)
-
-
-def test_cube_smooth_phis_edge_blend_width_defaults_to_two():
-    """smooth_phis_cubed_sphere now blends with width=2 (TopographyConfig's
-    default and the static-topography path), not the old silent width=1 — the
-    docstring's 'same pipeline' promise (audit 2026-07-17)."""
-    from legoesm.grids.topography import (
-        smooth_phis_cubed_sphere, blend_scalar_cube_edges_2d,
-    )
-    from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
-    rng = np.random.default_rng(0)
-    phis = jnp.asarray(rng.normal(size=(6, 8, 8)) * 1.0e4)
-    got = np.asarray(smooth_phis_cubed_sphere(phis, smoothing_passes=2))
-    lap = _laplacian_smooth_cubed_sphere(np.asarray(phis), passes=2)
-    want_w2 = np.asarray(blend_scalar_cube_edges_2d(
-        jnp.asarray(lap), strength=0.3, width=2))
-    want_w1 = np.asarray(blend_scalar_cube_edges_2d(
-        jnp.asarray(lap), strength=0.3, width=1))
-    np.testing.assert_allclose(got, want_w2, atol=1e-9)
-    assert not np.allclose(got, want_w1), "default must be width=2, not width=1"
+def test_phis_adjust_refuses_a_zero_filled_raw_geopotential():
+    """A store without surface geopotential is zero-filled by the loader;
+    the hydrostatic move onto a real product refuses it."""
+    from legoesm.training.era5_to_state import _apply_phis_hydrostatic_adjustment
+    sigma = np.linspace(0.05, 0.95, 10)
+    with pytest.raises(ValueError, match="all zero"):
+        _apply_phis_hydrostatic_adjustment(
+            np.zeros((4, 8)), np.full((4, 8), 5000.0), np.full((4, 8), 1.0e5),
+            np.full((4, 8), 280.0), sigma, False)

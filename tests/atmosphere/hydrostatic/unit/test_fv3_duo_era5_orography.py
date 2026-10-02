@@ -232,6 +232,24 @@ def test_rest_state_over_a_smoothed_mountain(name, T_of_p, ps_of_phis, theta):
     assert np.abs(ps1 - ps0).max() < 100.0, np.abs(ps1 - ps0).max()   # Pa
 
 
+
+def _era5_phis_fn(era5):
+    """``phis_fn(lon, lat)`` for ``create_fv3_duo_grid``: the raw ERA5
+    surface geopotential at arbitrary points (KD-tree inverse distance) --
+    a TEST terrain function; production builds the grid on the terrain
+    product (decision C), never on ERA5's orography."""
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar)
+    lat_src, lon_src = np.asarray(era5.lat), np.asarray(era5.lon)
+    phis_src = jnp.asarray(era5.phis)
+
+    def fn(lon, lat):
+        lon, lat = np.asarray(lon), np.asarray(lat)
+        w = compute_latlon_to_voronoi_weights(
+            lat_src, lon_src, lat.reshape(-1), lon.reshape(-1))
+        return np.array(regrid_scalar(phis_src, w), dtype=np.float64).reshape(lon.shape)
+    return fn
+
 def _synthetic_era5(phis_max_m):
     """A tiny analytic ERA5Slice (5-degree lat-lon, 8 pressure levels):
     isothermal 280 K, calm, dry, a Gaussian mountain of ``phis_max_m``."""
@@ -250,14 +268,14 @@ def _synthetic_era5(phis_max_m):
 
 def test_era5_bundle_refuses_terrain_above_the_hybrid_floor():
     from legoesm.training.era5_to_state import (
-        era5_phis_fn, era5_to_fv3_duo_bundle)
+        era5_to_fv3_duo_bundle)
     e = _synthetic_era5(20000.0)      # p_s ~ 87 hPa at the peak, floor 231 hPa
-    grid = create_fv3_duo_grid(N, NG, phis_fn=era5_phis_fn(e), phis_filter_iter=1)
+    grid = create_fv3_duo_grid(N, NG, phis_fn=_era5_phis_fn(e), phis_filter_iter=1)
     dyn, col = _models(grid)                     # the L32 table's floor
     with pytest.raises(ValueError, match="positive-thickness floor"):
         era5_to_fv3_duo_bundle(e, col, n_tracers=3)
     e = _synthetic_era5(2000.0)
-    grid = create_fv3_duo_grid(N, NG, phis_fn=era5_phis_fn(e), phis_filter_iter=1)
+    grid = create_fv3_duo_grid(N, NG, phis_fn=_era5_phis_fn(e), phis_filter_iter=1)
     dyn, col = _models(grid)
     b = era5_to_fv3_duo_bundle(e, col, n_tracers=3)
     assert np.isfinite(np.asarray(b["state"]["pt"])).all()
@@ -267,8 +285,6 @@ def test_era5_bundle_refuses_terrain_above_the_hybrid_floor():
     q_v = np.asarray(b["q"][0])
     np.testing.assert_allclose(q_v[:, CI, CI], Q_CONST, rtol=1e-12, atol=0.0)
     assert not np.any(q_v[:, :NG]) and not np.any(q_v[:, :, :NG])
-    with pytest.raises(ValueError, match="all-zero surface geopotential"):
-        era5_phis_fn(e._replace(phis=np.zeros_like(e.phis)))
     # and the builder's own hydrostatic consistency on the analytic case:
     # isothermal 280 K, so p_s(grid phis) == 1e5*exp(-phis/(R T)) exactly
     st = col.from_bundle(b)
@@ -287,9 +303,9 @@ def era5():
 @needs_era5
 def test_era5_bundle_is_hydrostatic_on_the_grid_terrain(era5):
     from legoesm.training.era5_to_state import (
-        era5_phis_fn, era5_to_fv3_duo_bundle)
+        era5_to_fv3_duo_bundle)
     from legoesm.core.fv3_native_physics_coupling import column_view_sixface_jax
-    grid = create_fv3_duo_grid(N, NG, phis_fn=era5_phis_fn(era5), phis_filter_iter=4)
+    grid = create_fv3_duo_grid(N, NG, phis_fn=_era5_phis_fn(era5), phis_filter_iter=4)
     dyn, col = _models(grid)
     b = era5_to_fv3_duo_bundle(era5, col, n_tracers=3)
     st = col.from_bundle(b)
@@ -370,8 +386,8 @@ def test_era5_bundle_is_hydrostatic_on_the_grid_terrain(era5):
 @needs_era5
 def test_era5_run_two_days_finite_and_bounded(era5):
     from legoesm.training.era5_to_state import (
-        era5_phis_fn, era5_to_fv3_duo_bundle)
-    grid = create_fv3_duo_grid(N, NG, phis_fn=era5_phis_fn(era5), phis_filter_iter=4)
+        era5_to_fv3_duo_bundle)
+    grid = create_fv3_duo_grid(N, NG, phis_fn=_era5_phis_fn(era5), phis_filter_iter=4)
     dyn, col = _models(grid)
     b = era5_to_fv3_duo_bundle(era5, col, n_tracers=3)
     area = np.stack([grid.ctx_np["gs6"][t]["area"][CI, CI] for t in range(6)])
@@ -385,3 +401,73 @@ def test_era5_run_two_days_finite_and_bounded(era5):
     assert np.isfinite(spd) and spd < 1.5 * spd0 + 20.0, (spd0, spd)
     m1 = float((np.asarray(b["state"]["delp"])[:, CI, CI].sum(-1) * area).sum())
     assert abs(m1 - m0) / m0 < 1e-12
+
+
+def test_terrain_filter_zero_ocean_mask_pins_ocean_and_conserves_land():
+    """Decision C: with ``oro6`` (padded land fraction) the duo filter is
+    fv_surf_map's zero_ocean -- every ocean cell keeps its value exactly
+    (no flux across a coast), the land-only area integral is conserved to
+    the duo's cross-face accuracy (each face filters against its OWN
+    extension halo, not the neighbour's cells: the two sides of a face
+    boundary see fluxes that agree to ~1e-4, measured 1.4e-4 at C24; a
+    cube with neighbour-copy halos would be exact) and land noise is still
+    damped; without the mask the same field leaks into the ocean cells
+    (the test fails if the factor is dropped)."""
+    from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+    from legoesm.grids.terrain_filter import terrain_filter_duo
+    grid = create_fv3_duo_grid(N, NG, phis_fn=_mountain_with_2dx_noise)
+    ctx = grid.ctx_np
+    m_a = N + 2 * NG
+    hs0 = np.stack([np.asarray(h, dtype=np.float64) for h in ctx["hs6"]])
+    lat = np.stack([np.asarray(gs["agrid_lat"]) for gs in ctx["gs6"]])
+    oro = np.where(lat > 0.3, 1.0, 0.0).astype(np.float64)   # land north of 0.3 rad
+    faces = [oro[t].copy() for t in range(6)]
+    ext_scalar_sixface(faces, "A", ctx["ectx"])
+    oro6 = np.stack(faces)
+    hs0 = np.where(oro6 > 0.0, hs0, 0.0)                      # ocean at 0
+    on = np.asarray(terrain_filter_duo(hs0, ctx["gs6"], ctx["ectx"], n_iter=4, oro6=oro6))
+    off = np.asarray(terrain_filter_duo(hs0, ctx["gs6"], ctx["ectx"], n_iter=4))
+    ci = slice(NG, NG + N)
+    ocean = oro6[:, ci, ci] == 0.0
+    assert np.all(on[:, ci, ci][ocean] == 0.0)
+    assert np.any(off[:, ci, ci][ocean] != 0.0)
+    area = np.stack([np.asarray(gs["area"]) for gs in ctx["gs6"]])[:, ci, ci]
+    land = ~ocean
+    np.testing.assert_allclose(np.sum((on[:, ci, ci] * area)[land]),
+                               np.sum((hs0[:, ci, ci] * area)[land]), rtol=1e-3)
+    assert np.std(on[:, ci, ci][land]) < np.std(hs0[:, ci, ci][land])
+    assert m_a == on.shape[1]
+
+
+def test_duo_column_quads_own_their_centres_and_every_source_point():
+    """Decision C binning on the duo columns: each column centre lies in
+    its own corner quad, and every source point of a 0.25-degree lat-lon
+    field is claimed by a quad that contains it (exact polygon ownership,
+    not the nearest centre)."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import build_duo_column_mesh
+    from legoesm.grids.topography import (
+        _corner_neighbours, _inside_quads, _xyz, owner_by_quads)
+    grid = create_fv3_duo_grid(N, NG)
+    mesh = build_duo_column_mesh(grid.ctx_np, N, NG)
+    quads = _xyz(mesh.cornerLat, mesh.cornerLon).reshape(-1, 4, 3)
+    centres = _xyz(mesh.latCell, mesh.lonCell)
+    assert _inside_quads(centres, quads, centres).all()
+    # planted violation: a neighbour's centre is OUTSIDE every quad that is
+    # not its own (the half-plane test is not tautological)
+    nb = _corner_neighbours(quads)
+    valid = nb[0] >= 0
+    assert valid.all()
+    assert not _inside_quads(centres[nb[0]], quads, centres).any()
+    # the production source resolution (ETOPO 0.25 deg): the corner
+    # neighbourhood search must reach every owner from the nearest centre
+    lat = np.deg2rad(np.arange(-89.875, 90.0, 0.25))
+    lon = np.deg2rad(np.arange(0.125, 360.0, 0.25))
+    lo, la = np.meshgrid(lon, lat)
+    pts = _xyz(la.ravel(), lo.ravel())
+    owner, n_fb = owner_by_quads(pts, centres, quads, nb)
+    assert n_fb == 0
+    assert _inside_quads(pts, quads[owner], centres[owner]).all()
+    # the nearest centre is NOT always the owner on a cube (that is the point)
+    from scipy.spatial import cKDTree
+    nearest = cKDTree(centres).query(pts)[1]
+    assert np.mean(nearest != owner) > 0.0

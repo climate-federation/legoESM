@@ -34,6 +34,7 @@ _OPTIONAL_3D_OUTPUT_FIELDS = (
     "dN_r_dt",
     "dN_i_dt",
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +638,8 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
 
         expected_3d = (6, N, N, NLEV)
         expected_2d = (6, N, N)
@@ -682,7 +684,8 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
 
         assert jnp.all(jnp.isfinite(carry.T)), "T non-finite with Tibet phis"
         assert jnp.all(jnp.isfinite(carry.u)), "u non-finite with Tibet phis"
@@ -691,12 +694,10 @@ class TestERA5ToState:
         assert jnp.all(carry.p_s > 0), "p_s has non-positive values after correction"
 
     def test_era5_to_cubedsphere_carry_hybrid_ps_floor(self):
-        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, the p_s floor
-        must be enforced and phis adjusted so that all hybrid layer thicknesses
-        remain positive (no degenerate/inverted levels).  Without this fix, 19 of
-        40 levels are underground at p_s=56703 Pa and the arch-peak at lev 28–29
-        has dp = −1 Pa, causing catastrophic continuity-equation blow-up."""
-        import jax.numpy as jnp
+        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, 19 of 40
+        levels would be underground at p_s=56703 Pa and the arch-peak at lev
+        28-29 has dp = -1 Pa (continuity blow-up).  The carry refuses the
+        column instead of lowering the terrain product (decision C)."""
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
 
@@ -724,36 +725,12 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, sigma40)
-
-        # All fields must be finite
-        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.phis)), "phis non-finite after p_s floor"
-
-        # p_s must be at or above the minimum level where all hybrid layers
-        # have positive thickness (dp_floor=100 Pa).  Compute floor from the
-        # hybrid coordinate definition: p = A*p_ref + B*p_s, so minimum p_s
-        # that keeps all layers positive is where A[-1] + B[-1]*p_s = A[-2] + B[-2]*p_s
-        # i.e. p_s_floor = max over k of (A[k-1]-A[k])/(B[k]-B[k-1])+dp_floor/B_mean.
-        # Simpler: p_s_floor via the constraint that the lowest full level stays
-        # above the surface. Just verify the model enforces a positive floor.
-        assert float(jnp.min(carry.p_s)) > 0.0, "p_s must be positive everywhere"
-        # And that the floor was applied: Tibet column p_s=56703 Pa should be raised
-        assert float(jnp.min(carry.p_s)) > 56703.0, (
-            f"p_s floor not applied: min p_s={float(jnp.min(carry.p_s)):.1f} Pa "
-            f"still at Tibet value 56703 Pa"
-        )
-
-        # All L40 hybrid layer thicknesses must be positive for every column
-        A_full = jnp.asarray(sigma40.A_full)
-        B_full = jnp.asarray(sigma40.B_full)
-        p_model = A_full * sigma40.p_ref + B_full * carry.p_s[..., None]  # (6,N,N,40)
-        dp = jnp.diff(p_model, axis=-1)  # (6,N,N,39)
-        assert float(jnp.min(dp)) >= -1.0, (
-            f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
-        )
+        # decision C (2026-10-02): the product is fixed; a hybrid table whose
+        # positive-thickness floor the Tibet column violates is REFUSED, not
+        # lowered (the latlon/spectral carries share this helper)
+        with pytest.raises(ValueError, match="positive-thickness floor"):
+            era5_to_cubedsphere_carry(era5, _GRID, sigma40,
+                                      target_phis=era5_terrain_product(era5, _GRID))
 
     def test_era5_to_mpas_carry_phis_smoothing(self):
         """The MPAS carry smooths raw ERA5 phis on the Voronoi mesh (default
@@ -796,8 +773,10 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry_smooth = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=4)
-        carry_raw = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=0)
+        carry_smooth = era5_to_mpas_carry(
+            era5, mesh, sigma, target_phis=era5_terrain_product(era5, mesh, passes=4))
+        carry_raw = era5_to_mpas_carry(
+            era5, mesh, sigma, target_phis=era5_terrain_product(era5, mesh, passes=0))
 
         # Finite + physical
         for name, arr in (("T", carry_smooth.T), ("u", carry_smooth.u),
@@ -849,7 +828,8 @@ class TestERA5ToState:
             lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
         np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
         assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
@@ -874,8 +854,9 @@ class TestERA5ToState:
             lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),   # descending (ERA5 convention)
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        g8 = create_gaussian_grid(8)
         carry = era5_to_spectral_carry(
-            era5, create_gaussian_grid(8), create_sigma_coordinate(5))
+            era5, g8, create_sigma_coordinate(5), target_phis=era5_terrain_product(era5, g8))
         np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
         assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
@@ -903,7 +884,8 @@ class TestERA5ToState:
             lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
         np.testing.assert_allclose(np.asarray(carry.phis), phis0, rtol=1e-4)
 
 

@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from legoesm.thermo import specific_condensate_to_mixing_ratio
 from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+from legoesm.training.era5_to_state import era5_terrain_product
 
 _LEVELS = (1000.0, 500.0, 100.0)          # hPa, descending
 _NLAT, _NLON, _NLEV = 5, 6, 3
@@ -202,8 +203,9 @@ def _carry(with_cloud, microphysics):
     grid = create_gaussian_grid(n_max=10)
     nlev = 6
     sigma = create_sigma_coordinate(nlev)
-    return era5_to_spectral_carry(_mini_slice(grid, nlev, with_cloud=with_cloud),
-                                  grid, sigma, microphysics=microphysics)
+    era5 = _mini_slice(grid, nlev, with_cloud=with_cloud)
+    return era5_to_spectral_carry(era5, grid, sigma, microphysics=microphysics,
+                                  target_phis=era5_terrain_product(era5, grid))
 
 
 def test_the_carry_is_cloud_free_without_the_option():

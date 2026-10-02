@@ -1138,7 +1138,6 @@ class ExperimentConfig(NamedTuple):
     # Topography
     topography: str = "flat"
     topo_smoothing: int = 4
-    topo_edge_blend: float = 0.3
     # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
@@ -4150,7 +4149,6 @@ class ExperimentConfig(NamedTuple):
             moisture_advection=getattr(amip_cfg, 'moisture_advection', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
-            topo_edge_blend=amip_cfg.topo_edge_blend,
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
@@ -4372,7 +4370,6 @@ class ExperimentConfig(NamedTuple):
             energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
-            topo_edge_blend=self.topo_edge_blend,
             T_init=self.T_init,
             rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,

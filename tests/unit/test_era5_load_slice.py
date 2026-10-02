@@ -17,6 +17,7 @@ from legoesm.training.era5_to_state import (
     load_era5_slice,
     resolve_var,
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 
 _LEVELS = (1000.0, 500.0, 100.0)   # hPa, descending (the loader sorts to ascending Pa)
 
@@ -439,7 +440,8 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     nlat, nlon, nlev = 3, 4, 5
     grid = create_latlon_grid(nlat, nlon)
     sigma = create_sigma_coordinate(nlev)
-    carry = era5_to_latlon_carry(era5, grid, sigma)   # REAL regrid + interp + carry
+    carry = era5_to_latlon_carry(era5, grid, sigma,   # REAL regrid + interp + carry
+                                 target_phis=era5_terrain_product(era5, grid))
     ref = column_state_from_carry(carry)
 
     # shapes land on the MODEL grid + sigma (not the ERA5 grid/levels).
@@ -484,7 +486,8 @@ def test_era5_to_latlon_carry_hybrid_over_terrain_is_physical(monkeypatch):
     era5 = era5._replace(p_s=np.full_like(np.asarray(era5.p_s), 7.0e4))   # 700-hPa terrain
     grid = create_latlon_grid(3, 4)
     ref = column_state_from_carry(
-        era5_to_latlon_carry(era5, grid, make_hybrid_levels(5, p_top_Pa=100.0)))
+        era5_to_latlon_carry(era5, grid, make_hybrid_levels(5, p_top_Pa=100.0),
+                             target_phis=era5_terrain_product(era5, grid)))
     validate_reference_physical(ref, name="hybrid-over-terrain ERA5 reference")  # T/q/p_s in range
     assert bool(np.all(np.isfinite(np.asarray(ref.T))))
     assert 150.0 < float(np.min(ref.T)) and float(np.max(ref.T)) < 350.0
@@ -510,7 +513,8 @@ def test_reference_columnstate_invariant_to_config_levels_order(monkeypatch):
 
     def _ref(levels):
         era5 = load_era5_slice(TrainingERA5Config(zarr_store="dummy", levels=levels), 0)
-        return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+        return column_state_from_carry(era5_to_latlon_carry(
+            era5, grid, sigma, target_phis=era5_terrain_product(era5, grid)))
 
     ref_mono = _ref((1000.0, 500.0, 100.0))         # monotonic descending (store order)
     ref_scrambled = _ref((500.0, 1000.0, 100.0))    # non-monotonic permutation

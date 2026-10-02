@@ -706,13 +706,13 @@ def test_driver_column_lane_refuses_a_plain_mpas_checkpoint(tmp_path):
         drv.load_checkpoint(bad)
 
 
-def test_driver_column_lane_restart_rebuilds_terrain_from_the_file(tmp_path):
-    """The terrain lives in the GRID, not the bundle: a run on a non-flat
-    terrain checkpoints its padded ``hs6`` stack, and a fresh driver --
-    whose factory grid is FLAT -- rebuilds the grid from the file at
-    load (no ERA5 re-derivation) and continues bitwise.  Synthetic bump
-    through the same factory path the ERA5 IC uses (phis_fn + the del-2
-    filter), so no data file is needed."""
+def test_driver_column_lane_restart_refuses_another_terrain(tmp_path):
+    """Decision C: the terrain lives in the GRID; a run on a non-flat terrain
+    checkpoints its padded ``hs6`` stack and a restart on the SAME terrain
+    continues bitwise, while a fresh driver whose grid carries ANOTHER
+    terrain (flat here) is REFUSED at load -- never rebuilt from the file.
+    Synthetic bump through the factory path (phis_fn + the del-2 filter),
+    so no data file is needed."""
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.grids.factory import create_fv3_duo_grid
 
@@ -721,8 +721,9 @@ def test_driver_column_lane_restart_rebuilds_terrain_from_the_file(tmp_path):
             -((np.asarray(lat) - 0.6) ** 2 + (np.asarray(lon) - 1.0) ** 2)
             / 0.15)
 
-    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
-    dir_a.mkdir(), dir_b.mkdir()
+    dir_a, dir_b, dir_c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    for d in (dir_a, dir_b, dir_c):
+        d.mkdir()
     cfg_a = _driver_cfg(dir_a, days=1, microphysics="kessler")
     cfg_a = cfg_a._replace(output=cfg_a.output._replace(checkpoint_days=0.5))
     drv_a = ModelDriver(cfg_a, output_dir=dir_a)
@@ -737,16 +738,26 @@ def test_driver_column_lane_restart_rebuilds_terrain_from_the_file(tmp_path):
     with np.load(mid) as d:
         assert _same_bytes(d["fv3duo_hs6"], hs6_a)
 
+    # the same terrain: bitwise continuation
     drv_b = ModelDriver(_driver_cfg(dir_b, days=0.5, microphysics="kessler"),
                         output_dir=dir_b)
     drv_b.setup()
-    assert float(np.abs(drv_b._fv3_duo_column_hs6(drv_b.model)).max()) == 0.0
+    drv_b._fv3_duo_column_rewrap(create_fv3_duo_grid(
+        N, NG, phis_fn=bump, phis_filter_iter=2))
     step, day = drv_b.load_checkpoint(mid)
     assert _same_bytes(drv_b._fv3_duo_column_hs6(drv_b.model), hs6_a)
     assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
     got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
     diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
     assert not diffs, f"terrain restart is NOT bitwise: {diffs}"
+
+    # another terrain (the factory's flat grid): refused
+    drv_c = ModelDriver(_driver_cfg(dir_c, days=0.5, microphysics="kessler"),
+                        output_dir=dir_c)
+    drv_c.setup()
+    assert float(np.abs(drv_c._fv3_duo_column_hs6(drv_c.model)).max()) == 0.0
+    with pytest.raises(RuntimeError, match="terrain differs"):
+        drv_c.load_checkpoint(mid)
 
 
 # ---------------------------------------------------------------------
@@ -918,9 +929,9 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
     sampled at the duo's A-grid centres.  The gate: each field matches
     its analytic value at the DUO's cell positions, and the same regrid
     on the standard cubed sphere's centres (the pre-M6 placement,
-    MEASURED 1.6 deg off) does NOT.  The dynamics terrain is the ERA5
-    IC's own mountain (nonzero, smoothed), NOT the elevation file (which
-    is land fraction + CMOR orog only, as on the MPAS lane).  The run
+    MEASURED 1.6 deg off) does NOT.  Decision C: the dynamics terrain IS
+    the elevation file's product (cell-mean, masked del-2), the same
+    field as the land fraction's source and the CMOR orog.  The run
     then completes through gray radiation, and the driver's grid /
     vertical coordinate / state are the model's own objects."""
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import FV3DuoColumnState
@@ -955,12 +966,22 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
     # worse)
     phis = np.asarray(drv._phis_data).reshape(-1)
     assert phis.shape == (mesh.nCells,)
+    # decision C: _phis_data IS the dynamics terrain -- the grid's filtered
+    # padded stack on the compute window, bitwise
+    ng, n = drv.model.ng, drv.model.n
+    hs6 = drv._fv3_duo_column_hs6(drv.model)
+    assert np.array_equal(phis, hs6[:, ng:ng + n, ng:ng + n].reshape(-1))
+    assert float(np.abs(hs6).max()) > 0.0
+    # cell-mean of the clipped analytic elevation, 4 masked del-2 passes:
+    # within 10 % of the point value at the duo columns (a smooth field),
+    # the cube-centre placement is worse
     want = constants.g * np.maximum(_elev_analytic(lat, lon), 0.0)
     err_duo = np.abs(phis - want).max() / (constants.g * 2000.0)
     err_cube = np.abs(phis - constants.g * np.maximum(
         _elev_analytic(clat, clon), 0.0)).max() / (constants.g * 2000.0)
-    assert err_duo < 0.02, err_duo
-    assert err_cube > 4.0 * err_duo, (err_duo, err_cube)
+    assert err_duo < 0.1, err_duo
+    assert err_cube > err_duo, (err_duo, err_cube)
+    assert np.all(phis[np.asarray(drv._f_land).reshape(-1) == 0.0] == 0.0)
     # ... and the land fraction it derives: the continent sits where the
     # analytic elevation is positive AT THE DUO COLUMNS
     f_land = np.asarray(drv._f_land).reshape(-1)
@@ -981,11 +1002,12 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
     assert err_duo < 0.1, err_duo
     assert err_cube > 4.0 * err_duo, (err_duo, err_cube)
 
-    # dynamics terrain = ERA5's mountain (rebuilt grid), not the file
+    # dynamics terrain = the file's product (NOT the ERA5 IC's 1500 m
+    # mountain): the state's phis is _phis_data bitwise
     dyn_phis = np.asarray(drv.state.phis.data).reshape(-1)
-    assert 1000.0 * constants.g < dyn_phis.max() <= 1500.0 * constants.g
-    assert np.abs(dyn_phis - phis).max() > 500.0 * constants.g
-    hs6 = drv._fv3_duo_column_hs6(drv.model)
+    assert np.array_equal(dyn_phis, phis)
+    assert np.abs(dyn_phis - constants.g * np.maximum(
+        _elev_analytic(lat, lon), 0.0)).max() < 0.1 * constants.g * 2000.0
     assert np.abs(hs6).max() == dyn_phis.max()
 
     assert drv.run() == "COMPLETED"
@@ -1172,3 +1194,25 @@ def test_column_positivity_runs_on_the_dynamics_only_path_too(moist):
     assert np.asarray(out.native["q"][1])[:, CI, CI].min() >= 0.0
     raw = dyn.step(ic2, DT)
     assert np.asarray(raw["q"][1])[:, CI, CI].min() < 0.0   # the dycore alone did not
+
+
+def test_restart_terrain_check_covers_spectral_phis_hat():
+    """Decision C: a spectral checkpoint carries ``phis_hat``; the restart
+    check synthesises it and refuses a planted mismatch, accepts the
+    product's own coefficients."""
+    from types import SimpleNamespace
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis, sh_synthesis
+    grid = create_gaussian_grid(10)
+    lat = np.asarray(grid.grid_lat)
+    phis = jnp.asarray(2000.0 * np.exp(-((lat - 0.5) ** 2) / 0.1))
+    product = sh_synthesis(grid, sh_analysis(grid, phis))
+    good = SimpleNamespace(_phis_data=np.asarray(product), grid=grid,
+                           state=SimpleNamespace(phis=None, phis_hat=SimpleNamespace(
+                               data=sh_analysis(grid, phis))))
+    ModelDriver._check_restart_terrain(good)
+    bad = SimpleNamespace(_phis_data=np.asarray(product), grid=grid,
+                          state=SimpleNamespace(phis=None, phis_hat=SimpleNamespace(
+                              data=sh_analysis(grid, 0.5 * phis))))
+    with pytest.raises(RuntimeError, match="terrain differs"):
+        ModelDriver._check_restart_terrain(bad)

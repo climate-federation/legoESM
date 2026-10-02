@@ -34,6 +34,7 @@ from legoesm.thermo import (  # noqa: E402
     specific_humidity_to_mixing_ratio,
     virtual_temperature,
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 
 Q = jnp.asarray([1e-4, 2e-3, 1e-2, 2e-2, 3e-2])
 
@@ -104,7 +105,8 @@ def test_column_water_through_the_carry_matches_the_reanalysis_integral():
         phis=np.zeros((n_lat, n_lon)),
         lat=np.asarray(grid.lat), lon=np.asarray(grid.lon), plev_Pa=plev)
     sigma = create_sigma_coordinate(40, dtype=jnp.float64)
-    carry = era5_to_spectral_carry(era5, grid, sigma)
+    carry = era5_to_spectral_carry(era5, grid, sigma,
+                                   target_phis=era5_terrain_product(era5, grid))
     q_m = jnp.asarray(carry.q_v)
     p_s = jnp.asarray(carry.p_s)
     tpw = np.asarray(column_water_vapor(q_m, p_s, sigma.dsigma))

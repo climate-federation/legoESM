@@ -214,7 +214,8 @@ def main():
     from legoesm.training.aimip_spatial import land_mask_from_phis
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
-    )
+    era5_terrain_product,
+)
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state, spectral_amip_rollout,
     )
@@ -255,7 +256,8 @@ def main():
     ic_date = start + _dt.timedelta(days=int(args.member))
     wb2 = TrainingERA5Config().zarr_store
     ic_slice = load_era5_ic(wb2, ic_date.year, ic_date.month, ic_date.day)
-    ic_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
+    ic_carry = era5_to_spectral_carry(ic_slice, grid, sigma,
+                                      target_phis=era5_terrain_product(ic_slice, grid))
     state = carry_to_spectral_state(ic_carry, grid)
     land_mask = land_mask_from_phis(jnp.asarray(ic_carry.phis), smooth=True)
     sigma_full_np = np.asarray(sigma.sigma_full)
@@ -471,7 +473,8 @@ def main():
             _rd = day + _dt.timedelta(days=int(args.member))
             _slice = load_era5_ic(wb2, _rd.year, _rd.month, _rd.day)
             state = carry_to_spectral_state(
-                era5_to_spectral_carry(_slice, grid, sigma), grid,
+                era5_to_spectral_carry(_slice, grid, sigma,
+                                       target_phis=era5_terrain_product(_slice, grid)), grid,
             )
             logger.info(f"{day}: REINIT from ERA5 {_rd} "
                         f"(hindcast-IAV mode, every {_reinit_months}mo)")

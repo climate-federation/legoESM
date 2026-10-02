@@ -139,28 +139,37 @@ def _apply_phis_hydrostatic_adjustment(
       ``dln_p = -dPhi / (R_d T)`` then gives ``dln_p = +delta/(R_d T) > 0`` — so
       ``p_s`` INCREASES: ``p_s_corrected = p_s * exp(+delta/(R_d T))``.
       (Lowering terrain raises surface pressure. ✓)
-    * Hybrid floor: where layers would become degenerate, raise ``p_s`` to
-      ``p_s_floor`` and LOWER ``phis`` by the barometric equivalent
-      ``R_d*T*ln(p_s_floor/p_s_corrected)`` so the split-PGF cancellation stays
-      consistent with the raised ``p_s``.
+    * Hybrid floor: a column whose moved ``p_s`` would make a layer thinner
+      than ``dp_floor`` is refused (ValueError); the terrain is never lowered.
 
     Returns ``(phis_adjusted, p_s_adjusted)`` with the same shapes as inputs.
     """
+    if not np.any(np.asarray(phis_raw)) and np.any(np.asarray(phis_smooth)):
+        raise ValueError(
+            "hydrostatic p_s move: the raw ERA5 surface geopotential is all zero "
+            "(the store had no 'geopotential_at_surface' and was zero-filled) while "
+            "the target terrain is not -- moving real surface pressure from flat "
+            "terrain onto the product would be grossly non-hydrostatic")
     # >= 0 where smoothing lowered terrain; may be NEGATIVE where a caller
     # passes a spectrally round-tripped target whose Gibbs overshoot exceeds
     # the raw peak — the barometric relation is exact for either sign.
     delta_phis = phis_raw - phis_smooth
     p_s_corrected = p_s * jnp.exp(delta_phis / (constants.R_d * T_sfc))
     if is_hybrid:
+        # Decision C (2026-10-02, majority of three reviewers): the terrain is
+        # ONE product shared by dynamics, land fraction and CMOR orog, so it
+        # is never lowered here; a column whose moved p_s falls below the
+        # table's positive-thickness floor is REFUSED (the duo lane's rule).
         p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=dp_floor)
-        # Only ever RAISE p_s toward the floor (ln_ratio >= 0); lower phis to match.
-        ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
-        phis_adjusted = phis_smooth - constants.R_d * T_sfc * ln_ratio
-        p_s_adjusted = jnp.maximum(p_s_corrected, p_s_floor)
-    else:
-        phis_adjusted = phis_smooth
-        p_s_adjusted = p_s_corrected
-    return phis_adjusted, p_s_adjusted
+        n_low = int(jnp.sum(p_s_corrected < p_s_floor))
+        if n_low:
+            raise ValueError(
+                f"_apply_phis_hydrostatic_adjustment: {n_low} columns have p_s "
+                f"below the hybrid table's positive-thickness floor {p_s_floor:.0f} "
+                f"Pa (min {float(p_s_corrected.min()):.0f} Pa) on the terrain "
+                "product; smooth more or change the table, the product is not "
+                "lowered")
+    return phis_smooth, p_s_corrected
 
 
 # Module-level cache for regridding weights (expensive to recompute)
@@ -1388,9 +1397,10 @@ def era5_to_spectral_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    *,
+    target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
-    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -1422,36 +1432,13 @@ def era5_to_spectral_carry(
         era5, grid,
     )
 
-    # Smooth the regridded ERA5 orography + hydrostatically reconcile p_s —
-    # the SAME treatment the cube / lat-lon / MPAS carries already apply
-    # (mirrors era5_to_latlon_carry; the spectral Gaussian grid IS a lat-lon
-    # grid in grid space, so smooth_phis_gaussian applies directly).  Raw
-    # regridded ERA5 phis (peaks ~5.6e4 m^2/s^2) with an unreconciled p_s
-    # drives an unbalanced pressure-gradient force at step ~0; the barometric
-    # correction + hybrid p_s floor live in the SHARED
-    # _apply_phis_hydrostatic_adjustment (not re-implemented here).
-    from legoesm.grids.topography import smooth_phis_gaussian
+    # Decision C: the dynamics terrain is the grid's terrain PRODUCT
+    # (``target_phis``, driver ``_phis_data``), spectrally truncated as the
+    # lane requires; the raw ERA5 phis is used only to move p_s to it.
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(
-        phis_ll_raw, smoothing_passes=smoothing_passes)
-    # Reconcile against the terrain the DYNAMICS actually feel: the spectral
-    # core reads phis only through its truncation (carry_to_spectral_state:
-    # phis_hat = sh_analysis(phis)), so the effective surface is the
-    # ROUND-TRIPPED field, Gibbs ringing included — not the grid-space
-    # smoothed one.  Reconciling to the grid-space field left every ingested
-    # state ~850 Pa RMS off the model's balanced manifold; the model adjusted
-    # there within one 1800 s step, and because targets ride this same
-    # ingestion, that standing gap was 87% of the WB training loss.  Measured
-    # 2026-08-26 over 8 seasonal scenes: the one-step ps adjustment matches
-    # the barometric response to (grid phis − round-tripped phis) at
-    # correlation +0.996 per scene (+0.998 mean field, 46 Pa unexplained of
-    # 836).  The truncation is idempotent, so the carry's phis and the
-    # spectral core's phis_hat now describe the same surface.
     from legoesm.grids.gaussian import sh_analysis, sh_synthesis
     phis_ll_model = sh_synthesis(
-        grid, sh_analysis(grid, jnp.asarray(phis_ll_smooth, jnp.float64)))
-    # T_sfc proxy = ERA5 T at the highest pressure level (plev_Pa ascending →
-    # last index = nearest to surface), matching the lat-lon carry.
+        grid, sh_analysis(grid, jnp.asarray(target_phis, jnp.float64)))
     _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
     phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
         jnp.asarray(phis_ll_raw), phis_ll_model,
@@ -1531,11 +1518,10 @@ def era5_to_cubedsphere_carry(
     era5: ERA5Slice,
     grid,
     sigma,
-    target_phis=None,
+    *,
+    target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
-    smoothing_passes: int = 4,
-    edge_blend_strength: float = 0.3,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -1547,23 +1533,15 @@ def era5_to_cubedsphere_carry(
     era5 : ERA5Slice
     grid : CubedSphereGrid
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
-    target_phis : array-like, optional
-        Accepted for caller compatibility (the driver passes the model's
-        ETOPO surface geopotential here).  CURRENTLY NOT APPLIED: the IC
-        dynamics are initialised on the *smoothed ERA5* orography below
-        (the validated behaviour — job 25918469), while the CMOR ``orog``
-        field separately reports the ETOPO mountain mask
-        (``model_driver._setup_diagnostics``).  Wiring this through to place
-        the dynamics on ``target_phis`` (with a barometric p_s adjustment
-        from ERA5 orography to ETOPO) would change the IC and is a
-        deliberate, revalidation-gated change intentionally NOT made here.
+    target_phis : array-like ``(6, n, n)`` [m^2/s^2]
+        The grid's terrain PRODUCT (driver ``_phis_data``; decision C
+        2026-10-02): the dynamics start on it, p_s moved barometrically from
+        the raw ERA5 phis.
 
     Returns
     -------
     SegmentCarry
     """
-    # ``target_phis`` is intentionally unused — see the parameter docstring.
-    del target_phis
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
     from legoesm.driver.compiled_segments import pack_carry
@@ -1604,27 +1582,9 @@ def era5_to_cubedsphere_carry(
     p_s_cs = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)
     phis_cs_raw = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
 
-    # Apply topography smoothing to match load_real_topography defaults
-    # (topo_smoothing=4, topo_edge_blend=0.3).  Without this, raw ERA5 phis
-    # has steep gradients near cubed-sphere face boundaries: the northern
-    # Tibet slope (~37°N) sits only 3-4 cells from face 1's polar edge, and
-    # the Arakawa-Lamb gradient scheme amplifies face-boundary gradient errors
-    # to O(dx^-1) magnitude.  With raw ERA5 phis differences of ~50 kJ/kg,
-    # this creates spurious ~0.4 m/s² PGF that drives blowup in ~1–5 days
-    # even from rest.
-    # edge_blend_width now defaults to TopographyConfig's 2 (was silently 1);
-    # driver wires smoothing_passes/edge_blend_strength from cfg.topo_*.
-    from legoesm.grids.topography import smooth_phis_cubed_sphere
-    phis_cs_smooth = smooth_phis_cubed_sphere(
-        phis_cs_raw, smoothing_passes=smoothing_passes,
-        edge_blend_strength=edge_blend_strength)
-
-    # Hydrostatically reconcile p_s with the smoothed phis (barometric p_s
-    # correction + hybrid p_s floor).  Shared with the lat-lon carry via
-    # ``_apply_phis_hydrostatic_adjustment`` — see that helper for the full
-    # sign-convention + barometric derivation and the degenerate-hybrid-layer
-    # rationale (Tibet: 19/40 levels underground, dp = −1 Pa at the arch peak).
-    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).
+    # Decision C: the dynamics terrain is the grid's terrain PRODUCT
+    # (``target_phis``); the raw ERA5 phis only moves p_s to it.
+    phis_cs_smooth = jnp.asarray(target_phis, dtype=phis_cs_raw.dtype)
     _T_sfc_cs = T_cs[..., -1]  # (6, n, n) — 1000 hPa, nearest to surface
     phis_cs, p_s_cs = _apply_phis_hydrostatic_adjustment(
         phis_cs_raw, phis_cs_smooth, p_s_cs, _T_sfc_cs, sigma, _is_hybrid,
@@ -1744,9 +1704,10 @@ def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    *,
+    target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
-    smoothing_passes: int = 4,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1784,21 +1745,11 @@ def era5_to_latlon_carry(
 
     plev = jnp.asarray(era5.plev_Pa)
 
-    # Smooth the regridded ERA5 orography — Gaussian-grid analogue of the cube
-    # carry's smooth_phis_cubed_sphere.  Raw ERA5 phis (peaks ~5.6e4 m^2/s^2)
-    # regridded to a coarse 2° lat-lon grid drives an unbalanced
-    # pressure-gradient force that blows up the dycore at step ~0; smoothing +
-    # the hydrostatic p_s reconciliation below is the SAME treatment the cube
-    # carry already applies (factored into _apply_phis_hydrostatic_adjustment).
-    from legoesm.grids.topography import smooth_phis_gaussian
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
+    # Decision C: the dynamics terrain is the grid's terrain product
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    phis_ll_smooth = smooth_phis_gaussian(
-        phis_ll_raw, smoothing_passes=smoothing_passes)
-
-    # Hydrostatically reconcile p_s with the smoothed phis (+ hybrid p_s floor).
-    # T_sfc proxy = ERA5 T at 1000 hPa (plev_Pa ascending → last index = surface).
+    phis_ll_smooth = jnp.asarray(target_phis, dtype=jnp.float64)
     _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
     phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
         jnp.asarray(phis_ll_raw), jnp.asarray(phis_ll_smooth),
@@ -1885,7 +1836,8 @@ def era5_to_mpas_carry(
     era5: ERA5Slice,
     mesh,
     sigma,
-    smoothing_passes: int = 4,
+    *,
+    target_phis,
 ):
     """Convert an ERA5 slice to an initial condition on an MPAS/Voronoi mesh.
 
@@ -1914,14 +1866,11 @@ def era5_to_mpas_carry(
     mesh : VoronoiMesh
         Exposes ``latCell``/``lonCell``/``latEdge``/``lonEdge``/``angleEdge``
         (radians), ``nCells``/``nEdges``, and the cell adjacency
-        ``cellsOnCell``/``nEdgesOnCell`` used for phis smoothing.
+        ``cellsOnEdge`` (the edge p_s move).
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
-    smoothing_passes : int
-        Laplacian smoothing passes applied to the regridded ERA5 surface
-        geopotential before it is used as ``phis`` (default 4, matching the
-        cubed-sphere path).  ``0`` disables smoothing.  Raw ERA5 phis on a
-        coarse Voronoi mesh produces O(dx^-1) spurious pressure-gradient force
-        over steep terrain that drives a wind runaway / blowup within days.
+    target_phis : array ``(nCells,)`` [m^2/s^2]
+        The mesh's terrain PRODUCT (driver ``_phis_data``, decision C): the
+        dynamics start on it, p_s moved barometrically from the raw ERA5 phis.
 
     Returns
     -------
@@ -1978,27 +1927,24 @@ def era5_to_mpas_carry(
     # cancel.  p_s_new = p_s · exp[(phis_raw − phis_smooth) / (R_d · T_sfc)],
     # from hydrostatic Δln_p = −ΔΦ / (R_d · T); T_sfc proxy = ERA5 T at 1000 hPa
     # (plev ascending -> last index).
-    if smoothing_passes > 0:
-        from legoesm.grids.topography import smooth_phis_voronoi
-        phis_cell_raw = phis_cell
-        phis_cell = smooth_phis_voronoi(
-            phis_cell, mesh.cellsOnCell, mesh.nEdgesOnCell,
-            smoothing_passes=smoothing_passes,
-        )
-        _T_sfc = T_cell[..., -1]
-        _delta_phis = phis_cell_raw - phis_cell  # > 0 where terrain was lowered
-        p_s_cell = p_s_cell * jnp.exp(_delta_phis / (constants.R_d * _T_sfc))
+    # Decision C: the dynamics terrain is the mesh's terrain PRODUCT
+    # (``target_phis``); p_s is moved to it from the raw ERA5 phis by the
+    # shared helper (which REFUSES a column below the hybrid floor), cells
+    # and edges alike (the edge target = mean of the two cells, the raw
+    # edge phis and T regridded like p_s_edge).
+    _T_sfc = T_cell[..., -1]
+    phis_cell_raw = phis_cell
+    phis_cell, p_s_cell = _apply_phis_hydrostatic_adjustment(
+        phis_cell_raw, jnp.asarray(target_phis, dtype=jnp.float64), p_s_cell,
+        _T_sfc, sigma, _is_hybrid)
+    coe = jnp.asarray(mesh.cellsOnEdge)
+    phis_edge_target = 0.5 * (phis_cell[coe[0]] + phis_cell[coe[1]])
+    phis_edge_raw = regrid_scalar(jnp.asarray(era5.phis), edge_w)
+    T_sfc_edge = regrid_scalar(jnp.asarray(era5.T)[..., -1], edge_w)
+    _, p_s_edge = _apply_phis_hydrostatic_adjustment(
+        phis_edge_raw, phis_edge_target, p_s_edge, T_sfc_edge, sigma, _is_hybrid)
 
-    # Hybrid p_s floor over high terrain: raise p_s where the hybrid layers
-    # would become degenerate (dp < dp_floor), and lower phis by the
-    # barometric equivalent so the split-PGF cancellation is preserved.
-    if _is_hybrid:
-        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
-        _T_sfc = T_cell[..., -1]  # 1000 hPa (plev ascending -> last index)
-        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_cell))
-        phis_cell = phis_cell - constants.R_d * _T_sfc * _ln_ratio
-        p_s_cell = jnp.maximum(p_s_cell, p_s_floor)
-        p_s_edge = jnp.maximum(p_s_edge, p_s_floor)
+
 
     # Vertical interpolation to model levels.
     plev = jnp.asarray(era5.plev_Pa)
@@ -2053,33 +1999,35 @@ def era5_to_mpas_carry(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def era5_phis_fn(era5: ERA5Slice):
-    """``phis_fn(lon, lat)`` for ``create_fv3_duo_grid``: the raw ERA5
-    surface geopotential at arbitrary points (KD-tree inverse distance,
-    the MPAS path's regrid), radians in, ``m^2/s^2`` out, shape of the
-    inputs.  The duo grid builder evaluates it on the padded A-grid and
-    the del-2 terrain filter then smooths it ON the duo grid."""
-    from legoesm.grids.regridding import (
-        compute_latlon_to_voronoi_weights, regrid_scalar)
-    lat_src, lon_src = np.asarray(era5.lat), np.asarray(era5.lon)
-    if not np.any(np.asarray(era5.phis)):
-        # load_era5_ic zero-fills a store without surface geopotential
-        # (warning only); on this lane that would pair mountain p_s with
-        # flat terrain and skip the hydrostatic move -- refuse
-        raise ValueError(
-            "era5_phis_fn: the ERA5 slice carries an all-zero surface "
-            "geopotential (store without 'geopotential_at_surface'); the "
-            "duo lane needs the real terrain")
-    phis_src = jnp.asarray(era5.phis)
 
-    def fn(lon, lat):
-        lon, lat = np.asarray(lon), np.asarray(lat)
+def era5_terrain_product(era5: ERA5Slice, grid, passes: int = 4):
+    """A terrain target for lanes WITHOUT an elevation file (the training /
+    inference ingestion of ERA5 on its own grid): the raw ERA5 surface
+    geopotential regridded to ``grid`` and run through the grid's masked
+    flux-form diffusion with an all-land mask (:func:`masked_diffusion`,
+    ``passes`` passes) -- the same smoothing class those lanes had before
+    decision C.  NOT the ETOPO product the driver builds; a run that wants
+    the product passes the driver's ``_phis_data`` instead.  Shapes follow
+    the grid: ``(6, n, n)`` cube, ``(n_lat, n_lon)`` structured, ``(nCells,)``
+    Voronoi."""
+    from legoesm.grids.regridding import regrid_scalar
+    from legoesm.grids.topography import _neighbour_table, masked_diffusion
+    lat = np.asarray(grid.grid_lat)
+    if lat.ndim == 3:
+        raw = regrid_scalar(jnp.asarray(np.asarray(era5.phis).ravel()),
+                            _get_cs_weights(era5.lat, era5.lon, grid))
+    elif lat.ndim == 2:
+        raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    else:
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
         w = compute_latlon_to_voronoi_weights(
-            lat_src, lon_src, lat.reshape(-1), lon.reshape(-1))
-        # a WRITABLE array: the grid builder's halo exchange fills it in place
-        return np.array(regrid_scalar(phis_src, w), dtype=np.float64).reshape(lon.shape)
-    return fn
-
+            np.asarray(era5.lat), np.asarray(era5.lon),
+            np.asarray(grid.latCell), np.asarray(grid.lonCell))
+        raw = regrid_scalar(jnp.asarray(era5.phis), w)
+    raw = np.asarray(raw, dtype=np.float64)
+    nb, area = _neighbour_table(grid)
+    out = masked_diffusion(raw.ravel(), np.ones(area.shape), nb, area, passes=passes)
+    return jnp.asarray(out.reshape(raw.shape))
 
 def era5_to_fv3_duo_bundle(era5: ERA5Slice, col_model, *, n_tracers: int = 3):
     """ERA5 slice -> the FV3 duo's native six-face bundle through the
