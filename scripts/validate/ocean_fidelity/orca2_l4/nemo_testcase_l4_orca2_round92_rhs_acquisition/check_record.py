@@ -36,7 +36,9 @@ def _i4(raw: bytes, offset: int, count: int) -> tuple[tuple[int, ...], int]:
     return struct.unpack_from(f"={count}i", raw, offset), end
 
 
-def read_record(path: Path, *, plant: str = "none") -> dict:
+def read_record(
+    path: Path, *, plant: str = "none", include_owned_values: bool = False,
+) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-1]
@@ -57,6 +59,7 @@ def read_record(path: Path, *, plant: str = "none") -> dict:
             f"{path.name}: bad owned bounds")
     require(nfields == len(NAMES), f"{path.name}: expected ten fields")
     fields: dict[str, dict] = {}
+    owned_values: dict[str, np.ndarray] = {}
     for index in range(nfields):
         require(offset + 32 <= len(raw), f"{path.name}: truncated field header")
         name = raw[offset:offset + 16].decode("ascii").rstrip(" \x00")
@@ -82,9 +85,11 @@ def read_record(path: Path, *, plant: str = "none") -> dict:
             "count": count,
             "sha256": hashlib.sha256(raw[offset:end]).hexdigest(),
         }
+        if include_owned_values:
+            owned_values[name] = owned.transpose(1, 0, 2).copy()
         offset = end
     require(offset == len(raw), f"{path.name}: trailing or truncated bytes")
-    return {
+    result = {
         "rank": rank,
         "kt": kt,
         "levels": {"Kbb": kbb, "Krhs": krhs},
@@ -95,6 +100,9 @@ def read_record(path: Path, *, plant: str = "none") -> dict:
         "bytes": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
     }
+    if include_owned_values:
+        result["owned_values"] = owned_values
+    return result
 
 
 def run(root: Path, baseline: Path, plant: str) -> dict:
