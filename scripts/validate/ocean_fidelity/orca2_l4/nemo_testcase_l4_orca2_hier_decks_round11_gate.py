@@ -30,8 +30,8 @@ MANIFEST = ACQUISITION / "rung1_manifest.json"
 RUNG2_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung2"
 )
-RUNG2_RECORD = RUNG2_ROOT / "record"
-RUNG2_ADMISSION = RUNG2_ROOT / "rung2_admission.json"
+RUNG2_RECORD = RUNG2_ROOT / "record_havtb1_superseded"
+RUNG2_ADMISSION = RUNG2_ROOT / "rung2_admission_havtb1_superseded.json"
 MAIN_RUNG0_CFG = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round90/"
     "acquisition/orca2_rung0_entry_stage_runoff_guarded_10step_np2/namelist_cfg"
@@ -302,9 +302,8 @@ def stage_deck(root: Path) -> None:
         ledger.write_text(rows)
 
 
-def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
-    inherited_plant = plant if plant in set(rung2.RECORD_PLANTS) else "none"
-    inherited = rung2.validate_resolved(root, plant=inherited_plant)
+def validate_bbl_bbc_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    """Validate only rung 1's BBL/geothermal boundary."""
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
         "ln_trabbc_false": re.search(
@@ -323,7 +322,14 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     if plant == "bbl-bbc-consequence":
         checks["ln_trabbl_false"] = False
     require(all(checks.values()), f"resolved rung-1 checks failed: {checks}")
-    return {"status": "PASS_RUNG1_RESOLVED", "upper_rung": inherited, **checks}
+    return {"status": "PASS_RUNG1_BBL_BBC_RESOLVED", **checks}
+
+
+def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    inherited_plant = plant if plant in set(rung2.RECORD_PLANTS) else "none"
+    inherited = rung2.validate_resolved(root, plant=inherited_plant)
+    own = validate_bbl_bbc_resolved(root, plant=plant)
+    return {**own, "status": "PASS_RUNG1_RESOLVED", "upper_rung": inherited}
 
 
 def validate_record(

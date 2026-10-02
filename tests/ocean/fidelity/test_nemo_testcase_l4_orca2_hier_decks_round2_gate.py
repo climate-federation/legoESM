@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 from netCDF4 import Dataset
-
 
 SCRIPT = (
     Path(__file__).parents[3]
@@ -157,7 +156,7 @@ HIERARCHY_GATES = tuple(
         "scripts.validate.ocean_fidelity.orca2_l4."
         f"nemo_testcase_l4_orca2_hier_decks_round{round_number}_gate"
     )
-    for round_number in range(1, 16)
+    for round_number in range(1, 19)
 )
 HIERARCHY_PLANTS = tuple(
     (module, plant)
