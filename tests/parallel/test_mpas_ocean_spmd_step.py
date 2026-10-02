@@ -65,7 +65,7 @@ def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2, partial_cells=False):
 
     mesh0 = create_voronoi_mesh(level)
     n_real = mesh0.nCells
-    mesh = reorder_voronoi_for_sharding(mesh0, n_dev, edge_order="owner")
+    mesh = reorder_voronoi_for_sharding(mesh0, n_dev, edge_order="block")
     z = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     config = MPASOceanConfig(**config_kwargs)
     state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
@@ -256,7 +256,7 @@ def test_vertex_lane_restores_global_ids():
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout, spmd_vertex_refresh_probe,
     )
-    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV, edge_order="owner")
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV, edge_order="block")
     try:
         layout = build_mpas_ocean_spmd_layout(mesh, N_DEV, nlev=1)
         assert layout.vppermute_perms, "fixture has no vertex exchange"
@@ -593,15 +593,16 @@ def test_complete_cell_rings_counts_local_stencils():
     from legoesm.parallel.sharded_dynamics import build_voronoi_partition_infra
     from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
     from legoesm.parallel.voronoi_spmd_ocean import complete_cell_rings
-    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(4), N_DEV, edge_order="owner")
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(4), N_DEV, edge_order="block")
     parts = build_voronoi_partition_infra(mesh, N_DEV, halo_depth=2)[7]
     assert complete_cell_rings(mesh, parts) == 3
     p = parts[0]
     coe = np.asarray(mesh.cellsOnEdge)
     owned = set(np.asarray(p.local_cells[:p.n_owned_cells]).tolist())
     le = np.asarray(p.local_edges)
-    # a local edge between an owned cell and a ring-1 cell
-    k = next(i for i in range(p.n_owned_edges, len(le))
+    # a local edge between an owned cell and a ring-1 cell (owned or halo:
+    # under the block edge order rank 0 owns all of its boundary edges)
+    k = next(i for i in range(len(le))
              if (int(coe[0, le[i]]) in owned) != (int(coe[1, le[i]]) in owned))
     parts[0] = p._replace(local_edges=np.delete(le, k))
     assert complete_cell_rings(mesh, parts) == 0
