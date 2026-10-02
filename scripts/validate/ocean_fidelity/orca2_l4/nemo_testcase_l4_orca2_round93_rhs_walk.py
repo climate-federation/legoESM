@@ -28,6 +28,9 @@ from scripts.validate.ocean_fidelity.testcases import (
 from scripts.validate.ocean_fidelity.testcases import (
     nemo_testcase_l2_gyre_round84_rhs_walk as rhs_common,
 )
+from scripts.validate.ocean_fidelity.testcases import (
+    nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
+)
 
 
 BOUNDARIES = ("after_hpg", "after_ldf", "after_vor", "after_keg", "after_zad")
@@ -256,10 +259,8 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         parts["zad_u"], parts["zad_v"],
     ))
     oracle, record_census = assemble_rhs(record_root, plant=plant)
-    active = {
-        "u": np.asarray(state.u_mask.data[:, 1:, :], dtype=bool),
-        "v": np.asarray(state.v_mask.data[1:, :, :], dtype=bool),
-    }
+    masks = phase3_gate.expected_masks(card)
+    active = {face: masks[face] for face in FACES}
     live = {
         "u": {boundary: round83.native_u(accumulated[f"{boundary}_u"])
               for boundary in BOUNDARIES},
