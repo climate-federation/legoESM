@@ -137,6 +137,14 @@ FILES = {
         _ORCA2_R69SURFACE_COMPILED / "sbcrnf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90": (
         _ORCA2_R69SURFACE_COMPILED / "trasbc.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traqsr.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "traqsr.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcssm.f90": (
+        _ORCA2_R69SURFACE_COMPILED / "sbcssm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/EXP00/namelist_ref": (
+        _ORCA2_R69SURFACE / "EXP00/namelist_ref"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/divhor.f90": (
         _ORCA2_R69SURFACE_COMPILED / "divhor.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stp2d.f90": (
@@ -1293,6 +1301,28 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:244-246': [
         ('IF( ln_zdftke ) THEN', 3),
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) + en(ji,jj,jk)', 3],
+    # --- ORCA2 hierarchy decks round 8: rung-4 shortwave boundary ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/EXP00/namelist_ref:202': [
+        'ln_traqsr   = .false.',
+        'ln_traqsr   = .false.'],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/EXP00/namelist_ref:424-431': [
+        'ln_qsr_rgb  = .false.',
+        'nn_chldta   =      0', 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traqsr.f90:1101-1103': [
+        'READ(numnam_ref',
+        'IF(lwm) WRITE ( numond, namtra_qsr )', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/traqsr.f90:1123-1137': [
+        'ioptio = 0',
+        'IF( ln_qsr_bio                      )   nqsr = np_BIO', 15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:525': [
+        'IF( ln_traqsr  )   CALL tra_qsr',
+        'IF( ln_traqsr  )   CALL tra_qsr'],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trasbc.f90:267-270': [
+        'IF( .NOT.ln_traqsr  .AND. kstg == 1) THEN',
+        'qsr(ji,jj) = 0._wp', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcssm.f90:284': [
+        'IF( .NOT. ln_traqsr )   fraqsr_1lev(:,:) = 1._wp',
+        'IF( .NOT. ln_traqsr )   fraqsr_1lev(:,:) = 1._wp'],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288': [
         ('IF( ln_zdftke ) THEN', 4),
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],
