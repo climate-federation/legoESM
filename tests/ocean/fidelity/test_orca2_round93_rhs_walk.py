@@ -65,16 +65,24 @@ def test_slow_record_reader_uses_its_self_describing_header(tmp_path: Path) -> N
     payload.extend(struct.pack(
         "=16i", 1, 1, 1, 3, 3, 0, 94, 152, 1, 1,
         3, 3, 92, 150, 64, len(slow_record.NAMES)))
-    values = np.zeros(94 * 152, dtype=np.float64).tobytes()
-    for name in slow_record.NAMES:
+    for index, name in enumerate(reversed(slow_record.NAMES)):
+        n1, n2 = ((90, 148) if index % 2 == 0 else (94, 152))
+        values = np.zeros(n1 * n2, dtype=np.float64).tobytes()
         payload.extend(name.encode("ascii").ljust(16, b" "))
-        payload.extend(struct.pack("=4i", 2, 94, 152, 1))
+        payload.extend(struct.pack("=4i", 2, n1, n2, 1))
         payload.extend(values)
     path.write_bytes(payload)
-    record = slow_record.read_record(path)
-    assert tuple(record["fields"]) == slow_record.NAMES
+    record = slow_record.read_record(path, include_owned_values=True)
+    assert set(record["fields"]) == set(slow_record.NAMES)
     assert record["rank"] == 0
-    for plant in ("header", "field-name", "truncation", "swapped-rank"):
+    assert all(value.shape == (148, 90)
+               for value in record["owned_values"].values())
+    assert set(map(tuple, record["field_shapes"].values())) == {
+        (148, 90), (152, 94),
+    }
+    for plant in (
+        "header", "field-name", "field-dims", "truncation", "swapped-rank",
+    ):
         if plant == "swapped-rank":
             assert slow_record.read_record(path, plant)["rank"] == 1
         else:

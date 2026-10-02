@@ -17,7 +17,10 @@ NAMES = (
     "wind_u", "wind_v", "final_u", "final_v", "ssh_rhs", "ssh_after",
     "ub_after", "vb_after",
 )
-PLANTS = ("none", "header", "field-name", "truncation", "swapped-rank", "restart-byte")
+PLANTS = (
+    "none", "header", "field-name", "field-dims", "truncation",
+    "swapped-rank", "restart-byte",
+)
 
 
 class Refusal(RuntimeError):
@@ -29,7 +32,9 @@ def require(condition: bool, message: str) -> None:
         raise Refusal(message)
 
 
-def read_record(path: Path, plant: str = "none") -> dict:
+def read_record(
+    path: Path, plant: str = "none", *, include_owned_values: bool = False,
+) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-1]
@@ -43,36 +48,63 @@ def read_record(path: Path, plant: str = "none") -> dict:
      ntsi, ntsj, ntei, ntej, bits, nfields) = header
     if plant == "swapped-rank":
         rank = 1 - rank
-    require((version, kt, nx, ny, bits, nfields) == (1, 1, 94, 152, 64, 14),
-            f"{path.name}: header moved")
-    require((ntsi, ntsj, ntei, ntej) == (3, 3, 92, 150),
-            f"{path.name}: owned bounds moved")
+    require(version == 1, f"{path.name}: unsupported version {version}")
+    require(kt == 1, f"{path.name}: unexpected timestep {kt}")
+    require(bits == 64, f"{path.name}: precision is not fp64")
+    require(nx > 0 and ny > 0, f"{path.name}: non-positive local domain")
+    require(1 <= ntsi <= ntei <= nx and 1 <= ntsj <= ntej <= ny,
+            f"{path.name}: owned bounds outside local domain")
+    require(nfields == len(NAMES),
+            f"{path.name}: field count {nfields} != {len(NAMES)}")
     offset = 80
     fields = {}
-    for index, expected in enumerate(NAMES):
+    field_shapes = {}
+    owned_values = {}
+    for index in range(nfields):
         require(offset + 32 <= len(raw), f"{path.name}: truncated field header")
         name = raw[offset:offset + 16].decode("ascii").rstrip(" \x00")
         offset += 16
         ndim, n1, n2, n3 = struct.unpack_from("=4i", raw, offset)
         offset += 16
         if plant == "field-name" and index == 0:
-            name = "planted"
-        require(name == expected and (ndim, n1, n2, n3) == (2, nx, ny, 1),
-                f"{path.name}: bad field {index} {name!r}")
+            name = NAMES[1]
+        if plant == "field-dims" and index == 0:
+            n1 += 1
+        require(name and name not in fields,
+                f"{path.name}: empty or duplicate field {index} {name!r}")
+        require(ndim == 2 and n1 > 0 and n2 > 0 and n3 == 1,
+                f"{path.name}: bad dimensions for {name!r}")
+        require(nx >= n1 and ny >= n2
+                and (nx - n1) % 2 == 0 and (ny - n2) % 2 == 0,
+                f"{path.name}: {name!r} is not centred in the local domain")
         end = offset + 8 * n1 * n2
         require(end <= len(raw), f"{path.name}: truncated {name}")
         values = np.frombuffer(raw, dtype="=f8", count=n1 * n2, offset=offset)
-        owned = values.reshape((n1, n2), order="F")[ntsi - 1:ntei, ntsj - 1:ntej]
+        ioff, joff = (nx - n1) // 2, (ny - n2) // 2
+        i0, i1 = ntsi - 1 - ioff, ntei - ioff
+        j0, j1 = ntsj - 1 - joff, ntej - joff
+        require(0 <= i0 < i1 <= n1 and 0 <= j0 < j1 <= n2,
+                f"{path.name}: {name!r} does not contain the owned slab")
+        owned = values.reshape((n1, n2), order="F")[i0:i1, j0:j1].T
         require(bool(np.isfinite(owned).all()), f"{path.name}: nonfinite {name}")
         fields[name] = hashlib.sha256(raw[offset:end]).hexdigest()
+        field_shapes[name] = [n2, n1]
+        if include_owned_values:
+            owned_values[name] = np.array(owned, copy=True)
         offset = end
+    require(set(fields) == set(NAMES),
+            f"{path.name}: field names differ from the required registry")
     require(offset == len(raw), f"{path.name}: trailing or truncated bytes")
-    return {
+    result = {
         "rank": rank, "kt": kt, "levels": [kbb, kaa, krhs],
         "shape": [nx, ny], "origin": [nimpp, njmpp],
         "owned": [ntsi, ntsj, ntei, ntej], "fields": fields,
+        "field_shapes": field_shapes,
         "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
     }
+    if include_owned_values:
+        result["owned_values"] = owned_values
+    return result
 
 
 def run(root: Path, baseline: Path, plant: str) -> dict:

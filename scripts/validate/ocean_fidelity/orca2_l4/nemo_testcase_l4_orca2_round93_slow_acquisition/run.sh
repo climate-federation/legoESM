@@ -33,6 +33,7 @@ readonly SOURCE_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5
 readonly SOURCE_BINARY_SHA=86117fc6afa5916208cc1f6de3bd154b9c92a2176c6f761526f7eebb1871ca44
 readonly DECK_MANIFEST_SHA=92f2a73eeb3b9989b6f390519e3f0cab900b122194259f2988cad672e1819677
 readonly INPUT_MANIFEST_SHA=395ae3e2dad969bc7ef5c94e20f5f441875e17d8a87b73407d9cab5e0c3a2b51
+readonly EXPECTED_PRODUCER=cffea640d114ddec04913417f3e4e3fccba9c9d5
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 
@@ -131,17 +132,20 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 admit() {
-  local plant record
-  [[ "$(cat "$TARGET_RUN/producer_commit.txt")" == "$COMMIT" ]] || {
-    printf 'REFUSE: producer commit differs from current tree\n' >&2; exit 70;
+  local plant record expected_stamp
+  [[ "$(cat "$TARGET_RUN/producer_commit.txt")" == "$EXPECTED_PRODUCER" ]] || {
+    printf 'REFUSE: producer commit differs from the pinned record producer\n' >&2; exit 70;
   }
   [[ "$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_r93_slow_rank????_kt00000001.bin' | wc -l)" -eq 2 ]] || {
     printf 'REFUSE: expected exactly two rank slow records\n' >&2; exit 70;
   }
   for record in "$TARGET_RUN"/oracle_r93_slow_rank????_kt00000001.bin; do
-    printf '%s %s %s\n' "$(sha256sum "$record" | awk '{print $1}')" "$COMMIT" "$(basename "$record")" >"$record.stamp"
+    expected_stamp="$(sha256sum "$record" | awk '{print $1}') $EXPECTED_PRODUCER $(basename "$record")"
+    [[ "$(cat "$record.stamp")" == "$expected_stamp" ]] || {
+      printf 'REFUSE: record stamp moved: %s\n' "$record" >&2; exit 70;
+    }
   done
-  for plant in header field-name truncation swapped-rank restart-byte; do
+  for plant in header field-name field-dims truncation swapped-rank restart-byte; do
     if "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" --plant "$plant" \
       >"$TARGET_RUN/round93_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
