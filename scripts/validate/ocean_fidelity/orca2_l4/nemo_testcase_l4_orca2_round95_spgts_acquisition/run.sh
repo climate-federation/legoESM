@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Operator-executed ORCA2 hierarchy rung-0 split-explicit substep acquisition.
+# Round 96 repairs round 95's deck-staging provenance defect while retaining
+# the already preregistered self-describing R95SPG record format.
 set -Eeuo pipefail
 
 refuse_unexpected() {
   local status=$?
-  printf 'REFUSE: round-95 SPG acquisition failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-96 SPG acquisition failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -22,11 +24,11 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4_R93SLOW
-readonly TARGET_CFG=ORCA2_OMIP_L4_R95SPG
+readonly TARGET_CFG=ORCA2_OMIP_L4_R96SPG
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round93/acquisition/orca2_rung0_slow_ranked_10step_np2
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round95/acquisition
+readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round96/acquisition
 readonly TARGET_RUN=$EVIDENCE/orca2_rung0_spgts_ranked_10step_np2
 readonly SOURCE_DYNSPG_SHA=c1542a517a40627aeea099c0955728cda85eb49b3ec5aa9d98068f371dbcb74c
 readonly SOURCE_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
@@ -44,7 +46,7 @@ readonly PATCH=$here/dynspg_ts_round95.patch
 readonly DECISION83_PATCH=$here/namelist_rung0_decision83.patch
 readonly WRITER=$here/l4_r95_spgts_frames.F90
 readonly GATE=$here/check_record.py
-readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round95.md
+readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round96.md
 
 pin() {
   local digest=$1 path=$2 label=$3
@@ -127,14 +129,14 @@ cpp -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
 "$FC" -fsyntax-only -ffree-line-length-none -I "$dry" -I "$SOURCE_ROOT/BLD/inc" -J "$dry" "$dry/dynspg_ts.f90"
 printf 'SYNTAX_PROOF_PASS l4_r95_spgts_frames.f90 dynspg_ts.f90\n'
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND95_RUNG0_SPGTS_PREFLIGHT_READY %s\n' "$TARGET_RUN"
+  printf 'ORCA2_ROUND96_RUNG0_SPGTS_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
 fi
 
 verify_recorded_tools() {
   local recorded=$1 path rel current recorded_digest
   git cat-file -e "$recorded^{commit}" || { printf 'REFUSE: unknown producer commit %s\n' "$recorded" >&2; exit 70; }
-  for path in "$0" "$PATCH" "$WRITER" "$GATE" "$PREREG"; do
+  for path in "$0" "$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG"; do
     rel=${path#"$REPO"/}
     current=$(sha256sum "$path" | awk '{print $1}')
     recorded_digest=$(git show "$recorded:$rel" | sha256sum | awk '{print $1}')
@@ -159,19 +161,19 @@ admit() {
   done
   for plant in header field-name field-dims truncation missing-frame swapped-rank restart-byte; do
     if "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" --plant "$plant" \
-      >"$TARGET_RUN/round95_${plant}_plant.log" 2>&1; then
+      >"$TARGET_RUN/round96_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
     fi
-    grep -Fq 'STATUS PLANT-FIRED' "$TARGET_RUN/round95_${plant}_plant.log" || {
+    grep -Fq 'STATUS PLANT-FIRED' "$TARGET_RUN/round96_${plant}_plant.log" || {
       printf 'REFUSE: %s plant lacks firing marker\n' "$plant" >&2; exit 71;
     }
   done
   "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" \
-    --output "$TARGET_RUN/round95_spgts_admission.json"
+    --output "$TARGET_RUN/round96_spgts_admission.json"
   (cd "$TARGET_RUN" && sha256sum oracle_r95_spg_rank*.bin oracle_r95_spg_rank*.bin.stamp \
-    ORCA2_000000??_restart_????.nc round95_*_plant.log round95_spgts_admission.json \
-    >round95_outputs.sha256)
-  printf 'ORCA2_ROUND95_RUNG0_SPGTS_ACQUISITION_PASS %s\n' "$TARGET_RUN"
+    ORCA2_000000??_restart_????.nc round96_*_plant.log round96_spgts_admission.json \
+    >round96_outputs.sha256)
+  printf 'ORCA2_ROUND96_RUNG0_SPGTS_ACQUISITION_PASS %s\n' "$TARGET_RUN"
 }
 
 if [[ "$MODE" == --admit-existing ]]; then
@@ -207,6 +209,11 @@ cd "$NEMO_ROOT"
 ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+# The config directory is only a source-code container.  Its EXP00 namelist is
+# the shipped deck, not the admitted rung-0 run deck.  Round 95 patched that
+# stale copy and refused.  Stage and pin the actual admitted deck first.
+cp "$SOURCE_RUN/namelist_cfg" "$TARGET_ROOT/EXP00/namelist_cfg"
+pin "$SOURCE_NML_SHA" "$TARGET_ROOT/EXP00/namelist_cfg" 'staged source rung-0 namelist'
 patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/EXP00" <"$DECISION83_PATCH"
 pin "$HARMONIZED_NML_SHA" "$TARGET_ROOT/EXP00/namelist_cfg" 'built Decision-83 namelist'
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"

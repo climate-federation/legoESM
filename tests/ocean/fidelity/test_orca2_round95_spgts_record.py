@@ -60,3 +60,15 @@ def test_swapped_rank_plant_is_observable(tmp_path: Path) -> None:
     path = tmp_path / "oracle_r95_spg_rank0000_kt00000001.bin"
     synthetic_record(path)
     assert record.read_record(path, "swapped-rank")["rank"] == 1
+
+
+def test_round96_launcher_stages_admitted_deck_before_decision83_patch() -> None:
+    launcher = Path(
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round95_spgts_acquisition/run.sh"
+    ).read_text(encoding="utf-8")
+    stage = 'cp "$SOURCE_RUN/namelist_cfg" "$TARGET_ROOT/EXP00/namelist_cfg"'
+    pin = "pin \"$SOURCE_NML_SHA\" \"$TARGET_ROOT/EXP00/namelist_cfg\""
+    patch = 'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/EXP00" <"$DECISION83_PATCH"'
+    assert launcher.index(stage) < launcher.index(pin) < launcher.index(patch)
+    assert "readonly TARGET_CFG=ORCA2_OMIP_L4_R96SPG" in launcher
