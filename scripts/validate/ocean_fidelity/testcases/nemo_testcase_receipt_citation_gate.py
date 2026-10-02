@@ -69,6 +69,8 @@ _ORCA2_R93SLOW_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo")
 _ORCA2_R96SPG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
+_ORCA2_R104EENACC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -172,6 +174,14 @@ FILES = {
         _ORCA2_R96SPG_COMPILED / "domzgr.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R96SPG_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg.f90": (
+        _ORCA2_R104EENACC_COMPILED / "dynspg.f90"),
+    "ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R104EENACC_COMPILED / "dynspg_ts.f90"),
+    "l4_r104_een_accum.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+        "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
+        "/l4_r104_een_accum.F90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1241,6 +1251,18 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 105: failed recorder and compiled call frequency ---
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg.f90:300-303': [
+        'SELECT CASE( nspg )',
+        'CASE ( np_NO )', 4],
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:302':
+        'IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( Kmm )',
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1294-1297': [
+        'CALL r104_een_accum_dump(r104_acc_u_nw',
+        '& r104_scl_v_sw, r104_scl_v_se, r104_scl_v_nw, r104_scl_v_ne)', 4],
+    'l4_r104_een_accum.F90:23-27': [
+        "IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop",
+        "IF(ios /= 0) CALL ctl_stop('round104: cannot open EEN operand record')", 5],
     # --- ORCA2 round 99: admitted frozen EEN coefficient discriminator ---
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:126-127': [
         'ALLOCATE( ffu_nw(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))',
