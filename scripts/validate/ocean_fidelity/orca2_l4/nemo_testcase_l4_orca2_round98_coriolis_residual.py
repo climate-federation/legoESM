@@ -285,6 +285,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     pre = {
         "coefficient_evaluation": "nemo_literal",
         "literal_coefficients": fold_coeff,
+        "coefficient_eta": coefficient_eta,
         "scheme": "een",
     }
     substep_dt = float(oracle["i000_entry_sc"][0])
