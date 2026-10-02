@@ -82,9 +82,9 @@ fv3_duo_sponge_d2_top: 0.0016
 #    (2-cell divergence-mode e-folding, 3.0 %/step on 4dx).
 fv3_duo_nord: 1
 fv3_duo_d4_bg: 0.05
-# B3 positivity: FV3 fillz in the remap + the MPAS positivity stage every step
-#    on the column lane (replaces mpas_conservative_tracer_clamp, which the duo
-#    does not read).
+# B3 positivity: FV3 fillz in the remap + the MPAS borrow positivity stage every
+#    step on the column lane (mpas_conservative_tracer_clamp below, the one
+#    MPAS knob the duo reads; kept at the MPAS deck's value).
 fv3_duo_fill: true
 # B4 vertical advection: no FV3 counterpart (vertically Lagrangian + kord remap);
 #    mpas_vert_advection_scheme not set.  B5 qv del-4 smoothing: OFF (below).
@@ -224,7 +224,7 @@ land_soil_init: aridity
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0
 mpas_qv_smooth_del4_m4s: 0.0        # B5: OFF on the duo (no FV3 counterpart; refused on the column lane)
-mpas_conservative_tracer_clamp: false  # B3: the duo uses fillz + the positivity stage instead
+mpas_conservative_tracer_clamp: true   # B3: the borrow positivity stage every step (the column lane reads this grid-general knob; the MPAS deck value) + FV3 fillz in the remap
 
 # ---- forcing / IC / output (unchanged) ------------------------------------------
 diurnal_cycle: true
