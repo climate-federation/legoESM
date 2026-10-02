@@ -39,6 +39,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 CARDS = ("GYRE-zco", "VORTEX-zco", "VORTEX_VEC-zco")
 
 
+def _scoped_main(function):
+    """Keep the allow-dirty escape from outliving this driver's own call."""
+    from legoesm.ocean.fidelity.provenance import scoped_allow_dirty
+
+    return scoped_allow_dirty(function)
+
+
 def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
     import numpy as np
     import jax.numpy as jnp
@@ -48,7 +55,7 @@ def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
         build_nemo_testcase_card,
     )
     from legoesm.ocean.fidelity.provenance import (
-        scoped_allow_dirty,
+        allow_dirty_stamps,
         worktree_stamp,
     )
     from legoesm.ocean.vertical import nemo_e3f_0vor_from_tmask
@@ -62,9 +69,12 @@ def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
         if raw is None:
             raise SystemExit(f"{name}: card carries no literal barotropic "
                              "operands; this probe would prove nothing")
-        scheme = getattr(recipe.model_config, "barotropic_een_scheme", None)
-        if scheme is None:
-            scheme = getattr(recipe.model_config, "een_scheme", None)
+        # The production call site resolves the literal builder's branch from
+        # the card's own barotropic Coriolis selection, exactly as here.
+        bt_cor = getattr(recipe.model_config.barotropic,
+                         "barotropic_coriolis", "avg")
+        scheme = ("ene" if bt_cor.startswith("ene")
+                  and not bt_cor.startswith("een") else "een")
         dtype = get_policy().control
         eta = jnp.zeros(np.asarray(raw.ff_f).shape, dtype=dtype)
         fill = jnp.asarray(raw.e3f_0, dtype=dtype)
@@ -94,6 +104,7 @@ def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
             float(np.max(np.abs(np.asarray(new[k]) - np.asarray(old[k]))))
             for k in keys)
         out[name] = {
+            "barotropic_coriolis": bt_cor,
             "branch": scheme,
             "n_vertices_e3f_0vor_differs": differs,
             "n_vertices_total": int(np.asarray(fill).size),
@@ -101,8 +112,8 @@ def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
             "coefficient_bit_identity": same,
             "max_abs_coefficient_change": worst,
         }
-    with scoped_allow_dirty(allow_dirty):
-        stamp = worktree_stamp()
+    allow_dirty_stamps(allow_dirty)
+    stamp = worktree_stamp()
     return {
         "format": "nemo-testcase-l1-round198-e3f-0vor-scope-v1",
         "worktree": stamp,
@@ -110,6 +121,7 @@ def run(cards=CARDS, *, allow_dirty: bool = False) -> dict:
     }
 
 
+@_scoped_main
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path)
