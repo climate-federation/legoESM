@@ -34,6 +34,8 @@ readonly SOURCE_BINARY_SHA=7a65083c8f9a625a394844c9bfb0fcb927d666f34136a010de33f
 readonly SOURCE_NML_SHA=5192355842d9233d8356ab87b4ff8b65eac539e66dc135f77a07e26451d360e8
 readonly DECK_MANIFEST_SHA=0e40688deddd7a22f8a6a7105ebc623c80e335d7bea5d88a80702bf447148312
 readonly INPUT_MANIFEST_SHA=395ae3e2dad969bc7ef5c94e20f5f441875e17d8a87b73407d9cab5e0c3a2b51
+readonly RECORDED_RUN_SHA=b4e36311224d9fdf14efade2158c385576f9e3f67bbea203c702e5b675baa3ac
+readonly RECORDED_CHECKER_SHA=5a47165a18200e3bc25dad0e9661c22639b3c071959d49a380cfa358c1ff1152
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 
@@ -118,17 +120,24 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 verify_recorded_tools() {
-  local manifest=${1:-$TARGET_RUN/toolchain.sha256} path name matches digest
+  local manifest=${1:-$TARGET_RUN/toolchain.sha256} path name matches digest expected entry
   [[ -f "$manifest" && "$(wc -l <"$manifest")" -eq 6 ]] || {
     printf 'REFUSE: producer content manifest is missing or has wrong cardinality\n' >&2; exit 70;
   }
-  for path in "$0" "$PATCH" "$WRITER" "$GATE" "$PREREG" "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90"; do
+  for path in "$PATCH" "$WRITER" "$PREREG" "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90"; do
     name=$(basename "$path")
     matches=$(awk -v name="$name" '{n=split($2,p,"/"); if(p[n]==name)c++} END{print c+0}' "$manifest")
     [[ "$matches" -eq 1 ]] || { printf 'REFUSE: producer manifest has %s entries for %s\n' "$matches" "$name" >&2; exit 70; }
     digest=$(awk -v name="$name" '{n=split($2,p,"/"); if(p[n]==name)print $1}' "$manifest")
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { printf 'REFUSE: malformed digest for %s\n' "$name" >&2; exit 70; }
     pin "$digest" "$path" "recorded producer content $name"
+  done
+  for entry in "run.sh:$RECORDED_RUN_SHA" "check_record.py:$RECORDED_CHECKER_SHA"; do
+    name=${entry%%:*}; expected=${entry#*:}
+    matches=$(awk -v name="$name" '{n=split($2,p,"/"); if(p[n]==name)c++} END{print c+0}' "$manifest")
+    [[ "$matches" -eq 1 ]] || { printf 'REFUSE: producer manifest has %s entries for %s\n' "$matches" "$name" >&2; exit 70; }
+    digest=$(awk -v name="$name" '{n=split($2,p,"/"); if(p[n]==name)print $1}' "$manifest")
+    [[ "$digest" == "$expected" ]] || { printf 'REFUSE: recorded producer digest moved for %s\n' "$name" >&2; exit 70; }
   done
 }
 

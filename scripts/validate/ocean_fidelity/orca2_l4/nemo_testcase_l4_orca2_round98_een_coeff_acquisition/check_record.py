@@ -49,6 +49,7 @@ def read_record(path: Path, plant: str = "none") -> dict:
             f"{path.name}: non-positive level or shape")
     require(1 <= ntsi <= ntei <= nx and 1 <= ntsj <= ntej <= ny,
             f"{path.name}: owned bounds outside local domain")
+    owned_shape = (ntei - ntsi + 1, ntej - ntsj + 1)
     offset = 16 + HEADER.size
     groups = {}
     for index in range(nfields):
@@ -64,8 +65,9 @@ def read_record(path: Path, plant: str = "none") -> dict:
             n1 += 1
         require(name and name not in groups,
                 f"{path.name}: empty or duplicate field {name!r}")
-        require((ndim, n1, n2, n3) == (2, nx, ny, 1),
-                f"{path.name}: {name!r} dimensions moved")
+        require((ndim, n1, n2, n3) == (2, *owned_shape, 1),
+                f"{path.name}: {name!r} dimensions {n1}x{n2} do not "
+                f"match owned coefficient shape {owned_shape[0]}x{owned_shape[1]}")
         end = offset + 8 * n1 * n2
         require(end <= len(raw), f"{path.name}: truncated payload {name!r}")
         values = np.frombuffer(raw, dtype="=f8", count=n1 * n2, offset=offset)

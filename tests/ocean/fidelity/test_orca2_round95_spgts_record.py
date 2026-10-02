@@ -192,11 +192,23 @@ def synthetic_r98_coefficient_record(path: Path, rank: int) -> None:
         1 + 90 * rank, 1, 3, 3, 92, 150, 64, 8,
     ))
     for index, name in enumerate(r98_record.FIELDS):
-        values = np.full((94, 152), index + 1.0, dtype=np.float64)
+        values = np.full((90, 148), index + 1.0, dtype=np.float64)
         payload.extend(name.encode("ascii").ljust(16, b" "))
-        payload.extend(struct.pack("=4i", 2, 94, 152, 1))
+        payload.extend(struct.pack("=4i", 2, 90, 148, 1))
         payload.extend(values.tobytes(order="F"))
     path.write_bytes(payload)
+
+
+def test_round98_ranked_coefficient_record_uses_declared_owned_shape(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "oracle_r98_een_coeff_rank0000_kt00000001.bin"
+    synthetic_r98_coefficient_record(path, 0)
+    record = r98_record.read_record(path)
+    assert record["shape"] == [94, 152, 31]
+    assert {tuple(group["shape"]) for group in record["fields"].values()} == {
+        (90, 148),
+    }
 
 
 @pytest.mark.parametrize(
@@ -219,6 +231,8 @@ def test_round98_ranked_coefficient_launcher_is_content_pinned() -> None:
     ).read_text(encoding="utf-8")
     assert "readonly TARGET_CFG=ORCA2_OMIP_L4_R98EENCOEFF" in launcher
     assert "SOURCE_DYNSPG_SHA=" in launcher
+    assert "RECORDED_RUN_SHA=" in launcher
+    assert "RECORDED_CHECKER_SHA=" in launcher
     assert "verify_recorded_tools" in launcher
     assert "git cat-file" not in launcher
     assert "git show" not in launcher
