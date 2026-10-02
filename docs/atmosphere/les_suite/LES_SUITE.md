@@ -826,7 +826,7 @@ analogue of a DEPHY case, so the reader mirrors `dephy_scm.py`:
   `test_sccm_arm_loader.py` (synthetic-fixture sign/conversion assertions + a real-`arm9707.nc`
   load + an SCM round-trip). Numerics codex-reviewed.
 
-**Phase 2 — DONE (2026-07-29): the obs-vs-SCM scoring assembly** (`les_suite/arm_obs_score.py`).
+**Phase 2 — DONE (2026-07-29): the obs-vs-SCM scoring assembly** (`les_suite/arm_obs_score.py`; parked in `atmosphere/_future/` 2026-10-02, not wired).
 - `build_arm_comparables(case, physics_config, ...)` runs the obs-forced SCM over a window
   (optionally re-initialised from the observed sounding at the window start — the ARM
   "continuous-forcing" restart that avoids multi-day free-run drift) and samples its output at the
