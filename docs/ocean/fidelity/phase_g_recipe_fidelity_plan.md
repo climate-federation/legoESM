@@ -345,7 +345,7 @@ acceptance metrics that prove it.
    matching interfaces.
 3. **Time-integrator coupling.** Veros uses leapfrog + AB2 +
    Robert-Asselin; legoESM uses SSP-RK3 by default. The leapfrog
-   scheme is implemented standalone
+   scheme was implemented standalone
    (``timestepping/leapfrog_ab2.py``, deleted 2026-10 as unwired; recover from git e86e0b86d) but not wired into legoESM's
    outer-integrator dispatch yet (would require
    ``SegmentCarry`` extension with a τ-1 carry field).
@@ -409,7 +409,7 @@ acceptance metrics that prove it.
   K profiles within ~few % of full prognostic equilibrium —
   adequate for the first ACC acceptance run; the prognostic
   upgrade tightens the tier-2 match.
-- **Leapfrog outer-integrator dispatch.** Standalone scheme is
+- **Leapfrog outer-integrator dispatch.** Standalone scheme was
   delivered (``timestepping/leapfrog_ab2.py``, deleted 2026-10 as unwired; recover from git e86e0b86d). Wiring it as
   ``outer_integrator="leapfrog_ab2"`` requires extending
   ``SegmentCarry`` with a τ-1 carry field. Tier-2 unaffected;
