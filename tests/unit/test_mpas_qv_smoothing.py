@@ -399,6 +399,42 @@ class TestBiharmonic:
                        0.0, None)
         np.testing.assert_allclose(np.asarray(both), want, rtol=1e-12)
 
+    @pytest.mark.parametrize("terms", ["del2", "del4", "both"])
+    def test_compiled_smoother_matches_the_eager_step(self, mesh, terms):
+        """The driver's smoother is the old eager sequence (halo refresh, then
+        the filter with the refresh again at the biharmonic midpoint), traced
+        once and reused."""
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_step, make_mpas_qv_smoother,
+        )
+        dt = 100.0
+        g_max = float(scalar_del2_cell_cfl_factor(mesh))
+        nu2 = 0.1 / (dt * g_max) if terms != "del4" else 0.0
+        nu4 = 0.1 / (dt * g_max ** 2) if terms != "del2" else 0.0
+        traced = []
+
+        def jit_refresh(x):
+            # stands in for the halo exchange; non-identity so a discarded
+            # or misplaced refresh changes the answer
+            traced.append(1)
+            return x * 0.5 + 1.0e-4
+
+        def eager_refresh(x):
+            return x * 0.5 + 1.0e-4
+
+        smooth = make_mpas_qv_smoother(mesh, nu2, dt, nu4=nu4,
+                                       halo_refresh=jit_refresh)
+        for seed in (7, 8):
+            q = _rand_q(mesh, seed=seed)
+            got = smooth(q)
+            want = _mpas_qv_smooth_step(eager_refresh(q), mesh, nu2, dt,
+                                        nu4=nu4, mid_refresh=eager_refresh)
+            assert not np.allclose(np.asarray(got), np.asarray(q))
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want),
+                                       rtol=1e-12, atol=1e-18)
+        # one trace for both calls: pre-filter refresh (+ del4 midpoint)
+        assert len(traced) == (2 if nu4 > 0.0 else 1)
+
     def test_validate_mpas_accepts_biharmonic(self):
         _mpas_cfg(mpas_qv_smooth_del4_m4s=3.6e14).validate_strict()
 

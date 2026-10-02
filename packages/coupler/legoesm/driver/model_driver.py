@@ -661,6 +661,26 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
                                       owned_mask=owned_mask)
 
 
+def make_mpas_qv_smoother(mesh, nu, dt, nu4=0.0, halo_refresh=None,
+                          owned_mask=None):
+    """Compiled ``_mpas_qv_smooth_step`` for the MPAS loop, built once per run.
+
+    ``halo_refresh`` (MPI lane only) refreshes the q_v cell halo before the
+    filter, so boundary-owned stencils read owner values (#1321), and again
+    for the biharmonic's intermediate Laplacian.  ``mesh`` and ``owned_mask``
+    are baked in as constants: build a new smoother if the partition changes.
+    Returns ``q_v -> q_v``.
+    """
+    @jax.jit
+    def smooth(q_v):
+        if halo_refresh is not None:
+            q_v = halo_refresh(q_v)
+        return _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=nu4,
+                                    mid_refresh=halo_refresh,
+                                    owned_mask=owned_mask)
+    return smooth
+
+
 def clear_sky_pass_effective(
     *, clear_sky_diag: bool, radiation: str, spatial_feed_on: bool,
     feed_steps_reached: bool = True,
@@ -10409,6 +10429,7 @@ class ModelDriver:
         _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
         _qv_smooth_nu4 = float(getattr(cfg, "mpas_qv_smooth_del4_m4s", 0.0))
         _qv_halo_refresh = None
+        _qv_smooth_jit = None
         if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
             from legoesm.core.operators_voronoi import (
                 scalar_del2_cell_cfl_factor,
@@ -10506,6 +10527,15 @@ class ModelDriver:
                         f"nu4={_qv_smooth_nu4:g} m^4/s, dt={DT:g}s, "
                         f"g_max={_g_max:.3e} 1/m^2)."
                     )
+            # Compiled once: run eagerly, every mpi4jax call re-wraps its MPI
+            # handles in fresh objects that defeat JAX's dispatch cache, so
+            # the two halo refreshes and two allreduces were re-traced and
+            # re-compiled EVERY step (~0.7 s/step at 16 ranks, res6).
+            _qv_smooth_jit = make_mpas_qv_smoother(
+                self.grid, _qv_smooth_nu, DT, nu4=_qv_smooth_nu4,
+                halo_refresh=_qv_halo_refresh,
+                owned_mask=(None if self._voronoi_layout is None
+                            else self._voronoi_layout.owned_mask_cells))
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
@@ -10825,6 +10855,11 @@ class ModelDriver:
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
             from legoesm.grids.voronoi import reconstruct_cell_velocity
+            # Compiled once: eagerly it ran op-by-op every land-forcing call
+            # (~0.5 s/step at 16 ranks, res6).
+            _recon_grid = self.grid
+            _recon_cell_velocity_jit = jax.jit(
+                lambda u_edge: reconstruct_cell_velocity(u_edge, _recon_grid))
             _lml_cfg = self.physics.land_ml_cfg
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
@@ -11054,8 +11089,7 @@ class ModelDriver:
                 q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
                          else jnp.zeros_like(T_air))
                 p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
-                u_c, v_c = reconstruct_cell_velocity(
-                    self.state.u.data[:, -1], self.grid)
+                u_c, v_c = _recon_cell_velocity_jit(self.state.u.data[:, -1])
                 # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
                 # ideal-gas rho at the lowest level, snow split at T_freeze.
                 # The zenith is the REAL per-cell sun (same doy/seconds the
@@ -12005,19 +12039,10 @@ class ModelDriver:
             # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
-            # Eager like the drain below (outside jit).
+            # Compiled once at setup (_qv_smooth_jit), unlike the drain below.
             if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
-                _qv_sm_in = _trc_sm["q_v"].data
-                if _qv_halo_refresh is not None:
-                    # MPI lane: fresh cell halo so boundary-owned stencils
-                    # read owner values (see the setup note, #1321).
-                    _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
-                _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
-                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
-                    owned_mask=(None if self._voronoi_layout is None
-                                else self._voronoi_layout.owned_mask_cells))
+                _qv_new_sm = _qv_smooth_jit(_trc_sm["q_v"].data)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
