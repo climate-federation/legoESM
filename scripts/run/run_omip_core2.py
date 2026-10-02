@@ -8301,6 +8301,10 @@ def main() -> int:
     if args.vertical_momentum_scheme is not None and args.grid != "tripole":
         raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
+    if args.nemo_een_coriolis and args.momentum_rk3:
+        raise SystemExit("--nemo-een-coriolis with --momentum-rk3 is refused: the "
+                         "implicit_cn barotropic solve then steps the barotropic "
+                         "Coriolis forward-Euler (unstable rotation).")
     if args.nemo_een_coriolis and args.grid != "tripole":
         raise SystemExit("--nemo-een-coriolis is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")

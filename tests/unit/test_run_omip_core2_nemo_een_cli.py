@@ -57,3 +57,10 @@ def test_vertical_momentum_flag_refused_off_tripole(monkeypatch):
                                       "--vertical-momentum-scheme", "nemo_advective"])
     with pytest.raises(SystemExit, match="tripole only"):
         _core2().main()
+
+
+def test_een_refused_with_rk3(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole",
+                                      "--nemo-een-coriolis", "--momentum-rk3"])
+    with pytest.raises(SystemExit, match="forward-Euler"):
+        _core2().main()
