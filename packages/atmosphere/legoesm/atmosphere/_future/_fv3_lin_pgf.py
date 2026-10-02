@@ -1,5 +1,9 @@
 """FV3-faithful Lin (1997) hydrostatic pressure-gradient force.
 
+PARKED in ``_future/`` (ponytail #9, user-approved 2026-10-02): not wired —
+no production driver, factory or registry imports this module, and its tests
+are skipped.  Wire it into production (moving it back) or delete it.
+
 Direct port of GFDL FV3 ``dyn_core.F90:p_grad_c`` (line 2073) with the
 companion gz-half / pk-half computation from ``a_p_pe`` / hydrostatic
 geopotential calculation in the same file (line 2767-2778).
