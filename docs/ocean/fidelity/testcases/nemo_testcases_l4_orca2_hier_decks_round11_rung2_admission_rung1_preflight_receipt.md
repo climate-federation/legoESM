@@ -123,8 +123,17 @@ rung 0.  The discrepancy is recorded as OPEN for the cross-lane handoff.
 
 ## Gates, review, and scope
 
-- The focused round-11 gate battery passes **9 tests**; all four preflight
-  plants fire.
+- The focused hierarchy rounds 1 through 11 plus citation-control battery
+  passes **115 tests**; all four round-11 preflight plants fire.
+- The receipt citation gate passes with five mapped citations, zero failures,
+  and zero unmapped citations; its shifted-line plant fires.  The cumulative
+  default-receipt gate passes with 274 citations and zero failures or unmapped
+  citations.
+- The one allowed `tests/ocean/fidelity -n 12` battery selected 2,275 tests,
+  reached 99%, and was interrupted after the documented late-suite no-output
+  stall.  The two visible failures are listed pre-existing reds: the worktree-
+  stamp ratchet and stale GYRE round-51 trace assertion.  Every round-11 test
+  was green; no second broad battery ran.
 - The committed launcher passes shell syntax, Python compilation, stages the
   exact deck idempotently, and prints `ORCA2_HIERARCHY_RUNG1_PREFLIGHT_READY`
   without invoking NEMO.  HD11-P4 is **CONFIRMED**.
