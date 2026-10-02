@@ -96,10 +96,22 @@ plants also fire. Focused probe and acquisition tests pass 6/6.
 - Measurement execution: production JIT, CPU, fp64/x64, libm.
 - The round changes no `packages/` file, so GYRE, DINO, tank, rung-0 trajectory,
   and rung-7 trajectory gates are unchanged by construction.
-- Citation gate and prescribed battery results are recorded in the final
-  validation addendum below.
-- Independent read-only review verdict is recorded in the final validation
-  addendum below.
+- The default citation gate passes 274 citations and this receipt passes four;
+  both have zero unmapped citations, citation failures, or map-audit failures.
+  Shifting the cited U-loop span from 1229--1230 to 1227--1228 fires
+  `SYMBOL-NOT-AT-LINE` and exits nonzero.
+- The prescribed `tests/ocean/fidelity -n 12` battery was invoked on a clean
+  tree. It reached 99%, reporting 2,302 passes and the six known failures
+  (SI3 scalar math, live-operands field order, dirty escape scope,
+  worktree-stamp, missing `hires_lane_surface` case-board row, and the
+  round-129 certified-year harness stamp), then stopped in the pre-existing
+  LOCK_EXCHANGE planted stage control without a terminal pytest summary. An
+  isolated rerun of that file passed its first seven tests and stopped in the
+  same control; neither incomplete run is counted as a pass. No failure is in
+  a file changed by this round.
+- Separate read-only Codex review was attempted. Verdict: **independent review
+  unavailable in-sandbox** (`failed to initialize in-process app-server
+  client: Read-only file system`).
 
 ## OPEN
 
