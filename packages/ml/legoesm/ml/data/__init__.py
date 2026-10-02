@@ -8,5 +8,4 @@ from legoesm.ml.data.era5_loader import (
     WB2_HRES_ZARR,
     create_era5_dataset,
     create_climatology_dataset,
-    create_training_iterator,
 )
