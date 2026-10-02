@@ -12,8 +12,8 @@ trap refuse_unexpected ERR
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--admit-existing|--plant-layout|--plant-path|--plant-duplicate|--plant-toolchain) ;;
-  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-path|--plant-duplicate|--plant-toolchain]\n' "$0" >&2; exit 63 ;;
+  --run|--preflight-only|--admit-existing|--plant-layout|--plant-path|--plant-duplicate|--plant-toolchain|--plant-rank-log) ;;
+  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-path|--plant-duplicate|--plant-toolchain|--plant-rank-log]\n' "$0" >&2; exit 63 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -69,6 +69,21 @@ check_layout() {
   [[ "$(grep -Fc 'CALL r105_een_accum_dump' "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc 'r105_acc_u_nw(ji,jj) = ffu_nw(ji,jj)' "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc 'r105_acc_v_nw(ji,jj) = ffv_nw(ji,jj)' "$source")" -eq 1 ]]
+}
+
+check_rank_markers() {
+  local root=$1 token ranks
+  [[ -f "$root/ocean.output" && -f "$root/run.user.stdout.log" ]] || return 1
+  for token in INIT DUMP; do
+    if [[ "$token" == INIT ]]; then
+      ranks=$(grep -h "ORCA2_R105_EEN_ACCUM_$token" \
+        "$root/ocean.output" "$root/run.user.stdout.log" | awk '{print $(NF-1)}' | sort)
+    else
+      ranks=$(grep -h "ORCA2_R105_EEN_ACCUM_$token" \
+        "$root/ocean.output" "$root/run.user.stdout.log" | awk '{print $NF}' | sort)
+    fi
+    [[ "$ranks" == $'0\n1' ]] || return 1
+  done
 }
 
 cd "$REPO"
@@ -129,6 +144,16 @@ if [[ "$MODE" == --plant-duplicate ]]; then
   printf 'STATUS PLANT-FIRED duplicate\n'
   exit 69
 fi
+if [[ "$MODE" == --plant-rank-log ]]; then
+  mkdir "$dry/logs"
+  printf ' ORCA2_R105_EEN_ACCUM_INIT 1 0 /tmp/rank0\n ORCA2_R105_EEN_ACCUM_DUMP 1 0\n' >"$dry/logs/ocean.output"
+  printf ' ORCA2_R105_EEN_ACCUM_INIT 1 1 /tmp/rank1\n' >"$dry/logs/run.user.stdout.log"
+  if check_rank_markers "$dry/logs"; then
+    printf 'REFUSE: rank-log plant stayed green\n' >&2; exit 69
+  fi
+  printf 'STATUS PLANT-FIRED rank-log\n'
+  exit 69
+fi
 check_writer "$dry/l4_r105_een_accum.F90" || { printf 'REFUSE: writer path/one-shot contract is incomplete\n' >&2; exit 66; }
 
 cpp -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
@@ -181,11 +206,8 @@ admit() {
   [[ "$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_r104_een_accum_rank????_kt00000001.bin' | wc -l)" -eq 2 ]] || {
     printf 'REFUSE: expected exactly two rank EEN operand records\n' >&2; exit 70;
   }
-  [[ "$(grep -h 'ORCA2_R105_EEN_ACCUM_INIT' "$TARGET_RUN"/ocean.output "$TARGET_RUN"/ocean.output_0001 | wc -l)" -eq 2 ]] || {
+  check_rank_markers "$TARGET_RUN" || {
     printf 'REFUSE: expected exactly one recorder initialization per rank\n' >&2; exit 70;
-  }
-  [[ "$(grep -h 'ORCA2_R105_EEN_ACCUM_DUMP' "$TARGET_RUN"/ocean.output "$TARGET_RUN"/ocean.output_0001 | wc -l)" -eq 2 ]] || {
-    printf 'REFUSE: expected exactly one recorder dump per rank\n' >&2; exit 70;
   }
   for record in "$TARGET_RUN"/oracle_r104_een_accum_rank????_kt00000001.bin; do
     expected="$(sha256sum "$record" | awk '{print $1}') $recorded $(basename "$record")"
@@ -267,4 +289,3 @@ cp "$manifest"/* "$TARGET_RUN/"
   printf 'RUN DONE\n' >>run.user.time.log
 )
 admit
-

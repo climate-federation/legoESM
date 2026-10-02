@@ -111,4 +111,7 @@ def test_round105_repair_initializes_one_absolute_rank_file_and_is_additions_onl
     assert "export ORCA2_R105_EEN_ACCUM_DIR=$TARGET_RUN" in launcher
     assert "--plant-path" in launcher
     assert "--plant-duplicate" in launcher
+    assert "--plant-rank-log" in launcher
+    assert '"$root/ocean.output" "$root/run.user.stdout.log"' in launcher
+    assert "ocean.output_0001" not in launcher
     assert "/usr/bin/time" not in launcher
