@@ -119,8 +119,8 @@ the probe refuses rather than reporting if it does not.
 With the card as it ships, the cross term is NOT equal to NEMO's.  The
 disagreement is on exactly **238 faces** — `2x61 + 2x60 - 4`, the boundary
 ring of the 63x63 closed box — at every substep, with a relative error that
-is the SAME constant `0.2506283612741219` at the worst face of every
-substep sampled, although the worst face moves (`[61,28]` at substep 1,
+agrees to fifteen digits at the worst face of every substep sampled
+(`0.2506283612741221`, `...219`, `...186`), although the worst face moves (`[61,28]` at substep 1,
 `[61,36]` at substep 48).  A fixed relative error at a fixed set of faces is
 a frozen coefficient, not an operand.
 
@@ -168,8 +168,15 @@ barotropic window is AT-BAR in both velocity components.
 ## The certified trajectory, before and after
 
 Both VORTEX cards, `kt=1..10`, normalized max abs, same oracle, same gate,
-one variable (`phase3/round197/traj_*_{before,after}.json`).  Rows that do
-not move are omitted.
+one variable (`phase3/round197/traj_*_{before,after}.json`).  **34 of the
+vector card's 50 rows move and 39 of the flux card's do; the table below
+shows seven of them, chosen to be the largest, so it is NOT the ledger.**
+The ledger is this: of the rows that move, **11 worsen on the vector card**
+(`kt3 u`, `kt3 v`, `kt4 T`, `kt4 u`, `kt4 v`, `kt5 T`, `kt5 u`, `kt6 T`,
+`kt7 T`, `kt9 v`, `kt10 T`; the largest is `kt4 u`,
+`2.3727e-06 -> 2.3866e-06`, 0.6%) and **6 worsen on the flux card**
+(`kt3 T`, `kt10 T`, and four salinity rows at `kt4`, `kt6`, `kt8`, `kt9`,
+each by exactly one quantum of their own resolution).
 
 | row | VORTEX_VEC-zco before | after | VORTEX-zco before | after |
 |---|---:|---:|---:|---:|
@@ -182,9 +189,10 @@ not move are omitted.
 | kt10 v | `4.725e-06` | `4.717e-06` | `2.192e-06` | `4.860e-07` |
 
 The flux card's velocity rows improve by 3-5x and both cards' sea surface
-rows by one to four orders of magnitude.  The vector card's velocity rows do
-NOT move, because its `kt=2` owner is the stage vertical velocity round 194
-named and this round does not touch it: `3.3693e-06` before and after.
+rows by one to four orders of magnitude.  The vector card's `kt=2` velocity rows do not move AT ALL -- `3.3693e-06`
+and `3.3370e-06` before and after -- because that row's owner is the stage
+vertical velocity round 194 named and this round does not touch it; its
+kt>=3 velocity rows move by under 1% in both directions.
 
 ## Why it is HELD: the gate that is red
 
@@ -204,7 +212,11 @@ evidence rather than on the headline: across the 50 certified rows,
 **1,015,156 cells improve and 143,924 worsen** on the vector card
 (1,045,802 against 112,378 on the flux card), the worst row is the vector
 card's `kt10` sea surface with **106 cells worse and 3615 better of 3721**,
-and `first_over_bar` does not move earlier.  The largest move the fix makes
+and `first_over_bar` does not move earlier.  **One certified row crosses the
+bar**: the flux card's `kt6` salinity goes AT-BAR to DEBT by one quantum
+(`8.1205e-16 -> 1.0151e-15`), and its `kt7` salinity crosses back the other
+way (`1.0151e-15 -> 8.1205e-16`) -- the same one-quantum salinity pair that
+held round 194's candidate.  The vector card has no status change.  The largest move the fix makes
 in any field (`3.7e+10` row-scale ulps) is more than an order of magnitude
 larger than the largest worsening.
 
@@ -215,15 +227,18 @@ fix is kept as
 ## Predictions, kept with their verdicts
 
 * **P1 — the hook is zero-change when unset.** **CONFIRMED** for (a): 1059
-  rows and 336 scalars bit-identical across a commit change, plus a
-  step-level byte-identical control.  (b) is CONFIRMED BY CONSTRUCTION
-  rather than by a GYRE run: the production diff this round contains no
-  line any GYRE, DINO, LOCK_EXCHANGE or OVERFLOW path reads — the two new
-  hook fields default to `None` and the three `if` statements that read
-  them are the only consumers — and the land gate's own battery, which
-  includes the NEMO recipe and prognostic-barotropic-state modules, is
-  green.  The VORTEX card edit that WOULD move GYRE-adjacent numbers is
-  not landed.
+  rows, 336 scalars, the exit frame and the Coriolis table bit-identical
+  across a commit change, plus a step-level byte-identical control.
+  **(b) WAS NOT RUN and is therefore NOT confirmed as preregistered.**  The
+  GYRE certified ladder and the round-191 VORTEX-vector registry were not
+  re-run for the hook alone.  What stands in their place is weaker and is
+  stated as such: the three new `if` statements ARE inside the shared
+  barotropic loop every card traces, so they are no-ops rather than absent;
+  they test a closure-captured `None` at trace time, no constructible model
+  configuration can set it, and the VORTEX walk's 1059 rows are bit-identical
+  with the hook present.  The card edit that would actually move certified
+  numbers is not landed.  A round that lands the fix must run the full
+  ladder.
 * **P2 — the substitution binds and says so.** **CONFIRMED.** `cor.u` and
   `cor.v` bit-exact at all 48 substeps in the arm, and not in production.
 * **P3 — the end-of-window velocity.** **CONFIRMED** against the
@@ -246,21 +261,80 @@ fix is kept as
   private hook fields and the three `if` statements that read them; the
   card fix is restored and held as a patch
   (`git status --porcelain` clean after the restore).
-* **Citation gate** on this receipt: quoted below with the focused battery.
-  `dynvor.f90` for this build is newly registered with the gate, the same
-  way round 196 registered `dynspg_ts.f90`.
-* **Round-197 unit controls**: `3 passed in 58.63s`
-  (`tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round197_substep_override.py`).
-* **Measurement provenance.** The production walk and both substitution
-  arms were run on the clean commit `721070e2aa5ff2f82e3c149af6bc4b6e13de5ac8`;
-  the trajectory and cross-test arms that needed the held patch applied are
-  stamped `allow_dirty_escape_used: true` with the patch's own
-  `diff_sha256` recorded in each artefact, and the before arms were taken
-  with the patch stashed out on the same commit.
+* **Citation gate** on this receipt: `"status": "PASS"`,
+  `"citations_found": 10`, `"unmapped_citations": []`, no failures, no map
+  entry failing its own audit, and all nine of its planted-shift self-tests
+  fired (`phase3/round197/citations.json`).  Its planted control, shifting
+  the cited `e3f_0vor` construction by two lines, fires
+  `SYMBOL-NOT-AT-LINE ... that symbol identifies line 897` and exits 1
+  (`phase3/round197/citations_plant.json`).  `dynvor.f90` for this build is
+  newly registered with the gate, the same way round 196 registered
+  `dynspg_ts.f90`.
+* **Citation re-anchor.** The hook adds eleven lines before the model file's
+  first cited line and fourteen more before its barotropic call site, so
+  **41 citations were re-anchored by rigid shift** -- both endpoints by the
+  same delta, pinned extents unchanged -- and the gate re-verified every
+  endpoint symbol afterwards.  No citation was weakened or deleted.
+* **Round-197 unit controls**: `3 passed in 77.40s`
+  (`tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round197_substep_override.py`),
+  with three non-vacuity arms: zeros, the first substep's trend held for the
+  whole window, and the trend rolled by one substep.
+* **Measurement provenance.** An independent reviewer found that the two
+  artefacts carrying this round's headline recorded only `<sha>-dirty` and
+  no diff hash, so their numbers were not pinned to the patch that produced
+  them.  Both emitters now stamp the worktree and both arms were re-run:
+  `cor_operator_kt1_e3fvor.json` and `spgts_walk_kt1_e3fvor.json` carry
+  `diff_sha256 = fa62e5dfe8760eaa8ef9...`, which is the sha256 of
+  `manifests/nemo_testcase_l1_vortex_round197_e3f_0vor_held.patch` itself
+  and the same hash the trajectory and move-gate artefacts record.  The
+  production walk is stamped clean at
+  `dd9548080f95` and reproduces `1.2458906277138998e-08`; the before
+  trajectory arms were taken with the patch stashed out on the same
+  commit.
 
-## Independent adversarial review
+## Independent adversarial review (fresh reviewer, this round)
 
-Recorded below with the push gate.
+Codex is reserved for the ORCA2 lanes, so the mandatory second opinion was a
+fresh reviewer agent given the diff, the evidence root and the claims with no
+knowledge of how they were produced.  Its verdict was **DO-NOT-SHIP the
+receipt as written, the science holds**, and every finding is accepted and
+fixed above.
+
+* **DEFECT (accepted, fixed).** The trajectory table said rows that do not
+  move are omitted; 27 of the vector card's moved rows and 33 of the flux
+  card's were omitted, including every row that worsens.  The full ledger of
+  worsening rows is now in the text and the table is labelled as a selection.
+* **DEFECT (accepted, fixed, and it is material to the decision).** The flux
+  card's `kt6` salinity crosses AT-BAR to DEBT; the receipt reported only
+  that `first_over_bar` does not move.
+* **DEFECT (accepted, fixed).** The two artefacts carrying the headline were
+  not pinned to the held patch.  Both emitters now stamp the worktree and
+  both arms were re-run; the recorded `diff_sha256` is the patch's own
+  sha256.
+* **DEFECT (accepted, corrected).** "The vector card's velocity rows do not
+  move" contradicted the table; only its `kt=2` rows do not move.
+* **DEFECT (accepted, corrected).** The per-face relative error agrees to
+  fifteen digits across substeps, it is not one constant.
+* **DEFECT (accepted, corrected).** P1(b)'s preregistered falsifier -- a GYRE
+  ladder run -- was not run, and "confirmed by construction" was substituted
+  for it.  It is now recorded as NOT CONFIRMED, with the weaker argument
+  named as weaker.
+* **GAP (accepted, closed).** The index controls could not see a trend stack
+  rolled by ONE substep; that arm is now a third non-vacuity control and the
+  module is `3 passed in 77.40s`.
+* **DEFECT (accepted, corrected).** 238 is the perimeter of the 61x60 wet
+  u-face window, not of the 63x63 box.
+* The reviewer independently CONFIRMED: every one of the nine NEMO citations
+  says what the receipt says it says; the deck resolves `nn_e3f_typ = 0` and
+  the EEN branch is the one that runs; the held patch transcribes the
+  compiled stencil faithfully, including which four T cells and NEMO's
+  association, and `e3f_0` has exactly one consumer so the arm is one
+  variable; the hook is inert unset and reachable from no configuration; the
+  override sits at the compiled boundary it claims and no later statement
+  rebinds the trend (`ln_drg_OFF = .true.` on this card); the probe's
+  conventions survive, because a bit-exact cross term admits no padding or
+  stagger error; and every number in the receipt reproduces from the
+  committed JSON.
 
 ## Landing verdict: HELD (instrument + named statement + held fix)
 
