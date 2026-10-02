@@ -46,14 +46,14 @@ def _synthetic_tree(tmp_path: Path):
 
         operand = tmp_path / f"oracle_r104_een_accum_rank{rank:04d}_kt00000001.bin"
         with operand.open("wb") as handle:
-            handle.write(gate.MAGIC.encode("ascii"))
+            handle.write(gate.MAGIC.encode("ascii").ljust(16, b" "))
             handle.write(gate.HEADER.pack(
                 1, 1, rank, 94, 152, 31, nimpp, 1, 3, 3, 92, 150, 64, 16))
             _write_groups(handle, gate, acc | scale)
 
         final_path = tmp_path / f"oracle_r98_een_coeff_rank{rank:04d}_kt00000001.bin"
         with final_path.open("wb") as handle:
-            handle.write(gate.FINAL_MAGIC.encode("ascii"))
+            handle.write(gate.FINAL_MAGIC.encode("ascii").ljust(16, b" "))
             handle.write(gate.FINAL_HEADER.pack(
                 1, 1, 1, 3, rank, 94, 152, 31, nimpp, 1, 3, 3, 92, 150, 64, 8))
             _write_groups(handle, gate, final)
