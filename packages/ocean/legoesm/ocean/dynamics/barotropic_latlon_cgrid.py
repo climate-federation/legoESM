@@ -3501,38 +3501,3 @@ def nemo_literal_midpoint_extrapolation(
         coefficients[2] * nemo_source_round(before_before))
     value = nemo_source_round(first + second)
     return nemo_source_round(value + third)
-
-
-def nemo_literal_depth_mean(
-    field, h_face, face_mask, r1_live, *, level_mask,
-):
-    """NEMO ``stp2d.F90:210-211`` source-ordered slow depth mean."""
-
-    acc = jnp.zeros_like(field[..., 0])
-    for jk in range(field.shape[-1]):
-        product = nemo_source_round(
-            nemo_source_round(h_face[..., jk] * field[..., jk])
-            * level_mask[..., jk])
-        acc = nemo_source_round(acc + product)
-    return nemo_source_round(
-        nemo_source_round(acc * r1_live) * face_mask)
-
-
-def nemo_literal_slow_forcing(generic_u, generic_v, context, state, config):
-    """Select the compiled NEMO slow-depth statement for identity cards."""
-
-    if getattr(
-        config.barotropic, "barotropic_seed_evaluation", "generic"
-    ) != "nemo_literal":
-        return generic_u, generic_v
-    du_dt, dv_dt, h_u, h_v, H_u, H_v = context
-    dtype = h_u.dtype
-    one = jnp.asarray(1.0, dtype=dtype)
-    return (
-        nemo_literal_depth_mean(
-            du_dt, h_u, state.u_mask.data, one / H_u,
-            level_mask=(h_u > 0.0).astype(dtype)),
-        nemo_literal_depth_mean(
-            dv_dt, h_v, state.v_mask.data, one / H_v,
-            level_mask=(h_v > 0.0).astype(dtype)),
-    )
