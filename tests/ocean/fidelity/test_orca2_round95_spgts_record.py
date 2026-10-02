@@ -169,6 +169,22 @@ def test_round98_coefficient_movement_separates_fold_support() -> None:
                for name in residual.COEFFICIENTS if name != "ffu_nw")
 
 
+def test_round98_one_ulp_coefficient_plant_reaches_output() -> None:
+    u = np.arange(12, dtype=np.float64).reshape(3, 4) + 1.0
+    v = np.arange(12, dtype=np.float64).reshape(4, 3) + 1.0
+    coefficients = {
+        name: np.full((3, 3), index + 1.0, dtype=np.float64)
+        for index, name in enumerate(residual.COEFFICIENTS)
+    }
+    planted, location = residual.one_ulp_sensitive_coefficient(
+        {"u_mid": [u], "v_mid": [v]}, coefficients,
+        {"u": np.ones((3, 3), dtype=bool),
+         "v": np.ones((3, 3), dtype=bool)},
+    )
+    changed = planted[location["name"]] != coefficients[location["name"]]
+    assert np.count_nonzero(changed) == 1
+
+
 def synthetic_r98_coefficient_record(path: Path, rank: int) -> None:
     payload = bytearray(r98_record.MAGIC.encode("ascii").ljust(16, b" "))
     payload.extend(struct.pack(

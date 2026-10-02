@@ -123,6 +123,38 @@ def coefficient_movement(base, candidate):
     return rows
 
 
+def one_ulp_sensitive_coefficient(trace, coefficients, active):
+    """Return a one-cell/one-ULP coefficient plant visible at Coriolis output."""
+
+    baseline_u, baseline_v, _ = strict_application(
+        trace["u_mid"][0], trace["v_mid"][0], coefficients)
+    for name in COEFFICIENTS:
+        trial = dict(coefficients)
+        values = np.asarray(coefficients[name])
+        all_next = np.nextafter(values, np.float64(np.inf))
+        trial[name] = all_next
+        trial_u, trial_v, _ = strict_application(
+            trace["u_mid"][0], trace["v_mid"][0], trial)
+        face = "u" if name.startswith("ffu") else "v"
+        before = baseline_u if face == "u" else baseline_v
+        after = trial_u if face == "u" else trial_v
+        moved = (before.view(np.uint64) != after.view(np.uint64)) & active[face]
+        if not np.any(moved):
+            continue
+        j, i = np.argwhere(moved)[0]
+        planted = dict(coefficients)
+        array = np.array(values, copy=True)
+        array[j, i] = np.nextafter(array[j, i], np.float64(np.inf))
+        planted[name] = array
+        check_u, check_v, _ = strict_application(
+            trace["u_mid"][0], trace["v_mid"][0], planted)
+        check = check_u if face == "u" else check_v
+        require(check[j, i].view(np.uint64) != before[j, i].view(np.uint64),
+                "selected one-ULP coefficient plant rounded away")
+        return planted, {"name": name, "j": int(j), "i": int(i)}
+    raise GateError("no active one-ULP coefficient mutation reaches Coriolis")
+
+
 def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             expect_commit: str, *, plant: str) -> dict:
     import jax
@@ -278,10 +310,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "fold-only divisor unexpectedly moved")
     fold_coeff = source_coeff
     if plant == "coefficient-bit":
-        fold_coeff = dict(fold_coeff)
-        planted = np.array(fold_coeff["ffu_nw"], copy=True)
-        planted[147, 134] = np.nextafter(planted[147, 134], np.float64(np.inf))
-        fold_coeff["ffu_nw"] = jnp.asarray(planted)
+        fold_coeff, coefficient_plant = one_ulp_sensitive_coefficient(
+            source_trace, fold_coeff, active)
+        fold_coeff = {name: jnp.asarray(value)
+                      for name, value in fold_coeff.items()}
 
     pre = {
         "coefficient_evaluation": "nemo_literal",
@@ -308,8 +340,15 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         state, passive.slow_forcing[0], slow[0], slow[1]))
     fold_score = r97._coriolis_arm(fold_trace, oracle, active)
     if plant == "coefficient-bit":
-        require(fold_score != source_score, "coefficient-bit plant stayed green")
-        raise GateError("coefficient-bit plant fired")
+        face = "u" if coefficient_plant["name"].startswith("ffu") else "v"
+        observed = np.asarray(fold_trace[f"cor_{face}"][0])
+        baseline = np.asarray(source_trace[f"cor_{face}"][0])
+        require(not np.array_equal(observed, baseline),
+                "coefficient-bit plant stayed green")
+        raise GateError(
+            "coefficient-bit plant fired at "
+            f"{coefficient_plant['name']}[{coefficient_plant['j']},"
+            f"{coefficient_plant['i']}]")
 
     movement = coefficient_movement(source_coeff, fold_coeff)
     return {
