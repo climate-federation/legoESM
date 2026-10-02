@@ -465,6 +465,18 @@ def warn_sed_substeps_unreported(cfg, lane: str = "current",
     return True
 
 
+def _evap_sfc_slot() -> int:
+    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
+    ``_sfc_diag`` tuple, derived from the SHARED slot contract like
+    ``_sed_substeps_slot`` -- never hand-counted."""
+    from legoesm.core.state import (
+        MPAS_SFC_DIAG_BASE_KEYS,
+        MPAS_SFC_DIAG_EXTRA_KEYS,
+    )
+    return (len(MPAS_SFC_DIAG_BASE_KEYS)
+            + MPAS_SFC_DIAG_EXTRA_KEYS.index("evap_sfc"))
+
+
 def _sed_substeps_slot() -> int:
     """Index of ``sed_substeps_required`` in the MPAS ``_sfc_diag`` tuple.
 
@@ -661,6 +673,27 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
                                       owned_mask=owned_mask)
 
 
+def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
+                           owned_mask=None):
+    """Build the per-step MPAS q_v smoother as ONE compiled call.
+
+    Halo refresh (MPI lane: boundary-owned stencils read owner values, #1321)
+    then :func:`_mpas_qv_smooth_step`.  Built once, before the time loop.
+    Called eagerly instead, every mpi4jax halo/allreduce inside was re-lowered
+    and recompiled on each call -- mpi4jax wraps the comm in a fresh object
+    with no ``__eq__``, so JAX's eager dispatch cache misses every time
+    (~45% of the 4-GPU AMIP step, 2026-09-27 profile).
+    """
+    @jax.jit
+    def smooth(q):
+        if halo_refresh is not None:
+            q = halo_refresh(q)
+        return _mpas_qv_smooth_step(q, mesh, nu, dt, nu4=nu4,
+                                    mid_refresh=halo_refresh,
+                                    owned_mask=owned_mask)
+    return smooth
+
+
 def _spectral_micro_config(cfg):
     """MicrophysicsConfig for the spectral standalone lane, with the flat
     ``morrison_*`` ExperimentConfig scalars threaded exactly as the FV and MPAS
@@ -781,7 +814,9 @@ class _MPASSfcFluxAccum:
     # against an accumulated 20.5, and an apparent leak of +34.7 W/m^2 where
     # accumulated channels gave ~11.  Accumulating costs one device-side add
     # per step per slot and is what makes the budget answerable at all.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    # 13 = evap_sfc (the column's surface water flux): accumulated like hfls
+    # so CMOR evspsbl and the moisture closure get the same window MEAN.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -4579,6 +4614,7 @@ class ModelDriver:
                 sw_down_toa=kwargs.get('sw_down_toa', None),
                 shflx=kwargs.get('shflx', None),
                 lhflx=kwargs.get('lhflx', None),
+                evspsbl=kwargs.get('evspsbl', None),
             )
 
         if self._device_config is not None:
@@ -4616,7 +4652,7 @@ class ModelDriver:
                         'q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g',
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
-                        'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                        'sw_down_toa', 'shflx', 'lhflx', 'evspsbl', 'lat_deg_grid',
                         't_low_mean', 'sw_up_toa_clr', 'lw_up_toa_clr',
                     ):
                         if kwargs.get(_tname) is not None:
@@ -4664,7 +4700,7 @@ class ModelDriver:
                     # this gather rank 0 would write zeros / stale values
                     # on its five non-owned faces into the timeseries and
                     # CMOR output.  All ranks must participate (collective).
-                    for tname in ('precip_total', 'shflx', 'lhflx',
+                    for tname in ('precip_total', 'shflx', 'lhflx', 'evspsbl',
                                   'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
                                   'lw_net_sfc', 'sw_down_toa', 't_low_mean',
                                   'sw_up_toa_clr', 'lw_up_toa_clr'):
@@ -8062,17 +8098,26 @@ class ModelDriver:
         if _acc is None or not _acc.has_samples() or not _acc.is_complete():
             return
         precip = kw.get("precip")
-        hfls = kw.get("hfls")
+        evspsbl = kw.get("evspsbl")
         tracers = self.state.tracers
-        if (precip is None or hfls is None or tracers is None
-                or "q_v" not in tracers):
+        if precip is None or tracers is None or "q_v" not in tracers:
             return          # dry run, or a window whose fluxes were withheld
+        if evspsbl is None:
+            # Heat without water: the closure will NOT rebuild E as hfls / L_v
+            # (the hidden 2-3 % fallback the water channel removed).  Loud,
+            # because a silent return would read as "the budget closes".
+            import warnings
+            warnings.warn(
+                "MPAS moisture closure skipped: the window has precip and hfls "
+                "but no evspsbl (turbulence evap_sfc slot); the closure refuses "
+                "to derive water from latent heat.", stacklevel=2)
+            return
         area = getattr(self.grid, "areaCell", None)
         _p_s = self.state.p_s.data
         _p_half = self.sigma.pressure_at_half(_p_s)
         diag.moisture_tracker.update(
             tracers["q_v"].data, _p_s, self.sigma.dsigma,
-            precip, hfls,
+            precip, evap=evspsbl,
             elapsed_seconds=float(day) * 86400.0,
             area_weights=(None if area is None
                           else jnp.asarray(area).reshape(-1)),
@@ -8280,6 +8325,7 @@ class ModelDriver:
         rsdt = _sfc_slot(5)
         hfss = _sfc_slot(6)
         hfls = _sfc_slot(7)
+        evspsbl = _sfc_slot(_evap_sfc_slot())   # the column's water flux, window mean
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
@@ -8353,6 +8399,7 @@ class ModelDriver:
             rsdt=rsdt,
             hfss=hfss,
             hfls=hfls,
+            evspsbl=evspsbl,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
             wap=wap,
@@ -11022,6 +11069,7 @@ class ModelDriver:
         _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
         _land_shflx_cells = None       # (nCells,) land's own sensible flux
         _land_lhflx_cells = None       # (nCells,) land's own latent flux
+        _land_evap_cells = None        # (nCells,) land's own water flux [kg/m2/s]
         _land_a2s_sum = None           # cadence: running forcing sum
         _land_a2s_n = 0                # cadence: steps accumulated
         if _land_ml_on:
@@ -11216,10 +11264,11 @@ class ModelDriver:
                                 o, _land_pack_idx, _land_ncol_full)
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
-                                    resp.shflx, resp.lhflx))
+                                    resp.shflx, resp.lhflx, resp.surface_mass_flux))
                             + (_n_held, _n_held_land))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx, _n_held, _n_held_land)
+                        resp.shflx, resp.lhflx, resp.surface_mass_flux,
+                        _n_held, _n_held_land)
               return _land_step
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -11444,7 +11493,8 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
-            # 1.0 = the seven energy channels above are diagnostic-INTERVAL
+            "evspsbl": [],
+            # 1.0 = the seven energy channels above (and evspsbl) are diagnostic-INTERVAL
             # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
             # cycle of the land-dominated turbulent fluxes (#1354/#1353).
             "energy_flux_interval_mean": [],
@@ -11793,6 +11843,7 @@ class ModelDriver:
                 # the land produces its first solved fluxes.
                 _land_shflx_cells = jnp.zeros_like(_q_air0)
                 _land_lhflx_cells = jnp.zeros_like(_q_air0)
+                _land_evap_cells = jnp.zeros_like(_q_air0)
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -11809,7 +11860,45 @@ class ModelDriver:
         # flushed after the loop so a partial window is not lost).
         _sed_req_window = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
+        _qv_smooth_jit = make_mpas_qv_smooth_fn(
+            self.grid, _qv_smooth_nu, DT, nu4=_qv_smooth_nu4,
+            halo_refresh=_qv_halo_refresh,
+            owned_mask=(None if self._voronoi_layout is None
+                        else self._voronoi_layout.owned_mask_cells))
+
+        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
+        # state at both ends so the trace holds exactly those steps; a window
+        # running past the end is stopped after the loop.
+        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
+        _trace_win = None
+        _trace_on = False
+        if _trace_spec:
+            try:
+                _t0, _tn, _tdir = _trace_spec.split(":", 2)
+                _t0, _tn = int(_t0), int(_tn)
+            except ValueError:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
+                    "'first:count:dir' with integer first and count") from None
+            if _t0 < 0 or _tn < 1:
+                raise ValueError(
+                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
+                    "count >= 1")
+            _trace_rank = (os.environ.get("SLURM_PROCID")
+                           or os.environ.get("OMPI_COMM_WORLD_RANK")
+                           or os.environ.get("PMI_RANK", "0"))
+            _trace_win = (_t0, _t0 + _tn,
+                          os.path.join(_tdir, "rank" + _trace_rank))
         for step in range(n_steps_total):
+            if _trace_win is not None and step in _trace_win[:2]:
+                jax.block_until_ready(self.state)
+                if step == _trace_win[0]:
+                    jax.profiler.start_trace(_trace_win[2])
+                    _trace_on = True
+                else:
+                    jax.profiler.stop_trace()
+                    _trace_on = False
             # Enter the daily-boundary block also when a coupler segment_callback
             # is present, so the ocean/land still steps even on a coupled run with
             # radiation=none (where _sst_forcing is False) — else coupling would
@@ -12038,6 +12127,7 @@ class ModelDriver:
                 if _land_shflx_cells is not None:
                     _forcing["shflx_land"] = _land_shflx_cells
                     _forcing["lhflx_land"] = _land_lhflx_cells
+                    _forcing["evap_land"] = _land_evap_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -12180,7 +12270,7 @@ class ModelDriver:
                     _land_a2s_n = 0
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
-                     _land_shflx_step, _land_lhflx_step,
+                     _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_n_held_step, _land_n_held_land_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64),
@@ -12216,6 +12306,7 @@ class ModelDriver:
                         _land_qsfc_cells = _land_qsfc_step
                         _land_shflx_cells = _land_shflx_step
                         _land_lhflx_cells = _land_lhflx_step
+                        _land_evap_cells = _land_evap_step
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).
@@ -12265,19 +12356,10 @@ class ModelDriver:
             # UNWEIGHTED SCVT del2 + q>=0 floor.  Conserves (to fp roundoff)
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
-            # Eager like the drain below (outside jit).
+            # Compiled once before the loop (_qv_smooth_jit).
             if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
-                _qv_sm_in = _trc_sm["q_v"].data
-                if _qv_halo_refresh is not None:
-                    # MPI lane: fresh cell halo so boundary-owned stencils
-                    # read owner values (see the setup note, #1321).
-                    _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
-                _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
-                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
-                    owned_mask=(None if self._voronoi_layout is None
-                                else self._voronoi_layout.owned_mask_cells))
+                _qv_new_sm = _qv_smooth_jit(_trc_sm["q_v"].data)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
@@ -12542,6 +12624,7 @@ class ModelDriver:
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
                 _sw_ns, _lw_ns = _slot(0), _slot(1)
                 _shf, _lhf = _slot(6), _slot(7)
+                _evp = _slot(_evap_sfc_slot())
                 if (_ebd is not None and _qv_e is not None
                         and not _is_mpas_cell_partitioned(self)
                         and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
@@ -12579,10 +12662,12 @@ class ModelDriver:
                                        if _shf is not None else float("nan"))
                     _ts["hfls"].append(float(_awm(_lhf, _awt))
                                        if _lhf is not None else float("nan"))
+                    _ts["evspsbl"].append(float(_awm(_evp, _awt))
+                                          if _evp is not None else float("nan"))
                 else:
                     for _ek in ("energy_toa_net", "energy_dE_dt",
                                 "energy_residual", "sw_net_sfc", "lw_net_sfc",
-                                "hfss", "hfls"):
+                                "hfss", "hfls", "evspsbl"):
                         _ts[_ek].append(float("nan"))
                 # Latest closure the CMOR feed recorded, or NaN before the
                 # first complete diagnostic window.  NaN, never 0: a zero here
@@ -12814,6 +12899,9 @@ class ModelDriver:
         # periodic checkpoint (exact-checkpoint-cadence completion).  Gated on
         # the feed being active (serial / 1-rank with CMIP output); a no-op
         # otherwise.
+        if _trace_on:
+            jax.block_until_ready(self.state)
+            jax.profiler.stop_trace()
         # Flush the partial sedimentation window: an overflow in the last
         # steps before the run ends must still be reported.
         if _sed_req_window is not None:
@@ -13645,7 +13733,8 @@ class ModelDriver:
             energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
-            # Flux-timing provenance for the seven channels above. WITHOUT
+            evspsbl=_arr("evspsbl") if "evspsbl" in ts else nan,
+            # Flux-timing provenance for the seven channels above and evspsbl. WITHOUT
             # this the closure probe refuses every real series as "timing
             # unknown" -- which is the correct refusal, and exactly what
             # happens when a collected channel is never persisted.
@@ -14126,9 +14215,9 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx = (None, None)
+            _shflx, _lhflx, _evap = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx = self.get_sfc_flux_override(day)
+                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -14139,6 +14228,7 @@ class ModelDriver:
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+                sfc_evap_override=_evap,
             )
 
             if seg_idx == 0:
@@ -14708,9 +14798,9 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx = (None, None)
+            _shflx, _lhflx, _evap = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx = self.get_sfc_flux_override(day)
+                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -14721,6 +14811,7 @@ class ModelDriver:
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+                sfc_evap_override=_evap,
             )
             forcing = shard_operator_split_forcing(forcing, mesh)
 
@@ -15786,9 +15877,9 @@ class ModelDriver:
             # (None unless a coupled driver wired the shared-flux feedback).
             # When present the atmosphere consumes these instead of its own
             # bulk fluxes so the air-sea heat+water budget closes.
-            _sfc_shflx_ovr, _sfc_lhflx_ovr = (None, None)
+            _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = (None, None, None)
             if self.get_sfc_flux_override is not None:
-                _sfc_shflx_ovr, _sfc_lhflx_ovr = self.get_sfc_flux_override(day)
+                _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = self.get_sfc_flux_override(day)
 
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
@@ -15803,6 +15894,7 @@ class ModelDriver:
                 sfc_emissivity_override=_sfc_emis_ovr,
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
+                sfc_evap_override=_sfc_evap_ovr,
                 # Transient land-use cover: this segment's re-weighted multilayer
                 # land params (None unless transient_land_cover is active), fed as a
                 # traced arg so the jitted step follows the cover — the 5th-issue fix.
@@ -15960,11 +16052,13 @@ class ModelDriver:
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
                 _dm_carry = mean_carry
+                seg_evap = mean_carry.evap_accum   # [kg/m2], read off the carry
             else:
                 (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
                 _dm_carry = carry
+                seg_evap = carry.evap_accum        # [kg/m2], read off the carry
             # Write evolved double-moment hydrometeors back into the registry
             # dict (unpack_carry only returns q_v/q_c/q_r; q_i/q_s/q_g/N_c/N_r/N_i
             # ride the carry directly). No-op for warm-rain (carry fields None).
@@ -16168,6 +16262,7 @@ class ModelDriver:
                 seg_precip_rate = segment_accum_to_rate(seg_precip, seg_steps, DT)
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
+                seg_evap_rate = seg_evap / _seg_dur    # kg/m²/s, the CMOR evspsbl feed
                 # Segment-MEAN radiative fluxes / T_low (time integrals from
                 # the carry / segment duration) instead of the segment-end
                 # instantaneous held_* values: the held snapshots put a full
@@ -16240,6 +16335,7 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    evspsbl=seg_evap_rate,
                     t_low_mean=seg_t_low_mean,
                     q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
                     q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,

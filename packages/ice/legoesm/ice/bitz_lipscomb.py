@@ -138,7 +138,7 @@ def ice_enthalpy(T_K, S):
     Tc = _legacy_neg_temp_c(T_K)
     return -canonical_constants.rho_ice * (
         canonical_constants.c_pi * (Tm - Tc)
-        + canonical_constants.L_f * (1.0 - Tm / Tc)
+        + canonical_constants.L_f * (1.0 - Tm / Tc)  # latent-ok: Bitz-Lipscomb mushy-ice enthalpy at the melting point (oracle thermodynamics)
         - canonical_constants.c_pw * Tm
     )
 
@@ -217,8 +217,8 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
         Tm = freezing_temperature(S)
         q_spec = e / canonical_constants.rho_ice
         b = ((canonical_constants.c_pw - canonical_constants.c_pi) * Tm
-             - canonical_constants.L_f - q_spec)
-        c = canonical_constants.L_f * Tm
+             - canonical_constants.L_f - q_spec)  # latent-ok: Bitz-Lipscomb mushy-ice enthalpy at the melting point (oracle thermodynamics)
+        c = canonical_constants.L_f * Tm  # latent-ok: Bitz-Lipscomb mushy-ice enthalpy at the melting point (oracle thermodynamics)
         disc = jnp.maximum(
             b * b - 4.0 * canonical_constants.c_pi * c,
             _LEGACY_DISC_FLOOR,
@@ -272,7 +272,7 @@ def ice_specific_heat(T_K, S):
     T_c = _legacy_neg_temp_c(T_K)
     return (
         canonical_constants.c_pi
-        + canonical_constants.L_f * canonical_constants.mu_ice_freeze * S
+        + canonical_constants.L_f * canonical_constants.mu_ice_freeze * S  # latent-ok: Bitz-Lipscomb mushy-ice enthalpy at the melting point (oracle thermodynamics)
         / (T_c * T_c)
     )
 

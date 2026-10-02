@@ -519,18 +519,15 @@ def test_gwd_grad_through_T_finite_and_nonzero(scheme):
         )
 
 
-def test_hines_T_gradient_is_limiter_gated_not_missing():
-    """Documents the diagnosis behind the relaxed-limiter hines config above.
-
-    The hines heating IS a differentiable function of T (via the Brunt-Väisälä
-    frequency N(theta) → saturation amplitude → drag → frictional heating). But
-    the E3SM-faithful magnitude limiter ``accel = -min(|accel|, umcfac*U_mag/dt)``
-    is intentionally T-independent *when it binds*: ``jnp.minimum`` routes the
-    gradient to the cap, so the operational (saturated, Fmax=100) regime shows a
-    ~zero dT/dT. That is the limiter doing its job, not a missing/severed T-path.
-
-    Proof that the relaxed config exposes REAL signal (not numerical noise): the
-    cap-off gradient is many orders of magnitude larger than the cap-on one.
+def test_hines_T_gradient_is_not_limiter_gated_at_the_700hpa_launch():
+    """The hines heating is a differentiable function of T (N(theta) ->
+    saturation amplitude -> drag -> frictional heating).  With the old SURFACE
+    launch the wave broke in the boundary layer, the E3SM magnitude limiter
+    ``accel = -min(|accel|, umcfac*U_mag/dt)`` bound there and routed the
+    gradient to the T-independent cap, so dT/dT was ~0 (which is why the
+    relaxed-limiter config above exists).  Launched at 700 hPa the limiter does
+    not bind on this state: the operational gradient is real signal and equal
+    to the limiter-free one.
     """
     from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 
@@ -548,17 +545,14 @@ def test_hines_T_gradient_is_limiter_gated_not_missing():
             return jnp.sum(tend.dT_dt.data ** 2)
         return abs(float(jax.grad(loss)(jnp.asarray(0.0))))
 
-    capped = grad_for(HinesConfig(Fmax=100.0))  # E3SM limiter binds → ~0
+    capped = grad_for(HinesConfig(Fmax=100.0))
     freed = grad_for(HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3))
     assert jnp.isfinite(capped) and jnp.isfinite(freed)
-    assert freed > 1e-15, (
-        f"uncapped hines T-gradient should be real signal, got {freed}"
-    )
-    assert freed > 1.0e6 * capped, (
-        f"lifting the magnitude limiter must expose a far larger T-gradient "
-        f"(capped={capped:.3e}, freed={freed:.3e}) — confirms it is the cap, "
-        f"not a missing T-path, that zeroes the operational gradient."
-    )
+    assert capped > 1e-15, (
+        f"operational hines T-gradient should be real signal, got {capped}")
+    assert capped == pytest.approx(freed, rel=1e-6), (
+        f"the limiter should not bind at the 700 hPa launch "
+        f"(capped={capped:.3e}, freed={freed:.3e})")
 
 
 @pytest.mark.parametrize("scheme", ["rayleigh", "lindzen", "mcfarlane", "hines"])

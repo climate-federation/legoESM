@@ -232,6 +232,18 @@ def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
     return None
 
 
+
+def _refuse_heat_without_water(where: str, lhflx, evspsbl) -> None:
+    """Heat without water is refused before any series grows: deriving E as
+    lhflx / L_v was the hidden 2-3 % fallback the water channel removes."""
+    if evspsbl is None and lhflx is not None:
+        raise ValueError(
+            f"DiagnosticCollector.{where}: lhflx was fed without evspsbl; "
+            "the moisture closure and CMOR evspsbl need the water the column "
+            "actually received -- feed evspsbl from the lane's water channel "
+            "(the segment carry's evap accumulator, the MPAS evap_sfc slot, "
+            "or the turbulence output's evap_sfc), never lhflx / L_v.")
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -341,6 +353,7 @@ class DiagnosticCollector:
         self.rsdt: list[float] = []
         self.hfss: list[float] = []
         self.hfls: list[float] = []
+        self.evspsbl: list[float] = []   # surface water flux [kg/m2/s], the evap_sfc feed
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
 
@@ -945,6 +958,7 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
         sw_up_toa_clr=None,
         lw_up_toa_clr=None,
         q_i=None,
@@ -995,6 +1009,7 @@ class DiagnosticCollector:
         # GPU pipeline at every diagnostic interval.  The model step
         # following ``collect()`` cannot launch until all 12 have
         # round-tripped — fusing them collapses the stall to one.
+        _refuse_heat_without_water("collect", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1022,6 +1037,7 @@ class DiagnosticCollector:
             area_weighted_mean(sw_down_toa, _aw) if sw_down_toa is not None else _zero,
             area_weighted_mean(shflx, _aw) if shflx is not None else _zero,
             area_weighted_mean(lhflx, _aw) if lhflx is not None else _zero,
+            area_weighted_mean(evspsbl, _aw) if evspsbl is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -1039,6 +1055,7 @@ class DiagnosticCollector:
         mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
         mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
         mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
+        mean_evspsbl = float(_stats_host[15]) if evspsbl is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -1056,6 +1073,7 @@ class DiagnosticCollector:
         self.rsdt.append(mean_rsdt)
         self.hfss.append(mean_hfss)
         self.hfls.append(mean_hfls)
+        self.evspsbl.append(mean_evspsbl)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
@@ -1089,6 +1107,8 @@ class DiagnosticCollector:
                 ),
                 'hfls': (np.asarray(lhflx) if lhflx is not None
                          else np.zeros_like(np.asarray(sst))),
+                'evspsbl': (np.asarray(evspsbl) if evspsbl is not None
+                            else np.zeros_like(np.asarray(sst))),
                 'hfss': (np.asarray(shflx) if shflx is not None
                          else np.zeros_like(np.asarray(sst))),
             }
@@ -1107,14 +1127,16 @@ class DiagnosticCollector:
             q_frozen=_frozen_condensate(state),
         )
 
-        # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
-        # (positive-up evaporation source) so the E − P − dW/dt closure
-        # residual shares one flux definition with the output diagnostics;
-        # a fluxless config (lhflx None) closes against E = 0.
+        # Moisture budget.  evspsbl is the SAME water flux reported as CMOR
+        # evspsbl (positive-up evaporation source, PhysicsOutput.evap_sfc) so
+        # the E − P − dW/dt closure shares one definition with the output; a
+        # fluxless config (no surface exchange at all) closes against E = 0.
+        # Heat without water was refused at entry (before any series grew).
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total,
-            lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
+            evap=(evspsbl if evspsbl is not None
+                  else jnp.zeros_like(state.p_s.data)),
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
@@ -1141,6 +1163,8 @@ class DiagnosticCollector:
                 fields_2d['hfss'] = np.asarray(shflx)
             if lhflx is not None:
                 fields_2d['hfls'] = np.asarray(lhflx)
+            if evspsbl is not None:
+                fields_2d['evspsbl'] = np.asarray(evspsbl)
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
             # Reuse the T_low array already materialised above.
@@ -1189,6 +1213,7 @@ class DiagnosticCollector:
                 'rsdt': mean_rsdt,
                 'hfss': mean_hfss,
                 'hfls': mean_hfls,
+                'evspsbl': mean_evspsbl,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -1374,6 +1399,11 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(lhflx)
                 if r is not None:
                     fields_2d['hfls'] = r
+            # evspsbl: surface water flux [kg/m2/s] the column received
+            if evspsbl is not None:
+                r = self._regrid_to_latlon_2d(evspsbl)
+                if r is not None:
+                    fields_2d['evspsbl'] = r
 
             if fields_2d:
                 self._spatial_monthly.add_2d(doy, year, fields_2d)
@@ -1454,6 +1484,7 @@ class DiagnosticCollector:
         sw_down_toa=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1475,6 +1506,7 @@ class DiagnosticCollector:
         # overhead, but the previous per-scalar ``float(...)`` chain
         # serialised 12 GPU stalls per diagnostic step — exactly the
         # sin the long ``collect`` path was already corrected for.
+        _refuse_heat_without_water("collect_lightweight", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1533,9 +1565,12 @@ class DiagnosticCollector:
                  if shflx is not None else float('nan'))
         _hfls = (float(area_weighted_mean(lhflx, _aw))
                  if lhflx is not None else float('nan'))
+        _evspsbl = (float(area_weighted_mean(evspsbl, _aw))
+                    if evspsbl is not None else float('nan'))
         self.rsdt.append(_rsdt)
         self.hfss.append(_hfss)
         self.hfls.append(_hfls)
+        self.evspsbl.append(_evspsbl)
 
         # Energy-budget tracker on the lightweight path too (#1354/#1515): the
         # tracker is grid-agnostic (column integral over the trailing level
@@ -1610,6 +1645,7 @@ class DiagnosticCollector:
         rsdt=None,
         hfss=None,
         hfls=None,
+        evspsbl=None,
         rsutcs=None,
         rlutcs=None,
         wap=None,
@@ -1815,6 +1851,7 @@ class DiagnosticCollector:
         rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
+        evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
 
@@ -1837,6 +1874,7 @@ class DiagnosticCollector:
             ("rsdt", rsdt_np, (_ncol,)),
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
+            ("evspsbl", evspsbl_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
@@ -1871,14 +1909,9 @@ class DiagnosticCollector:
         fields_3d: dict[str, np.ndarray] = {}
         daily_2d: dict[str, np.ndarray] = {}
         if have_spatial:
-            # evspsbl [kg/m2/s] = latent heat flux / L_v. PRE-EXISTING
-            # documented approximation for this lane: no sublimation split
-            # (L_s over ice-covered cells => ~13% undercount there; see
-            # coupling_fields.surface_mass_flux for the phase-aware form),
-            # matching the bulk-flux scheme's own L_v-only partition of
-            # lhflx.  Wiring the phase-aware flux needs the ice fraction in
-            # this feed — tracked as a follow-up, unchanged by #1353.
-            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
+            # evspsbl [kg/m2/s]: the water the column received (the evap_sfc
+            # feed), fed by every lane beside hfls; never rebuilt from
+            # hfls / L_v here.
             for _name, _src in (
                 ('tas', tas_field),
                 ('ts', ts_field),
@@ -2156,6 +2189,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -2185,6 +2219,7 @@ class DiagnosticCollector:
         self.rsdt.clear()
         self.hfss.clear()
         self.hfls.clear()
+        self.evspsbl.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -2393,6 +2428,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),

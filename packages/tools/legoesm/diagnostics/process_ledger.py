@@ -367,7 +367,7 @@ def column_total_energy(p_s, dsigma, T, *, u=None, v=None, phis=None,
                 continue
             ke = w * w if ke is None else ke + w * w
         total = total + _col(ke, 0.5)
-    total = total + _col(q_v, constants.L_v) - _col(q_ice, constants.L_f)
+    total = total + _col(q_v, constants.L_v) - _col(q_ice, constants.L_f)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention)
     if phis is not None:
         total = total + jnp.asarray(phis) * ref / constants.g
     # NB the accumulation dtype is whatever ``column_mass_integral`` produced
@@ -451,7 +451,7 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
             continue
         dke = w * dw if dke is None else dke + w * dw
     rate = rate + _col(dke, 1.0)
-    rate = rate + _col(dq_v_dt, constants.L_v) - _col(dq_ice_dt, constants.L_f)
+    rate = rate + _col(dq_v_dt, constants.L_v) - _col(dq_ice_dt, constants.L_f)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention)
     return rate
 
 

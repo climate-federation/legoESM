@@ -854,7 +854,7 @@ def run(args) -> int:
             gpp_day = surf_out.gpp * _SEC_PER_DAY
         else:
             gpp_day = _ZEROS
-        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        et_mmday = resp.surface_mass_flux * _SEC_PER_DAY   # the land's own water flux
         # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
         # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
         # evaporation), converted to a water flux.  None for simple_seb (single skin,
@@ -863,8 +863,13 @@ def run(args) -> int:
         # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
         # reported albedo/lw_up already reflect the canopy RT).
         if surf_out is not None and surf_out.LE_canopy is not None:
-            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
-            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+            # Inverse of the L_v(T) the canopy charged: two_leaf_canopy's lam is
+            # L_v(T_soil_top), the PRE-step top-soil temperature (resp.T_sfc is
+            # the canopy-air temperature, a different number).
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _L_charge = _lv_T(state.T_soil[:, 0])
+            transp = surf_out.LE_canopy / _L_charge * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / _L_charge * _SEC_PER_DAY
         else:
             transp = _ZEROS
             soil_evap = _ZEROS

@@ -108,9 +108,7 @@ class TestLatentHeatVaporization:
 
     def test_anchor_and_slope(self):
         from legoesm import constants
-        from legoesm.atmosphere.physics.thermodynamics import (
-            latent_heat_vaporization,
-        )
+        from legoesm.thermo import latent_heat_vaporization
         T = jnp.asarray([constants.T_freeze, constants.T_freeze + 10.0])
         L = latent_heat_vaporization(T)
         # L(T_freeze) = L_v exactly.
@@ -122,9 +120,7 @@ class TestLatentHeatVaporization:
     def test_c_liquid_override_changes_slope(self):
         """Emanuel passes its tunable CL in place of c_pw."""
         from legoesm import constants
-        from legoesm.atmosphere.physics.thermodynamics import (
-            latent_heat_vaporization,
-        )
+        from legoesm.thermo import latent_heat_vaporization
         T = jnp.asarray([constants.T_freeze + 20.0])
         c_l = 2500.0
         L = latent_heat_vaporization(T, c_liquid=c_l)
