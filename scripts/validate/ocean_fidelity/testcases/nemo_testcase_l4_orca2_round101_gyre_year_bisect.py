@@ -10,6 +10,7 @@ and compares full saved arrays with ``np.array_equal``.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -116,11 +117,65 @@ def parse_reverse_commits(repo: Path, value: str) -> tuple[str, ...]:
     return commits
 
 
+def parse_source_opcodes(repo: Path, value: str) -> tuple[int, ...]:
+    if not value:
+        return ()
+    selected: list[int] = []
+    for part in value.split(","):
+        bounds = part.strip().split("-")
+        require(len(bounds) in (1, 2), f"bad source-opcode range {part!r}")
+        try:
+            start = int(bounds[0])
+            stop = int(bounds[-1])
+        except ValueError as error:
+            raise GateError(f"bad source-opcode range {part!r}") from error
+        require(0 <= start <= stop, f"bad source-opcode range {part!r}")
+        selected.extend(range(start, stop + 1))
+    require(len(selected) == len(set(selected)), "duplicate --source-opcodes entry")
+    path = f"{OCEAN_PREFIX}dynamics/ocean_model_latlon_cgrid.py"
+    source = _git(repo, "show", f"{SOURCE}:{path}").decode().splitlines(True)
+    combined = _git(repo, "show", f"{COMBINED}:{path}").decode().splitlines(True)
+    count = sum(
+        tag != "equal" for tag, *_ in
+        difflib.SequenceMatcher(None, source, combined, autojunk=False).get_opcodes()
+    )
+    require(max(selected, default=-1) < count,
+            f"source opcode exceeds frozen count {count}")
+    return tuple(selected)
+
+
+def source_opcode_overlay(repo: Path, selected: tuple[int, ...]) -> tuple[bytes, list[dict]]:
+    path = f"{OCEAN_PREFIX}dynamics/ocean_model_latlon_cgrid.py"
+    source = _git(repo, "show", f"{SOURCE}:{path}").decode().splitlines(True)
+    combined = _git(repo, "show", f"{COMBINED}:{path}").decode().splitlines(True)
+    output: list[str] = []
+    records: list[dict] = []
+    diff_index = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, source, combined, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            output.extend(combined[j1:j2])
+            continue
+        use_source = diff_index in selected
+        output.extend(source[i1:i2] if use_source else combined[j1:j2])
+        records.append({
+            "index": diff_index,
+            "tag": tag,
+            "source_lines": [i1 + 1, i2],
+            "combined_lines": [j1 + 1, j2],
+            "selected": use_source,
+        })
+        diff_index += 1
+    return "".join(output).encode(), records
+
+
 def build_overlay(
     repo: Path,
     target: Path,
     selected: tuple[str, ...],
     reverse_commits: tuple[str, ...] = (),
+    source_opcodes: tuple[int, ...] = (),
 ) -> dict:
     require(not target.exists(), f"refusing existing overlay {target}")
     unchanged = subprocess.run(
@@ -143,6 +198,13 @@ def build_overlay(
         if relative in selected:
             source_payload = _git(repo, "show", f"{SOURCE}:{path}")
             destination.write_bytes(source_payload)
+    opcode_records: list[dict] = []
+    if source_opcodes:
+        payload, opcode_records = source_opcode_overlay(repo, source_opcodes)
+        destination = target / (
+            OCEAN_PREFIX + "dynamics/ocean_model_latlon_cgrid.py"
+        )
+        destination.write_bytes(payload)
     for commit in reverse_commits:
         patch = _git(
             repo, "show", "--format=", "--binary", commit, "--",
@@ -178,6 +240,8 @@ def build_overlay(
         "combined_commit": COMBINED,
         "selected_source_files": list(selected),
         "reversed_commits": list(reverse_commits),
+        "source_opcodes": list(source_opcodes),
+        "opcode_records": opcode_records,
         "files": records,
     }
     (target / "overlay_manifest.json").write_text(
@@ -264,12 +328,16 @@ def compare_snapshots(
 def run_candidate(args, repo: Path) -> dict:
     selected = parse_source_files(repo, args.source_files)
     reverse_commits = parse_reverse_commits(repo, args.reverse_commits)
-    require(not (selected and reverse_commits),
-            "source-file and reverse-commit arms are mutually exclusive")
+    source_opcodes = parse_source_opcodes(repo, args.source_opcodes)
+    arm_count = sum(bool(arm) for arm in (selected, reverse_commits, source_opcodes))
+    require(arm_count <= 1,
+            "source-file, source-opcode, and reverse-commit arms are mutually exclusive")
     root = args.output / "candidates" / args.tag
     overlay = args.output / "overlays" / args.tag
     require(not root.exists(), f"refusing existing candidate output {root}")
-    manifest = build_overlay(repo, overlay, selected, reverse_commits)
+    manifest = build_overlay(
+        repo, overlay, selected, reverse_commits, source_opcodes
+    )
     harness = overlay / (
         "scripts/validate/ocean_fidelity/testcases/"
         "nemo_testcase_l2_gyre_year_fromrest.py"
@@ -305,6 +373,7 @@ def run_candidate(args, repo: Path) -> dict:
     )
     report["selected_source_files"] = list(selected)
     report["reversed_commits"] = list(reverse_commits)
+    report["source_opcodes"] = list(source_opcodes)
     report["run_log"] = str(log_path)
     report["run_command"] = list(command)
     report["overlay"] = manifest
@@ -320,6 +389,7 @@ def main(argv=None) -> int:
     parser.add_argument("--tag")
     parser.add_argument("--source-files", default="NONE")
     parser.add_argument("--reverse-commits", default="")
+    parser.add_argument("--source-opcodes", default="")
     parser.add_argument("--compare", nargs=2, type=Path,
                         metavar=("REFERENCE", "CANDIDATE"))
     parser.add_argument("--days", type=int, default=17)

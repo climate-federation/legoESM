@@ -100,3 +100,18 @@ def test_reverse_commit_parser_is_fail_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_git", _missing)
     with pytest.raises(module.GateError, match="unknown reverse commit"):
         module.parse_reverse_commits(tmp_path, "missing")
+
+
+def test_source_opcode_parser_and_overlay_are_frozen():
+    module = _module()
+    root = Path(__file__).parents[3]
+    selected = module.parse_source_opcodes(root, "0,2-3")
+    assert selected == (0, 2, 3)
+    payload, records = module.source_opcode_overlay(root, selected)
+    assert len(records) == 49
+    assert [record["index"] for record in records if record["selected"]] == [
+        0, 2, 3
+    ]
+    assert module.sha256_bytes(payload) == (
+        "686f5feaa98176c956b76e6936080b2275cad5e0fb56b44ae536cfae0279dfea"
+    )
