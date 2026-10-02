@@ -61,7 +61,7 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
 
 def assemble_record(root: Path, plant: str) -> tuple[dict[str, np.ndarray], dict]:
     assembled = {
-        name: np.zeros((148, 180, 31), dtype=np.float64)
+        name: np.zeros((148, 180, 30), dtype=np.float64)
         for name in record_gate.FIELDS[:-1]
     }
     coverage = np.zeros((148, 180), dtype=np.int8)
@@ -77,6 +77,7 @@ def assemble_record(root: Path, plant: str) -> tuple[dict[str, np.ndarray], dict
         coverage[j0:j1, i0:i1] += 1
         groups = row["groups"]
         bottom = groups["mbku"][..., 0].astype(np.int64)
+        require(bool(np.all(bottom <= 30)), "NEMO mbku enters its dummy jpk level")
         executed = np.arange(1, 32)[None, None, :] <= bottom[..., None]
         recurrence_bits += int(np.count_nonzero(
             groups["acc_after"][executed].view(np.uint64)
@@ -84,10 +85,12 @@ def assemble_record(root: Path, plant: str) -> tuple[dict[str, np.ndarray], dict
         ))
         for name in assembled:
             values = groups[name]
+            require(bool(np.all(values[..., 30] == 0.0)),
+                    f"{name} writes NEMO's dummy jpk level")
             if plant == "oracle-bit" and rank == 0 and name == "zpvo_nw":
                 values = np.array(values, copy=True)
                 values.view(np.uint64)[0, 0, 0] ^= np.uint64(1)
-            assembled[name][j0:j1, i0:i1, :] = values.transpose(1, 0, 2)
+            assembled[name][j0:j1, i0:i1, :] = values[..., :30].transpose(1, 0, 2)
         rows.append({"rank": rank, "sha256": row["sha256"], "owned": row["owned"]})
     require(bool(np.all(coverage == 1)), "rank slabs do not cover the domain exactly once")
     require(recurrence_bits == 0, "recorded acc_after != acc_before + term_nw")
