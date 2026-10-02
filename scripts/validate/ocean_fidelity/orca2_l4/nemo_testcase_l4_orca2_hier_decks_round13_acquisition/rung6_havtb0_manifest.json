@@ -1,0 +1,36 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 6,
+  "decision": 83,
+  "label": "ORCA2 constant-mixing deck with uniform background tracer diffusivity",
+  "module_removed_from_upper_rung": "TKE closure and its shipped equatorial background shape, replaced by constant mixing with the GYRE uniform background",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung7/record",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "superseded": {
+    "record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6/record_havtb1_superseded",
+    "admission_sha256": "45d76acb89ff7377563ae54734c9644441aae07b8a3bed82fae4a3ed7b8e1d46",
+    "record_inventory_sha256": "f2e3f89de5859d51c0135c805c92ebd7b5157d6e31537095df159a2f3928f488"
+  },
+  "build": {
+    "configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "450410b5c9b1960c4cc8d05d690decca3308f888e70987b444682315bb846572",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "b116511cbefb6d2b6f1d911a77079a4268f343ea3aa1b861d08ac0c8d2bc4bcf",
+    "compiled_zdfphy_sha256": "903e0d1220a2f9b38cdd55b6eece5dbbfed992f12f497155cca8633702e7451e"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "351ef6310b3f98e82dd4907bb370cb50288750db2502295c5c6c72eeef0feef8",
+    "namelist_ice_cfg_sha256": "6b647863137b518b95ff97f83975d9afcb3944b7f6e8d63e45a05f494f5edc89",
+    "execution_namelist_cfg_sha256": "b4967ae2138af43c112d6826bf17d509a82e196da169b6881135bb5b9553089b",
+    "execution_namzdf_tke": "committed gate-generated unread sentinel"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}
