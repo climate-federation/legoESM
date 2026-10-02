@@ -28,7 +28,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "nemo_testcase_l1_vortex"))
 
 from nemo_testcase_l1_vortex_kt2_walk import (  # noqa: E402
-    _seed_from_record, _u_full,
+    _seed_from_record, _u_full, _v_full,
 )
 from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
     BAR, GateError, expected_masks, read_entry, require, score,
@@ -154,7 +154,8 @@ def _lego_plane(values, stagger):
 
 
 def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
-        plant: str | None = None, substeps: int | None = None) -> dict:
+        plant: str | None = None, substeps: int | None = None,
+        nemo_entry_forcing: bool = False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -191,9 +192,20 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
     meta, groups = read_spgts(root, kt)
     n_loop = meta["icycle"] if substeps is None else min(substeps, meta["icycle"])
 
+    # Round 196's ONE VARIABLE for the ownership question: whether the loop
+    # is handed NEMO's own recorded slow forcing (dynspg_ts.f90:362, after the
+    # barotropic Coriolis subtraction -- exactly the boundary legoESM's
+    # override lands on) or legoESM's own.  Everything else is production.
+    override = None
+    if nemo_entry_forcing:
+        import jax.numpy as jnp
+        override = (jnp.asarray(_u_full(groups["i000_zu_frc"][..., None])[..., 0]),
+                    jnp.asarray(_v_full(groups["i000_zv_frc"][..., None])[..., 0]))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True))
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_slow_forcing_override=override))
     result = jax.device_get(model.step(seed, dt=card.dt_s))
     trace = {key: np.asarray(value) for key, value in result.substeps.items()}
     traced_loops = int(next(iter(trace.values())).shape[0])
@@ -276,6 +288,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
         "execution_regime": "production_step_jit",
         "substeps_walked": n_loop,
+        "entry_forcing_arm": ("nemo_recorded" if nemo_entry_forcing
+                              else "legoesm_production"),
         "plant": plant,
         "scalar_rows": len(scalars),
         "scalar_non_bit": bad_scalars[:8],
@@ -285,6 +299,93 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         "status": "PLANT-FIRED" if plant else ("DEBT" if first else "BIT"),
     }
     return report
+
+
+def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
+    """How much does the solve amplify ONE last-bit change at its entry?
+
+    A walk that finds every boundary inside the loop at the rounding floor
+    while the loop's OUTPUT is 1e-08 has two readings: a statement inside the
+    loop is wrong, or the loop amplifies what it is handed.  This arm settles
+    it without NEMO: it perturbs legoESM's own barotropic entry velocity by
+    exactly one unit in the last place at one wet face and re-runs the SAME
+    production-jitted step, so the only difference between the two traces is
+    that one ULP.  The per-substep response is the recurrence's own
+    conditioning, measured rather than argued.
+    """
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card(CASE)
+    nlev = int(card.recipe.z_coord.n_levels)
+    interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
+    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", CASE,
+                       expect_interior=interior)
+    seed = _seed_from_record(card.recipe.initial_state, entry, nlev)
+    masks3 = expected_masks(card)
+    use = np.asarray(masks3["u"])[..., 0]
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True))
+
+    def trace_of(state):
+        return {k: np.asarray(v) for k, v in
+                jax.device_get(model.step(state, dt=card.dt_s)).substeps.items()}
+
+    base = trace_of(seed)
+    carried = np.asarray(seed.uu_b.data if hasattr(seed.uu_b, "data")
+                         else seed.uu_b, dtype=np.float64).copy()
+    # One ULP at EVERY wet face, not at one of them.  A single-cell probe
+    # spreads more slowly than the real difference and so never reaches the
+    # state the real difference is in when it starts to grow -- it would
+    # prove nothing about the growth and would look like a refutation.  The
+    # perturbation is field-wide and last-bit, exactly the shape of the
+    # entry disagreement the walk measures.
+    owned = carried[:, 1:]
+    where = np.unravel_index(int(np.argmax(np.abs(np.where(use, owned, 0.0)))),
+                             owned.shape)
+    before = owned[where]
+    bumped_owned = np.where(use, np.nextafter(owned, np.inf), owned)
+    carried[:, 1:] = bumped_owned
+    import jax.numpy as jnp
+    bumped = seed._replace(uu_b=seed.uu_b.replace(data=jnp.asarray(carried)))
+    moved = trace_of(bumped)
+    require(float(np.max(np.abs(
+        np.asarray(bumped.uu_b.data) - np.asarray(seed.uu_b.data)))) > 0.0,
+        "the one-ULP probe perturbed nothing; it would prove nothing")
+
+    n_loop = int(base["u_exit"].shape[0])
+    rows = []
+    for jn in range(1, n_loop + 1):
+        delta = np.abs(_lego_plane(moved["u_exit"][jn - 1], "u")
+                       - _lego_plane(base["u_exit"][jn - 1], "u"))
+        rows.append({"substep": jn,
+                     "max_abs": float(np.max(delta[use])),
+                     "cells_moved": int(np.count_nonzero(delta[use]))})
+    first = next((r["max_abs"] for r in rows if r["max_abs"] > 0.0), 0.0)
+    final = rows[-1]["max_abs"]
+    return {
+        "case": CASE, "kt": kt, "git_sha": sha, "arm": "one_ulp_entry_probe",
+        "perturbed_faces": int(np.count_nonzero(use)),
+        "largest_cell": [int(where[0]), int(where[1]) + 1],
+        "perturbation_at_largest_cell": float(
+            np.nextafter(before, np.inf) - before),
+        "perturbation_max": float(np.max(np.abs(bumped_owned - owned))),
+        "substeps": n_loop,
+        "first_responding_substep_max_abs": first,
+        "final_substep_max_abs": final,
+        "amplification": (final / first) if first > 0 else None,
+        "rows": rows,
+    }
 
 
 def main(argv=None) -> int:
@@ -297,10 +398,29 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--plant", help="perturb one boundary; MUST exit 1")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--nemo-entry-forcing", action="store_true",
+                        help="one-variable arm: hand the loop NEMO's recorded "
+                             "slow forcing instead of legoESM's own")
+    parser.add_argument("--one-ulp-entry-probe", action="store_true",
+                        help="legoESM-vs-legoESM conditioning arm: perturb the "
+                             "barotropic entry velocity by one ULP and report "
+                             "the per-substep response")
     args = parser.parse_args(argv)
+    if args.one_ulp_entry_probe:
+        report = conditioning(args.oracle_root, kt=args.kt,
+                              allow_dirty=args.allow_dirty)
+        if args.output:
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n")
+        for row in report["rows"]:
+            print(f"j{row['substep']:03d} max={row['max_abs']:.17e} "
+                  f"cells={row['cells_moved']}")
+        print("amplification:", report["amplification"])
+        return 0
     try:
         report = run(args.oracle_root, kt=args.kt, allow_dirty=args.allow_dirty,
-                     plant=args.plant, substeps=args.substeps)
+                     plant=args.plant, substeps=args.substeps,
+                     nemo_entry_forcing=args.nemo_entry_forcing)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
