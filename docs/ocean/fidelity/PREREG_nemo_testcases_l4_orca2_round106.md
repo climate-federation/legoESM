@@ -36,3 +36,26 @@ ten-step gates plus the standing GYRE, DINO, tank, citation, focused-test,
 ocean-fidelity, and independent-review gates. Otherwise this round is
 **HELD** with every failed prediction retained. No configuration choice is
 authorized in this round.
+
+## Post-discrimination preregistration — northern V-scale metric
+
+Committed after R106-P1 through P5 were measured and before this arm. R106-P1,
+P2, P3, and P5 are confirmed. R106-P4 is **REFUTED**: all non-fold scale bits
+are exact, but `scl_v_nw` and `scl_v_ne` each differ at 68 northern-fold
+cells; rebuilding with NEMO's accumulator retains exactly the registered
+66/67 final-coefficient magnitude differences. Thus the first magnitude
+statement is the compiled final V scale, not the recurrence.
+
+The compiled statements read `e2u(ji-1,jj+1)` and `e2u(ji,jj+1)` for the
+northwest/northeast V scales
+(`ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1282-1283`). At the
+northern fold, `jj+1` is NEMO's U-stagger fold halo. The current literal
+builder uses periodic `jnp.roll` for that north row. The one-variable arm
+replaces only the top-row north-neighbour `e2u` with the existing grid's
+U-stagger fold permutation; all other scale operands and rows remain fixed.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R106-P6 | The U-stagger fold-halo metric is the sole owner of both northern V-scale debts. | The arm makes all eight recorded scales bit-exact, with zero non-fold or other-scale movement. | Any scale bit remains or any previously exact scale moves: **REFUTED**; hold and continue operand association. |
+| R106-P7 | Exact fold scales close the 66/67 `ffv_nw/ne` coefficient magnitudes without changing their recorded accumulators or any other coefficient magnitude. | All eight final coefficients become magnitude-exact; only the already-registered accumulation zero signs remain. | Any magnitude remains or any new magnitude appears: hold without a production change. |
+| R106-P8 | The independent 68-cell substep-2 U residual survives exact coefficients. | Exact NEMO coefficients still leave 68 active U cells, maximum `2.9617669311254642e-8`, while substep-2 V remains active-bit-exact. | Any different support/value: stop and name the moved consumer statement before landing. |
