@@ -695,15 +695,11 @@ Read `src/legoesm/parallel/voronoi_partition.py` and `src/legoesm/parallel/halo_
   - Assert: result matches standard `pad_halo()`.
 - Skip if sub-face tiling (currently rejected by implementation).
 
-**13e) Async halo step — vector fields**
-- `async_halo_step_vector(u, v, ...)`: overlapped vector halo exchange.
-- Assert: matches sequential `pad_halo_vector()`.
-
 **Key imports:**
 ```python
 from legoesm.parallel.async_halo import (
     InteriorBoundaryMasks, OverlapContext,
-    overlapped_halo_compute, async_halo_step, async_halo_step_vector,
+    overlapped_halo_compute,
     jax_native_halo_exchange,
 )
 ```
