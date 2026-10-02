@@ -14,7 +14,7 @@ an exact predictor and the source-derived LDF routing statement is not eligible
 to land in this round.
 
 The first non-bit statement in this walk is the association at
-`ocean_model_latlon_cgrid.py:1862-1912`: production forms its stage-3 content
+`ocean_model_latlon_cgrid.py:1888-1938`: production forms its stage-3 content
 as the already-materialized FCT advection content plus the Kmm-weighted source,
 while round 68's NumPy reconstruction of that statement moves three temperature
 cells by one ULP. This is an instrument boundary, not a new NEMO-physics

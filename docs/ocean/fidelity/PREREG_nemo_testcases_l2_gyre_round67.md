@@ -16,7 +16,7 @@ constructs the content right-hand side as
 `e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs` at `:547-565`.
 
 legoESM constructs the stage-3 surface/solar source in concentration-rate form
-at `ocean_model_latlon_cgrid.py:6257-6348`. It computes the GM/Redi rate from
+at `ocean_model_latlon_cgrid.py:6307-6398`. It computes the GM/Redi rate from
 Kbb operands at `:7048-7127,7340-7460`, then adds `dt*dT_gm`/`dt*dS_gm` to
 the intermediate concentration at `:7474-7480`. The WS-RK3 call later restarts
 from the step-entry tracer and consumes only `_stage_source_rates` at

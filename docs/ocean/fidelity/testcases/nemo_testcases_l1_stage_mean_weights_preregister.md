@@ -31,7 +31,7 @@ whole run, and `M_ref(umask) = 1` exactly by construction.
 
 legoESM removes a LIVE-weighted mean instead: `_replace_stage_mean` uses
 `sum(u * h_u_pre) / H_u_pre` with
-`h_u_pre = min_cell_to_uface(h_k_pre)` (`ocean_model_latlon_cgrid.py:4370`),
+`h_u_pre = min_cell_to_uface(h_k_pre)` (`ocean_model_latlon_cgrid.py:4418`),
 `h_k_pre` being the ssh-stretched thickness, and the stage TARGET is formed
 with the same live pair.
 

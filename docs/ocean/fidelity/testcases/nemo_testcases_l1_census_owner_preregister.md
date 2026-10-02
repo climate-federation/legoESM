@@ -108,7 +108,7 @@ cells (`tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:157-180`).
 The current legoESM BBL geometry instead signs the continuous cumulative
 partial-cell centroid, uses the minimum of adjacent bottom **T-cell**
 thicknesses, and supplies a cumulative live bottom centroid to `eos_rab`
-(`bbl_adv.py:117-165,176-229`; `ocean_model_latlon_cgrid.py:1344-1361`).
+(`bbl_adv.py:117-165,176-229`; `ocean_model_latlon_cgrid.py:1370-1387`).
 The static census-domain count is decisive and computed without a model arm:
 NEMO has 29 wet interior nonzero i-slope faces; legoESM has 141, including 112
 same-bottom-level faces on which NEMO's `mgrhu` is exactly zero.  On shared

@@ -155,7 +155,7 @@ bridge separately requires the step-entry record's `Nbb=3`
 (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1248-1252`). This is the NEMO
 before-level before `zdf_phy`, feeding WS-RK3 stage 1, with forcing kt=2 and
 the kt=2 barotropic handoff. The ordinary public model step enters
-`_step_jitted` at `ocean_model_latlon_cgrid.py:11212-11225`; no live operand
+`_step_jitted` at `ocean_model_latlon_cgrid.py:11281-11294`; no live operand
 observer is enabled.
 
 **Physical-range sanity, before accepting the score:** wet candidate K_H is
@@ -196,7 +196,7 @@ intervention proves it is not a sufficient explanation for the production
 K_H residual. The
 extracted object is the ordinary returned `LatLonCGridOceanState.tke_avt`
 carry, declared at `state.py:577-581` and assigned from
-`_tke_coeff_new.K_H` at `ocean_model_latlon_cgrid.py:11022-11027`.
+`_tke_coeff_new.K_H` at `ocean_model_latlon_cgrid.py:11091-11096`.
 
 The fix-round-5 artifact was produced at candidate commit `3849b99199c6` with
 only the two evidence probes modified and the dirty-tree escape stamped in

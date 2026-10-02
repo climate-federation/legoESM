@@ -90,7 +90,7 @@ switching to it is not generally bitwise neutral for healthy runs.
   the fold and inside band 10 in the log; this does not certify all halo code.
 
 The existing public `LatLonCGridOceanModel.tendencies_with_diagnostics`
-(`ocean_model_latlon_cgrid.py:3962`) supplies the component momentum budget.
+(`ocean_model_latlon_cgrid.py:4010`) supplies the component momentum budget.
 The next necessary input is an initial or pre-runaway state with the velocity
 maximum's level. Evaluate that budget at the growing faces, separate PGF from
 KE (the current diagnostic combines them), and compare otherwise identical

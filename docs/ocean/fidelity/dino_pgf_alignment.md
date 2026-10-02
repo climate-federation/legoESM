@@ -65,7 +65,7 @@ table), **EOS** (coefficients exact), **PGF** (this table).
 The one confirmed defect standing is the **tracer-content leak**: legoESM drifts +8.6e-6
 relative in globally-integrated heat over 200 forcing-free steps where NEMO drifts
 +3.4e-16 — ten orders apart. Mechanism: the outer leapfrog combine adds a bare
-concentration increment (`ocean_model_latlon_cgrid.py:6990-6993`) instead of conserving
+concentration increment (`ocean_model_latlon_cgrid.py:7040-7043`) instead of conserving
 thickness-weighted content as NEMO does (`trazdf.F90:271-278`). Fix commissioned as
 `.claude/ralph_tracer_content_conservation_task.md`. Its expected magnitude (~9 mK over a
 3-yr run vs a ~0.15 K abyssal signal) does NOT obviously account for 12.9 Sv — if the fix

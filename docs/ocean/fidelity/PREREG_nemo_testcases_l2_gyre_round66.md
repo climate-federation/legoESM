@@ -22,7 +22,7 @@ The compiled stage-3 arm sets `rDt=rn_Dt` at
 `e3t(Kxx)=e3t_3d*(1+r3t(Kxx)*tmask)`.
 
 legoESM's active shared WS-RK3 statement is
-`ocean_model_latlon_cgrid.py:1992-1998`: it starts the final content from
+`ocean_model_latlon_cgrid.py:2018-2024`: it starts the final content from
 `h_k_old*tr`, subtracts the complete stage-3 FCT content divergence, then
 adds `dt*h_one_half*stage_source_rates[2]`.  The production call supplies the
 step-entry tracer and thickness at `:7639-7667` and the already-computed

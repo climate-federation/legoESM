@@ -1295,6 +1295,32 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # only after the ordinary step has completed.
     stage2_momentum_rhs_override: object = None
     expose_stage2_momentum_rhs: bool = False
+    # WRITE-only stage-1 companions of the pair above.  ``dyn_adv`` is the
+    # ONLY momentum statement NEMO runs in stage 1 of the flux-form program
+    # (``stprk3_stg.F90:316``, ``IF( .NOT.ln_dynadv_vec ) CALL dyn_adv( ...,
+    # zFu, zFv, zFw )``; the vector-invariant arm has already completed its
+    # 3-D RHS in ``stp_2D``), and the thickness-weighted explicit update that
+    # consumes it is ``stprk3_stg.F90:372-379``.  Scoring either against
+    # NEMO's own record needs a stage-1 seam, and the stage-1 arm of
+    # ``expose_momentum_operator`` is refused by construction.
+    # ``expose_stage1_momentum_rhs`` publishes the completed stage-1 Krhs --
+    # NEMO's ``uu(:,:,:,Krhs)`` immediately after that call -- and
+    # ``expose_stage1_raw_momentum`` publishes Kaa immediately after the
+    # update and BEFORE the barotropic replacement (``:409-421``), the same
+    # boundary ``expose_stage2_raw_momentum`` reads one stage later.  Both
+    # substitute the returned u/v slots only after the ordinary step has
+    # completed, so neither can perturb a later stage; no card constructs
+    # them.
+    expose_stage1_momentum_rhs: bool = False
+    expose_stage1_raw_momentum: bool = False
+    # One-variable companion of ``stage2_momentum_rhs_override``: supply
+    # NEMO's own completed stage-1 Krhs (the recorded ``adv_u``/``adv_v``)
+    # immediately before the literal stage update, so the update statement
+    # (``stprk3_stg.F90:372-379``) and the barotropic replacement
+    # (``:409-421``) can be scored as carriers with every other stage input
+    # left as legoESM's.  Private diagnostic only; ``None`` keeps the live
+    # right-hand side.
+    stage1_momentum_rhs_override: object = None
     # WRITE-only stage-3 momentum-RHS gauge.  ``"post_ldf"`` publishes the
     # complete stage-3 Krhs that enters the implicit vertical solve, the
     # operand NEMO hands ``dyn_zdf`` (``stprk3_stg.F90:430``); ``"pre_ldf"``
@@ -2782,6 +2808,28 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_stage3_momentum_rhs must be '', 'pre_ldf', or "
                 f"'post_ldf'; got {_stage3_rhs_hook!r}")
+        _stage1_slots = tuple(
+            (_name, getattr(self._nemo_ws_test_hooks, _name))
+            for _name in ("expose_stage1_momentum_rhs",
+                          "expose_stage1_raw_momentum"))
+        for _name, _flag in _stage1_slots:
+            if not isinstance(_flag, bool):
+                # At CONSTRUCTION: anything truthy-but-not-bool would select
+                # the exposure silently and the walk would score one stage-1
+                # boundary under the other's name.
+                raise ValueError(f"{_name} must be a bool")
+        _stage1_selected = [_name for _name, _flag in _stage1_slots if _flag]
+        if _stage1_selected and (
+                len(_stage1_selected) > 1
+                or bool(self._nemo_ws_test_hooks.expose_momentum_stage)
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or bool(self._nemo_ws_test_hooks.expose_momentum_operator)
+                or bool(_stage3_rhs_hook)):
+            raise ValueError(
+                "expose_stage1_momentum_rhs / expose_stage1_raw_momentum "
+                "cannot be combined with another momentum exposure: they "
+                "share the returned u/v slots")
         if _stage3_rhs_hook and (
                 self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
                 or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
@@ -5973,6 +6021,8 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage1_wzv = None
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
+        _nemo_ws_exposed_stage1_rhs = None
+        _nemo_ws_exposed_stage1_raw = None
         _nemo_ws_exposed_stage2_rhs = None
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
@@ -7331,6 +7381,11 @@ class LatLonCGridOceanModel:
                 _stage1_rhs_post_zad,
                 (_u1_rhs, _v1_rhs),
             )
+            if self._nemo_ws_test_hooks.expose_stage1_momentum_rhs:
+                _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+            if self._nemo_ws_test_hooks.stage1_momentum_rhs_override is not None:
+                _u1_rhs, _v1_rhs = (
+                    self._nemo_ws_test_hooks.stage1_momentum_rhs_override)
             u1_raw = rk3_stage_velocity_update(
                 u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
@@ -7339,6 +7394,8 @@ class LatLonCGridOceanModel:
                 v0, _v1_rhs, dt_mom / 3.0, _ws_stage_v_mask,
                 vector_form=_vector_velocity_stage_update,
                 qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13)
+            if self._nemo_ws_test_hooks.expose_stage1_raw_momentum:
+                _nemo_ws_exposed_stage1_raw = (u1_raw, v1_raw)
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
             _g0_tracer = _tracer_transport_geometry_override(
@@ -9444,6 +9501,18 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_op_u),
                 v=state_new.v.replace(data=_op_v),
+            )
+        if _nemo_ws_exposed_stage1_rhs is not None:
+            _rhs_u, _rhs_v = _nemo_ws_exposed_stage1_rhs
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_rhs_u),
+                v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage1_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage1_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
             )
         if _nemo_ws_exposed_stage2_rhs is not None:
             _rhs_u, _rhs_v = _nemo_ws_exposed_stage2_rhs

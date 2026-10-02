@@ -37,9 +37,9 @@ thickness, and T mask and rebuilds the compiled F reference/live fields at
 `vertical.py:362-444`.  It deliberately materialises the stored F-cell area
 before the final division, preserving the compiled association under
 production JIT.  The production route is selected only by the complete source
-condition at `ocean_model_latlon_cgrid.py:5312-5314`; GYRE supplies its
-step-entry tuple at `ocean_model_latlon_cgrid.py:5361-5396` and its stage tuple
-at `ocean_model_latlon_cgrid.py:5896-5955`.  Recorded bridge fields remain an
+condition at `ocean_model_latlon_cgrid.py:5360-5362`; GYRE supplies its
+step-entry tuple at `ocean_model_latlon_cgrid.py:5409-5444` and its stage tuple
+at `ocean_model_latlon_cgrid.py:5944-6003`.  Recorded bridge fields remain an
 oracle check in the developed-state walk, not a production dependency.  No
 state field, stabiliser, carried state, or selector was added.
 

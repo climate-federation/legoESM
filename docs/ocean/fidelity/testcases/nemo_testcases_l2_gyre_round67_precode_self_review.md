@@ -10,7 +10,7 @@ NEMO's compiled stage clears `Krhs`, then calls advection/SBC
 `trazdf.f90:416-479` adds isoneutral K33 to the implicit matrix, while
 `:547-565` constructs content from Kbb tracer plus Kmm-weighted Krhs before the
 solve. legoESM constructs SBC/QSR rates at
-`ocean_model_latlon_cgrid.py:6257-6348`, adds GM/Redi to `T_mid/S_mid` at
+`ocean_model_latlon_cgrid.py:6307-6398`, adds GM/Redi to `T_mid/S_mid` at
 `:7474-7480`, but its later WS call restarts at `state.T/state.S` and the saved
 stage-2 result (`:7639-7677`). Only `stage_source_rates[2]` reaches the content
 statement (`:1905-1917`) passed to ZDF (`:8038-8150,10417-10438`). Therefore
@@ -62,7 +62,7 @@ Self-review verdict: **EDIT ELIGIBLE**, subject to every preregistered gate.
 
 The first implementation was correctly REFUTED by the exact kt3 criterion.
 The discrepancy is traced to the helper's two-sum content association at
-`ocean_model_latlon_cgrid.py:1992-1998`, not to LDF sign, level, mask, or K33.
+`ocean_model_latlon_cgrid.py:2018-2024`, not to LDF sign, level, mask, or K33.
 The follow-up rewrites that one shared statement into the literal compiled
 `trazdf` Krhs association; it does not alter fluxes, stages 1/2, the matrix, or
 the solver. Because it executes on tank cards even when LDF is absent, their

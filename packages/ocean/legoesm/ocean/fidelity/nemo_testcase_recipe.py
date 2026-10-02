@@ -201,7 +201,7 @@ def _model_config(
         # FLUX-FORM arm, which calls vor_een on the PLANETARY vorticity alone
         # -- so on this case EEN *is* the Coriolis discretisation, a triad-
         # weighted f x u.  legoESM binds its own EEN arm to VECTOR-INVARIANT
-        # momentum (ocean_model_latlon_cgrid.py:4392-4400 refuses the pair
+        # momentum (ocean_model_latlon_cgrid.py:4440-4448 refuses the pair
         # outright, because its flux-form branch never receives f_vtx) and
         # gives the flux-form branch the 4-point C-grid average instead.
         # Selecting een_total here would not build; selecting nothing and

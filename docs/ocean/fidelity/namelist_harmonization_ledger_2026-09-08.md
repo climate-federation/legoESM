@@ -184,7 +184,7 @@ mechanism is real and present: a low recomputed K makes low production, which
 makes low K.
 
 This is not a missing feature. `carried_previous_step` is implemented, seeded at
-cold start (`ocean_model_latlon_cgrid.py:7289` reproduces `zdf_phy_init`'s
+cold start (`ocean_model_latlon_cgrid.py:7339` reproduces `zdf_phy_init`'s
 background-times-wmask construction), restart-bridged, unit-tested
 (`tests/ocean/unit/test_tke_carried_coefficients.py`), and **selected by the
 DINO NEMO-oracle preset** (`experiments/dino.py:1247`). It is simply not wired
