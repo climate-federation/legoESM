@@ -68,7 +68,8 @@ admission controls.
 The launcher pins the failed binary, compiled source, namelist, deck manifest,
 input manifest, checker, and preregistration by content. Its inherited-variable,
 rank-log, and toolchain plants all fire. Shell syntax passes, the focused
-launcher/checker test passes 4/4, and the clean-tree preflight ends:
+launcher/checker plus citation tests pass 21/21, and the clean-tree preflight
+ends:
 
 ```text
 ORCA2_ROUND108_EEN_STEP_RESUME_READY /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round108/acquisition/orca2_rung0_een_step_ranked_resume_10step_np2
@@ -76,6 +77,22 @@ ORCA2_ROUND108_EEN_STEP_RESUME_READY /data/abyssal/dbalwada/nemo-testcases-l2/ph
 
 This round changes no `packages/` file. The GYRE, DINO, tank, rung-0 trajectory,
 and rung-7 trajectory implementations therefore do not move.
+
+The default citation gate and this receipt's gate both pass with zero unmapped
+citations, citation failures, or map-audit failures. Shifting the compiled
+initializer-call citation by two lines fires `SYMBOL-NOT-AT-LINE`.
+
+The one prescribed `tests/ocean/fidelity -n 12` invocation reached 99%, with
+2,286 passes and the six known failures (SI3 scalar math, live-operands field
+order, dirty escape scope, worktree stamp, missing `hires_lane_surface`
+case-board row, and the round-129 certified-year harness stamp), then stopped
+in the pre-existing planted-control tail without a terminal pytest summary.
+It was terminated and is not counted as a pass. No failure is in a file changed
+by this round.
+
+Separate read-only Codex review was attempted. Verdict: **independent review
+unavailable in-sandbox** (`failed to initialize in-process app-server client:
+Read-only file system`).
 
 ## OPEN
 
@@ -98,4 +115,3 @@ and rung-7 trajectory implementations therefore do not move.
 ## Choices
 
 ASKED: Decisions 52, 80, 83, and 84 remain unchanged. UNASKED: none.
-
