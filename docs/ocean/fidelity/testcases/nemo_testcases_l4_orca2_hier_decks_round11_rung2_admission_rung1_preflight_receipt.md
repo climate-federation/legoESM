@@ -60,7 +60,7 @@ allocation when `ln_trabbl=false`
 The geothermal initializer reads its namelist but allocates/reads the heat-flow
 field only inside `ln_trabbc=true`; the false arm prints that no geothermal
 flux is used
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90:200-252`).
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90:200-251`).
 
 At runtime, both possible BBL coefficient call sites are guarded by
 `ln_trabbl` and stage 3

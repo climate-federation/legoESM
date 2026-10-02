@@ -1386,9 +1386,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbl.f90:540-564': [
         'NAMELIST/nambbl/ ln_trabbl',
         "CALL ctl_stop( 'STOP', 'tra_bbl_init : unable to allocate arrays' )", 25],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90:200-252': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90:200-251': [
         'NAMELIST/nambbc/ln_trabbc',
-        "IF(lwp) WRITE(numout,*) '   ==>>>   no geothermal heat flux'", 53],
+        "IF(lwp) WRITE(numout,*) '   ==>>>   no geothermal heat flux'", 52],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:430-458': [
         ('!* Update or Compute (VIF) advective transport', 1),
         ('IF( kstg == 3 .AND. ln_trabbl )   CALL bbl', 2), 29],
