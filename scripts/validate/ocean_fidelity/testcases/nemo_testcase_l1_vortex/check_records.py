@@ -184,12 +184,18 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
         if corrupt_extent and not groups:
             n1 += 1
         offset += 32
-        _require(rank in (2, 3), f"{path.name}: group {name!r} has rank {rank}")
+        # Rank 1 exists only in the round-196 barotropic record, which
+        # carries the two time-filter weight vectors and the per-substep
+        # coefficients; the older families are 2-D and 3-D only, and
+        # accepting a rank they never write would weaken their guard.
+        allowed = (1, 2, 3) if family == "oracle_spgts_kt" else (2, 3)
+        _require(rank in allowed,
+                 f"{path.name}: group {name!r} has rank {rank}")
         _require(min(n1, n2, n3) > 0,
                  f"{path.name}: group {name!r} declares a nonpositive extent")
         _require(name not in groups,
                  f"{path.name}: duplicate group name {name!r}")
-        count = n1 * n2 * (n3 if rank == 3 else 1)
+        count = n1 * (n2 if rank >= 2 else 1) * (n3 if rank == 3 else 1)
         _require(offset + 8 * count <= len(raw),
                  f"{path.name}: group {name!r} declares {count} doubles, but "
                  f"only {(len(raw) - offset) // 8} remain in the file")
