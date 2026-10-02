@@ -1693,9 +1693,9 @@ Key iterations:
   - iter 482: **composite iter-466 + iter-481 → 60% reduction
     (1.42×, 5 seeds pinned)**.
   - iter 483: new ``make_legoesm_nh_min_edge_aggressive_config``
-    user-facing factory.
+    user-facing factory (removed 2026-10-02, never called).
   - iter 484: PE mirror ``make_legoesm_pe_min_edge_aggressive_
-    config``.
+    config`` (removed 2026-10-02, never called).
 - **Iters 465-474 (compacted iter 480)**: edge-artifact
   empirical investigation phase 2 (per-flag + duogrid
   bisection start).
