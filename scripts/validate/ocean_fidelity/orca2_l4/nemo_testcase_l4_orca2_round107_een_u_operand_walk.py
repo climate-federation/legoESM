@@ -68,7 +68,8 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
 
 def literal_accumulators(eta, z_coord, dtype, *, grid,
                          source_face_thickness: bool,
-                         literal_bottom_loop: bool = False):
+                         literal_bottom_loop: bool = False,
+                         return_fraction_operands: bool = False):
     """Replay compiled dynspg_ts.f90:1231-1280 with one mask choice."""
 
     import jax.numpy as jnp
@@ -182,7 +183,7 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
             e3v, vn[corner][0], vn[corner][1], vq[corner], mbkv)
         accumulators[f"acc_v_{corner}"] = acc
         terms[f"term_v_{corner}"] = term
-    return accumulators, {
+    parts = {
         "source_e3u": source_e3u,
         "source_e3v": source_e3v,
         "current_e3u": current_e3u,
@@ -192,6 +193,16 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         "mbkv": mbkv,
         **terms,
     }
+    if return_fraction_operands:
+        parts.update({
+            "een_ff": ff,
+            "een_e3f0": e3f0,
+            "een_r3f": r3f,
+            "een_fmask": fmask,
+            "een_denom": e3f,
+            "een_q": q,
+        })
+    return accumulators, parts
 
 
 def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
