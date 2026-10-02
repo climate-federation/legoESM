@@ -831,6 +831,12 @@ FILES = {
         NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90": (
         NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
+    # Round 196: the split-explicit barotropic solve, read from the SAME
+    # uninstrumented-dynspg build the rounds 192-195 citations use (that
+    # build instruments stprk3_stg and dynadv only, so its dynspg_ts is the
+    # shipped one).
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
         NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90"),
     "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
