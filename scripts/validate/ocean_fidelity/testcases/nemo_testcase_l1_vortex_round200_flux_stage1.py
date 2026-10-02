@@ -73,6 +73,22 @@ def require_live(label: str, slot: str, exposed, plain) -> None:
             "step output in every cell; the seam is inert")
 
 
+def _unowned_for_test(values, face: str, levels: int) -> np.ndarray:
+    """Module-level copy of the carrier arm's record-to-model layout map.
+
+    ``run`` closes over the same rule; this name exists so a unit control can
+    pin the axis and the round trip without running a step.
+    """
+    values = np.asarray(values)
+    require(values.shape[-1] >= levels,
+            f"the record has {values.shape[-1]} levels, the model needs "
+            f"{levels}")
+    values = values[..., :levels]
+    pad = [(0, 0), (0, 0), (0, 0)]
+    pad[1 if face == "u" else 0] = (1, 0)
+    return np.pad(values, pad)
+
+
 def read_flux_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
     """Every named group of the round-200 flux record, self-described."""
     checker_path = HERE / "nemo_testcase_l1_vortex" / "check_records.py"
@@ -195,25 +211,13 @@ def run(root: Path, *, plant: str | None = None,
     rows = []
     carrier_rows: list[dict] = []
 
-    def _unowned(values, face, levels):
-        """Put a record array back on the model's INTERNAL array layout.
-
-        ``_owned`` above drops the model's leading ghost line on the face's
-        own axis (``[:, 1:, :]`` on ``u``, ``[1:, :, :]`` on ``v``) because
-        NEMO's local interior stores one record per T column.  An override
-        is handed to the model, so it has to go the other way.  The restored
-        ghost line is never scored -- every row of this walk is compared on
-        the owned slice -- and the stage update is pointwise, so a ghost
-        value cannot reach an owned cell within the stage.
-        """
-        values = np.asarray(values)
-        require(values.shape[-1] >= levels,
-                f"the record has {values.shape[-1]} levels, the model needs "
-                f"{levels}")
-        values = values[..., :levels]
-        pad = [(0, 0), (0, 0), (0, 0)]
-        pad[1 if face == "u" else 0] = (1, 0)
-        return np.pad(values, pad)
+    # ``_owned`` above drops the model's leading ghost line on the face's own
+    # axis because NEMO's local interior stores one record per T column; an
+    # override is handed TO the model, so it has to go the other way.  The
+    # restored ghost is never scored -- every row is compared on the owned
+    # slice -- and the stage update and the barotropic correction are both
+    # column-local, so a ghost value cannot reach an owned cell.
+    _unowned = _unowned_for_test
 
     def _row(label, reference, candidate, mask, nemo_boundary, planted,
              convention_sensitive=False):

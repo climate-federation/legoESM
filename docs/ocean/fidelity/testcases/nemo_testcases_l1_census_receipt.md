@@ -296,7 +296,7 @@ By contrast the already-owned `k=25` family at gate face 23 is wet on a
 The phantom round's open item 3 asks whether legoESM's stage depth mean, which
 uses LIVE weights (`_replace_stage_mean`: `sum(u*h_u_pre)/H_u_pre`, with
 `h_u_pre = min_cell_to_uface(h_k_pre)` at
-`ocean_model_latlon_cgrid.py:4418`), differs from NEMO's, which uses REFERENCE
+`ocean_model_latlon_cgrid.py:4432`), differs from NEMO's, which uses REFERENCE
 weights (`stprk3_stg.F90:440`
 `zub = uu_b(Kaa) - SUM(e3u_0(:)*uu(:,Kaa)) * r1_hu_0`, with
 `hu_0 = SUM(e3u_0*umask)` at `domain.F90:145`).
@@ -522,7 +522,7 @@ probe's own tests and I had not re-run them -- CONFIRMED, fixed, and the
 fixture now carries the new keys.  (2) IMPORTANT: open item 3 was closed on a
 reference-against-reference measurement and the stated z*/qco basis is false
 for legoESM's min-rule -- CONFIRMED at the source
-(`ocean_model_latlon_cgrid.py:4418`), measured, and section 4 is rewritten;
+(`ocean_model_latlon_cgrid.py:4432`), measured, and section 4 is rewritten;
 their independent values reproduce mine to the last digit.  (3) IMPORTANT: the
 `1.05e-9` was a mismatched normalization -- CONFIRMED, corrected to `8.43e-8`.
 (4) IMPORTANT: `census_map.json` stamped a commit that lacked four of its

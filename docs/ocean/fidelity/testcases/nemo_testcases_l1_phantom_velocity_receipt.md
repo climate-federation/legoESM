@@ -77,7 +77,7 @@ zFu_t(ji+1,jj) = (  zFu(ji,jj) + zFu(ji+1,jj)  ) * ( zui - gamma1 * zl_u )      
 ```
 
 **(i) the operator that writes a nonzero `u` into a masked cell**:
-`ocean_model_latlon_cgrid.py:5080-5093` (`_replace_stage_mean`, the ONE stage
+`ocean_model_latlon_cgrid.py:5094-5107` (`_replace_stage_mean`, the ONE stage
 ladder, called at `:5103,:5120,:5139`) applied `u_mask_3d =
 state.u_mask.data[..., jnp.newaxis]` (`:4066`) -- the 2-D face mask broadcast
 over levels -- to `u_in + (target_u - mean_u)[..., jnp.newaxis]`; and

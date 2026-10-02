@@ -63,7 +63,7 @@ legoESM's side of the change is one function and two call sites:
 `ocean_model_latlon_cgrid.py:1681-1692` is the predicate that decides which
 cards are in this program at all,
 `ocean_model_latlon_cgrid.py:1816-1821` is the second solve itself, and
-`ocean_model_latlon_cgrid.py:6956-6962` is the helper the two momentum
+`ocean_model_latlon_cgrid.py:6970-6976` is the helper the two momentum
 consumers read it through.  Stage 1 gets no momentum solve.
 
 **The adaptive-implicit pair is refused, not run once.**  Where
@@ -345,13 +345,13 @@ this receipt does not make them as citations:
 ocean_model_latlon_cgrid.py:1274-1352   (round-8 and round-159 receipts)
 ocean_model_latlon_cgrid.py:1287-1332   (nemo_branch_isomorphism_map)
 ocean_model_latlon_cgrid.py:1888-1938   (round-66, round-67, round-68 receipts)
-ocean_model_latlon_cgrid.py:6671-6734   (card reconciliation receipt)
-ocean_model_latlon_cgrid.py:6686-6751   (decision-35 preregistration + receipt)
-ocean_model_latlon_cgrid.py:6940-7426   (mlf step transcription spec)
-ocean_model_latlon_cgrid.py:7132-7151   (round-66 ldf preregistration)
-ocean_model_latlon_cgrid.py:7132-7571   (round-66 and round-67 receipts)
-ocean_model_latlon_cgrid.py:9041-9121   (split-explicit rounds 2 and 3)
-ocean_model_latlon_cgrid.py:9046-9119   (decision-36 receipt)
+ocean_model_latlon_cgrid.py:6685-6748   (card reconciliation receipt)
+ocean_model_latlon_cgrid.py:6700-6765   (decision-35 preregistration + receipt)
+ocean_model_latlon_cgrid.py:6954-7440   (mlf step transcription spec)
+ocean_model_latlon_cgrid.py:7146-7165   (round-66 ldf preregistration)
+ocean_model_latlon_cgrid.py:7146-7585   (round-66 and round-67 receipts)
+ocean_model_latlon_cgrid.py:9055-9135   (split-explicit rounds 2 and 3)
+ocean_model_latlon_cgrid.py:9060-9133   (decision-36 receipt)
 ```
 
 ## The independent review

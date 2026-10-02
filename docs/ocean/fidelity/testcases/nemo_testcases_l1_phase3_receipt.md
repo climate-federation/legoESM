@@ -920,7 +920,7 @@ found `vertical.py:140 nemo_qco_live_face_geometry_from_operands` and
 `vertical.py:197 nemo_qco_live_face_thicknesses`, the shared canonical
 `dom_qco_r3c` builders already used by the DINO ldfslp/dynzad path and by the
 `wzv_call2_evaluation="nemo_literal"` tracer path
-(`ocean_model_latlon_cgrid.py:5315`).  `_nemo_ws_qco_stage_faces` calls the
+(`ocean_model_latlon_cgrid.py:5329`).  `_nemo_ws_qco_stage_faces` calls the
 `_from_operands` primitive and only maps its native east/north extent onto
 legoESM's redundant west/south layout; the wrapper was not usable directly
 because it reads operands from `z_coord.nemo_*` fields the L1 testcase cards
@@ -951,7 +951,7 @@ can move.
 fixed here.**  NEMO's MLF `dom_qco_r3c` (`domqco.F90:166-169`) uses the
 IDENTICAL `r3u` formula as the RK3 variant (`:219-222`) — both were read.
 legoESM's MLF transport face thickness is still
-`min_cell_to_uface(h_k)` (`ocean_model_latlon_cgrid.py:9480`), and main's
+`min_cell_to_uface(h_k)` (`ocean_model_latlon_cgrid.py:9494`), and main's
 PR #1642 separately moved the MLF *vertical-mixing* face control volume to a
 masked average (`:8130-8160`), which is a third rule again.  Changing the MLF
 transport face would move every DINO number and is a different one-variable
@@ -963,7 +963,7 @@ round; recorded here as open debt.
 does not follow.**  Retracted here rather than quietly corrected, because a
 stale confident pointer gets built on.
 
-`ocean_model_latlon_cgrid.py:9480` at this round's base `28d166428` is
+`ocean_model_latlon_cgrid.py:9494` at this round's base `28d166428` is
 `h_u = min_cell_to_uface(h_k)` whose ENCLOSING function is `_ab2_step`
 (`def` at `:9108`) — the Veros Adams-Bashforth-2 outer integrator, which is
 not the MLF lane at all — and that line is a barotropic/baroclinic DEPTH-MEAN
@@ -1297,7 +1297,7 @@ MLF lane and its short-run gates were not run.
 - `_replace_stage_mean` still weights with `min_cell_to_uface(h_k_pre)` where
   `stprk3_stg.F90:438` uses `e3u_0` and `r1_hu_0`.  These agree exactly at
   kt=1 (ssh = 0 at Kbb) and drift apart afterwards; not touched this round;
-- ~~the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9480`), which
+- ~~the MLF-lane face thickness (`ocean_model_latlon_cgrid.py:9494`), which
   has the same defect against the identical `domqco.F90:166-169` formula~~ —
   RETRACTED, see the retraction block above: that line is in `_ab2_step`, and
   the DINO MLF cards were already on NEMO's rule;
@@ -1873,7 +1873,7 @@ with `pUe`/`pVe` and so writes only the 2-D barotropic seed
 (`dynadv_up3.F90:158-202`).
 
 legoESM's stage 1 steps with the step-entry `tendencies()` result
-(`ocean_model_latlon_cgrid.py:4241-4247`, then `:5011-5017`), which is
+(`ocean_model_latlon_cgrid.py:4255-4261`, then `:5011-5017`), which is
 evaluated BEFORE the barotropic solve at `:4826` produces `Hu_avg` and
 therefore advects with `Q = h u(Kbb)`, i.e. `zub = 0`; stages 2-3 do carry it
 through `_mom_pert_ws` (`:4439-4454`).  Difference, per unit `e2u`:

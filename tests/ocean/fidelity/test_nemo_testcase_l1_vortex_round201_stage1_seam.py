@@ -156,6 +156,18 @@ def test_the_known_answer_control_is_not_vacuous(steps):
       "expose_stage2_raw_momentum": True}, "share the returned u/v slots"),
     ({"expose_stage1_raw_momentum": True,
       "expose_momentum_operator": "hpg"}, "share the returned u/v slots"),
+    # These two are substituted EARLIER into the same slots, so a stage-1
+    # exposure alongside them would silently win.
+    ({"expose_stage1_raw_momentum": True,
+      "expose_tracer_transport_stage": 1}, "share the returned u/v slots"),
+    ({"expose_stage1_momentum_rhs": True,
+      "expose_stage1_transport_operand": "zub"},
+     "share the returned u/v slots"),
+    # The exposure publishes the PRODUCTION right-hand side; with the
+    # override also set it would publish the array the step did not use.
+    ({"expose_stage1_momentum_rhs": True,
+      "stage1_momentum_rhs_override": (1.0, 2.0)},
+     "stage1_momentum_rhs_override"),
     ({"expose_stage1_momentum_rhs": 1}, "must be a bool"),
 ])
 def test_the_construction_guard_refuses_an_ambiguous_exposure(
@@ -166,6 +178,42 @@ def test_the_construction_guard_refuses_an_ambiguous_exposure(
 
     with pytest.raises(ValueError, match=match):
         _card_and_model(_NEMOWSRK3TestHooks(**hooks_kwargs))
+
+
+def test_the_record_to_model_layout_helper_is_not_an_identity():
+    """`_unowned` puts a record array back on the model's internal layout.
+
+    The carrier arm hands the model an array built by this helper, so a
+    wrong axis or a dropped level would substitute a transposed field and
+    the arm would measure nothing it claims.  The planes here are
+    DELIBERATELY NOT SQUARE, so the control cannot pass on a transpose.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).parents[3]
+    script = (root / "scripts/validate/ocean_fidelity/testcases/"
+              "nemo_testcase_l1_vortex_round200_flux_stage1.py")
+    spec = importlib.util.spec_from_file_location("r200_walk", script)
+    assert spec and spec.loader
+    walk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(walk)
+
+    nj, ni, nk = 5, 7, 3
+    record = np.arange(nj * ni * nk, dtype=np.float64).reshape(nj, ni, nk) + 1
+    for face, owned in (("u", lambda a: a[:, 1:, :]),
+                        ("v", lambda a: a[1:, :, :])):
+        restored = walk._unowned_for_test(record, face, nk)
+        # one ghost line added on the face's own axis, filled with zero
+        assert restored.shape[0] == nj + (1 if face == "v" else 0)
+        assert restored.shape[1] == ni + (1 if face == "u" else 0)
+        # and the round trip through the walk's own `_owned` rule returns it
+        np.testing.assert_array_equal(owned(restored), record)
+        ghost = restored[:, 0, :] if face == "u" else restored[0, :, :]
+        np.testing.assert_array_equal(ghost, np.zeros_like(ghost))
+    # a record with fewer levels than the model is refused, not padded
+    with pytest.raises(Exception, match="levels"):
+        walk._unowned_for_test(record, "u", nk + 1)
 
 
 def test_one_stage1_exposure_alone_is_accepted(fp64):

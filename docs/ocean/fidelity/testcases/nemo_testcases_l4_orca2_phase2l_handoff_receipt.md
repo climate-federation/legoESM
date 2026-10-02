@@ -128,7 +128,7 @@ NEMO first materializes the HYB stage SSH
 `rDt=rn_Dt/3` at `:118-124`, and consumes the pair in
 `sshwzv.F90:330-336`.  legoESM instead builds a full endpoint delta and passes
 the full step through `_stage_transport_kw` at
-`ocean_model_latlon_cgrid.py:5933-5948`.  These are algebraically the same
+`ocean_model_latlon_cgrid.py:5947-5962`.  These are algebraically the same
 real quotient, with different source association.
 
 Phase 2k's 233,341 / 233,341, 7.329623319094706e-05 m/s arm held the

@@ -620,7 +620,7 @@ card:
 
 - NEMO: `dyn_cor_2D_init(Kmm)` (dynspg_ts.F90:359) + `dyn_cor_2D(puu_b(Kmm),
   pvv_b(Kmm)) → zu_frc -= zu_trd*ssumask` (:363, :366-367).
-- legoESM: `ocean_model_latlon_cgrid.py:3418-3460` subtracts
+- legoESM: `ocean_model_latlon_cgrid.py:3432-3474` subtracts
   `barotropic_coriolis_een_pre_step(state_mid.u, state_mid.v, h_k_pre)` from
   `F_slow_u`/`F_slow_v`, gated on `coriolis_scheme="explicit_ab2"` AND
   `barotropic_coriolis_split="live"` — both set by the `nemo_dino_kamm_mlf`
@@ -691,7 +691,7 @@ itself uses (`zu_frc_write_ledger.py` STEP 3, new code this session).
 (`ocean_pe_latlon_cgrid.py:3519-3520`) to recover the ocean-reaction stress
 the deposit actually uses. The `barotropic_forcing_centred` average
 (`0.5*(state.tau_x_prev + surface_forcing.tau_x)`,
-`ocean_model_latlon_cgrid.py:2908`) was therefore mixing OPPOSITE-sign
+`ocean_model_latlon_cgrid.py:2922`) was therefore mixing OPPOSITE-sign
 operands. Measured `corr(tau_x_prev, tau_x_now) = -0.98` on the DINO y5
 restart before the fix — the centred wind term collapsed to near-zero at
 2/3 of wet u-faces instead of tracking NEMO's dumped increment.

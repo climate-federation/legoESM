@@ -73,7 +73,7 @@ Verified against the oracle's own `mesh_mask.nc` (`RUN_20Y`): `e3w_1d[1:]` minus
 `0.5*(e3t_k + e3t_{k-1})` is 7.3e-4 rising to 3.2e-3. The two are not the same
 object on a stretched grid.
 
-**legoESM's divisor** — `ocean_model_latlon_cgrid.py:8345`, the `else` branch of
+**legoESM's divisor** — `ocean_model_latlon_cgrid.py:8359`, the `else` branch of
 the divisor block inside `_apply_implicit_vertical_mixing` (defined at `:7706`),
 reached from `_leapfrog_step` (`:9867`, calling the solve at `:10278`) because
 the card resolves `outer_integrator='leapfrog'`. The path is proven to execute

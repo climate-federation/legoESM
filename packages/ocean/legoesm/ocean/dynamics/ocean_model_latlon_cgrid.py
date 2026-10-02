@@ -2825,11 +2825,25 @@ class LatLonCGridOceanModel:
                 or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
                 or self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
                 or bool(self._nemo_ws_test_hooks.expose_momentum_operator)
-                or bool(_stage3_rhs_hook)):
+                or bool(_stage3_rhs_hook)
+                # These two also write the returned u/v slots, and they are
+                # substituted EARLIER, so a stage-1 exposure would silently
+                # win and the walk would score the stage-1 frame under the
+                # transport's name.
+                or bool(self._nemo_ws_test_hooks
+                        .expose_tracer_transport_stage)
+                or bool(self._nemo_ws_test_hooks
+                        .expose_stage1_transport_operand)
+                # The exposure publishes the PRODUCTION right-hand side, so
+                # selecting it together with the override would publish the
+                # array the step did NOT use.
+                or (self._nemo_ws_test_hooks.stage1_momentum_rhs_override
+                    is not None)):
             raise ValueError(
                 "expose_stage1_momentum_rhs / expose_stage1_raw_momentum "
-                "cannot be combined with another momentum exposure: they "
-                "share the returned u/v slots")
+                "cannot be combined with another momentum exposure or with "
+                "stage1_momentum_rhs_override: they share the returned u/v "
+                "slots")
         if _stage3_rhs_hook and (
                 self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
                 or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
