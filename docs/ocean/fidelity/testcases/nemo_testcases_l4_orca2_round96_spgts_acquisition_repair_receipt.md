@@ -101,11 +101,20 @@ provenance needed to obtain that record.
 
 ## Gates, tests, and review
 
-The focused record/launcher suite passes 8/8. The citation gate and its
-non-vacuity controls are run after this receipt is committed; their final
-verdict is recorded in the landing commit message and round handoff. The
-prescribed `tests/ocean/fidelity -n 12` battery is likewise run once after the
-receipt exists; known pre-existing failures are not relabelled.
+The focused record/launcher plus citation-gate suite passes 25/25. The default
+citation gate passes 274 citations and this receipt passes all five of its
+compiled citations, with zero unmapped citations, failures, or map-audit
+failures. All nine built-in non-vacuity controls fire; shifting the cited
+mid-step range by two lines makes the receipt gate fail with exit 1.
+
+The prescribed single `tests/ocean/fidelity -n 12` battery reached 99%. The
+round-96 launcher regression test passed in that run. It displayed the known
+worktree-stamp ratchet, recipe case-board ratchet, and SI3 scalar-math
+provenance failures, then reproduced the established silent tail: every
+`python -m pytest` process disappeared without a summary while the launcher
+remained open. After confirming the process census was empty, only the
+stranded launcher was interrupted. This receipt does not represent that wide
+battery as PASS and does not assign an unseen failure.
 
 The required separate `codex exec --sandbox read-only` review did not reach
 the diff: `failed to initialize in-process app-server client: Read-only file
