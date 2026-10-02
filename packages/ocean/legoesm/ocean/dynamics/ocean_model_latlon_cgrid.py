@@ -7018,7 +7018,10 @@ class LatLonCGridOceanModel:
             _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
             _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
-            from legoesm.ocean.eos import nemo_r3t_stretch
+            from legoesm.ocean.eos import (
+                nemo_r3t_rk3_stage1_stretch,
+                nemo_r3t_stretch,
+            )
 
             def _qco_t_ratio(eta_stage):
                 return nemo_r3t_stretch(
@@ -7026,7 +7029,9 @@ class LatLonCGridOceanModel:
                     evaluation="nemo_reciprocal")
 
             _qt_b = _qco_t_ratio(state.eta.data)
-            _qt_13 = _qco_t_ratio(_eta_live_one_third)
+            _qt_13 = nemo_r3t_rk3_stage1_stretch(
+                _zc, state.eta.data, state_new.eta.data,
+                state.H_bathy.data)
             _qt_12 = _qco_t_ratio(_eta_live_one_half)
             _qt_aa = _qco_t_ratio(state_new.eta.data)
             _tracer_qco_weights = (
