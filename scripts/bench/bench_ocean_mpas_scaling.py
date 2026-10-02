@@ -948,13 +948,14 @@ def main() -> int:
             "halo_refresh": halo_refresh,
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
-            "pcg_precond": config.barotropic_implicit_pcg_precond,
-            # The recurrence only runs on the distributed implicit solve.
-            "pcg_variant_effective": (
-                config.barotropic_implicit_pcg_variant
-                if args.barotropic_solver == "implicit_cn" and n_ranks > 1
-                else None),
-            "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
+            # The fixed-M PCG only runs on the distributed implicit solve;
+            # None elsewhere (explicit substeps, or single-rank stock CG).
+            **({"pcg_precond": config.barotropic_implicit_pcg_precond,
+                "pcg_variant_effective": config.barotropic_implicit_pcg_variant,
+                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters)}
+               if args.barotropic_solver == "implicit_cn" and n_ranks > 1 else
+               {"pcg_precond": None, "pcg_variant_effective": None,
+                "pcg_fixed_iters": None}),
             "n_barotropic_substeps": args.n_substeps,
             "conservation_fixer": args.conservation_fixer,
             "eta_floor_clamp_iters": args.eta_floor_iters,

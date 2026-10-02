@@ -373,7 +373,7 @@ class MPASOceanConfig(NamedTuple):
     # ms/step at 1 node, 167 vs 171 at 2, 110 vs 118 at 4, 86.9 vs 97.2 at 8.
     # float32 checked too (same systems): both recurrences reach the f32
     # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
-    # GPU (NCCL) was not re-measured with it; "standard" stays selectable.
+    # GPU (NCCL) was not re-measured with it.
     # "single_reduce_deep" (opt-in): the same recurrence with the cell halo
     # of (r, s) exchanged once every `complete_cell_rings` iterations instead
     # of every iteration; the halo is recomputed redundantly.  Owned results
