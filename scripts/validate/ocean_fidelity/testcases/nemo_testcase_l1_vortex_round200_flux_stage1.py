@@ -51,7 +51,8 @@ DEFAULT_ROOT = Path(
 # The boundaries this walk can score with an existing WRITE-only seam, in
 # NEMO's own stage-1 execution order.
 PLANTS = ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
-          "adv.u", "adv.v", "update.u", "update.v",
+          "adv.u", "adv.v", "base_noadv.u", "base_noadv.v",
+          "advtrend.u", "advtrend.v", "update.u", "update.v",
           "out.u", "out.v")
 
 
@@ -365,6 +366,64 @@ def run(root: Path, *, plant: str | None = None,
              "Krhs after the flux-form dyn_adv (stprk3_stg.f90:316)",
              plant == f"adv.{face}")
 
+    # ---- 4b. THE SPLIT (round 204) --------------------------------------
+    # Round 201 could not attribute the completed right-hand side to a
+    # statement because legoESM's pre-stage array carries an advection term
+    # NEMO's does not: on the ``np_FLX_up3`` branch ``stp_2D`` calls
+    # ``dyn_adv_up3`` with ``pUe``/``pVe`` (stp2d.f90:169-170), which writes
+    # the TWO-dimensional RHS only (dynadv_up3.f90:201,288,349,362-364), so
+    # the three-dimensional ``Krhs`` stage 1 receives is HPG + LDF + COR/MET
+    # (stp2d.f90:137-144; this deck pins ln_dynldf_OFF so LDF adds nothing).
+    # ``expose_stage1_momentum_rhs_split`` publishes legoESM's own stage-1
+    # right-hand side with its advection content removed, which IS
+    # like-for-like with that array, and the trend is then the difference
+    # against the completed row scored just above.
+    _adv_candidate = {face: np.asarray(fields[face])[..., :nlev]
+                      for face in ("u", "v")}
+    # CONTROL, before either row is believed: asking the step-level tendency
+    # for its per-term decomposition flips ``diagnose_momentum`` inside
+    # ``tendencies()``.  Read the completed right-hand side back under THAT
+    # configuration; it must be the same array, cell for cell, or the split
+    # is not a decomposition of the production step.
+    hooks = _NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external,
+        expose_stage1_momentum_rhs_split="completed")
+    diag_fields = lego_fields(model_step(hooks))
+    split_control = {}
+    for face in ("u", "v"):
+        same = np.asarray(diag_fields[face])[..., :nlev]
+        differing = int(np.count_nonzero(same != _adv_candidate[face]))
+        split_control[f"completed_{face}_cells_differing"] = differing
+        require(differing == 0,
+                f"the per-term decomposition moved the completed stage-1 "
+                f"right-hand side in {differing} {face} cells; the split "
+                "would not be like-for-like with the production step")
+    hooks = _NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external,
+        expose_stage1_momentum_rhs_split="pre_advection")
+    fields = lego_fields(model_step(hooks))
+    for face in ("u", "v"):
+        _require_live("base_noadv." + face, face,
+                      np.asarray(fields[face])[..., :nlev])
+        noadv = np.asarray(fields[face])[..., :nlev]
+        _row(f"base_noadv.{face}", groups[f"base_{face}"][..., :nlev], noadv,
+             masks[face],
+             "Krhs as stp_2D leaves it, before dyn_adv "
+             "(stp2d.f90:137-144,169-170)", plant == f"base_noadv.{face}")
+        _row(f"advtrend.{face}",
+             (groups[f"adv_{face}"][..., :nlev]
+              - groups[f"base_{face}"][..., :nlev]),
+             _adv_candidate[face] - noadv, masks[face],
+             "the flux-form dyn_adv trend (stprk3_stg.f90:316)",
+             plant == f"advtrend.{face}")
+        # The partition control: the two halves must put the completed
+        # right-hand side back.  Reported, not asserted bit-exact -- adding
+        # and subtracting the same array is not an identity in floating
+        # point.
+        back = (_adv_candidate[face] - noadv) + noadv
+        split_control[f"partition_{face}_max_abs"] = float(np.max(np.abs(
+            back - _adv_candidate[face])))
+
     # ---- 5. the stage-1 Kaa, after the thickness-weighted update ---------
     # stprk3_stg.F90:372-379 (the ELSE branch at :371, taken because the deck
     # pins ln_vvl_zstar=.true. so lk_linssh is false):
@@ -434,6 +493,7 @@ def run(root: Path, *, plant: str | None = None,
     report = {
         "case": CASE, "oracle_root": str(root), "legoesm_git_sha": sha,
         "plant": plant, "rows": rows, "carrier_rows": carrier_rows,
+        "split_control": split_control,
         "first_non_bit": first["name"] if first else None,
         "first_non_bit_max_abs": first["max_abs"] if first else 0.0,
         "status": "MEASURED",

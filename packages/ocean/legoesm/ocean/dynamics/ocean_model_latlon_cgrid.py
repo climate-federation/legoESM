@@ -1313,6 +1313,21 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # them.
     expose_stage1_momentum_rhs: bool = False
     expose_stage1_raw_momentum: bool = False
+    # WRITE-only stage-1 SPLIT gauge.  ``stp_2D`` leaves the THREE-dimensional
+    # ``Krhs`` with HPG + LDF + COR/MET only: in flux form ``dyn_adv_up3`` is
+    # called with ``pUe``/``pVe`` and writes the two-dimensional RHS alone
+    # (``stp2d.f90:169-170``; ``dynadv_up3.f90:201,288,349,362-364``), while
+    # legoESM's step-level tendency already carries its advection -- so the
+    # two codes' pre-stage arrays are NOT like-for-like and round 201 could
+    # not attribute the stage-1 error to a statement.  ``"pre_advection"``
+    # publishes legoESM's stage-1 right-hand side MINUS the advection content
+    # it carries, which IS like-for-like with NEMO's pre-``dyn_adv`` array;
+    # ``"completed"`` publishes the completed right-hand side from the SAME
+    # evaluation, so a caller can prove that asking ``tendencies()`` for its
+    # per-term decomposition perturbed nothing.  Both substitute the returned
+    # u/v slots only after the ordinary step has completed, and no card
+    # constructs either.
+    expose_stage1_momentum_rhs_split: str = ""
     # One-variable companion of ``stage2_momentum_rhs_override``: supply
     # NEMO's own completed stage-1 Krhs (the recorded ``adv_u``/``adv_v``)
     # immediately before the literal stage update, so the update statement
@@ -2818,7 +2833,16 @@ class LatLonCGridOceanModel:
                 # the exposure silently and the walk would score one stage-1
                 # boundary under the other's name.
                 raise ValueError(f"{_name} must be a bool")
+        _stage1_split = (
+            self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+        if _stage1_split not in ("", "pre_advection", "completed"):
+            raise ValueError(
+                "expose_stage1_momentum_rhs_split must be '', "
+                f"'pre_advection', or 'completed'; got {_stage1_split!r}")
         _stage1_selected = [_name for _name, _flag in _stage1_slots if _flag]
+        if _stage1_split:
+            # It writes the SAME returned u/v slots as the two bools above.
+            _stage1_selected.append("expose_stage1_momentum_rhs_split")
         if _stage1_selected and (
                 len(_stage1_selected) > 1
                 or bool(self._nemo_ws_test_hooks.expose_momentum_stage)
@@ -5634,7 +5658,9 @@ class LatLonCGridOceanModel:
         _rhs_term_observer = (
             self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
         _want_rhs_components = (
-            _return_live_stage_operands or callable(_rhs_term_observer))
+            _return_live_stage_operands or callable(_rhs_term_observer)
+            or bool(self._nemo_ws_test_hooks
+                    .expose_stage1_momentum_rhs_split))
         _tend_result = self.tendencies(
                                state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
@@ -5658,6 +5684,19 @@ class LatLonCGridOceanModel:
             tend, _mom_term_diagnostics, _live_operands = _tend_result
             _nemo_ws_stage1_operator_operands = (
                 _live_operands if _return_live_stage_operands else None)
+            # dyn_adv's content as THIS evaluation accumulated it: the half
+            # of the step-level right-hand side that NEMO's three-dimensional
+            # pre-stage array does not carry.  ``advection_u`` is
+            # -dKE_dx + Dterm + vertadv and ``flux_form_hadv_u`` the
+            # flux-form horizontal trend, which shares its diagnostic slot
+            # with the rotation terms and is therefore published apart
+            # (zero on every vector-invariant card, where the KE gradient
+            # inside ``advection_u`` carries the horizontal half instead).
+            _nemo_ws_stage1_main_advection = (
+                _live_operands["advection_u"].data
+                + _live_operands["flux_form_hadv_u"].data,
+                _live_operands["advection_v"].data
+                + _live_operands["flux_form_hadv_v"].data)
             if callable(_rhs_term_observer):
                 jax.debug.callback(
                     _rhs_term_observer,
@@ -5667,6 +5706,7 @@ class LatLonCGridOceanModel:
         else:
             tend = _tend_result
             _nemo_ws_stage1_operator_operands = None
+            _nemo_ws_stage1_main_advection = None
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -7402,6 +7442,37 @@ class LatLonCGridOceanModel:
             )
             if self._nemo_ws_test_hooks.expose_stage1_momentum_rhs:
                 _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+            _stage1_split_arm = (
+                self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+            if _stage1_split_arm:
+                if _nemo_ws_stage1_main_advection is None:
+                    raise ValueError(
+                        "expose_stage1_momentum_rhs_split needs the "
+                        "step-level per-term decomposition")
+                if _aimp_vertadv_ws:
+                    # With ln_zad_Aimp=.true. the step-level tendency does
+                    # NOT carry the vertical advection that ``advection_u``
+                    # reports (it is applied as its own operator-split
+                    # stage), so subtracting the reported half would remove a
+                    # term the array never held.  Fail closed.
+                    raise ValueError(
+                        "expose_stage1_momentum_rhs_split is defined only "
+                        "with adaptive_implicit_vertadv disabled")
+                if _stage1_split_arm == "completed":
+                    _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+                else:
+                    # ``_stage1_rhs_base`` is the stage-1 right-hand side
+                    # before the two increments added below it, and BOTH of
+                    # those increments are pure advection (the zub transport
+                    # operand and the stage ZAD operand), so removing the
+                    # step-level advection component here leaves exactly the
+                    # non-advective right-hand side -- NEMO's
+                    # ``Krhs`` as ``stp_2D`` hands it to stage 1.
+                    _nemo_ws_exposed_stage1_rhs = (
+                        _stage1_rhs_base[0]
+                        - _nemo_ws_stage1_main_advection[0],
+                        _stage1_rhs_base[1]
+                        - _nemo_ws_stage1_main_advection[1])
             if self._nemo_ws_test_hooks.stage1_momentum_rhs_override is not None:
                 _u1_rhs, _v1_rhs = (
                     self._nemo_ws_test_hooks.stage1_momentum_rhs_override)
