@@ -113,7 +113,12 @@ Evidence is under
 `admission.log`, `een_operand_discrimination.json`,
 `een_fold_scale_arm.json`, `een_direct_accumulator.json`, and both firing
 operand plants. The rank-log plant is in the same directory. The focused
-record/probe battery passes 3/3.
+record plus citation-gate battery passes 20/20.
+
+The default receipt citation gate passes 274 citations and this receipt passes
+three, each with zero unmapped citations, citation failures, or map-audit
+failures. Shifting the cited U recurrence by two lines fires
+`SYMBOL-NOT-AT-LINE` and exits nonzero.
 
 The one prescribed `tests/ocean/fidelity -n 12` invocation reached 97% and
 then stopped producing output after every pytest worker had exited. It was
