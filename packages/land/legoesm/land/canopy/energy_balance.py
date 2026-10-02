@@ -20,16 +20,17 @@ import functools
 
 import jax
 import jax.numpy as jnp
-
-from legoesm import constants
-from legoesm.thermo import (
-    saturation_vapor_pressure_aerk,
-    d_saturation_vapor_pressure_aerk,
-    dd_saturation_vapor_pressure_aerk,
-    vapor_pressure_from_specific_humidity,
-)
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.stomata import ball_berry_gs, medlyn_gs
+from legoesm.thermo import (
+    d_saturation_vapor_pressure_aerk,
+    dd_saturation_vapor_pressure_aerk,
+    latent_heat_vaporization,
+    saturation_vapor_pressure_aerk,
+    vapor_pressure_from_specific_humidity,
+)
+
+from legoesm import constants
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
@@ -42,11 +43,6 @@ _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
 # mol m-2 s-1 → m s-1 leaf-conductance prefactor at IUPAC STP (encodes the
 # reference molar volume 22.4 L/mol); scaled by (T_freeze/Tf)·(Ps/_Ps0).
 _CF_MOLAR_VOLUME = 0.446
-
-# Latent-heat-of-vaporisation temperature slope −dλ/dT [J kg-1 K-1], used as
-# λ(T) = L_v − _LAMBDA_T_SLOPE·(T − T_freeze). DifferBESS canopy value; distinct
-# from ``constants.L_v_sst_slope`` (2.370e3) — keep the canopy value verbatim.
-_LAMBDA_T_SLOPE = 2.361e3
 
 # Minimum cuticular (residual) stomatal conductance [mol m-2 s-1].  Stomata
 # never fully close — the leaf cuticle always leaks a little — so the conductance
@@ -174,7 +170,6 @@ def canopy_met_variables(
     """
     # Vapour pressure from specific humidity
     e_c  = vapor_pressure_from_specific_humidity(q_c, Ps)
-    TcC  = Tc - constants.T_freeze
     # Saturation vapour pressure + its analytic derivatives from the shared AERK
     # water+ice curve (one consistent curve; over-ice below freezing).  ddesTc
     # uses the saturation curve only (no actual vapour pressure) — the historical
@@ -187,7 +182,10 @@ def canopy_met_variables(
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
 
     # Latent heat (temperature-corrected) and psychrometric constant
-    lam   = constants.L_v - _LAMBDA_T_SLOPE * TcC
+    # One latent heat for the codebase (user decision 2026-09-30): the core
+    # Kirchhoff L_v(T) replaces the canopy's own 2361 J/kg/K slope (2372 here;
+    # gamma moves by ~1e-4 at 30 degC).
+    lam   = latent_heat_vaporization(Tc)
     gamma = constants.c_pd / constants.epsilon * Ps / lam   # [Pa K-1]
 
     return e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma

@@ -76,3 +76,19 @@ def test_barrier_is_value_and_gradient_neutral_under_jit():
         return jnp.sum(tend(state._replace(u=state.u.replace(data=u))) ** 2)
 
     check_grads(loss, (u0,), order=1, modes=["rev"], rtol=1e-4, atol=1e-6)
+
+
+def test_barrier_gradient_equals_unfenced_gradient_under_jit():
+    state, mesh, sig = _setup()
+    cfg = MPASPrimitiveEquationConfig()
+
+    def grad_u(fence):
+        def loss(u):
+            s = state._replace(u=state.u.replace(data=u))
+            return jnp.sum(mpas_hydrostatic_tendencies(
+                s, mesh, sig, cfg, fence_pv_flux=fence).du_dt.data ** 2)
+        return np.asarray(jax.jit(jax.grad(loss))(state.u.data))
+
+    fenced, unfenced = grad_u(True), grad_u(False)
+    assert np.all(np.isfinite(fenced)) and np.any(fenced != 0.0)
+    np.testing.assert_allclose(fenced, unfenced, rtol=1e-12, atol=1e-18)

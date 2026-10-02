@@ -82,7 +82,7 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     """
     deficit = jnp.maximum(-q_v_raw, 0.0)
     q_v_out = q_v_raw + deficit
-    T_out = T - (constants.L_v / constants.c_pd) * deficit
+    T_out = T - (constants.L_v / constants.c_pd) * deficit  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     return q_v_out, T_out
 
 
@@ -120,9 +120,9 @@ def is_borrow_eligible_tracer(name: str) -> bool:
 #: HARD-floor certificate only; the BORROW is h-neutral for every species with
 #: no T change (it conserves each column integral), so it needs none of this.
 _FLOOR_LATENT_COEF = {
-    "q_v": constants.L_v,
+    "q_v": constants.L_v,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     "q_c": 0.0, "q_r": 0.0,
-    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,
+    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
 }
 
 

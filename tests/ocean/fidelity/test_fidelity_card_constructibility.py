@@ -66,7 +66,9 @@ def test_dino_card_constructs(recipe_name):
     assert np.asarray(model.z_coord.z_full_ref).dtype == np.float64
 
 
-@pytest.mark.parametrize("case", ("LOCK_EXCHANGE-zco", "OVERFLOW-zps"))
+@pytest.mark.parametrize(
+    "case",
+    ("LOCK_EXCHANGE-zco", "OVERFLOW-zps", "VORTEX-zco", "VORTEX_VEC-zco"))
 def test_nemo_testcase_card_constructs(case):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -80,8 +82,35 @@ def test_nemo_testcase_card_constructs(case):
     validate_nemo_testcase_card(card)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    assert model.config.eos == "nemo_teos10"
-    assert model.config.eos_depth == "geometric"
+    if case.startswith("VORTEX"):
+        # VORTEX is the one card whose &nameos selects NEMO's simplified
+        # equation of state (decision 69); every other card runs TEOS-10.
+        # Its S-EOS is depth-blind, so it needs no geometric-depth ladder.
+        assert model.config.eos == "nemo_seos"
+        assert model.config.eos_depth == "insitu"
+        assert model.config.eos_nemo_seos is not None
+        assert model.config.eos_nemo_seos.a0 == 0.28
+        # VORTEX is the first card on this identity with a LIVE rotation
+        # operator, and building the model is what discovered that the model
+        # used to REFUSE the scheme pair its namelist selects.  It now runs
+        # NEMO's energy-and-enstrophy triad on the planetary vorticity, with
+        # the Matsuno rotation off so f enters exactly once.
+        assert model.config.coriolis_scheme == "explicit_ab2"
+        assert not model.config.adaptive_implicit_vertadv
+        if case == "VORTEX-zco":
+            assert model.config.vorticity_scheme == "een_planetary"
+            assert model.config.momentum_advection == "flux_form"
+        else:
+            # The vector-EEN deck (decision 73): the same triad, handed the
+            # live relative vorticity as well as the planetary one, plus the
+            # kinetic-energy gradient and the vertical advection of momentum.
+            assert model.config.vorticity_scheme == "een_total"
+            assert model.config.momentum_advection == "vector_invariant"
+            assert model.config.ke_gradient_scheme == "c2"
+            assert model.config.vertical_momentum_scheme == "nemo_advective"
+    else:
+        assert model.config.eos == "nemo_teos10"
+        assert model.config.eos_depth == "geometric"
 
 
 def test_l2_gyre_testcase_card_constructs():

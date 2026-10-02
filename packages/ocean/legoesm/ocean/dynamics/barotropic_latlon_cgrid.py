@@ -2620,15 +2620,31 @@ def barotropic_substeps_latlon_cgrid(
         _h_k_corr = compute_layer_thickness(
             _h_eta_corr, H_bathy, z_coord,
             min_water_column_m=config.min_water_column_m).astype(_dt)
-        # OPEN, DELIBERATE ASYMMETRY (PR #1802 review, finding B2ii): this
-        # REPLACEMENT reference keeps the shared min-rule/generic reduction
-        # even on a card whose window SEED uses the NEMO ssh-average face
-        # depth and the literal mesh evaluation.  It is left that way on
-        # purpose: the literal seed evaluation is a different code path with
-        # its own operands (eta_dyn / H_bathy / area / z_coord), so adopting
-        # it here would change every certified NEMO trajectory, and that is an
-        # operator decision, not a silent one.  Do not "fix" this in passing —
-        # moving it re-certifies GYRE, ORCA2 and DINO.
+        # DECISION 67 (user, 2026-09-28) IS HELD, AND ITS PREMISE IS
+        # REFUTED.  The decision was to give this replacement depth-mean the
+        # card's own face-thickness convention, on the reading that NEMO forms
+        # its barotropic velocity by dividing the accumulated transport by the
+        # e1e2-weighted ssh-averaged face depth
+        # (``dynspg_ts.f90:835-842``).  That statement is inside
+        # ``IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av )``, and
+        # BOTH cards this campaign runs set ``ln_dynadv_vec = .TRUE.``
+        # (GYRE ``EXP00/ocean.output:780``, DINO ``RUN_TRAJ/ocean.output:1012``),
+        # so that branch never executes here.  What NEMO actually runs on these
+        # cards sums the substep VELOCITIES and divides by the weight sum --
+        # ``puu_b(:,:,Kaa) = puu_b(:,:,Kaa) + za1 * ua_e(:,:)``
+        # (``dynspg_ts.f90:768``) then ``/ r1_wgt1s``
+        # (``dynspg_ts.f90:802``) -- with NO face depth in it at all.
+        # Threading the ssh-average convention through here would therefore
+        # transcribe a convention NEMO does not use on any card under test, so
+        # the generic reduction stays until the user rules on the real
+        # statement.  Measured, for whoever picks this up: the threading is
+        # INERT on every ``rk3_ws`` card (GYRE and both tanks are byte-identical
+        # with and without it, and a 1e-6 relative perturbation of this
+        # reference moves no row of the certified ladder, because
+        # ``rk3_stage_barotropic_correction`` replaces the velocity downstream),
+        # and on DINO -- the one card that consumes it -- it moves the 90-day
+        # twin's ACC by 7e-6 Sv.  See the PR #1802 final re-certification
+        # receipt.
         U_bar_corr, V_bar_corr = _depth_average_to_faces(
             u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,
         )

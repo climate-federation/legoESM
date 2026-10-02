@@ -489,10 +489,26 @@ class CubedSphereToLatLonWeights(NamedTuple):
     lat_cent: np.ndarray
 
 
+def _target_lat(n_lat: int, lat_cent) -> np.ndarray:
+    """Target latitudes [deg]: pole-to-pole ``linspace(-90, 90, n_lat)`` by
+    default, or the caller's own row centres (e.g. the CMIP writer's
+    cell-centred labels) so samples and labels come from ONE definition."""
+    if lat_cent is None:
+        return np.linspace(-90.0, 90.0, n_lat)
+    lat = np.asarray(lat_cent, dtype=np.float64)
+    if (lat.shape != (n_lat,) or n_lat == 0 or not np.all(np.isfinite(lat))
+            or np.any(np.diff(lat) <= 0.0) or lat[0] < -90.0 or lat[-1] > 90.0):
+        raise ValueError(
+            f"lat_cent must be {n_lat} finite, strictly increasing latitudes "
+            f"in [-90, 90]; got shape {lat.shape}")
+    return lat
+
+
 def compute_cubedsphere_to_latlon_weights(
     n: int,
     n_lon: int = 360,
     n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Precompute face-aware bilinear weights for CS → lat-lon.
 
@@ -511,6 +527,8 @@ def compute_cubedsphere_to_latlon_weights(
         Cubed-sphere tile size (cells per face edge).
     n_lon, n_lat : int
         Output regular lat-lon grid dimensions.
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
 
     Returns
     -------
@@ -518,7 +536,7 @@ def compute_cubedsphere_to_latlon_weights(
     """
     # Target grid
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     lon_r = np.deg2rad(lon2d.ravel())
@@ -590,17 +608,19 @@ def compute_cubedsphere_to_latlon_weights(
     )
 
 
-_cs_weights_cache: dict[tuple[int, int, int], CubedSphereToLatLonWeights] = {}
+_cs_weights_cache: dict[tuple, CubedSphereToLatLonWeights] = {}
 
 
 def get_cubedsphere_to_latlon_weights(
     n: int, n_lon: int = 360, n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Cached version of :func:`compute_cubedsphere_to_latlon_weights`."""
-    key = (n, n_lat, n_lon)
+    key = (n, n_lat, n_lon, None if lat_cent is None
+           else tuple(np.asarray(lat_cent, dtype=np.float64).tolist()))
     if key not in _cs_weights_cache:
         _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
+            n, n_lon=n_lon, n_lat=n_lat, lat_cent=lat_cent)
     return _cs_weights_cache[key]
 
 
@@ -770,6 +790,7 @@ def compute_voronoi_to_latlon_weights(
     n_lon: int = 360,
     n_lat: int = 181,
     k: int = 3,
+    lat_cent: np.ndarray | None = None,
 ) -> VoronoiToLatLonWeights:
     """Precompute IDW k-nearest weights from Voronoi cell centres to lat-lon.
 
@@ -782,11 +803,13 @@ def compute_voronoi_to_latlon_weights(
         Output regular lat-lon grid dimensions.
     k : int
         Number of nearest source cells per target point (clamped to nCells).
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
     """
     from scipy.spatial import cKDTree
 
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),

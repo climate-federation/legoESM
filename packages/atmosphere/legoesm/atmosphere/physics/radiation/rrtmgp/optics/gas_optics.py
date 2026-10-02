@@ -19,6 +19,7 @@ from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_base
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_longwave
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_shortwave
@@ -353,6 +354,7 @@ def _compute_minor_optical_depth(
     igpt: Array,
     is_lower_atmosphere: bool,
     vmr_fields: dict[int, Array] | None = None,
+    n_trips: int | None = None,
 ) -> Array:
   """Compute the optical depth from minor gases given atmosphere region.
 
@@ -371,6 +373,10 @@ def _compute_minor_optical_depth(
     vmr_fields: An optional dictionary containing precomputed volume mixing
       ratio fields, keyed by gas index, that will overwrite the global means for
       those gases that have a vmr field already available.
+    n_trips: Python-int loop trip count (never traced: a traced bound would
+      make the loop non-reverse-differentiable).  ``None`` (every caller)
+      uses the widest band's absorber range; tests pass a larger value to
+      check the result matches a longer masked loop.
 
   Returns:
     An `Array` with the pointwise optical depth contributions from the minor
@@ -454,21 +460,31 @@ def _compute_minor_optical_depth(
     )
     return lambda: scaling
 
-  # Optical depth will be aggregated over all the minor absorbers contributing
-  # to the frequency band.  We use fori_loop over the full static range and
-  # mask inactive iterations so that reverse-mode AD works (while_loop with
-  # dynamic stopping is not reverse-mode differentiable).
-  minor_start_idx = minor_bnd_start[ibnd]
-  _sentinel = jnp.array(minor_absorber_intervals, dtype=minor_start_idx.dtype)
-  i0 = jax.lax.cond(
-      minor_start_idx >= 0,
-      true_fun=lambda: minor_start_idx,
-      false_fun=lambda: _sentinel,
-  )
+  # Optical depth is aggregated over the minor absorbers i in [start, end]
+  # of the band (empty band: start = end = n, the sentinel).  The loop walks
+  # that range from its start with a STATIC trip count -- the widest range
+  # over all bands, read from the (concrete) table -- and masks the tail, so
+  # it adds exactly the same terms in the same order as a loop over all n
+  # absorbers masked to [start, end], minus the exact +0.0 additions (60 trips
+  # where 11 suffice for the LW lower table: most of the radiation step).
+  # A static trip count keeps reverse-mode AD (a dynamic-stop while_loop is
+  # not reverse-differentiable).
+  n_minor = minor_absorber_intervals
+  _starts, _ends = np.asarray(minor_bnd_start), np.asarray(minor_bnd_end)
+  if np.any(_starts < 0) or np.any(_ends[_starts < n_minor] >= n_minor):
+    raise ValueError(
+        'minor absorber band limits must lie in [0, n) with n as the '
+        'empty-band sentinel')
+  _has = _starts < n_minor
+  if n_trips is None:
+    n_trips = int(np.max(_ends[_has] - _starts[_has] + 1)) if _has.any() else 0
+  i0 = minor_bnd_start[ibnd]
   bnd_end = minor_bnd_end[ibnd]
 
-  def body_fn(i, tau_minor):
-    active = jnp.logical_and(i >= i0, i <= bnd_end)
+  def body_fn(j, tau_minor):
+    i_run = i0 + j
+    active = jnp.logical_and(i_run <= bnd_end, i_run < n_minor)
+    i = jnp.minimum(i_run, n_minor - 1)
     # Map the minor contributor to the RRTMGP gas index.
     gas_idx = idx_gases_minor[i] * jnp.ones_like(tropo_idx)
     vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields).astype(_wdtype)
@@ -495,7 +511,7 @@ def _compute_minor_optical_depth(
 
   tau_minor_0 = jnp.zeros_like(temperature)
 
-  return jax.lax.fori_loop(0, minor_absorber_intervals, body_fn, tau_minor_0)
+  return jax.lax.fori_loop(0, n_trips, body_fn, tau_minor_0)
 
 
 def compute_minor_optical_depth(

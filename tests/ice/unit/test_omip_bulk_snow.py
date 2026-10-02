@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+from legoesm.thermo import latent_heat_sublimation
 from legoesm.grids.latlon import create_latlon_geometry
 from legoesm.ice import (
     SeaIceConfig, distribute_dynamic_state_to_categories,
@@ -285,9 +286,9 @@ def test_sublimation_deposition_mass_and_surface_energy_sign(monkeypatch, latent
     out = _column(cfg, forc, T=T, snow=hs, h=h, dt=dt, conc=conc)
     # Positive latent is upward sublimation; negative latent is deposition.
     np.testing.assert_allclose((hs - out["h_snow"]) * cfg.snow.rho_snow,
-                               latent / constants.L_s * dt, rtol=1e-9, atol=1e-12)
+                               latent / float(latent_heat_sublimation(T)) * dt, rtol=1e-9, atol=1e-12)
     np.testing.assert_allclose(out["sublim_mass_to_atmos"],
-                               latent / constants.L_s * conc, rtol=1e-10)
+                               latent / float(latent_heat_sublimation(T)) * conc, rtol=1e-10)
     q = (forc.sw_down * (1 - cfg.albedo_ice - min(cfg.sw_transmittance_const, 1 - cfg.albedo_ice))
          + cfg.emissivity_ice * (forc.lw_down - constants.sigma_sb * T**4) - latent)
     k = 1 / (h / cfg.k_ice + hs / cfg.snow.k_snow)

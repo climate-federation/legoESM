@@ -40,7 +40,6 @@ from legoesm.land.multilayer_land import (
     init_multilayer_land_state,
     step_multilayer_land_with_diagnostics,
 )
-from legoesm.land.richards import RichardsConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
@@ -215,7 +214,10 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
-        kw["richards"] = RichardsConfig(bottom_bc=bottom_bc)
+        # Only the bottom boundary changes; every other Richards setting
+        # (incl. the field-capacity drainage limiter) stays the land default.
+        kw["richards"] = MultiLayerLandConfig().richards._replace(
+            bottom_bc=bottom_bc)
     if texture is not None:
         from legoesm.land import soil_texture as _st
         sand, clay = float(texture[0]), float(texture[1])

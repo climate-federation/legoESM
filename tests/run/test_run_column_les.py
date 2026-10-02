@@ -649,9 +649,18 @@ def test_column_surface_kinematic_fluxes_sign_and_reuse():
         jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
         jnp.atleast_1d(rho), cfg)
     exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    # Water: the bulk law charged Kirchhoff L_v(SST), so the inverse uses it too.
+    from legoesm.thermo import latent_heat_vaporization
+    evap = lh[0] / latent_heat_vaporization(sst)
+    np.testing.assert_allclose(float(w_qv), float(evap / rho), rtol=1e-12)
+    # Heat: the moist-enthalpy correction lh - L_v * E rides on the heat BC
+    # (the LES credits vapour at the constant L_v); ~3 % of lh at 300 K, negative.
+    corr = lh[0] - constants.L_v * evap
+    assert float(corr) < 0.0
+    np.testing.assert_allclose(float(corr / lh[0]),
+                               1.0 - constants.L_v / float(latent_heat_vaporization(sst)), rtol=1e-12)
     np.testing.assert_allclose(
-        float(w_th), float(sh[0] / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
-    np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
+        float(w_th), float((sh[0] + corr) / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
 
     # COLD SST (SST < T_1) ⇒ surface COOLS the air ⇒ w'θ'_s < 0 (sign flips) — non-vacuity.
     w_th_cold, _ = column_surface_kinematic_fluxes(
@@ -699,8 +708,15 @@ def test_column_surface_kinematic_fluxes_independent_analytic():
     wind = float(jnp.sqrt(u_col[s] ** 2 + v_col[s] ** 2 + 1e-4))  # production floor
     exner = float((constants.p_ref / p_s) ** constants.kappa)
     q_sfc = float(saturation_mixing_ratio(sst, p_s))
-    w_th_expected = ch * wind * (float(sst) - float(T_col[s])) * exner
     w_qv_expected = ch * wind * (q_sfc - float(q_col[s]))
+    # The heat BC carries the moist-enthalpy correction (lh - L_v E)/(rho c_pd):
+    # the bulk law charged Kirchhoff L_v(SST) per kg, the LES credits L_v; the
+    # rho cancels here too, leaving Ch |U| dq (L_v(SST) - L_v) / c_pd.
+    from legoesm.thermo import latent_heat_vaporization
+    corr = (w_qv_expected
+            * (float(latent_heat_vaporization(sst)) - constants.L_v) / constants.c_pd)
+    assert corr < 0.0   # 292 K > T0: L_v(SST) < L_v
+    w_th_expected = (ch * wind * (float(sst) - float(T_col[s])) + corr) * exner
 
     assert float(w_th) == pytest.approx(w_th_expected, rel=1e-12)
     assert float(w_qv) == pytest.approx(w_qv_expected, rel=1e-12)

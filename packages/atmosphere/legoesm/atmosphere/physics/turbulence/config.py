@@ -368,6 +368,11 @@ class SurfaceLayerConfig(NamedTuple):
     # not a tunable closure.
     prescribed_shflx_w_m2: float | None = None
     prescribed_lhflx_w_m2: float | None = None
+    # Prescribed surface WATER flux [kg/m2/s, positive up] from the coupler's
+    # tiles.  When set, the kernel's moisture lower BC is this mass flux (no
+    # heat -> water conversion); when None, the water flux is
+    # prescribed_lhflx_w_m2 / L_v(T_sfc) (surface_layer.surface_moisture_flux).
+    prescribed_evap_kg_m2_s: float | None = None
     # Stress ON THE ATMOSPHERE (opposite sign to the wind), matching
     # tau_x/tau_y in compute_surface_fluxes. [Pa]
     prescribed_tau_x_pa: float | None = None

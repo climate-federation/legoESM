@@ -35,7 +35,7 @@ _SKIP_EXACT = frozenset({
     "ic_path", "forcing_path", "sic_path", "solar_file", "ozone_file",
     "ghg_file", "aerosol_file", "volcanic_aerosol_file", "topography",
     "surfdata_path", "clm_surfdata_path", "land_mask_path", "land_mask_file",
-    "subgrid_orography_path", "subgrid_orography_file", "era5_land_ic_path",
+    "subgrid_orography_path", "subgrid_orography_file",
     "land_ic_path", "max_wallclock_seconds", "output", "cmor_output",
     "monthly_means",
 })
