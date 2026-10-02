@@ -368,7 +368,10 @@ def vector_laplacian_del2(u_edge, mesh):
     # For C-grid: tangent of curl gradient = (curl[v1] - curl[v0]) / dvEdge
     v0 = mesh.verticesOnEdge[0]
     v1 = mesh.verticesOnEdge[1]
-    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / mesh.dvEdge
+    # Padding edges carry dvEdge = 0 (and v0 == v1): 0/0 there is NaN, and
+    # its derivative poisons reverse mode even where the value is discarded.
+    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / jnp.where(
+        mesh.dvEdge > 0, mesh.dvEdge, 1.0)
 
     return grad_div - grad_curl_tangent
 
@@ -760,7 +763,10 @@ def vector_laplacian_del2_3d(u_edge_3d, mesh):
 
     v0 = mesh.verticesOnEdge[0]
     v1 = mesh.verticesOnEdge[1]
-    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / mesh.dvEdge[:, None]
+    # Padding edges carry dvEdge = 0 (and v0 == v1): 0/0 there is NaN, and
+    # its derivative poisons reverse mode even where the value is discarded.
+    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / jnp.where(
+        mesh.dvEdge > 0, mesh.dvEdge, 1.0)[:, None]
 
     return grad_div - grad_curl_tangent
 
