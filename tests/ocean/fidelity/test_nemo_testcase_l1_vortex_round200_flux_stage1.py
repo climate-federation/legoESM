@@ -132,3 +132,15 @@ def test_the_walk_names_nemos_stage1_order():
     assert walk.PLANTS == ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
                            "out.u", "out.v")
     assert walk.CASE == "VORTEX-zco"
+
+
+def test_the_seam_control_refuses_an_inert_exposure():
+    # The control the walk relies on to know its WRITE-only hooks are live.
+    # Shown to FAIL on exactly the thing it guards against, and to stay
+    # silent on a live seam, so it is not a tripwire that cannot trip.
+    plain = np.arange(12.0).reshape(3, 4)
+    with pytest.raises(Exception, match="the seam is inert"):
+        walk.require_live("inert", "u", plain, plain)
+    live = plain.copy()
+    live[0, 0] += 1.0
+    walk.require_live("live", "u", live, plain)

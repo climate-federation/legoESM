@@ -54,6 +54,24 @@ PLANTS = ("base.u", "base.v", "zfu", "zfv", "zfw", "ww",
           "out.u", "out.v")
 
 
+def require_live(label: str, slot: str, exposed, plain) -> None:
+    """Refuse an exposure that returned the ordinary step output.
+
+    Every row of this walk is read out of a state slot the ordinary step also
+    fills, so a hook that went inert would hand the walk the PLAIN output and
+    the row would still score a number.  Perturbing the candidate afterwards
+    proves the scoring reacts, not that the seam is live.
+    """
+    exposed = np.asarray(exposed)
+    plain = np.asarray(plain)[..., :exposed.shape[-1]]
+    require(exposed.shape == plain.shape,
+            f"{label}: the exposed {slot} slot has shape {exposed.shape}, the "
+            f"ordinary step output {plain.shape}")
+    require(int(np.count_nonzero(exposed == plain)) != exposed.size,
+            f"{label}: the exposed {slot} slot is identical to the ordinary "
+            "step output in every cell; the seam is inert")
+
+
 def read_flux_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
     """Every named group of the round-200 flux record, self-described."""
     checker_path = HERE / "nemo_testcase_l1_vortex" / "check_records.py"
@@ -164,13 +182,7 @@ def run(root: Path, *, plant: str | None = None,
         stage_barotropic_output_override=external)))
 
     def _require_live(label, slot, values):
-        same = int(np.count_nonzero(
-            np.asarray(values) == np.asarray(plain[slot])[
-                ..., :np.asarray(values).shape[-1]]))
-        total = int(np.asarray(values).size)
-        require(same != total,
-                f"{label}: the exposed {slot} slot is identical to the "
-                "ordinary step output in every cell; the seam is inert")
+        require_live(label, slot, values, plain[slot])
 
     observed: dict[str, np.ndarray] = {}
 
