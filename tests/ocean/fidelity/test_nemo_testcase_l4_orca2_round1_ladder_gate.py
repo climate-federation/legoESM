@@ -96,6 +96,30 @@ def test_compare_fields_detects_signed_zero_bit_difference():
     assert result["rows"]["T"]["max_abs"] == 0.0
 
 
+def test_card_entry_admits_only_temperature_zero_signs():
+    expected = {
+        name: np.zeros((2,), dtype=np.float64) for name in gate.FIELD_ORDER
+    }
+    actual = {name: value.copy() for name, value in expected.items()}
+    expected["T"][0] = np.float64(-0.0)
+
+    admitted = gate.compare_card_entry_to_masked_record(actual, expected)
+
+    assert admitted["first_non_bit_field"] is None
+    assert admitted["dry_temperature_zero_sign_differences"] == 1
+
+    actual["T"][1] = np.nextafter(0.0, 1.0)
+    assert gate.compare_card_entry_to_masked_record(
+        actual, expected)["first_non_bit_field"] == "T"
+
+    expected["S"][0] = np.float64(-0.0)
+    assert gate.compare_card_entry_to_masked_record(
+        actual={name: np.zeros((2,), dtype=np.float64)
+                for name in gate.FIELD_ORDER},
+        expected=expected,
+    )["first_non_bit_field"] == "S"
+
+
 def test_surface_support_names_every_missing_step(tmp_path):
     result = gate.surface_support(tmp_path)
     assert result["trajectory_supported"] is False

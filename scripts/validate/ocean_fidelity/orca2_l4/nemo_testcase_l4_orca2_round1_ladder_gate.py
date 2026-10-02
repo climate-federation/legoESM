@@ -207,6 +207,34 @@ def compare_fields(
             "first_non_bit_field": first_non_bit}
 
 
+def compare_card_entry_to_masked_record(
+    actual: dict[str, np.ndarray], expected: dict[str, np.ndarray]
+) -> dict[str, object]:
+    """Compare the card input while classifying NEMO's dry-T signed zeros.
+
+    The compiled ORCA2 initializer multiplies interpolated temperature by
+    ``tmask`` (dtatsd.f90:294,308). A negative dry value therefore becomes
+    ``-0.0``; the card loader canonicalizes the same inactive value to
+    ``+0.0``. This precondition admits that one representation difference
+    only. Every executed trajectory comparison still uses ``compare_fields``
+    and remains a strict bit predicate.
+    """
+
+    canonical = {name: np.array(value, copy=True)
+                 for name, value in actual.items()}
+    zero_sign_only = np.logical_and(
+        actual["T"] == 0.0,
+        expected["T"] == 0.0,
+    )
+    canonical["T"][zero_sign_only] = expected["T"][zero_sign_only]
+    result = compare_fields(canonical, expected)
+    raw_bits = actual["T"].view(np.uint64) != expected["T"].view(np.uint64)
+    result["dry_temperature_zero_sign_differences"] = int(
+        np.count_nonzero(np.logical_and(raw_bits, zero_sign_only)))
+    result["zero_sign_scope"] = "temperature zeros only at the card-input precondition"
+    return result
+
+
 def card_fields(deck_root: Path) -> tuple[dict[str, np.ndarray], object]:
     import jax
     import jax.numpy as jnp
@@ -1134,7 +1162,7 @@ def run_gate(
     v2_entry = read_state_frame(
         v2_root / "oracle_step_entry_kt00000001.bin", kt=1, stage=None
     )
-    card_vs_v2 = compare_fields(candidate, v2_entry)
+    card_vs_v2 = compare_card_entry_to_masked_record(candidate, v2_entry)
     require(card_vs_v2["first_non_bit_field"] is None,
             "planted kt1 T identity control fired" if plant else
             f"current card no longer matches V2 at kt=1: {card_vs_v2['first_non_bit_field']}")
