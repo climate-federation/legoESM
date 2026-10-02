@@ -277,9 +277,9 @@ def require_uniform_float_jax(fname: str, arrays: dict) -> None:
                 f"storage dtype (FV3DuoConfig.storage_dtype).")
 
 
-# Back-compat alias: the historical name is used at ~40 call sites and in
-# every private per-module copy. Keep it pointing at the generalised gate
-# so the certified fp64 path is byte-identical and no call site churns.
+# Back-compat alias: the historical name is used at ~40 call sites. Keep it
+# pointing at the generalised gate so the certified fp64 path is
+# byte-identical and no call site churns.
 require_f64_jax = require_uniform_float_jax
 
 
