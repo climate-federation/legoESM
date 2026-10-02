@@ -106,8 +106,23 @@ when face masks were assumed three-dimensional; none produced a model number.
 The final gate narrows capture to existing production tendency components and
 uses the card gate's established face masks.
 
-Test and independent-review results are recorded in the closing commit of this
-receipt; no PASS is claimed here before those commands finish.
+The focused round-93, rung-0-card, and citation-gate battery passes 25/25. The
+round receipt citation gate passes all seven citations and the default gate
+passes all 274 citations, both with zero failures and zero unmapped entries;
+shifting the vertical-average citation by two lines makes the gate fail.
+
+The prescribed single `tests/ocean/fidelity -n 12` run selected 2,233 tests,
+displayed six failures, and reached 96%, then reproduced the established
+silent-tail stall. It was stopped after three consecutive empty 30-second
+waits following its last progress. Because xdist emitted no failure summary
+before the interrupt, this receipt does not assign names to those six visible
+failures and makes no full-suite PASS claim. The round-93 focused tests had
+already passed both alone and within that battery.
+
+The required separate read-only review failed before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**. A local `git diff
+--check` is clean; it is not represented as independent review.
 
 ## OPEN
 
