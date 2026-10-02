@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight and admit Decision 83's replacement rung-3 oracle record."""
+"""Preflight and admit Decision 83's replacement rung-2 oracle record."""
 
 from __future__ import annotations
 
@@ -17,34 +17,33 @@ if str(REPO) not in sys.path:
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
-    nemo_testcase_l4_orca2_hier_decks_round9_gate as legacy,
+    nemo_testcase_l4_orca2_hier_decks_round10_gate as legacy,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
-    nemo_testcase_l4_orca2_hier_decks_round15_gate as upper,
+    nemo_testcase_l4_orca2_hier_decks_round16_gate as upper,
 )
 
 HERE = Path(__file__).resolve().parent
-ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round16_acquisition"
-MANIFEST = ACQUISITION / "rung3_havtb0_manifest.json"
-ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung3")
+ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round17_acquisition"
+MANIFEST = ACQUISITION / "rung2_havtb0_manifest.json"
+ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung2")
 CURRENT_RECORD = ROOT / "record"
 SUPERSEDED_RECORD = ROOT / "record_havtb1_superseded"
 CURRENT_DECK = ROOT / "deck"
 SUPERSEDED_DECK = ROOT / "deck_havtb1_superseded"
-CURRENT_ADMISSION = ROOT / "rung3_admission.json"
-SUPERSEDED_ADMISSION = ROOT / "rung3_admission_havtb1_superseded.json"
+CURRENT_ADMISSION = ROOT / "rung2_admission.json"
+SUPERSEDED_ADMISSION = ROOT / "rung2_admission_havtb1_superseded.json"
 UPPER_ADMISSION = upper.CURRENT_ADMISSION
-COMPILED = legacy.COMPILED
 
-OLD_LINE = "   nn_havtb    =    1         !  horizontal shape for avtb (=1) or not (=0)"
-NEW_LINE = "   nn_havtb    =    0         !  horizontal shape for avtb (=1) or not (=0)"
-OLD_ADMISSION_SHA = "5e4ce3e944b8561e46f472b0109006c435f5dfa36552bce1668c8e1eef39238e"
-OLD_INVENTORY_SHA = "0209b7c848d7ffc31df7d289c08e7accf483101b2b8dc66c11f54b2dbf20d2eb"
-OLD_CFG_SHA = legacy.RUNG3_CFG_SHA
+OLD_LINE = upper.OLD_LINE
+NEW_LINE = upper.NEW_LINE
+OLD_ADMISSION_SHA = "b1553d791db7df6ade5d9f3da06790e789a21b0be2ab4758b88e27f21509003e"
+OLD_INVENTORY_SHA = "72b65f0fcb930fb928ad97f3cbc490bd18f66fc6640970e59e0ee61d8c21607b"
+OLD_CFG_SHA = legacy.RUNG2_CFG_SHA
 OLD_EXEC_SHA = legacy.EXECUTION_CFG_SHA
-NEW_CFG_SHA = "0362b8cb572758ed20b7fceba5f151ae5dd4d8cb6b4352eb12e5cc21e7836d74"
-NEW_EXEC_SHA = "20866bcbfe851191ae91728f5e3f364d87563f7781cbfaff81bfa5d457f27469"
-UPPER_ADMISSION_SHA = "b337142222c0a0d9fc44539abc55c25c8df09ee5e2155022cbfc14676bb88089"
+NEW_CFG_SHA = "b4b8cb87249bf41ef41ea13637273ef097f6632ae4879dca883feebdd9011e38"
+NEW_EXEC_SHA = "d691aec39430a952bc4cff73e3af2487fe10a4cf728111fe3ec8fc66609c0416"
+UPPER_ADMISSION_SHA = "591bce28aea5626ea009c674271061ae5f0d4c7959df2ef879bd9b36134fb4b0"
 
 PRECHECK_PLANTS = (
     "deck-extra",
@@ -59,7 +58,7 @@ PLANTS = ("none", *PRECHECK_PLANTS, *RECORD_PLANTS)
 
 
 class GateError(RuntimeError):
-    """A frozen Decision-83 rung-3 predicate failed."""
+    """A frozen Decision-83 rung-2 predicate failed."""
 
 
 def require(condition: bool, message: str) -> None:
@@ -94,7 +93,7 @@ def _replace_havtb(payload: bytes, *, plant: str = "none") -> bytes:
     return text.encode()
 
 
-def rung3_cfg_bytes(*, plant: str = "none") -> bytes:
+def rung2_cfg_bytes(*, plant: str = "none") -> bytes:
     record, _, _ = _old_paths()
     return _replace_havtb((record / "namelist_cfg.deck").read_bytes(), plant=plant)
 
@@ -115,15 +114,15 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
     require(sha256(deck / "namelist_cfg") == OLD_CFG_SHA, "superseded staged deck changed")
 
     expected_upper = UPPER_ADMISSION_SHA if plant != "upper-pin" else "0" * 64
-    require(sha256(UPPER_ADMISSION) == expected_upper, "replacement rung-4 admission changed")
+    require(sha256(UPPER_ADMISSION) == expected_upper, "replacement rung-3 admission changed")
     upper_admission = json.loads(UPPER_ADMISSION.read_text())
     require(
-        upper_admission.get("status") == "PASS_RUNG4_HAVTB0_RECORD",
-        "replacement rung 4 is not admitted",
+        upper_admission.get("status") == "PASS_RUNG3_HAVTB0_RECORD",
+        "replacement rung 3 is not admitted",
     )
 
     manifest = json.loads(MANIFEST.read_text())
-    require(manifest.get("rung") == 3, "manifest rung changed")
+    require(manifest.get("rung") == 2, "manifest rung changed")
     require(
         manifest.get("upper_rung_admission_sha256") == UPPER_ADMISSION_SHA,
         "manifest upper admission changed",
@@ -140,45 +139,41 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         "run protocol changed",
     )
     for name, expected in legacy.SOURCE_SHA.items():
-        actual = sha256(COMPILED / f"{name}.f90")
-        if plant == "source-pin" and name == "sbcmod":
+        actual = sha256(legacy.COMPILED / f"{name}.f90")
+        if plant == "source-pin" and name == "ldftra":
             actual = "0" * 64
         require(actual == expected, f"compiled source changed: {name}")
         require(
             manifest["build"].get(f"compiled_{name}_sha256") == expected,
             f"manifest source pin changed: {name}",
         )
-    require(sha256(record / "nemo") == legacy.rung4.BINARY_SHA, "recorder binary changed")
+    require(sha256(record / "nemo") == legacy.rung3.rung4.BINARY_SHA, "recorder binary changed")
 
-    cfg = rung3_cfg_bytes(plant=plant)
+    cfg = rung2_cfg_bytes(plant=plant)
     require(hashlib.sha256(cfg).hexdigest() == NEW_CFG_SHA, "replacement exact deck changed")
     require(
         hashlib.sha256(execution_cfg_bytes()).hexdigest() == NEW_EXEC_SHA,
         "replacement execution deck changed",
     )
     require(
-        manifest["namelists"]["namelist_cfg_sha256"] == NEW_CFG_SHA,
-        "manifest exact-deck pin changed",
+        manifest["namelists"]["namelist_cfg_sha256"] == NEW_CFG_SHA, "manifest deck pin changed"
     )
     require(
         manifest["namelists"]["execution_namelist_cfg_sha256"] == NEW_EXEC_SHA,
-        "manifest execution-deck pin changed",
+        "manifest execution pin changed",
     )
 
-    with tempfile.TemporaryDirectory(prefix="orca2-rung3-havtb0-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="orca2-rung2-havtb0-") as temporary:
         root = Path(temporary)
-        (root / "old").mkdir()
-        (root / "new").mkdir()
-        (root / "upper").mkdir()
-        old_values = legacy._assignment_map(
-            (record / "namelist_cfg.deck").read_bytes(), root / "old"
-        )
-        new_values = legacy._assignment_map(cfg, root / "new")
-        upper_values = legacy._assignment_map(upper.rung4_cfg_bytes(), root / "upper")
+        for name in ("old", "new", "upper"):
+            (root / name).mkdir()
+        old = legacy._assignment_map((record / "namelist_cfg.deck").read_bytes(), root / "old")
+        new = legacy._assignment_map(cfg, root / "new")
+        upper_values = legacy._assignment_map(upper.rung3_cfg_bytes(), root / "upper")
     replacement_delta = {
-        name: [legacy._token(old_values[name]), legacy._token(new_values[name])]
-        for name in sorted(set(old_values) | set(new_values))
-        if old_values.get(name) != new_values.get(name)
+        name: [legacy._token(old[name]), legacy._token(new[name])]
+        for name in sorted(set(old) | set(new))
+        if old.get(name) != new.get(name)
     }
     require(
         replacement_delta == {"namzdf.nn_havtb": ["1", "0"]},
@@ -187,15 +182,15 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
     boundary_delta = {
         name: [
             legacy._token(upper_values[name]) if name in upper_values else "ABSENT",
-            legacy._token(new_values[name]) if name in new_values else "ABSENT",
+            legacy._token(new[name]) if name in new else "ABSENT",
         ]
-        for name in sorted(set(upper_values) | set(new_values))
-        if upper_values.get(name) != new_values.get(name)
+        for name in sorted(set(upper_values) | set(new))
+        if upper_values.get(name) != new.get(name)
     }
     old_admission = json.loads(admission_path.read_text())
     require(
-        boundary_delta == old_admission.get("deck_delta_from_rung4"),
-        f"rung-4/rung-3 boundary changed: {boundary_delta}",
+        boundary_delta == old_admission.get("deck_delta_from_rung3"),
+        f"rung-3/rung-2 boundary changed: {boundary_delta}",
     )
     old_lines = (record / "namelist_cfg.deck").read_text().splitlines()
     new_lines = cfg.decode().splitlines()
@@ -205,28 +200,28 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         if before != after
     ]
     require(line_delta == [[419, OLD_LINE, NEW_LINE]], f"physical line delta changed: {line_delta}")
-    source = (COMPILED / "zdfphy.f90").read_text()
+    source = (upper.COMPILED / "zdfphy.f90").read_text()
     require(
         "avtb_2d(:,:) = 1._wp" in source and "IF( nn_havtb == 1 ) THEN" in source,
         "compiled background-shape branch changed",
     )
     return {
-        "status": "PREFLIGHT_PASS_RUNG3_HAVTB0",
+        "status": "PREFLIGHT_PASS_RUNG2_HAVTB0",
         "claim_label": "independent",
-        "rung": 3,
+        "rung": 2,
         "decision": 83,
         "replacement_delta": replacement_delta,
         "line_delta": line_delta,
-        "rung4_boundary_delta": boundary_delta,
+        "rung3_boundary_delta": boundary_delta,
         "superseded_record": str(record),
-        "binary_sha256": legacy.rung4.BINARY_SHA,
+        "binary_sha256": legacy.rung3.rung4.BINARY_SHA,
     }
 
 
 def stage_deck(root: Path) -> None:
     record, _, _ = _old_paths()
     expected = {
-        "namelist_cfg": rung3_cfg_bytes(),
+        "namelist_cfg": rung2_cfg_bytes(),
         "namelist_ice_cfg": (record / "namelist_ice_cfg").read_bytes(),
         "manifest.json": MANIFEST.read_bytes(),
     }
@@ -251,28 +246,24 @@ def stage_deck(root: Path) -> None:
 
 
 def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
-    surface_plant = plant if plant in set(legacy.RECORD_PLANTS) else "none"
+    own_plant = plant if plant in set(legacy.RECORD_PLANTS) else "none"
     upper_plant = plant if plant in set(upper.RECORD_PLANTS) else "none"
-    surface = legacy.validate_surface_resolved(root, plant=surface_plant)
+    own = legacy.validate_gm_mle_resolved(root, plant=own_plant)
     inherited = upper.validate_resolved(root, plant=upper_plant)
-    return {
-        "status": "PASS_RUNG3_HAVTB0_RESOLVED",
-        "upper_rung": inherited,
-        "surface": surface,
-    }
+    return {"status": "PASS_RUNG2_HAVTB0_RESOLVED", "upper_rung": inherited, "gm_mle": own}
 
 
 def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant: {plant}")
-    preflight(plant=plant if plant in PRECHECK_PLANTS else "none")
+    report = preflight(plant=plant if plant in PRECHECK_PLANTS else "none")
     old_record, _, _ = _old_paths()
     require(
         (root / "producer_commit.txt").read_text().strip() == expect_commit,
         "producer commit differs",
     )
-    require(sha256(root / "nemo") == legacy.rung4.BINARY_SHA, "record binary differs")
+    require(sha256(root / "nemo") == legacy.rung3.rung4.BINARY_SHA, "record binary differs")
     require((root / "namelist_cfg").read_bytes() == execution_cfg_bytes(), "execution deck differs")
-    require((root / "namelist_cfg.deck").read_bytes() == rung3_cfg_bytes(), "exact deck differs")
+    require((root / "namelist_cfg.deck").read_bytes() == rung2_cfg_bytes(), "exact deck differs")
     require(
         json.loads((root / "hierarchy_manifest.json").read_text())
         == json.loads(MANIFEST.read_text()),
@@ -283,6 +274,11 @@ def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> d
         == (old_record / "recorder_repair_manifest.json").read_bytes(),
         "repair manifest differs",
     )
+    for name, expected in legacy.SOURCE_SHA.items():
+        require(
+            sha256(root / f"compiled_{name}.f90") == expected,
+            f"record compiled source changed: {name}",
+        )
     frame_plant = (
         plant
         if plant
@@ -296,26 +292,26 @@ def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> d
         }
         else "none"
     )
-    inherited_plant = plant if plant in set(legacy.rung4.rung5_deck.PLANTS) else "none"
-    frames = legacy.rung4.rung5_record.validate_frames(root, plant=frame_plant)
-    terminal = legacy.rung4.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
+    inherited_plant = plant if plant in set(legacy.rung3.rung4.rung5_deck.PLANTS) else "none"
+    frames = legacy.rung3.rung4.rung5_record.validate_frames(root, plant=frame_plant)
+    terminal = legacy.rung3.rung4.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
         root, plant=inherited_plant
     )
-    month = legacy.rung4.rung5_deck.rung6.rung10.validate_month_products(root)
+    month = legacy.rung3.rung4.rung5_deck.rung6.rung10.validate_month_products(root)
     resolved = validate_resolved(root, plant=plant)
-    zero_flux = legacy._validate_zero_flux(root, plant=plant)
-    inventory = legacy.rung4.rung5_deck.rung6.rung10.validate_sha_inventory(
+    zero_flux = legacy.rung3._validate_zero_flux(root, plant=plant)
+    inventory = legacy.rung3.rung4.rung5_deck.rung6.rung10.validate_sha_inventory(
         root, plant=inherited_plant
     )
     return {
-        "format": "nemo-testcase-l4-orca2-hierarchy-rung3-havtb0-record-v1",
-        "status": "PASS_RUNG3_HAVTB0_RECORD",
+        "format": "nemo-testcase-l4-orca2-hierarchy-rung2-havtb0-record-v1",
+        "status": "PASS_RUNG2_HAVTB0_RECORD",
         "claim_label": "independent",
-        "rung": 3,
+        "rung": 2,
         "decision": 83,
         "producer_commit": expect_commit,
         "deck_delta_from_superseded": {"namzdf.nn_havtb": [1, 0]},
-        "deck_delta_from_rung4": preflight()["rung4_boundary_delta"],
+        "deck_delta_from_rung3": report["rung3_boundary_delta"],
         "frames": frames,
         "zero_flux": zero_flux,
         "terminal": terminal,

@@ -30,9 +30,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 HERE = Path(__file__).resolve().parent
 ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round9_acquisition"
 MANIFEST = ACQUISITION / "rung3_manifest.json"
-RUNG4_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung4"
-)
+RUNG4_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung4")
 RUNG4_RECORD = (
     RUNG4_ROOT / "record_havtb1_superseded"
     if (RUNG4_ROOT / "record_havtb1_superseded").exists()
@@ -97,9 +95,7 @@ def sha256(path: Path) -> str:
 
 def _group_spans(text: str) -> dict[str, tuple[int, int]]:
     spans = {}
-    pattern = re.compile(
-        r"(?ms)^[ \t]*&([A-Za-z_]\w*)\b.*?^[ \t]*/[ \t]*(?:![^\n]*)?$"
-    )
+    pattern = re.compile(r"(?ms)^[ \t]*&([A-Za-z_]\w*)\b.*?^[ \t]*/[ \t]*(?:![^\n]*)?$")
     for match in pattern.finditer(text):
         group = match.group(1).lower()
         require(group not in spans, f"duplicate namelist group {group}")
@@ -121,8 +117,10 @@ def _add(text: str, qualified: str, value: str) -> str:
     group, key = qualified.split(".", 1)
     start, end = _group_spans(text)[group]
     body = text[start:end]
-    require(re.search(rf"(?mi)^\s*{re.escape(key)}\s*=", body) is None,
-            f"{qualified}: assignment already exists")
+    require(
+        re.search(rf"(?mi)^\s*{re.escape(key)}\s*=", body) is None,
+        f"{qualified}: assignment already exists",
+    )
     slash = body.rfind("/")
     require(slash >= 0, f"{group}: missing terminator")
     body = body[:slash] + f"   {key:<14} = {value}\n" + body[slash:]
@@ -139,9 +137,7 @@ def _render(payload: bytes, *, plant: str = "none") -> bytes:
     insert = text.find("\n", spans["namsbc"][1]) + 1
     require(insert > spans["namsbc"][0], "cannot place namsbc_flx")
     flux_name = (
-        "not_zero_flux"
-        if plant == "nonzero-file-selector"
-        else ZERO_FILE.removesuffix(".nc")
+        "not_zero_flux" if plant == "nonzero-file-selector" else ZERO_FILE.removesuffix(".nc")
     )
     flux = f"""!-----------------------------------------------------------------------
 &namsbc_flx    ! hierarchy rung-3 exact-zero flux formulation (ln_flx=T)
@@ -191,29 +187,45 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
 
     manifest = json.loads(MANIFEST.read_text())
     require(manifest.get("rung") == 3, "manifest rung changed")
-    require(manifest.get("upper_rung_admission_sha256") == RUNG4_ADMISSION_SHA,
-            "manifest upper admission changed")
-    require(manifest.get("run") == {
-        "mpi_ranks": 2, "first_step": 1, "last_step": 240,
-        "from_rest": True, "initial_state_output": 1,
-    }, "run protocol changed")
+    require(
+        manifest.get("upper_rung_admission_sha256") == RUNG4_ADMISSION_SHA,
+        "manifest upper admission changed",
+    )
+    require(
+        manifest.get("run")
+        == {
+            "mpi_ranks": 2,
+            "first_step": 1,
+            "last_step": 240,
+            "from_rest": True,
+            "initial_state_output": 1,
+        },
+        "run protocol changed",
+    )
     for name, expected in SOURCE_SHA.items():
         actual = sha256(COMPILED / f"{name}.f90")
         if plant == "source-pin" and name == "sbcmod":
             actual = "0" * 64
         require(actual == expected, f"compiled source changed: {name}")
-        require(manifest["build"].get(f"compiled_{name}_sha256") == expected,
-                f"manifest source pin changed: {name}")
+        require(
+            manifest["build"].get(f"compiled_{name}_sha256") == expected,
+            f"manifest source pin changed: {name}",
+        )
     require(sha256(RUNG4_RECORD / "nemo") == rung4.BINARY_SHA, "binary changed")
 
     cfg = rung3_cfg_bytes(plant=plant)
     require(hashlib.sha256(cfg).hexdigest() == RUNG3_CFG_SHA, "rung-3 exact deck changed")
-    require(hashlib.sha256(execution_cfg_bytes()).hexdigest() == EXECUTION_CFG_SHA,
-            "rung-3 execution deck changed")
-    require(manifest["namelists"]["namelist_cfg_sha256"] == RUNG3_CFG_SHA,
-            "manifest deck pin changed")
-    require(manifest["namelists"]["execution_namelist_cfg_sha256"] == EXECUTION_CFG_SHA,
-            "manifest execution-deck pin changed")
+    require(
+        hashlib.sha256(execution_cfg_bytes()).hexdigest() == EXECUTION_CFG_SHA,
+        "rung-3 execution deck changed",
+    )
+    require(
+        manifest["namelists"]["namelist_cfg_sha256"] == RUNG3_CFG_SHA, "manifest deck pin changed"
+    )
+    require(
+        manifest["namelists"]["execution_namelist_cfg_sha256"] == EXECUTION_CFG_SHA,
+        "manifest execution-deck pin changed",
+    )
 
     with tempfile.TemporaryDirectory(prefix="orca2-rung3-deck-") as temporary:
         root = Path(temporary)
@@ -222,9 +234,12 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         upper = _assignment_map(rung4.rung4_cfg_bytes(), root / "upper")
         lower = _assignment_map(cfg, root / "lower")
     delta = {
-        name: [_token(upper[name]) if name in upper else "ABSENT",
-               _token(lower[name]) if name in lower else "ABSENT"]
-        for name in sorted(set(upper) | set(lower)) if upper.get(name) != lower.get(name)
+        name: [
+            _token(upper[name]) if name in upper else "ABSENT",
+            _token(lower[name]) if name in lower else "ABSENT",
+        ]
+        for name in sorted(set(upper) | set(lower))
+        if upper.get(name) != lower.get(name)
     }
     expected_delta = {
         **{name: [old, new] for name, (old, new) in CHANGES.items()},
@@ -263,8 +278,10 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         "sbcfwb": ("SUBROUTINE sbc_fwb",),
     }
     for name, required in needles.items():
-        require(all(needle in source[name] for needle in required),
-                f"compiled surface branch changed: {name}")
+        require(
+            all(needle in source[name] for needle in required),
+            f"compiled surface branch changed: {name}",
+        )
     return {
         "status": "PREFLIGHT_PASS_RUNG3",
         "rung": 3,
@@ -296,8 +313,10 @@ def stage_deck(root: Path) -> None:
     for name, payload in expected.items():
         target = root / name
         if target.exists():
-            require(target.is_file() and target.read_bytes() == payload,
-                    f"existing deck differs: {target}")
+            require(
+                target.is_file() and target.read_bytes() == payload,
+                f"existing deck differs: {target}",
+            )
         else:
             target.write_bytes(payload)
     rows = "".join(
@@ -317,8 +336,10 @@ def _validate_zero_flux(root: Path, *, plant: str) -> dict[str, object]:
     require(path.is_file(), f"missing exact-zero flux file: {path}")
     fields = {}
     with Dataset(path) as dataset:
-        require(len(dataset.dimensions["x"]) == 180 and len(dataset.dimensions["y"]) == 148,
-                "zero-flux grid is not ORCA2 180x148")
+        require(
+            len(dataset.dimensions["x"]) == 180 and len(dataset.dimensions["y"]) == 148,
+            "zero-flux grid is not ORCA2 180x148",
+        )
         for name in ("utau", "vtau", "qtot", "qsr", "emp"):
             require(name in dataset.variables, f"zero-flux variable missing: {name}")
             variable = dataset[name]
@@ -333,8 +354,10 @@ def _validate_zero_flux(root: Path, *, plant: str) -> dict[str, object]:
     for line in (root / "input_files.sha256").read_text().splitlines():
         digest, name = line.split(maxsplit=1)
         entries[name] = digest
-    require(entries.get(ZERO_FILE) == sha256(root / ZERO_FILE),
-            "zero-flux file is absent or stale in input manifest")
+    require(
+        entries.get(ZERO_FILE) == sha256(root / ZERO_FILE),
+        "zero-flux file is absent or stale in input manifest",
+    )
     return {"sha256": sha256(root / ZERO_FILE), "fields": fields}
 
 
@@ -342,9 +365,8 @@ def validate_surface_resolved(root: Path, *, plant: str = "none") -> dict[str, o
     """Validate only rung 3's surface-forcing consequences."""
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
-        "ln_usr_false": re.search(
-            r"user defined formulation\s+ln_usr\s+=\s+F\b", ocean
-        ) is not None,
+        "ln_usr_false": re.search(r"user defined formulation\s+ln_usr\s+=\s+F\b", ocean)
+        is not None,
         "ln_flx_true": re.search(r"flux\s+formulation\s+ln_flx\s+=\s+T\b", ocean) is not None,
         "ln_blk_false": re.search(r"bulk\s+formulation\s+ln_blk\s+=\s+F\b", ocean) is not None,
         "ln_ssr_false": re.search(r"Sea Surface Restoring.*ln_ssr\s+=\s+F\b", ocean) is not None,
@@ -375,22 +397,38 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
 def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> dict[str, object]:
     require(plant in ("none", *RECORD_PLANTS), f"invalid record plant: {plant}")
     preflight()
-    require((root / "producer_commit.txt").read_text().strip() == expect_commit,
-            "producer commit differs")
+    require(
+        (root / "producer_commit.txt").read_text().strip() == expect_commit,
+        "producer commit differs",
+    )
     require(sha256(root / "nemo") == rung4.BINARY_SHA, "record binary differs")
-    require((root / "namelist_cfg").read_bytes() == execution_cfg_bytes(),
-            "execution namelist differs")
-    require((root / "namelist_cfg.deck").read_bytes() == rung3_cfg_bytes(),
-            "exact deck differs")
-    require(json.loads((root / "hierarchy_manifest.json").read_text())
-            == json.loads(MANIFEST.read_text()), "record manifest differs")
-    require((root / "recorder_repair_manifest.json").read_bytes()
-            == (RUNG4_RECORD / "recorder_repair_manifest.json").read_bytes(),
-            "recorder repair manifest differs")
-    frame_plant = plant if plant in {
-        "field-name", "truncated", "frame-nonfinite", "absent-as-zero",
-        "owner-on", "missing-frame",
-    } else "none"
+    require(
+        (root / "namelist_cfg").read_bytes() == execution_cfg_bytes(), "execution namelist differs"
+    )
+    require((root / "namelist_cfg.deck").read_bytes() == rung3_cfg_bytes(), "exact deck differs")
+    require(
+        json.loads((root / "hierarchy_manifest.json").read_text())
+        == json.loads(MANIFEST.read_text()),
+        "record manifest differs",
+    )
+    require(
+        (root / "recorder_repair_manifest.json").read_bytes()
+        == (RUNG4_RECORD / "recorder_repair_manifest.json").read_bytes(),
+        "recorder repair manifest differs",
+    )
+    frame_plant = (
+        plant
+        if plant
+        in {
+            "field-name",
+            "truncated",
+            "frame-nonfinite",
+            "absent-as-zero",
+            "owner-on",
+            "missing-frame",
+        }
+        else "none"
+    )
     inherited_plant = plant if plant in set(rung4.rung5_deck.PLANTS) else "none"
     frames = rung4.rung5_record.validate_frames(root, plant=frame_plant)
     terminal = rung4.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
@@ -399,9 +437,7 @@ def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> d
     month = rung4.rung5_deck.rung6.rung10.validate_month_products(root)
     resolved = validate_resolved(root, plant=plant)
     zero_flux = _validate_zero_flux(root, plant=plant)
-    inventory = rung4.rung5_deck.rung6.rung10.validate_sha_inventory(
-        root, plant=inherited_plant
-    )
+    inventory = rung4.rung5_deck.rung6.rung10.validate_sha_inventory(root, plant=inherited_plant)
     return {
         "format": "nemo-testcase-l4-orca2-hierarchy-rung3-record-v2",
         "status": "PASS_RUNG3_RECORD",
@@ -433,10 +469,13 @@ def main() -> int:
             if args.stage_deck:
                 stage_deck(args.stage_deck)
         else:
-            require(args.record is not None and args.expect_commit,
-                    "record and expected commit are required")
-            report = validate_record(args.record, expect_commit=args.expect_commit,
-                                     plant=args.plant)
+            require(
+                args.record is not None and args.expect_commit,
+                "record and expected commit are required",
+            )
+            report = validate_record(
+                args.record, expect_commit=args.expect_commit, plant=args.plant
+            )
         report["worktree"] = worktree_stamp()
     except (
         RuntimeError,

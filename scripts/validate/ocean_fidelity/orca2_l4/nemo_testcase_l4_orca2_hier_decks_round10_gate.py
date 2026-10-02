@@ -27,11 +27,17 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 HERE = Path(__file__).resolve().parent
 ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round10_acquisition"
 MANIFEST = ACQUISITION / "rung2_manifest.json"
-RUNG3_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung3"
+RUNG3_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung3")
+RUNG3_RECORD = (
+    RUNG3_ROOT / "record_havtb1_superseded"
+    if (RUNG3_ROOT / "record_havtb1_superseded").exists()
+    else RUNG3_ROOT / "record"
 )
-RUNG3_RECORD = RUNG3_ROOT / "record"
-RUNG3_ADMISSION = RUNG3_ROOT / "rung3_admission.json"
+RUNG3_ADMISSION = (
+    RUNG3_ROOT / "rung3_admission_havtb1_superseded.json"
+    if (RUNG3_ROOT / "rung3_admission_havtb1_superseded.json").exists()
+    else RUNG3_ROOT / "rung3_admission.json"
+)
 COMPILED = rung3.COMPILED
 
 RUNG3_ADMISSION_SHA = "5e4ce3e944b8561e46f472b0109006c435f5dfa36552bce1668c8e1eef39238e"
@@ -229,8 +235,7 @@ def stage_deck(root: Path) -> None:
         else:
             target.write_bytes(payload)
     rows = "".join(
-        f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
-        for name, payload in expected.items()
+        f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in expected.items()
     )
     ledger = root / "SHA256SUMS"
     if ledger.exists():
@@ -239,9 +244,8 @@ def stage_deck(root: Path) -> None:
         ledger.write_text(rows)
 
 
-def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
-    inherited_plant = plant if plant in set(rung3.RECORD_PLANTS) else "none"
-    inherited = rung3.validate_resolved(root, plant=inherited_plant)
+def validate_gm_mle_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    """Validate only rung 2's inactive GM and MLE consequences."""
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
         "ln_ldfeiv_false": re.search(
@@ -250,22 +254,28 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
         is not None,
         "eiv_not_used": "eddy induced velocity param is NOT used" in ocean,
         "eiv_active_print_absent": "use eddy induced velocity parametrization" not in ocean,
-        "ln_mle_false": re.search(
-            r"use mixed layer eddy .*ln_mle\s*=\s*F\b", ocean
-        )
-        is not None,
+        "ln_mle_false": re.search(r"use mixed layer eddy .*ln_mle\s*=\s*F\b", ocean) is not None,
         "mle_not_used": "Mixed Layer Eddy parametrisation NOT used" in ocean,
         "mle_active_print_absent": "Mixed Layer Eddy induced transport added" not in ocean,
     }
     if plant == "gm-mle-consequence":
         checks["ln_mle_false"] = False
     require(all(checks.values()), f"resolved rung-2 checks failed: {checks}")
-    return {"status": "PASS_RUNG2_RESOLVED", "upper_rung": inherited, **checks}
+    return {"status": "PASS_RUNG2_GM_MLE_RESOLVED", **checks}
 
 
-def validate_record(
-    root: Path, *, expect_commit: str, plant: str = "none"
-) -> dict[str, object]:
+def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    inherited_plant = plant if plant in set(rung3.RECORD_PLANTS) else "none"
+    inherited = rung3.validate_resolved(root, plant=inherited_plant)
+    own = validate_gm_mle_resolved(root, plant=plant)
+    return {
+        "status": "PASS_RUNG2_RESOLVED",
+        "upper_rung": inherited,
+        **{key: value for key, value in own.items() if key != "status"},
+    }
+
+
+def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> dict[str, object]:
     require(plant in ("none", *RECORD_PLANTS), f"invalid record plant: {plant}")
     report = preflight()
     require(
@@ -292,17 +302,24 @@ def validate_record(
         "recorder repair manifest differs",
     )
     for name, expected in SOURCE_SHA.items():
-        require(sha256(root / f"compiled_{name}.f90") == expected,
-                f"record compiled source changed: {name}")
+        require(
+            sha256(root / f"compiled_{name}.f90") == expected,
+            f"record compiled source changed: {name}",
+        )
 
-    frame_plant = plant if plant in {
-        "field-name",
-        "truncated",
-        "frame-nonfinite",
-        "absent-as-zero",
-        "owner-on",
-        "missing-frame",
-    } else "none"
+    frame_plant = (
+        plant
+        if plant
+        in {
+            "field-name",
+            "truncated",
+            "frame-nonfinite",
+            "absent-as-zero",
+            "owner-on",
+            "missing-frame",
+        }
+        else "none"
+    )
     inherited_plant = plant if plant in set(rung3.rung4.rung5_deck.PLANTS) else "none"
     frames = rung3.rung4.rung5_record.validate_frames(root, plant=frame_plant)
     terminal = rung3.rung4.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
