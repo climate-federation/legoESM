@@ -97,6 +97,14 @@ ten-step row. R103-P5 is **UNMEASURED**, not refuted.
 - Final committed-tree rung-0 gate: PASS, 40 checkpoints / 200 rows, exit 0.
 - Final one-bit real-record plant: `STATUS PLANT-FIRED`, exit 2.
 - Focused frame/card/ladder tests: 30 passed.
+- Receipt citation gate: PASS with zero unmapped citations; the shifted
+  `stp2d` plant FAILS as required. The cumulative default receipt also passes
+  with zero unmapped citations.
+- The one prescribed `tests/ocean/fidelity -n 12` battery reached 97% and
+  terminated without a pytest summary. Five preliminary failures are the
+  existing SI3 scalar-math provenance, escape-scope stamp, worktree-stamp,
+  case-board, and GYRE round-129 stale-record reds. All three round-103 tests
+  passed inside that battery. The run is **incomplete**, not PASS.
 - No `packages/` diff exists, so the shared GYRE trajectory and year cannot
   move by construction; no GYRE result is re-pinned in this round.
 - Separate read-only Codex review: **independent review unavailable
