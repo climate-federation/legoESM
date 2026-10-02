@@ -426,6 +426,38 @@ def test_year_member_admission_requires_the_registered_harness_and_fp64(
         module._admit_year_member(root, expected_commit=commit, label="test")
 
 
+def test_year_member_admission_accepts_an_explicit_recorded_tag(tmp_path):
+    module = _module()
+    root = tmp_path / "year"
+    member = root / "lego_seed0_historical"
+    member.mkdir(parents=True)
+    commit = "e" * 40
+    manifest = {
+        "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
+        "case": "GYRE-zco",
+        "seed": 0,
+        "tag": "historical",
+        "days": 360,
+        "steps": 2160,
+        "dt_s": 14400.0,
+        "snapshot_step_interval": 6,
+        "snapshot_days": list(range(1, 361)),
+        "worktree": {"clean": True, "commit": commit},
+    }
+    (member / "manifest.json").write_text(json.dumps(manifest))
+    fields = {
+        name: np.ones((1,), dtype=np.float64)
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    for day in module.YEAR_DAYS:
+        np.savez(member / f"day{day:03d}.npz", **fields)
+
+    admitted = module._admit_year_member(
+        root, expected_commit=commit, label="test", tag="historical")
+
+    assert admitted["record"]["tag"] == "historical"
+
+
 def test_year_day240_cli_plant_prints_and_returns_nonzero(
         monkeypatch, tmp_path, capsys):
     module = _module()

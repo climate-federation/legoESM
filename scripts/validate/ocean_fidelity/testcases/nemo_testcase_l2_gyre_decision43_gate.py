@@ -78,9 +78,11 @@ def _admit_year_member(
     *,
     expected_commit: str,
     label: str,
+    tag: str = YEAR_TAG,
 ) -> dict:
     """Admit one Decision-45 seed-0 year member and its fp64 snapshots."""
-    member = root / f"lego_seed0_{YEAR_TAG}"
+    require(tag and "/" not in tag, f"{label}: invalid member tag {tag!r}")
+    member = root / f"lego_seed0_{tag}"
     manifest_path = member / "manifest.json"
     manifest = _read(manifest_path)
     require(manifest.get("format") == YEAR_MEMBER_FORMAT,
@@ -88,7 +90,7 @@ def _admit_year_member(
     expected = {
         "case": "GYRE-zco",
         "seed": 0,
-        "tag": YEAR_TAG,
+        "tag": tag,
         "days": 360,
         "steps": YEAR_STEPS,
         "dt_s": YEAR_DT_S,
@@ -135,15 +137,16 @@ def score_year_root(
     *,
     expected_commit: str,
     label: str,
+    tag: str = YEAR_TAG,
 ) -> dict:
     """Score the registered Decision-45 rows with the existing day-gap tool."""
     admission = _admit_year_member(
-        root, expected_commit=expected_commit, label=label)
+        root, expected_commit=expected_commit, label=label, tag=tag)
     mesh_path = nemo_root / "nemo_seed0" / "mesh_mask.nc"
     require(mesh_path.is_file(), f"{label}: missing NEMO mesh {mesh_path}")
     report = _load_year_owners().day_gap(
         lego_root=root,
-        lego_tag=YEAR_TAG,
+        lego_tag=tag,
         nemo_root=nemo_root,
         seed=0,
         mesh_path=mesh_path,
@@ -756,8 +759,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--after-year-root", type=Path)
     parser.add_argument("--year-nemo-root", type=Path)
     parser.add_argument("--expect-before-year-commit")
+    parser.add_argument("--before-year-tag", default=YEAR_TAG)
+    parser.add_argument("--after-year-tag", default=YEAR_TAG)
     parser.add_argument("--year-measure-root", type=Path)
     parser.add_argument("--expect-year-commit")
+    parser.add_argument("--year-measure-tag", default=YEAR_TAG)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--generic-measure-snapshot", type=Path)
     parser.add_argument("--generic-before-report", type=Path)
@@ -790,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.year_nemo_root,
                 expected_commit=args.expect_year_commit,
                 label="year measurement",
+                tag=args.year_measure_tag,
             )
             args.output.write_text(
                 json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -828,12 +835,14 @@ def main(argv: list[str] | None = None) -> int:
             args.year_nemo_root,
             expected_commit=args.expect_before_year_commit,
             label="before year",
+            tag=args.before_year_tag,
         )
         after_year_gap = score_year_root(
             args.after_year_root,
             args.year_nemo_root,
             expected_commit=args.expect_candidate_commit,
             label="after year",
+            tag=args.after_year_tag,
         )
         report = evaluate(
             _read(args.comparison),
