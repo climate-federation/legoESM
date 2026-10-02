@@ -179,10 +179,11 @@ def test_hines_drag_sublinear_in_launch_amplitude():
 
     Doubling ``total_rms_wind`` gives < 2× the column drag — a cap/saturation effect of THIS bulk
     scheme. (NOT a bulk-vs-spectrum discriminator: a finite Hines spectrum with a moving cutoff
-    can also be sublinear in the source amplitude.)
+    can also be sublinear in the source amplitude.)  Amplitudes 4 -> 8 m/s: with the 700 hPa
+    launch the 2 m/s wave on this 12-level column is still below saturation (drag ∝ amplitude²).
     """
-    out_1x, _ = _run(HinesConfig(total_rms_wind=2.0))
-    out_2x, _ = _run(HinesConfig(total_rms_wind=4.0))
+    out_1x, _ = _run(HinesConfig(total_rms_wind=4.0))
+    out_2x, _ = _run(HinesConfig(total_rms_wind=8.0))
     eps_1x = np.asarray(out_1x.eps_gwd)
     eps_2x = np.asarray(out_2x.eps_gwd)
     assert np.any(eps_1x > 1e-12)                       # non-vacuity: baseline drag
