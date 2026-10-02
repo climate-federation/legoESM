@@ -79,7 +79,11 @@ uninstrumented reference, and round 192's two runs:
 `f09be03c39a877b2dcbc731f…` in every case. The writer changes no answer,
 and it is the same card the rounds 192-195 receipts measured.
 
-**Plants.** All four fire, and the unplanted run is green:
+**Plants.** All four fire and the unplanted run is green. They exercise
+THREE distinct guards, not four: `field-name` and `missing-frame` both trip
+the required-group cross-check, though `missing-frame` is the only one that
+proves the required-frame list is derived from the header's `icycle` rather
+than from the file's own contents.
 
 | plant | the checker's own refusal |
 |---|---|
@@ -105,7 +109,15 @@ mid-step extrapolation coefficients and the four half-step-back
 interpolation coefficients at each of the 48 substeps — agree to the last
 bit, so neither the startup ramp nor the weight schedule is in question.
 
-**Every boundary is at the compiled-rounding floor through substep 25.**
+**Every boundary stays within a few multiples of the bar through substep
+25, and then they all grow together.** To be exact, because an earlier
+draft of this receipt said "at the compiled-rounding floor" and the
+independent reviewer refuted it: the bar is `1e-15`, 503 of the walk's 1059
+rows are DEBT, the first of them is the after-SSH at substep 2
+(`1.2768e-15`, 1.28x bar), and the largest normalized residual anywhere in
+substeps 1-25 is `6.217e-15`, 6.2x bar. Nothing in that range is bit-exact
+and nothing in it is more than an order of magnitude from the bar; what
+changes at substep 26 is that the rows start multiplying.
 Normalized max abs, `VORTEX_VEC-zco`, kt=1. The campaign's normalisation
 divides by `max(peak |NEMO|, 1)`, so for the velocities and the sea surface
 it is a relative error and for the trends — whose peaks are far below one —
@@ -125,12 +137,14 @@ velocity rows without that in mind.
 | Coriolis trend | `3.388e-21` | `1.216e-19` | — | `7.237e-11` |
 | updated velocity | `5.551e-17` | `1.110e-16` | `6.447e-16` | `1.246e-08` |
 
-The updated velocity sits on the floor (`5.6e-17 … 1.1e-16`) for 26
-substeps and then grows about threefold per substep, reaching
+The updated velocity sits at `5.6e-17 … 1.1e-16` for 26 substeps and then
+grows, by a geometric mean of **2.17x per substep** between substeps 28 and
+48 (3.36x at the start of that range, 1.51x at the end), reaching
 `1.2458906277138998e-08` at the last substep — **the same number, to
-thirteen digits, that rounds 194 and 195 measured for the stage velocity
-residual the held candidate leaves behind** (`1.24589062771391176e-08`).
-The barotropic solve's own end-of-window output is that residual.
+fourteen significant digits, that rounds 194 and 195 measured for the stage
+velocity residual the held candidate leaves behind**
+(`1.24589062771391176e-08`; relative difference `9.6e-15`). The barotropic
+solve's own end-of-window output is that residual.
 
 ## The residual is not amplified entry error
 
@@ -143,28 +157,45 @@ velocity by one unit in the last place at **every** wet face — 3660 faces,
 the same spatial extent the real difference reaches — and re-run the same
 production-jitted step. The response stays on the floor for all 48
 substeps: `5.551e-17` at substep 1, `1.110e-16` at substep 48,
-amplification **2.0** (`phase3/round196/one_ulp_entry_probe.json`). A
-single-cell probe was run first and gave amplification 5.0; it is reported
-only as a note, because it spreads far more slowly than the real difference
-and could not have reached the state the real difference is in when it
-starts to grow. The loop does not amplify a last-bit entry change by `1e+08`.
+amplification **2.0** (`phase3/round196/one_ulp_entry_probe.json`), with
+the response reaching 2725-3643 of those faces at every substep, so the
+perturbation is not being discarded. A single-cell probe was written first
+and discarded as the wrong control — it spreads far more slowly than the
+real difference — and its number is deliberately not quoted here, because
+no committed artefact carries it. The loop does not amplify a same-sign
+last-bit entry change by `1e+08`. This control bounds the response to one
+SHAPE of perturbation; the substitution arms above are what rule the entry
+out for the actual difference.
 
-**Substitution (one variable).** Hand the loop NEMO's own recorded slow
-forcing at the boundary where legoESM forms it — after the barotropic
-Coriolis subtraction — and change nothing else. The loop-entry forcing rows
-become bit-exact (`2.711e-20 -> 0`) and the last substep's velocity is
-**unchanged in the first thirteen digits**: `1.2458906277138204e-08`
-against production's `1.2458906277138998e-08`. The slow forcing is not the
-owner.
+**Substitution, operand 1 of 2 (one variable).** Hand the loop NEMO's own
+recorded slow forcing at the boundary where legoESM forms it — after the
+barotropic Coriolis subtraction — and change nothing else. The loop-entry
+forcing rows become bit-exact (`2.711e-20 -> 0`) and the last substep's
+velocity is **unchanged in the first thirteen digits**:
+`1.2458906277138204e-08` against production's `1.2458906277138998e-08`.
 
-So the owner is inside the sub-time-step loop.
+**Substitution, operand 2 of 2 (one variable).** Start the loop from NEMO's
+own recorded barotropic entry velocity instead of legoESM's carried pair,
+and change nothing else. The arm is self-checking and the check passes: the
+first substep's entering velocity rows go from 120 unequal faces to **0**,
+so the substitution bound. The last substep's velocity is again
+**unchanged**: `1.2458906277138840e-08`
+(`phase3/round196/spgts_walk_kt1_nemo_entry_velocity.json`).
 
-## The named statement
+Both operands the barotropic loop is handed have now been replaced by
+NEMO's own, one at a time, and neither moves the end of the window. **The
+owner is inside the sub-time-step loop.**
+
+## What the growth is carried by, and what is not shown
 
 Decompose the compiled velocity update
 (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:535`,
 `ua_e = ( un_e + rDt_e * ( zu_spg + zu_trd + zu_frc ) ) * ssumask`) into the
-differences its own operands carry, with `rDt_e = 60 s`:
+differences its own operands carry, with `rDt_e = rn_Dt / nn_e = 2880/48 =
+60 s`. The table is arithmetic on field MAXIMA, not a per-cell residual —
+the walk stores maxima only — so it bounds the budget rather than closing
+it cell by cell. The fourth operand, `rDt_e * d(zu_frc)`, is `1.6e-18` and
+is omitted from the columns as immaterial.
 
 | substep | entering velocity | `rDt_e * d(spg)` | `rDt_e * d(trd)` | predicted | measured | ratio |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -173,41 +204,68 @@ differences its own operands carry, with `rDt_e = 60 s`:
 | 28 | `6.447e-16` | `6.54e-17` | `1.71e-15` | `2.42e-15` | `2.313e-15` | 0.95 |
 | 48 | `8.234e-09` | `3.64e-10` | `4.34e-09` | `1.29e-08` | `1.246e-08` | 0.96 |
 
-From substep 28 the budget closes to within 4-5%, so the update statement
-itself is faithful and the growth is in a term it reads. That term is the
-**barotropic Coriolis trend**, formed at
+From substep 28 the budget closes to within 4-5%, and the term that carries
+the growth is the **barotropic Coriolis trend**, formed at
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:503`
-(`CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )`; the explicit bottom
-stress at `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517` adds exactly nothing on this card — the
-Coriolis and the post-stress trend rows are identical to the last bit at
-every substep). At the last substep it supplies `4.34e-09` of the
-`4.71e-09` injected per substep, 92% of it, against the surface-pressure
-gradient's `3.64e-10`.
+(`CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )`). At the last substep it
+supplies `4.34e-09` of the `4.71e-09` injected per substep, 92% of it,
+against the surface-pressure gradient's `3.64e-10`. The explicit bottom
+stress at `dynspg_ts.f90:517` is active on this card, but it contributes
+nothing to the DIFFERENCE: the Coriolis and post-stress trend rows are
+identical to the last bit at all 48 substeps.
 
-The quantitative signature, and the reason the Coriolis trend rather than
-its operand is named: for the first sixteen substeps the ratio of the
-Coriolis-trend difference to the velocity difference it is handed is
-`6.1e-05 … 8.1e-05`, which is the Coriolis parameter on this beta-plane —
-exactly what a faithful operator produces. From substep 24 that ratio rises
-to `1.1e-03`, and by substep 32 to `3.1e-02`, 380 times the Coriolis
-parameter. Meanwhile the velocity difference the operator is handed is flat
-on the rounding floor until substep 27.
+**Whether the Coriolis operator itself differs is NOT shown, and an earlier
+draft of this receipt overstated it.** That draft compared the Coriolis
+trend difference against the ENTERING velocity difference; the operator is
+handed the MID-STEP extrapolated velocity set at `dynspg_ts.f90:389`, and
+the independent reviewer refuted both the operand and the quoted numbers.
+Re-measured against the right operand, and per cell rather than
+max-against-max:
 
-**CONFIRMED:** the loop-entry forcing is not the owner (substitution); the
-recurrence does not amplify a last-bit entry change (conditioning control);
-the velocity update is faithful (budget closes at 0.95-0.96); the Coriolis
-trend carries 92% of the per-substep injection at the end of the window.
-**PLAUSIBLE, not confirmed:** that the barotropic Coriolis operator itself
-differs. The trend-to-velocity ratio is a ratio of two field maxima that
-need not occur at the same cell, and no arm has yet substituted NEMO's
-recorded per-substep Coriolis trend. That substitution is the closing test
-and the record this round built is what makes it possible — see OPEN.
+| substep | faces where the operand differs | median ratio | 95th pct | max | max/max |
+|---:|---:|---:|---:|---:|---:|
+| 8 | 1775 | `2.79e-04` | `1.29e+00` | `2.44e+00` | `8.14e-05` |
+| 16 | 2447 | `2.44e-04` | `2.59e-01` | `9.30e-01` | `8.14e-05` |
+| 24 | 3047 | `2.44e-04` | `7.54e-02` | `3.64e-01` | `7.30e-04` |
+| 32 | 3417 | `2.10e-04` | `3.34e-02` | `1.09e+00` | `2.16e-02` |
+| 48 | 3638 | `1.84e-04` | `1.17e-02` | `8.98e-01` | `7.24e-03` |
+
+The Coriolis parameter on this card (`rn_ppgphi0 = 38.5`) is `9.08e-05`.
+The MEDIAN face therefore sees `2.0 … 3.1` times `f`, which is what a
+four-triad energy-and-enstrophy stencil gives, and that median is flat
+across the whole window: in the bulk of the domain the operator responds to
+the difference it is handed exactly as a faithful operator would. The
+departure is in the TAIL, and it shrinks as the window runs (95th
+percentile `1.29` at substep 8, `1.17e-02` at substep 48) — the opposite of
+what a growing operator error would do.
+
+Against that, the reviewer's norm argument: `dyn_cor_2D_init` freezes the
+four barotropic Coriolis coefficients, so the operator is a time-invariant
+linear map and `max|d(trd)| <= ||L||_inf * max|d(v)|` with `||L||_inf` of
+order `f`, with no co-location assumption. The measured ratio of maxima at
+substep 48 is `7.24e-03`, about 80 times that bound. The two readings
+disagree — a flat per-cell median at `2f` and a max-over-max 80 times `f` —
+which means the difference field has become concentrated at a few faces
+where the response is far larger than `f`, and the honest statement is that
+the walk has localised the growth to the Coriolis trend's few worst faces
+without showing that the operator which produces them differs from NEMO's.
+
+**CONFIRMED:** neither loop-entry operand is the owner (two independent
+substitutions, each self-checking); the recurrence does not amplify a
+same-sign last-bit entry change; every extrapolation, interpolation and
+filter coefficient is bit-identical at all 48 substeps; the velocity
+update's budget on field maxima closes to 4-5% from substep 28; the
+Coriolis trend carries 92% of the per-substep injection at the end of the
+window; the end-of-window velocity is the certified downstream residual to
+14 significant digits. **NOT SHOWN:** that any single compiled statement
+inside `dyn_spg_ts` differs. The closing test is named in OPEN.
 
 ## Predictions (frozen before measurement), kept with their verdicts
 
-* **P1 — the record admits.** **CONFIRMED.** Ten records, 50 frames and
-  1562 groups each, `icycle` 48 read from the header, all four plants fire
-  and the unplanted run is green.
+* **P1 — the record admits.** **CONFIRMED**, with one correction to the
+  prediction's own wording: the four plants exercise three distinct guards,
+  not four. Ten records, 50 frames and 1562 groups each, `icycle` 48 read
+  from the header, every plant fires and the unplanted run is green.
 * **P2 — the instrument is additive.** **CONFIRMED.** The step-10 restart
   is byte-identical to the uninstrumented reference and to round 192's two
   runs of the same card.
@@ -217,13 +275,16 @@ and the record this round built is what makes it possible — see OPEN.
   `5.551e-17`, at the floor. The substitution arm then showed that
   replacing the entry forcing outright leaves the end of the window
   unchanged in thirteen digits.
-* **P4 — the owner is one statement, re-made every substep.** **REFUTED as
-  stated, and the refutation is the finding.** No boundary is non-bit at
-  substep 1 and bit-exact later; instead every boundary sits on the floor
-  for 26 substeps and then grows together. The owner is not a fixed
-  per-substep offset but a term whose difference grows — the Coriolis
-  trend, whose ratio to its own operand departs from the Coriolis parameter
-  from substep 24 onward.
+* **P4 — the owner is one statement, re-made every substep.** **REFUTED,
+  and the refutation is the finding.** No boundary is non-bit at substep 1
+  and bit-exact later; instead every boundary stays within a few multiples
+  of the bar for 26 substeps and then grows together at 2.17x per substep.
+  The owner is not a fixed per-substep offset. The Coriolis trend carries
+  92% of what is injected at the end, but per cell its response to the
+  operand it is handed is a flat `2 … 3` times the Coriolis parameter
+  across the whole window, so this round does NOT name a differing
+  statement — it localises the growth and leaves the naming to the
+  substitution in OPEN.
 * **P5 — nothing lands unless a cited statement closes every gate.**
   **CONFIRMED.** Nothing in production changed.
 
@@ -253,6 +314,56 @@ and the record this round built is what makes it possible — see OPEN.
   `vortex_round196_spgts_outputs.sha256` are all written into the evidence
   directory by the harness.
 
+## Independent adversarial review (fresh reviewer, this round)
+
+Codex is out of budget on this account and the GLM tool is unreachable in
+this session, so the mandatory second opinion was a fresh reviewer agent
+given the diff, the evidence root and the claims, with no knowledge of how
+they were produced. Its verdict was **DO-NOT-SHIP on the receipt text,
+ship everything else**, and every finding is accepted and fixed above.
+
+* **BLOCKER (accepted, corrected).** The conditioning control perturbs 3660
+  faces, not 3639.
+* **BLOCKER (accepted, corrected).** "Every boundary is at the
+  compiled-rounding floor through substep 25" contradicted the walk's own
+  bar: 503 of 1059 rows are DEBT and the first is the after-SSH at substep
+  2. The claim is now the measured one — within 6.2x of bar through
+  substep 25.
+* **BLOCKER (accepted, corrected, and it changed the verdict).** The
+  Coriolis-ratio argument used the entering velocity; the operator is
+  handed the mid-step extrapolated velocity. Re-measured against the right
+  operand AND per cell, the median response is a flat `2 … 3` times the
+  Coriolis parameter across the window, so the earlier reading that the
+  operator itself differs is RETRACTED. The reviewer's own norm argument
+  (the coefficients are frozen at `dyn_cor_2D_init`, so the operator is a
+  time-invariant linear map bounded by `||L||_inf ~ f`) points the other
+  way at the field maxima; both readings are now stated, and the
+  disagreement is recorded as the thing the OPEN item measures.
+* **DEFECT (accepted, corrected).** The single-cell probe's number had no
+  committed artefact; it is no longer quoted.
+* **DEFECT (accepted, corrected).** The budget table is arithmetic on field
+  maxima, and omitted the statement's fourth operand; both are now said.
+* **DEFECT (accepted, corrected).** Two of the four plants trip the same
+  guard.
+* **DEFECT (accepted, fixed in the tests).** The unit controls used a
+  square test plane, so a transpose could not fail them, and asserted
+  shapes only. The plane is now 8x7 and the controls compare values.
+* **DEFECT (accepted, corrected).** "Bottom stress adds exactly nothing" is
+  only shown for the difference; and the growth is 2.17x per substep, not
+  threefold.
+* The reviewer independently CONFIRMED: the patch is additions-only (69
+  added lines, 11 hunks, one removal line and it is the `---` header); the
+  restart sha256 identical across all four runs; the admission's 1562
+  groups `= 21 + 48x32 + 5` and the frame map derived from `header[9]`;
+  `scalar_non_bit` empty over 336 rows; the whole budget table reproducing
+  with `rDt_e = 60 s`; the headline matching round 195 to 14 significant
+  digits rather than the 13 claimed; the forcing substitution landing at
+  exactly the boundary claimed; the conditioning control being able to
+  fire; the index and stagger conventions, including that the record's
+  `ua_new` is written after `lbc_lnk` and immediately before the swap, so
+  the derived entering velocity is exactly the `un_e` read at line 535; the
+  citation gate and its plant; and the empty production diff.
+
 ## Landing verdict: HELD (record + walk)
 
 Decision 82 stands: round 194's two-solve candidate is not landed, and the
@@ -272,14 +383,19 @@ Nothing on the UNASKED list.
 
 ## OPEN — round 197
 
-1. **Close or clear the Coriolis trend.** The record now carries NEMO's
-   `cor_u`/`cor_v` at every substep. Substitute them, one variable, and
-   measure the end-of-window velocity: if it goes AT-BAR the barotropic
-   Coriolis operator is the statement and the fix is cited there; if it
-   does not, the remaining term is the entering velocity and the owner is
-   the recurrence's own composition. This needs a per-substep override
-   inside the compiled scan, which does not exist yet — it is the round's
-   one new instrument.
+1. **Close or clear the Coriolis trend, and settle the disagreement this
+   receipt records.** The record now carries NEMO's `cor_u`/`cor_v` at
+   every substep. Substitute them, one variable, and measure the
+   end-of-window velocity: if it goes AT-BAR the barotropic Coriolis
+   operator is the statement and the fix is cited there; if it does not,
+   the growth is a property of the coupled recurrence and the next operand
+   to substitute is the surface-pressure gradient. This needs a per-substep
+   override inside the compiled scan, which does not exist yet — it is the
+   round's one new instrument. The discriminating quantity is already
+   named: the per-cell response is a flat `2 … 3` times `f` while the
+   response at the field maxima is 80 times the frozen operator's norm
+   bound, and only the substitution tells which of those decides the
+   window.
 2. Re-test round 194's held candidate once the barotropic output is
    AT-BAR, under the unchanged gates (Decision 82).
 3. The flux card's (`VORTEX-zco`) own kt=2 owner is untouched since round
