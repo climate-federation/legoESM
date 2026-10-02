@@ -102,7 +102,26 @@ def parse_source_files(repo: Path, value: str) -> tuple[str, ...]:
     return tuple(path for path in available if path in selected)
 
 
-def build_overlay(repo: Path, target: Path, selected: tuple[str, ...]) -> dict:
+def parse_reverse_commits(repo: Path, value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    commits = tuple(part.strip() for part in value.split(",") if part.strip())
+    require(len(commits) == len(set(commits)), "duplicate --reverse-commits entry")
+    for commit in commits:
+        try:
+            kind = _git(repo, "cat-file", "-t", commit).decode().strip()
+        except subprocess.CalledProcessError as error:
+            raise GateError(f"unknown reverse commit {commit}") from error
+        require(kind == "commit", f"reverse object {commit} is {kind}, not commit")
+    return commits
+
+
+def build_overlay(
+    repo: Path,
+    target: Path,
+    selected: tuple[str, ...],
+    reverse_commits: tuple[str, ...] = (),
+) -> dict:
     require(not target.exists(), f"refusing existing overlay {target}")
     unchanged = subprocess.run(
         ("git", "-C", str(repo), "diff", "--quiet", COMBINED, "--",
@@ -118,14 +137,34 @@ def build_overlay(repo: Path, target: Path, selected: tuple[str, ...]) -> dict:
         ("git", "clone", "-q", "--shared", str(repo), str(target)),
         check=True,
     )
+    for relative in differing_files(repo):
+        path = f"{OCEAN_PREFIX}{relative}"
+        destination = target / path
+        if relative in selected:
+            source_payload = _git(repo, "show", f"{SOURCE}:{path}")
+            destination.write_bytes(source_payload)
+    for commit in reverse_commits:
+        patch = _git(
+            repo, "show", "--format=", "--binary", commit, "--",
+            "packages/ocean/legoesm/ocean",
+        )
+        require(bool(patch), f"reverse commit {commit} has no ocean-package diff")
+        applied = subprocess.run(
+            ("git", "-C", str(target), "apply", "--3way", "-R"),
+            input=patch, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            check=False,
+        )
+        require(
+            applied.returncode == 0,
+            f"reverse commit {commit} did not apply:\n"
+            f"{applied.stdout.decode(errors='replace')}",
+        )
     records = []
     for relative in differing_files(repo):
         path = f"{OCEAN_PREFIX}{relative}"
         combined_payload = _git(repo, "show", f"{COMBINED}:{path}")
         source_payload = _git(repo, "show", f"{SOURCE}:{path}")
         destination = target / path
-        if relative in selected:
-            destination.write_bytes(source_payload)
         records.append({
             "path": path,
             "selected": relative in selected,
@@ -138,6 +177,7 @@ def build_overlay(repo: Path, target: Path, selected: tuple[str, ...]) -> dict:
         "source_commit": SOURCE,
         "combined_commit": COMBINED,
         "selected_source_files": list(selected),
+        "reversed_commits": list(reverse_commits),
         "files": records,
     }
     (target / "overlay_manifest.json").write_text(
@@ -223,10 +263,13 @@ def compare_snapshots(
 
 def run_candidate(args, repo: Path) -> dict:
     selected = parse_source_files(repo, args.source_files)
+    reverse_commits = parse_reverse_commits(repo, args.reverse_commits)
+    require(not (selected and reverse_commits),
+            "source-file and reverse-commit arms are mutually exclusive")
     root = args.output / "candidates" / args.tag
     overlay = args.output / "overlays" / args.tag
     require(not root.exists(), f"refusing existing candidate output {root}")
-    manifest = build_overlay(repo, overlay, selected)
+    manifest = build_overlay(repo, overlay, selected, reverse_commits)
     harness = overlay / (
         "scripts/validate/ocean_fidelity/testcases/"
         "nemo_testcase_l2_gyre_year_fromrest.py"
@@ -261,6 +304,7 @@ def run_candidate(args, repo: Path) -> dict:
         overlay / "overlay_manifest.json"
     )
     report["selected_source_files"] = list(selected)
+    report["reversed_commits"] = list(reverse_commits)
     report["run_log"] = str(log_path)
     report["run_command"] = list(command)
     report["overlay"] = manifest
@@ -275,6 +319,7 @@ def main(argv=None) -> int:
     parser.add_argument("--run-candidate", action="store_true")
     parser.add_argument("--tag")
     parser.add_argument("--source-files", default="NONE")
+    parser.add_argument("--reverse-commits", default="")
     parser.add_argument("--compare", nargs=2, type=Path,
                         metavar=("REFERENCE", "CANDIDATE"))
     parser.add_argument("--days", type=int, default=17)

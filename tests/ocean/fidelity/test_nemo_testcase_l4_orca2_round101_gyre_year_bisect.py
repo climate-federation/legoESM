@@ -85,3 +85,18 @@ def test_source_file_parser_is_fail_closed(monkeypatch, tmp_path):
         module.parse_source_files(tmp_path, "c.py")
     with pytest.raises(module.GateError, match="duplicate"):
         module.parse_source_files(tmp_path, "a.py,a.py")
+
+
+def test_reverse_commit_parser_is_fail_closed(monkeypatch, tmp_path):
+    module = _module()
+    monkeypatch.setattr(module, "_git", lambda _repo, *_args: b"commit\n")
+    assert module.parse_reverse_commits(tmp_path, "abc,def") == ("abc", "def")
+    with pytest.raises(module.GateError, match="duplicate"):
+        module.parse_reverse_commits(tmp_path, "abc,abc")
+
+    def _missing(_repo, *_args):
+        raise module.subprocess.CalledProcessError(1, "git")
+
+    monkeypatch.setattr(module, "_git", _missing)
+    with pytest.raises(module.GateError, match="unknown reverse commit"):
+        module.parse_reverse_commits(tmp_path, "missing")
