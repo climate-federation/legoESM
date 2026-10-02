@@ -36,7 +36,7 @@ def _dummy_cfg():
     }
 
 
-class TestApplyHardwareConfig:
+class TestBootstrapFromYamlConfig:
     """Runtime setup should consume precision/devices/parallelism settings."""
 
     def test_legacy_hardware_devices_is_consumed(self):
