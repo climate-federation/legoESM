@@ -564,8 +564,3 @@ def tidal_acceleration_from_phase(basis: TidalBasis, cos_phase, sin_phase):
     return a_x, a_y
 
 
-def tidal_acceleration_at(basis: TidalBasis, t_seconds):
-    """Single-shot reconstruction at one time. Equals
-    :func:`tidal_acceleration` to round-off; used by tests and offline code."""
-    cos_p, sin_p = tidal_phase_factors(basis, t_seconds)
-    return tidal_acceleration_from_phase(basis, cos_p, sin_p)

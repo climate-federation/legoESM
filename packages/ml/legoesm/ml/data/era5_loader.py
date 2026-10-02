@@ -236,65 +236,6 @@ def create_climatology_dataset(config: ERA5ClimatologyConfig = ERA5ClimatologyCo
     return ds
 
 
-def load_era5_batch(
-    config: ERA5Config,
-    batch_size: int = 4,
-    dt_hours: int | None = None,
-    rng: np.random.Generator | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Load a random batch of (input, target) pairs from ERA5.
-
-    Each sample consists of two consecutive time steps separated by
-    ``dt_hours``. The input is the earlier state and the target is
-    the later state.
-
-    Parameters
-    ----------
-    config : ERA5Config
-        Data configuration.
-    batch_size : int
-        Number of samples in the batch.
-    dt_hours : int, optional
-        Override for the time step between input and target.
-    rng : numpy.random.Generator, optional
-        Random number generator for reproducibility.
-
-    Returns
-    -------
-    inputs : jax.Array, shape (batch_size, n_lat, n_lon, n_channels)
-        Input states.
-    targets : jax.Array, shape (batch_size, n_lat, n_lon, n_channels)
-        Target states (dt_hours later).
-    """
-    if dt_hours is None:
-        dt_hours = config.dt_hours
-    if rng is None:
-        rng = np.random.default_rng()
-
-    ds = create_era5_dataset(config)
-
-    # Number of time steps between input and target
-    time_stride = dt_hours // config.dt_hours
-    n_times = len(ds.time) - time_stride
-
-    # Random time indices
-    t_indices = rng.choice(n_times, size=batch_size, replace=False)
-
-    inputs_list = []
-    targets_list = []
-
-    for t in t_indices:
-        inp = _dataset_to_array(ds.isel(time=int(t)), config)
-        tgt = _dataset_to_array(ds.isel(time=int(t + time_stride)), config)
-        inputs_list.append(inp)
-        targets_list.append(tgt)
-
-    inputs = jnp.stack(inputs_list, axis=0)
-    targets = jnp.stack(targets_list, axis=0)
-
-    return inputs, targets
-
-
 def create_training_iterator(
     config: ERA5Config,
     batch_size: int = 4,
