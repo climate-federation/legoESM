@@ -242,6 +242,12 @@ and the record this round built is what makes it possible — see OPEN.
   freshwater closure, the mask-rank and prognostic-barotropic-state tests,
   and the four VORTEX walk-script test modules including this round's own.
   Decisive line quoted with the landing.
+* **Measurement provenance.** All three arms were re-run on a clean
+  worktree at commit `8153857a3a30f24686a7184a038a390fcdcc7c9c` and every
+  number in this receipt is from that run: the production walk
+  (`spgts_walk_kt1.json`), the NEMO-forcing arm
+  (`spgts_walk_kt1_nemo_forcing.json`) and the conditioning control
+  (`one_ulp_entry_probe.json`). None carries a `-dirty` stamp.
 * **Record provenance.** `legoesm_git_sha.txt`, `toolchain.sha256`,
   `binaries.sha256`, `shipped_case.sha256` and
   `vortex_round196_spgts_outputs.sha256` are all written into the evidence
