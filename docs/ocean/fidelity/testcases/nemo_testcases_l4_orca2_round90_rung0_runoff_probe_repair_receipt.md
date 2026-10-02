@@ -64,6 +64,12 @@ against round 83. Debug values are diagnostic-only.
   `ORCA2_ROUND90_RUNG0_FRAMES_PREFLIGHT_READY`; its missing-guard plant fires.
 - Focused round-90 controls: **4 passed**; `bash -n` and `git diff --check`
   pass.
+- The required `tests/ocean/fidelity -n 12` battery selected 2,223 tests,
+  reached 99%, then repeated the established silent-tail stall and was stopped
+  after repeated empty waits. Its two visible failures reproduce alone as the
+  listed pre-existing worktree-stamp ratchet (`the certified phase-3 stepping
+  gate moved`) and SI3 scalar-math provenance red (`A MY_SRC is not verbatim`).
+  No round-90 test failed; there is no suite-PASS claim.
 - The receipt citation gate passes this receipt and the default cumulative
   receipt with zero unmapped citations; shifting the dereference citation by
   two lines makes the gate fail.
