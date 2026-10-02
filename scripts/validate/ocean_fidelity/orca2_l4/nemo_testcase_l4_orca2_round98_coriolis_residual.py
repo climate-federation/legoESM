@@ -219,7 +219,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         for name in COEFFICIENTS
     }
     require(all(row["bit_exact"] for row in coefficient_seed.values()),
-            "external literal coefficient seed is not the production Kmm seed")
+            "external literal coefficient seed is not the production Kmm seed: "
+            + json.dumps(coefficient_seed, sort_keys=True))
 
     source_application = score_application(
         source_trace, source_coeff, oracle, active,
