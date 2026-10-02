@@ -186,6 +186,9 @@ def measure(
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_seed_depth_mean,
+    )
 
     require(plant in PLANTS, f"unknown plant {plant}")
     stamp = worktree_stamp()
@@ -259,6 +262,28 @@ def measure(
     require(all(row["bit_exact"] for row in rhs_calibration.values()),
             "slow trace and admitted exact RHS observer disagree")
 
+    literal_u, literal_v = jax.device_get(jax.jit(
+        lambda du, dv, hu, hv, Hu, Hv, mu, mv: (
+            _nemo_literal_seed_depth_mean(
+                du, hu, mu, np.float64(1.0) / Hu),
+            _nemo_literal_seed_depth_mean(
+                dv, hv, mv, np.float64(1.0) / Hv),
+        )
+    )(
+        operands["du_dt"], operands["dv_dt"],
+        operands["h_u"], operands["h_v"],
+        operands["H_u"], operands["H_v"],
+        state.u_mask.data, state.v_mask.data,
+    ))
+    literal_arm = {
+        "u": rhs_walk.score(
+            round83.native_u(np.asarray(literal_u)),
+            oracle["depth_u"], active["u"]),
+        "v": rhs_walk.score(
+            round83.native_v(np.asarray(literal_v)),
+            oracle["depth_v"], active["v"]),
+    }
+
     state_after = trace.state_after_barotropic
     live = {
         "depth_u": round83.native_u(np.asarray(operands["depth_u"])),
@@ -302,6 +327,7 @@ def measure(
         "stage0_entry": entry_rows,
         "observer_passivity": passivity,
         "rhs_trace_calibration": rhs_calibration,
+        "source_literal_jit_arm": literal_arm,
         "source_order": list(SOURCE_ORDER),
         "rows": rows,
         "depth_operand_walk_rank0": depth_operands,
