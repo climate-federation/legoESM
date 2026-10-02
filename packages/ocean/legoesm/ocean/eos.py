@@ -145,11 +145,16 @@ def wright_eos(
 
     Notes
     -----
-    Intermediate computation is promoted to float64 to avoid precision
-    loss from large polynomial coefficients (e.g., WRIGHT_B0 ~ 5.79e8).
-    If ``JAX_ENABLE_X64=1`` is not set, the astype calls are no-ops
-    (safe but no precision improvement).  ``jnp.astype`` is
-    differentiable in JAX.
+    The polynomial runs in the precision POLICY's ``equation_of_state``
+    compute dtype (``compute_dtype`` overrides it), NOT the input dtype:
+    float64 under the fp64 policy and under the mixed policy's ocean
+    overrides, but float32 under the default policy -- even when the state
+    is float64 under ``JAX_ENABLE_X64=1``. In float32 the large coefficients
+    (e.g. WRIGHT_B0 ~ 5.79e8) leave density good to ~1e-7 relative, so the
+    anomaly rho - rho_0 to ~1e-5 (measured 2026-09-26: jit vs eager of the
+    same MPAS ocean step differ by eta 7.8e-6 after one step at the default
+    policy, 1.4e-14 at fp64). Set the policy for any float64 run.
+    ``jnp.astype`` is differentiable in JAX.
 
     The Wright (1997) polynomial is nominally valid for T in [-2, 40] degC
     and S in [0, 42] PSU, but extrapolates smoothly outside that box.

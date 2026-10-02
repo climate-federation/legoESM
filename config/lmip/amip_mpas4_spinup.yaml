@@ -67,6 +67,7 @@ physics:
   stomatal_model: ball_berry
   snow_albedo_feedback: true
   enable_freeze_thaw: true      # boreal winter columns diverge without it
+  soil_ice_impedance_exponent: 6.0  # frozen soil impedes water flow, CLM5 e_ice (user 2026-09-28)
 
 forcing:
   source: cru_jra

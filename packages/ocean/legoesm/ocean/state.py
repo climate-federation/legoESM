@@ -2049,6 +2049,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
+    # Coefficients for eos="nemo_seos" (NEMO's simplified/linear law, the
+    # ``ln_seos`` branch of ``eosbn2.F90``).  ``None`` keeps
+    # ``NemoSEOSConfig()``'s DINO defaults, which is what every card that
+    # selected this EOS before relied on; a card whose ``&nameos`` block
+    # differs from DINO's (VORTEX) MUST pass its own here, because a defaulted
+    # physical coefficient is a hidden choice.
+    eos_nemo_seos: object = None  # NemoSEOSConfig when eos="nemo_seos"
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
@@ -2400,6 +2407,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     # default only, refused by the model at STEP-TIME if the card also
     # resolves ``nemo_literal`` without overriding it.
     nemo_stage_momentum_wzv_split: bool | None = None
+    # Which NEMO time-stepping program's after-SSH slot the FIRST wzv call
+    # reads, and therefore what its scale-factor term is built from:
+    #   "rk3_extrapolated"   -- NEMO's RK3 leaves the previous step's linear
+    #       extrapolation there (stprk3.F90:225), which stp_2D turns into
+    #       r3t(:,:,Kaa) (stp2d.F90:149) just before CALL wzv (stp2d.F90:153).
+    #   "leapfrog_continuity" -- NEMO's modified leapfrog fills the same slot
+    #       from the barotropic continuity in ssh_nxt before wzv_MLF reads it.
+    # This is an EXPLICIT per-card choice and is NOT inferred from the time
+    # integrator or from any other field: keying it on a sibling selector is
+    # the hidden coupling decision 75 bans and round 163 rejected once
+    # already.  Every card whose resolved configuration reaches the
+    # nemo_literal ZAD branch MUST state one of the two, or the model raises
+    # rather than guessing.  "" here is a construction default only.
+    nemo_first_wzv_after_ssh: str = ""
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian

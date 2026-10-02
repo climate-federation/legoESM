@@ -1135,3 +1135,40 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
         # the per-column baked thermal inertia survives the override
         assert np.ndim(th.C_soil) == 2
     assert got == {False: False, True: True}
+
+
+def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_path):
+    """``land_canopy_stress_b0`` / ``land_canopy_interception`` must survive
+    the calibration bake, which rebuilds the surface scheme at its library
+    default, and interception must allocate the canopy water store."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.interception import InterceptionConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        mpas_land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    got = {}
+    for arm, (sb0, icp) in {"default": (True, False),
+                            "flipped": (False, True)}.items():
+        cfg = base._replace(land_canopy_stress_b0=sb0,
+                            land_canopy_interception=icp)
+        cfg.validate_strict()
+        drv = ModelDriver(cfg, output_dir=tmp_path / arm)
+        drv.setup()
+        lc = drv.physics.land_ml_cfg
+        got[arm] = (lc.surface_scheme.stress_b0,
+                    isinstance(lc.interception, InterceptionConfig),
+                    drv._land_ml_state.W_canopy is not None)
+    assert got == {"default": (True, False, False),
+                   "flipped": (False, True, True)}
