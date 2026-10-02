@@ -80,6 +80,14 @@ def _write_minimal_s2s_store(tmp_path: Path) -> ChaosBenchS2SConfig:
                     coords={"level": levels, "latitude": source_lat, "longitude": source_lon},
                     dims=("level", "latitude", "longitude"),
                 ),
+                **{
+                    wind: xr.DataArray(
+                        np.full((len(levels), source_lat.size, source_lon.size), value, dtype=np.float32),
+                        coords={"level": levels, "latitude": source_lat, "longitude": source_lon},
+                        dims=("level", "latitude", "longitude"),
+                    )
+                    for wind, value in (("u", 5.0), ("v", -3.0))
+                },
             },
             coords={"time": np.datetime64(f"2000-01-{day_index + 1:02d}")},
         )
@@ -130,13 +138,15 @@ def _write_minimal_s2s_store(tmp_path: Path) -> ChaosBenchS2SConfig:
     xr.Dataset(
         {
             "mean": xr.DataArray(
-                np.zeros(4, dtype=np.float32),
-                coords={"param": ["t-500", "t-850", "q-500", "q-850"]},
+                np.zeros(8, dtype=np.float32),
+                coords={"param": ["t-500", "t-850", "q-500", "q-850",
+                                  "u-500", "u-850", "v-500", "v-850"]},
                 dims=("param",),
             ),
             "sigma": xr.DataArray(
-                np.ones(4, dtype=np.float32),
-                coords={"param": ["t-500", "t-850", "q-500", "q-850"]},
+                np.ones(8, dtype=np.float32),
+                coords={"param": ["t-500", "t-850", "q-500", "q-850",
+                                  "u-500", "u-850", "v-500", "v-850"]},
                 dims=("param",),
             ),
         }
@@ -671,11 +681,12 @@ def test_prepare_arco_surface_forcing_regrids_and_preserves_sst_mask(tmp_path: P
 class _PassThroughCoupledAtmosModel(eqx.Module):
     def __call__(self, x, grid):
         del grid
-        return x[..., :4]
+        return x[..., :8]   # t, q, u, v at 2 levels (the slab forcing needs u, v)
 
 
 def test_coupled_rollout_targets_future_sst_without_external_surface_forcing(tmp_path: Path):
-    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
 
     ds = coupled_rollout_to_dataset(
         _PassThroughCoupledAtmosModel(),
@@ -702,7 +713,8 @@ def test_coupled_rollout_targets_future_sst_without_external_surface_forcing(tmp
 
 
 def test_uncoupled_rollout_keeps_fixed_sst_finite_in_forcing_state(tmp_path: Path):
-    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
     target = build_target_grid(config.gaussian_n_max)
     lat = target.latitude_deg.astype(np.float32)
     lon = target.longitude_deg.astype(np.float32)
