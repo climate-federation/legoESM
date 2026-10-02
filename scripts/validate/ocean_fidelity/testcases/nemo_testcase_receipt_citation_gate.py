@@ -1197,6 +1197,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 99: admitted frozen EEN coefficient discriminator ---
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:126-127': [
+        'ALLOCATE( ffu_nw(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))',
+        '&      ffv_nw(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))', 2],
     # --- ORCA2 round 97: admitted rung-0 split-explicit statement walk ---
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:580-666': [
         '!     Compute Sea Level at step jit+1',
