@@ -210,8 +210,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     # The literal builder freezes at Kmm. On rung 0 this is the bridged state
     # eta; prove that by equality to all eight production-traced coefficients.
     coefficient_eta = source_trace["coefficient_eta"][0]
-    source_coeff = jax.device_get(_nemo_literal_een_coefficients(
-        coefficient_eta, source_z, jnp.float64, scheme="een"))
+    source_coeff = jax.device_get(jax.jit(
+        lambda eta: _nemo_literal_een_coefficients(
+            eta, source_z, jnp.float64, scheme="een"),
+    )(coefficient_eta))
     coefficient_seed = {
         name: rhs_walk.score(np.asarray(source_coeff[name]),
                              np.asarray(source_trace[name][0]),
@@ -269,9 +271,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             np.asarray(live_source[:-1]) != np.asarray(current_live[:-1]))),
     }
 
-    fold_coeff = jax.device_get(_nemo_literal_een_coefficients(
-        coefficient_eta, source_z, jnp.float64, scheme="een",
-        _e3f_test_override=fold_only))
+    fold_coeff = jax.device_get(jax.jit(
+        lambda eta, e3f: _nemo_literal_een_coefficients(
+            eta, source_z, jnp.float64, scheme="een",
+            _e3f_test_override=e3f),
+    )(coefficient_eta, fold_only))
     if plant == "coefficient-bit":
         fold_coeff = dict(fold_coeff)
         planted = np.array(fold_coeff["ffu_nw"], copy=True)
