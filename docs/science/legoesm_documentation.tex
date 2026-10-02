@@ -52,11 +52,11 @@
 \DeclareMathOperator{\Var}{Var}
 
 % Document version tracks the package MAJOR.MINOR (root pyproject [project].version).
-\newcommand{\legoesmversion}{0.1}
-\title{\textbf{legoESM v\legoesmversion{}: A Differentiable Earth System Model in JAX}\\[6pt]
+\newcommand{\legoesmversion}{1.0}
+\title{\textbf{legoESM \legoesmversion{}: A Differentiable Earth System Model in JAX}\\[6pt]
 \large Technical Documentation of Equations and Implementations}
 \author{legoESM Development Team}
-\date{Version \legoesmversion{} --- June 2026}
+\date{Version \legoesmversion{} --- October 2026}
 
 \begin{document}
 
@@ -72,7 +72,18 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and 35+ physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  The cubed-sphere transport uses an FV3-faithful PPM reconstruction with monotonicity limiters and flux-form mass transport on staggered grids, complemented by an FV3-style forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}) implementing the full c\_sw/d\_sw stepping (kernels certified bit-exact against Fortran; full-chain fidelity in progress) and d2a2c\_vect (D-grid $\to$ A-grid $\to$ C-grid) vector conversion with duo-grid sub-grid metrics ($\sin\alpha_{\mathrm{sg}}$, $\cos\alpha_{\mathrm{sg}}$) following Mouallem et al.\ (2023).  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, CMIP6-class infrastructure (CF/CMOR output across four tables, experiment templates, restart reproducibility, documented tuning), and a fully differentiable 4D-Var data assimilation system leveraging JAX autodiff for adjoint-free gradient computation.  The MPI-distributed runtime supports native 4D halo exchange (one message per neighbour for all vertical levels), reverse-mode AD through MPI via a custom \texttt{sendrecv} VJP wrapper, and AD-safe \texttt{allreduce(SUM)} for gradient-compatible global reductions.  The codebase comprises approximately 385 source modules (${\sim}$102,000 lines of code) validated by 3489 tests across 216 test files.
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and 35+ physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  The cubed-sphere transport uses an FV3-faithful PPM reconstruction with monotonicity limiters and flux-form mass transport on staggered grids, complemented by an FV3-style forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}) implementing the full c\_sw/d\_sw stepping (kernels certified bit-exact against Fortran; full-chain fidelity in progress) and d2a2c\_vect (D-grid $\to$ A-grid $\to$ C-grid) vector conversion with duo-grid sub-grid metrics ($\sin\alpha_{\mathrm{sg}}$, $\cos\alpha_{\mathrm{sg}}$) following Mouallem et al.\ (2023).  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, CMIP6-class infrastructure (table-driven CF/CMOR output across eleven CMIP6 tables, experiment templates, restart reproducibility, documented tuning), and a fully differentiable 4D-Var data assimilation system leveraging JAX autodiff for adjoint-free gradient computation.  The MPI-distributed runtime supports native 4D halo exchange (one message per neighbour for all vertical levels), reverse-mode AD through MPI via a custom \texttt{sendrecv} VJP wrapper, and AD-safe \texttt{allreduce(SUM)} for gradient-compatible global reductions.  The codebase comprises approximately 990 source modules (${\sim}$590,000 lines of code, excluding the vendored CLM-ML canopy backend) exercised by roughly 32,000 test functions across some 2,700 test files.
+
+\paragraph{What legoESM 1.0 adds.}
+Version 1.0 is the first release in which a production climate configuration, rather than only the component library, is a versioned part of the model.  The headline additions since the previous documentation release are:
+\begin{itemize}[nosep]
+  \item a \textbf{production AMIP configuration} on the MPAS Voronoi mesh with a CAM6-homogenised physics suite --- CAM6 32-level hybrid table, Zhang--McFarlane convection, prognostic CLUBB with CAM6 cloud fraction, MG2-flavour two-moment microphysics, McICA cloud overlap, and an interactive multilayer land (Section~\ref{sec:amip-production});
+  \item \textbf{conservation repairs}: on the production lane, conservative tracer vertical transport on the hybrid coordinate and column-conserving tracer positivity on every grid; in the spectral core, Simmons--Burridge vertical transport and frictional heating; and a single temperature-dependent latent-heat family used by the surface-flux interface, sea ice and the land canopy (schemes ported from a reference model, and the FV3 duo-grid lane, keep their own constants) (Sections~\ref{sec:conservation-v1} and~\ref{sec:constants});
+  \item a hardened \textbf{parallel runtime} for multi-GPU and multi-node runs, with size-aware halo scheduling, space-filling-curve ordering, a communication-free ocean preconditioner, and explicit precision policies (Section~\ref{sec:parallel});
+  \item an \textbf{FV3 duo-grid lane} whose adiabatic deck is certified against the Fortran FV3 core (Section~\ref{sec:fv3duo});
+  \item table-driven \textbf{CMIP6 output} read from the official CMOR tables, with interval means and multi-rank output on the MPAS lane (Section~\ref{sec:cmip});
+  \item unified \textbf{training and calibration lanes} that train one model registry across the WeatherBench and AIMIP campaigns and refuse parameters that carry no gradient (Section~\ref{sec:training}).
+\end{itemize}
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -235,17 +246,17 @@ a string scheme name resolved through the listed factory; an unknown name raises
 \textbf{Swap axis} & \textbf{Factory entry point} & \textbf{Example menu} \\
 \midrule
 Horizontal grid & \texttt{create\_grid()} & cubed-sphere, Gaussian/spectral, lat-lon, MPAS Voronoi, tripolar (ocean) \\
-Dynamical core & \texttt{create\_atmosphere\_dycore()} & \{cdgrid, spectral, mpas, sfno\} $\times$ \{shallow water, hydrostatic PE, NH compressible Euler\}; lat-lon C-grid; plane \\
-Vertical coordinate & \texttt{create\_*\_coordinate()} & sigma, hybrid $\sigma$--$p$, height / $z^*$ \\
-Time integrator & \texttt{dispatch\_integrator()} & ssp\_rk3, ssp\_rk3\_scan, ssp\_rk34, ssp\_rk54, rk4 \\
-Radiation & \texttt{make\_radiation\_physics()} & gray (Frierson), RRTMGP correlated-$k$ \\
-Convection & \texttt{make\_convection\_physics()} & Bechtold, Tiedtke, Kain--Fritsch, Zhang--McFarlane, Emanuel, Kuo, SBM \\
-Microphysics & \texttt{make\_microphysics\_physics()} & Kessler, Sundqvist, Morrison, Seifert--Beheng, Thompson, ML \\
-Turbulence / BL & \texttt{make\_turbulence\_physics()} & Louis, Holtslag--Boville, YSU, EDMF, TKE, CLUBB-lite, Smagorinsky \\
-Gravity-wave drag & \texttt{make\_gwd\_physics()} & Lindzen, Hines, McFarlane, Rayleigh, spectral, ML \\
+Dynamical core & \texttt{create\_atmosphere\_dycore()} & \{cdgrid, spectral, mpas, sfno\} $\times$ \{shallow water, hydrostatic PE, NH compressible Euler\}; lat-lon C-grid; FV3 duo-grid; plane \\
+Vertical coordinate & \texttt{create\_*\_coordinate()} & sigma, hybrid $\sigma$--$p$, CAM6 L32 hybrid table, height / $z^*$ \\
+Time integrator & \texttt{dispatch\_integrator()} & ssp\_rk3, ssp\_rk3\_scan, ssp\_rk34, ssp\_rk54, ssp\_rk54\_scan, rk4 \\
+Radiation & \texttt{make\_radiation\_physics()} & gray (Frierson), simple LW, RRTMGP correlated-$k$, 3-D Monte-Carlo (plane LES/CRM only) \\
+Convection & \texttt{make\_convection\_physics()} & Bechtold, Tiedtke, Kain--Fritsch, Zhang--McFarlane, Emanuel, Kuo, SBM, mass flux, EDMF, DCA \\
+Microphysics & \texttt{make\_microphysics\_physics()} & Kessler, Sundqvist, Morrison (MG2 / SAM flavours), Seifert--Beheng, Thompson, P3, fast SBM, SDM, ML emulator \\
+Turbulence / BL & \texttt{make\_turbulence\_physics()} & Louis, Holtslag--Boville, YSU, EDMF, TKE, MYNN-2.5, CLUBB (prognostic), CLUBB-lite, Smagorinsky \\
+Gravity-wave drag & \texttt{make\_gwd\_physics()} & Lindzen, Hines, McFarlane, E3SM/CAM, Rayleigh, prognostic spectral, ML \\
 Physics core & \texttt{make\_\{physics,hybrid,neural\}} & classical, hybrid, neural (SFNO) \\
-Ocean vertical mixing & \texttt{make\_vertical\_mixing\_physics()} & KPP, Richardson, constant, Jayne--St-Laurent tidal \\
-Ocean lateral mixing & \texttt{make\_lateral\_mixing\_physics()} & harmonic, biharmonic, GM-Redi, Visbeck, Leith, backscatter \\
+Ocean vertical mixing & \texttt{make\_vertical\_mixing\_physics()} & KPP, Richardson, constant, TKE (NEMO \texttt{zdftke}), CATKE; tidal mixing applied as a separate additive step \\
+Ocean lateral mixing & \texttt{make\_lateral\_mixing\_physics()} & harmonic, biharmonic, GM-Redi \\
 Ocean surface forcing & \texttt{make\_surface\_forcing\_physics()} & bulk, restoring, prescribed \\
 Complexity ladder & \texttt{resolve\_model\_complexity()} & idealized, intermediate, full \\
 \bottomrule
@@ -304,16 +315,7 @@ Two halo widths are supported.  \textbf{Halo\,=\,1} (one ghost cell per side) su
 
 Under MPI, the native \textbf{4D halo exchange} path (\texttt{pad\_halo\_4d}, \texttt{pad\_halo\_vector\_4d}) exchanges all vertical levels in a single MPI message per neighbour, replacing the earlier per-level \texttt{vmap(pad\_halo)} path.  All \texttt{sendrecv} calls go through a \texttt{@jax.custom\_vjp} wrapper that swaps source/dest in the backward pass, enabling \texttt{jax.grad} through distributed halo exchange for differentiable MPI simulations.
 
-The May 2026 GPU-scaling branch (\#228) further compresses per-RK3-step
-collectives across all dycore backends: cubed-sphere allreduces fuse
-$4\to 1$ (halo bandwidth reduced ${\sim}36\text{--}144\times$ at
-high resolution), the spectral PE FFT and Legendre transforms fuse
-into a single pass with stacked per-tracer SH analyses, and MPAS
-\texttt{sendrecv}s drop $12\to 6$ with mass-fix payloads $3\to 2$.
-Fifteen SPMD-correctness unit tests gate the changes.  Real-hardware
-Levante-cluster validation is described in
-\texttt{docs/REAL\_HARDWARE\_SCALING.md} and
-\texttt{docs/GPU\_SCALING\_BRANCH.md}.
+Per-step collectives are further compressed on every dycore backend: the cubed-sphere allreduces are fused, the spectral FFT and Legendre transforms run as a single pass with stacked per-tracer analyses, and the MPAS exchanges are grouped into coloured rounds.  The multi-device runtime, its halo schedules and their defaults are described in Section~\ref{sec:parallel}; measured scaling is documented in \texttt{docs/performance/REAL\_HARDWARE\_SCALING.md}.
 
 %-----------------------------------------------------------------------------
 \subsection{Gaussian Grid and Spectral Transforms}
@@ -670,6 +672,9 @@ The spectral curl and divergence of flux vectors $(U,V)=(F_u\cos\phi,\,F_v\cos\p
 \end{equation}
 where $\mathcal S$ and $\mathcal S_\mu$ denote the SH analysis with standard and $\dd P_n^m/\dd\mu$ Legendre matrices.
 
+\paragraph{Energy-conserving vertical transport and frictional heating.}
+Vertical advection of $u$, $v$ and $T$ uses the centred \citet{SimmonsBurridge1981} pairing on both the sigma and the hybrid coordinate (\texttt{vertical\_advection\_scheme="sb\_centered"}, the default), so that the discrete vertical transport is consistent with continuity and, in the adiabatic frictionless limit, conserves total energy.  The kinetic energy removed by the explicit vorticity/divergence hyperdiffusion is returned to the temperature equation as local frictional heating (\texttt{frictional\_heating=True}, default), computed from the dealiased tendencies.  The legacy first-order upwind form remains selectable for reproducing older results but emits a warning, because it removes heat from the column with no physical counterpart.  Tracers keep upwind vertical advection on this core: a centred scheme would overshoot and drive moisture negative.
+
 %-----------------------------------------------------------------------------
 \subsection{Non-Hydrostatic Compressible Euler Equations}
 %-----------------------------------------------------------------------------
@@ -726,6 +731,15 @@ The diffusion terms $D_u,D_v,D_w,D_\theta$ are evaluated in flux form, $D_\phi =
   \item \textbf{DNS} (direct numerical simulation, $\Delta x\to$ the Kolmogorov scale; \texttt{molecular}): no turbulence model; $K_m$ is the constant molecular kinematic viscosity $\nu$ with $K_h=\nu/\mathrm{Pr}$ ($\mathrm{Pr}\approx0.71$ for air), giving the molecular dissipation $\nu\nabla^2\bm u$ directly.
 \end{itemize}
 Because the three regimes share one discrete flux-form operator, LES and DNS are configuration changes rather than separate code paths; the molecular closure reproduces the analytical viscous decay $\partial_t\hat u=-\nu k^2\hat u$ of an isolated shear mode to within the time-integration error.
+
+%-----------------------------------------------------------------------------
+\subsection{FV3 Duo-Grid Lane}
+\label{sec:fv3duo}
+%-----------------------------------------------------------------------------
+
+Alongside the native C-D grid cores, legoESM carries a JAX twin of the FV3 \texttt{fv\_dynamics} step on the six-face duo-grid cube \citep{Mouallem2023} (\texttt{dycore.discretization="fv3\_duo"}).  Its kernels, halo exchange and multi-step trajectories are scored against a pinned build of the Fortran FV3 core on both the hydrostatic and non-hydrostatic arms, and FV3's own physical constants are used on this lane so that the comparison is not confounded by the model-wide constant set.  The certified deck is adiabatic with humidity as a passenger; a moist arm passes FV3's virtual-temperature factor into the step and is selected automatically when Kessler microphysics is attached.  The lane runs in float64 storage by default; reduced-precision storage is declared but refused at construction until every workspace follows the storage dtype.
+
+The step is face-sharded across devices with ring exchanges of width proportional to the halo, and a window layout splits each face into $k_t\times k_t$ windows ($6k_t^2$ devices, \texttt{dycore.fv3\_duo\_windows}) with a measured per-deck halo pad that must be given explicitly.  A column-model bridge (\texttt{dycore.fv3\_duo\_column\_lane}) presents the duo state as cell columns so that the MPAS-lane physics suite can run on FV3 dynamics, applying physics increments in the FV3 manner (winds through the D-grid lift, water tracers and layer mass through the moist update) without an additive surface-pressure fixer.
 
 %=============================================================================
 \section{Atmospheric Physics}
@@ -1167,6 +1181,13 @@ Interior shear-driven diffusivity:
 \subsubsection{Constant Mixing}
 Uniform $K_v$ (default $10^{-4}$~m$^2$\,s$^{-1}$) for idealised experiments.
 
+\subsubsection{Prognostic TKE closures}
+Two one-equation turbulent-kinetic-energy closures carry $e$ as ocean state.  The Gaspar--Burchard form (\texttt{tke}) solves
+\begin{equation}
+  \frac{\pp e}{\pp t} = K_M\Bigl[\Bigl(\frac{\pp u}{\pp z}\Bigr)^2+\Bigl(\frac{\pp v}{\pp z}\Bigr)^2\Bigr] - K_H N^2 - \varepsilon + \frac{\pp}{\pp z}\Bigl(\alpha_{\mathrm{tke}}K_M\frac{\pp e}{\pp z}\Bigr)
+\end{equation}
+at cell interfaces and derives $K_M$ and $K_H$ from $e$ and a mixing length; its options (mixing-length choice, surface boundary condition, background floors) reproduce the NEMO \texttt{zdftke} card used by the OMIP configurations.  CATKE (\texttt{catke}) follows the Oceananigans implementation, with a dynamic convective mixing length and separate Richardson-number stability functions for momentum, tracers and TKE.
+
 %-----------------------------------------------------------------------------
 \subsection{Ocean Lateral Mixing}
 %-----------------------------------------------------------------------------
@@ -1234,8 +1255,8 @@ Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-l
 \subsection{Tracer Advection Schemes}
 %-----------------------------------------------------------------------------
 
-Tracer transport in \texttt{src/legoesm/ocean/advection.py} and
-\texttt{advection\_som.py} provides upwind, TVD (Van Leer / Sweby),
+Tracer transport in \texttt{legoesm.ocean.advection} and
+\texttt{legoesm.ocean.advection\_som} provide upwind, TVD (Van Leer / Sweby),
 DST3, PPM, PPM-FCT, WENO5/7, and Second-Order Moments
 (SOM) schemes \citep{Prather1986}.  The volume-weighted variance $\Var(T)$ on the Eady
 uniform channel ranks them: \texttt{som}\,+\,Smagorinsky
@@ -1243,7 +1264,7 @@ uniform channel ranks them: \texttt{som}\,+\,Smagorinsky
 600~d in the weak-forcing regime; \texttt{tvd} preserves $94\%$ at
 $\le 2\%$ runtime overhead vs. \texttt{upwind} (recommended
 production default); \texttt{ppm\_fct} is gated on the sign-split
-Zalesak/Kuzmin limiter (open issue \#9).  Forcing regime (strong
+Zalesak/Kuzmin limiter.  Forcing regime (strong
 $U{=}0.8\,\mathrm{m\,s^{-1}}$ vs.\ weak $U{=}0.2$) dominates absolute
 mixing; the weak-forcing setup is the scientifically defensible
 ocean-interior benchmark.
@@ -1253,7 +1274,7 @@ ocean-interior benchmark.
 %-----------------------------------------------------------------------------
 
 Global Wolfe--Cessi spinups on real ETOPO/GEBCO bathymetry are
-supported on the lat-lon C-grid via \texttt{src/legoesm/ocean/bathymetry.py}
+supported on the lat-lon C-grid via \texttt{legoesm.ocean.bathymetry}
 (auto-detect ETOPO/GEBCO/ERDDAP/CF, Laplacian smoothing, MEO
 $r$-cap, polar-cap mask, isolated-basin filling, strait
 enforcement).  Stability conditioners: AL81 12-corner-triad
@@ -1261,8 +1282,7 @@ PV-flux closure with partial-cell extension
 \citep[][\texttt{pv\_flux\_al81\_partial\_cell}]{LeSommer2009}; MOM6-style $\cos^4\phi$
 biharmonic-viscosity scaling \citep[][\texttt{biharmonic\_scaling\_factor}]{GriffiesHallberg2000}; SMC03 pressure-gradient force; implicit
 Crank--Nicolson barotropic solver.  Validated 20-yr global-overturning
-spinup at $1^\circ$ delivers canonical thermohaline structure
-(branch \texttt{realistic-geometry-full}, PR \#224).
+spinup at $1^\circ$ delivers canonical thermohaline structure.
 
 %=============================================================================
 \section{Time Integration}
@@ -1309,6 +1329,28 @@ where $S\in(0,1]$ is a safety factor (default 0.5).  The function \texttt{adapti
 %-----------------------------------------------------------------------------
 
 Each outer RK stage computes slow tendencies once, updates $u,v$ and tracers, then runs $N_s$ forward--backward acoustic substeps on the fast variables ($w,\theta',\rho'$) with substep size $\Delta t_s=\Delta t/N_s$.
+
+%=============================================================================
+\section{Parallel Runtime and Precision}
+\label{sec:parallel}
+%=============================================================================
+
+Every run executes on one \texttt{ParallelRuntime} (serial, single-process multi-device SPMD, multi-process MPI, or hybrid).  Reverse-mode differentiation is supported across all of them, with one limitation: halo exchanges go through the \texttt{sendrecv} custom VJP, and global sums through \texttt{allreduce(SUM)}, whose identity VJP is exact only when the sum is the final loss.  An intermediate global sum that is broadcast back and reused (fixer factors, normalisations, inner products) needs \texttt{broadcast\_allreduce\_sum}; most such call sites have not yet been migrated, so their cross-rank cotangents are dropped.  \texttt{MAX}/\texttt{MIN} reductions are reserved for diagnostics.
+
+\subsection{Process and device setup}
+Each process is bound to exactly one GPU by narrowing \texttt{CUDA\_VISIBLE\_DEVICES} before the XLA backend and, on CUDA-aware MPI stacks, before \texttt{MPI\_Init} (\texttt{pin\_local\_gpu}); without this, every rank on a node silently shares the first GPU.  For multi-process CPU runs the gloo collectives are pinned to the fastest addressed network interface rather than the interface the hostname resolves to (\texttt{LEGOESM\_GLOO\_IFACE}; \texttt{default} restores JAX's choice).  The GPU command-buffer default captures fusions and custom calls but not collectives, which measured faster on multi-rank steps; \texttt{LEGOESM\_XLA\_CMDBUF\_COLLECTIVES=1} restores collective capture.  Cluster launchers additionally set a per-lane NCCL channel recipe.
+
+\subsection{Halo schedules on the Voronoi (MPAS) mesh}
+Before sharding, the mesh is reordered so that each device owns one contiguous block of cells; on the SPMD path the default partition cuts a Hilbert space-filling curve into balanced chunks (recursive coordinate bisection and METIS remain selectable).  On the atmosphere, edges and vertices inside each owner block are also placed in Hilbert order (\texttt{edge\_order="hilbert"}, the default) so that stencil gathers touch nearby memory; the ocean lanes keep owner order.  Both layouts evaluate the same discrete operators; only the memory layout differs.  The halo fill is a sequence of coloured \texttt{ppermute} rounds.  Because every pair in a round ships the round's largest payload, the colouring groups pairs of similar size (size-aware colouring, on by default, \texttt{LEGOESM\_MPAS\_SIZE\_COLORING=0} to disable); this changes only the wire grouping, and results are bit-identical to the legacy colouring.  Three further strategies are opt-in: a ragged all-to-all fill (\texttt{LEGOESM\_MPAS\_RAGGED\_HALO}, with an \texttt{auto} setting that uses it only up to 32 devices, beyond which its per-slice cost loses), a wide halo that fills once per model step at the depth of all its tendency evaluations (\texttt{LEGOESM\_MPAS\_WIDE\_HALO=1}), and an interior/rim overlap that computes the device-interior tendency while the halo is in flight (\texttt{LEGOESM\_MPAS\_HALO\_OVERLAP=1}).  Mutually exclusive strategies are refused rather than silently combined.
+
+\subsection{Lat-lon and cubed-sphere exchanges}
+On the lat-lon band decomposition the per-stage halo pads can be packed into a single exchange at stage entry (\texttt{LEGOESM\_LATLON\_PACKED\_EXCHANGE=1}, opt-in in the library and enabled by the scaling launchers), and the static band-geometry pads are precomputed once instead of being exchanged every step (default on).  The cubed-sphere lane keeps the native 4-D halo exchange described with the grid (all vertical levels in one message per neighbour).
+
+\subsection{Ocean barotropic solver at scale}
+The distributed MPAS ocean solves the implicit free surface with a fixed-iteration preconditioned conjugate gradient (default 20 iterations) in its single-reduction (Chronopoulos--Gear) form, which batches the two inner products of each iteration into one allreduce.  The default preconditioner is a communication-free Neumann-series polynomial in the device-local block of the operator (four sweeps): it needs no halo exchange and reaches a given residual in fewer iterations than Jacobi.  An opt-in global variant (\texttt{barotropic\_implicit\_pcg\_precond="gpoly"}) evaluates the same polynomial on the global operator using the existing halo, so the answer no longer depends on the number of devices.  The MPAS ocean runs multi-device through \texttt{run\_omip.py --enable-mpas-spmd}.
+
+\subsection{Precision policies}
+Precision is a policy rather than a global switch.  A \texttt{PrecisionPolicy} assigns separate dtypes to storage, compute, accumulation (global sums and budget integrals) and control (implicit solves, EOS, diagnostics needing tight tolerances).  Four modes are provided: \texttt{fp32}, \texttt{fp64}, \texttt{mixed} (float32 storage and compute, float64 accumulation and control) and \texttt{mixed\_fp64\_storage} (float64 storage, float32 compute).  In mixed mode the stiff semi-implicit Helmholtz solve runs in float64 and returns the caller's dtype, surface pressure is kept in float64 as the conservation field, and sharded runs that would silently carry it in float32 raise instead.  A per-mode leaf-dtype test pins which state leaves carry which dtype.  The production AMIP configuration runs in \texttt{fp64}.
 
 %=============================================================================
 \section{Land, Ice, and Coupler}
@@ -1432,6 +1474,12 @@ End-to-end differentiable land model training with three carbon cycle modes: ``n
 NPP allocation is sequential: foliar $\to$ labile $\to$ root $\to$ wood.
 
 %-----------------------------------------------------------------------------
+\subsection{Interactive Multilayer Land on the MPAS Lane}
+%-----------------------------------------------------------------------------
+
+The production atmosphere couples a multilayer soil model (Richards-equation soil water, \texttt{multilayer\_n\_layers}\,=\,10 layers over 3\,m in the production deck) with prognostic snow and a canopy energy balance selected by \texttt{land\_surface\_scheme} (\texttt{simple\_seb}, \texttt{two\_leaf} (default), or the multilayer \texttt{clm\_ml} canopy, whose JAX backend is vendored in-repo).  Land columns are packed so that only land cells are integrated, and the land tile may be called at its own cadence (\texttt{land\_update\_seconds}): the atmospheric forcing is averaged over the interval, conserving its mass and energy, and the tile's fluxes and skin temperature are held in between.  The production deck steps the land every 1800\,s, as CLM does under CAM6, with soil freeze/thaw enabled, calibrated land tables, seasonal refresh of leaf area, canopy height and soil albedo, and a 1979 ERA5-based soil initial state.  Sea ice on this lane carries a prognostic skin temperature (\texttt{mpas\_ice\_skin\_prognostic}).
+
+%-----------------------------------------------------------------------------
 \subsection{Tile Coupler}
 %-----------------------------------------------------------------------------
 
@@ -1449,7 +1497,7 @@ The constant ocean albedo $\alpha_{\mathrm{ocn}}$ is controlled by \texttt{Coupl
 where $\mu_0=\cos\theta_z$ is the cosine of the solar zenith angle.
 
 \paragraph{External forcing.}
-Time-varying greenhouse gases (CO$_2$, CH$_4$, N$_2$O), total solar irradiance, and monthly zonal-mean ozone and aerosol climatologies can be read from NetCDF files and linearly interpolated in time via the \texttt{ExternalForcingConfig} interface.  Ozone and aerosol data are loaded but not yet connected to the radiation solver.
+Time-varying greenhouse gases (CO$_2$, CH$_4$, N$_2$O, CFCs), total and spectral solar irradiance, ozone, and tropospheric and volcanic aerosol are read from CMIP6 input4MIPs files and interpolated in time.  With RRTMG/RRTMGP radiation and \texttt{ozone\_forcing="external"} / \texttt{aerosol\_forcing="external"}, ozone and aerosol optical properties enter the radiation solver; multi-year files are sampled at the simulated calendar year (\texttt{start\_year}) rather than collapsed onto a 12-month cycle.  Gray radiation does not respond to these channels.
 
 \paragraph{Two-layer lake model.}
 Epilimnion (mixed layer, default $h_{\mathrm{epi}}=5$~m) and hypolimnion (deep layer, $h_{\mathrm{hypo}}=20$~m) connected by wind-enhanced vertical mixing:
@@ -1504,6 +1552,25 @@ Equinox MLP column model with hybrid mode blending learned corrections with conv
 Per-column physics replacement following \citet{Rasp2018}, mapping the full column state to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
 
 %=============================================================================
+\section{Training and Calibration}
+\label{sec:training}
+%=============================================================================
+
+The segment-based training lanes (WeatherBench and AIMIP) differentiate the model itself: a segment is built once by \texttt{build\_segment\_fn} and its non-donating, non-jitted form is called inside \texttt{eqx.filter\_value\_and\_grad}, with per-iteration forcing passed as an explicit argument rather than captured in a closure so that it never triggers recompilation.
+
+\subsection{One model registry}
+The WeatherBench and AIMIP campaigns train the same four variants --- \texttt{classical} (the physics suite with trainable parameters), \texttt{column\_nn} (a learned column model), \texttt{sfno\_physics} and \texttt{sfno\_full} --- built by a single \texttt{build\_variant} with one set of architecture defaults, so that ``the same variant'' means the same pytree in both campaigns.  The classical WeatherBench baseline runs the production CAM6 scheme set on the spectral core (\texttt{config/wb/campaign/spectral\_t63\_cam6.yaml}); a sibling deck prescribes ERA5 surface fluxes as the lower boundary condition.
+
+\subsection{Parameter specifications and tiers}
+Every physics scheme configuration declares a machine-readable \texttt{\_\_param\_spec\_\_}: units, bounds, a tunable tier, a constraining transform (sigmoid, softplus or none), a category and a literature reference for each tunable float field; float fields that are not trainable (for example prescribed gas concentrations) are listed as excluded with a reason.  \texttt{build\_trainable\_params(tier=\ldots)} collects tier~1 (\texttt{"core"}: well-posed parameters already trained in practice), tier~$\le$2 (\texttt{"extended"}: closure knobs with literature bounds) or tier~$\le$3 (\texttt{"aggressive"}); tier~0 marks numerical floors, smoothing widths and iteration-coupled constants that are never trainable and are refused on the command-line calibration route.  Trained values are injected through the configuration pytree by \texttt{apply\_param\_overrides} inside the loss, so the leaves are traced during training while production keeps static values.  The MIP drivers accept a YAML calibration file of tuned values keyed by the qualified name \texttt{scheme\_key.field} (\texttt{--params}), validated against the declared bounds, and a CI audit checks that every specified tunable is reachable from a driver.
+
+\subsection{No inert parameters}
+A parameter that the forward model never consumes would appear calibrated while doing nothing.  The training driver, the spectral neural-GCM trainer and the offline land trainers therefore evaluate the full-data gradient at initialisation and abort if any trainable leaf is identically zero or entirely non-finite (\texttt{assert\_no\_inert}); parameters belonging to inactive schemes are frozen out of the trainable set before this check.
+
+\subsection{Process-level calibration}
+Turbulence closures are tuned in the single-column model against matched large-eddy simulations of several boundary-layer regimes, and convection against a cloud-resolving radiative--convective equilibrium reference (\texttt{scm\_rce\_metrics} supplies the normalised profile score).  An offline compare-to-reanalysis loop runs the model, ranks the columns with the largest bias against ERA5, diagnoses a closure coefficient from targeted LES, and keeps only rounds that reduce the bias.  Optimisers come from \texttt{create\_optimizer} (warm-up, cosine decay, gradient clipping; AdamW by default, Muon available).
+
+%=============================================================================
 \section{Conservation Corrections}
 %=============================================================================
 
@@ -1524,13 +1591,26 @@ For long AMIP/CMIP integrations, the fixer can anchor to the \emph{initial} mass
 \end{equation}
 Set via \texttt{model.set\_initial\_mass(state)} or \texttt{anchor\_mass\_to\_initial=True} in the config.  All accumulations use float64 regardless of the state precision.
 
+\subsection{Water and Energy on the Production Lane}
+\label{sec:conservation-v1}
+Three corrections close the water and energy budgets of the hybrid-coordinate MPAS lane used for AMIP.
+\begin{itemize}[nosep]
+  \item \textbf{Conservative tracer vertical transport.}  All tracers on the hybrid coordinate are advected vertically by a van Leer scheme written in increment (face-minus-cell) form with the interfacial mass flux and each column's layer pressure thickness, so the discrete transport satisfies the product rule with continuity.  The earlier advective upwind operator on averaged mass fluxes created water; there is no option to restore it on this lane.  Potential temperature uses the conservative Simmons--Burridge flux form (\texttt{mpas\_vert\_advection\_scheme="sb"} in the production deck).
+  \item \textbf{Column-conserving positivity.}  Negative tracer values are set to zero and the column's positive values rescaled so that the layer-mass-weighted column integral is unchanged, instead of a plain clip that creates mass (\texttt{mpas\_conservative\_tracer\_clamp=True}, the default, applied on every grid despite its name).  Each per-mass tracer, including the per-mass number concentrations of the two-moment schemes, is conserved separately.
+  \item \textbf{Energy-consistent moisture floor.}  When the vapour floor removes moisture, the latent heat of the removed vapour is taken out of the temperature equation as well (\texttt{energy\_consistent\_moisture\_clip}; off in the library, on in the production deck).
+\end{itemize}
+Global water and energy residuals (\texttt{diagnostics.water\_budget}, \texttt{diagnostics.energy\_budget}) are diagnostic tripwires, never fed back into the physics: they use the coordinate's hybrid-aware layer mass, area-weighted means, and AD-safe global sums, so the reported residual does not depend on how the run is sharded beyond floating-point round-off.
+
 \subsection{Ocean}
 Volume conservation: $\eta^{\mathrm{corr}}=\eta^{\mathrm{new}}+(\sum\eta_{\mathrm{old}}\,A-\sum\eta_{\mathrm{new}}\,A)/\sum A$.\\
 Heat and salt conservation: uniform additive correction per unit volume.
 
 %=============================================================================
 \section{Physical Constants}
+\label{sec:constants}
 %=============================================================================
+
+All physical constants are defined once in \texttt{legoesm.constants}; a CI ratchet refuses new hard-coded copies elsewhere (the FV3 duo-grid lane deliberately uses FV3's own constants).
 
 \begin{center}
 \begin{tabular}{llrl}
@@ -1538,20 +1618,34 @@ Heat and salt conservation: uniform additive correction per unit volume.
 Symbol & Name & Value & Unit \\
 \midrule
 $g$ & Gravitational acceleration & 9.80616 & m\,s$^{-2}$ \\
-$\Rd$ & Dry-air gas constant & 287.04 & J\,kg$^{-1}$\,K$^{-1}$ \\
-$\cpd$ & Dry-air heat capacity & 1005.0 & J\,kg$^{-1}$\,K$^{-1}$ \\
-$\Rv$ & Water-vapour gas constant & 461.5 & J\,kg$^{-1}$\,K$^{-1}$ \\
-$\Lv$ & Latent heat of vapourisation & $2.501\times10^6$ & J\,kg$^{-1}$ \\
-$\kappa$ & $\Rd/\cpd$ & 0.285 & --- \\
+$\Rd$ & Dry-air gas constant & 287.05 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\cpd$ & Dry-air heat capacity & 1004.64 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\Rv$ & Water-vapour gas constant & 461.51 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$c_{pv}$ & Water-vapour heat capacity & 1846.0 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$c_{pw}$ & Liquid-water heat capacity & 4218.0 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$c_{pi}$ & Ice heat capacity & 2106.0 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\Lv$ & Latent heat of vapourisation at 0\,$^\circ$C & $2.501\times10^6$ & J\,kg$^{-1}$ \\
+$L_f$ & Latent heat of fusion at 0\,$^\circ$C & $3.337\times10^5$ & J\,kg$^{-1}$ \\
+$L_s$ & Latent heat of sublimation at 0\,$^\circ$C, $\Lv+L_f$ & $2.8347\times10^6$ & J\,kg$^{-1}$ \\
+$\kappa$ & $\Rd/\cpd$ & 0.2857 & --- \\
 $\pref$ & Reference pressure & $10^5$ & Pa \\
-$\SB$ & Stefan--Boltzmann constant & $5.67\times10^{-8}$ & W\,m$^{-2}$\,K$^{-4}$ \\
+$\SB$ & Stefan--Boltzmann constant & $5.670374\times10^{-8}$ & W\,m$^{-2}$\,K$^{-4}$ \\
 $\kappa_{\mathrm{vK}}$ & von K\'arm\'an constant & 0.4 & --- \\
 $\Omega$ & Earth rotation rate & $7.292\times10^{-5}$ & rad\,s$^{-1}$ \\
-$R_{\oplus}$ & Earth radius & $6.371\times10^6$ & m \\
+$R_{\oplus}$ & Earth radius & $6.371229\times10^6$ & m \\
 $\rho_0$ & Ocean reference density & 1025 & kg\,m$^{-3}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{One latent-heat family.}
+Latent heats are temperature dependent and share one Kirchhoff family in \texttt{legoesm.thermo}:
+\begin{align}
+  L_v(T) &= L_v^{0} - (c_{pw}-c_{pv})\,(T-T_0), \\
+  L_s(T) &= L_s^{0} + (c_{pv}-c_{pi})\,(T-T_0), \\
+  L_f(T) &= L_s(T) - L_v(T),
+\end{align}
+with $L_v^{0}$, $L_s^{0}$ the values at $T_0=273.15$\,K, so the three latent heats close identically at every temperature ($L_v$ falls by 2372\,J\,kg$^{-1}$ per kelvin, about 3\,\% lower at 30\,$^\circ$C).  The latent heat of water leaving a surface is the phase-weighted blend $(1-f)\,L_v(T_{\mathrm{sfc}})+f\,L_s(T_{\mathrm{sfc}})$, with $f$ the frozen fraction of the evaporating surface, so the flux stays continuous and differentiable across melt-out; a surface made of several evaporating components (canopy under snow, sea-ice categories) sums $L\,E$ per component.  Remaining uses of the bare 0\,$^\circ$C constants at component interfaces are tracked by a shrink-only ratchet.
 
 %=============================================================================
 \section{Ocean Biogeochemistry}
@@ -1582,44 +1676,29 @@ where $\mu_P = \mu_{\max}\,f(T)\,\min(L_N,L_I)$ with Michaelis-Menten nutrient l
 
 %=============================================================================
 \section{CMIP Infrastructure}
+\label{sec:cmip}
 %=============================================================================
 
 \subsection{CF/CMOR-Compliant Output}
 
-The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Four CMOR tables are provided: \texttt{Amon} (33 atmospheric variables including clear-sky radiative fluxes, cloud condensate, and relative humidity), \texttt{Lmon} (6 land variables), \texttt{Omon} (2 ocean variables: SST and sea-ice fraction), and \texttt{Aday} (5 daily atmospheric variables).  3-D fields are interpolated to a standard CMIP6 19-level pressure grid.
+The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Variable metadata (units, \texttt{cell\_methods}, \texttt{positive}, \texttt{cell\_measures}) is read from the official CMIP6 CMOR tables vendored with the package rather than retyped; adding an output variable means adding it to the table-subset builder, never editing metadata by hand.  Eleven tables are available: \texttt{Amon} (45 variables), \texttt{Aday}, \texttt{day}, \texttt{CFday}, \texttt{fx}, \texttt{Lmon}, \texttt{Omon}, \texttt{Oyr}, \texttt{Ofx}, \texttt{SImon} and \texttt{SIyr}.  3-D fields are interpolated to the standard 19 CMIP6 pressure levels read from the same tables.
 
-\subsection{AMIP CMIP6 Forcing Deck}
+On the MPAS lane every published time-varying field other than the daily extremes is an interval mean whose \texttt{cell\_methods} is true: radiative and surface fluxes are accumulated every step, and state fields (near-surface and level temperature, winds, humidity, cloud cover, water paths) are accumulated from hourly samples so that monthly means are not aliased onto one hour of the diurnal cycle.  Daily maxima and minima are taken from the same hourly samples.  Multi-rank MPAS runs gather the cells each rank owns before writing, and a multi-rank configuration that would write empty files is refused.  Across chained restarts the writer keeps the first value of a time already on disk instead of writing a duplicate, and refuses any time earlier than the last written one, so the time axis stays monotonic.
 
-The script \texttt{scripts/run\_amip\_cmip6\_deck.py} drives the full
-CMIP6 AMIP protocol with six prescribed-forcing channels:
-SST/SIC (HadISST/COBE monthly), annual GHG (\texttt{greenhouse\_historical\_plus.nc}
-schema, year-indexed CO$_2$/CH$_4$/N$_2$O/CFC-11/CFC-12; consumed by
-RRTMGP only --- gray radiation does not respond), ozone
-($\mathrm{vmro3}$ on $(t,\phi,p)$ either as monthly climatology or
-multi-decadal CMIP6 transient via the loader's non-cyclic dispatch),
-solar TSI plus 14-band fractions (\texttt{swflux\_14band\_cmip6\_*}
-expanded to 112 RRTMG-SW $g$-points), aerosol AOD (Kinne zonal monthly),
-and volcanic AOD (CMIP6 \texttt{bc\_aeropt\_cmip6\_volc\_*} with
-1982/1991 eruptions sampled at correct calendar months).  The configs
-\texttt{GHGConfig}, \texttt{OzoneConfig}, \texttt{SolarConfig},
-\texttt{AerosolConfig} (\texttt{src/legoesm/forcing/external.py})
-all carry \texttt{start\_year} so simulation days map onto file
-absolute time axes via \texttt{\_simday\_to\_file\_day}.
+\subsection{Production AMIP Configuration}
+\label{sec:amip-production}
 
-The deck physics defaults are RRTMG\,+\,Sundqvist cloud fraction\,+\,
-Sundqvist large-scale condensation\,+\,SBM\,+\,Louis (Kessler
-microphysics is currently disabled in this path because it produces
-NaN winds at day ${\sim}2$).  When forcing files are absent the user
-must pass \texttt{--auto-generate} to invoke
-\texttt{scripts/generate\_amip\_forcing.py} for synthetic
-CMIP6-shape replacements.  \texttt{scripts/smoke\_test\_amip\_all\_grids.py}
-exercises the dispatch path on cubed-sphere (centred / FV3 / C-D),
-lat-lon (centred / FV3 / C-grid), Gaussian spectral, and Voronoi/MPAS
-using gray radiation with aerosol/volcanic disabled; it does not
-validate the full forcing stack on every grid.  Voronoi/MPAS
-additionally requires \texttt{--turbulence none} (TKE/MPAS edge-wind
-mismatch) and \texttt{--dt 60} (hidden hydrostatic-dycore CFL).
-Spectral and MPAS paths bypass \texttt{DiagnosticCollector}.
+The production AMIP configuration is a single machine-independent file, \texttt{config/amip/amip\_production.yaml}, run with \texttt{scripts/run/run\_amip.py --config}; machine-specific paths are supplied separately by \texttt{config/amip/amip\_production.sh}.  It homogenises the atmosphere with CAM6:
+\begin{itemize}[nosep]
+  \item \textbf{Grid and dynamics:} MPAS Voronoi mesh at resolution 6 (40{,}962 cells, ${\sim}1.1^\circ$), the CAM6 32-level hybrid table (model top 2.255\,hPa), dynamics time step 112.5\,s, float64.
+  \item \textbf{Cadence:} physics every 1800\,s (16 dynamics steps), radiation hourly, and three cloud macro/microphysics sub-steps per physics step, as in CAM6.
+  \item \textbf{Physics:} RRTMG-band radiation with McICA cloud overlap; Zhang--McFarlane deep convection; prognostic CLUBB turbulence with CAM6 cloud fraction; two-moment Morrison microphysics in its MG2 flavour; McFarlane orographic gravity-wave drag; CESM Large--Yeager surface fluxes; homogeneous ice nucleation and aerosol-dependent cloud droplet number.
+  \item \textbf{Surface:} interactive multilayer land with a two-leaf canopy (Section~\ref{sec:conservation-v1} and the land section above) and prognostic sea-ice skin temperature over prescribed SST/sea-ice concentration.
+  \item \textbf{Forcing:} CMIP6 input4MIPs SST/SIC, greenhouse gases, ozone, aerosol and spectral solar irradiance, starting 1979-01-01 from ERA5.
+\end{itemize}
+The deck names its scientific choices explicitly, including many values that equal a code default, so that the deck rather than the library defaults is the record of the run; a few choices are still inherited from code defaults (for example the Morrison flavour, \texttt{mg}).  The previous Sundqvist/L36 production deck is preserved as \texttt{config/amip/amip\_sundqvist\_l36.yaml}.
+
+The CMIP6 forcing channels are read by loaders that all carry \texttt{start\_year}, so simulation days map onto each file's absolute time axis: SST/SIC (monthly boundary conditions), annual greenhouse gases (CO$_2$/CH$_4$/N$_2$O/CFC-11/CFC-12; consumed by RRTMG/RRTMGP only --- gray radiation does not respond), ozone (monthly climatology or multi-decadal transient), solar TSI plus spectral band fractions, tropospheric aerosol, and volcanic aerosol sampled at the correct calendar months.  \texttt{scripts/data/generate\_amip\_forcing.py} produces synthetic CMIP6-shaped replacements when the files are absent, and \texttt{scripts/validate/smoke\_test\_amip\_all\_grids.py} exercises the dispatch path on the cubed-sphere, lat-lon, Gaussian spectral and Voronoi/MPAS grids with gray radiation; it does not validate the full forcing stack on every grid.
 
 \subsection{Experiment Templates}
 
@@ -1653,7 +1732,10 @@ A registry of 16 tunable parameters across five categories (dynamics, radiation,
 
 \subsection{OMIP Simulation Pipeline}
 
-The \texttt{run\_omip.py} script provides a complete Ocean Model Intercomparison Project (OMIP) simulation pipeline supporting cubed-sphere, lat-lon, MPAS, and spectral grids.  Features include WOA18-based initialisation with fallback, Haney-style SST/SSS restoring toward climatology, configurable physics presets (``none'', ``minimal'', ``full'' with KPP, GM/Redi, bottom drag, shortwave penetration), per-grid resolution and timestep defaults, and diagnostic extraction with wall-time tracking.
+The \texttt{run\_omip.py} script provides a complete Ocean Model Intercomparison Project (OMIP) simulation pipeline supporting cubed-sphere, lat-lon, MPAS, and spectral grids.  Features include WOA18-based initialisation with fallback, Haney-style SST/SSS restoring toward climatology, configurable physics presets (``none'', ``minimal'', ``full'' with KPP, GM/Redi, bottom drag, shortwave penetration), per-grid resolution and timestep defaults, and diagnostic extraction with wall-time tracking.  The lat-lon and Voronoi lanes run multi-device (\texttt{--enable-latlon-spmd}, \texttt{--enable-mpas-spmd}).
+
+\paragraph{Reference-model fidelity.}
+Ocean numerics are checked term by term against reference models through recipes that select the shared canonical blocks rather than bespoke solvers: NEMO (the GYRE and DINO configurations and NEMO's idealised test cases), MITgcm, Oceananigans and Veros.  Glue that exists only to mimic a reference (halo stripping, axis transposes, time-level bookkeeping) lives in the fidelity harness, never in the model, and oracle tiers are locked whenever a truth tier (conservation, equivariance, analytic solution) fails.
 
 %=============================================================================
 \section{4D-Var Data Assimilation (v3.9)}
@@ -1690,6 +1772,7 @@ Four background error covariance formulations are implemented:
   \item \textbf{Spectral}: $\bm B$ is diagonal in spectral space, with variance specified per total wavenumber; correlations arise naturally from the spectral truncation.
   \item \textbf{Hybrid}: $\bm B = \beta_1\bm B_{\mathrm{static}} + \beta_2\bm B_{\mathrm{ensemble}}$, blending a static covariance with flow-dependent ensemble covariance, the latter spatially localised by a compactly supported \citet{GaspariCohn1999} correlation function to suppress spurious long-range sampling error.
 \end{enumerate}
+A GEN\_BE-style operator is also available, $\bm B^{1/2}=U_{\mathrm{wind}}\,U_\sigma\,U_{\mathrm{vert}}\,U_{\mathrm{bal}}\,U_{\mathrm{horiz}}$, whose horizontal correlation, balance regression, vertical EOFs and variances are fitted from an ensemble of background-error samples (for example NMC forecast differences); its horizontal correlation uses spherical harmonics on Gaussian grids and neighbour-graph diffusion on Voronoi meshes.
 
 \subsection{Observation Operators}
 
@@ -1702,7 +1785,7 @@ Three observation operator types are provided:
 
 \subsection{Minimiser}
 
-The cost function is minimised using preconditioned gradient descent.  The preconditioner is the square root of $\bm B$, transforming the problem to $\bm\chi$-space where the background term becomes isotropic.  The minimiser supports configurable iteration counts and convergence tolerances, and all operations are JIT-compiled.
+Two minimisers run entirely on device inside \texttt{jax.lax.while\_loop}: limited-memory BFGS with a backtracking line search, and preconditioned Polak--Ribi\`ere conjugate gradient.  The preconditioner is the square root of $\bm B$, transforming the problem to $\bm\chi$-space where the background term becomes isotropic.  An incremental 4D-Var driver wraps them in an outer relinearisation loop.  Both support configurable iteration counts and convergence tolerances.
 
 \subsection{DA Cycling and Incremental Analysis}
 

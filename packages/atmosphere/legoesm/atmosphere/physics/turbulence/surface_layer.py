@@ -243,6 +243,56 @@ def compute_surface_fluxes(
 _PRESCRIBED_TAU_FLOOR_PA = 1.0e-12  # coeff-ok: numerical floor for a 0/0 gradient
 
 
+def charged_latent_heat(config, T_sfc):
+    """Latent heat [J/kg] the ``config.bulk_scheme`` law charged for its water.
+
+    The Kirchhoff ``L_v(T_sfc)`` for every law here except the CESM
+    ``shr_flux_atmOcn`` port (``large_yeager_cesm``), which charges its
+    oracle's constant (``compute_sam_oceflx_fluxes``).  Dividing a law's
+    ``lhflx`` by this is its exact water flux.
+    """
+    if getattr(config, "bulk_scheme", None) == "large_yeager_cesm":
+        return constants.L_v   # latent-ok: CESM shr_flux_atmOcn oracle constant (compute_sam_oceflx_fluxes charges it)
+    from legoesm.thermo import latent_heat_vaporization
+    return latent_heat_vaporization(T_sfc)
+
+
+def surface_moisture_flux(config, lhflx, T_sfc):
+    """Surface water flux [kg/m2/s, positive up] for a kernel's moisture BC.
+
+    The coupler's prescribed mass flux (``config.prescribed_evap_kg_m2_s``)
+    when one was folded in -- the tiles' water leaves the surface exactly as
+    it enters the atmosphere, whatever latent heat each tile charged for it.
+    Otherwise the latent heat flux is converted back with the SAME
+    latent heat the bulk law charged (:func:`charged_latent_heat`), so the two
+    are exact inverses (a constant ``L_v`` here against an ``L_v(T)`` there
+    lost ~2 % of warm-ocean evaporation).  Standalone lanes without a coupler
+    have no phase information here: sublimation over their prescribed ice is
+    charged at ``L_v`` on both sides, consistently.
+    """
+    evap = getattr(config, "prescribed_evap_kg_m2_s", None)
+    if evap is not None:
+        return jnp.broadcast_to(jnp.asarray(evap, dtype=jnp.asarray(lhflx).dtype),
+                                jnp.shape(lhflx))
+    return lhflx / charged_latent_heat(config, T_sfc)
+
+
+def latent_enthalpy_correction(lhflx, evap):
+    """Heat [W/m2, positive up] the atmosphere must ADD to its sensible flux so
+    that its energy intake equals the physical ``shflx + lhflx``.
+
+    The atmosphere's moist enthalpy credits every kilogram of vapour with the
+    reference ``constants.L_v`` (its constant-L convention, see
+    core.conservation), while the surface charged ``L(T_sfc, phase) * E`` --
+    at 30 degC about 3 % less.  ``lhflx - L_v * E`` is that difference, the
+    enthalpy carried by the water itself (user decision 2026-09-28, 4a):
+    booked into the diffusion's heat lower BC, never into the reported
+    ``shflx``/``lhflx`` (those stay the physical fluxes).  Exactly zero when
+    the surface charged the constant.
+    """
+    return lhflx - constants.L_v * evap   # latent-ok: moist-enthalpy reference L_v of the atmosphere
+
+
 def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
                                  lhflx=None, tau_x=None, tau_y=None):
     """Replace the prescribed components of a ``(tau_x, tau_y, shflx, lhflx,
@@ -486,7 +536,8 @@ def compute_tiled_surface_fluxes(
     config_ice: SurfaceLayerConfig,
     config_land: SurfaceLayerConfig,
     z_low=None,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    return_water: bool = False,
+):
     """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
 
     Computes the turbulent surface fluxes SEPARATELY on each tile (each
@@ -569,4 +620,19 @@ def compute_tiled_surface_fluxes(
     tau_mag = jnp.sqrt(tau_x ** 2 + tau_y ** 2)
     ustar = jnp.sqrt(tau_mag / jnp.maximum(rho, 1e-6))  # coeff-ok: density floor [kg/m^3]
 
-    return tau_x, tau_y, shflx, lhflx, ustar
+    if not return_water:
+        return tau_x, tau_y, shflx, lhflx, ustar
+    # The blended WATER flux: each tile's latent heat inverted with the L_v of
+    # ITS OWN surface temperature (what its bulk law charged), then area
+    # weighted.  Dividing the blended heat by one L_v(T_blend) is not the same
+    # number on a mixed cell; the kernel takes this as its moisture BC.
+    # Each tile is inverted with the L its law CHARGED.  All three tile laws
+    # run through _single_tile_flux, which never passes ``L_latent``, so the
+    # ice tile (``constant`` scheme, tiled_surface_tile_configs) charged
+    # L_v(T_ice) like the others -- the atmosphere-side mosaic has no phase
+    # information; the coupled lane's sea-ice model charges L_s itself and
+    # hands its water down the coupler's evaporation channel instead.
+    water = (tiles.frac_ocean * f_ocean[3] / charged_latent_heat(config_ocean, tiles.T_ocean)
+             + tiles.frac_ice * f_ice[3] / charged_latent_heat(config_ice, tiles.T_ice)
+             + tiles.frac_land * f_land[3] / charged_latent_heat(config_land, tiles.T_land))
+    return (tau_x, tau_y, shflx, lhflx, ustar), water

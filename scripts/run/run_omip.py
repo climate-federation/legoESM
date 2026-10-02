@@ -2973,7 +2973,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
-    fw = jra55_to_freshwater(slc, tile_resp.lhflx)
+    fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
         q_net=q_net,
@@ -6918,6 +6918,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             from legoesm.parallel.voronoi_spmd_ocean import (
                 build_mpas_ocean_spmd_layout,
                 gather_state_mpas_ocean_spmd,
+                halo_depth_for_config,
                 make_sharded_mpas_ocean_step,
                 n_real_cells,
                 shard_cell_stack_spmd,
@@ -6926,7 +6927,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             _layout = build_mpas_ocean_spmd_layout(
                 grid, _nd, n_cells_real=n_real_cells(grid),
                 tracer_advection=str(model.config.tracer_advection),
-                nlev=int(args.nlev))
+                nlev=int(args.nlev),
+                halo_depth=halo_depth_for_config(model.config))
             spmd_step = make_sharded_mpas_ocean_step(model, _layout)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather

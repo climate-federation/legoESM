@@ -74,8 +74,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
 from metadata import (  # noqa: E402
     annotate_incomplete, hlo_collective_census, scaling_metadata,
-    tidy_throughput_fields)
+    state_all_finite, tidy_throughput_fields)
 from hyperdiff import hyperdiff_coeff  # noqa: E402
+
+# Cap on the del4 stability number nu*dt/dx^4 (dx = mean cell spacing),
+# user-approved 2026-09-27.  Measured on the lloyd-0 mesh over 500 steps:
+# finite at 0.0006-0.003, non-finite from 0.008 up; 6e-4 keeps a margin.
+DEL4_S_MAX = 6e-4
+
+
+def del4_coeff(subdivision: int, dt: float) -> float:
+    """The shared resolution law (hyperdiff.py), capped at DEL4_S_MAX for this dt."""
+    from legoesm import constants
+    dx = constants.R_earth * np.sqrt(4.0 * np.pi / (10 * 4 ** subdivision + 2))
+    return float(min(hyperdiff_coeff(subdivision, "icosahedral"),
+                     DEL4_S_MAX * dx ** 4 / dt))
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -107,13 +120,8 @@ def dt_for(subdivision):
     return 300.0 * 2.0 ** (4 - subdivision)
 
 
-def nu_del4_for(subdivision):
-    """del4 coefficient for this subdivision (shared law, hyperdiff.py)."""
-    return hyperdiff_coeff(subdivision, "icosahedral")
-
-
-def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
-                          moist=False, lloyd_iterations=50, fix_mass=True):
+def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method, *,
+                          dt, moist=False, lloyd_iterations=50, fix_mass=True):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
@@ -144,12 +152,15 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
             f"count divides --reorder-for ({reorder_target}).")
     sigma = create_sigma_coordinate(nlev)
     # Same recipe as the icosahedral lane of run_levante_gpu_scaling /
-    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion
-    # (scaled with resolution, nu_del4_for), energy-conserving PV flux,
-    # SSP-RK3, global mass fixer.
+    # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
+    # energy-conserving PV flux, SSP-RK3, global mass fixer.  The del4
+    # coefficient is the shared resolution law (hyperdiff.py: 1e16 at level 4,
+    # 16x weaker per level), capped at the stability limit measured for THIS
+    # dt.  A fixed 1e16 at every level broke the limit from level 7 up (levels
+    # 7 and 8 non-finite within 500 steps, 2026-09-27).
+    nu4 = del4_coeff(subdivision, dt)
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=nu_del4_for(subdivision), nu_del4_ps=nu_del4_for(subdivision),
-        fix_mass=fix_mass,
+        nu_del4=nu4, nu_del4_ps=nu4, fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -183,18 +194,6 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
 def _block(state):
     jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
                            if leaf is not None])
-
-
-def _state_is_finite(state) -> bool:
-    """True when every floating leaf of the (possibly sharded) state is finite.
-
-    Every process must call this: the reduction over a global array is a
-    collective under multi-controller.
-    """
-    import jax.numpy as jnp
-    flags = [jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(state)
-             if jnp.issubdtype(getattr(x, "dtype", np.int8), jnp.inexact)]
-    return bool(jnp.all(jnp.stack(flags))) if flags else True
 
 
 def _global_dry_mass(state, mesh):
@@ -276,8 +275,8 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
-                   help="timestep [s]; default auto: 600 * 4**(4-L) "
-                        "(CFL: dx halves per level), min 30 s.")
+                   help="timestep [s]; default auto: 300 * 2**(4-L) "
+                        "(fixed Courant: dt halves with dx, no floor).")
     p.add_argument("--out", type=str,
                    default="results/a1/mpas_spmd_scaling.jsonl")
     p.add_argument(
@@ -381,7 +380,7 @@ def main() -> int:
                else PrecisionPolicy.fp32())
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
-        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
+        dt=dt, moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
         fix_mass=not args.no_fix_mass)
 
     if args.multicontroller:
@@ -582,7 +581,7 @@ def main() -> int:
     # 1e16 del4 went non-finite at s7+ within 4 steps and every such ladder
     # row serialized as data.  Stamp it; plot_nature_scaling refuses
     # valid=false / finite_ok=false rows.
-    finite_ok = _state_is_finite(s)
+    finite_ok = state_all_finite(s)
     if not finite_ok and jax.process_index() == 0:
         print("ERROR: final state is NON-FINITE; the record is marked "
               "INVALID (finite_ok=false, valid=false).", flush=True)
@@ -653,6 +652,7 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
+        nu_del4=float(model.config.nu_del4),
         # lloyd=0 is the LABELLED synthetic scaling mesh — anti-masquerade:
         # a row without this field could pass as a production-SCVT receipt.
         lloyd_iterations=args.lloyd,
@@ -696,9 +696,13 @@ def main() -> int:
         physics_level=args.physics,
         backend=jax.default_backend(),
         **tidy_throughput_fields(
-            dt_seconds=dt, time_per_step_ms=med,
+            dt_seconds=dt, time_per_step_ms=med if finite_ok else None,
             total_cells=int(mesh.nCells) * args.nlev),
     )
+    if not finite_ok:
+        # A timing of a non-finite state is not a measurement.
+        for _k in ("steady_median_ms", "steady_min_ms", "scan_median_ms"):
+            rec[_k] = None
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="icosahedral",
         component="atmosphere",
@@ -725,7 +729,6 @@ def main() -> int:
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
             "fix_mass": not args.no_fix_mass,
-            "nu_del4": nu_del4_for(args.subdivision),
             "per_rank_median_ms": per_rank_median_ms,
             "per_rank_spread_ms": per_rank_spread_ms,
             # The NCCL transport the arm ran with: the channel count moves
@@ -764,7 +767,7 @@ def main() -> int:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
                   "hardware scaling — do not report it as a speedup.")
-    return 0
+    return 0 if finite_ok else 3
 
 
 if __name__ == "__main__":

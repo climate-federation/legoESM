@@ -701,6 +701,18 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             f"turbulence.scheme={config.turbulence.scheme!r}."
         )
     _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
+    # MG2 in-cloud warm rain reads the cloud fraction CLUBB wrote in the SAME
+    # macmic sub-step (CAM order); at N=1 the modules run in parallel and it
+    # would read the previous step's value.
+    if (getattr(getattr(config.microphysics, config.microphysics.scheme, None),
+                "warm_rain_incloud", False)
+            and (not _turb_produces_cf or _n_macmic < 2)):
+        raise ValueError(
+            "MorrisonConfig.warm_rain_incloud=True needs CLUBB turbulence and "
+            "cld_macmic_num_steps>=2 (the microphysics reads the cloud "
+            "fraction CLUBB diagnosed in the same sub-step); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}, "
+            f"cld_macmic_num_steps={_n_macmic}.")
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -903,7 +915,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
                         "shflx_sfc", "lhflx_sfc",
                         "sw_up_toa_clr", "lw_up_toa_clr",
-                        "sed_substeps_required")
+                        "sed_substeps_required", "evap_sfc")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -1036,7 +1048,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     _COUNT_DIAG_FIELDS = frozenset({"sed_substeps_required"})
     assert _COUNT_DIAG_FIELDS <= {"sw_up_toa", "lw_up_toa", "sw_down_toa",
                                   "shflx_sfc", "lhflx_sfc", "sw_up_toa_clr",
-                                  "lw_up_toa_clr", "sed_substeps_required"}
+                                  "lw_up_toa_clr", "sed_substeps_required",
+                                  "evap_sfc"}
 
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""

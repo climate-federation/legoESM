@@ -213,10 +213,11 @@ class MultiLayerLandConfig(NamedTuple):
     surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
-    # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
-    # ``W_canopy`` store, drips the excess as throughfall, and evaporates the wet
-    # leaf — reducing soil infiltration and re-partitioning the canopy latent
-    # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
+    # When set, the two-leaf path intercepts rain into a prognostic ``W_canopy``
+    # store, drips the excess as throughfall, and evaporates the wet leaf —
+    # reducing soil infiltration and re-partitioning the canopy latent flux.
+    # SimpleSEB has no canopy latent stream and ignores it; the CLM-ML canopy
+    # has its OWN internal interception and ignores it too.
     interception: Any | None = None
 
 
@@ -234,6 +235,18 @@ def resolve_land_config(land_mode: str, land_config=None):
     if land_mode == "none":
         return LandConfig()
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
+
+
+def inactive_land_param_names(config: MultiLayerLandConfig) -> frozenset:
+    """Registry-qualified land tunables that carry no gradient in ``config``.
+
+    A trainable-parameter collector over the multilayer land must drop these
+    (no inert parameters): the ice impedance exponent is read only when soil
+    freeze/thaw is on.
+    """
+    if config.thermal.enable_freeze_thaw:
+        return frozenset()
+    return frozenset({"land.richards.ice_impedance_exponent"})
 
 
 LAND_MODELS = ("none", "slab", "multilayer")

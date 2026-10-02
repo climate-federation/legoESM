@@ -745,7 +745,7 @@ def main():
             beta = 1.0
         lhflx = rho_low * constants.L_v * C_H * wind * beta * (q_sat_sfc - q_v[..., -1])
         lhflx = jnp.maximum(lhflx, 0.0)  # no dew in simple scheme
-        evap = lhflx / constants.L_v
+        evap = lhflx / constants.L_v   # latent-ok: this script's own bulk pair, charged and inverted with the same constant
 
         # Atmospheric tendencies (lowest level)
         dT_BL = constants.g * shflx / (constants.c_pd * dp_low)

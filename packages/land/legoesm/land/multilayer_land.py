@@ -29,6 +29,8 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -44,7 +46,8 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import moisture_fusion_heat_source, solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    liquid_water_content, moisture_fusion_heat_source, solve_soil_thermal)
 
 # Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
 # 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
@@ -81,6 +84,9 @@ from legoesm.land.snow_bands import (
     band_precip_snow,
     step_snow_bands,
 )
+
+# ln 10: CLM5 writes the ice impedance as a power of ten.
+_LN10 = math.log(10.0)
 
 
 def _get(lp, name: str, fallback):
@@ -874,8 +880,9 @@ def _step_multilayer_land_impl(
     # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
     # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
     # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
-    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt
-                   + blow_subl * constants.L_s)
+    from legoesm.thermo import latent_heat_sublimation as _lhs
+    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt   # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
+                   + blow_subl * _lhs(T_surface))
     G_surface = G_surface - melt_energy
 
     # --- Latent mass partition (component- and phase-correct, water-limited) ---
@@ -922,7 +929,11 @@ def _step_multilayer_land_impl(
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
     snow_after_melt = snow_new
     max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
-    sublim_demand = snow_latent / constants.L_s
+    # Inverses of the L the surface solve charged (surface_latent_heat at T_surface).
+    from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+    _L_s_T = latent_heat_sublimation(T_surface)
+    _L_v_T = latent_heat_vaporization(T_surface)
+    sublim_demand = snow_latent / _L_s_T
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -978,7 +989,7 @@ def _step_multilayer_land_impl(
         # unchanged in that edge case.
         infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
     # --- Soil / plant-water evaporation (L_v), water-limited ---
-    soil_evap_demand = soil_latent / constants.L_v
+    soil_evap_demand = soil_latent / _L_v_T
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
@@ -1012,15 +1023,6 @@ def _step_multilayer_land_impl(
     max_soil_evap = jnp.maximum(
         extractable_water / dt + infil_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
-
-    # --- Combine the two phase streams ---
-    # Total vapour mass leaving the surface = pack sublimation + soil / plant
-    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
-    # unmet by a reservoir cap or the bare-soil resistance returns to the ground
-    # heat flux as ``evap_excess_energy`` so the surface energy budget still
-    # closes (in - out - dStorage = 0).
-    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
-    evap_excess_energy = lhflx - lhflx_actual
 
     # --- Root water uptake partition ---
     # ``soil_flux`` is the L_v soil / plant-water stream ONLY: the snowpack
@@ -1056,9 +1058,10 @@ def _step_multilayer_land_impl(
     # the total soil+canopy water budget closes against precip - ET - runoff and
     # the reported LE is unchanged.
     W_canopy_new = state.W_canopy
+    _wet_evap = jnp.zeros_like(evap_transp)
     if _do_intercept:
         _wet_evap_demand = jnp.maximum(
-            surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
+            surface_out.LE_wet_canopy, 0.0) / _L_v_T   # kg m-2 s-1
         # Cap by BOTH the store (can't evaporate water it doesn't hold) AND the
         # transpiration the caller is about to draw (the wet-leaf flux re-sources
         # transpiration; drawing more than that from the store would remove more
@@ -1079,18 +1082,49 @@ def _step_multilayer_land_impl(
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
+    # --- Frozen-soil ice impedance (CLM5 IceImpedance), freeze/thaw lanes only ---
+    # At start-of-step T and water, held for the step.  Off -> original Richards path.
+    _log_imped = (soil_ice_log_impedance(T_soil, theta, config)
+                  if config.thermal.enable_freeze_thaw else None)
+
     # --- Richards equation (+ coupled surface ponding cell, #671) ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
         surface_water=state.surface_water,
+        log_impedance=_log_imped,
     )
     # NB (#671): the former "evaporation water budget closure" — a clip of
     # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
     # band-aid for the old infiltration/evap mismatch; theta_from_psi is now
     # bounded below at theta_r by construction, the coupled surface cell carries
     # the ponded excess, and the mixed-form solve closes the water budget.
+
+    # --- Realised soil / plant-water evaporation (what the soil actually gave) ---
+    # A draw the dry column cannot supply (bare-soil top flux or root sink) ends
+    # at the Richards psi dry floor, which REFILLS it: the soil loses less than
+    # the demand (measured: 0.51 of a 0.8 mm/d desert demand was refilled).  The
+    # evaporation handed to the atmosphere is therefore the demand minus that
+    # refill (``richards_out.refill``, bounded by the solver's draw, so a negative
+    # or non-draw residual is never turned into evaporation or dew; the solver
+    # takes non-draw created water back out of the soil).  Draws are NOT pre-capped by
+    # start-of-step layer water: that would also cut legitimate capillary supply
+    # from moister layers below (-3.7% of a moist-subsoil day's ET, measured).
+    # Transpiration is rebuilt from the sink the solve received, so a column with
+    # zero root weight reports none.  Units: kg m-2 s-1, positive = upward.
+    evap_transp = rho_w * jnp.sum(sink * dz[None, :], axis=-1)
+    soil_evap = evap_bare + evap_transp + _wet_evap - richards_out.refill * rho_w / dt
+
+    # --- Combine the two phase streams ---
+    # Total vapour mass leaving the surface = pack sublimation + soil / plant
+    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
+    # unmet by a reservoir cap, the bare-soil resistance or the soil supply limit
+    # returns to the ground heat flux as ``evap_excess_energy`` (below) so the
+    # surface energy budget still closes (in - out - dStorage = 0); the skin
+    # temperature is not re-solved this step.
+    lhflx_actual = sublim_actual * _L_s_T + soil_evap * _L_v_T
+    evap_excess_energy = lhflx - lhflx_actual
 
     # --- Soil thermal diffusion (final, with converged G) ---
     # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
@@ -1353,7 +1387,7 @@ def _step_multilayer_land_impl(
         # Latent heat to the atmosphere = the evaporative/sublimation demand PLUS the
         # blowing-snow sublimation (gap 5): its L_s was charged to the surface energy
         # budget, so it must reach the atmosphere as latent heat (0 when bands off).
-        lhflx=lhflx_actual + blow_subl * constants.L_s,
+        lhflx=lhflx_actual + blow_subl * _L_s_T,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=response_lw_up,
@@ -1543,6 +1577,27 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
             held_carbon = carbon_new
 
     return held_state, held_response, held_carbon, bad, n_held
+
+
+def soil_ice_log_impedance(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    config: MultiLayerLandConfig,
+) -> jnp.ndarray:
+    """ln of the CLM5 frozen-soil conductivity multiplier, per layer.
+
+    ``10**(-e * icefrac)`` with ``icefrac = min(1, vol_ice / theta_sat)`` and
+    ``vol_ice`` the ice (``theta - theta_liq(T)``, the thermal solve's own split)
+    at ice density, as CLM5 SoilHydrologyMod / IceImpedance.  ``e`` =
+    ``config.richards.ice_impedance_exponent``.  Zero-porosity cells get no ice.
+    """
+    liq, _ = liquid_water_content(T_soil, theta, config.thermal)
+    theta_sat = jnp.broadcast_to(config.hydraulics.theta_sat, theta.shape)
+    ice_vol = (theta - liq) * (constants.rho_water / constants.rho_ice)
+    icefrac = jnp.where(
+        theta_sat > 0.0,
+        jnp.clip(ice_vol / jnp.maximum(theta_sat, 1e-6), 0.0, 1.0), 0.0)
+    return -config.richards.ice_impedance_exponent * _LN10 * icefrac
 
 
 def init_multilayer_land_state(

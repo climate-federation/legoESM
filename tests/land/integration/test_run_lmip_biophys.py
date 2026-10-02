@@ -404,6 +404,16 @@ def test_freeze_thaw_wires_into_soil_thermal(tmp_path):
     assert _run_config(mod, cfg_on, out_on) == 0
     assert _meta_freeze_thaw(out_on) is True
 
+    # The deck's ice impedance exponent reaches the constructed Richards config.
+    out_e = tmp_path / "ft_e3"
+    cfg_e = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.enable_freeze_thaw=true", "physics.soil_ice_impedance_exponent=3.0"])
+    assert _run_config(mod, cfg_e, out_e) == 0
+    r = list(out_e.glob("restart_*.npz"))[0]
+    _, meta = load_land_restart(r, expected_land_mode="multilayer",
+                                expected_ncol=32, expected_n_layers=None)
+    assert meta["metadata"]["soil_ice_impedance_exponent"] == 3.0
+
 
 def test_two_leaf_canopy_most_runs(tmp_path):
     """The mechanistic two-leaf canopy (intrinsic Ball-Berry stomata) + MOST

@@ -207,6 +207,11 @@ def probe_latlon_cgrid(
         eos_linear=getattr(config, "eos_linear", None),
         eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+        # NEMO's simplified-EOS coefficients are a per-run &nameos block, not a
+        # library constant: a card whose block differs from the shared defaults
+        # (VORTEX) would otherwise be probed against a different fluid from the
+        # one it integrates.  None keeps every existing probe bit-identical.
+        eos_nemo_seos=getattr(config, "eos_nemo_seos", None),
         **_eos_mk_kw,
     )
     # The recipe's gravity, read the same way the two GM/Redi calls below it

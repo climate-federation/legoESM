@@ -203,7 +203,7 @@ def main() -> int:
     from legoesm.ocean.eos import nemo_seos_eos
     from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
     from legoesm.ocean.physics.vertical_mixing.tke import (
-        _mixing_length_floor, compute_K_from_tke, compute_mixing_lengths,
+        _mxl0_anchor_floor, compute_K_from_tke, compute_mixing_lengths,
     )
     sys.path.insert(0, str(_REPO / "scripts" / "run"))
     from run_omip_core2 import orca1_zdftke_config
@@ -312,7 +312,7 @@ def main() -> int:
     # shortens lup near the surface and therefore UNDERSTATES our l_k -- which
     # is the direction of the 0.86 zero-step ratio, so the ratio may have been
     # measuring the probe rather than the model.
-    _rmxl_min = _mixing_length_floor(cfg)
+    _rmxl_min = _mxl0_anchor_floor(cfg)
     _anchor = np.full((ncol,), _rmxl_min)
     _anchor_src = f"windless derived rmxl_min={_rmxl_min:.17g} m"
     if a.trd_tfile:

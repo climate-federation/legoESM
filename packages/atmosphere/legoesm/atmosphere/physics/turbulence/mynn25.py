@@ -110,6 +110,8 @@ from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -495,7 +497,7 @@ def mynn25_turbulence(
     # Kinematic surface fluxes for closure consistency (jax_scm convention).
     rho_sfc = rho[:, -1]
     w_th_s_kin = shflx / (rho_sfc * constants.c_pd)
-    w_qv_s_kin = lhflx / (rho_sfc * constants.L_v)
+    w_qv_s_kin = surface_moisture_flux(config.surface, lhflx, T_sfc) / rho_sfc
 
     # Potential temperature (full levels) via the canonical inverse-Exner
     # helper (exner_pref = 1/Π = (p_ref/p)^κ; same 1 Pa pressure floor).
@@ -609,8 +611,9 @@ def mynn25_turbulence(
     # ``surface_flux = ρ K dφ/dz`` in mass-weighted form).
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # Diffuse u, v, theta, q_v using the existing implicit helpers.
     u_new = implicit_vertical_diffusion(
@@ -674,7 +677,7 @@ def mynn25_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
     )

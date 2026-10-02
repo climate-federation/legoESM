@@ -70,11 +70,11 @@ from legoesm.thermo import (
     saturation_vapor_pressure,
     saturation_mixing_ratio,
     saturation_mixing_ratio_dT,
+    latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
-    latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -152,7 +152,7 @@ def _latent_heat(T: jax.Array) -> jax.Array:
     branch only.
 
     Thin named alias over the shared Kirchhoff helper
-    :func:`legoesm.atmosphere.physics.thermodynamics.latent_heat_vaporization`
+    :func:`legoesm.thermo.latent_heat_vaporization`
     (same pattern as :func:`_dqsat_dT` below) so the Kuo call sites read
     like the oracle while the formula lives in one place.
     """

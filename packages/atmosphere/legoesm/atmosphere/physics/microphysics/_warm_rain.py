@@ -768,6 +768,58 @@ _KK2000_AUTOCONV_NC_EXPONENT = -1.79
 _KK2000_ACCRETION_PREFACTOR = 67.0
 _KK2000_ACCRETION_EXPONENT = 1.15
 
+# CAM6 MG2 KK2000 autoconversion (micro_mg_utils.F90:689-736,
+# kk2000_liq_autoconversion), published CAM6 constants:
+#   prc = var_coef(relvar, 2.47) * 0.01 * 1350 * qcic^2.47
+#         * (ncic[#/kg] * 1e-6 * rho)^-1.1          [kg/kg/s]
+#   nprc  = prc / droplet_mass_25um   (rain number source, per kg)
+#   nprc1 = prc * ncic / qcic         (cloud number sink, per kg)
+# gated on qcic >= icsmall (1e-8, micro_mg_utils.F90:160); qcic capped at
+# 5e-3 kg/kg by micro_mg2_0.F90:1226 before the call.
+_KK2000_CAM6_PREFACTOR = 0.01 * 1350.0
+_KK2000_CAM6_NC_EXPONENT = -1.1
+_KK2000_CAM6_QC_MIN = 1.0e-8    # icsmall [kg/kg]
+KK2000_CAM6_QC_MAX = 5.0e-3     # in-cloud cap [kg/kg] (shared with morrison.py)
+_KK2000_CAM6_RELVAR_MIN = 1.0e-3   # relvar clip (clubb_intr.F90:2425)
+_KK2000_CAM6_RELVAR_MAX = 10.0     # relvarmax, non-CLUBB deep scheme (:2418)
+
+# --- CAM6 MG2 in-cloud warm-rain inputs (micro_mg2_0.F90, CESM2.1) ---
+# lcldm = max(liqcldf, mincld) (:878), micro_mg_utils.F90:123 mincld = 1e-4;
+# qcic = min(qc/lcldm, 5e-3), ncic = max(nc/lcldm, 0), both 0 where qc < qsmall
+# (:1224-1236); qric = min(qr/precip_frac, 0.01), 0 where qric < qsmall
+# (:1312-1322).  precip_frac = cldm, "in_cloud" method under CLUBB
+# (namelist_defaults_cam.xml micro_mg_precip_frac_method, :1260-1266): only a
+# level with qc < qsmall AND qi < qsmall inherits the level above's value, and
+# there qcic = 0, so every warm-rain rate is zero whatever qric is.  For the
+# warm-rain consumers here precip_frac therefore equals lcldm (cldm = lcldm
+# with CLUBB's fraction as both).
+_MG2_MINCLD = 1.0e-4       # micro_mg_utils.F90:123 mincld [-]
+_MG2_QSMALL = 1.0e-18      # micro_mg_utils.F90 qsmall [kg/kg]
+_MG2_QRIC_MAX = 0.01       # micro_mg2_0.F90:1316 in-precip rain cap [kg/kg]
+
+
+def mg2_incloud_warm_rain_inputs(q_c, q_r, N_c, cloud_fraction, rescale_nc):
+    """CAM6 MG2 in-cloud warm-rain inputs ``(q_c_ic, q_r_ic, N_c_ic, lcldm)``.
+
+    ``cloud_fraction`` is MG2's ``liqcldf`` (= ``cldn``), shape ``(ncol, nlev)``.
+    Rates evaluated on these inputs are multiplied back by ``lcldm`` to give
+    grid-mean tendencies (micro_mg2_0.F90:1666, :1890, :1949, :1966).
+    ``rescale_nc`` divides ``N_c`` by ``lcldm`` (a grid-mean prognostic
+    number); a SPECIFIED droplet number is already the in-cloud value (MG2
+    ``nccons``: ``ncic = ncnst/rho``), so it passes through.  ``q_r_ic`` is
+    valid only where ``q_c_ic > 0`` (see the precip_frac note above).
+    """
+    lcldm = jnp.maximum(cloud_fraction, _MG2_MINCLD)
+    has_qc = q_c >= _MG2_QSMALL
+    q_c_ic = jnp.where(has_qc, jnp.minimum(q_c / lcldm, KK2000_CAM6_QC_MAX),
+                       0.0)
+    N_c_ic = N_c
+    if rescale_nc:
+        N_c_ic = jnp.where(has_qc, jnp.maximum(N_c / lcldm, 0.0), 0.0)
+    q_r_ic = jnp.minimum(q_r / lcldm, _MG2_QRIC_MAX)
+    q_r_ic = jnp.where(q_r_ic < _MG2_QSMALL, 0.0, q_r_ic)
+    return q_c_ic, q_r_ic, N_c_ic, lcldm
+
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
 # (module_mp_graupel.f90:1835-1844 autoconversion, :1960-1962 accretion).
@@ -818,7 +870,7 @@ _RAIN_EVAP_VENT_EXP = 0.525      # Marshall-Palmer rain-evaporation ventilation 
 
 
 
-def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
+def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
     """Khairoutdinov–Kogan (2000) warm-rain autoconversion — the SAM
     M2005 DEFAULT (``IRAIN=0``, ``module_mp_graupel.f90:1813``):
 
@@ -841,6 +893,9 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
         Air density [kg/m³].
     dt : float
         Time step [s] (caps the rain-number source at ``N_c/dt``).
+    fact : float
+        Multiplier on PRC (``MorrisonConfig.autocon_fact``, CAM6 MG2-style),
+        applied before both number caps. 1.0 = unscaled, bit-identical.
 
     Returns
     -------
@@ -853,8 +908,10 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
+    # ``fact`` (MorrisonConfig.autocon_fact) scales PRC before both caps,
+    # so the rain-number source and cloud-number sink follow it.
     prc = (
-        _KK2000_AUTOCONV_PREFACTOR
+        (fact * _KK2000_AUTOCONV_PREFACTOR)
         * safe_pow(q_c_pos, _KK2000_AUTOCONV_QC_EXPONENT)
         * safe_pow(n_c_cm3, _KK2000_AUTOCONV_NC_EXPONENT)
     )
@@ -873,12 +930,62 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     return prc, dN_r_au, x_c
 
 
-def accretion_kk2000(q_c, q_r):
+def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0):
+    """CAM6 MG2 KK2000 autoconversion (``kk2000_liq_autoconversion``,
+    micro_mg_utils.F90:689-736, CAM6 default ``microp_uniform=.false.``)::
+
+        PRC = var_coef(relvar, 2.47) · 13.5 · q_c^2.47 · (N_c[#/cm³])^−1.1
+
+    ``N_c[#/cm³]`` = ``N_c_eff``[#/m³]·1e-6, identical to CAM6's
+    ``ncic[#/kg]·1e-6·rho``.  ``var_coef(r, a) = Γ(r+a)/(Γ(r)·r^a)`` is the
+    sub-grid cloud-water variance enhancement, verbatim from
+    micro_mg_utils.F90:574-583 + :333-339.  CAM6's ``relvar`` is the
+    INVERSE relative variance (gamma shape ν = mean²/variance,
+    clubb_intr.F90:2425 ``rcm**2/qclvar``), so large relvar = uniform cloud
+    (factor → 1) and small relvar = strong enhancement.  Ported guards: ``q_c >= 1e-8``
+    gate (``icsmall``) and the 5e-3 kg/kg in-cloud cap.  Rain-number source =
+    ``PRC·rho / m(25 µm)`` (CAM6 ``nprc``, per-volume here); the cloud-number
+    sink is the caller's ``-PRC·rho/x_c`` = CAM6 ``nprc1`` (``x_c`` from the
+    capped water).  ``N_c_eff`` must be the IN-CLOUD number, as CAM6's
+    ``ncic``: true for the specified-Nc mode (production,
+    ``predict_Nc=False``); with prognostic Nc it is the grid mean, the same
+    known limitation as the other laws here.  ``relvar`` is clipped to
+    [0.001, 10] as CAM6 does.  N_c is floored at 1 m^-3 (CAM6 has no floor;
+    it would give inf at ncic=0).  ``fact`` =
+    ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
+    :func:`autoconversion_kk2000`.
+    """
+    q_c_pos = jnp.clip(q_c, 0.0)
+    q_c_ic = jnp.minimum(q_c_pos, KK2000_CAM6_QC_MAX)
+    n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
+    # CAM6 clips relvar to [0.001, relvarmax=10] (clubb_intr.F90:2425).
+    r = jnp.clip(jnp.asarray(relvar, dtype=q_c_pos.dtype),
+                 _KK2000_CAM6_RELVAR_MIN, _KK2000_CAM6_RELVAR_MAX)
+    a = _KK2000_AUTOCONV_QC_EXPONENT
+    var_coef = jnp.exp(jax.scipy.special.gammaln(r + a)
+                       - jax.scipy.special.gammaln(r)) / r ** a
+    prc = jnp.where(
+        q_c_ic >= _KK2000_CAM6_QC_MIN,
+        (fact * _KK2000_CAM6_PREFACTOR) * var_coef
+        * safe_pow(q_c_ic, a) * safe_pow(n_c_cm3, _KK2000_CAM6_NC_EXPONENT),
+        0.0,
+    )
+    # Mean droplet mass from the CAPPED in-cloud water, so the caller's
+    # -PRC*rho/x_c equals CAM6 nprc1 = prc*ncic/qcic (Morrison then limits
+    # the cloud-number sink to N_c/dt, as CAM6 does at micro_mg2_0:1630).
+    x_c = q_c_ic * rho / jnp.clip(N_c_eff, 1.0)
+    return prc, prc * rho / _KK2000_CONS29, x_c
+
+
+def accretion_kk2000(q_c, q_r, fact=1.0):
     """Khairoutdinov–Kogan (2000) warm-rain accretion — SAM M2005
     (``module_mp_graupel.f90:1952``; identical to gSAM P3
     ``module_mp_p3.f90:3615``, iparam=3):
 
         PRA = 67 · (q_c · q_r)^1.15      [kg/kg/s]
+
+    times ``fact`` (``MorrisonConfig.accre_enhan_fact``, MG2 ``accre_enhan``;
+    1.0 = unscaled, bit-identical).
 
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
 
@@ -895,7 +1002,8 @@ def accretion_kk2000(q_c, q_r):
     ``d/dx x^1.15 = 1.15·x^0.15 -> 0``, so this is NOT replacing a singular slope).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
-    return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
+    return (fact * _KK2000_ACCRETION_PREFACTOR) * safe_pow(
+        dum, _KK2000_ACCRETION_EXPONENT)
 
 
 def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, nu=_SB2001_NU_CLOUD):

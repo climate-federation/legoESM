@@ -395,7 +395,8 @@ def compute_two_leaf_canopy_fluxes(
     q_atm = forcing.q_lowest
     rhoa  = forcing.rho_lowest
     Tv_atm = Ta * (1.0 + _VIRT_T_COEF * q_atm)
-    lam   = constants.L_v
+    from legoesm.thermo import latent_heat_vaporization
+    lam   = latent_heat_vaporization(T_soil_top)   # the L the multilayer inverts (same T)
     Cp    = constants.c_pd
     Ca    = forcing.co2_ppmv
 
