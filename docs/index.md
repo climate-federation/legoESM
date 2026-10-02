@@ -76,8 +76,7 @@ legoesm reproduce <manifest> --check               # bit-identical reproducibili
 
 ## The three Lego axes
 
-Everything is assembled from interchangeable bricks along three independent axes —
-inspect the full capability map via [`legoesm.taxonomy`](#capability-taxonomy):
+Everything is assembled from interchangeable bricks along three independent axes:
 
 | Axis | What varies | Where it lives |
 |------|-------------|----------------|
@@ -93,15 +92,6 @@ See [Composability & architecture](architecture/composability.md) for how to ins
 axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity
 ladder), a high-level tour of the packages, and the research → operational
 (AMIP/OMIP/CMIP) progression.
-
-(capability-taxonomy)=
-## Capability taxonomy
-
-```python
-from legoesm import taxonomy
-taxonomy.capability_report()   # the full complexity × extent × grid/core map
-taxonomy.grid_capability("mpas").variable_resolution   # True
-```
 
 ## Reproducibility
 
