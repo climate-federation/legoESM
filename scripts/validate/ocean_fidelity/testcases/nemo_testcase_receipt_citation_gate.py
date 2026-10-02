@@ -1270,7 +1270,7 @@ CITATION_MAP = {
         'IF( kstg == 3 )   CALL dyn_zdf(', 36],
     'ocean_model_latlon_cgrid.py:5627-5673': [
         'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
-        'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 45],
+        'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 47],
     'ocean_model_latlon_cgrid.py:6198-6257': [
         '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 60],
     # --- round 135: accepted-state swap before the daily tracer record ---
