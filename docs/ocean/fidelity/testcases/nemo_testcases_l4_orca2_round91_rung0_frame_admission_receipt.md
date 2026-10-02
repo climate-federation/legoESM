@@ -63,10 +63,22 @@ confuse NEMO's physical evolution with cross-model error.
 ## Gates, tests, and review
 
 The new census reuses the existing frame parser and its validated offsets; the
-repository search found no prior rung-0 stage census. Focused tests and the
-two real-record plants pass. Citation results, the required read-only Codex
-review, and the prescribed fidelity battery are recorded in the final round
-commit after they run.
+repository search found no prior rung-0 stage census. Focused frame, surface,
+acquisition, census, and citation controls pass **28/28**. Both real-record
+stage plants fire. The campaign citation gate passes its 274-citation default
+receipt and this receipt's two citations with zero failures and zero unmapped
+citations; shifting the stage-1 span makes the gate fail.
+
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,225 tests and
+reached 98%, then repeated the established silent-tail stall and was stopped
+after three empty 30-second waits. Its two visible failures reproduce alone as
+the listed pre-existing case-board omission (`hires_lane_surface`) and SI3
+scalar-math provenance red (`A MY_SRC is not verbatim`). No round-91 test
+failed; there is no suite-PASS claim.
+
+The required separate read-only review stopped before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**.
 
 No `packages/` file changed, so GYRE, DINO, tank cards, and the shipped ORCA2
 card are unchanged by construction. The shipped card's sea-ice
