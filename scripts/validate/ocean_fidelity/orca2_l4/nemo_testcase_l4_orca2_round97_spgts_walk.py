@@ -204,6 +204,10 @@ def measure(
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         barotropic_substeps_latlon_cgrid,
     )
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_dynvor_e3f_0vor,
+    )
 
     require(plant in PLANTS, f"unknown plant {plant}")
     stamp = worktree_stamp()
@@ -402,17 +406,44 @@ def measure(
     control_observed = jax.device_get(control_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     control_e3f = _coriolis_arm(control_observed.substeps, oracle, active)
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "literal EEN path has no carried coefficient operands")
+    e3t_0 = compute_layer_thickness(
+        jnp.zeros_like(state.eta.data), state.H_bathy.data,
+        card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m,
+    )
+    source_divisor = nemo_dynvor_e3f_0vor(
+        e3t_0, card.recipe.z_coord.is_active,
+        grid=card.recipe.grid, dtype=jnp.float64,
+    )
+    source_z_coord = card.recipe.z_coord._replace(
+        nemo_een_barotropic=raw._replace(e3f_0=source_divisor))
+    source_model = LatLonCGridOceanModel(
+        card.recipe.grid, source_z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_slow_forcing_override=(slow_u, slow_v),
+            barotropic_raw_history_override=raw_history,
+        ),
+    )
+    source_observed = jax.device_get(source_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    source_e3f = _coriolis_arm(source_observed.substeps, oracle, active)
     e3f_arm = {
-        "statement": "een_e3f_scheme",
-        "source_exact": "nemo_avg4",
-        "control": "min",
-        "source_exact_score": current_e3f,
-        "control_score": control_e3f,
+        "statement": "literal barotropic divisor e3f_0 -> e3f_0vor",
+        "baseline_score": current_e3f,
+        "selector_reachability_control": {
+            "selector": "een_e3f_scheme nemo_avg4 -> min",
+            "score": control_e3f,
+            "identical_to_baseline": control_e3f == current_e3f,
+        },
+        "source_exact_score": source_e3f,
         "verdict": (
             "CONFIRMED_SOURCE_EXACT" if (
-                current_e3f["maximum_absolute"] < control_e3f["maximum_absolute"]
-                or current_e3f["differing_cells_sum"]
-                < control_e3f["differing_cells_sum"]
+                source_e3f["maximum_absolute"] < current_e3f["maximum_absolute"]
+                or source_e3f["differing_cells_sum"]
+                < current_e3f["differing_cells_sum"]
             ) else "REFUTED_AS_FIRST_NONBIT_OWNER"
         ),
     }
