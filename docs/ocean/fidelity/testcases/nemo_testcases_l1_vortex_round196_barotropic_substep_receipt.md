@@ -106,7 +106,12 @@ interpolation coefficients at each of the 48 substeps — agree to the last
 bit, so neither the startup ramp nor the weight schedule is in question.
 
 **Every boundary is at the compiled-rounding floor through substep 25.**
-Normalized max abs, `VORTEX_VEC-zco`, kt=1:
+Normalized max abs, `VORTEX_VEC-zco`, kt=1. The campaign's normalisation
+divides by `max(peak |NEMO|, 1)`, so for the velocities and the sea surface
+it is a relative error and for the trends — whose peaks are far below one —
+it is the absolute difference; the budget table further down is therefore
+in absolute units throughout, and trend rows must not be compared against
+velocity rows without that in mind.
 
 | boundary | j001 | j024 | j027 | j048 |
 |---|---:|---:|---:|---:|
@@ -134,7 +139,7 @@ output at `1e-08` has two readings: the loop amplifies what it is handed,
 or a statement inside it is wrong. Two controls settle it.
 
 **Conditioning (legoESM against itself).** Perturb the barotropic entry
-velocity by one unit in the last place at **every** wet face — 3639 faces,
+velocity by one unit in the last place at **every** wet face — 3660 faces,
 the same spatial extent the real difference reaches — and re-run the same
 production-jitted step. The response stays on the floor for all 48
 substeps: `5.551e-17` at substep 1, `1.110e-16` at substep 48,

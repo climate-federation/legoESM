@@ -355,6 +355,10 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
                              owned.shape)
     before = owned[where]
     bumped_owned = np.where(use, np.nextafter(owned, np.inf), owned)
+    # ``owned`` is a VIEW into ``carried``; measure the perturbation BEFORE
+    # writing it back, or the recorded size is identically zero and the
+    # record of the control says it perturbed nothing.
+    perturbation_max = float(np.max(np.abs(bumped_owned - owned)))
     carried[:, 1:] = bumped_owned
     import jax.numpy as jnp
     bumped = seed._replace(uu_b=seed.uu_b.replace(data=jnp.asarray(carried)))
@@ -379,7 +383,7 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
         "largest_cell": [int(where[0]), int(where[1]) + 1],
         "perturbation_at_largest_cell": float(
             np.nextafter(before, np.inf) - before),
-        "perturbation_max": float(np.max(np.abs(bumped_owned - owned))),
+        "perturbation_max": perturbation_max,
         "substeps": n_loop,
         "first_responding_substep_max_abs": first,
         "final_substep_max_abs": final,
