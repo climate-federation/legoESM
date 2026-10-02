@@ -148,6 +148,52 @@ def _forcing(shape):
     return freshwater, surface
 
 
+def _capture_stage1_parts(model, state, dt, freshwater, surface):
+    """Capture the first production tendency call without the all-stage trace."""
+
+    import jax
+
+    names = (
+        "hpg_u", "hpg_v", "ldf_u", "ldf_v", "vorticity_u", "vorticity_v",
+        "keg_u", "keg_v", "zad_u", "zad_v",
+    )
+    captures: list[dict[str, np.ndarray]] = []
+    real = type(model).tendencies
+    call_index = 0
+
+    def sink(*values):
+        captures.append({
+            name: np.asarray(value, dtype=np.float64)
+            for name, value in zip(names, values, strict=True)
+        })
+
+    def wrapper(self, *args, **kwargs):
+        nonlocal call_index
+        capture = call_index == 0
+        call_index += 1
+        if not capture:
+            return real(self, *args, **kwargs)
+        original_components = kwargs.get("return_nemo_operator_components", False)
+        kwargs["diagnose_momentum"] = True
+        kwargs["return_nemo_operator_components"] = True
+        result = real(self, *args, **kwargs)
+        tendency, diagnostics, parts = result
+        jax.debug.callback(
+            sink, *(parts[name].data for name in names), ordered=True)
+        return result if original_components else tendency
+
+    type(model).tendencies = wrapper
+    try:
+        state_after = jax.device_get(model.step(
+            state, dt, freshwater=freshwater, surface_forcing=surface))
+        jax.effects_barrier()
+    finally:
+        type(model).tendencies = real
+    require(call_index > 0, "production step made no tendency call")
+    require(len(captures) == 1, "stage-1 component callback did not fire once")
+    return state_after, captures[0]
+
+
 def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: str) -> dict:
     import jax
 
@@ -187,13 +233,13 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         card.recipe.grid, card.recipe.z_coord, cfg)
     traced_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True),
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(),
     )
     ordinary = jax.device_get(ordinary_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    trace = jax.device_get(traced_model.step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    traced_fields = rung0.candidate_fields(trace.state_after)
+    traced_state, parts = _capture_stage1_parts(
+        traced_model, state, card.dt_s, freshwater, surface)
+    traced_fields = rung0.candidate_fields(traced_state)
     if plant == "trace-bit":
         traced_fields["T"] = np.array(traced_fields["T"], copy=True)
         traced_fields["T"][0, 0, 0] = np.nextafter(
@@ -203,13 +249,12 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
     require(passivity["first_non_bit_field"] is None,
             "live operand trace changes the production trajectory")
 
-    parts = trace.operator_operands[0]
     accumulated = jax.device_get(jax.jit(rhs_common.source_order_accumulators)(
-        parts["hpg_u"].data, parts["hpg_v"].data,
-        parts["ldf_u"].data, parts["ldf_v"].data,
-        parts["vorticity_u"].data, parts["vorticity_v"].data,
-        parts["keg_u"].data, parts["keg_v"].data,
-        parts["zad_u"].data, parts["zad_v"].data,
+        parts["hpg_u"], parts["hpg_v"],
+        parts["ldf_u"], parts["ldf_v"],
+        parts["vorticity_u"], parts["vorticity_v"],
+        parts["keg_u"], parts["keg_v"],
+        parts["zad_u"], parts["zad_v"],
     ))
     oracle, record_census = assemble_rhs(record_root, plant=plant)
     active = {
