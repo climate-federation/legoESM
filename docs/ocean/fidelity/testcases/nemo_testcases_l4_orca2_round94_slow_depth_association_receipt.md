@@ -119,13 +119,20 @@ the already-dispositive GYRE refusal.
 ## Gates, tests, and review
 
 The default citation gate passes with zero unmapped citations, failures, or
-map-audit failures; shifting a real mapped citation by two lines makes it fail.
-Focused tests and the prescribed single wide battery are recorded in the final
-commit of this receipt.
+map-audit failures; shifting a real mapped citation by two lines makes it fail
+with `SYMBOL-NOT-AT-LINE` and exit 1. Focused parser/walk tests pass 8/8.
 
-The required separate read-only Codex review is recorded verbatim in the
-round-94 evidence directory and summarized in the final commit of this
-receipt.
+The prescribed single `tests/ocean/fidelity -n 12` run reached 96%, displayed
+six failures, and then reproduced the established silent-tail termination:
+the pytest process disappeared without a summary or `lastfailed` cache. This
+is the same visible count and failure mode recorded by round 93. No new
+failure is assigned without an ID, and this receipt does not represent the
+wide battery as PASS.
+
+The required separate `codex exec --sandbox read-only` review failed before
+reading the diff: `failed to initialize in-process app-server client:
+Read-only file system`. Verdict: **independent review unavailable in-sandbox**.
+The complete transcript is `round94/codex_review.log`.
 
 ## OPEN
 
