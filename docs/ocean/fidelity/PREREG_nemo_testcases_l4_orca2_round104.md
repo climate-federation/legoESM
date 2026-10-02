@@ -62,3 +62,23 @@ only where the local face mask says that level belongs to the NEMO loop.
 | R104-P6 | Explicit `mbku/mbkv`-equivalent loop gating owns the non-fold zero signs without changing magnitudes. | All eight coefficients have zero non-fold bit differences; only the registered 66/67 fold magnitudes remain. | Any non-fold bit difference or any new magnitude difference: **REFUTED** and hold without a model landing. |
 | R104-P7 | The source loop arm closes substep-1 U/V and leaves the independent 68-cell substep-2 U fold residual. | Same consumer rows as R104-P3. | Any other row moves: hold and name it. |
 | R104-P8 | Replacing the conditional update with unconditional masked arithmetic makes the synthetic dry-column control fail. | Direct test observes positive-zero accumulator for the skipped loop and a negative zero for the planted unconditional term. | Control stays green: no landing. |
+
+## Second post-refutation preregistration — minimum-one bottom index
+
+Committed after R104-P6 was measured and **REFUTED**, before measuring arm 3.
+Arm 2 made every non-fold magnitude exact but left 79–209 signed-zero cells per
+coefficient. The compiled setup explains the remainder: `mbku` and `mbkv` are
+forced to at least one (`domzgr.f90:621-631`), then a bottom index of one clears
+the entire corresponding mask (`dommsk.f90:218-229`). Therefore a fully dry
+face executes exactly the `jk=1` recurrence once even though its 3-D mask is
+all zero. Arm 2 incorrectly skipped that iteration.
+
+Arm 3 changes only the derived loop predicate: active faces execute their wet
+levels; fully dry faces execute level one exactly once. The operand expressions,
+neighbor masks, accumulation order, and final scale remain fixed.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R104-P9 | The compiled minimum-one bottom-index rule owns every remaining non-fold signed zero. | All six coefficients without fold magnitude debt are bit-exact; `ffv_nw/ne` differ only at their registered 66/67 fold cells. | Any other bit difference: **REFUTED** and hold. |
+| R104-P10 | The minimum-one arm closes substep-1 U/V and preserves the 68-cell substep-2 U residual exactly. | Same consumer rows as R104-P3, with no additional moved row. | Any other movement: hold and name it. |
+| R104-P11 | A fully dry synthetic face distinguishes minimum-one from zero-iteration gating. | The production builder's coefficient sign changes when the planted first-level iteration is suppressed, and the gate rejects that arm. | No sign change: the control is vacuous; no landing. |
