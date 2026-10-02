@@ -1044,8 +1044,9 @@ def _build_observed_sif(args, table, inputs, cell_id, cell_w, n_arch_full):
     if not args.with_sif:
         return None
     from legoesm.land.carbon.sif_observations import (
-        load_gridded_sif, per_archetype_observed_sif, synthetic_observed_sif,
+        SIF_VAR_CANDIDATES, per_archetype_observed_sif, synthetic_observed_sif,
     )
+    from legoesm.land.carbon.soc_observations import load_gridded_obs
     if args.dry_run_synthetic:
         return synthetic_observed_sif(table)
     if args.surfdata_preset != "clm5_surfdata":
@@ -1054,7 +1055,8 @@ def _build_observed_sif(args, table, inputs, cell_id, cell_w, n_arch_full):
             f"preset (the gridded SIF must match the cover grid); '{args.surfdata_preset}' "
             "regrids the cover. Use clm5_surfdata.")
     ncell = int(inputs.pft_weights.shape[0])
-    sif_cell = load_gridded_sif(args.sif_obs, ncell=ncell, sif_var=(args.sif_var or None))
+    sif_cell = load_gridded_obs(
+        args.sif_obs, SIF_VAR_CANDIDATES, "sif", ncell=ncell, var=(args.sif_var or None))
     return per_archetype_observed_sif(sif_cell, cell_id, cell_w, n_arch=n_arch_full)
 
 
@@ -1129,11 +1131,12 @@ def _build_observed_d13c(args, table, inputs, cell_id, cell_w, n_arch_full):
     if not args.with_d13c:
         return None
     from legoesm.land.carbon.d13c_observations import (
+        D13C_VAR_CANDIDATES,
         c4_archetype_mask,
-        load_gridded_d13c,
         per_archetype_observed_d13c,
         synthetic_observed_d13c,
     )
+    from legoesm.land.carbon.soc_observations import load_gridded_obs
     if args.dry_run_synthetic:
         observed = np.asarray(synthetic_observed_d13c(table), dtype=float)
     else:
@@ -1143,8 +1146,9 @@ def _build_observed_d13c(args, table, inputs, cell_id, cell_w, n_arch_full):
                 f"'clm5_surfdata' preset (the gridded delta13C must match the cover grid); "
                 f"'{args.surfdata_preset}' regrids the cover. Use clm5_surfdata.")
         ncell = int(inputs.pft_weights.shape[0])
-        d13c_cell = load_gridded_d13c(
-            args.d13c_obs, ncell=ncell, d13c_var=(args.d13c_var or None))
+        d13c_cell = load_gridded_obs(
+            args.d13c_obs, D13C_VAR_CANDIDATES, "d13c", ncell=ncell,
+            var=(args.d13c_var or None))
         observed = np.asarray(
             per_archetype_observed_d13c(d13c_cell, cell_id, cell_w, n_arch=n_arch_full),
             dtype=float)
