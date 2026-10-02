@@ -463,6 +463,45 @@ def test_poly_unchanged_by_deeper_halo():
     assert not bad, (bad, worst)
 
 
+def test_gpoly_sharded_gradient_matches_finite_difference():
+    """Reverse mode through the sharded fixed-M gpoly solve (the SPMD default
+    since 2026-10-02): d/ds sum(eta^2) after one step from s * eta0 vs a
+    central difference.  Padding edges (dvEdge = 0) made this NaN before the
+    del2 divisor guard."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import (
+        build_mpas_ocean_spmd_layout, halo_depth_for_config,
+        make_sharded_mpas_ocean_step, shard_state_mpas_ocean_spmd)
+    mesh, n_real, model, state, (fw, sf, sp) = _build(dict(_GPOLY), level=3)
+    try:
+        layout = build_mpas_ocean_spmd_layout(
+            mesh, N_DEV, n_cells_real=n_real, tracer_advection="superbee",
+            nlev=state.T.data.shape[1],
+            halo_depth=halo_depth_for_config(model.config))
+        step = make_sharded_mpas_ocean_step(model, layout)
+        st = shard_state_mpas_ocean_spmd(state, layout)
+        put = lambda x: jax.device_put(x, layout.cell_sharding)  # noqa: E731
+        fw_s, sf_s = jax.tree.map(put, fw), jax.tree.map(put, sf)
+        sp_s = sp._replace(gamma=put(sp.gamma))
+
+        def loss(s):
+            out = step(st._replace(eta=st.eta.replace(data=st.eta.data * s)),
+                       _GPOLY_DT, freshwater=fw_s, surface_forcing=sf_s,
+                       sponge=sp_s)
+            return jnp.sum(out.eta.data ** 2)
+
+        g = float(jax.jit(jax.grad(loss))(1.0))
+        h = 1e-4
+        fd = (float(jax.jit(loss)(1.0 + h))
+              - float(jax.jit(loss)(1.0 - h))) / (2 * h)
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    assert np.isfinite(g) and g != 0.0
+    np.testing.assert_allclose(g, fd, rtol=1e-6)
+
+
 def test_single_device_ignores_gpoly():
     """One device keeps the stock CG solve to tolerance whatever the
     preconditioner (owner decision 2026-10-02): gpoly and poly give the

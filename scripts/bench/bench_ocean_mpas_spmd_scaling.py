@@ -102,10 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
                    help="unset = MPASOceanConfig default (single_reduce); "
-                        "single_reduce_deep needs --pcg-precond jacobi (poly/gpoly need "
+                        "single_reduce_deep needs --pcg-precond jacobi and, for the "
+                        "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
                         "--pcg-variant single_reduce or standard)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 30); "
+                   help="distributed PCG iteration count (config default 15); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,

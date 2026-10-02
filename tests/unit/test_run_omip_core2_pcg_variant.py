@@ -74,10 +74,10 @@ def test_config_fields_exist_with_measured_defaults():
 
     from legoesm.ocean.mpas_config import MPASOceanConfig
 
-    # MPAS default single_reduce_deep since 2026-09-30 (owner-approved after
-    # CPU multi-node A/B, evidence in mpas_config.py); the lat-lon C-grid
-    # default above is a different operator and stays standard.
-    assert MPASOceanConfig().barotropic_implicit_pcg_variant == "single_reduce_deep"
+    # MPAS default single_reduce (gpoly x 15, owner decision 2026-10-02;
+    # single_reduce_deep is opt-in, evidence in mpas_config.py); the lat-lon
+    # C-grid default above is a different operator and stays standard.
+    assert MPASOceanConfig().barotropic_implicit_pcg_variant == "single_reduce"
 
 
 # ------------------------------------------------- builder threading
