@@ -59,6 +59,8 @@ _ORCA2_R85FRAMEDEBUG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo")
 _ORCA2_R87FRAMES_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R88FRAMEDEBUG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -132,6 +134,12 @@ FILES = {
         _ORCA2_R87FRAMES_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90": (
         _ORCA2_R87FRAMES_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "stprk3_stg.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1161,6 +1169,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 90: source-resolved OFF-runoff recorder fault ---
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:287':
+        "&       l4_canon_2d(rnf,'T')",
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:357':
+        'IF( llwet ) zfield(ji,jj) = pfield(ji,jj)',
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90:201':
+        'IF(ln_rnf)   ALLOCATE( rnf(jpi,jpj), rnf_b(jpi,jpj), STAT=ierr(3) )',
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90:555':
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
     # --- ORCA2 round 88: exact optimized branch and unresolved crash ---
     'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90:90-108': [
         "IF( ln_timing )   CALL timing_start('stp_RK3')",
