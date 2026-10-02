@@ -1269,7 +1269,6 @@ CITATION_MAP = {
         ('CALL r107_een_step_init', 1), 2],
     'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90:34-45': [
         ("GET_ENVIRONMENT_VARIABLE('ORCA2_R105_EEN_ACCUM_DIR'", 1),
-        ("STATUS='NEW'", 1),
         ("ORCA2_R105_EEN_ACCUM_INIT", 1), 12],
     # --- ORCA2 round 107: literal EEN vertical loop bounds ---
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1229-1230': [
