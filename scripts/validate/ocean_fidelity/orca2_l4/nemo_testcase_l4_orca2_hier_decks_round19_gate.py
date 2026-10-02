@@ -47,6 +47,67 @@ INVENTORY_SHA = {
 STATUS = {k: f"PASS_RUNG{k}_RECORD" for k in range(7, 11)} | {
     k: f"PASS_RUNG{k}_HAVTB0_RECORD" for k in range(1, 7)
 }
+EXPECTED_DELTAS = {
+    9: {"namsbc.nn_ice": ["2", "0"]},
+    8: {
+        "namsbc_rnf.ln_rnf_mouth": [".true.", ".false."],
+        "namzdf.ln_zdfddm": [".true.", ".false."],
+        "namzdf_iwm.ln_tsdiff": [".true.", ".false."],
+    },
+    7: {"namzdf.ln_zdfiwm": [".true.", ".false."]},
+    6: {
+        "namzdf.ln_zdfcst": ["ABSENT", ".true."],
+        "namzdf.ln_zdftke": [".true.", ".false."],
+        "namzdf.nn_havtb": ["1", "0"],
+    },
+    5: {"namsbc.ln_rnf": [".true.", ".false."]},
+    4: {
+        "namsbc.ln_traqsr": [".true.", ".false."],
+        "namtra_qsr.ln_qsr_rgb": [".true.", ".false."],
+        "namtra_qsr.nn_chldta": ["1", "0"],
+    },
+    3: {
+        "namsbc.ln_abl": ["ABSENT", ".false."],
+        "namsbc.ln_blk": [".true.", ".false."],
+        "namsbc.ln_cpl": ["ABSENT", ".false."],
+        "namsbc.ln_dm2dc": ["ABSENT", ".false."],
+        "namsbc.ln_flx": ["ABSENT", ".true."],
+        "namsbc.ln_mixcpl": ["ABSENT", ".false."],
+        "namsbc.ln_ssr": [".true.", ".false."],
+        "namsbc.ln_usr": ["ABSENT", ".false."],
+        "namsbc.nn_fwb": ["2", "0"],
+        "namsbc_flx.cn_dir": ["ABSENT", "'./'"],
+        "namsbc_flx.sn_emp": [
+            "ABSENT",
+            "'rung3_zero_flux', -12., 'emp',  .false., .true., 'yearly', '', '', ''",
+        ],
+        "namsbc_flx.sn_qsr": [
+            "ABSENT",
+            "'rung3_zero_flux', -12., 'qsr',  .false., .true., 'yearly', '', '', ''",
+        ],
+        "namsbc_flx.sn_qtot": [
+            "ABSENT",
+            "'rung3_zero_flux', -12., 'qtot', .false., .true., 'yearly', '', '', ''",
+        ],
+        "namsbc_flx.sn_utau": [
+            "ABSENT",
+            "'rung3_zero_flux', -12., 'utau', .false., .true., 'yearly', '', '', ''",
+        ],
+        "namsbc_flx.sn_vtau": [
+            "ABSENT",
+            "'rung3_zero_flux', -12., 'vtau', .false., .true., 'yearly', '', '', ''",
+        ],
+        "namsbc_ssr.ln_sssr_bnd": [".true.", ".false."],
+    },
+    2: {
+        "namtra_eiv.ln_ldfeiv": [".true.", ".false."],
+        "namtra_mle.ln_mle": [".true.", ".false."],
+    },
+    1: {
+        "nambbc.ln_trabbc": [".true.", ".false."],
+        "nambbl.ln_trabbl": [".true.", ".false."],
+    },
+}
 PLANTS = (
     "none",
     "admission-pin",
@@ -55,6 +116,7 @@ PLANTS = (
     "background-boundary",
     "rung1-payload",
     "superseded-missing",
+    "adjacent-delta",
 )
 
 
@@ -90,6 +152,7 @@ def evaluate(*, plant: str = "none") -> dict[str, object]:
     )
 
     rows = []
+    values_by_rung = {}
     for level in range(1, 11):
         root = ROOT / f"rung{level}"
         admission_path = root / f"rung{level}_admission.json"
@@ -124,6 +187,7 @@ def evaluate(*, plant: str = "none") -> dict[str, object]:
         if not exact_deck.exists():
             exact_deck = root / "record/namelist_cfg"
         values = rung1.legacy.namelist_values(exact_deck)
+        values_by_rung[level] = values
         expected_havtb = "0" if level <= 6 else "1"
         if plant == "background-boundary" and level == 6:
             expected_havtb = "1"
@@ -148,11 +212,30 @@ def evaluate(*, plant: str = "none") -> dict[str, object]:
             }
         )
 
+    adjacent_deltas = {}
+    for lower in range(1, 10):
+        upper_values = values_by_rung[lower + 1]
+        lower_values = values_by_rung[lower]
+        delta = {
+            key: [
+                rung1.legacy._token(upper_values[key]) if key in upper_values else "ABSENT",
+                rung1.legacy._token(lower_values[key]) if key in lower_values else "ABSENT",
+            ]
+            for key in sorted(set(upper_values) | set(lower_values))
+            if upper_values.get(key) != lower_values.get(key)
+        }
+        expected = EXPECTED_DELTAS[lower]
+        if plant == "adjacent-delta" and lower == 6:
+            expected = {**expected, "plant.extra": ["0", "1"]}
+        require(delta == expected, f"rung-{lower + 1}/rung-{lower} boundary changed")
+        adjacent_deltas[f"rung{lower + 1}_to_rung{lower}"] = delta
+
     return {
         "status": "PASS_ORCA2_NEMO_HIERARCHY_RUNGS_1_10",
         "claim_label": "independent",
         "rung1_fresh_validation": fresh["status"],
         "rung1_to_rung0_differences": fresh["main_rung0_semantic_differences"],
+        "adjacent_rung_differences": adjacent_deltas,
         "rungs": rows,
     }
 

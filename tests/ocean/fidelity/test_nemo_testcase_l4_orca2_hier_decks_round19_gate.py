@@ -24,6 +24,11 @@ def test_complete_hierarchy_is_admitted_at_authorized_background_boundary():
     assert [row["rung"] for row in report["rungs"]] == list(range(1, 11))
     assert [row["nn_havtb"] for row in report["rungs"]] == [0] * 6 + [1] * 4
     assert {row["frames"] for row in report["rungs"]} == {480}
+    assert report["adjacent_rung_differences"]["rung7_to_rung6"] == {
+        "namzdf.ln_zdfcst": ["ABSENT", ".true."],
+        "namzdf.ln_zdftke": [".true.", ".false."],
+        "namzdf.nn_havtb": ["1", "0"],
+    }
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
