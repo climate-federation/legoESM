@@ -983,12 +983,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
     r3f = b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))
-    # dynspg_ts.f90:1230-1233,1257-1260 leaves the local live thickness
-    # unmasked and applies exactly one mask to the neighbouring face inside
-    # each coefficient recurrence.  Masking here as well changes dry-cell
-    # zero signs before the written accumulation.
-    e3u = b(e3u0 * b(one + r3u[..., None] * umask))
-    e3v = b(e3v0 * b(one + r3v[..., None] * vmask))
+    e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
+    e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
     q = b(ff[..., None] / e3f)
 
