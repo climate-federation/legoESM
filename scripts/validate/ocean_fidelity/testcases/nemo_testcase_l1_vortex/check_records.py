@@ -48,6 +48,14 @@ _FAMILIES = {
     # count, three spare integers and word size.  Payload sizes remain wholly
     # self-described by the groups that follow.
     "oracle_stage_terms_kt": ("NEMO_L1_STGTRM1", 15, "groups", 0),
+    # Round 196's per-substep barotropic (dyn_spg_ts) record.  Fifteen header
+    # integers: version, step, the four time-level indices, the three
+    # extents, the substep count icycle, the four interior-domain bounds and
+    # the word size LAST.  It carries NO group count: the number of groups is
+    # a function of icycle, which the header already states, so writing it
+    # twice would be a second thing to keep in step.  Every payload remains
+    # self-described by its own (rank, n1, n2, n3).
+    "oracle_spgts_kt": ("NEMO_L1_SPGTS1", 15, "groups", 0),
 }
 # The groups every per-term record must carry, by name.  This list, the magic
 # and the format version are the ONLY hard-coded expectations.
@@ -66,6 +74,27 @@ _STAGE_TERM_BY_STAGE = {
 }
 
 
+# Round 196's per-substep barotropic record.  Three frame kinds: the
+# loop-entry frame 'i000_', one frame 'jNNN_' per sub-time-step, and the
+# loop-exit frame 'o000_'.  These names, the magic and the format version
+# are the ONLY hard-coded expectations; sizes are never predicted.
+_SPGTS_ENTRY = (
+    "ssh_frc", "zu_frc", "zv_frc", "un_e", "vn_e", "ub_e", "vb_e",
+    "ubb_e", "vbb_e", "sshn_e", "sshb_e", "sshbb_e",
+    "hu_e", "hv_e", "hur_e", "hvr_e", "zCdU_u", "zCdU_v",
+    "wgtbtp1", "wgtbtp2", "entry_sc",
+)
+_SPGTS_SUBSTEP = (
+    "ua_ext", "va_ext", "sshp2_mid", "htp2_e", "hup2_e", "hvp2_e", "ext_coef",
+    "zhU", "zhV", "ssha_e", "un_adv", "vn_adv", "sshu_a", "sshv_a",
+    "sshp2_bck", "zu_spg", "zv_spg", "bck_coef", "cor_u", "cor_v",
+    "trd_u", "trd_v", "ua_new", "va_new", "hu_e", "hv_e", "hur_e", "hvr_e",
+    "uub_sum", "vvb_sum", "ssh_sum", "sum_coef",
+)
+_SPGTS_EXIT = ("un_adv", "vn_adv", "uu_b_aa", "vv_b_aa", "ssh_aa")
+_SPGTS_PLANTS = ("header", "field-name", "truncated", "missing-frame")
+
+
 class Refusal(RuntimeError):
     pass
 
@@ -75,13 +104,20 @@ def _require(ok, message):
         raise Refusal(message)
 
 
-def parse_record(path: Path, corrupt_header: bool = False) -> dict:
+def parse_record(path: Path, corrupt_header: bool = False,
+                 plant: str | None = None) -> dict:
     """Parse one record from its own header.  Raises Refusal on any mismatch."""
     family = next(
         (name for name in _FAMILIES if path.name.startswith(name)), None)
     _require(family is not None, f"{path.name}: unknown record family")
     magic_expected, n_header, layout, n_2d = _FAMILIES[family]
     raw = path.read_bytes()
+    if plant == "truncated":
+        # Lose the last eight bytes: the file must then stop reading mid-group
+        # and the group walk must say so rather than silently accepting it.
+        raw = raw[:-8]
+    if plant == "header":
+        corrupt_header = True
     _require(len(raw) > 16 + 4 * n_header, f"{path.name}: truncated")
     magic = raw[:16].decode("ascii", "replace").rstrip()
     header = list(struct.unpack(f"={n_header}i", raw[16:16 + 4 * n_header]))
@@ -103,7 +139,7 @@ def parse_record(path: Path, corrupt_header: bool = False) -> dict:
                  f"says {header[1]}")
     if layout == "groups":
         return _parse_groups(path, raw, magic, header, n_header, family,
-                             corrupt_header)
+                             corrupt_header, plant)
     payload = len(raw) - (16 + 4 * n_header)
     _require(payload % 8 == 0, f"{path.name}: payload is not a whole number of f64")
     values = payload // 8
@@ -130,7 +166,8 @@ def parse_record(path: Path, corrupt_header: bool = False) -> dict:
 
 
 def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
-                  n_header: int, family: str, corrupt_extent: bool) -> dict:
+                  n_header: int, family: str, corrupt_extent: bool,
+                  plant: str | None = None) -> dict:
     """Walk (name, rank, n1, n2, n3, payload) groups to end of file.
 
     Nothing here predicts a size: each payload's length is checked against the
@@ -162,6 +199,8 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
     _require(offset == len(raw),
              f"{path.name}: {len(raw) - offset} trailing bytes after the last "
              "group; the file does not end on a group boundary")
+    if family == "oracle_spgts_kt":
+        return _finish_spgts(path, magic, header, groups, plant)
     if family == "oracle_rhsterm_kt":
         required = _RHSTERM_GROUPS
         declared_index = 9
@@ -191,6 +230,52 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
             "doubles": sum(g["doubles"] for g in groups.values())}
 
 
+def _finish_spgts(path: Path, magic: str, header: list, groups: dict,
+                  plant: str | None) -> dict:
+    """Verify the frame structure the record's OWN header implies.
+
+    The header states icycle; the file must therefore carry the loop-entry
+    frame, exactly icycle substep frames and the loop-exit frame, each
+    complete.  Nothing about a size is written down here.
+    """
+    icycle = header[9]
+    _require(icycle > 0, f"{path.name}: header declares icycle {icycle}")
+    if plant == "field-name":
+        # Rename one required operand: a record that lost a field under a
+        # typo must be refused, not quietly scored with the field missing.
+        victim = f"j001_zhU"
+        _require(victim in groups,
+                 f"{path.name}: plant target {victim!r} is absent")
+        groups[victim.replace("zhU", "zhX")] = groups.pop(victim)
+    if plant == "missing-frame":
+        for name in [n for n in groups if n.startswith(f"j{icycle:03d}_")]:
+            groups.pop(name)
+    frames = {"i000": _SPGTS_ENTRY, "o000": _SPGTS_EXIT}
+    for jn in range(1, icycle + 1):
+        frames[f"j{jn:03d}"] = _SPGTS_SUBSTEP
+    missing, unexpected = [], []
+    seen = set()
+    for prefix, required in frames.items():
+        for name in required:
+            key = f"{prefix}_{name}"
+            seen.add(key)
+            if key not in groups:
+                missing.append(key)
+    unexpected = [name for name in groups if name not in seen]
+    _require(not missing,
+             f"{path.name}: missing group(s) {missing[:6]} "
+             f"({len(missing)} in total)")
+    _require(not unexpected,
+             f"{path.name}: unexpected group(s) {unexpected[:6]} "
+             f"({len(unexpected)} in total)")
+    nx, ny, nz = header[6:9]
+    return {"file": path.name, "magic": magic, "header": header,
+            "nx": nx, "ny": ny, "nz": nz, "ntr": 0, "stage": None,
+            "icycle": icycle, "frames": len(frames),
+            "groups": groups,
+            "doubles": sum(g["doubles"] for g in groups.values())}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, type=Path,
@@ -206,9 +291,17 @@ def main(argv=None) -> int:
     parser.add_argument("--stage-terms", action="store_true",
                         help="also require round 8's stage-2 and stage-3 "
                              "momentum term records")
+    parser.add_argument("--spgts-terms", action="store_true",
+                        help="also require round 196's per-substep "
+                             "barotropic (dyn_spg_ts) records")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--plant", action="store_true",
-                        help="corrupt one parsed header; MUST exit non-zero")
+    parser.add_argument("--plant", nargs="?", const="header",
+                        choices=_SPGTS_PLANTS,
+                        help="corrupt one parsed record; MUST exit non-zero. "
+                             "'header' bumps a declared extent, 'field-name' "
+                             "renames a required operand, 'truncated' drops "
+                             "the file's last eight bytes and 'missing-frame' "
+                             "deletes the last substep frame")
     args = parser.parse_args(argv)
 
     report = {"run_dir": str(args.run_dir), "records": [], "plant": args.plant}
@@ -242,13 +335,22 @@ def main(argv=None) -> int:
             wanted += [args.run_dir /
                        f"oracle_stage_terms_kt00000001_s{stage}.bin"
                        for stage in (2, 3)]
+        if args.spgts_terms:
+            wanted += [args.run_dir / f"oracle_spgts_kt{kt:08d}.bin"
+                       for kt in range(1, args.steps + 1)]
         for path in wanted:
             _require(path.is_file(), f"the run did not write {path.name}")
-        corrupt_path = wanted[-1] if args.stage_terms else wanted[0]
+        if args.spgts_terms:
+            corrupt_path = args.run_dir / "oracle_spgts_kt00000001.bin"
+        elif args.stage_terms:
+            corrupt_path = wanted[-1]
+        else:
+            corrupt_path = wanted[0]
         for path in sorted(args.run_dir.glob("oracle_*.bin")):
+            planted = args.plant if path == corrupt_path else None
             report["records"].append(
-                parse_record(path, corrupt_header=args.plant
-                             and path == corrupt_path))
+                parse_record(path, corrupt_header=bool(planted)
+                             and planted == "header", plant=planted))
         _require(len(report["records"]) >= args.steps,
                  "fewer oracle records than the requested ladder")
         # 3. Every step-entry record must agree with the others on geometry.
@@ -298,6 +400,20 @@ def main(argv=None) -> int:
             report["stage_term_groups"] = {
                 str(r["stage"]): sorted(r["groups"])
                 for r in stage_records}
+        if args.spgts_terms:
+            spgts = [r for r in report["records"]
+                     if r["magic"] == "NEMO_L1_SPGTS1"]
+            _require(len(spgts) == args.steps,
+                     f"{len(spgts)} barotropic substep records, expected "
+                     f"{args.steps}")
+            cycles = {r["icycle"] for r in spgts}
+            _require(len(cycles) == 1,
+                     f"the substep records disagree on icycle: {sorted(cycles)}")
+            report["spgts_icycle"] = sorted(cycles)[0]
+            report["spgts_frames_per_step"] = sorted(
+                {r["frames"] for r in spgts})
+            report["spgts_groups_per_step"] = sorted(
+                {len(r["groups"]) for r in spgts})
         report["status"] = "ADMITTED"
     except Refusal as error:
         report["status"] = "REFUSED"
