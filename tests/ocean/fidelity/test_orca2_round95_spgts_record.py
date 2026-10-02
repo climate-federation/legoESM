@@ -72,3 +72,4 @@ def test_round96_launcher_stages_admitted_deck_before_decision83_patch() -> None
     patch = 'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/EXP00" <"$DECISION83_PATCH"'
     assert launcher.index(stage) < launcher.index(pin) < launcher.index(patch)
     assert "readonly TARGET_CFG=ORCA2_OMIP_L4_R96SPG" in launcher
+    assert "STATUS PLANT-FIRED source-deck" in launcher

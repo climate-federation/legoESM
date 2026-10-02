@@ -14,8 +14,8 @@ trap refuse_unexpected ERR
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--admit-existing|--plant-layout) ;;
-  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout]\n' "$0" >&2; exit 63 ;;
+  --run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck) ;;
+  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck]\n' "$0" >&2; exit 63 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -98,6 +98,15 @@ printf 'temporary source proof directory (retained): %s\n' "$dry"
 cp "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$dry/dynspg_ts.F90"
 cp "$WRITER" "$dry/l4_r95_spgts_frames.F90"
 cp "$SOURCE_RUN/namelist_cfg" "$dry/namelist_cfg"
+if [[ "$MODE" == --plant-source-deck ]]; then
+  cp "$SOURCE_ROOT/EXP00/namelist_cfg" "$dry/namelist_cfg"
+  if [[ "$(sha256sum "$dry/namelist_cfg" | awk '{print $1}')" == "$SOURCE_NML_SHA" ]]; then
+    printf 'REFUSE: source-deck plant stayed green\n' >&2
+    exit 69
+  fi
+  printf 'STATUS PLANT-FIRED source-deck\n'
+  exit 69
+fi
 patch -s --fuzz=0 -p0 -d "$dry" <"$PATCH"
 patch -s --fuzz=0 -p0 -d "$dry" <"$DECISION83_PATCH"
 pin "$HARMONIZED_NML_SHA" "$dry/namelist_cfg" 'Decision-83 rung-0 namelist'
