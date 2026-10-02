@@ -67,7 +67,8 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
 
 
 def literal_accumulators(eta, z_coord, dtype, *, grid,
-                         source_face_thickness: bool):
+                         source_face_thickness: bool,
+                         literal_bottom_loop: bool = False):
     """Replay compiled dynspg_ts.f90:1231-1280 with one mask choice."""
 
     import jax.numpy as jnp
@@ -126,6 +127,9 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
     e3v = source_e3v if source_face_thickness else current_e3v
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
     q = b(ff[..., None] / e3f)
+    levels = jnp.arange(1, umask.shape[-1] + 1, dtype=jnp.int32)
+    mbku = jnp.maximum(jnp.max(jnp.where(umask > 0.0, levels, 0), axis=-1), 1)
+    mbkv = jnp.maximum(jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)
 
     def shift(value, di=0, dj=0):
         out = jnp.roll(value, di, axis=1) if di else value
@@ -159,20 +163,23 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         "se": (e3u, umask),
     }
 
-    def accumulate(face, neighbor, neighbor_mask, q_factor):
+    def accumulate(face, neighbor, neighbor_mask, q_factor, bottom):
         term = b(b(b(face * neighbor) * neighbor_mask) * q_factor)
         acc = jnp.zeros_like(eta)
         for jk in range(term.shape[-1]):
-            acc = b(acc + term[..., jk])
+            updated = b(acc + term[..., jk])
+            acc = jnp.where(jk < bottom, updated, acc) if literal_bottom_loop else updated
         return acc, term
 
     accumulators = {}
     terms = {}
     for corner in ("nw", "ne", "sw", "se"):
-        acc, term = accumulate(e3u, un[corner][0], un[corner][1], uq[corner])
+        acc, term = accumulate(
+            e3u, un[corner][0], un[corner][1], uq[corner], mbku)
         accumulators[f"acc_u_{corner}"] = acc
         terms[f"term_u_{corner}"] = term
-        acc, term = accumulate(e3v, vn[corner][0], vn[corner][1], vq[corner])
+        acc, term = accumulate(
+            e3v, vn[corner][0], vn[corner][1], vq[corner], mbkv)
         accumulators[f"acc_v_{corner}"] = acc
         terms[f"term_v_{corner}"] = term
     return accumulators, {
@@ -181,6 +188,8 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         "current_e3u": current_e3u,
         "current_e3v": current_e3v,
         "zpvo_u_nw": uq["nw"],
+        "mbku": mbku,
+        "mbkv": mbkv,
         **terms,
     }
 
@@ -232,6 +241,11 @@ def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
             value, source_z, jnp.float64, grid=card.recipe.grid,
             source_face_thickness=True),
     )(eta))
+    literal_loop, literal_loop_parts = jax.device_get(jax.jit(
+        lambda value: literal_accumulators(
+            value, source_z, jnp.float64, grid=card.recipe.grid,
+            source_face_thickness=True, literal_bottom_loop=True),
+    )(eta))
     oracle, census = residual.assemble_oracle_accumulators(accumulator_root)
 
     if plant == "current-bit":
@@ -247,16 +261,19 @@ def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
             "current replay does not reproduce round-106 accumulator census: "
             + json.dumps(observed, sort_keys=True))
 
-    unplanted_candidate = candidate
+    unplanted_candidate = literal_loop
     if plant == "candidate-bit":
-        planted = np.array(candidate["acc_u_nw"], copy=True)
+        planted = np.array(literal_loop["acc_u_nw"], copy=True)
         planted[1, 49] = np.nextafter(planted[1, 49], np.float64(np.inf))
-        candidate = dict(candidate, acc_u_nw=planted)
+        literal_loop = dict(literal_loop, acc_u_nw=planted)
     candidate_score = {
         name: _score(value, oracle[name]) for name, value in candidate.items()
     }
+    literal_loop_score = {
+        name: _score(value, oracle[name]) for name, value in literal_loop.items()
+    }
     if plant == "candidate-bit":
-        require(candidate_score["acc_u_nw"] != _score(
+        require(literal_loop_score["acc_u_nw"] != _score(
             unplanted_candidate["acc_u_nw"], oracle["acc_u_nw"]),
             "candidate-bit plant rounded away")
         raise GateError("candidate-bit plant fired")
@@ -268,6 +285,8 @@ def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
             current_parts["zpvo_u_nw"], candidate_parts["zpvo_u_nw"]),
         "term_u_nw": _score(
             current_parts["term_u_nw"], candidate_parts["term_u_nw"]),
+        "literal_loop_term_u_nw_identity": _score(
+            candidate_parts["term_u_nw"], literal_loop_parts["term_u_nw"]),
     }
     return {
         "status": "MEASURED_R107_EEN_U_OPERAND_WALK",
@@ -276,6 +295,7 @@ def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
         "record_census": census,
         "current_accumulators": current_score,
         "source_face_thickness_accumulators": candidate_score,
+        "literal_bottom_loop_accumulators": literal_loop_score,
         "operand_movement": face_changes,
         "r107_p1_zpvo_expression_unchanged": (
             face_changes["zpvo_u_nw_self_identity"]["bit_unequal"] == 0),
@@ -283,6 +303,14 @@ def measure(deck_root: Path, frame_root: Path, accumulator_root: Path,
             candidate_score["acc_u_nw"]["magnitude_unequal"] == 0),
         "r107_p3_ffu_nw_bit_exact": (
             candidate_score["acc_u_nw"]["bit_unequal"] == 0),
+        "r107_p6_ffu_nw_magnitude_exact": (
+            literal_loop_score["acc_u_nw"]["magnitude_unequal"] == 0),
+        "r107_p7_ffu_nw_bit_exact": (
+            literal_loop_score["acc_u_nw"]["bit_unequal"] == 0),
+        "r107_p8_all_u_nonfold_magnitude_exact": all(
+            literal_loop_score[f"acc_u_{corner}"]["nonfold_magnitude_unequal"] == 0
+            for corner in ("nw", "ne", "sw", "se")
+        ),
         "worktree": stamp,
     }
 
