@@ -261,6 +261,11 @@ class TrainingERA5Config(NamedTuple):
     time_range: tuple = ("1979-01-01", "2020-12-31")
     dt_hours: int = 6
     local_cache_dir: str = ""     # empty = no cache
+    #: a store without surface geopotential is REFUSED (decision C, 2026-10-02:
+    #: real surface pressure on flat terrain is grossly non-hydrostatic and the
+    #: hydrostatic move cannot see a zero-filled raw phis); True = zero-fill
+    #: for an idealized store, loud warning
+    allow_flat_phis: bool = False
     # Radiation-flux targets for AIMIP TOA + surface flux supervision.
     # When True, ``load_era5_slice`` also loads ERA5 TOA/surface radiation
     # and derives the four model-comparable fluxes (rsut, OLR, surface net
@@ -815,14 +820,21 @@ def load_era5_slice(
 
         Resolves ``geopotential_at_surface`` / ``z_sfc`` / a 2-D ``z``
         (``resolve_var``'s dimension-checked short alias).  A store lacking all
-        of them keeps the legacy zero-fill so idealized ICs still load, but
-        warns loudly (matching ``_get_sst``): real ERA5 surface pressure
-        (~600 hPa over Tibet) combined with phis=0 (flat topography) yields a
-        grossly NON-HYDROSTATIC initial condition that the dycore cannot
-        balance.
+        of them is REFUSED unless ``config.allow_flat_phis`` (an idealized
+        store): real ERA5 surface pressure (~600 hPa over Tibet) combined
+        with phis=0 (flat topography) yields a grossly NON-HYDROSTATIC initial
+        condition that the dycore cannot balance, and a zero-filled raw phis
+        hides from the hydrostatic p_s move (codex + GLM, 2026-10-02).
         """
         if _has("geopotential_at_surface"):
             return _get_2d("geopotential_at_surface")
+        if not config.allow_flat_phis:
+            raise ValueError(
+                "ERA5 store has no surface geopotential ('geopotential_at_surface'"
+                " / 'z_sfc' / 2-D 'z'): real surface pressure on flat terrain is "
+                "grossly non-hydrostatic. Stage the field, or pass "
+                "allow_flat_phis=True (run_amip --era5-allow-flat-phis) for an "
+                "idealized store.")
         logger.warning(
             "ERA5 store has no surface geopotential ('geopotential_at_surface'"
             " / 'z_sfc' / 2-D 'z'); phis zero-filled (flat topography) — with"
@@ -2204,6 +2216,8 @@ def load_era5_ic(
     month: int = 1,
     day: int = 1,
     hour: int = 0,
+    *,
+    allow_flat_phis: bool = False,
 ) -> ERA5Slice:
     """Load a single ERA5 time slice for use as AMIP initial conditions.
 
@@ -2255,5 +2269,6 @@ def load_era5_ic(
         zarr_store=zarr_path,
         levels=levels_hPa,
         local_cache_dir="",
+        allow_flat_phis=allow_flat_phis,
     )
     return load_era5_slice(cfg, time_idx)

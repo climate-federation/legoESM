@@ -487,6 +487,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "'era5' loads reanalysis from --ic-path")
     parser.add_argument("--ic-path", type=str, default="",
                         help="Path to ERA5 Zarr store for --ic era5")
+    parser.add_argument("--era5-allow-flat-phis", action="store_true",
+                        default=_EXPERIMENT_DEFAULTS.era5_allow_flat_phis,
+                        help="Accept an ERA5 store WITHOUT surface geopotential "
+                             "(zero-filled, flat terrain; idealized stores only). "
+                             "Default: such a store is refused -- real surface "
+                             "pressure on flat terrain is grossly non-hydrostatic.")
 
     # Radiation
     # Derived from the canonical tuple so this list cannot drift from
@@ -2638,6 +2644,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ensemble_size=args.ensemble_size,
         ic=args.ic,
         ic_path=args.ic_path,
+        era5_allow_flat_phis=args.era5_allow_flat_phis,
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"rh_init": args.rh_init} if args.rh_init is not None else {}),
     )

@@ -241,15 +241,19 @@ def test_sst_skin_temperature_still_wins_over_fallbacks(monkeypatch):
 # --- with phis=0 is a grossly non-hydrostatic IC; the zero-fill must warn) ---
 
 
-def test_phis_missing_warns_loudly_and_zero_fills(monkeypatch, caplog):
-    """A store with NO surface geopotential keeps the zero-fill (idealized ICs
-    still load) but warns LOUDLY, same mechanism/level as the sst zero-fill."""
+def test_phis_missing_is_refused_unless_allowed(monkeypatch, caplog):
+    """A store with NO surface geopotential is REFUSED (decision C: real
+    surface pressure on flat terrain is grossly non-hydrostatic); with
+    ``allow_flat_phis`` it zero-fills for an idealized store and warns
+    LOUDLY, same mechanism/level as the sst zero-fill."""
     import logging
     monkeypatch.setattr(
         e2s, "open_era5_zarr",
         lambda store: _synthetic_era5("long", drop=("geopotential_at_surface",)))
+    with pytest.raises(ValueError, match="no surface geopotential"):
+        load_era5_slice(_config(), 0)
     with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
-        sl = load_era5_slice(_config(), 0)
+        sl = load_era5_slice(_config()._replace(allow_flat_phis=True), 0)
     np.testing.assert_allclose(sl.phis, 0.0)
     assert any("phis zero-filled" in r.message for r in caplog.records)
     assert any("non-hydrostatic" in r.message for r in caplog.records)
@@ -273,15 +277,18 @@ def test_phis_resolves_2d_short_z(monkeypatch, caplog):
 
 def test_phis_does_not_resolve_3d_z(monkeypatch, caplog):
     """A 3-D 'z' (the pressure-level geopotential, same GRIB short name) must
-    NOT be mistaken for phis: zero-fill + loud warning instead."""
+    NOT be mistaken for phis: refused by default, zero-fill + loud warning
+    when flat phis is allowed."""
     import logging
     ds = _synthetic_era5("long", drop=("geopotential_at_surface",))
     nlat, nlon, nlev = 5, 6, 3
     ds = ds.assign(z=(("time", "level", "lat", "lon"),
                       np.full((1, nlev, nlat, nlon), 9.8e4, dtype=np.float32)))
     monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: ds)
+    with pytest.raises(ValueError, match="no surface geopotential"):
+        load_era5_slice(_config(), 0)
     with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
-        sl = load_era5_slice(_config(), 0)
+        sl = load_era5_slice(_config()._replace(allow_flat_phis=True), 0)
     np.testing.assert_allclose(sl.phis, 0.0)
     assert any("phis zero-filled" in r.message for r in caplog.records)
 

@@ -2785,7 +2785,8 @@ class ModelDriver:
                 f"  IC: loading ERA5 from {cfg.ic_path} "
                 f"(year={cfg.start_year})"
             )
-            era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
+            era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year,
+                                      allow_flat_phis=cfg.era5_allow_flat_phis)
 
             # Decision C: every lane starts its dynamics ON the grid's terrain
             # product (``_phis_data``; zeros = an explicit flat target, never
@@ -9470,7 +9471,8 @@ class ModelDriver:
             )
             if not cfg.ic_path:
                 raise ValueError("ic='era5' needs ic_path")
-            era5 = load_era5_ic(cfg.ic_path, cfg.start_year)
+            era5 = load_era5_ic(cfg.ic_path, cfg.start_year,
+                                allow_flat_phis=cfg.era5_allow_flat_phis)
             bundle = era5_to_fv3_duo_bundle(
                 era5, self.model, n_tracers=len(self.model.tracer_names))
             ng = self.model.ng

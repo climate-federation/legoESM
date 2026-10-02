@@ -408,6 +408,18 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
         cfg._replace(use_multilayer_land=False).validate_strict()
 
 
+def test_era5_allow_flat_phis_flows_to_config():
+    """--era5-allow-flat-phis round-trips; the default REFUSES a store
+    without surface geopotential (decision C, 2026-10-02)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.era5_allow_flat_phis is False
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--era5-allow-flat-phis"]), parser))
+    assert cfg.era5_allow_flat_phis is True
+
+
 def test_land_ic_path_flows_to_config():
     """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
     spun-up MultiLayerLandState restart from run_land_spinup replaces the
@@ -4543,3 +4555,31 @@ def test_fv3_duo_sponge_flags_round_trip_and_validate():
             cfg._replace(dycore=cfg.dycore._replace(**{field: bad})).validate_strict()
     with pytest.raises(ValueError, match="fv3_duo_sponge_"):
         cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
+
+
+def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
+    """The CAM6 duo deck (config/amip/amip_production_fv3duo_c24.yaml) sets the
+    eight physics-loop knobs validate_strict keys on the lane (cadence, CLUBB
+    cloud scheme, land cadence / calibrated land, mpas_land_* / ice skin).
+    The COLUMN lane runs the MPAS loop itself (model_driver._run_fv3_duo_column
+    -> _run_mpas), so the deck must pass; the same deck on the CLOSED duo lane
+    (fv3_duo_column_lane=False) must be refused with those messages -- the
+    guards are not vacuous."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    deck = _repo_root() / "config" / "amip" / "amip_production_fv3duo_c24.yaml"
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    assert cfg.dycore.discretization == "fv3_duo" and cfg.dycore.fv3_duo_column_lane
+    assert cfg.mpas_loop_lane
+    cfg.validate_strict()
+    closed = cfg._replace(dycore=cfg.dycore._replace(fv3_duo_column_lane=False))
+    assert not closed.mpas_loop_lane
+    with pytest.raises(ValueError) as ei:
+        closed.validate_strict()
+    msg = str(ei.value)
+    for needle in ("physics_update_steps", "cld_macmic_num_steps", "cam6_clubb",
+                   "land_update_seconds", "land_calibrated_physics",
+                   "mpas_land_beta", "mpas_land_beta_soil", "mpas_ice_skin_prognostic"):
+        assert needle in msg, needle

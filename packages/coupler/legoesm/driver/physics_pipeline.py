@@ -4251,8 +4251,11 @@ def apply_surface_flux_config(tc, config):
     # Keying this off the grid alone was wrong and left the tiled lane
     # evaporating fresh water while the code to fix it sat unreachable two
     # files away (GLM).
-    _can_saline = _is_mpas_grid(config) or bool(
-        getattr(config, "surface_tiled", False))
+    # the FV3 duo column lane runs the MPAS loop (its bridge carries the
+    # ocean fraction), so it resolves this the way the MPAS deck does
+    _can_saline = (_is_mpas_grid(config)
+                   or bool(getattr(config, "mpas_loop_lane", False))
+                   or bool(getattr(config, "surface_tiled", False)))
     qsal = _can_saline if _qsal_req is None else bool(_qsal_req)
     if _qsal_req and not _can_saline:
         # The sea-water surface humidity needs an ocean FRACTION to apply to,

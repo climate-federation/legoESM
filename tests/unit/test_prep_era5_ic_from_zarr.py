@@ -94,6 +94,8 @@ def test_build_writes_local_zarr_loadable_by_load_era5_ic(tmp_path, monkeypatch)
     assert ret == str(out) and out.exists()
 
     from legoesm.training.era5_to_state import load_era5_ic
-    sl = load_era5_ic(str(out), year=1979, month=1, day=1)
+    # the synthetic source carries no surface geopotential (optional in the
+    # builder); an idealized store must say so to load (decision C)
+    sl = load_era5_ic(str(out), year=1979, month=1, day=1, allow_flat_phis=True)
     assert np.all(np.isfinite(np.asarray(sl.T)))               # real ERA5Slice produced
     assert np.asarray(sl.p_s).size > 0

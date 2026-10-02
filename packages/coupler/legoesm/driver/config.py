@@ -1290,6 +1290,9 @@ class ExperimentConfig(NamedTuple):
     #   "era5"     — ERA5 reanalysis snapshot (requires ic_path)
     ic: str = "default"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
+    # an ERA5 store without surface geopotential is refused (decision C);
+    # True zero-fills it for an idealized store (loud warning)
+    era5_allow_flat_phis: bool = False
 
     # CMIP
     experiment: str = ""
@@ -1864,6 +1867,19 @@ class ExperimentConfig(NamedTuple):
                                 "liquid_partition", False))
         return False
 
+    @property
+    def mpas_loop_lane(self) -> bool:
+        """True when the run executes the MPAS lane's physics loop, which
+        consumes the whole ExperimentConfig surface: the MPAS dycore itself,
+        or the FV3 duo as that loop's dynamics operator (route A,
+        ``dycore.fv3_duo_column_lane``; what the column model cannot honour
+        is refused by name in its factory).  The lane-keyed guards in
+        :meth:`validate_strict` read this, not the discretization string."""
+        d = self.dycore
+        return (d.discretization == "mpas"
+                or normalize_grid_type(self.grid.grid_type) == "mpas"
+                or (d.discretization == "fv3_duo" and bool(d.fv3_duo_column_lane)))
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -2201,8 +2217,7 @@ class ExperimentConfig(NamedTuple):
                 "land_update_seconds > 0 requires use_multilayer_land: the "
                 "slab land has no held-flux cadence — the knob would be "
                 "silently inert.")
-        if (self.land_update_seconds > 0
-                and self.grid.grid_type not in ("mpas", "voronoi")):
+        if self.land_update_seconds > 0 and not self.mpas_loop_lane:
             errors.append(
                 "land_update_seconds > 0 is implemented only on the MPAS "
                 f"lane; grid_type={self.grid.grid_type!r} would silently "
@@ -2497,7 +2512,7 @@ class ExperimentConfig(NamedTuple):
                     "use_clubb_cloud_fraction=True (routes the CLUBB cloud-"
                     "fraction carry to radiation); got False."
                 )
-            if self.dycore.discretization != "mpas":
+            if not self.mpas_loop_lane:
                 errors.append(
                     "cloud_scheme='cam6_clubb' is wired on the MPAS lane only; "
                     f"got discretization={self.dycore.discretization!r}."
@@ -2793,8 +2808,7 @@ class ExperimentConfig(NamedTuple):
             # handoff to the structured lanes means carrying those fluxes at the
             # radiation cadence through SegmentCarry; until then, refuse rather
             # than deploy the tables under a coupling that cannot express them.
-            _is_mesh_lane = (d.discretization == "mpas"
-                             or normalize_grid_type(g.grid_type) == "mpas")
+            _is_mesh_lane = self.mpas_loop_lane
             if not _is_mesh_lane:
                 errors.append(
                     "land_calibrated_physics=True is supported only on the MPAS "
@@ -2880,8 +2894,7 @@ class ExperimentConfig(NamedTuple):
         # fail-closed at the component factory, but the guard here must not
         # emit a wrong-lane message for grid_type-keyed configs (codex F4,
         # alias set via normalize_grid_type per codex F-B3).
-        _is_mpas = (d.discretization == "mpas"
-                    or normalize_grid_type(g.grid_type) == "mpas")
+        _is_mpas = self.mpas_loop_lane
         _pus = self.physics_update_steps
         if not isinstance(_pus, int) or isinstance(_pus, bool) or _pus < 1:
             errors.append(

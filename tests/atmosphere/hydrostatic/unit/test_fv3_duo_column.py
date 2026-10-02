@@ -941,7 +941,7 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
         _synthetic_era5)
     import legoesm.training.era5_to_state as e2s
     era5 = _synthetic_era5(1500.0)
-    monkeypatch.setattr(e2s, "load_era5_ic", lambda path, year: era5)
+    monkeypatch.setattr(e2s, "load_era5_ic", lambda path, year, **kw: era5)
     sst_path, elev_path = tmp_path / "sst.nc", tmp_path / "elev.nc"
     _write_sst_file(sst_path)
     _write_elevation_file(elev_path)
