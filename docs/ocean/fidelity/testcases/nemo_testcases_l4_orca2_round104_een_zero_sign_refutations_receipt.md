@@ -142,8 +142,21 @@ path in OPEN; no result is claimed before admission.
 - Acquisition writer and patched compiled source pass the gfortran syntax
   proof; a synthetic rank-complete record passes, and all eight record plants
   fire.
-- Citation gate, focused tests, prescribed ocean-fidelity battery, and
-  separate read-only review are recorded in the final round commit.
+- Focused admission, citation, and split-explicit record tests first reported
+  43 passed and one failed synthetic fixture: its magic lacked Fortran's one
+  trailing blank. The fixture was corrected; both round-104 tests then pass
+  in isolation. This was a test-data defect, not a checker relaxation.
+- The cumulative citation gate passes 274 citations with zero failures and
+  zero unmapped entries. This receipt passes all three compiled citations;
+  the shifted `dommsk` plant fails as required.
+- The one prescribed `tests/ocean/fidelity -n 12` battery reached 99% without
+  a terminal pytest summary. The only observed failure is the known
+  pre-existing `test_every_report_emitter_stamps_the_worktree` ratchet. Both
+  round-104 tests pass inside the battery. The battery is recorded as
+  **incomplete**, not PASS.
+- Separate read-only Codex review: **independent review unavailable
+  in-sandbox** (`failed to initialize in-process app-server client: Read-only
+  file system`).
 
 ## OPEN
 
