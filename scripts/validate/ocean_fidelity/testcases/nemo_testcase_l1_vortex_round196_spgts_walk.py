@@ -165,10 +165,16 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
-    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    from legoesm.ocean.fidelity.provenance import (
+        allow_dirty_stamps, git_sha, worktree_stamp,
+    )
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
+    # An arm run with a HELD patch applied carries only "<sha>-dirty" without
+    # this; the worktree stamp records the patch's own diff hash, which is
+    # what pins the arm's numbers to the code that produced them.
+    tree = worktree_stamp(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64/libm")
@@ -342,7 +348,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
 
     bad_scalars = [s for s in scalars if not s["bit_exact"]]
     report = {
-        "case": CASE, "kt": kt, "git_sha": sha, "oracle_root": str(root),
+        "case": CASE, "kt": kt, "git_sha": sha, "worktree": tree,
+        "oracle_root": str(root),
         "record": meta, "bar": BAR,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
         "execution_regime": "production_step_jit",

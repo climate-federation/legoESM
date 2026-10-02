@@ -105,6 +105,10 @@ def test_substituting_the_models_own_trend_reproduces_the_step_bit_for_bit(fp64)
         (jnp.zeros_like(own[0]), jnp.zeros_like(own[1])),
         (jnp.broadcast_to(own[0][:1], own[0].shape),
          jnp.broadcast_to(own[1][:1], own[1].shape)),
+        # ...and rolled by ONE substep, which is the defect a
+        # per-substep hook hides most easily and which neither control
+        # above can see.
+        (jnp.roll(own[0], 1, axis=0), jnp.roll(own[1], 1, axis=0)),
     ):
         _, bent = _card_and_model(_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,

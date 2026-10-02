@@ -59,10 +59,15 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
-    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    from legoesm.ocean.fidelity.provenance import (
+        allow_dirty_stamps, git_sha, worktree_stamp,
+    )
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
+    # With a held patch applied the bare SHA says "-dirty" and nothing more;
+    # the worktree stamp carries the patch's own diff hash.
+    tree = worktree_stamp(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64/libm")
@@ -174,7 +179,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
     cross = max(max(r["cross_u"], r["cross_v"]) for r in rows)
     production = max(max(r["production_u"], r["production_v"]) for r in rows)
     return {
-        "case": CASE, "kt": kt, "git_sha": sha, "bar": BAR,
+        "case": CASE, "kt": kt, "git_sha": sha, "worktree": tree,
+        "bar": BAR,
         "oracle_root": str(root), "substeps": n_loop,
         "selfcheck_max_abs": selfcheck,
         "cross_max_abs": cross,
