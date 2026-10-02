@@ -154,6 +154,24 @@ def run(root: Path, *, plant: str | None = None,
         values = np.asarray(values)
         return values[:, 1:, :] if face == "u" else values[1:, :, :]
 
+    # THE SEAM CONTROL.  Every row below is read out of a state slot that the
+    # ordinary step also fills, so an exposure hook that silently went inert
+    # would hand the walk the PLAIN step output and every row would still
+    # score.  Perturbing the candidate afterwards cannot catch that -- it
+    # proves the scoring reacts, not that the seam is live.  So the plain
+    # step is run once here and each exposed slot must DIFFER from it.
+    plain = lego_fields(model_step(_NEMOWSRK3TestHooks(
+        stage_barotropic_output_override=external)))
+
+    def _require_live(label, slot, values):
+        same = int(np.count_nonzero(
+            np.asarray(values) == np.asarray(plain[slot])[
+                ..., :np.asarray(values).shape[-1]]))
+        total = int(np.asarray(values).size)
+        require(same != total,
+                f"{label}: the exposed {slot} slot is identical to the "
+                "ordinary step output in every cell; the seam is inert")
+
     observed: dict[str, np.ndarray] = {}
 
     def _observe(name):
@@ -220,10 +238,13 @@ def run(root: Path, *, plant: str | None = None,
         expose_tracer_transport_stage=1)
     fields = lego_fields(model_step(hooks))
     for face in ("u", "v"):
+        _require_live("zf" + face, face,
+                      np.asarray(fields[face])[..., :nlev])
         _row(f"zf{face}", groups[f"zf{face}"][..., :nlev],
              np.asarray(fields[face])[..., :nlev], masks[face],
              "zFu/zFv, the stage advective transports "
              "(stprk3_stg.F90:276-277)", plant == f"zf{face}")
+    _require_live("zfw", "T", np.asarray(fields["T"])[..., :nlev])
     _row("zfw", groups["zfw"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
          "zFw = e1e2t*ww (stprk3_stg.F90:301)", plant == "zfw")
@@ -236,6 +257,7 @@ def run(root: Path, *, plant: str | None = None,
         expose_tracer_transport_stage=1,
         expose_tracer_transport_as_ww=True)
     fields = lego_fields(model_step(hooks))
+    _require_live("ww", "T", np.asarray(fields["T"])[..., :nlev])
     _row("ww", groups["ww"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
          "ww after wzv(..., np_transport) (stprk3_stg.F90:298)",
@@ -247,6 +269,8 @@ def run(root: Path, *, plant: str | None = None,
         expose_momentum_stage=1, expose_tracer_stage=1)
     fields = lego_fields(model_step(hooks))
     for face in ("u", "v"):
+        _require_live("out." + face, face,
+                      np.asarray(fields[face])[..., :nlev])
         _row(f"out.{face}", groups[f"out_{face}"][..., :nlev],
              np.asarray(fields[face])[..., :nlev], masks[face],
              "stage-1 output after the barotropic correction "
