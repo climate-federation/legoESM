@@ -902,7 +902,7 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
 
 
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
-                                   *, grid=None, _return_een_parts=False):
+                                   *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
 
     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
@@ -913,8 +913,6 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     if scheme not in ("een", "ene"):
         raise ValueError(
             f"unknown literal barotropic PV-flux scheme {scheme!r}")
-    if _return_een_parts and scheme != "een":
-        raise ValueError("EEN accumulator tracing requires scheme='een'")
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         raise ValueError(
@@ -1003,10 +1001,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
             acc = b(acc + term[..., jk])
-        scale = b(b(b(leading_scale * b(one / local_metric)) * r1_h)
-                  * neighbor_metric)
-        value = b(scale * acc)
-        return (value, acc, scale) if _return_een_parts else value
+        return b(b(b(b(leading_scale * b(one / local_metric)) * r1_h)
+                     * neighbor_metric) * acc)
 
     def ene_coefficient(face, neighbor, neighbor_mask, e3f_divisor,
                         f_factor, neighbor_metric, local_metric, r1_h):
@@ -1085,7 +1081,6 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r1_hu = b(r1_hu0 / b(one + r3u))
     r1_hv = b(r1_hv0 / b(one + r3v))
     out = {}
-    parts = {}
     for corner in ("nw", "ne", "sw", "se"):
         neighbor, neighbor_mask, metric = un[corner]
         if scheme == "ene":
@@ -1094,13 +1089,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                 e3u, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e1u, r1_hu)
         else:
-            value = coefficient(
+            out[f"ffu_{corner}"] = coefficient(
                 e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
-            if _return_een_parts:
-                value, acc, scale = value
-                parts[f"acc_u_{corner}"] = acc
-                parts[f"scl_u_{corner}"] = scale
-            out[f"ffu_{corner}"] = value
         neighbor, neighbor_mask, metric = vn[corner]
         if scheme == "ene":
             divisor, f_factor = ene_v_f[corner]
@@ -1108,14 +1098,9 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                 e3v, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e2v, r1_hv)
         else:
-            value = coefficient(
+            out[f"ffv_{corner}"] = coefficient(
                 e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
-            if _return_een_parts:
-                value, acc, scale = value
-                parts[f"acc_v_{corner}"] = acc
-                parts[f"scl_v_{corner}"] = scale
-            out[f"ffv_{corner}"] = value
-    return (out, parts) if _return_een_parts else out
+    return out
 
 
 def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,

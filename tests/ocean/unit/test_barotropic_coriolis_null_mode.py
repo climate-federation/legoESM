@@ -914,17 +914,6 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
             / scale)
         assert relative_max <= 1.0e-15
 
-    traced_coeff, traced_parts = _nemo_literal_een_coefficients(
-        eta, z, jnp.float64, _return_een_parts=True)
-    for name, expected in zip(sorted(traced_coeff), eager[:-2]):
-        np.testing.assert_array_equal(np.asarray(traced_coeff[name]),
-                                      np.asarray(expected))
-    assert set(traced_parts) == {
-        f"{prefix}_{corner}"
-        for prefix in ("acc_u", "scl_u", "acc_v", "scl_v")
-        for corner in ("nw", "ne", "sw", "se")
-    }
-
     cu, cv = compiled[-2:]
     # Native east/north arrays are mapped only after application: periodic U
     # gets a redundant west face; V gets an exactly zero south-wall face.

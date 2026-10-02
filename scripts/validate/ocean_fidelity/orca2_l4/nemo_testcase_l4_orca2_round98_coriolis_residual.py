@@ -36,8 +36,7 @@ from scripts.validate.ocean_fidelity.testcases import (
 )
 
 
-PLANTS = ("none", "coefficient-bit", "application-bit", "scale-bit",
-          "accumulator-bit")
+PLANTS = ("none", "coefficient-bit", "application-bit", "scale-bit")
 COEFFICIENTS = (
     "ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
     "ffv_sw", "ffv_se", "ffv_nw", "ffv_ne",
@@ -456,24 +455,9 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "external literal coefficient seed is not the production Kmm seed: "
             + json.dumps(coefficient_seed, sort_keys=True))
 
-    traced_coeff, current_parts = jax.device_get(jax.jit(
-        lambda eta: _nemo_literal_een_coefficients(
-            eta, source_z, jnp.float64, scheme="een",
-            grid=card.recipe.grid, _return_een_parts=True),
-    )(coefficient_eta))
-    traced_identity = {
-        name: rhs_walk.score(
-            np.asarray(traced_coeff[name]), np.asarray(source_coeff[name]),
-            np.ones_like(np.asarray(source_coeff[name]), dtype=bool))
-        for name in COEFFICIENTS
-    }
-    require(all(row["bit_exact"] for row in traced_identity.values()),
-            "accumulator trace changed a default coefficient")
-
     operand_discrimination = None
     accumulator_census = None
     fold_scale_arm = None
-    direct_accumulator_trace = None
     if accumulator_root is not None:
         require(coefficient_root is not None,
                 "accumulator discrimination requires final coefficients")
@@ -490,11 +474,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             current_scales = dict(current_scales, scl_u_nw=planted)
 
         oracle_coeff, _ = assemble_oracle_coefficients(coefficient_root)
-        if plant == "accumulator-bit":
-            planted = np.array(current_parts["acc_u_nw"], copy=True)
-            planted[1, 49] = np.nextafter(
-                planted[1, 49], np.float64(np.inf))
-            current_parts = dict(current_parts, acc_u_nw=planted)
         candidate_scales = jax.device_get(jax.jit(
             lambda value: literal_een_scales(
                 value, source_z, jnp.float64, grid=card.recipe.grid,
@@ -503,7 +482,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         candidate_coeff = {}
         scale_rows = {}
         operand_discrimination = {}
-        direct_accumulator_trace = {}
         for acc_name, scl_name, final_name in zip(
                 accumulator_record.ACC, accumulator_record.SCL,
                 accumulator_record.FINAL):
@@ -526,28 +504,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             candidate_coeff_bits = (
                 candidate_coeff[final_name].view(np.uint64)
                 != final_reference.view(np.uint64))
-            current_acc = np.asarray(current_parts[acc_name])
-            current_part_scale = np.asarray(current_parts[scl_name])
-            acc_bits = current_acc.view(np.uint64) != oracle_acc.view(np.uint64)
-            acc_magnitude = current_acc != oracle_acc
-            scale_only = oracle_scale * current_acc
-            acc_only = current_part_scale * oracle_acc
-            direct_accumulator_trace[final_name] = {
-                "accumulator_bit_unequal": int(np.count_nonzero(acc_bits)),
-                "accumulator_magnitude_unequal": int(
-                    np.count_nonzero(acc_magnitude)),
-                "accumulator_nonfold_magnitude_unequal": int(
-                    np.count_nonzero(acc_magnitude[:-1])),
-                "accumulator_fold_magnitude_unequal": int(
-                    np.count_nonzero(acc_magnitude[-1])),
-                "scale_only_final_magnitude_unequal": int(
-                    np.count_nonzero(scale_only != final_reference)),
-                "accumulator_only_final_magnitude_unequal": int(
-                    np.count_nonzero(acc_only != final_reference)),
-                "both_nemo_final_bit_unequal": int(np.count_nonzero(
-                    (oracle_scale * oracle_acc).view(np.uint64)
-                    != final_reference.view(np.uint64))),
-            }
             scale_rows[scl_name] = {
                 "bit_unequal": int(np.count_nonzero(candidate_scale_bits)),
                 "nonfold_bit_unequal": int(
@@ -586,11 +542,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
                         for row in operand_discrimination.values()),
                     "scale-bit plant stayed green")
             raise GateError("scale-bit plant fired")
-        if plant == "accumulator-bit":
-            require(any(row["accumulator_bit_unequal"] > 0
-                        for row in direct_accumulator_trace.values()),
-                    "accumulator-bit plant stayed green")
-            raise GateError("accumulator-bit plant fired")
 
     oracle_coefficient_census = None
     oracle_coefficient_identity = None
@@ -744,8 +695,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "accumulator_census": accumulator_census,
         "operand_discrimination": operand_discrimination,
         "fold_scale_arm": fold_scale_arm,
-        "direct_accumulator_trace": direct_accumulator_trace,
-        "traced_coefficient_identity": traced_identity,
         "oracle_coefficient_census": oracle_coefficient_census,
         "oracle_coefficient_identity": oracle_coefficient_identity,
         "oracle_coefficient_difference_census": (
