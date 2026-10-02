@@ -81,7 +81,7 @@ Everything is assembled from interchangeable bricks along three independent axes
 | Axis | What varies | Where it lives |
 |------|-------------|----------------|
 | **Complexity** | fixed-SST → slab → multilayer → full-3-D ocean; shallow-water → hydrostatic → nonhydrostatic atmosphere; … | `legoesm.components.complexity` |
-| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (component protocols; `legoesm.driver.component_factory` builds them) |
+| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (component protocols); `legoesm.driver.component_factory` builds the components |
 | **Extent** | global, regional (limited-area), or idealized; uniform or **refined** | `legoesm.grids.factory` |
 
 Grids are shared between components: lat-lon FV, spectral Gaussian, cubed-sphere
