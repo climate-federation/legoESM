@@ -1118,13 +1118,22 @@ def _step_multilayer_land_impl(
 
     # --- Combine the two phase streams ---
     # Total vapour mass leaving the surface = pack sublimation + soil / plant
-    # evaporation; total latent energy = their L_s / L_v weighted sum.  Demand
-    # unmet by a reservoir cap, the bare-soil resistance or the soil supply limit
-    # returns to the ground heat flux as ``evap_excess_energy`` (below) so the
-    # surface energy budget still closes (in - out - dStorage = 0); the skin
-    # temperature is not re-solved this step.
+    # evaporation; total latent energy = their L_s / L_v weighted sum.
+    #
+    # Latent energy the surface solve spent on evaporation that the reservoirs
+    # could not supply (snow-pack cap, SimpleSEB bare-soil resistance, Richards
+    # dry-floor refill) leaves as SENSIBLE heat to the air, the CLM/CTSM rule
+    # (SoilFluxesMod: "conserve total energy flux", eflx_sh_grnd += (demand -
+    # limit)*htvp; t_grnd is not re-solved).  The ground heat flux is unchanged,
+    # so the land boundary still closes: Rn = (SH + X) + LE_actual + G.
+    # Previously X went into G, i.e. into the ~3 mm top soil layer with no skin
+    # re-solve: 85-160 W/m2 at midday over dry desert, top soil 336-351 K, and
+    # the overheated columns then failed their canopy solve and were held.
+    # CTSM applies this to its snow/urban caps; the refill is our analogue.
+    # Sign: positive up for SH/LE; X < 0 (delivery above demand) lowers SH.
     lhflx_actual = sublim_actual * _L_s_T + soil_evap * _L_v_T
     evap_excess_energy = lhflx - lhflx_actual
+    shflx = shflx + evap_excess_energy
 
     # --- Soil thermal diffusion (final, with converged G) ---
     # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
@@ -1132,7 +1141,6 @@ def _step_multilayer_land_impl(
     # T_sfc-dependence implicit here, removing the explicit-coupling large-dt/thin-
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
-    G_surface = G_surface + evap_excess_energy
     # Fusion heat of the ice change Richards made at fixed T (evaluated at the
     # start-of-step T the apparent heat capacity uses).
     _fusion_source = (
