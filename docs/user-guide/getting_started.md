@@ -56,7 +56,7 @@ python scripts/experiment/install_federation.py --all --extras dev
 ```
 
 > A bare `pip install -e ".[dev]"` **fails** here (`Could not find a version that
-> satisfies the requirement legoesm-core~=0.1.0`): plain pip cannot resolve the
+> satisfies the requirement legoesm-core~=1.0.0`): plain pip cannot resolve the
 > unpublished workspace members. Use `uv` or the helper above. To install just one
 > component standalone: `python scripts/experiment/install_federation.py atmosphere`
 > (or `ocean` / `land` / `ice`).
@@ -108,8 +108,10 @@ JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_amip.py \
     --grid-type cubed_sphere --resolution 16 --days 365
 ```
 
-Atmosphere-only 365-day AMIP at C16/L40. This is the smallest
-production-grade end-to-end run. Output lands under `output/`.
+Atmosphere-only 365-day AMIP at C16/L40 with the bare-CLI default physics —
+a smoke test, not the production configuration (that is
+`--config config/amip/amip_production.yaml`; see [amip.md](amip.md)).
+Output lands under `results/amip/` unless `--output` is given.
 
 ### d. (Optional) A coupled aquaplanet
 
@@ -195,7 +197,7 @@ Everything inside the time-step kernel is pure JAX, so you can do:
 
 ```python
 import jax
-from legoesm.training import build_segment_fn
+from legoesm.driver.compiled_segments import build_segment_fn
 
 segment_fn = build_segment_fn(...)
 loss, grads = jax.value_and_grad(loss_fn)(params, segment_fn.raw, ...)
@@ -234,10 +236,10 @@ JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
 
 Passing pytest is *necessary but not sufficient* on the cubed-sphere
 — edge artifacts only reliably show up in field snapshots. See
-[docs/cubed_sphere_edge_artifacts.md](../dev-notes/cubed_sphere_edge_artifacts.md).
+[docs/dev-notes/cubed_sphere_edge_artifacts.md](../dev-notes/cubed_sphere_edge_artifacts.md).
 
-Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
-PASS).
+Ocean: `scripts/matrix/run_ocean_test_matrix.py` (per-case PASS/FAIL is
+written to its `summary.json`).
 
 Fast static guardrails (constants/saturation/dispatch/contracts/federation
 tripwires — seconds, no GPU):

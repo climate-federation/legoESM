@@ -259,6 +259,23 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # Zhang-McFarlane + CLUBB tunables -> _resolve_convection's ZM branch and
+    # turbulence_config_for (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS in
+    # driver/config.py), the resolvers every lane (MPAS included) consumes.
+    "atm.conv.ZhangMcFarlaneConfig.c0_lnd": "zm_c0_lnd",
+    "atm.conv.ZhangMcFarlaneConfig.c0_ocn": "zm_c0_ocn",
+    "atm.conv.ZhangMcFarlaneConfig.ke": "zm_ke",
+    "atm.conv.ZhangMcFarlaneConfig.dmpdz": "zm_dmpdz",
+    "atm.conv.ZhangMcFarlaneConfig.tau": "zm_tau",
+    "atm.conv.ZhangMcFarlaneConfig.capelmt": "zm_capelmt",
+    "atm.turb.CLUBBParams.C14": "clubb_c14",
+    "atm.turb.CLUBBParams.C8": "clubb_c8",
+    "atm.turb.CLUBBParams.C11": "clubb_c11",
+    "atm.turb.CLUBBParams.C11b": "clubb_c11b",
+    "atm.turb.CLUBBParams.gamma_coef": "clubb_gamma_coef",
+    "atm.turb.CLUBBParams.gamma_coefb": "clubb_gamma_coefb",
+    "atm.turb.CLUBBParams.beta": "clubb_beta",
+    "atm.turb.CLUBBParams.c_K10": "clubb_c_k10",
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).

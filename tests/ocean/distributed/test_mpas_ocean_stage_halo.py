@@ -201,6 +201,57 @@ if __name__ == "__main__":                    # subprocess entry (rank 0)
     raise SystemExit(0)
 
 
+@pytest.mark.skipif(_SIZE != 1, reason="serial gate; run without mpirun")
+def test_implicit_predictor_refresh_feeds_gradient_to_rhs_divergence_only(monkeypatch):
+    """The implicit predictor's single edge refresh carries (u_bar_old,
+    F_slow_u, grad_eta_old).  Only the Helmholtz-RHS divergence may read the
+    refreshed gradient; the predictor keeps the local copy.  A fake refresh
+    returns that gradient perturbed, and the two divergence inputs are
+    compared against an unperturbed run."""
+    import legoesm.ocean.dynamics.barotropic_implicit_mpas as bim
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+
+    mesh = create_voronoi_mesh(3)
+    z = create_ocean_z_star(n_levels=NLEV)
+    model = MPASOceanModel(
+        mesh, z, _all_frontier_config(MPASOceanConfig(), "implicit_cn"))
+    state = _perturbed_state(mesh, z)
+    n_e = int(mesh.nEdges)
+    delta_np = np.random.default_rng(1).standard_normal(n_e) * 1e-6
+    delta_np[::3] = 0.0
+    delta = jnp.asarray(delta_np)
+    real_div = bim.divergence_cell
+
+    def run(bump):
+        divs, merged = [], []
+
+        def spy_div(flux, m):
+            divs.append(flux)
+            return real_div(flux, m)
+
+        def edges(*fs):
+            if len(fs) == 3 and all(f.shape == (n_e,) for f in fs):
+                merged.append(fs)
+                return fs[0], fs[1], fs[2] + (delta if bump else 0.0)
+            return tuple(fs)
+
+        monkeypatch.setattr(bim, "divergence_cell", spy_div)
+        model._step_impl(state, DT,
+                         halo_refresh=_identity_refresh()._replace(edges=edges))
+        monkeypatch.setattr(bim, "divergence_cell", real_div)
+        return [np.asarray(f) for f in divs[:2]], merged
+
+    (pred0, rhs0), merged = run(False)
+    (pred1, rhs1), _ = run(True)
+    assert len(merged) == 1, "expected ONE merged predictor edge refresh per step"
+    np.testing.assert_array_equal(
+        pred1, pred0, err_msg="the predictor consumed the REFRESHED gradient")
+    changed = rhs1 != rhs0
+    assert changed.any(), "the RHS divergence ignored the refreshed gradient"
+    assert not changed[delta_np == 0.0].any(), "the RHS changed where nothing was perturbed"
+
+
 @pytest.mark.skipif(_SIZE < 2, reason="needs mpirun -np 2")
 @pytest.mark.parametrize("solver", ["explicit_substep", "implicit_cn"])
 def test_np2_stage_correct_parity_and_tripwire(solver, tmp_path_factory):

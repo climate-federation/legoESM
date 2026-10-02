@@ -20,8 +20,8 @@
 #
 #   MATRIX=atm_gpu   qsub -l select=32:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
 #                         -v MATRIX=atm_gpu scripts/cluster/scaling_derecho/nature_ladder.pbs
-#   MATRIX=atm_cpu   qsub -l select=16:ncpus=128:mpiprocs=4:mem=200GB \
-#                         -l walltime=08:00:00 -v MATRIX=atm_cpu ... (PPN=4)
+#   MATRIX=atm_cpu   qsub -l select=16:ncpus=128:mpiprocs=16:mem=200GB \
+#                         -l walltime=08:00:00 -v MATRIX=atm_cpu ... (PPN=16)
 #   MATRIX=ocean_gpu / ocean_cpu likewise.
 #
 # The ladders now run to 1024 devices, which is 256 nodes at four GPUs per
@@ -78,18 +78,46 @@ if [[ "$BACKEND" == gpu ]]; then
   LAUNCH_WRAP=(bash -c "$PIN" _)
 else
   export JAX_PLATFORMS=cpu
-  # One rank per quarter node, matching the Levante CPU density (measured
-  # optimum there: 4 ranks x 32 cores beat 8x16 and 2x64).  Derecho's EPYC
-  # nodes have 128 cores, so a rank gets 32 with mpiprocs=4.
-  PPN="${PPN:-4}"; ARM_TIMEOUT="${ARM_TIMEOUT:-5400}"
-  LAUNCH_WRAP=()
+  # 16 ranks x 8 cores per node (owner-approved 2026-09-25). Measured on
+  # Derecho, one node, ms/step at 4x32 -> 16x8: lat-lon 1024x2048 738 -> 430,
+  # MPAS ocean s6 f64 235 -> 124 (s7 969 -> 420), MPAS atm s7 104 -> 97
+  # (s8 353 -> 332); at two nodes the 16x8 layout stays ahead (-10% atm s8,
+  # -25% ocean s7, -36% lat-lon 2048x4096). Levante's 4x32 optimum was
+  # measured on MPAS atm s7 only. Peak memory at 16x8: 5.3 GB/rank (atm s8).
+  PPN="${PPN:-16}"; ARM_TIMEOUT="${ARM_TIMEOUT:-5400}"
+  # PALS binds each rank to ONE core unless given a depth: measured on a
+  # Derecho CPU node (2026-09-25), 4 ranks of MPAS atmosphere s6 took
+  # 410 ms/step bound that way against 36 ms with --depth 32 (11x). Same
+  # defect the Levante launcher fixed on 2026-09-21. The divisor is the
+  # node's PHYSICAL core count: PBS's NCPUS is per MPI process (it reads 1
+  # under mpiprocs=128), so it cannot be used here.
+  NODE_CORES="$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)"
+  (( PPN >= 1 && NODE_CORES >= PPN )) || { echo "cannot size --depth: $NODE_CORES cores, PPN=$PPN" >&2; exit 2; }
+  LAUNCH_WRAP=(--cpu-bind depth --depth "$(( NODE_CORES / PPN ))")
 fi
+# The env's mpi4py links cray-mpich 8.1.27 (libmpi_gnu_91.so.12), whose
+# Slingshot (CXI) init fails across nodes ("OFI fi_getinfo() failed"), so
+# every multi-node arm died at MPI_Init; MPICH 8.1.32 works (2026-09-25).
+# The batch default is the INTEL flavour (no libmpi_gnu_*); loading gcc
+# makes Lmod swap in the GNU one. Loaded BEFORE _env.sh so conda's own
+# libraries stay ahead of the PE runtime on LD_LIBRARY_PATH.
+module load gcc cray-mpich/8.1.32 || { echo "module load gcc cray-mpich/8.1.32 failed" >&2; exit 2; }
+MPI_GNU="$(ls "${MPICH_DIR:-/nonexistent}"/lib/libmpi_gnu_*.so.12 2>/dev/null | head -1)"
+MPIF_GNU="$(ls "${MPICH_DIR:-/nonexistent}"/lib/libmpifort_gnu_*.so.12 2>/dev/null | head -1)"
+[[ -n "$MPI_GNU" && -n "$MPIF_GNU" ]] || { echo "no GNU cray-mpich libs under MPICH_DIR='${MPICH_DIR:-}'" >&2; exit 2; }
 source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"   # $REPO, $PY, PYTHONPATH, fabric
 cd "$REPO"
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 JOBID="${PBS_JOBID%%.*}"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/nature_${MATRIX}_j${JOBID}}"
 mkdir -p "$OUTDIR"
+# Route mpi4py's 8.1.27 soname to the loaded 8.1.32 GNU library (same
+# MPICH ABI), on shared storage every node sees, after _env.sh so nothing
+# prepends ahead of it. GPU arms import the same mpi4py: both take it.
+MPISHIM="$OUTDIR/mpishim"; mkdir -p "$MPISHIM"
+ln -sf "$MPI_GNU" "$MPISHIM/libmpi_gnu_91.so.12"
+ln -sf "$MPIF_GNU" "$MPISHIM/libmpifort_gnu_91.so.12"
+export LD_LIBRARY_PATH="$MPISHIM:${LD_LIBRARY_PATH:-}"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 # PBS gives the node count only through the node file; no fallback, a wrong
 # count would silently run every arm at one node.

@@ -383,11 +383,12 @@ def test_compute_omip2_freshwater_forcing_emp():
     # evap and lh are mutually consistent through L_vap at the POTENTIAL
     # SST (NEMO BULK_FORMULA pTs = zsspt; ~0.1% below L_vap(SST_abs)).
     from legoesm.ocean.bulk_flux_omip import (
-        exner_potential_temperature, latent_heat_vaporization_sst,
+        exner_potential_temperature,
+        latent_heat_vaporization_sst as latent_heat_vaporization,
     )
     theta_sst = exner_potential_temperature(
         jnp.asarray(T_sfc_K), jnp.asarray(float(constants.p_atm_std)))
-    L_vap = np.asarray(latent_heat_vaporization_sst(theta_sst))
+    L_vap = np.asarray(latent_heat_vaporization(theta_sst))
     assert np.allclose(np.asarray(evap_ref), -np.asarray(lh) / L_vap,
                        rtol=1e-9, atol=1e-15)
 

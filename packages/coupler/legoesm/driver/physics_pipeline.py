@@ -217,6 +217,10 @@ class PhysicsPipeline:
         self.land_ml_cfg = None        # MultiLayerLandConfig
         self.land_ml_params = None     # LandSurfaceParams (per land column)
         self.land_ml_lat = None        # (ncol,) latitude [rad], column order
+        # (theta_top, doy, year) -> (land_params, lai) per-step rebuild of the
+        # two-leaf canopy params (MPAS lane); None = params fixed at setup.
+        self.land_ml_params_update = None
+        self.land_ml_params_update_factory = None   # () -> the above, lazily
         self.land_ml_doy = 0.0
         self.land_ml_u_min = 1.0
         # CONCRETE dynamics timestep [s] for the CLM-ML canopy's static sub-step
@@ -1007,7 +1011,7 @@ class PhysicsPipeline:
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None,
-                           q_sfc_land_override=None, z_low=None):
+                           q_sfc_land_override=None, z_low=None, return_water=False):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -1099,6 +1103,7 @@ class PhysicsPipeline:
         return compute_tiled_surface_fluxes(
             u_low, v_low, T_low, q_low, rho_low,
             tiles, ocean_cfg, ice_cfg, land_cfg, z_low=z_low,
+            return_water=return_water,
         )
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
@@ -1111,6 +1116,7 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             sfc_taux_override=None, sfc_tauy_override=None,
+                            sfc_evap_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
                             land_ml_params=None, cloud_fraction=None):
@@ -1833,7 +1839,9 @@ class PhysicsPipeline:
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
-        lhflx = rho_low * constants.L_v * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        from legoesm.thermo import latent_heat_vaporization as _lv_T
+        lhflx = rho_low * _lv_T(T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        evap_sfc = None   # the water flux actually applied to the column (set below)
 
         turb_owns_surface = (
             self.turbulence_fn is not None
@@ -1896,6 +1904,13 @@ class PhysicsPipeline:
                 "prescribed as a pair (sfc_shflx_override AND "
                 "sfc_lhflx_override) — only one was given."
             )
+        if sfc_evap_override is not None and sfc_lhflx_override is None:
+            raise ValueError(
+                "physics_step_no_rad: sfc_evap_override (the tiles' water flux) "
+                "needs sfc_lhflx_override (the physical latent heat those tiles "
+                "charged) alongside it; the heat consumers must not re-derive "
+                "one from the other."
+            )
         if (sfc_taux_override is None) != (sfc_tauy_override is None):
             # Stress is a vector: prescribing only one component would leave
             # the other at the scheme's own estimate — a caller bug.
@@ -1921,8 +1936,21 @@ class PhysicsPipeline:
         # the prescribed flux as its diffusion bottom BC via the config fold
         # below, never both (that would double-count the flux).
         if not turb_owns_surface:
-            evap_rate = lhflx / constants.L_v
-            dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
+            # The coupler's water flux when given; else the inverse of the SAME
+            # L_v(T_sfc) the bulk law charged (surface_layer.surface_moisture_flux).
+            if sfc_evap_override is not None:
+                evap_rate = sfc_evap_override
+            else:
+                from legoesm.thermo import latent_heat_vaporization
+                evap_rate = lhflx / latent_heat_vaporization(T_sfc)
+            evap_sfc = evap_rate
+            # Heat kick carries the latent enthalpy correction (surface_layer
+            # .latent_enthalpy_correction): water credited at L_v by the column
+            # but charged at L(T_sfc) by the surface.
+            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                latent_enthalpy_correction as _lec)
+            dT_BL = (constants.g * (shflx + _lec(lhflx, evap_rate))
+                     / (constants.c_pd * dp_low))
             dq_BL = constants.g * evap_rate / dp_low
             dT_dt = dT_dt.at[..., -1].add(dT_BL)
             dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
@@ -1964,6 +1992,15 @@ class PhysicsPipeline:
                 shflx = ad.unflatten_2d(turb_out.shflx)
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
+            if getattr(turb_out, 'evap_sfc', None) is not None:
+                evap_sfc = ad.unflatten_2d(turb_out.evap_sfc)
+            elif getattr(turb_out, 'lhflx', None) is not None:
+                # A kernel that replaced lhflx without publishing its water: the
+                # bulk kick's value would now pair with the wrong heat -- report
+                # absence, never a stale pair.  (The mirror case, water without
+                # lhflx, keeps the bulk heat: no in-tree kernel does it and each
+                # leg stays individually truthful.)
+                evap_sfc = None
         elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(
@@ -1984,6 +2021,7 @@ class PhysicsPipeline:
             # tuple (louis / clubb_lite / clubb) by ExperimentConfig.validate_strict.
             # ``beta_land`` (None unless the soil-water bucket is active)
             # soil-moisture-limits the land tile's latent flux.
+            _tiled_water = None
             if (self.surface_tiled and self.f_land is not None
                     and T_land is not None):
                 # MULTILAYER land: override the land-tile surface humidity with
@@ -1994,11 +2032,12 @@ class PhysicsPipeline:
                                                land_ml_params=land_ml_params)
                     if land_ml is not None else None
                 )
-                _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
+                _turb_kwargs["surface_flux"], _tiled_water = self._tiled_surface_flux(
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
                     z_low=_lowest_level_height(z_full_col, z_half_col),
+                    return_water=True,
                 )
             # --- prescribed surface flux = the scheme's lower BC -------------
             # Fold the coupler/ERA5 overrides (grid-shaped; flattened to
@@ -2010,14 +2049,30 @@ class PhysicsPipeline:
             # surface flux.  A tiled-surface bulk ``surface_flux`` tuple formed
             # above is exactly what the prescribed flux replaces — drop it
             # (injecting both would double-count / silently disagree).
-            if _prescribed_sfc_flux:
+            #
+            # The moisture BC: the coupler's water when it prescribes it; else,
+            # on the mosaic path, the per-tile-inverted water blend (a mixed
+            # cell's blended heat over one L_v(T_blend) is not the summed tile
+            # water) -- folded EVEN WITH NO OVERRIDES, paired with the tiled
+            # blended heat the kernel reads from the tuple; a heat override
+            # keeps the kernel's own L_v(T_sfc) inverse of that override.
+            _fold_lhflx = (None if sfc_lhflx_override is None
+                           else ad.flatten_2d(sfc_lhflx_override))
+            if sfc_evap_override is not None:
+                _fold_evap = ad.flatten_2d(sfc_evap_override)
+            elif _tiled_water is not None and sfc_lhflx_override is None:
+                _fold_evap = _tiled_water
+                _fold_lhflx = _turb_kwargs["surface_flux"][3]
+            else:
+                _fold_evap = None
+            if _prescribed_sfc_flux or _fold_evap is not None:
                 from legoesm.atmosphere.physics.turbulence.integration import (
                     fold_prescribed_surface_fluxes
                 )
                 from legoesm.atmosphere.physics.turbulence.surface_layer import (
                     prescribed_into_surface_flux,
                 )
-                if "surface_flux" in _turb_kwargs:
+                if _prescribed_sfc_flux and "surface_flux" in _turb_kwargs:
                     # The tiled tuple is what the kernel will read, so the
                     # prescribed components replace THEIR slots in it and
                     # the unprescribed ones (e.g. the tiled stress when the
@@ -2026,8 +2081,7 @@ class PhysicsPipeline:
                         _turb_kwargs["surface_flux"], rho_col_phys[:, -1],
                         shflx=(None if sfc_shflx_override is None
                                else ad.flatten_2d(sfc_shflx_override)),
-                        lhflx=(None if sfc_lhflx_override is None
-                               else ad.flatten_2d(sfc_lhflx_override)),
+                        lhflx=_fold_lhflx,
                         tau_x=(None if sfc_taux_override is None
                                else ad.flatten_2d(sfc_taux_override)),
                         tau_y=(None if sfc_tauy_override is None
@@ -2039,10 +2093,8 @@ class PhysicsPipeline:
                         None if sfc_shflx_override is None
                         else ad.flatten_2d(sfc_shflx_override)
                     ),
-                    lhflx_w_m2=(
-                        None if sfc_lhflx_override is None
-                        else ad.flatten_2d(sfc_lhflx_override)
-                    ),
+                    lhflx_w_m2=_fold_lhflx,
+                    evap_kg_m2_s=_fold_evap,
                     tau_x_pa=(
                         None if sfc_taux_override is None
                         else ad.flatten_2d(sfc_taux_override)
@@ -2091,6 +2143,15 @@ class PhysicsPipeline:
                 shflx = ad.unflatten_2d(turb_out.shflx)
             if getattr(turb_out, 'lhflx', None) is not None:
                 lhflx = ad.unflatten_2d(turb_out.lhflx)
+            if getattr(turb_out, 'evap_sfc', None) is not None:
+                evap_sfc = ad.unflatten_2d(turb_out.evap_sfc)
+            elif getattr(turb_out, 'lhflx', None) is not None:
+                # A kernel that replaced lhflx without publishing its water: the
+                # bulk kick's value would now pair with the wrong heat -- report
+                # absence, never a stale pair.  (The mirror case, water without
+                # lhflx, keeps the bulk heat: no in-tree kernel does it and each
+                # leg stays individually truthful.)
+                evap_sfc = None
 
         # --- Budget-ledger capture: turbulence row -------------------------
         # The BL scheme's tendencies INCLUDE its implicit surface-flux bottom
@@ -2320,6 +2381,7 @@ class PhysicsPipeline:
             conv_prog=conv_prog_out,
             shflx=shflx,
             lhflx=lhflx,
+            evap_sfc=evap_sfc,
             # Carry dtype stability: pin each updated carry to its INPUT
             # dtype so the value fed back next step (and the lax.scan
             # carry) never changes dtype.  The prognostic-spectral GWD
@@ -3023,6 +3085,7 @@ class PhysicsPipeline:
                          sfc_emissivity_override=None,
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
+                         sfc_evap_override=None,
                          sfc_taux_override=None, sfc_tauy_override=None,
                          sfc_lw_up=None, sfc_sw_up=None, sfc_sw_down=None,
                          land_frac=None, phis=None,
@@ -3042,7 +3105,7 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 sfc_taux_override, sfc_tauy_override,
+                 sfc_taux_override, sfc_tauy_override, sfc_evap_override,
                  sfc_lw_up, sfc_sw_up, sfc_sw_down,
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
@@ -3099,6 +3162,7 @@ class PhysicsPipeline:
                     aerosol_od=aerosol_od,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
+                    sfc_evap_override=sfc_evap_override,
                     sfc_taux_override=sfc_taux_override,
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
@@ -3141,7 +3205,7 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 sfc_taux_override, sfc_tauy_override,
+                 sfc_taux_override, sfc_tauy_override, sfc_evap_override,
                  sfc_lw_up, sfc_sw_up, sfc_sw_down,
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
@@ -3163,6 +3227,7 @@ class PhysicsPipeline:
                     aerosol_od=aerosol_od,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
+                    sfc_evap_override=sfc_evap_override,
                     sfc_taux_override=sfc_taux_override,
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
@@ -3203,7 +3268,7 @@ class PhysicsPipeline:
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
-                    sfc_taux_override, sfc_tauy_override,
+                    sfc_taux_override, sfc_tauy_override, sfc_evap_override,
                     sfc_lw_up, sfc_sw_up, sfc_sw_down,
                     land_frac, phis,
                     tke, qke, gwd_spectrum,
@@ -3648,6 +3713,7 @@ def convection_config_for(config, grid_dx_m=None):
 
     scheme = config.convection
     cc = ConvectionConfig(scheme=scheme)
+    _zm_overrides(config)  # refuse zm_* before the "none" early return
     if scheme == "none":
         return cc
     cc = cc._replace(rain_to_surface=bool(
@@ -3669,6 +3735,19 @@ def convection_config_for(config, grid_dx_m=None):
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
+
+
+def _zm_overrides(config):
+    """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
+    does not select zhang_mcfarlane (they would be silently inert)."""
+    from legoesm.driver.config import ZM_SCALAR_FIELDS
+
+    given = [f for f in ZM_SCALAR_FIELDS if getattr(config, f, None) is not None]
+    if given and config.convection != "zhang_mcfarlane":
+        raise ValueError(
+            f"{given} are Zhang-McFarlane parameters; got "
+            f"convection={config.convection!r}, which does not read them.")
+    return {ZM_SCALAR_FIELDS[f]: float(getattr(config, f)) for f in given}
 
 
 def _resolve_convection(config):
@@ -3699,6 +3778,7 @@ def _resolve_convection(config):
     )
 
     scheme = config.convection
+    _zm_set = _zm_overrides(config)
     if scheme == "none":
         return _noop_convection, None
 
@@ -3814,7 +3894,14 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(precip_efficiency=_pe)
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
-                land_fraction=config.zm_land_fraction)
+                land_fraction=config.zm_land_fraction, **_zm_set)
+
+        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
+        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
+        if scheme == "tiedtke":
+            conv_config = conv_config._replace(
+                buoyancy_death_memory=bool(getattr(
+                    config, "convective_buoyancy_death_memory", False)))
 
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
@@ -4388,9 +4475,6 @@ def turbulence_config_for(config):
         # changed nothing while reporting success.  Thread any NON-DEFAULT
         # value into the active louis sub-config; an all-defaults config
         # takes no _replace, preserving the byte-identity contract above.
-        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
-        # LouisConfig field and are NOT threaded here — still inert, see the
-        # upstream note in the calibration repo.)
         # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
         # scheme's nested config here, for the same reason the marine-Sc flag
         # above is threaded here -- this function is the single source every
@@ -4479,6 +4563,32 @@ def turbulence_config_for(config):
             tc = tc._replace(clubb=tc.clubb._replace(
                 q_flux_scale=float(_qfs), q_flux_scale_sigma_lo=float(_lo),
                 q_flux_scale_sigma_hi=float(_hi)))
+        # CAM6-namelist CLUBB tunables (CLUBB_SCALAR_FIELDS): same threading
+        # and refusal.  None (default) => the scheme's own CLUBBParams value.
+        from legoesm.driver.config import (
+            CLUBB_PROGNOSTIC_ONLY,
+            CLUBB_SCALAR_FIELDS,
+        )
+        _cp_given = [f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None]
+        _cp = {CLUBB_SCALAR_FIELDS[f]: float(getattr(config, f))
+               for f in _cp_given}
+        if _cp:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"{_cp_given} are CLUBB parameters; got "
+                    f"turbulence={tc.scheme!r}.")
+            _diag_inert = sorted(set(_cp_given) & CLUBB_PROGNOSTIC_ONLY)
+            if _diag_inert and not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    f"{_diag_inert} are read only by prognostic CLUBB; "
+                    "set clubb_prognostic=True.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                params=tc.clubb.params._replace(**_cp)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -4556,6 +4666,13 @@ def turbulence_config_for(config):
             "clubb_q_flux_scale is set but an explicit turbulence_override is "
             "in force; set CLUBBConfig(q_flux_scale=..., q_flux_scale_sigma_lo/hi=...) "
             "inside the override instead of the experiment-level probe.")
+    from legoesm.driver.config import CLUBB_SCALAR_FIELDS
+    _cp_set = sorted(f for f in CLUBB_SCALAR_FIELDS
+                     if getattr(config, f, None) is not None)
+    if _cp_set:
+        raise ValueError(
+            f"{_cp_set} are set but an explicit turbulence_override is in "
+            "force; set them in the override's CLUBBParams instead.")
     return apply_surface_flux_config(tc, config)
 
 
@@ -4617,9 +4734,7 @@ def gwd_config_for(config):
     gc = GravityWaveDragConfig(scheme=scheme)
     if scheme == "none":
         return gc
-    # McFarlane (orographic) tunables. ``mcfarlane_N_ref`` is deliberately
-    # NOT wired: no McFarlaneConfig field of that name exists (dangling
-    # ExperimentConfig scalar, tracked separately).
+    # McFarlane (orographic) tunables.
     mc = gc.mcfarlane._replace(
         k_wave=float(getattr(config, "mcfarlane_k_wave", gc.mcfarlane.k_wave)),
         directional_spread=float(getattr(
@@ -4633,9 +4748,7 @@ def gwd_config_for(config):
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
         Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
-        # None (default) = legacy surface launch, byte-identical.
-        launch_p=(None if getattr(config, "hines_launch_p", 0.0) in (0.0, None)
-                  else float(config.hines_launch_p)),
+        launch_p=float(config.hines_launch_p),
     )
     fr = gc.e3sm_cam.frontal._replace(
         taubgnd=float(getattr(config, "e3sm_cam_taubgnd",

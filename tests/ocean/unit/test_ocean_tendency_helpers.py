@@ -79,6 +79,12 @@ def test_make_none_physics_fn_returns_zero_tendencies():
         assert jnp.array_equal(getattr(out, name).data, getattr(ref, name).data)
 
 
+def test_none_physics_fn_accepts_dt_like_enabled_schemes():
+    state = _mini_state()
+    out = make_none_physics_fn()(state, None, None, dt=900.0)
+    assert jnp.array_equal(out.dT_dt.data, zero_ocean_tendencies(state).dT_dt.data)
+
+
 def test_helpers_are_differentiable():
     """wrap/zero must carry gradients (ocean physics is jax.grad-trained)."""
     state = _mini_state()
