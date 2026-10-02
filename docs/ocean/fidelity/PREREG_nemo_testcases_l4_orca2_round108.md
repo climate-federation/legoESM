@@ -1,6 +1,6 @@
 # Preregistration — ORCA2 round 108 EEN recorder-chain repair
 
-Date: 2026-10-02. Base: `18b659b0333b50ddc5ec2c0ea68370121c49f78a`.
+Date: 2026-10-02. Base: `18b659b033b1032bb9f4c29b3a6f244d16cae17f`.
 Scope is instrumentation only on hierarchy rung 0. Every later ORCA2 number
 from this record will be **independent** because rung 0 starts from NEMO's own
 from-rest state. No model physics, card field, configuration value, carried
@@ -43,4 +43,3 @@ per-level operand number is quoted until R108-P1 through P5 pass. The next
 measurement, after admission, compares `zpvo_nw`, the two live thicknesses,
 the neighboring mask, the product, and the accumulator in compiled source
 order to name the first remaining non-bit statement.
-
