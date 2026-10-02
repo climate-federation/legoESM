@@ -136,7 +136,7 @@ def _run(new_state, response, converged=None):
         albedo=response.albedo, emissivity=response.emissivity, z0=response.z0,
         converged=converged)
     held, held_resp, _carbon, mask, n_held = _hold_unsolved_columns(
-        old, new_state, response, out, _forcing(), _CFG, _NCOL)
+        old, new_state, response, out, _forcing(), _CFG, _NCOL)[:5]
     return old, (held, held_resp, mask, n_held)
 
 
@@ -182,9 +182,10 @@ def test_a_non_finite_column_is_reverted_and_its_neighbours_are_not():
 
 
 def test_a_non_converged_column_is_held_even_though_it_is_finite():
-    # The dangerous case is not NaN — it is a FINITE stopped iterate. A canopy
-    # closure that hit its iteration cap returns large, plausible-looking fluxes
-    # that then drive the soil out of range over the following steps.
+    # Without ``fallback_ok`` (a scheme whose unsolved energy the caller did not
+    # close) a FINITE stopped iterate is still reverted: a canopy closure that
+    # hit its iteration cap can return large, plausible-looking fluxes.  The
+    # accepted-fallback path is tested in test_land_unsolved_fallback.py.
     new = _new_state()
     resp = _response(shflx=jnp.array([40.0, -2040.0, 40.0]),
                      lhflx=jnp.array([60.0, -3231.0, 60.0]))
@@ -212,7 +213,7 @@ def test_the_guard_survives_jit():
         emissivity=resp.emissivity, z0=resp.z0, converged=None)
     f = jax.jit(lambda a, b, c, d: _hold_unsolved_columns(
         a, b, c, d, _forcing(), _CFG, _NCOL))
-    held, held_resp, _carbon, mask, n_held = f(old, new, resp, out)
+    held, held_resp, _carbon, mask, n_held = f(old, new, resp, out)[:5]
     assert int(n_held) == 1 and bool(mask[0])
     assert np.all(np.isfinite(np.asarray(held.T_soil)))
     assert np.allclose(np.asarray(held.T_soil[0]), np.asarray(old.T_soil[0]))
@@ -247,7 +248,7 @@ def test_a_nested_carrier_is_held_too():
         q_surface=jnp.zeros(_NCOL), albedo=jnp.full(_NCOL, 0.2),
         emissivity=jnp.full(_NCOL, 0.97), z0=jnp.full(_NCOL, 0.1))
     held, _resp, _carbon, mask, n_held = _hold_unsolved_columns(
-        old_state, new, _response(), out, _forcing(), _CFG, _NCOL)
+        old_state, new, _response(), out, _forcing(), _CFG, _NCOL)[:5]
     assert int(n_held) == 1
     assert np.all(np.isfinite(np.asarray(held.canopy_state["inner"]))), \
         "the nested carrier kept its non-finite value"
@@ -271,7 +272,7 @@ def test_carbon_pools_revert_with_the_column():
         emissivity=jnp.full(_NCOL, 0.97), z0=jnp.full(_NCOL, 0.1))
     _held, _resp, carbon, _mask, n_held = _hold_unsolved_columns(
         old, new, _response(), out, _forcing(), _CFG, _NCOL,
-        carbon_old=carbon_old, carbon_new=carbon_new)
+        carbon_old=carbon_old, carbon_new=carbon_new)[:5]
     assert int(n_held) == 1
     assert float(carbon["C_fol"][1]) == 110.0, "carbon advanced on a held column"
     assert float(carbon["C_fol"][0]) == 101.0, "carbon froze on a healthy column"

@@ -54,6 +54,16 @@ from legoesm.land.soil_thermal import (
 # curtain in a thin top layer; six 300 s sub-steps keep it on the curtain
 # (user decision 2026-09-28).  A loop count, never config or trainable.
 FINAL_THERMAL_SUBSTEPS = 6
+
+# --- Unsolved-canopy fallback guards (containment thresholds, NOT physics) ---
+# A finite column whose canopy solve did not converge is ACCEPTED with the
+# scheme's fallback fluxes, energy-closed into sensible heat (CLM CanopyFluxes
+# carries its iteration-cap imbalance into eflx_sh_veg the same way).  It is
+# still reverted (held) if accepting it would move the top soil layer more than
+# this in one land step, or hand the atmosphere a turbulent flux beyond this
+# magnitude.  User decision 2026-10-02 (20 K, 1000 W/m2).  Tier 0: never tuned.
+FALLBACK_MAX_TOP_SOIL_CHANGE_K = 20.0
+FALLBACK_MAX_FLUX_W_M2 = 1000.0
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -786,6 +796,26 @@ def _step_multilayer_land_impl(
     tau_y = surface_out.tau_y
     G_surface = surface_out.G_soil
 
+    # --- Unsolved canopy column: close its energy at the land boundary ---
+    # A column whose canopy solve did not converge carries the scheme's fallback
+    # fluxes (evaluated at the finite cold state), which do not balance its net
+    # radiation.  The imbalance goes to sensible heat, as CLM CanopyFluxes does
+    # with its iteration-cap error (eflx_sh_veg = ... + err), so that
+    # Rn_ext = SH + LE + G holds exactly for the column and it can be accepted
+    # instead of held (see ``_hold_unsolved_columns``).  ``G_surface`` is the
+    # CLIPPED ground flux the soil receives, so the clip is absorbed too.
+    # Positive up for SH/LE, G positive into the soil.  Static gate: only a
+    # scheme that reports both ``converged`` and ``Rn_ext`` (the two-leaf
+    # canopy), and only without elevation bands (which recompute G from the
+    # band radiation below; bands are off on every MPAS lane).
+    _fallback_ok = (surface_out.converged is not None
+                    and surface_out.Rn_ext is not None
+                    and bands is None)
+    if _fallback_ok:
+        _unsolved = ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool)
+        _fallback_resid = surface_out.Rn_ext - (shflx + lhflx + G_surface)
+        shflx = jnp.where(_unsolved, shflx + _fallback_resid, shflx)
+
     # --- Banded surface radiation (gaps 1,2): override the cell-mean radiation in
     # G_surface with the area-weighted per-band balance (elevation-lapsed SW/LW +
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
@@ -1418,16 +1448,18 @@ def _step_multilayer_land_impl(
         salt_flux=jnp.zeros(ncol),
     )
 
-    # The hold must be ATOMIC over everything this step advanced. The carbon
-    # pools are stepped above from the SAME rejected GPP and surface
-    # temperature, so a column held in the soil but advanced in carbon would
-    # carry that inconsistency into the restart file.
-    new_state, response, carbon_state_new, _held_mask, _n_held = (
-        _hold_unsolved_columns(state, new_state, response, surface_out,
-                               forcing, config, ncol,
-                               carbon_old=carbon_state,
-                               carbon_new=carbon_state_new))
-    surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+    # A REVERTED column is reverted atomically (soil, snow, carbon, cache).  An
+    # ACCEPTED unsolved column advances its energy and water but keeps its
+    # carbon pools and exchanges no CO2: the fallback GPP is the cold state's,
+    # not physics, and pools + flux are held as a consistent pair.
+    (new_state, response, carbon_state_new, _held_mask, _n_held,
+     _fb_mask, _n_fb, _n_fb_rej) = _hold_unsolved_columns(
+        state, new_state, response, surface_out, forcing, config, ncol,
+        carbon_old=carbon_state, carbon_new=carbon_state_new,
+        fallback_ok=_fallback_ok)
+    surface_out = surface_out._replace(
+        held=_held_mask, n_held=_n_held, fallback=_fb_mask,
+        n_fallback=_n_fb, n_fallback_rejected=_n_fb_rej)
 
     return new_state, response, carbon_state_new, surface_out
 
@@ -1437,49 +1469,57 @@ def _step_multilayer_land_impl(
 # ---------------------------------------------------------------------------
 
 def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
-                           config, ncol, carbon_old=None, carbon_new=None):
-    """Freeze any column the land model failed to solve, and say so.
+                           config, ncol, carbon_old=None, carbon_new=None,
+                           fallback_ok=False):
+    """Contain columns the land model failed to solve, and say so.
 
-    Two things make a column's new state untrustworthy:
+    Two things make a column suspect:
 
     * the surface scheme's iterative closure did not reach a root
-      (``SurfaceFluxOutput.converged is False``), so its fluxes are a stopped
-      iterate rather than a solution of the surface energy balance; or
+      (``SurfaceFluxOutput.converged is False``), so its fluxes are the
+      scheme's fallback rather than a solution of the surface energy balance; or
     * some leaf of the new state or of the tile response came back non-finite.
 
-    Either way the column is HELD: its state (soil, snow, ponding, carbon)
-    reverts to the start of the step and its tile response reports no turbulent
-    exchange and no runoff, with a surface temperature equal to the (finite)
-    previous top-soil temperature and a surface humidity equal to the air's.
+    A NON-FINITE column is REVERTED (held): its state (soil, snow, ponding,
+    carbon, canopy cache) goes back to the start of the step and its tile
+    response reports no turbulent exchange and no runoff, with a surface
+    temperature equal to the (finite) previous top-soil temperature and a
+    surface humidity equal to the air's.
 
-    That does NOT mean the atmosphere exchanges nothing with a held column.
-    On the coupled path the land tile hands back only the skin temperature and
-    albedo and the atmosphere recomputes its own sensible and latent fluxes
-    from them, so it keeps exchanging with the held surface — it simply does so
-    against a finite, frozen surface instead of a diverging one.  Making the
-    atmosphere's own flux law honour the hold needs the mask threaded to it and
-    is NOT done here.
+    A FINITE UNSOLVED column, when ``fallback_ok`` (the caller closed its energy
+    into sensible heat: two-leaf canopy, no elevation bands), is ACCEPTED, the
+    way CLM CanopyFluxes proceeds past its iteration cap: soil heat and water,
+    snow and the response advance with the fallback fluxes, which close
+    ``Rn_ext = SH + LE + G`` exactly.  Its carbon pools are kept and its CO2
+    flux is zero (the fallback GPP is not physics), and its canopy warm-start
+    cache keeps the previous root, so the next step retries from it.  It is
+    reverted instead if accepting it would move the top soil layer by more than
+    ``FALLBACK_MAX_TOP_SOIL_CHANGE_K`` or report a turbulent flux beyond
+    ``FALLBACK_MAX_FLUX_W_M2``.  Without ``fallback_ok`` every unsolved column
+    is reverted, as before.
 
-    Why this exists.  Before it, ONE column of 2562 that went non-finite
+    Why the revert exists.  Before it, ONE column of 2562 that went non-finite
     reached the atmosphere through the land skin temperature and, via the
     dynamical core's global mass fixer, made every column of the model
-    non-finite within a single step: a 5-day AMIP run died 7 hours in with a
-    NaN in every field. Containing the damage to the column that produced it
-    turns a dead run into a reported defect.
+    non-finite within a single step.  Why unsolved columns are no longer
+    reverted: a reverted column restarts from the identical state, tends to
+    fail again, and was measured frozen for 40 consecutive land steps (20 h) at
+    its 342 K midday skin, with its energy discarded every step.
 
-    This is CONTAINMENT, NOT PHYSICS. A held column conserves neither energy
-    nor water over the step it is held, so it must never be absorbed silently —
-    a run whose land is quietly frozen somewhere is worse than one that stops.
-    Returning the per-column mask and the count is how that is made visible:
-    this function runs inside the jitted step, where a host print is not
-    available on a GPU-only runtime (``jax.debug.print`` raises there), so the
-    caller is responsible for surfacing them.  ``SurfaceFluxOutput.held`` and
-    ``SurfaceFluxOutput.n_held`` carry them out.
+    The canopy warm-start cache (``canopy_x``) is NaN by design where a column
+    has never converged ("cold start"), so NaN there is not a failure; Inf is.
+
+    The atmosphere receives the land's own sensible and latent fluxes on the
+    MPAS lane (``shflx_land`` / ``lhflx_land``), so what this returns is what it
+    exchanges with.  This runs inside the jitted step, where a host print is not
+    available on a GPU-only runtime; the caller surfaces the counts.
 
     Returns
     -------
-    held_state, held_response, held_carbon, held_mask (ncol,) bool,
-    n_held () int32
+    held_state, held_response, held_carbon,
+    held_mask (ncol,) bool, n_held () int32         -- reverted columns
+    fallback_mask (ncol,) bool, n_fallback () int32 -- accepted unsolved columns
+    n_fallback_rejected () int32 -- finite unsolved columns the guards reverted
     """
     def _is_float_leaf(leaf):
         # NOT ``dtype.kind in "fc"``: bfloat16 is an extension dtype whose kind
@@ -1489,41 +1529,63 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         dtype = getattr(leaf, "dtype", None)
         return dtype is not None and jnp.issubdtype(dtype, jnp.inexact)
 
-    def _col_bad(leaf):
-        """Per-column non-finiteness of one (ncol, ...) array leaf."""
+    def _col_reduce(leaf, test):
+        """Per-column ``any(test)`` over one (ncol, ...) array leaf."""
         arr = jnp.asarray(leaf)
         if arr.ndim == 0 or arr.shape[0] != ncol:
             return jnp.zeros(ncol, dtype=bool)
-        flat = arr.reshape(ncol, -1)
-        return jnp.any(~jnp.isfinite(flat), axis=-1)
+        return jnp.any(test(arr.reshape(ncol, -1)), axis=-1)
 
-    def _any_bad(tree):
+    def _any_bad(tree, test=lambda a: ~jnp.isfinite(a)):
         # Over tree LEAVES, so a nested carrier (the CLM-ML canopy state) is
         # inspected too, not just the top-level fields.
         acc = jnp.zeros(ncol, dtype=bool)
         for leaf in jax.tree.leaves(tree):
             if _is_float_leaf(leaf):
-                acc = acc | _col_bad(leaf)
+                acc = acc | _col_reduce(leaf, test)
         return acc
 
-    bad = _any_bad(new_state) | _any_bad(response)
-    if surface_out.converged is not None:
-        bad = bad | ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool)
+    nonfinite = _any_bad(response)
+    for name in new_state._fields:
+        field = getattr(new_state, name)
+        if name == "canopy_x":
+            nonfinite = nonfinite | _any_bad(field, jnp.isinf)
+        else:
+            nonfinite = nonfinite | _any_bad(field)
+
+    unsolved = (jnp.zeros(ncol, dtype=bool) if surface_out.converged is None
+                else ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool))
+    if fallback_ok:
+        dT_top = jnp.abs(new_state.T_soil[:, 0] - state.T_soil[:, 0])
+        guard_fail = ((dT_top > FALLBACK_MAX_TOP_SOIL_CHANGE_K)
+                      | (jnp.abs(response.shflx) > FALLBACK_MAX_FLUX_W_M2)
+                      | (jnp.abs(response.lhflx) > FALLBACK_MAX_FLUX_W_M2))
+        candidate = unsolved & ~nonfinite
+        fallback = candidate & ~guard_fail
+        rejected = candidate & guard_fail
+    else:
+        fallback = jnp.zeros(ncol, dtype=bool)
+        rejected = jnp.zeros(ncol, dtype=bool)
+    bad = nonfinite | (unsolved & ~fallback)
 
     n_held = jnp.sum(bad.astype(jnp.int32))
+    n_fallback = jnp.sum(fallback.astype(jnp.int32))
+    n_rejected = jnp.sum(rejected.astype(jnp.int32))
 
-    def _hold_leaf(new_leaf, old_leaf):
-        if not _is_float_leaf(new_leaf) or old_leaf is None:
-            return new_leaf
-        if new_leaf.ndim == 0 or new_leaf.shape[0] != ncol:
-            return new_leaf
-        old_arr = jnp.asarray(old_leaf)
-        if old_arr.shape != new_leaf.shape:
-            return new_leaf
-        mask = bad.reshape((ncol,) + (1,) * (new_leaf.ndim - 1))
-        return jnp.where(mask, old_arr, new_leaf)
+    def _revert_leaf(mask):
+        def _rl(new_leaf, old_leaf):
+            if not _is_float_leaf(new_leaf) or old_leaf is None:
+                return new_leaf
+            if new_leaf.ndim == 0 or new_leaf.shape[0] != ncol:
+                return new_leaf
+            old_arr = jnp.asarray(old_leaf)
+            if old_arr.shape != new_leaf.shape:
+                return new_leaf
+            m = mask.reshape((ncol,) + (1,) * (new_leaf.ndim - 1))
+            return jnp.where(m, old_arr, new_leaf)
+        return _rl
 
-    def _hold_field(new_field, old_field):
+    def _hold_field(new_field, old_field, mask):
         # Per FIELD rather than one tree.map over the whole state: a field that
         # is None on one side and an array on the other (an optional store
         # switched on mid-run) makes the two states different pytrees, which a
@@ -1532,20 +1594,24 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         if new_field is None or old_field is None:
             return new_field
         if _is_float_leaf(new_field):
-            return _hold_leaf(new_field, old_field)
+            return _revert_leaf(mask)(new_field, old_field)
         try:
-            return jax.tree.map(_hold_leaf, new_field, old_field)
+            return jax.tree.map(_revert_leaf(mask), new_field, old_field)
         except (ValueError, TypeError):
             # Structurally different this step (e.g. a carrier rebuilt from
             # scratch): nothing to revert to, so leave it. Loud rather than
             # silent — the count below still reports the column as held.
             return new_field
 
+    # The canopy cache of an accepted unsolved column keeps its previous root
+    # (its new entry is NaN: nothing converged this step).
+    _cache_mask = bad | fallback
     held_state = new_state._replace(
-        **{name: _hold_field(getattr(new_state, name), getattr(state, name))
+        **{name: _hold_field(getattr(new_state, name), getattr(state, name),
+                             _cache_mask if name == "canopy_x" else bad)
            for name in new_state._fields})
 
-    # Inert-surface response for a held column.
+    # Inert-surface response for a reverted column.
     T_prev = state.T_soil[:, 0]
     eps = jnp.full(ncol, config.emissivity_land)
     inert = dict(
@@ -1554,9 +1620,7 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         emissivity=eps,
         z0=jnp.full(ncol, config.z0_land),
         # Equal to the air, so any consumer that forms a humidity GRADIENT from
-        # this field gets zero.  Note the coupled atmosphere is not such a
-        # consumer — it recomputes surface humidity from saturation at the skin
-        # temperature and ignores this field (see the note in the docstring).
+        # this field gets zero.
         q_surface=jnp.asarray(forcing.q_lowest).reshape(-1),
         lw_up=eps * constants.sigma_sb * T_prev ** 4,
     )
@@ -1567,8 +1631,12 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         arr = jnp.asarray(leaf)
         if arr.ndim == 0 or arr.shape[0] != ncol:
             return leaf
-        fallback = inert.get(name, jnp.zeros_like(arr))
-        return jnp.where(bad, jnp.broadcast_to(fallback, arr.shape), arr)
+        fallback_val = inert.get(name, jnp.zeros_like(arr))
+        arr = jnp.where(bad, jnp.broadcast_to(fallback_val, arr.shape), arr)
+        if name == "co2_flux":
+            # Carbon is held on an accepted unsolved column: no exchange either.
+            arr = jnp.where(fallback, jnp.zeros_like(arr), arr)
+        return arr
 
     held_response = response._replace(
         **{name: _hold_response(name, getattr(response, name))
@@ -1577,14 +1645,16 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     held_carbon = carbon_new
     if carbon_old is not None and carbon_new is not None:
         try:
-            held_carbon = jax.tree.map(_hold_leaf, carbon_new, carbon_old)
+            held_carbon = jax.tree.map(
+                _revert_leaf(bad | fallback), carbon_new, carbon_old)
         except (ValueError, TypeError):
             # The carbon carrier changed structure this step, so there is no
             # matching value to revert to. Leave it rather than guess; the
             # column is still reported held by the count below.
             held_carbon = carbon_new
 
-    return held_state, held_response, held_carbon, bad, n_held
+    return (held_state, held_response, held_carbon, bad, n_held,
+            fallback, n_fallback, n_rejected)
 
 
 def soil_ice_log_impedance(

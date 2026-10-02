@@ -504,8 +504,10 @@ def compute_two_leaf_canopy_fluxes(
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a
-        # reverse-mode tangent.  Those fluxes are not physics either way -- the
-        # column reports converged=False and the caller holds it.
+        # reverse-mode tangent.  Those fluxes are the column's FALLBACK, not a
+        # root: it reports converged=False, and the multilayer land step closes
+        # their energy into sensible heat and accepts the column (or reverts it
+        # if non-finite or beyond the fallback guards).
         x_final = jnp.where(converged[:, None], x_final, cold_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
@@ -668,9 +670,9 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sh=gs_Sh,
         n_iters=n_iters,
         # Whether the Newton closure actually reached a root on this column.
-        # False means the fluxes above are a stopped iterate, not a solution —
-        # the caller decides what to do with the column; it must not simply
-        # spend them.  Carried from the LAST Picard pass.
+        # False means the fluxes above are the cold-state fallback, not a
+        # solution — the caller must close their energy before spending them
+        # (multilayer land does).  Carried from the LAST Picard pass.
         converged=converged,
         f_veg=f_veg,
         fSun=fSun,
