@@ -17,6 +17,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round98_coriolis_residual as residual,
 )
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round98_een_coeff_acquisition import (
+    check_record as r98_record,
+)
 
 
 def write_group(payload: bytearray, name: str, rank: int) -> None:
@@ -164,3 +167,44 @@ def test_round98_coefficient_movement_separates_fold_support() -> None:
     }
     assert all(movement[name]["differing_cells"] == 0
                for name in residual.COEFFICIENTS if name != "ffu_nw")
+
+
+def synthetic_r98_coefficient_record(path: Path, rank: int) -> None:
+    payload = bytearray(r98_record.MAGIC.encode("ascii").ljust(16, b" "))
+    payload.extend(struct.pack(
+        "=16i", 1, 1, 3, 3, rank, 94, 152, 31,
+        1 + 90 * rank, 1, 3, 3, 92, 150, 64, 8,
+    ))
+    values = np.zeros((94, 152), dtype=np.float64)
+    for name in r98_record.FIELDS:
+        payload.extend(name.encode("ascii").ljust(16, b" "))
+        payload.extend(struct.pack("=4i", 2, 94, 152, 1))
+        payload.extend(values.tobytes(order="F"))
+    path.write_bytes(payload)
+
+
+@pytest.mark.parametrize(
+    "plant", ("header", "field-name", "field-dims", "truncation", "missing-field"),
+)
+def test_round98_ranked_coefficient_record_plants_refuse(
+    tmp_path: Path, plant: str,
+) -> None:
+    path = tmp_path / "oracle_r98_een_coeff_rank0000_kt00000001.bin"
+    synthetic_r98_coefficient_record(path, 0)
+    with pytest.raises(r98_record.Refusal):
+        r98_record.read_record(path, plant)
+
+
+def test_round98_ranked_coefficient_launcher_is_content_pinned() -> None:
+    launcher = Path(
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round98_een_coeff_acquisition/run.sh"
+    ).read_text(encoding="utf-8")
+    assert "readonly TARGET_CFG=ORCA2_OMIP_L4_R98EENCOEFF" in launcher
+    assert "SOURCE_DYNSPG_SHA=" in launcher
+    assert "verify_recorded_tools" in launcher
+    assert "git cat-file" not in launcher
+    assert "git show" not in launcher
+    assert "STATUS PLANT-FIRED layout" in launcher
+    assert "STATUS PLANT-FIRED toolchain" in launcher
+    assert "/usr/bin/time" not in launcher

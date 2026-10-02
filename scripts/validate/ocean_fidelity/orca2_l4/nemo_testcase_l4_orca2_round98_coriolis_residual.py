@@ -209,7 +209,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     # The literal builder freezes at Kmm. On rung 0 this is the bridged state
     # eta; prove that by equality to all eight production-traced coefficients.
-    coefficient_eta = source_trace["coefficient_eta"][0]
+    coefficient_eta = jnp.asarray(state.eta.data, dtype=jnp.float64)
     source_coeff = jax.device_get(jax.jit(
         lambda eta: _nemo_literal_een_coefficients(
             eta, source_z, jnp.float64, scheme="een"),
@@ -271,11 +271,12 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             np.asarray(live_source[:-1]) != np.asarray(current_live[:-1]))),
     }
 
-    fold_coeff = jax.device_get(jax.jit(
-        lambda eta, e3f: _nemo_literal_een_coefficients(
-            eta, source_z, jnp.float64, scheme="een",
-            _e3f_test_override=e3f),
-    )(coefficient_eta, fold_only))
+    # The registered fold replacement is a no-op: every live divisor value,
+    # including the northern row, is already bit-identical.  Reuse the source
+    # coefficients rather than adding a test hook to the production model.
+    require(divisor_movement["fold_only_vs_current"]["bit_exact"],
+            "fold-only divisor unexpectedly moved")
+    fold_coeff = source_coeff
     if plant == "coefficient-bit":
         fold_coeff = dict(fold_coeff)
         planted = np.array(fold_coeff["ffu_nw"], copy=True)

@@ -900,9 +900,7 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
-def _nemo_literal_een_coefficients(
-    eta, z_coord, dtype, scheme="een", *, _e3f_test_override=None,
-):
+def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een"):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
 
     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
@@ -968,13 +966,6 @@ def _nemo_literal_een_coefficients(
     e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
     e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
-    if _e3f_test_override is not None:
-        candidate = jnp.asarray(_e3f_test_override, dtype=dtype)
-        if candidate.shape != e3f.shape:
-            raise ValueError(
-                "literal EEN test e3f override must match the native A2D "
-                f"coefficient divisor shape {e3f.shape}; got {candidate.shape}")
-        e3f = candidate
     q = b(ff[..., None] / e3f)
 
     def shift(value, di=0, dj=0):
@@ -1196,7 +1187,6 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     if coefficient_evaluation == "nemo_literal":
         out["literal_coefficients"] = _nemo_literal_een_coefficients(
             eta, z_coord, dtype, scheme=scheme)
-        out["coefficient_eta"] = jnp.asarray(eta, dtype=dtype)
     out["coefficient_evaluation"] = coefficient_evaluation
     return out
 
@@ -2116,10 +2106,6 @@ def _run_substep_loop(
                 "ffv_ne": (_literal_cor_coeff["ffv_ne"]
                            if _literal_cor_coeff is not None
                            else _zero_cor_coeff),
-                "coefficient_eta": (
-                    een_pre["coefficient_eta"]
-                    if _literal_cor_coeff is not None
-                    else jnp.zeros_like(eta)),
                 "cor_u": jnp.asarray(_cor_u) * jnp.ones_like(U_bar_c),
                 "cor_v": jnp.asarray(_cor_v) * jnp.ones_like(V_bar_c),
                 "drag_coefficient_u": (
