@@ -37,8 +37,7 @@ vertical scale factor at the F point
 in that denominator is `e3f_0vor`, which is NOT the F-point reference
 thickness.  It is built in
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:892`, and with this
-deck's resolved `nn_e3f_typ = 0` (namelist_ref:1072; `namelist_cfg` does not
-override it) it is the four surrounding T cells' MASKED thickness divided by
+deck's resolved `nn_e3f_typ = 0` (`namelist_ref` line 1072; `namelist_cfg` does not override it) it is the four surrounding T cells' MASKED thickness divided by
 FOUR — by four, not by the number of wet cells, which is the
 `nn_e3f_typ = 1` branch —
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897`, with a sweep that
@@ -149,8 +148,9 @@ anything; this test did.
 
 The VORTEX card hands the frozen-coefficient builder the plain reference
 thickness where NEMO's `dyn_cor_2D_init` divides by `e3f_0vor`.  Building
-`e3f_0vor` the way `dynvor.f90:897` builds it — masked four-cell sum over
-four, with `dynvor.f90:920`'s restore at a fully dry vertex — and changing
+`e3f_0vor` the way `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897` builds it — the masked
+four-cell sum over four, with the restore at a fully dry vertex
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:920`) — and changing
 NOTHING else:
 
 | measurement, `VORTEX_VEC-zco`, `kt=1` | card as it ships | with `e3f_0vor` |
@@ -269,7 +269,7 @@ Recorded below with the push gate.
 | choice | ASKED / UNASKED | note |
 |---|---|---|
 | every NEMO deck option | ASKED | unchanged from rounds 3-12; Decisions 69, 70, 73, 75 |
-| `nn_e3f_typ = 0` | n/a | resolved by the deck's own `namelist_ref:1072`, not chosen here |
+| `nn_e3f_typ = 0` | n/a | resolved by the deck's own namelist_ref line 1072, not chosen here |
 | which two operands the override reaches | n/a | instrument choice, named in the frozen preregistration |
 
 Nothing on the UNASKED list.
