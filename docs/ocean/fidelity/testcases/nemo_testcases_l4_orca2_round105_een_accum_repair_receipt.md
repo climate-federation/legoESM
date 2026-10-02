@@ -78,7 +78,22 @@ shards byte-for-byte with the admitted round-98 run.
 - Focused recorder/admission tests: 3 passed.
 - An initial citation-test invocation while the citation map was intentionally
   uncommitted produced the expected two worktree-stamp refusals; it is not a
-  product failure. The clean committed rerun is recorded below.
+  product failure. On the clean committed tree, the focused recorder plus
+  citation tests pass 20/20.
+- The default citation receipt and this round's receipt each pass with zero
+  unmapped citations, zero citation failures, and zero map-audit failures. The
+  planted `l4_r104_een_accum.F90:23-27` displacement fires
+  `SYMBOL-NOT-AT-LINE` and exits nonzero.
+- The one prescribed `tests/ocean/fidelity -n 12` invocation collected 2,310
+  tests and reached 99% before its wrapper stopped producing output after the
+  worker processes exited. It was terminated rather than counted as a pass:
+  2,284 passed, 6 failed, and 20 received no terminal report. All six failures
+  reproduce at the untouched `fe48ccb31` base: the known SI3 scalar-math and
+  worktree-stamp ratchets, plus the live-operands field-order ratchet, dirty
+  escape-scope ratchet, missing `hires_lane_surface` case-board row, and the
+  round-129 certified-year-harness stamp. The latter's isolated refusal is
+  `GATE ERROR: the certified year harness moved after the registered members
+  ran`. None is in a file changed by this round.
 - Separate read-only Codex claim and diff reviews were attempted with both the
   ordinary and ephemeral CLI modes. Verdict: **independent review unavailable
   in-sandbox** (`failed to initialize in-process app-server client: Read-only
@@ -106,4 +121,3 @@ shards byte-for-byte with the admitted round-98 run.
 ## Choices
 
 ASKED: Decisions 52, 80, 83, and 84 remain unchanged. UNASKED: none.
-
