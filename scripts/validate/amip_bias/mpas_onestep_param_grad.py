@@ -54,10 +54,12 @@ class _Captured(BaseException):
 
 def launch_argv(run: str, day: int, out: Path) -> list[str]:
     logs = sorted((ROOT / "slurm_logs").glob(f"{run}-*.out"), key=os.path.getmtime)
+    # packed campaign bundles log into the run directory instead
+    logs = logs or sorted((ROOT / run).glob("slurm-*.out"), key=os.path.getmtime)
     line = None
     for lg in reversed(logs):
         for ln in open(lg, errors="replace"):
-            if "[chain] launching:" in ln and "run_amip.py" in ln:
+            if "[chain] launching" in ln and "run_amip.py" in ln:
                 line = ln
                 break
         if line:
