@@ -1251,7 +1251,7 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
-    'vertical.py:296-378': [
+    'vertical.py:356-438': [
         'def nemo_qco_live_vorticity_e3f_cgrid(',
         'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
         83],
