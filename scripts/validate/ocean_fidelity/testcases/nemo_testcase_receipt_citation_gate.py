@@ -73,6 +73,8 @@ _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo")
+_ORCA2_R107EENSTEP_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -184,6 +186,10 @@ FILES = {
         _ORCA2_R105EENACC_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R105EENACC_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R107EENSTEP_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90": (
+        _ORCA2_R107EENSTEP_COMPILED / "l4_r105_een_accum.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1257,6 +1263,14 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 108: inherited recorder initialization chain ---
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1103-1104': [
+        ('CALL r105_een_accum_init', 1),
+        ('CALL r107_een_step_init', 1), 2],
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90:34-45': [
+        ("GET_ENVIRONMENT_VARIABLE('ORCA2_R105_EEN_ACCUM_DIR'", 1),
+        ("STATUS='NEW'", 1),
+        ("ORCA2_R105_EEN_ACCUM_INIT", 1), 12],
     # --- ORCA2 round 107: literal EEN vertical loop bounds ---
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1229-1230': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
