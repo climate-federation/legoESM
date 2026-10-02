@@ -296,13 +296,21 @@ inside `dyn_spg_ts` differs. The closing test is named in OPEN.
   tanks and the generic NEMO-GYRE recipe are untouched by construction.
   The DINO month gate is therefore auto-skipped by `land.sh`, as it was in
   round 195.
-* **Citation gate** on this receipt and its planted control: quoted with
-  the landing below.
+* **Citation gate** on this receipt: `"status": "PASS"`,
+  `"citations_found": 17`, `"unmapped_citations": []`, no failures, and all
+  nine of its own self-test plants fired
+  (`phase3/round196/citations.json`). Its planted control, shifting the
+  cited `dyn_cor_2D` call by two lines, fires `SYMBOL-NOT-AT-LINE … that
+  symbol identifies line 503` and exits 1
+  (`phase3/round196/citations_plant.json`). The campaign's default receipt
+  gate also still exits 0; no model file was edited, so the citation
+  re-anchor rule does not apply this round.
 * **Focused battery**, run serialized after confirming no other pytest was
   on the host: the citation-gate tests, the NEMO recipe and TKE tests, the
   freshwater closure, the mask-rank and prognostic-barotropic-state tests,
-  and the four VORTEX walk-script test modules including this round's own.
-  Decisive line quoted with the landing.
+  and the four VORTEX walk-script test modules including this round's own —
+  `178 passed in 932.63s (0:15:32)`
+  (`phase3/round196/focused_pytest.log`).
 * **Measurement provenance.** All three arms were re-run on a clean
   worktree at commit `8153857a3a30f24686a7184a038a390fcdcc7c9c` and every
   number in this receipt is from that run: the production walk
@@ -363,6 +371,12 @@ ship everything else**, and every finding is accepted and fixed above.
   `ua_new` is written after `lbc_lnk` and immediately before the swap, so
   the derived entering velocity is exactly the `un_e` read at line 535; the
   citation gate and its plant; and the empty production diff.
+
+* **Push gate** (`land.sh gyre`, the lane's authoritative battery):
+  `135 passed in 953.73s (0:15:53)`, then `PUSHED 56520a628aab` — 12
+  commits onto `fidelity/nemo-testcases-l2-gyre-codex2` from
+  `d3fa8b22a`. The DINO month gate was auto-skipped because the round's
+  diff against the lane in `packages/` and `src/` is zero lines.
 
 ## Landing verdict: HELD (record + walk)
 
