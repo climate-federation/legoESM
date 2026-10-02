@@ -626,7 +626,9 @@ def barotropic_implicit_mpas(
         # The local TRiSK A_op is correct on OWNED cells provided its
         # input carries fresh ghost values — compose one cell-halo
         # exchange per application (one message round per PCG
-        # iteration, static collective schedule).  Dots are owned-
+        # iteration, static collective schedule) — or, for
+        # "single_reduce_deep", exchange (r, s) once every certified-ring
+        # count of iterations and recompute the halo.  Dots are owned-
         # masked AND area-weighted: owned-masking removes the halo
         # double-count in the allreduce; the area weight is the inner
         # product in which this FV Helmholtz is self-adjoint (required
@@ -659,6 +661,29 @@ def barotropic_implicit_mpas(
 
         def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
             return A_op(_exchange_cells(eta_in))
+
+        _pcg_variant = str(config.barotropic_implicit_pcg_variant)
+        _deep_halo = None
+        if _pcg_variant == "single_reduce_deep":
+            # jacobi implies not gpoly, so this branch is the distributed one
+            if _pcg_precond != "jacobi":
+                raise NotImplementedError(
+                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs "
+                    "barotropic_implicit_pcg_precond='jacobi' (got "
+                    f"{_pcg_precond!r}): the preconditioner must be pointwise; "
+                    "select pcg_variant='single_reduce' for the polynomial ones.")
+            if _vlayout is not None:
+                _rings = int(_vlayout.complete_cell_rings)
+                _exch_many = (halo_refresh.cells if halo_refresh is not None
+                              else lambda *fs: tuple(_exchange_cells(f) for f in fs))
+            else:
+                _rings = int(halo_refresh.complete_cell_rings)
+                _exch_many = halo_refresh.cells
+            if _rings < 1:
+                raise NotImplementedError(
+                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs a "
+                    f"layout certifying >= 1 complete cell ring (got {_rings}).")
+            _deep_halo = (_exch_many, _owned, _rings)
 
         _x0_solve = eta_old
         if _gpoly:
@@ -713,7 +738,9 @@ def barotropic_implicit_mpas(
 
         _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
         eta_new, _solve_diag = solve_helmholtz_implicit(
-            A_op_dist, rhs, _M_inv_dist, _x0_solve,
+            # deep halo: the LOCAL operator; the solver does the exchanges
+            A_op if _deep_halo is not None else A_op_dist,
+            rhs, _M_inv_dist, _x0_solve,
             distributed=True,
             fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
             # f32-safe acceptance tolerance (f64 unchanged); the fixed-iter
@@ -724,8 +751,9 @@ def barotropic_implicit_mpas(
             ),
             stock_cg_tol=config.barotropic_implicit_pcg_tol,
             stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
-            pcg_variant=str(config.barotropic_implicit_pcg_variant),
+            pcg_variant=_pcg_variant,
             dot_weight=_w_dots,
+            deep_halo=_deep_halo,
         )
         # Refresh the halo ring of the solution before downstream
         # stencils consume it.

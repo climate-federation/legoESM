@@ -100,9 +100,9 @@ class TestValidation:
 
     def test_defaults(self):
         cfg = MPASOceanConfig()
-        assert cfg.barotropic_implicit_pcg_precond == "poly"
+        assert cfg.barotropic_implicit_pcg_precond == "jacobi"   # 2026-09-30
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 30
 
 
 class TestPolynomial:
@@ -207,6 +207,8 @@ def _ocean():
 
 def _solve(ocean, **cfg_kw):
     mesh, z_coord, state, F_eta = ocean
+    # Jacobi vs poly on the SAME recurrence (the deep-halo default refuses poly).
+    cfg_kw.setdefault("barotropic_implicit_pcg_variant", "single_reduce")
     # No floor clamp: its global reduction needs an MPI stack even on one
     # process, and the clamp is a no-op on this rest-state problem anyway.
     cfg = MPASOceanConfig(barotropic_solver="implicit_cn",

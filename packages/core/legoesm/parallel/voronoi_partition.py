@@ -1235,3 +1235,39 @@ def reorder_voronoi_for_sharding(
 
     # --- Pad so that nCells and nEdges are divisible by n_devices ---
     return _pad_voronoi_for_sharding(reordered, n_devices)
+
+
+def complete_cell_rings(mesh: VoronoiMesh, partitions, max_rings: int = 8) -> int:
+    """Largest k such that, on EVERY partition, all cells within k cellsOnCell
+    hops of the owned block (owned cells included) are local cells AND have
+    every incident edge and every neighbour cell local — so a cell -> edge ->
+    cell stencil evaluated on the local mesh equals the owner's value on rings
+    0..k.  (Neighbours are checked explicitly: the MPI partition keeps an edge
+    when only ONE of its cells is local.)  Capped at ``max_rings``.
+    """
+    coc = np.asarray(mesh.cellsOnCell)
+    eoc = np.asarray(mesh.edgesOnCell)
+    neoc = np.asarray(mesh.nEdgesOnCell)
+    slot = np.arange(eoc.shape[0])[:, None]
+    best = max_rings
+    for part in partitions:
+        is_lc = np.zeros(coc.shape[1], bool)
+        is_lc[np.asarray(part.local_cells)] = True
+        is_le = np.zeros(int(mesh.nEdges), bool)
+        is_le[np.asarray(part.local_edges)] = True
+        seen = np.zeros(coc.shape[1], bool)
+        ring = np.asarray(part.local_cells[:part.n_owned_cells])
+        seen[ring] = True
+        k = -1
+        while k < best:
+            e = np.where(slot < neoc[ring], eoc[:, ring], -1)
+            nb = np.where(slot < neoc[ring], coc[:, ring], -1).ravel()
+            nb = np.unique(nb[nb >= 0])
+            if not (is_lc[ring].all() and is_le[e[e >= 0]].all()
+                    and is_lc[nb].all()):
+                break
+            k += 1
+            ring = nb[~seen[nb]]
+            seen[ring] = True
+        best = min(best, k)
+    return max(best, 0)

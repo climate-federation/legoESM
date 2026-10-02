@@ -98,11 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
     # these two numbers alone. They are exposed so a ladder arm can measure
     # how much of the plateau the barotropic solve owns, instead of inferring
     # it from a reduction count.
-    p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
+    p.add_argument("--pcg-variant",
+                   choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
-                   help="unset = MPASOceanConfig default (single_reduce)")
+                   help="unset = MPASOceanConfig default (single_reduce_deep); "
+                        "single_reduce_deep needs --pcg-precond jacobi (poly/gpoly need "
+                        "--pcg-variant single_reduce or standard)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 20); "
+                   help="distributed PCG iteration count (config default 30); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
@@ -314,7 +317,7 @@ def main() -> int:
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (
-                   1 + (1 if config.barotropic_implicit_pcg_variant == "single_reduce" else 2)
+                   1 + (1 if config.barotropic_implicit_pcg_variant != "standard" else 2)
                    * int(config.barotropic_implicit_pcg_fixed_iters)
                    if nd > 1 else None)},
     ))
