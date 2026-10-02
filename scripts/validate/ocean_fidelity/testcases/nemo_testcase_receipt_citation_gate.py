@@ -1337,7 +1337,7 @@ CITATION_MAP = {
         'IF( ln_blk      )   CALL sbc_blk_init',
         'IF( ln_ssr      )   CALL sbc_ssr_init', 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:440-449': [
-        'SELECT CASE( nsbc )',
+        ('SELECT CASE( nsbc )', 2),
         'END SELECT', 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcmod.f90:517-521': [
         'IF( ln_rnf         )   CALL sbc_rnf( kt )',
@@ -1345,18 +1345,18 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcflx.f90:158-204': [
         'IF( kt == nit000 ) THEN',
         'emp (ji,jj) =   sf(jp_emp )%fnow', 47],
-    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:124-140': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:124-135': [
         'ztrp= - 40.e0',
-        'qns (ji,jj) = ztrp', 17],
+        'qns (ji,jj) = ztrp', 12],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:182-191': [
         'mean intensity at 0.105',
         'vtau(ji,jj) =   ztaun * SIN', 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcssr.f90:187-198': [
-        'ELSEIF( nn_sssr == 2 ) THEN',
+        ('ELSEIF( nn_sssr == 2 ) THEN', 2),
         'qns(ji,jj) = qns(ji,jj) - erp', 12],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/sbcfwb.f90:149-177': [
         'NAMELIST/namsbc_fwb/rn_fwb0',
-        "CALL ctl_stop( 'sbc_fwb : wrong nn_fwb value", 29],
+        ("CALL ctl_stop( 'sbc_fwb : wrong nn_fwb value", 1), 29],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288': [
         ('IF( ln_zdftke ) THEN', 4),
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],

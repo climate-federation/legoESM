@@ -60,7 +60,7 @@ At runtime it calls only the selected routine
 
 `ln_usr` is **not** a zero-flux arm in this build.  Its compiled routine applies
 the GYRE temperature/shortwave/freshwater forcing
-(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:124-140`)
+(`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:124-135`)
 and nonzero analytical wind stress
 (`ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/usrdef_sbc.f90:182-191`).
 Therefore that alternative is **REFUTED**.
