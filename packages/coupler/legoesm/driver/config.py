@@ -3680,6 +3680,14 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"{_nm}={_v} requires microphysics='morrison' "
                     f"(got {self.microphysics!r}); it would be silently inert")
+        _cam6_rh_set = [f for f in ("cloud_cam6_rhmini", "cloud_cam6_rhmaxi",
+                                    "cloud_cam6_rhminis", "cloud_cam6_rhmaxis")
+                         if getattr(self, f) is not None]
+        if _cam6_rh_set and self.cloud_scheme != "cam6_clubb":
+            errors.append(
+                f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
+                f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
+                "cloud_scheme='cam6_clubb' (otherwise silently inert).")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
                 or self.subgrid_autoconversion
