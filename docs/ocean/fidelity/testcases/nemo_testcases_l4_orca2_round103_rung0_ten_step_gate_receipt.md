@@ -1,9 +1,9 @@
 # ORCA2 round 103 — rung-0 ten-step ladder gate
 
-**Date:** 2026-10-02  
-**Base:** `04396546bc37aea5346fb621509a7b8a0f00d793`  
-**Preregistration:** `d2412d9aa`  
-**Measurement commit:** `2e98c69a46ba1cd77ec0826dae9e66206b853331`  
+**Date:** 2026-10-02
+**Base:** `04396546bc37aea5346fb621509a7b8a0f00d793`
+**Preregistration:** `d2412d9aa`
+**Measurement commit:** `2e98c69a46ba1cd77ec0826dae9e66206b853331`
 **Disposition:** **LANDED — rung-0 gate and rung-7 kt=1..10 replay complete**
 
 ## Claim boundary
