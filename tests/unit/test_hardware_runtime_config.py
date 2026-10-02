@@ -11,11 +11,7 @@ import pytest
 from legoesm.config import Config
 from legoesm.atmosphere.dynamics import create_model
 from legoesm.core.conservation import _accumulation_dtype
-from legoesm.core.hardware import (
-    apply_hardware_config,
-    get_runtime_precision_dtype,
-    set_runtime_precision_policy,
-)
+from legoesm.runtime.config import bootstrap_from_yaml_config
 from legoesm.core.precision import PrecisionPolicy, set_policy
 
 
@@ -23,18 +19,8 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 def _reset_precision_policy():
     """Reset global precision policy before and after each test."""
     set_policy(PrecisionPolicy.fp32())
-    set_runtime_precision_policy(
-        dynamics="float32",
-        ml="bfloat16",
-        conservation=None,
-    )
     yield
     set_policy(PrecisionPolicy.fp32())
-    set_runtime_precision_policy(
-        dynamics="float32",
-        ml="bfloat16",
-        conservation=None,
-    )
 
 
 def _dummy_cfg():
@@ -70,7 +56,7 @@ class TestApplyHardwareConfig:
             "legoesm.parallel.mesh.create_device_mesh",
             return_value=_dummy_cfg(),
         ) as create_mesh:
-            apply_hardware_config(cfg)
+            bootstrap_from_yaml_config(cfg)
         create_mesh.assert_called_once_with(
             n_devices=3, backend="cpu", allow_level_fallback=False
         )
@@ -92,7 +78,7 @@ class TestApplyHardwareConfig:
             "legoesm.parallel.mesh.create_device_mesh",
             return_value=_dummy_cfg(),
         ) as create_mesh:
-            apply_hardware_config(cfg)
+            bootstrap_from_yaml_config(cfg)
         create_mesh.assert_called_once_with(
             n_devices=6, backend="cpu", allow_level_fallback=False
         )
@@ -115,37 +101,9 @@ class TestApplyHardwareConfig:
         ) as init_dist, patch(
             "legoesm.parallel.mesh.create_device_mesh",
         ) as create_mesh:
-            apply_hardware_config(cfg)
+            bootstrap_from_yaml_config(cfg)
         init_dist.assert_called_once()
         create_mesh.assert_not_called()
-
-    def test_precision_policy_is_applied(self):
-        cfg = Config.from_dict(
-            {
-                "hardware": {
-                    "precision": {
-                        "dynamics": "float64",
-                        "ml": "float32",
-                        "conservation": "float32",
-                    },
-                    "parallelism": {
-                        "distributed": False,
-                        "n_devices": 1,
-                        "backend": "cpu",
-                    },
-                }
-            }
-        )
-        with patch(
-            "legoesm.parallel.mesh.create_device_mesh",
-            return_value=_dummy_cfg(),
-        ):
-            apply_hardware_config(cfg)
-
-        # Legacy 3-component dict should reflect the config values.
-        assert get_runtime_precision_dtype("dynamics") == jnp.float64
-        assert get_runtime_precision_dtype("ml") == jnp.float32
-        assert get_runtime_precision_dtype("conservation") == jnp.float32
 
     def test_create_model_consumes_hardware_config(self):
         cfg = Config.from_dict(
