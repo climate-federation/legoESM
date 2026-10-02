@@ -337,6 +337,18 @@ fixed above.
   stagger error; and every number in the receipt reproduces from the
   committed JSON.
 
+* **Push gate** (`land.sh gyre`, the lane's authoritative battery).  Its
+  FIRST run was RED -- `1 failed, 134 passed in 958.52s`, the citation
+  gate's own test, because re-anchoring the map had left the default
+  receipt's citations on the pre-hook line numbers.  The same old-to-new
+  map was applied to the two receipts that cite those lines (no citation
+  weakened, none removed) and the second run is green:
+  `135 passed in 1087.35s (0:18:07)`, then
+  `DINO month gate: day-30 wet 3-D T rms vs NEMO kt=960: 2.040288765e-03 K
+  against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`,
+  then `PUSHED f7f57e17ed4d`.  The DINO gate ran because the round changes
+  `packages/`.
+
 ## Landing verdict: HELD (instrument + named statement + held fix)
 
 ## Option choices made this round
