@@ -53,6 +53,10 @@ _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
+    # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
+    # cannot bind to one of the _SM_ probe builds.
+    "GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "stp2d.F90": _OCE / "stp2d.F90",
     "oce.F90": _OCE / "oce.F90",
     "DOM/istate.F90": _OCE / "DOM/istate.F90",
@@ -4141,6 +4145,14 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/sshwzv.f90:295-298': [
         ('integrate from the bottom the hor. divergence', 4),
         ('r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )', 2), 4],
+    # --- round 202: shared stage-one tracer-thickness ratio order ---
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
+        '!==  ssh/h0 ratio at Kaa  ==!',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 20],
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:167':
+        'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:177':
+        'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
     'domhgr.F90:222-223': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ("& iom_varid( inum, 'ff_t', ldstop = .FALSE. ) > 0    ) THEN", 1), 2],
 }
 
