@@ -49,11 +49,12 @@ def test_resolved_requires_uniform_background_and_disabled_shortwave(tmp_path, m
     monkeypatch.setattr(
         gate.upper,
         "validate_resolved",
-        lambda root, plant="none": {"status": "PASS_RUNG5_HAVTB0_RESOLVED", "nn_havtb_uniform": True},
+        lambda root, plant="none": {
+            "status": "PASS_RUNG5_HAVTB0_RESOLVED",
+            "nn_havtb_uniform": True,
+        },
     )
-    (tmp_path / "ocean.output").write_text(
-        "Light penetration in temperature Eq. ln_traqsr = F\n"
-    )
+    (tmp_path / "ocean.output").write_text("Light penetration in temperature Eq. ln_traqsr = F\n")
     assert gate.validate_resolved(tmp_path)["status"] == "PASS_RUNG4_HAVTB0_RESOLVED"
     for plant in ("shortwave-consequence", "resolved-havtb"):
         with pytest.raises(gate.GateError):

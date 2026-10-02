@@ -16,6 +16,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
+
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_hier_decks_round8_gate as legacy,
 )
@@ -133,22 +134,34 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
 
     manifest = json.loads(MANIFEST.read_text())
     require(manifest.get("rung") == 4, "manifest rung changed")
-    require(manifest.get("run") == {
-        "mpi_ranks": 2,
-        "first_step": 1,
-        "last_step": 240,
-        "from_rest": True,
-        "initial_state_output": 1,
-    }, "run protocol changed")
+    require(
+        manifest.get("run")
+        == {
+            "mpi_ranks": 2,
+            "first_step": 1,
+            "last_step": 240,
+            "from_rest": True,
+            "initial_state_output": 1,
+        },
+        "run protocol changed",
+    )
     expected_binary = legacy.BINARY_SHA if plant != "source-pin" else "0" * 64
     require(manifest["build"]["binary_sha256"] == expected_binary, "manifest build pin changed")
     require(sha256(record / "nemo") == legacy.BINARY_SHA, "recorder binary changed")
 
     cfg = rung4_cfg_bytes(plant=plant)
     require(hashlib.sha256(cfg).hexdigest() == NEW_CFG_SHA, "replacement exact deck changed")
-    require(hashlib.sha256(execution_cfg_bytes()).hexdigest() == NEW_EXEC_SHA, "replacement execution deck changed")
-    require(manifest["namelists"]["namelist_cfg_sha256"] == NEW_CFG_SHA, "manifest deck pin changed")
-    require(manifest["namelists"]["execution_namelist_cfg_sha256"] == NEW_EXEC_SHA, "manifest execution pin changed")
+    require(
+        hashlib.sha256(execution_cfg_bytes()).hexdigest() == NEW_EXEC_SHA,
+        "replacement execution deck changed",
+    )
+    require(
+        manifest["namelists"]["namelist_cfg_sha256"] == NEW_CFG_SHA, "manifest deck pin changed"
+    )
+    require(
+        manifest["namelists"]["execution_namelist_cfg_sha256"] == NEW_EXEC_SHA,
+        "manifest execution pin changed",
+    )
 
     with tempfile.TemporaryDirectory(prefix="orca2-rung4-havtb0-") as temporary:
         root = Path(temporary)
@@ -166,7 +179,10 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         for name in sorted(set(old_values) | set(new_values))
         if old_values.get(name) != new_values.get(name)
     }
-    require(replacement_delta == {"namzdf.nn_havtb": ["1", "0"]}, f"replacement delta changed: {replacement_delta}")
+    require(
+        replacement_delta == {"namzdf.nn_havtb": ["1", "0"]},
+        f"replacement delta changed: {replacement_delta}",
+    )
     boundary_delta = {
         name: [
             legacy.rung5_deck.rung6.rung10._token(upper_values[name]),
@@ -175,11 +191,15 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
         for name in sorted(set(upper_values) | set(new_values))
         if upper_values.get(name) != new_values.get(name)
     }
-    require(boundary_delta == {
-        "namsbc.ln_traqsr": [".true.", ".false."],
-        "namtra_qsr.ln_qsr_rgb": [".true.", ".false."],
-        "namtra_qsr.nn_chldta": ["1", "0"],
-    }, f"rung-5/rung-4 boundary is not shortwave-only: {boundary_delta}")
+    require(
+        boundary_delta
+        == {
+            "namsbc.ln_traqsr": [".true.", ".false."],
+            "namtra_qsr.ln_qsr_rgb": [".true.", ".false."],
+            "namtra_qsr.nn_chldta": ["1", "0"],
+        },
+        f"rung-5/rung-4 boundary is not shortwave-only: {boundary_delta}",
+    )
     old_lines = (record / "namelist_cfg.deck").read_text().splitlines()
     new_lines = cfg.decode().splitlines()
     line_delta = [
@@ -189,7 +209,10 @@ def preflight(*, plant: str = "none") -> dict[str, object]:
     ]
     require(line_delta == [[403, OLD_LINE, NEW_LINE]], f"physical line delta changed: {line_delta}")
     source = (COMPILED / "zdfphy.f90").read_text()
-    require("avtb_2d(:,:) = 1._wp" in source and "IF( nn_havtb == 1 ) THEN" in source, "compiled background-shape branch changed")
+    require(
+        "avtb_2d(:,:) = 1._wp" in source and "IF( nn_havtb == 1 ) THEN" in source,
+        "compiled background-shape branch changed",
+    )
     return {
         "status": "PREFLIGHT_PASS_RUNG4_HAVTB0",
         "claim_label": "independent",
@@ -214,10 +237,15 @@ def stage_deck(root: Path) -> None:
     for name, payload in expected.items():
         target = root / name
         if target.exists():
-            require(target.is_file() and target.read_bytes() == payload, f"existing deck differs: {target}")
+            require(
+                target.is_file() and target.read_bytes() == payload,
+                f"existing deck differs: {target}",
+            )
         else:
             target.write_bytes(payload)
-    rows = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in expected.items())
+    rows = "".join(
+        f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in expected.items()
+    )
     ledger = root / "SHA256SUMS"
     if ledger.exists():
         require(ledger.read_text() == rows, "deck SHA256SUMS changed")
@@ -230,7 +258,10 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     inherited = upper.validate_resolved(root, plant=inherited_plant)
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
-        "ln_traqsr_false": re.search(r"Light penetration in temperature Eq\.\s+ln_traqsr\s*=\s*F\b", ocean) is not None,
+        "ln_traqsr_false": re.search(
+            r"Light penetration in temperature Eq\.\s+ln_traqsr\s*=\s*F\b", ocean
+        )
+        is not None,
         "shortwave_initializer_absent": "tra_qsr_init : penetration" not in ocean,
         "rgb_print_absent": "RGB (Red-Green-Blue) light penetration" not in ocean,
     }
@@ -238,7 +269,10 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
         checks["ln_traqsr_false"] = False
     if plant == "resolved-havtb":
         inherited["nn_havtb_uniform"] = False
-    require(all(checks.values()) and inherited.get("nn_havtb_uniform") is True, f"resolved rung-4 checks failed: {checks}, upper={inherited}")
+    require(
+        all(checks.values()) and inherited.get("nn_havtb_uniform") is True,
+        f"resolved rung-4 checks failed: {checks}, upper={inherited}",
+    )
     return {"status": "PASS_RUNG4_HAVTB0_RESOLVED", "upper_rung": inherited, **checks}
 
 
@@ -246,16 +280,43 @@ def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> d
     require(plant in PLANTS, f"unknown plant: {plant}")
     preflight(plant=plant if plant in PRECHECK_PLANTS else "none")
     old_record, _, _ = _old_paths()
-    require((root / "producer_commit.txt").read_text().strip() == expect_commit, "producer commit differs")
+    require(
+        (root / "producer_commit.txt").read_text().strip() == expect_commit,
+        "producer commit differs",
+    )
     require(sha256(root / "nemo") == legacy.BINARY_SHA, "record binary differs")
     require((root / "namelist_cfg").read_bytes() == execution_cfg_bytes(), "execution deck differs")
     require((root / "namelist_cfg.deck").read_bytes() == rung4_cfg_bytes(), "exact deck differs")
-    require(json.loads((root / "hierarchy_manifest.json").read_text()) == json.loads(MANIFEST.read_text()), "record manifest differs")
-    require((root / "recorder_repair_manifest.json").read_bytes() == (old_record / "recorder_repair_manifest.json").read_bytes(), "repair manifest differs")
-    frame_plant = plant if plant in {"field-name", "truncated", "frame-nonfinite", "absent-as-zero", "owner-on", "missing-frame"} else "none"
-    inherited_plant = plant if plant in {"terminal-nonfinite", "terminal-step", "sha-inventory"} else "none"
+    require(
+        json.loads((root / "hierarchy_manifest.json").read_text())
+        == json.loads(MANIFEST.read_text()),
+        "record manifest differs",
+    )
+    require(
+        (root / "recorder_repair_manifest.json").read_bytes()
+        == (old_record / "recorder_repair_manifest.json").read_bytes(),
+        "repair manifest differs",
+    )
+    frame_plant = (
+        plant
+        if plant
+        in {
+            "field-name",
+            "truncated",
+            "frame-nonfinite",
+            "absent-as-zero",
+            "owner-on",
+            "missing-frame",
+        }
+        else "none"
+    )
+    inherited_plant = (
+        plant if plant in {"terminal-nonfinite", "terminal-step", "sha-inventory"} else "none"
+    )
     frames = legacy.rung5_record.validate_frames(root, plant=frame_plant)
-    terminal = legacy.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(root, plant=inherited_plant)
+    terminal = legacy.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
+        root, plant=inherited_plant
+    )
     month = legacy.rung5_deck.rung6.rung10.validate_month_products(root)
     resolved = validate_resolved(root, plant=plant)
     inventory = legacy.rung5_deck.rung6.rung10.validate_sha_inventory(root, plant=inherited_plant)
@@ -290,8 +351,13 @@ def main() -> int:
             if args.stage_deck:
                 stage_deck(args.stage_deck)
         else:
-            require(args.record is not None and args.expect_commit, "record and expected commit are required")
-            report = validate_record(args.record, expect_commit=args.expect_commit, plant=args.plant)
+            require(
+                args.record is not None and args.expect_commit,
+                "record and expected commit are required",
+            )
+            report = validate_record(
+                args.record, expect_commit=args.expect_commit, plant=args.plant
+            )
         report["worktree"] = worktree_stamp()
     except (RuntimeError, OSError, KeyError, TypeError, UnicodeError, ValueError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "FAIL"
