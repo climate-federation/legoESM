@@ -56,6 +56,11 @@ _FAMILIES = {
     # twice would be a second thing to keep in step.  Every payload remains
     # self-described by its own (rank, n1, n2, n3).
     "oracle_spgts_kt": ("NEMO_L1_SPGTS1", 15, "groups", 0),
+    # Round 200's FLUX-card stage record.  Same header shape as round 192's
+    # (fifteen integers after the magic) and the same self-describing group
+    # stream, but it opens at EVERY stage and carries the advective
+    # transports the flux-form advection call consumes.
+    "oracle_stage_flux_terms_kt": ("NEMO_L1_STGFLX1", 15, "groups", 0),
 }
 # The groups every per-term record must carry, by name.  This list, the magic
 # and the format version are the ONLY hard-coded expectations.
@@ -71,6 +76,21 @@ _STAGE_TERM_COMMON = (
 _STAGE_TERM_BY_STAGE = {
     2: _STAGE_TERM_COMMON + ("update_u", "update_v"),
     3: _STAGE_TERM_COMMON + ("ldf_u", "ldf_v", "zdf_u", "zdf_v"),
+}
+# Round 200's FLUX-card stage record.  Stage 1 runs ONE momentum statement
+# (the flux-form advection call); stages 2 and 3 add HPG and VOR before it,
+# and stage 3 replaces the explicit update with LDF + the implicit ZDF
+# integration.  The transports zfu/zfv/zfw are the advection call's operands.
+_STAGE_FLUX_COMMON = (
+    "kmm_u", "kmm_v", "ssh_kmm", "ww", "zfu", "zfv", "zfw",
+    "base_u", "base_v", "adv_u", "adv_v", "out_u", "out_v",
+)
+_STAGE_FLUX_BY_STAGE = {
+    1: _STAGE_FLUX_COMMON + ("update_u", "update_v"),
+    2: _STAGE_FLUX_COMMON + ("hpg_u", "hpg_v", "vor_u", "vor_v",
+                             "update_u", "update_v"),
+    3: _STAGE_FLUX_COMMON + ("hpg_u", "hpg_v", "vor_u", "vor_v",
+                             "ldf_u", "ldf_v", "zdf_u", "zdf_v"),
 }
 
 
@@ -211,6 +231,12 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
         required = _RHSTERM_GROUPS
         declared_index = 9
         stage = None
+    elif family == "oracle_stage_flux_terms_kt":
+        stage = header[2]
+        _require(stage in _STAGE_FLUX_BY_STAGE,
+                 f"{path.name}: unsupported stage {stage}")
+        required = _STAGE_FLUX_BY_STAGE[stage]
+        declared_index = 10
     else:
         stage = header[2]
         _require(stage in _STAGE_TERM_BY_STAGE,
@@ -297,6 +323,9 @@ def main(argv=None) -> int:
     parser.add_argument("--stage-terms", action="store_true",
                         help="also require round 8's stage-2 and stage-3 "
                              "momentum term records")
+    parser.add_argument("--stage-flux-terms", action="store_true",
+                        help="also require round 200's flux-card stage-1, "
+                             "stage-2 and stage-3 momentum term records")
     parser.add_argument("--spgts-terms", action="store_true",
                         help="also require round 196's per-substep "
                              "barotropic (dyn_spg_ts) records")
@@ -341,6 +370,10 @@ def main(argv=None) -> int:
             wanted += [args.run_dir /
                        f"oracle_stage_terms_kt00000001_s{stage}.bin"
                        for stage in (2, 3)]
+        if args.stage_flux_terms:
+            wanted += [args.run_dir /
+                       f"oracle_stage_flux_terms_kt00000001_s{stage}.bin"
+                       for stage in (1, 2, 3)]
         if args.spgts_terms:
             wanted += [args.run_dir / f"oracle_spgts_kt{kt:08d}.bin"
                        for kt in range(1, args.steps + 1)]
@@ -348,6 +381,9 @@ def main(argv=None) -> int:
             _require(path.is_file(), f"the run did not write {path.name}")
         if args.spgts_terms:
             corrupt_path = args.run_dir / "oracle_spgts_kt00000001.bin"
+        elif args.stage_flux_terms:
+            corrupt_path = (args.run_dir /
+                            "oracle_stage_flux_terms_kt00000001_s1.bin")
         elif args.stage_terms:
             corrupt_path = wanted[-1]
         else:
@@ -406,6 +442,23 @@ def main(argv=None) -> int:
             report["stage_term_groups"] = {
                 str(r["stage"]): sorted(r["groups"])
                 for r in stage_records}
+        if args.stage_flux_terms:
+            flux_records = [r for r in report["records"]
+                            if r["magic"] == "NEMO_L1_STGFLX1"]
+            stages = {r["stage"] for r in flux_records}
+            _require(stages == {1, 2, 3},
+                     f"flux stage-term records cover {sorted(stages)}, "
+                     "expected [1, 2, 3]")
+            _require(len(flux_records) == 3,
+                     f"{len(flux_records)} flux stage-term records, expected 3")
+            for record in flux_records:
+                for name, meta in record["groups"].items():
+                    want = 2 if name == "ssh_kmm" else 3
+                    _require(meta["rank"] == want,
+                             f"stage {record['stage']} {name} is not "
+                             f"rank {want}")
+            report["stage_flux_term_groups"] = {
+                str(r["stage"]): sorted(r["groups"]) for r in flux_records}
         if args.spgts_terms:
             spgts = [r for r in report["records"]
                      if r["magic"] == "NEMO_L1_SPGTS1"]

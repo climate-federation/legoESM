@@ -104,7 +104,7 @@ while [[ $# -gt 0 ]]; do
     --run) do_run=1 ;;
     --variant) shift; variant=${1:-} ;;
     --variant=*) variant=${1#--variant=} ;;
-    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs|stage23|spgts]\n' "$0" >&2 ; exit 64 ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs|stage23|spgts|stage123flx]\n' "$0" >&2 ; exit 64 ;;
   esac
   shift
 done
@@ -164,6 +164,20 @@ case "$variant" in
     exp_name=VORTEX_VEC_OMIP_L1
     tag=round192_stage23
     ;;
+  stage123flx)
+    # Round 200 / VORTEX round 16: the FLUX card, new paired build, additive
+    # stage-1/2/3 term writer.  Round 200's stage-local walk puts 4.4e-08 of
+    # the flux card's kt=2 velocity error in STAGE 1, where the only momentum
+    # statement NEMO runs is the flux-form advection call -- and no record
+    # carries that call's operands (the advective transports zFu, zFv, zFw) or
+    # the right-hand side on either side of it.  Round 192's record is the
+    # VECTOR card's and starts at stage 2.
+    deck_basename=namelist_cfg_omip_l1.patch
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round200/oracle_stage123_flux_terms
+    ref_name=VORTEX_R16_OMIP_L1
+    exp_name=VORTEX_OMIP_L1
+    tag=round200_stage123flx
+    ;;
   spgts)
     # Round 196 / VORTEX round 12: same vector-EEN deck, new paired build,
     # additive per-substep writer inside the split-explicit barotropic solve.
@@ -177,7 +191,7 @@ case "$variant" in
     tag=round196_spgts
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23 or spgts\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts or stage123flx\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -212,13 +226,30 @@ if [[ "$variant" == "stage23" ]]; then
   DYNADV_INSTRUMENT=$here/dynadv_stage_terms_record.patch
   STAGE_MODULE=$here/vortex_r8_stage_terms.F90
   STAGE_STUBS=$here/vortex_r8_stage_terms_syntax_stubs.F90
+  STAGE_MODULE_NAME=vortex_r8_stage_terms.F90
+  STAGE_SYMBOL=vortex_r8_stage
+  STAGE_FLAG_NAME=--stage-terms
+elif [[ "$variant" == "stage123flx" ]]; then
+  # One patched file, not two: the flux-form advection trend is recorded at
+  # its CALL SITE in stprk3_stg, so dynadv.F90 stays shipped.
+  STAGE_INSTRUMENT=$here/stprk3_stage123_flux_record.patch
+  DYNADV_INSTRUMENT=
+  STAGE_MODULE=$here/vortex_r16_stage_terms.F90
+  STAGE_STUBS=$here/vortex_r16_stage_terms_syntax_stubs.F90
+  STAGE_MODULE_NAME=vortex_r16_stage_terms.F90
+  STAGE_SYMBOL=vortex_r16_stage
+  STAGE_FLAG_NAME=--stage-flux-terms
 else
   STAGE_INSTRUMENT=
   DYNADV_INSTRUMENT=
   STAGE_MODULE=
   STAGE_STUBS=
+  STAGE_MODULE_NAME=
+  STAGE_SYMBOL=
+  STAGE_FLAG_NAME=
 fi
 readonly STAGE_INSTRUMENT DYNADV_INSTRUMENT STAGE_MODULE STAGE_STUBS
+readonly STAGE_MODULE_NAME STAGE_SYMBOL STAGE_FLAG_NAME
 readonly SHIPPED_STG=$NEMO_ROOT/src/OCE/stprk3_stg.F90
 readonly SHIPPED_DYNADV=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly DECK=$here/$deck_basename
@@ -266,12 +297,13 @@ if [[ -n "$SPGTS_INSTRUMENT" ]]; then
   fi
 fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then
-  for path in "$STAGE_INSTRUMENT" "$DYNADV_INSTRUMENT" "$STAGE_MODULE" \
-              "$STAGE_STUBS" "$SHIPPED_STG" "$SHIPPED_DYNADV"; do
+  for path in "$STAGE_INSTRUMENT" ${DYNADV_INSTRUMENT:+"$DYNADV_INSTRUMENT"} \
+              "$STAGE_MODULE" "$STAGE_STUBS" "$SHIPPED_STG" \
+              ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"}; do
     [[ -f "$path" ]] \
       || { printf 'REFUSE: missing stage-term input %s\n' "$path" >&2; exit 66; }
   done
-  for override in stprk3_stg.F90 dynadv.F90 vortex_r8_stage_terms.F90; do
+  for override in stprk3_stg.F90 ${DYNADV_INSTRUMENT:+dynadv.F90} "$STAGE_MODULE_NAME"; do
     if [[ -e "$SRC_CASE/MY_SRC/$override" ]]; then
       printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
         "$TEST_CASE" "$override" >&2
@@ -310,7 +342,7 @@ if [[ -n "$RHS_INSTRUMENT" ]]; then
   fi
 fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then
-  for patch_file in "$STAGE_INSTRUMENT" "$DYNADV_INSTRUMENT"; do
+  for patch_file in "$STAGE_INSTRUMENT" ${DYNADV_INSTRUMENT:+"$DYNADV_INSTRUMENT"}; do
     if [[ $(grep -c '^-' "$patch_file") -ne $(grep -c '^---' "$patch_file") ]]; then
       printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
         "$patch_file" >&2
@@ -378,19 +410,36 @@ if [[ -n "$SPGTS_INSTRUMENT" ]]; then
 fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then
   cp "$SHIPPED_STG" "$dry/stprk3_stg.F90"
-  cp "$SHIPPED_DYNADV" "$dry/dynadv.F90"
   patch -s "$dry/stprk3_stg.F90" <"$STAGE_INSTRUMENT" \
     || { printf 'REFUSE: stage-term patch does not apply to stprk3_stg.F90\n' >&2
          exit 67; }
-  patch -s "$dry/dynadv.F90" <"$DYNADV_INSTRUMENT" \
-    || { printf 'REFUSE: stage-term patch does not apply to dynadv.F90\n' >&2
-         exit 67; }
-  for symbol in vortex_r8_stage_begin vortex_r8_stage_rhs \
-                vortex_r8_stage_state vortex_r8_stage_finish; do
-    grep -q "$symbol" "$dry/stprk3_stg.F90" "$dry/dynadv.F90" \
+  if [[ -n "$DYNADV_INSTRUMENT" ]]; then
+    cp "$SHIPPED_DYNADV" "$dry/dynadv.F90"
+    patch -s "$dry/dynadv.F90" <"$DYNADV_INSTRUMENT" \
+      || { printf 'REFUSE: stage-term patch does not apply to dynadv.F90\n' >&2
+           exit 67; }
+  fi
+  for symbol in ${STAGE_SYMBOL}_begin ${STAGE_SYMBOL}_rhs \
+                ${STAGE_SYMBOL}_state ${STAGE_SYMBOL}_finish; do
+    grep -q "$symbol" "$dry/stprk3_stg.F90" \
+         ${DYNADV_INSTRUMENT:+"$dry/dynadv.F90"} \
       || { printf 'REFUSE: patched sources do not call %s\n' "$symbol" >&2
            exit 67; }
   done
+  # Every per-term boundary this record claims, in NEMO's own stage order.
+  # A boundary that went missing would leave one term silently unmeasured.
+  if [[ "$variant" == "stage123flx" ]]; then
+    for boundary in adv hpg vor ldf; do
+      grep -q "${STAGE_SYMBOL}_rhs( '$boundary'" "$dry/stprk3_stg.F90" \
+        || { printf 'REFUSE: the flux stage instrument has no %s boundary\n' \
+               "$boundary" >&2; exit 67; }
+    done
+    for boundary in update zdf; do
+      grep -q "${STAGE_SYMBOL}_state( '$boundary'" "$dry/stprk3_stg.F90" \
+        || { printf 'REFUSE: the flux stage instrument has no %s boundary\n' \
+               "$boundary" >&2; exit 67; }
+    done
+  fi
   syntax_dir=$dry/syntax
   mkdir -p "$syntax_dir"
   round192_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
@@ -432,7 +481,7 @@ fi
 # a deck that silently carried the other card's pair would run the other card
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
-  flux)          want_vec='.false.' ; want_up3='.true.'  ;;
+  flux | stage123flx)   want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts)  want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
@@ -535,10 +584,12 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
     fi
     if [[ -n "$STAGE_INSTRUMENT" ]]; then
       cp "$SHIPPED_STG" "$cfg/MY_SRC/stprk3_stg.F90"
-      cp "$SHIPPED_DYNADV" "$cfg/MY_SRC/dynadv.F90"
-      cp "$STAGE_MODULE" "$cfg/MY_SRC/vortex_r8_stage_terms.F90"
+      cp "$STAGE_MODULE" "$cfg/MY_SRC/$STAGE_MODULE_NAME"
       patch "$cfg/MY_SRC/stprk3_stg.F90" <"$STAGE_INSTRUMENT"
-      patch "$cfg/MY_SRC/dynadv.F90" <"$DYNADV_INSTRUMENT"
+      if [[ -n "$DYNADV_INSTRUMENT" ]]; then
+        cp "$SHIPPED_DYNADV" "$cfg/MY_SRC/dynadv.F90"
+        patch "$cfg/MY_SRC/dynadv.F90" <"$DYNADV_INSTRUMENT"
+      fi
     fi
   fi
   touch "$cfg/MY_SRC/"*.F90
@@ -565,10 +616,12 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
       || { printf 'REFUSE: substep calls are absent from compiled dynspg_ts\n' >&2; exit 69; }
   fi
   if [[ -n "$STAGE_INSTRUMENT" && "$instrumented" -eq 1 ]]; then
-    grep -q 'vortex_r8_stage_begin' "$cfg/BLD/ppsrc/nemo/stprk3_stg.f90" \
+    grep -q "${STAGE_SYMBOL}_begin" "$cfg/BLD/ppsrc/nemo/stprk3_stg.f90" \
       || { printf 'REFUSE: stage-term calls are absent from compiled stprk3_stg\n' >&2; exit 69; }
-    grep -q 'vortex_r8_stage_rhs' "$cfg/BLD/ppsrc/nemo/dynadv.f90" \
-      || { printf 'REFUSE: stage-term calls are absent from compiled dynadv\n' >&2; exit 69; }
+    if [[ -n "$DYNADV_INSTRUMENT" ]]; then
+      grep -q "${STAGE_SYMBOL}_rhs" "$cfg/BLD/ppsrc/nemo/dynadv.f90" \
+        || { printf 'REFUSE: stage-term calls are absent from compiled dynadv\n' >&2; exit 69; }
+    fi
   fi
   # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
   # and require nm to have succeeded before believing the grep.
@@ -603,7 +656,7 @@ run_one() {            # $1 = config name, $2 = run directory
   )
   [[ -f "$dir/$RESTART" ]] \
     || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
-  if [[ "$variant" == "stage23" ]] && ! grep -q 'ln_tile    =  F' "$dir/ocean.output"; then
+  if [[ "$variant" == "stage23" || "$variant" == "stage123flx" ]] && ! grep -q 'ln_tile    =  F' "$dir/ocean.output"; then
     printf 'REFUSE: stage-term writer requires the resolved VORTEX non-tiled branch\n' >&2
     exit 71
   fi
@@ -625,7 +678,7 @@ cp "$manifest/legoesm_git_sha.txt" "$EVIDENCE/"
 # refuses unless the two restarts are byte-identical (note AS).  Its plant
 # MUST turn it red, or it proves nothing.
 if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
-if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=--stage-terms; else STAGE_FLAG=; fi
+if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=$STAGE_FLAG_NAME; else STAGE_FLAG=; fi
 if [[ -n "$SPGTS_INSTRUMENT" ]]; then SPGTS_FLAG=--spgts-terms; else SPGTS_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
