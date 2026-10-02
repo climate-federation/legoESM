@@ -416,6 +416,7 @@ def measure(
     source_divisor = nemo_dynvor_e3f_0vor(
         e3t_0, card.recipe.z_coord.is_active,
         grid=card.recipe.grid, dtype=jnp.float64,
+        substitute_e3f=raw.e3f_0,
     )
     source_z_coord = card.recipe.z_coord._replace(
         nemo_een_barotropic=raw._replace(e3f_0=source_divisor))
@@ -479,7 +480,7 @@ def main() -> int:
             args.deck_root, args.frame_root, args.spg_root,
             args.expect_commit, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (OSError, ValueError, GateError) as error:
+    except (OSError, ValueError, GateError, rhs_walk.GateError) as error:
         if args.plant != "none":
             print(f"STATUS PLANT-FIRED {args.plant}: {error}")
         else:
