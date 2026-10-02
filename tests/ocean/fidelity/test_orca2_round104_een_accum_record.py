@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).parents[3]
 ACQ = ROOT / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
+REPAIR = ROOT / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round105_een_accum_acquisition"
 
 
 def _gate():
@@ -87,4 +88,27 @@ def test_patch_is_additions_only_and_launcher_is_fail_closed():
     launcher = (ACQ / "run.sh").read_text(encoding="utf-8")
     assert "set -Eeuo pipefail" in launcher
     assert "REFUSE:" in launcher
+    assert "/usr/bin/time" not in launcher
+
+
+def test_round105_repair_initializes_one_absolute_rank_file_and_is_additions_only():
+    patch = (REPAIR / "dynspg_ts_round105.patch").read_text(
+        encoding="utf-8").splitlines()
+    removed = [line for line in patch if line.startswith("-") and not line.startswith("---")]
+    assert removed == []
+
+    writer = (REPAIR / "l4_r105_een_accum.F90").read_text(encoding="utf-8")
+    assert writer.count("GET_ENVIRONMENT_VARIABLE('ORCA2_R105_EEN_ACCUM_DIR'") == 1
+    assert writer.count("output_dir(1:1) /= '/'") == 1
+    assert writer.count("IF(dumped) RETURN") == 1
+    assert writer.count("STATUS='NEW'") == 1
+    assert writer.index("STATUS='NEW'") < writer.index("SUBROUTINE r105_een_accum_dump")
+    assert writer.count('rank",I4.4') == 1
+
+    launcher = (REPAIR / "run.sh").read_text(encoding="utf-8")
+    assert "set -Eeuo pipefail" in launcher
+    assert "REFUSE:" in launcher
+    assert "export ORCA2_R105_EEN_ACCUM_DIR=$TARGET_RUN" in launcher
+    assert "--plant-path" in launcher
+    assert "--plant-duplicate" in launcher
     assert "/usr/bin/time" not in launcher
