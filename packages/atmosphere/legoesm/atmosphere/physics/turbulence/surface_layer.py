@@ -272,6 +272,38 @@ def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
     return tx, ty, sh, lh, us
 
 
+# Wind-speed floor for the unit wind vector the land stress is laid along; at
+# u = v = 0 the vector is (0, 0), so the floor only removes a 0/0.
+_WIND_DIR_FLOOR_MS = 1.0e-6  # coeff-ok: numerical floor for a 0/0 direction
+
+
+def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
+    """Surface stress with the LAND fraction's share taken from the land model.
+
+    ``tau_x``/``tau_y`` [Pa] are the atmosphere's bulk stress (opposing the
+    wind, ``tau_x = -rho Cd |V| u``), which on a non-tiled surface is computed
+    with the bulk scheme's own (ocean) roughness over land as well.
+    ``tau_land_mag`` [Pa] is the land model's solved stress magnitude
+    ``rho u*^2`` (its canopy roughness and stability). The land share is laid
+    along the CURRENT lowest-level wind, opposing it, in the bulk convention;
+    the land magnitude may be up to one land step old.
+
+    A column whose land magnitude is not positive was HELD by the land step
+    (its response is zeroed) or has not been solved yet; it keeps the bulk
+    stress rather than receiving no drag at all.
+
+    Returns the blended ``(tau_x, tau_y)``; ``f_land = 0`` returns the bulk
+    stress unchanged.
+    """
+    speed = jnp.sqrt(u * u + v * v)
+    inv_speed = 1.0 / jnp.maximum(speed, _WIND_DIR_FLOOR_MS)
+    have_land = tau_land_mag > 0.0
+    tlx = jnp.where(have_land, -tau_land_mag * u * inv_speed, tau_x)
+    tly = jnp.where(have_land, -tau_land_mag * v * inv_speed, tau_y)
+    return ((1.0 - f_land) * tau_x + f_land * tlx,
+            (1.0 - f_land) * tau_y + f_land * tly)
+
+
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
     """Override the turbulent surface fluxes with prescribed values.
 

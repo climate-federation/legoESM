@@ -1026,6 +1026,26 @@ def _make_mpas_turbulence(
                 (1.0 - _fl) * _lh + _fl * _lh_land,
                 _us,
             )
+            # ``forcing["taumag_land"]`` (mpas_land_stress_from_land): the land
+            # model's solved stress magnitude replaces the bulk (ocean-roughness)
+            # stress over the land fraction; ustar is rebuilt from the blended
+            # stress.  Absent key = the bulk stress above, unchanged.
+            _taum_land = forcing.get("taumag_land")
+            if _taum_land is not None:
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    blend_land_surface_stress, prescribed_into_surface_flux,
+                )
+                _btx, _bty = blend_land_surface_stress(
+                    _tx, _ty,
+                    jnp.asarray(_taum_land, dtype=q_sfc.dtype).reshape(nCells),
+                    u_col[:, -1], v_col[:, -1], _fl)
+                _surface_flux = prescribed_into_surface_flux(
+                    _surface_flux, rho[:, -1], tau_x=_btx, tau_y=_bty)
+        elif forcing is not None and forcing.get("taumag_land") is not None:
+            raise ValueError(
+                "forcing['taumag_land'] (land-model surface stress) is only "
+                "consumed together with the land's own heat fluxes "
+                "(forcing['shflx_land']); without them it would be ignored.")
 
         # Forwarded on BOTH branches: clubb and clubb_lite carry a prognostic
         # energy field and still accept the flux, so gating this on the carry

@@ -429,3 +429,97 @@ def test_validate_bounds():
         _mpas_cfg(mpas_land_lapse_K_per_km=-1.0).validate_strict()
     with pytest.raises(ValueError, match="mpas_land_lapse_K_per_km"):
         _mpas_cfg(mpas_land_lapse_K_per_km=25.0).validate_strict()
+
+
+# ---------------------------------------------------------------------------
+# Land-model surface stress over the land fraction (mpas_land_stress_from_land)
+# ---------------------------------------------------------------------------
+
+def test_blend_land_stress_pure_helper():
+    """Bulk convention (stress opposes the wind), land fraction only, held
+    columns keep the bulk stress."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        blend_land_surface_stress,
+    )
+    u = jnp.array([3.0, 3.0, 3.0, 3.0, 0.0])
+    v = jnp.array([4.0, 4.0, 4.0, 4.0, 0.0])          # |V| = 5
+    tx = jnp.array([-0.03, -0.03, -0.03, -0.03, 0.0])  # bulk |tau| = 0.05 Pa
+    ty = jnp.array([-0.04, -0.04, -0.04, -0.04, 0.0])
+    mag = jnp.array([0.05, 0.5, 0.0, 0.5, 0.5])
+    f = jnp.array([1.0, 1.0, 1.0, 0.0, 1.0])
+    bx, by = blend_land_surface_stress(tx, ty, mag, u, v, f)
+    bx, by = np.asarray(bx), np.asarray(by)
+    # same magnitude as the bulk -> the bulk vector (direction and sign)
+    np.testing.assert_allclose([bx[0], by[0]], [-0.03, -0.04], rtol=1e-12)
+    # 10x the magnitude, still opposing the wind
+    np.testing.assert_allclose([bx[1], by[1]], [-0.3, -0.4], rtol=1e-12)
+    # held (zero land magnitude) -> bulk
+    np.testing.assert_allclose([bx[2], by[2]], [-0.03, -0.04], rtol=1e-12)
+    # ocean column untouched
+    np.testing.assert_array_equal([bx[3], by[3]], [-0.03, -0.04])
+    # calm air -> no direction, no stress (finite)
+    np.testing.assert_array_equal([bx[4], by[4]], [0.0, 0.0])
+    # linear in the land fraction
+    hx, _ = blend_land_surface_stress(tx[:2], ty[:2], mag[:2], u[:2], v[:2],
+                                      jnp.array([0.5, 0.5]))
+    np.testing.assert_allclose(np.asarray(hx)[1], 0.5 * (-0.03) + 0.5 * (-0.3),
+                               rtol=1e-12)
+
+
+def _windy(mpas_state):
+    rng = np.random.default_rng(0)
+    u_e = jnp.asarray(10.0 * rng.standard_normal(mpas_state.u.data.shape))
+    return mpas_state._replace(u=mpas_state.u.replace(data=u_e))
+
+
+def _du_low(out):
+    if isinstance(out, tuple):
+        out = out[0]
+    return np.asarray(out.du_dt.data)[:, -1]
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb"])
+def test_land_stress_reaches_the_momentum_tendency(mpas_mesh, sigma_coord,
+                                                   mpas_state, scheme):
+    """A land stress far above the bulk one must DECELERATE the lowest-level
+    wind more (sign pinned via the kinetic-energy tendency); a zero (held)
+    land stress and an all-ocean column must reproduce the bulk stress."""
+    st = _windy(mpas_state)
+    ncell = st.T.data.shape[0]
+    u_low = np.asarray(st.u.data)[:, -1]
+    land = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.ones((ncell,)))
+    base_f = _land_forcing(ncell, 0.0, 0.0)
+    bulk = _du_low(land(st, mpas_mesh, sigma_coord, forcing=base_f))
+    strong = _du_low(land(st, mpas_mesh, sigma_coord, forcing=dict(
+        base_f, taumag_land=jnp.full((ncell,), 5.0))))
+    held = _du_low(land(st, mpas_mesh, sigma_coord, forcing=dict(
+        base_f, taumag_land=jnp.zeros((ncell,)))))
+    assert np.sum(u_low * strong) < np.sum(u_low * bulk) < 0.0, (
+        f"{scheme}: a 5 Pa land stress must remove lowest-level kinetic "
+        "energy faster than the bulk stress")
+    np.testing.assert_allclose(held, bulk, rtol=1e-10, atol=1e-14)
+
+    ocean = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.zeros((ncell,)))
+    o_bulk = _du_low(ocean(st, mpas_mesh, sigma_coord, forcing=base_f))
+    o_with = _du_low(ocean(st, mpas_mesh, sigma_coord, forcing=dict(
+        base_f, taumag_land=jnp.full((ncell,), 5.0))))
+    np.testing.assert_allclose(o_with, o_bulk, rtol=1e-10, atol=1e-14)
+
+
+def test_land_stress_without_land_heat_fluxes_is_refused(
+        mpas_mesh, sigma_coord, mpas_state):
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+    with pytest.raises(ValueError, match="taumag_land"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=dict(
+            _land_forcing(ncell), taumag_land=jnp.ones((ncell,))))
+
+
+def test_validate_land_stress_flag_needs_the_land_flux_handoff():
+    with pytest.raises(ValueError, match="mpas_land_stress_from_land.*requires"):
+        _mpas_cfg(mpas_land_stress_from_land=True).validate_strict()
+    with pytest.raises(ValueError, match="mpas_land_stress_from_land is an MPAS"):
+        _cdgrid_cfg(mpas_land_stress_from_land=True).validate_strict()

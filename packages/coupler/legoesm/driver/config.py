@@ -1569,6 +1569,12 @@ class ExperimentConfig(NamedTuple):
     # measured to deliver about a tenth of the solved flux.  With it off the mesh
     # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
+    # MPAS lane, with mpas_land_beta_soil: take the surface STRESS over the land
+    # fraction from the land model (its canopy roughness and stability, rho u*^2)
+    # instead of the atmosphere's bulk call, which on the non-tiled surface uses
+    # the bulk scheme's ocean roughness over land too.  Heat and moisture fluxes
+    # are unchanged (already the land's).  Off = byte-identical bulk stress.
+    mpas_land_stress_from_land: bool = False
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -3124,6 +3130,12 @@ class ExperimentConfig(NamedTuple):
                     "refresh does not rebuild. Set mpas_land_params_refresh="
                     "false for this scheme."
                 )
+            if self.mpas_land_stress_from_land and not self.mpas_land_beta_soil:
+                errors.append(
+                    "mpas_land_stress_from_land hands the land model's stress to "
+                    "the turbulence together with the land's own heat fluxes; "
+                    "it requires mpas_land_beta_soil=True (which publishes "
+                    "them), otherwise it would be silently inert.")
             if self.mpas_land_beta_soil:
                 # Traced beta_soil needs the multilayer land producing it and
                 # the turbulence surface flux consuming it (inert-corner
@@ -3162,6 +3174,11 @@ class ExperimentConfig(NamedTuple):
                     "land tile (slab_land_active / use_multilayer_land) and "
                     "would silently ignore them."
                 )
+            if self.mpas_land_stress_from_land:
+                errors.append(
+                    "mpas_land_stress_from_land is an MPAS-lane flag; "
+                    f"discretization={d.discretization!r} would silently "
+                    "ignore it.")
             if self.mpas_land_beta_soil:
                 errors.append(
                     "mpas_land_beta_soil is an MPAS-lane flag; "
