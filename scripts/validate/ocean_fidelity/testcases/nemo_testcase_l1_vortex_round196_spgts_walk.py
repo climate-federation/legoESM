@@ -156,7 +156,9 @@ def _lego_plane(values, stagger):
 def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         plant: str | None = None, substeps: int | None = None,
         nemo_entry_forcing: bool = False,
-        nemo_entry_velocity: bool = False) -> dict:
+        nemo_entry_velocity: bool = False,
+        nemo_substep_coriolis: bool = False,
+        nemo_substep_pgf: bool = False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -214,11 +216,28 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
                 _u_full(groups["i000_un_e"][..., None])[..., 0])),
             vv_b=seed.vv_b.replace(data=jnp.asarray(
                 _v_full(groups["i000_vn_e"][..., None])[..., 0])))
+    # Round 197's ONE VARIABLE: a PER-SUBSTEP operand of the compiled loop.
+    # The stacks are NEMO's own recorded frames in substep order, so the
+    # override the scan reads at substep jn is the array NEMO's own
+    # dyn_cor_2D (or ts_bck_interp pressure gradient) wrote at that substep,
+    # not one frame reused for the whole window.
+    def _stack(group_u, group_v):
+        import jax.numpy as jnp
+        us = np.stack([_u_full(groups[f"j{jn:03d}_{group_u}"][..., None])[..., 0]
+                       for jn in range(1, meta["icycle"] + 1)])
+        vs = np.stack([_v_full(groups[f"j{jn:03d}_{group_v}"][..., None])[..., 0]
+                       for jn in range(1, meta["icycle"] + 1)])
+        return jnp.asarray(us), jnp.asarray(vs)
+
+    cor_override = _stack("cor_u", "cor_v") if nemo_substep_coriolis else None
+    pgf_override = _stack("zu_spg", "zv_spg") if nemo_substep_pgf else None
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
-            barotropic_slow_forcing_override=override))
+            barotropic_slow_forcing_override=override,
+            barotropic_substep_coriolis_override=cor_override,
+            barotropic_substep_pgf_override=pgf_override))
     result = jax.device_get(model.step(seed, dt=card.dt_s))
     trace = {key: np.asarray(value) for key, value in result.substeps.items()}
     traced_loops = int(next(iter(trace.values())).shape[0])
@@ -332,6 +351,25 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
                               else "legoesm_production"),
         "entry_velocity_arm": ("nemo_recorded" if nemo_entry_velocity
                                else "legoesm_production"),
+        "substep_coriolis_arm": ("nemo_recorded" if nemo_substep_coriolis
+                                 else "legoesm_production"),
+        "substep_pgf_arm": ("nemo_recorded" if nemo_substep_pgf
+                            else "legoesm_production"),
+        # The arms are self-checking: a substitution that does not BIND
+        # reports NULL, not a result.  These are the rows the override is
+        # supposed to make bit-exact by construction.
+        "substitution_bound": {
+            name: all(r["cells_unequal"] == 0
+                      for r in rows if r["boundary"] == name
+                      and r["substep"] >= 1)
+            for name in ("cor.u", "cor.v", "spg.u", "spg.v")},
+        "end_of_window": {
+            r["boundary"]: {"max_abs": r["max_abs"],
+                            "normalized_max_abs": r["normalized_max_abs"],
+                            "cells_unequal": r["cells_unequal"]}
+            for r in rows
+            if r["substep"] == n_loop
+            and r["boundary"] in ("new.u", "new.v", "ssha")},
         "plant": plant,
         "scalar_rows": len(scalars),
         "scalar_non_bit": bad_scalars[:8],
@@ -451,6 +489,14 @@ def main(argv=None) -> int:
     parser.add_argument("--nemo-entry-velocity", action="store_true",
                         help="one-variable arm: start the loop from NEMO's "
                              "recorded barotropic entry velocity")
+    parser.add_argument("--nemo-substep-coriolis", action="store_true",
+                        help="one-variable arm: substitute NEMO's recorded "
+                             "per-substep 2-D Coriolis trend inside the "
+                             "compiled scan (dynspg_ts.f90:503)")
+    parser.add_argument("--nemo-substep-pgf", action="store_true",
+                        help="one-variable arm: substitute NEMO's recorded "
+                             "per-substep surface pressure gradient "
+                             "(dynspg_ts.f90:498)")
     parser.add_argument("--one-ulp-entry-probe", action="store_true",
                         help="legoESM-vs-legoESM conditioning arm: perturb the "
                              "barotropic entry velocity by one ULP and report "
@@ -471,7 +517,9 @@ def main(argv=None) -> int:
         report = run(args.oracle_root, kt=args.kt, allow_dirty=args.allow_dirty,
                      plant=args.plant, substeps=args.substeps,
                      nemo_entry_forcing=args.nemo_entry_forcing,
-                     nemo_entry_velocity=args.nemo_entry_velocity)
+                     nemo_entry_velocity=args.nemo_entry_velocity,
+                     nemo_substep_coriolis=args.nemo_substep_coriolis,
+                     nemo_substep_pgf=args.nemo_substep_pgf)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
@@ -489,6 +537,11 @@ def main(argv=None) -> int:
         print(f"coriolis j{row['substep']:03d} faces={row['faces']:<5d} "
               f"median={row['median_ratio']:.3e} p95={row['p95_ratio']:.3e} "
               f"max={row['max_ratio']:.3e}")
+    print("substitution_bound:", report["substitution_bound"])
+    for name, row in sorted(report["end_of_window"].items()):
+        print(f"end_of_window {name:<8} unequal={row['cells_unequal']:<6d} "
+              f"max={row['max_abs']:.17e} "
+              f"norm={row['normalized_max_abs']:.17e}")
     print("first_non_bit_boundary:", report["first_non_bit_boundary"])
     print("STATUS", report["status"])
     return 1 if report["status"] != "BIT" else 0

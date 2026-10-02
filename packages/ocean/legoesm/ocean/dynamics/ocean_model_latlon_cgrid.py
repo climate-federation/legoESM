@@ -1069,6 +1069,17 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # constructible as a model configuration selector.
     slow_forcing_incoming_override: object = None
     barotropic_slow_forcing_override: object = None
+    # Private round-197 per-substep discriminator for the compiled barotropic
+    # sub-time-step loop: a pair of (n_substeps, ...) stacks that replace the
+    # 2-D Coriolis trend (NEMO dyn_cor_2D, dynspg_ts.f90:503) at the substep
+    # the scan is on, keyed by the scan's own substep index.  ``None`` is the
+    # production value and is resolved at trace time, so the unset hook leaves
+    # the jaxpr unchanged; no constructible model configuration can select it.
+    barotropic_substep_coriolis_override: object = None
+    # Same instrument for the substep surface-pressure gradient
+    # (dynspg_ts.f90:498), so the two operands of the velocity update at
+    # dynspg_ts.f90:535 can be substituted one at a time.
+    barotropic_substep_pgf_override: object = None
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -6621,6 +6632,20 @@ class LatLonCGridOceanModel:
                             _baro_seed,
                             _nemo_flux_form_update_test_override=(
                                 _flux_update_override))
+                _cor_sub_override = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_substep_coriolis_override)
+                if _cor_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_coriolis_test_override=(
+                            _cor_sub_override))
+                _pgf_sub_override = (
+                    self._nemo_ws_test_hooks.barotropic_substep_pgf_override)
+                if _pgf_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_pgf_test_override=_pgf_sub_override)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,

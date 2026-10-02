@@ -1413,6 +1413,8 @@ def _run_substep_loop(
     return_trace=False,
     nemo_flux_form_update_test_override=None,
     nemo_continuity_update_test_override=None,
+    nemo_substep_coriolis_override=None,
+    nemo_substep_pgf_override=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1735,6 +1737,14 @@ def _run_substep_loop(
             raise ValueError(
                 "unknown barotropic_pgf_evaluation scheme "
                 f"{_pgf_eval!r}: must be one of ('generic', 'nemo_literal').")
+        if nemo_substep_pgf_override is not None:
+            # Round-197 per-substep substitution of NEMO's own surface
+            # pressure gradient (dynspg_ts.f90:498), the velocity update's
+            # other operand.  Same static gate and same substep index.
+            _pgf_u = jnp.asarray(
+                nemo_substep_pgf_override[0], dtype=dtype)[substep_index]
+            _pgf_v = jnp.asarray(
+                nemo_substep_pgf_override[1], dtype=dtype)[substep_index]
 
         # Average V to u-points for Coriolis.  In ab3am4 mode NEMO applies
         # the 2D Coriolis to the EXTRAPOLATED mid-step velocities (both
@@ -1767,6 +1777,15 @@ def _run_substep_loop(
             _cor_u = _cor_u_een
         else:
             _cor_u = f_u * V_at_u
+        if nemo_substep_coriolis_override is not None:
+            # Round-197 per-substep substitution of NEMO's own dyn_cor_2D
+            # output (dynspg_ts.f90:503), taken at THIS substep.  The gate is
+            # a Python ``if`` on a closure-captured static, so the production
+            # program never sees it; the index is the scan's own substep
+            # counter, so the arm cannot silently use one frame for all
+            # substeps.
+            _cor_u = jnp.asarray(
+                nemo_substep_coriolis_override[0], dtype=dtype)[substep_index]
         # NEMO dyn_drg in-subcycle explicit bottom stress (#1226;
         # dynspg_ts.F90:701-705, the .NOT.ll_wd branch — DINO's active path;
         # the implicit division at :764-768 is wetting-drying-only, ll_wd=F
@@ -1836,6 +1855,9 @@ def _run_substep_loop(
             _cor_v = _cor_v_een
         else:
             _cor_v = -f_v * U_new_at_v
+        if nemo_substep_coriolis_override is not None:
+            _cor_v = jnp.asarray(
+                nemo_substep_coriolis_override[1], dtype=dtype)[substep_index]
         # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
         # substep-START velocity + carry-eta face depth as the u-drag above.
         if drag_r_v is not None:
@@ -2431,6 +2453,8 @@ def barotropic_substeps_latlon_cgrid(
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
     _nemo_substep_trace_test_hook=False,
+    _nemo_substep_coriolis_test_override=None,
+    _nemo_substep_pgf_test_override=None,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -2901,6 +2925,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_flux_form_update_test_override),
         nemo_continuity_update_test_override=(
             _nemo_continuity_update_test_override),
+        nemo_substep_coriolis_override=_nemo_substep_coriolis_test_override,
+        nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
     )
     if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result
