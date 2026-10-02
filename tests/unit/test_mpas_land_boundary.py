@@ -466,6 +466,50 @@ def test_blend_land_stress_pure_helper():
                                rtol=1e-12)
 
 
+def test_blend_land_stress_gradient_finite_in_calm_air_and_held():
+    """Calm air and a held (zero) land stress must not give NaN gradients."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_stress_into_surface_flux,
+    )
+
+    def f(u, v, mag):
+        z = jnp.zeros(1)
+        out = land_stress_into_surface_flux(
+            (jnp.array([-0.01]), z, z, z, jnp.array([0.09])), mag, u, v,
+            jnp.array([1.0]), jnp.array([1.2]))
+        return jnp.sum(out[0] + out[1] + out[4])
+
+    for u, mag in ((0.0, 0.3), (5.0, 0.0), (0.0, 0.0)):
+        g = jax.grad(f, argnums=(0, 1, 2))(
+            jnp.array([u]), jnp.array([0.0]), jnp.array([mag]))
+        assert all(np.isfinite(np.asarray(x)).all() for x in g), (u, mag, g)
+
+
+def test_land_stress_ustar_bulk_off_land_rebuilt_on_land():
+    """ustar: bulk bit-for-bit on ocean-only and held columns; sqrt(|tau|/rho)
+    of the blended stress where the land stress is used."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_stress_into_surface_flux,
+    )
+    n = 4
+    tx = jnp.full(n, -0.03); ty = jnp.full(n, -0.04)       # |tau| 0.05 Pa
+    sh = jnp.full(n, 10.0); lh = jnp.full(n, 20.0)
+    us_bulk = jnp.full(n, 0.123)        # deliberately != sqrt(0.05/1.25)
+    rho = jnp.full(n, 1.25)
+    mag = jnp.array([0.5, 0.0, 0.5, 0.5])          # column 1 held
+    f = jnp.array([1.0, 1.0, 0.0, 0.5])            # column 2 ocean-only
+    out = land_stress_into_surface_flux(
+        (tx, ty, sh, lh, us_bulk), mag, jnp.full(n, 3.0), jnp.full(n, 4.0),
+        f, rho)
+    us = np.asarray(out[4])
+    assert us[1] == 0.123 and us[2] == 0.123
+    np.testing.assert_allclose(us[0], np.sqrt(0.5 / 1.25), rtol=1e-9)
+    np.testing.assert_allclose(us[3], np.sqrt(0.5 * (0.05 + 0.5) / 1.25),
+                               rtol=1e-9)
+    np.testing.assert_array_equal(np.asarray(out[2]), np.asarray(sh))
+    np.testing.assert_array_equal(np.asarray(out[3]), np.asarray(lh))
+
+
 def _windy(mpas_state):
     rng = np.random.default_rng(0)
     u_e = jnp.asarray(10.0 * rng.standard_normal(mpas_state.u.data.shape))

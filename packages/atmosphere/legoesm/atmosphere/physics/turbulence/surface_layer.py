@@ -272,8 +272,9 @@ def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
     return tx, ty, sh, lh, us
 
 
-# Wind-speed floor for the unit wind vector the land stress is laid along; at
-# u = v = 0 the vector is (0, 0), so the floor only removes a 0/0.
+# Wind-speed regulariser for the unit wind vector the land stress is laid
+# along, added INSIDE the square root so the derivative stays finite in calm
+# air: the vector is (0, 0) at u = v = 0 and damped by speed/floor below it.
 _WIND_DIR_FLOOR_MS = 1.0e-6  # coeff-ok: numerical floor for a 0/0 direction
 
 
@@ -295,13 +296,30 @@ def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
     Returns the blended ``(tau_x, tau_y)``; ``f_land = 0`` returns the bulk
     stress unchanged.
     """
-    speed = jnp.sqrt(u * u + v * v)
-    inv_speed = 1.0 / jnp.maximum(speed, _WIND_DIR_FLOOR_MS)
+    inv_speed = 1.0 / jnp.sqrt(u * u + v * v + _WIND_DIR_FLOOR_MS ** 2)
     have_land = tau_land_mag > 0.0
     tlx = jnp.where(have_land, -tau_land_mag * u * inv_speed, tau_x)
     tly = jnp.where(have_land, -tau_land_mag * v * inv_speed, tau_y)
     return ((1.0 - f_land) * tau_x + f_land * tlx,
             (1.0 - f_land) * tau_y + f_land * tly)
+
+
+def land_stress_into_surface_flux(surface_flux, tau_land_mag, u, v, f_land,
+                                  rho_sfc):
+    """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the land stress blended in.
+
+    Stress from :func:`blend_land_surface_stress`; ``ustar`` is rebuilt as
+    ``sqrt(|tau|/rho)`` of the blended stress ONLY where the land stress is
+    used (land fraction > 0 and a solved, positive land magnitude). Ocean-only
+    and held columns keep the bulk ``ustar`` bit-for-bit, including the bulk
+    law's own low-wind floor.
+    """
+    tx, ty = blend_land_surface_stress(
+        surface_flux[0], surface_flux[1], tau_land_mag, u, v, f_land)
+    rebuilt = prescribed_into_surface_flux(
+        surface_flux, rho_sfc, tau_x=tx, tau_y=ty)
+    used = (tau_land_mag > 0.0) & (f_land > 0.0)
+    return rebuilt[:4] + (jnp.where(used, rebuilt[4], surface_flux[4]),)
 
 
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):

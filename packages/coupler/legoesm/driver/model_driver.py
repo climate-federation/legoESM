@@ -11265,7 +11265,11 @@ class ModelDriver:
                 # The land's solved stress magnitude rho*u*^2 [Pa] (its canopy
                 # roughness and stability); 0 on a held column.  Consumed only
                 # under mpas_land_stress_from_land.
-                _taumag = jnp.sqrt(resp.tau_x ** 2 + resp.tau_y ** 2)
+                # (sqrt guarded so a zeroed column has a finite derivative.)
+                _tau2 = resp.tau_x ** 2 + resp.tau_y ** 2
+                _taumag = jnp.where(
+                    _tau2 > 0.0, jnp.sqrt(jnp.where(_tau2 > 0.0, _tau2, 1.0)),
+                    0.0)
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,

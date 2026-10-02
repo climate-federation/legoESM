@@ -1033,14 +1033,12 @@ def _make_mpas_turbulence(
             _taum_land = forcing.get("taumag_land")
             if _taum_land is not None:
                 from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                    blend_land_surface_stress, prescribed_into_surface_flux,
+                    land_stress_into_surface_flux,
                 )
-                _btx, _bty = blend_land_surface_stress(
-                    _tx, _ty,
+                _surface_flux = land_stress_into_surface_flux(
+                    _surface_flux,
                     jnp.asarray(_taum_land, dtype=q_sfc.dtype).reshape(nCells),
-                    u_col[:, -1], v_col[:, -1], _fl)
-                _surface_flux = prescribed_into_surface_flux(
-                    _surface_flux, rho[:, -1], tau_x=_btx, tau_y=_bty)
+                    u_col[:, -1], v_col[:, -1], _fl, rho[:, -1])
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "
