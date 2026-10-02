@@ -76,6 +76,13 @@ claim is made from it.
 - ORCA2 phase-1 gate tests: 19 passed.
 - GYRE trajectory: 70 rows unchanged; residual artifacts array-identical.
 - Fresh year: 360/360 snapshot files and 1,800/1,800 arrays reproduce round 100.
+- Receipt citation gate: PASS with zero unmapped citations; the shifted-line
+  plant FAILS as required. The default receipt citation gate also passes with
+  zero unmapped citations.
+- Full `tests/ocean/fidelity -n 12`: one CPU run reached 96% and displayed six
+  failures (the documented pre-existing red count), but the remaining
+  long-running tests did not terminate; the run was interrupted and is not a
+  completed battery claim.
 - Separate read-only Codex review: **independent review unavailable
   in-sandbox** (`failed to initialize in-process app-server client: Read-only
   file system`).
