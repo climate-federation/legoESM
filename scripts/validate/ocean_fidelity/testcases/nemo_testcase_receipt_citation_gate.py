@@ -1199,7 +1199,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:285': (
         "CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )", 1),
     'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:290-312': [
-        '!==   2D sea surface height forcing   ==!',
+        ('!                 !=======================================!', 1),
         "IF( kt == nit000 ) CALL r93_slow_put2( 'ssh_rhs', sshe_rhs )", 23],
     'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:317-326': [
         '!    using a split-explicit time integration in forward mode',
