@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -51,14 +50,8 @@ import numpy as np
 
 
 def _git_sha_of(path: str) -> str:
-    d = os.path.dirname(os.path.abspath(path))
-    try:
-        out = subprocess.run(
-            ["git", "-C", d, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30)
-        return out.stdout.strip() or "UNKNOWN"
-    except Exception:
-        return "UNKNOWN"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(path).commit or "UNKNOWN"
 
 
 def _count_nonfinite(name, arr, ledger):

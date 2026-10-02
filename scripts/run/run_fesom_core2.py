@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -100,13 +99,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _git_sha() -> str:
-    try:
-        return subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parents[2]),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True).stdout.strip()
-    except Exception:  # noqa: BLE001 -- provenance is best-effort
-        return "unknown"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(__file__).commit or "unknown"
 
 
 def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
