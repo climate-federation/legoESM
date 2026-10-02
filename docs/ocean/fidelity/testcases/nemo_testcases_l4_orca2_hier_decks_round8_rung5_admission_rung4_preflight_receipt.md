@@ -109,7 +109,15 @@ HD8-P5 is **CONFIRMED**.
 
 ## Validation, review, and scope
 
-- Focused round-7/round-8 controls: **17 passed**.
+- Focused hierarchy-rounds-1-through-8 plus citation controls: **90 passed**.
+- The receipt citation gate passes with seven mapped citations, zero failures,
+  and zero unmapped citations; its rigid-shift plant fires.  The cumulative
+  default-receipt gate passes with 274 citations and zero unmapped citations.
+- The one allowed `tests/ocean/fidelity -n 12` battery selected 2,250 tests,
+  reached 98%, and was interrupted after the known late-suite stall.  Its
+  three visible failures are listed pre-existing reds: the worktree-stamp
+  ratchet, the stale GYRE round-51 trace assertion, and the SI3 scalar-math
+  provenance gate.  No second broad battery was started.
 - Ruff passes the new gate/test; the launcher passes `bash -n` and reports
   `ORCA2_HIERARCHY_RUNG4_PREFLIGHT_READY`.
 - The required separate `codex exec --sandbox read-only` review failed before
