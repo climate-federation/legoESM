@@ -23,6 +23,10 @@ from legoesm.ml.s2s.sfno_slab.data import (
     normalize_forcing_channels,
     resolve_s2s_sample_dates,
 )
+from legoesm.ml.s2s.neuralgcm_slab.slab_coupling import (
+    SlabCouplingConfig,
+    extract_surface_forcing_from_dataset,
+)
 from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid
 from legoesm.ml.s2s.sfno_slab.training import S2SStochasticConfig, predict_next_atmosphere
 from legoesm.ocean.simple_ocean import SimpleOceanConfig, SlabOceanState, make_ocean
@@ -47,16 +51,6 @@ def _channel_index(labels: list[str], name: str) -> int:
     if name not in labels:
         raise KeyError(f"Required channel {name!r} not found.")
     return labels.index(name)
-
-
-def _optional_channel(labels: list[str], name: str) -> int | None:
-    """Return the channel index when present, otherwise ``None``."""
-    return labels.index(name) if name in labels else None
-
-
-def _level_label(base_var: str, pressure_levels: tuple[int, ...], preferred_level: int) -> str:
-    nearest = min(pressure_levels, key=lambda level: abs(level - preferred_level))
-    return f"{base_var}-{nearest}"
 
 
 def _fill_nan_with_mean(field: np.ndarray, *, default: float) -> np.ndarray:
@@ -117,47 +111,42 @@ def _build_atm_to_surface(
     pressure_levels: tuple[int, ...],
     config: S2SSlabCouplingConfig,
 ) -> AtmToSurface:
-    t_idx = _channel_index(channel_labels, _level_label("t", pressure_levels, config.lowest_level_hpa))
-    q_idx = _optional_channel(channel_labels, _level_label("q", pressure_levels, config.lowest_level_hpa))
-    u_idx = _optional_channel(channel_labels, _level_label("u", pressure_levels, config.lowest_level_hpa))
-    v_idx = _optional_channel(channel_labels, _level_label("v", pressure_levels, config.lowest_level_hpa))
+    """Slab-ocean forcing from one SFNO prediction via the shared S2S builder.
 
-    t_low = _fill_nan_with_mean(prediction_physical[..., t_idx], default=280.0)
-    q_low = (
-        _fill_nan_with_mean(prediction_physical[..., q_idx], default=0.0)
-        if q_idx is not None else np.zeros_like(t_low, dtype=np.float32)
+    Packs the lowest-level T/q/u/v channels and the surface fields into the
+    datasets :func:`extract_surface_forcing_from_dataset` (the NeuralGCM-slab
+    builder) consumes: density from the virtual temperature at the model-level
+    pressure.  A missing channel or surface field raises; nothing is filled.
+    """
+    level = min(pressure_levels, key=lambda lev: abs(lev - config.lowest_level_hpa))
+    shape = prediction_physical.shape[:-1]
+    coords = {"latitude": np.arange(shape[0]), "longitude": np.arange(shape[1])}
+    names = SlabCouplingConfig().field_names
+    atmosphere = xr.Dataset(
+        {
+            name: (("level", "latitude", "longitude"),
+                   prediction_physical[None, ..., _channel_index(channel_labels, f"{var}-{level}")])
+            for var, name in (
+                ("t", names.temperature),
+                ("q", names.specific_humidity),
+                ("u", names.u_component_of_wind),
+                ("v", names.v_component_of_wind),
+            )
+        },
+        coords={"level": [level], **coords},
     )
-    u_low = (
-        _fill_nan_with_mean(prediction_physical[..., u_idx], default=0.0)
-        if u_idx is not None else np.zeros_like(t_low, dtype=np.float32)
+    radiation = xr.Dataset(
+        {
+            names.sw_down: (("latitude", "longitude"), aux_surface["sw_down"]),
+            names.lw_down: (("latitude", "longitude"), aux_surface["lw_down"]),
+        },
+        coords=coords,
     )
-    v_low = (
-        _fill_nan_with_mean(prediction_physical[..., v_idx], default=0.0)
-        if v_idx is not None else np.zeros_like(t_low, dtype=np.float32)
-    )
-
-    p_sfc = _fill_nan_with_mean(aux_surface["sp"], default=100000.0)
-    sw_down = _fill_nan_with_mean(aux_surface["sw_down"], default=0.0)
-    lw_down = _fill_nan_with_mean(aux_surface["lw_down"], default=300.0)
-    rho = p_sfc / np.maximum(constants.R_d * t_low, 1.0)
-    zero = np.zeros_like(t_low, dtype=np.float32)
-
-    return AtmToSurface(
-        sw_down=jnp.asarray(sw_down, dtype=float),
-        lw_down=jnp.asarray(lw_down, dtype=float),
-        precip_total=jnp.asarray(zero, dtype=float),
-        precip_snow=jnp.asarray(zero, dtype=float),
-        T_lowest=jnp.asarray(t_low, dtype=float),
-        q_lowest=jnp.asarray(q_low, dtype=float),
-        u_lowest=jnp.asarray(u_low, dtype=float),
-        v_lowest=jnp.asarray(v_low, dtype=float),
-        p_lowest=jnp.asarray(p_sfc, dtype=float),
-        p_surface=jnp.asarray(p_sfc, dtype=float),
-        rho_lowest=jnp.asarray(rho, dtype=float),
-        cos_zenith=jnp.asarray(zero, dtype=float),
-        co2_ppmv=jnp.asarray(420.0, dtype=float),
-        has_radiation=jnp.asarray(1.0, dtype=float),
-        has_precipitation=jnp.asarray(0.0, dtype=float),
+    return extract_surface_forcing_from_dataset(
+        atmosphere,
+        radiation_dataset=radiation,
+        surface_pressure=aux_surface["sp"],
+        config=SlabCouplingConfig(lowest_level_hpa=config.lowest_level_hpa),
     )
 
 

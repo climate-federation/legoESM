@@ -827,3 +827,41 @@ def test_summarize_window_metrics_preserves_crps_columns():
     assert np.isclose(windows[0]["mae"], 1.0)
     assert np.isclose(windows[0]["crps"], 0.5)
     assert np.isclose(windows[0]["n_members"], 5.0)
+
+
+def _sfno_lowest_level_inputs(missing: str | None = None):
+    labels = ["t-1000", "q-1000", "u-1000", "v-1000", "t-850"]
+    if missing is not None:
+        labels = [lab for lab in labels if lab != missing] + ["z-500"]
+    rng = np.random.default_rng(3)
+    pred = np.stack(
+        [rng.uniform(280.0, 300.0, (3, 4)), rng.uniform(0.005, 0.02, (3, 4)),
+         rng.normal(0.0, 5.0, (3, 4)), rng.normal(0.0, 5.0, (3, 4)),
+         rng.uniform(270.0, 290.0, (3, 4))], axis=-1).astype(np.float32)
+    aux = {"sp": np.full((3, 4), 101000.0, np.float32),
+           "sw_down": np.full((3, 4), 200.0, np.float32),
+           "lw_down": np.full((3, 4), 350.0, np.float32)}
+    return pred, aux, labels
+
+
+def test_sfno_slab_forcing_uses_shared_builder_virtual_density():
+    pred, aux, labels = _sfno_lowest_level_inputs()
+    forcing = s2s_coupling._build_atm_to_surface(
+        pred, aux, channel_labels=labels, pressure_levels=(1000, 850),
+        config=s2s_coupling.S2SSlabCouplingConfig())
+    from legoesm import constants
+    t, q = pred[..., 0].astype(float), pred[..., 1].astype(float)
+    rho = 100000.0 / (constants.R_d * t * (1.0 + (1.0 / constants.epsilon - 1.0) * q))
+    np.testing.assert_allclose(np.asarray(forcing.rho_lowest), rho, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(forcing.p_lowest), 100000.0)
+    np.testing.assert_allclose(np.asarray(forcing.p_surface), 101000.0)
+    np.testing.assert_allclose(np.asarray(forcing.q_lowest), pred[..., 1])
+
+
+@pytest.mark.parametrize("missing", ["q-1000", "u-1000", "v-1000"])
+def test_sfno_slab_forcing_missing_channel_raises(missing):
+    pred, aux, labels = _sfno_lowest_level_inputs(missing)
+    with pytest.raises(KeyError, match=missing):
+        s2s_coupling._build_atm_to_surface(
+            pred, aux, channel_labels=labels, pressure_levels=(1000, 850),
+            config=s2s_coupling.S2SSlabCouplingConfig())
