@@ -128,8 +128,23 @@ All three round-97 controls fire:
 - one-ULP record mutation: `STATUS PLANT-FIRED record-bit`;
 - one-ULP trace-output mutation: `STATUS PLANT-FIRED trace-bit`.
 
-The focused record/launcher/walker test file passes 12/12. Citation and wide
-test results are recorded in the final commit after this receipt is gated.
+The focused record/launcher/walker and citation-gate selection passes 29/29 in
+3.30 s. The default citation receipt passes with 274 citations, zero failures,
+zero unmapped citations, and a clean map audit. This receipt passes with four
+citations and the same zero-failure result. A rigid +2 shift of the
+`dyncor_2D` citation is rejected by the planted control.
+
+The single `tests/ocean/fidelity -n 12` battery reached 99% before the known
+xdist silent tail left no live pytest process and no terminal summary; it is
+therefore recorded as incomplete, not PASS. Its six visible failures are the
+same established failures reported by the preceding rung-0 round:
+
+- test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes;
+- test_nemo_testcase_l2_gyre_round51_live_operands.py::test_live_trace_and_raw_history_arms_are_private_and_off_by_default;
+- test_nemo_testcase_round35_stamp_scope.py::test_every_driver_that_arms_the_escape_scopes_it;
+- test_recipe_case_board.py::test_every_oracle_comparison_has_a_row;
+- test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree;
+- test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants.
 
 The required separate `codex exec --sandbox read-only` review did not reach
 the diff: `failed to initialize in-process app-server client: Read-only file
