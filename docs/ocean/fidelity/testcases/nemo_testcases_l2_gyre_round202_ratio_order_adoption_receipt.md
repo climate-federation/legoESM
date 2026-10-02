@@ -54,7 +54,22 @@ Each refused file is an ORCA2-lane artefact and lives on that branch.  Nothing
 else in the tree moved: no default, no card, no deck, no threshold, no carried
 state, no scheme selector.
 
-## The certified GYRE ladder
+## The certified GYRE ladder — unchanged
+
+The full certified gate (`nemo_testcase_l2_gyre_phase3_gate.py --max-step 10`)
+was re-run with the statement applied and compared row by row against round
+201's certified report with the shared oracle-relative gate
+(`nemo_testcase_offline_compare.py`):
+
+```
+OFFLINE_ORACLE_RELATIVE_COMPARE PASS: rows=954 max_worsening_ulps=0
+  first_over_bar={'T','S','u','v','ssh'} kt=3 -> unchanged
+```
+
+**954 rows, 0 moved, 0 ULP, no row status change, no violation.**  The ten-step
+GYRE trajectory does not see this statement at all; the first ten steps are
+below its rounding difference.  That is why the year, not the ladder, is the
+binding measurement here.
 
 ## The from-rest year — WHY THIS ROUND IS HELD
 
@@ -124,14 +139,125 @@ files differ from the certified carried arm
 (`phase3/round202/gyre_year_byte_identity.txt`).  That number is reported as
 a measurement, not as grounds for a pin.
 
-## The other cards
+## The other cards — all inert
+
+| card | reference | result |
+|---|---|---|
+| `VORTEX-zco` (flux) | round 201 | **PASS**, 50 rows, **0 moved**, `max_worsening_ulps 0`, `first_over_bar` unchanged `{T,u,v,ssh} kt=2` |
+| `VORTEX_VEC-zco` (vector) | round 201 | **PASS**, 50 rows, **0 moved**, `max_worsening_ulps 0`, `first_over_bar` unchanged `{u,v,ssh} kt=2` |
+| `LOCK_EXCHANGE-zco` tank | round 199 | **PASS**, 50 rows, 0 moved, `first_over_bar` unchanged `{u} kt=4` |
+| `OVERFLOW-zps` tank | round 199 | **PASS**, 50 rows, 0 moved, `first_over_bar` unchanged `{T,u} kt=2` |
+
+Both VORTEX registries are 0 of 50, which is what the round order expected,
+and the ratchet is green on both.
 
 ## Gates
 
+| gate | result |
+|---|---|
+| GYRE certified kt=1..10 ladder vs round 201 | **PASS**, 954 rows, 0 moved, 0 ULP |
+| GYRE 360-day from-rest year vs the registered ORCA2 column | **FAIL on days 120/180/240/300/360** — the reason this round is HELD |
+| `VORTEX-zco` / `VORTEX_VEC-zco` certified 50-row registries | **PASS**, 0 of 50 each |
+| `LOCK_EXCHANGE-zco` / `OVERFLOW-zps` tanks | **PASS**, 0 of 50 each |
+| cellwise two-ULP ratchet plants (flux card) | `worsen-3ulp` exit 1 (`max_worsening_ulps=3`), `at-bar-to-debt` exit 1 — both red on the same inert pair the unplanted run passes |
+| receipt citation gate, `DEFAULT_RECEIPT` | **PASS** exit 0, 274 citations, `unmapped_citations []`, 0 failures, all nine self-test plants fired |
+| generic NEMO-GYRE recipe gate, push battery | run by `land.sh` |
+| DINO from-rest month gate | run by `land.sh` (reference `2.053801168e-03` K, bar `2.244317642e-03`) |
+
+Evidence, all under `phase3/round202/`: `gyre_ladder_after.{json,log}`,
+`gyre_ladder_compare.json`, `gyre_year_r202.log`,
+`gyre_year_byte_identity.txt`, `gyre_day_gap{,_before}.{json,log}`,
+`traj_{VORTEX-zco,VORTEX_VEC-zco,LOCK_EXCHANGE-zco,OVERFLOW-zps}_after.{json,log}`,
+`ulp_*.json`, `ulp_plant_*.{json,log}`, `ratchet_plants.txt`,
+`citations_default_receipt.{json,log}`, and the trajectory-only ladder arm
+`trajonly_*` kept because it is what first showed the gate's 70-row subset.
+
 ## Non-vacuity
+
+* **The ULP ratchet plants are red on the very pair the unplanted run
+  passes**: `worsen-3ulp` reports `max_worsening_ulps=3` and
+  `at-bar-to-debt` reports a crossed row, both exit 1
+  (`phase3/round202/ratchet_plants.txt`).
+* **The citation gate's nine internal plants all fired** (generic anchor,
+  widened extent, reversed range, endpoint shifted alone, and the rest), and
+  the gate found 0 failures only after the re-anchor — before it, it reported
+  7 receipt failures and 27 map entries off by exactly the five lines the
+  model hunk adds.  That is the gate doing work, quoted rather than claimed.
+* **The unit control refuses the old order.**  The adopted test builds the
+  SSH-interpolated-first value explicitly and asserts the new helper does not
+  equal it; the independent reviewer re-derived both orderings outside the
+  harness and measured a real one-ULP difference, so the assertion cannot pass
+  vacuously.
+* **The year comparison is two arms through one scorer.**  The before column
+  was re-scored this round from the certified carried arm with the same
+  committed scorer, the same NEMO restarts and the same eight days as the
+  after column, so the cross-lane agreement before and disagreement after is
+  a diff and not a protocol difference.
+* **The old pin fails against the new year** — 344 of 360 snapshots differ —
+  so a re-pin would not have been vacuous had the numbers justified one.
 
 ## Independent review
 
+One fresh `code-reviewer` subagent, no context from this round, on the diff
+only.  Verdict **APPROVE**, with two non-blocking notes, both recorded here
+because they are real:
+
+1. The sibling helper floors its stretch at `1e-6` as a legoESM-only safety
+   net and the new one does not.  Inert on GYRE's closed box (no wetting and
+   drying) and arguably more faithful to the Fortran, but it is a latent
+   inconsistency between two helpers feeding the same tracer-weight tuple.
+2. The companion `r3u`/`r3v` stage-one ratios are NOT transcribed and still
+   interpolate the free surface first.  The adjacent code comment says the
+   vector-invariant GYRE arm does not consume those factors, so this is
+   plausibly inert on this lane, but the commit message did not say so.
+
+It re-derived the association against the compiled source (including that
+NEMO's `r1_3`/`r2_3` are divisions, `stprk3_stg.f90:53-54`), confirmed the
+single production caller and the three untouched weights, and ran the unit
+battery itself: **32 passed in 1754.39s**, exit 0.
+
+Both notes are carried into OPEN rather than acted on, because this round
+lands no production change.
+
 ## Choices made this round
 
-## OPEN
+| choice | ASKED / UNASKED |
+|---|---|
+| Take only the two model hunks and the unit test, refuse the five ORCA2-lane artefacts | the round order named exactly this |
+| HOLD rather than land, because the year numbers differ | the round order's own stop condition |
+| Revert the citation re-anchor along with the model hunks | mechanical; the re-anchor exists only because the hunks shift those files |
+| Add the production GYRE build to the citation map | required so this receipt's own citation is audited rather than unmapped; additive, no existing entry or check changes |
+| Compare the ladder against round 201's FULL certified report rather than the 70-row trajectory-only subset | like-for-like; the trajectory-only arm is kept as evidence |
+| Re-score the before arm this round instead of quoting round 191's three days | controlled comparison; it is what makes the cross-lane diff readable |
+
+**UNASKED list: empty.**  No default, scheme, bound, threshold, deck value,
+card line or carried state was changed, and production code is byte-identical
+to the round-201 tip.
+
+## OPEN, in order
+
+1. **Settle the year divergence with one measurement, not an argument.**  Run a
+   second independent 360-day member on this tip with the held patch applied.
+   Identical numbers refute run-to-run nondeterminism and leave the tree
+   difference between this lane and ORCA2's merged tree; different numbers
+   settle it the other way.  About 25 minutes, no NEMO run.
+2. **If it is the tree difference**, diff this tip against the tree ORCA2
+   round 102 measured on and name the statement that is inert on the old GYRE
+   trajectory and not on the new one.  Rounds 198 and 199 both landed shared-path
+   statements and both proved GYRE byte-identical BEFORE this change, which is
+   the obvious place to look and not yet a claim.
+3. **Then re-run this round's step 3** — register the moved year rows and
+   re-pin the certified GYRE numbers and digests — against whichever column
+   survives.
+4. The reviewer's two notes: the missing `1e-6` floor in the new helper, and
+   the untranscribed `r3u`/`r3v` stage-one ratios
+   (`GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:160-179` covers all three).
+
+## UNVERIFIED
+
+* Why the two lanes' years part company from day 120 is **not measured**; both
+  candidate explanations are named above and neither is confirmed.
+* The day-gap scorer was run for eight days only, the days NEMO has restarts
+  for; no claim is made about any other day.
+* The focused unit battery was run by the independent reviewer on the applied
+  patch, not on this landing tree, which carries no model change.
