@@ -12,8 +12,17 @@ streams. They cannot determine whether rank 1 crosses a boundary first and do
 not meet the self-describing-record rule. A committed, preflight-clean
 acquisition now requests one kt=1 substep stream per rank and proves observer
 passivity against all twenty admitted kt=1..10 restart shards. No `packages/`
-file, selector, configuration choice, stabilizer, carried state, threshold,
-sea-ice field, or `unmeasured_features` entry changes.
+file, stabilizer, carried state, threshold, sea-ice field, or
+`unmeasured_features` entry changes.
+
+Decision 83 arrived after preregistration and is recorded as a loud amendment,
+not folded into the original predictions. Its authorized namelist-only patch
+keeps `nn_havtb=0`, changes the three cited-inert spellings `ln_spc_dyn`,
+`ln_sssr_bnd`, and `nn_chldta` to rung-1 values, and removes six explicit
+inactive `ln_zdf*` false assignments so the reference namelist supplies the
+same false values. The target namelist is SHA-256 pinned. Its rerun must keep
+all twenty terminal restarts byte-identical to the pre-harmonization round-93
+record; otherwise the entire acquisition refuses.
 
 ## Why the existing record stops
 
@@ -54,11 +63,12 @@ domain exactly once.
 
 ## Controls and preflight
 
-The launcher pins the round-93 source, binary, cpp keys, deck manifest and
-input manifest by SHA-256; refuses a dirty or uncommitted producer; proves the
-patch removes zero NEMO source lines; applies at fuzz zero; preprocesses and
-compiles both the writer and patched `dynspg_ts`; refuses existing target names;
-and never invokes NEMO without `--run`.
+The launcher pins the round-93 source, binary, cpp keys, source namelist, deck
+manifest and input manifest by SHA-256; refuses a dirty or uncommitted
+producer; proves the source patch removes zero NEMO lines; applies both source
+and Decision-83 deck patches at fuzz zero; pins the harmonized namelist digest;
+preprocesses and compiles both the writer and patched `dynspg_ts`; refuses
+existing target names; and never invokes NEMO without `--run`.
 
 Preflight reports:
 

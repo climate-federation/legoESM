@@ -31,6 +31,8 @@ readonly TARGET_RUN=$EVIDENCE/orca2_rung0_spgts_ranked_10step_np2
 readonly SOURCE_DYNSPG_SHA=c1542a517a40627aeea099c0955728cda85eb49b3ec5aa9d98068f371dbcb74c
 readonly SOURCE_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
 readonly SOURCE_BINARY_SHA=1c8c4a2df513e9b035889c9861571639c94a7161d46a05e2d8e4d12959c21809
+readonly SOURCE_NML_SHA=d25c69958aeb7d4dffeeab6b08c89f6b314dd7c6d130ed94acfee7cb90643c2c
+readonly HARMONIZED_NML_SHA=5192355842d9233d8356ab87b4ff8b65eac539e66dc135f77a07e26451d360e8
 readonly DECK_MANIFEST_SHA=92f2a73eeb3b9989b6f390519e3f0cab900b122194259f2988cad672e1819677
 readonly INPUT_MANIFEST_SHA=395ae3e2dad969bc7ef5c94e20f5f441875e17d8a87b73407d9cab5e0c3a2b51
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
@@ -39,6 +41,7 @@ readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly PATCH=$here/dynspg_ts_round95.patch
+readonly DECISION83_PATCH=$here/namelist_rung0_decision83.patch
 readonly WRITER=$here/l4_r95_spgts_frames.F90
 readonly GATE=$here/check_record.py
 readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round95.md
@@ -59,7 +62,7 @@ readonly COMMIT=$(git rev-parse HEAD)
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
-for path in "$0" "$PATCH" "$WRITER" "$GATE" "$PREREG"; do
+for path in "$0" "$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG"; do
   git ls-files --error-unmatch "${path#"$REPO"/}" >/dev/null || {
     printf 'REFUSE: acquisition artifact is not committed: %s\n' "$path" >&2; exit 64;
   }
@@ -73,6 +76,7 @@ pin "$SOURCE_DYNSPG_SHA" "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" 'source dynspg_ts'
 pin "$SOURCE_CPP_SHA" "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" 'source cpp keys'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
+pin "$SOURCE_NML_SHA" "$SOURCE_RUN/namelist_cfg" 'source rung-0 namelist'
 pin "$DECK_MANIFEST_SHA" "$SOURCE_RUN/deck_files.sha256" 'deck manifest'
 pin "$INPUT_MANIFEST_SHA" "$SOURCE_RUN/input_files.sha256" 'input manifest'
 (cd "$SOURCE_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
@@ -91,7 +95,10 @@ dry=$(mktemp -d /tmp/orca2-r95-spgts.XXXXXX)
 printf 'temporary source proof directory (retained): %s\n' "$dry"
 cp "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$dry/dynspg_ts.F90"
 cp "$WRITER" "$dry/l4_r95_spgts_frames.F90"
+cp "$SOURCE_RUN/namelist_cfg" "$dry/namelist_cfg"
 patch -s --fuzz=0 -p0 -d "$dry" <"$PATCH"
+patch -s --fuzz=0 -p0 -d "$dry" <"$DECISION83_PATCH"
+pin "$HARMONIZED_NML_SHA" "$dry/namelist_cfg" 'Decision-83 rung-0 namelist'
 
 check_layout() {
   local source=$1
@@ -177,6 +184,8 @@ if [[ "$MODE" == --admit-existing ]]; then
   check_layout "$TARGET_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90" || {
     printf 'REFUSE: compiled writer layout moved\n' >&2; exit 68;
   }
+  pin "$HARMONIZED_NML_SHA" "$TARGET_RUN/namelist_cfg" 'existing Decision-83 namelist'
+  (cd "$TARGET_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
   admit
   exit 0
 fi
@@ -191,12 +200,15 @@ done
 
 manifest=$(mktemp -d /tmp/orca2-r95-spgts-manifest.XXXXXX)
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
-sha256sum "$PATCH" "$WRITER" "$GATE" "$PREREG" "$SOURCE_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90" >"$manifest/toolchain.sha256"
+sha256sum "$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG" \
+  "$SOURCE_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90" >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/EXP00" <"$DECISION83_PATCH"
+pin "$HARMONIZED_NML_SHA" "$TARGET_ROOT/EXP00/namelist_cfg" 'built Decision-83 namelist'
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l4_r95_spgts_frames.F90"
 patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
@@ -213,7 +225,12 @@ if nm -D "$BINARY" | grep -q '_ZGV'; then printf 'REFUSE: vector-math symbol pre
 mkdir "$TARGET_RUN"
 while read -r _ name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/deck_files.sha256"
 while read -r _ name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/input_files.sha256"
-cp "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" "$TARGET_RUN/"
+cp "$SOURCE_RUN/deck_files.sha256" "$TARGET_RUN/source_deck_files.sha256"
+cp "$SOURCE_RUN/input_files.sha256" "$TARGET_RUN/"
+(cd "$TARGET_RUN" && sha256sum -c source_deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
+patch -s --fuzz=0 -p0 -d "$TARGET_RUN" <"$DECISION83_PATCH"
+pin "$HARMONIZED_NML_SHA" "$TARGET_RUN/namelist_cfg" 'run Decision-83 namelist'
+(cd "$TARGET_RUN" && while read -r _ name; do sha256sum "$name"; done <source_deck_files.sha256 >deck_files.sha256)
 cp "$BINARY" "$TARGET_RUN/nemo"
 cp "$TARGET_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90" "$TARGET_RUN/compiled_dynspg_ts.f90"
 cp "$manifest"/* "$TARGET_RUN/"

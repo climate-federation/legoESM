@@ -52,3 +52,19 @@ ladder plus every shared-card gate. The held round-94 reduction arm is not
 mixed into this record. No selector, configuration choice, stabilizer,
 carried-state convention, sea-ice field, threshold, or
 `unmeasured_features` entry changes.
+
+## Post-preregistration amendment — Decision 83
+
+After the acquisition was first committed, the compact campaign state recorded
+user Decision 83: rung 0 keeps `nn_havtb=0`, but its cited-inert
+`ln_spc_dyn`, `ln_sssr_bnd`, `nn_chldta`, and explicit inactive `ln_zdf*`
+spellings must be harmonized to rung 1, with the rung-0 record re-run and
+proved byte-identical. This is new authority, not a changed prediction.
+
+The launcher therefore applies a separate committed namelist-only patch and
+requires the harmonized instrumented run's twenty terminal restarts to remain
+byte-identical to the admitted pre-harmonization round-93 run. A moved restart
+refutes either inertness or observer passivity and withholds the record; it is
+not explained away. The dynamics source, forcing, timestep, initial state,
+`nn_havtb`, module switches, and every scientific prediction above are
+unchanged.
