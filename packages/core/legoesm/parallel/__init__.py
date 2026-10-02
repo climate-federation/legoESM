@@ -137,8 +137,6 @@ from legoesm.parallel.mesh import (
     create_voronoi_device_mesh,
     get_active_config,
     replicate_pytree,
-    shard_latlon,
-    shard_levels,
     shard_pytree,
 )
 from legoesm.parallel.profiling import (
@@ -210,8 +208,6 @@ __all__ = [
     "get_active_config",
     "replicate_pytree",
     "shard_pytree",
-    "shard_latlon",
-    "shard_levels",
     # Voronoi mesh decomposition
     "HaloCommSchedule",
     "VoronoiPartition",
