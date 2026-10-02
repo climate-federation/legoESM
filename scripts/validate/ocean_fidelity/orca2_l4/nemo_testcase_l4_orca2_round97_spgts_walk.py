@@ -78,6 +78,21 @@ def _payload(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     return metadata, values
 
 
+def _owned_block(
+    value: np.ndarray, ntsi: int, ntsj: int, ntei: int, ntej: int,
+) -> np.ndarray:
+    """Return a latitude-major owned slab from haloed or owned-only data."""
+
+    owned_shape = (ntei - ntsi + 1, ntej - ntsj + 1)
+    haloed_shape = (owned_shape[0] + 4, owned_shape[1] + 4)
+    if value.shape == owned_shape:
+        return value.T
+    require(value.shape == haloed_shape,
+            f"self-described local shape {value.shape} is neither owned "
+            f"{owned_shape} nor two-cell-haloed {haloed_shape}")
+    return value[ntsi - 1:ntei, ntsj - 1:ntej].T
+
+
 def assemble_record(root: Path, *, plant: str = "none") -> tuple[dict, dict]:
     """Assemble every two-dimensional group over the exact owned domain."""
 
@@ -106,9 +121,7 @@ def assemble_record(root: Path, *, plant: str = "none") -> tuple[dict, dict]:
                 else:
                     vectors[name] = value
                 continue
-            require(value.shape == (94, 152),
-                    f"{path.name}: {name} local shape moved")
-            block = value[ntsi - 1:ntei, ntsj - 1:ntej].T
+            block = _owned_block(value, ntsi, ntsj, ntei, ntej)
             assembled.setdefault(name, np.empty((148, 180), dtype=np.float64))[
                 j0:j1, i0:i1
             ] = block

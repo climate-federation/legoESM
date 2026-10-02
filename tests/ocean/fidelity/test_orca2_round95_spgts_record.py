@@ -110,3 +110,15 @@ def test_round97_walk_first_nonbit_uses_compiled_order() -> None:
     assert walk._first_nonbit(rows) == {
         "boundary": "transport_u", "bit_exact": False, "differing_cells": 1,
     }
+
+
+def test_round97_walk_accepts_owned_only_and_haloed_groups() -> None:
+    owned = np.arange(6, dtype=np.float64).reshape(3, 2)
+    haloed = np.zeros((7, 6), dtype=np.float64)
+    haloed[2:5, 2:4] = owned
+    np.testing.assert_array_equal(
+        walk._owned_block(owned, 3, 3, 5, 4), owned.T)
+    np.testing.assert_array_equal(
+        walk._owned_block(haloed, 3, 3, 5, 4), owned.T)
+    with pytest.raises(walk.GateError, match="neither owned"):
+        walk._owned_block(np.zeros((4, 2)), 3, 3, 5, 4)
