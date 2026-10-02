@@ -360,8 +360,12 @@ class MPASOceanConfig(NamedTuple):
     # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
     barotropic_implicit_pcg_fixed_iters: int = 15
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    # "single_reduce" (Chronopoulos-Gear, one batched allreduce per
-    # iteration instead of two) since 2026-09-26, owner-approved after two
+    # "standard" (two allreduces per iteration) is the default since
+    # 2026-10-02 (owner decision): it is the recurrence gpoly x 15 was
+    # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
+    # GPUs); gpoly x 15 with "single_reduce" has not been measured.
+    # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
+    # iteration instead of two) was the default 2026-09-26..2026-10-02, owner-approved after two
     # checks: convergence on the REAL captured systems is identical (s7 L40,
     # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
     # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
@@ -381,7 +385,7 @@ class MPASOceanConfig(NamedTuple):
     # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
     # with per-iteration exchange 92.7 / 165.3.  Not the default: owner
     # decision 2026-10-02 keeps gpoly x 15 (no head-to-head measurement).
-    barotropic_implicit_pcg_variant: str = "single_reduce"
+    barotropic_implicit_pcg_variant: str = "standard"
     # Distributed-only preconditioner for the fixed-iteration PCG
     # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
     # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series

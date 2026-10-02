@@ -376,13 +376,14 @@ _GPOLY = dict(barotropic_solver="implicit_cn", tracer_advection="superbee",
 _GPOLY_DT = 3600.0
 
 
-def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
+def _gpoly_pair(n_dev, sweeps=4, variant="standard", **spmd_kw):
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
     from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
     # level 4 (2562 cells): on the ico2 fixture two rings already reach ~85%
     # of the mesh, so a missing ring could not show.
     mesh, n_real, model, state, forcing = _build(
-        dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps), n_dev=n_dev,
+        dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps,
+             barotropic_implicit_pcg_variant=variant), n_dev=n_dev,
         level=4)
     spmd_kw.setdefault("halo_depth", halo_depth_for_config(model.config))
     try:
@@ -397,10 +398,13 @@ def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
     return _compare(ref, got, n_real, mesh), layout
 
 
+@pytest.mark.parametrize("variant", ["standard", "single_reduce"])
 @pytest.mark.parametrize("n_dev", [3, 4])
-def test_gpoly_spmd_partition_independent_at_small_m(n_dev):
+def test_gpoly_spmd_partition_independent_at_small_m(n_dev, variant):
+    """gpoly x M with the default "standard" recurrence (owner decision
+    2026-10-02) and the opt-in "single_reduce": 3 or 4 devices vs 2."""
     _need_devices(n_dev)
-    worst, layout = _gpoly_pair(n_dev)
+    worst, layout = _gpoly_pair(n_dev, variant=variant)
     assert layout.halo_depth == 2      # K=4 fits the historical depth
     bad = {k: v for k, v in worst.items() if v[0] > _ATOL[k]}
     assert not bad, (bad, worst)
@@ -464,9 +468,9 @@ def test_poly_unchanged_by_deeper_halo():
 
 
 def test_gpoly_sharded_gradient_matches_finite_difference():
-    """Reverse mode through the sharded fixed-M gpoly solve (the SPMD default
-    since 2026-10-02): d/ds sum(eta^2) after one step from s * eta0 vs a
-    central difference.  Padding edges (dvEdge = 0) made this NaN before the
+    """Reverse mode through the sharded fixed-M gpoly solve with the standard
+    recurrence (the SPMD default since 2026-10-02): d/ds sum(eta^2) after one
+    step from s * eta0 vs a central difference.  Padding edges (dvEdge = 0) made this NaN before the
     del2 divisor guard."""
     _need_devices(N_DEV)
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh

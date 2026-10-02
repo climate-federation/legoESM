@@ -818,9 +818,9 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        # single_reduce + gpoly x 15 (owner decision 2026-10-02; deep-halo
-        # Jacobi is opt-in); the lat-lon default stays standard.
-        assert cfg.barotropic_implicit_pcg_variant == "single_reduce"
+        # standard + gpoly x 15 (owner decision 2026-10-02: the recurrence
+        # gpoly x 15 was measured with; deep-halo Jacobi is opt-in).
+        assert cfg.barotropic_implicit_pcg_variant == "standard"
         # gpoly at 15 since 2026-10-02 (owner decision; A/B in mpas_config).
         assert cfg.barotropic_implicit_pcg_fixed_iters == 15
         assert cfg.barotropic_implicit_pcg_precond == "gpoly"

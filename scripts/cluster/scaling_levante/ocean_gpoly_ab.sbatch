@@ -22,7 +22,7 @@
 # a default. B vs A prices the extra local sweeps on the halo.
 #   sbatch -N 8  ... (d8, d32)     sbatch -N 32 ... (adds d128)
 # Submit from the worktree:  sbatch --export=ALL,LEGOESM_REPO=$PWD -N <n> <this>
-# PCG_VARIANT=standard|single_reduce (default single_reduce = production).
+# PCG_VARIANT=standard|single_reduce (default single_reduce; production is standard since 2026-10-02).
 # ===========================================================================
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
