@@ -174,6 +174,9 @@ def measure(
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
 
     require(plant in PLANTS, f"unknown plant {plant}")
     stamp = worktree_stamp()
@@ -199,27 +202,44 @@ def measure(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True),
     )
-    live_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True),
-    )
     passive_trace = jax.device_get(trace_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    passive_live = jax.device_get(live_model.step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    passive_slow = passive_trace.slow_forcing
+    substep_dt = float(oracle["i000_entry_sc"][0])
+    substep_count = int(oracle["i000_entry_sc"][2])
+
+    def direct_solver(trace: bool):
+        return jax.jit(lambda seed, f_eta, f_u, f_v: (
+            barotropic_substeps_latlon_cgrid(
+                seed, substep_dt, substep_count,
+                card.recipe.grid, card.recipe.z_coord,
+                card.recipe.model_config,
+                F_slow_eta=f_eta, F_slow_u=f_u, F_slow_v=f_v,
+                add_barotropic_coriolis=True,
+                u_now=seed.u.data, v_now=seed.v.data,
+                _nemo_substep_trace_test_hook=trace,
+            )
+        ))(state, *passive_slow)
+
+    live_state, live_transport = jax.device_get(direct_solver(False))
+    traced_state, traced_transport, _ = jax.device_get(direct_solver(True))
     trace_values = {
-        "ssh": np.asarray(passive_trace.state_after_barotropic.eta.data),
-        "u": np.asarray(passive_trace.state_after_barotropic.uu_b.data),
-        "v": np.asarray(passive_trace.state_after_barotropic.vv_b.data),
-        "transport_u": np.asarray(passive_trace.transport_average[0]),
-        "transport_v": np.asarray(passive_trace.transport_average[1]),
+        "ssh": np.asarray(traced_state.eta.data),
+        "u_3d": np.asarray(traced_state.u.data),
+        "v_3d": np.asarray(traced_state.v.data),
+        "u_barotropic": np.asarray(traced_state.uu_b.data),
+        "v_barotropic": np.asarray(traced_state.vv_b.data),
+        "transport_u": np.asarray(traced_transport[0]),
+        "transport_v": np.asarray(traced_transport[1]),
     }
     live_values = {
-        "ssh": np.asarray(passive_live.barotropic_targets[4]),
-        "u": np.asarray(passive_live.barotropic_targets[0]),
-        "v": np.asarray(passive_live.barotropic_targets[1]),
-        "transport_u": np.asarray(passive_live.barotropic_targets[2]),
-        "transport_v": np.asarray(passive_live.barotropic_targets[3]),
+        "ssh": np.asarray(live_state.eta.data),
+        "u_3d": np.asarray(live_state.u.data),
+        "v_3d": np.asarray(live_state.v.data),
+        "u_barotropic": np.asarray(live_state.uu_b.data),
+        "v_barotropic": np.asarray(live_state.vv_b.data),
+        "transport_u": np.asarray(live_transport[0]),
+        "transport_v": np.asarray(live_transport[1]),
     }
     if plant == "trace-bit":
         trace_values["ssh"] = np.array(trace_values["ssh"], copy=True)
