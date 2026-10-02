@@ -1258,9 +1258,9 @@ CITATION_MAP = {
     # --- ORCA2 round 106: admitted live EEN accumulator/scale producer ---
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1231-1244': [
         'zpvo_nw = ff_f(ji-1,jj  )',
-        'ffu_nw(ji,jj) = ffu_nw(ji,jj) +', 14],
+        ('ffu_nw(ji,jj) = ffu_nw(ji,jj) +', 1), 14],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1277-1278': [
-        'ffv_nw(ji,jj) = ffv_nw(ji,jj) +',
+        ('ffv_nw(ji,jj) = ffv_nw(ji,jj) +', 1),
         'ffv_ne(ji,jj) = ffv_ne(ji,jj) +', 2],
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1288-1289': [
         'ffv_nw(ji,jj) = r1_12 * r1_e2v',
