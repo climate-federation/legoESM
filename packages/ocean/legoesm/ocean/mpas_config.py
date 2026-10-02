@@ -307,6 +307,7 @@ class MPASOceanConfig(NamedTuple):
     # with one batched allreduce per iteration — validated at solver entry,
     # ValueError on unknown).
     #
+    # History (superseded 2026-10-02 by gpoly@15, see the end of this block):
     # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
     # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
     # Jacobi at 30, same residual).  The Jacobi history that set 30:
@@ -366,8 +367,9 @@ class MPASOceanConfig(NamedTuple):
     # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
     # GPU (NCCL) was not re-measured with it; "standard" stays selectable.
     barotropic_implicit_pcg_variant: str = "single_reduce"
-    # Distributed-only preconditioner for the fixed-iteration PCG.
-    # "jacobi" (default) or "poly": a communication-free Neumann-series
+    # Distributed-only preconditioner for the fixed-iteration PCG
+    # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
+    # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no
     # halo exchange, so it costs nothing in ppermute rounds and buys
     # iterations back).  Measured on the real subdivision-9 systems,
