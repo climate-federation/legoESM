@@ -1,0 +1,35 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 4,
+  "label": "ORCA2 ocean deck with non-penetrative surface shortwave and no higher hierarchy modules",
+  "module_removed_from_upper_rung": "three-band chlorophyll shortwave penetration",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung5/record_absent_v2",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "build": {
+    "source_configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "recorder_configuration": "ORCA2_ORCA1ICE_OMIP_L4_HIER_R7ABSENT",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "cee66aec4a9a9c2b85e755af0250c9b27cccef6ed7333b454a742af0692bc9ec",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "81304be81526980fb9f80549fdfd02c20df293b7a1a0725e94ef9b7e25c88c72",
+    "compiled_traqsr_sha256": "e35de18655671e28f806c42663330efc552ab838d417438beec4142e6bfd4493",
+    "compiled_stprk3_stg_sha256": "ec48b5d3cfc5637b0f3b4af49f3275735250078e0819b6ea48db31cae2848044",
+    "compiled_trasbc_sha256": "906d5479e5e3a1dc9dd74a50a58ba395a0d007b31a1c51261ae0dde6acd66441",
+    "compiled_sbcssm_sha256": "f0c78b59ea35a4987c0a12e782355e21ca03828b733345807a918804431f2fe0",
+    "compiled_sbcmod_sha256": "f2ce40cd468c056e3b39ccaa74cdf7b76fd3d477ab6aaa08b0bf6d18e807c52b",
+    "namelist_ref_sha256": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "96796ce98339c744f2d488cc8bbc962023ca769877de82a1ee7ee7e579b0a14c",
+    "execution_namelist_cfg_sha256": "0e84726416b62e1a4e15b94b4e529af4816a7053a58ef15996d53f45794bbf6b",
+    "namelist_ice_cfg_sha256": "2f3d69f0e4759142d23490b5663c291e18e3ebb0901d570bcbae69aadcaf4872"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}
