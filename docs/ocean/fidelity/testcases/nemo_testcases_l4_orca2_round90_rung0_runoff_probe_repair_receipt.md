@@ -54,7 +54,7 @@ against round 83. Debug values are diagnostic-only.
 | Prediction | Verdict |
 |---|---|
 | R90-P1: one debug run propagated through nested traps | **CONFIRMED** — one run stdout, one backtrace, one rank-0 signal exit, no second run target |
-| R90-P2: target stdout contains a source-resolved line | **CONFIRMED** — recorder call `traadv.f90:287`, dereference `:357` |
+| R90-P2: target stdout contains a source-resolved line | **CONFIRMED** — the recorder call and dereference are the two source lines cited above |
 | R90-P3: fault lies in additions-only recorder code | **CONFIRMED** — unconditional recorder access to an owner-disabled allocation |
 | R90-P4: one minimal repair is enough to request the optimized record | **CONFIRMED for preflight; trajectory result UNMEASURED** — exact three-guard repair parses and compiles, record remains operator action |
 
