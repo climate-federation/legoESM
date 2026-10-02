@@ -48,7 +48,6 @@ from legoesm.land.canopy.energy_balance import (
     leaf_energy_balance_pm,
     saturation_specific_humidity,
     soil_energy_balance_bt,
-    soil_energy_balance_pm,
 )
 from legoesm.land.canopy.photosynthesis import photosynthesis
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
@@ -275,18 +274,12 @@ def _canopy_residual(
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
-    if LE_module == "BT":
-        _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
-    else:
-        _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
+    # PM and BT coincide at the soil level (Ts prescribed), so one helper serves both.
+    _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
+        Ts, Tc, q_s, q_c,
+        b.lam, b.rhoa, b.Cp,
+        rah_below, raw_soil_evap, b.fStress_soil,
+        b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
@@ -468,18 +461,11 @@ def canopy_forward(
     LE_wet_Sh = _le_wet(LE_Sh, gs_Sh, Rb_Sh)
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
-    if LE_module == "BT":
-        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
-    else:
-        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
+    Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
+        Ts, Tc, q_s, q_c,
+        b.lam, b.rhoa, b.Cp,
+        rah_below, raw_soil_evap, b.fStress_soil,
+        b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
