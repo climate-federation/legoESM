@@ -112,9 +112,16 @@ invoking NEMO.
 
 ## Validation, review, and scope
 
-- Focused hierarchy rounds 1 through 10 plus citation controls: **PENDING**.
-- Receipt and cumulative citation gates: **PENDING**.
-- The one allowed `tests/ocean/fidelity -n 12` battery: **PENDING**.
+- Focused hierarchy rounds 1 through 10 plus citation controls: **106 passed**.
+- The receipt citation gate passes with three mapped citations, zero failures,
+  and zero unmapped citations; its shifted-line plant fires.  The cumulative
+  default-receipt gate passes with 274 citations and zero failures or unmapped
+  citations.
+- The one allowed `tests/ocean/fidelity -n 12` battery selected 2,266 tests,
+  reached 99%, and was interrupted after the documented late-suite no-output
+  stall.  The two visible failures are known pre-existing reds: the worktree-
+  stamp ratchet and stale GYRE round-51 trace assertion.  No second broad
+  battery ran.
 - Ruff, Python compilation, shell syntax, and diff whitespace: **PASS**.
 - The required separate `codex exec --sandbox read-only` review failed before
   reading the diff: `failed to initialize in-process app-server client:
