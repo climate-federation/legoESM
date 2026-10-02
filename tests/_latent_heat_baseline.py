@@ -42,7 +42,7 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/ml_emulator.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py': 6,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/p3.py': 3,
-    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/pdf_condensation.py': 1,
+    'packages/atmosphere/legoesm/atmosphere/_future/pdf_condensation.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/box_model.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/column.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/condensation.py': 2,
