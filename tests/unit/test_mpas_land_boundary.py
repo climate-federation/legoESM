@@ -457,6 +457,13 @@ def test_blend_land_stress_pure_helper():
     np.testing.assert_allclose([bx[2], by[2]], [-0.03, -0.04], rtol=1e-12)
     # ocean column untouched
     np.testing.assert_array_equal([bx[3], by[3]], [-0.03, -0.04])
+    # non-finite land magnitude -> bulk on land, untouched (finite) on ocean
+    for bad in (jnp.inf, jnp.nan):
+        ix, iy = blend_land_surface_stress(
+            tx[:2], ty[:2], jnp.array([bad, bad]), u[:2], v[:2],
+            jnp.array([1.0, 0.0]))
+        np.testing.assert_allclose(np.asarray(ix), [-0.03, -0.03], rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(iy), [-0.04, -0.04], rtol=1e-12)
     # calm air -> no direction, no stress (finite)
     np.testing.assert_array_equal([bx[4], by[4]], [0.0, 0.0])
     # linear in the land fraction

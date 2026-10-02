@@ -289,17 +289,18 @@ def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
     along the CURRENT lowest-level wind, opposing it, in the bulk convention;
     the land magnitude may be up to one land step old.
 
-    A column whose land magnitude is not positive was HELD by the land step
-    (its response is zeroed) or has not been solved yet; it keeps the bulk
-    stress rather than receiving no drag at all.
+    A column whose land magnitude is not positive and finite was HELD by the
+    land step (its response is zeroed), has not been solved yet, or failed; it
+    keeps the bulk stress rather than receiving no drag at all.
 
     Returns the blended ``(tau_x, tau_y)``; ``f_land = 0`` returns the bulk
     stress unchanged.
     """
     inv_speed = 1.0 / jnp.sqrt(u * u + v * v + _WIND_DIR_FLOOR_MS ** 2)
-    have_land = tau_land_mag > 0.0
-    tlx = jnp.where(have_land, -tau_land_mag * u * inv_speed, tau_x)
-    tly = jnp.where(have_land, -tau_land_mag * v * inv_speed, tau_y)
+    have_land = jnp.isfinite(tau_land_mag) & (tau_land_mag > 0.0)
+    mag = jnp.where(have_land, tau_land_mag, 0.0)   # no inf*0 at f_land = 0
+    tlx = jnp.where(have_land, -mag * u * inv_speed, tau_x)
+    tly = jnp.where(have_land, -mag * v * inv_speed, tau_y)
     return ((1.0 - f_land) * tau_x + f_land * tlx,
             (1.0 - f_land) * tau_y + f_land * tly)
 
@@ -318,7 +319,7 @@ def land_stress_into_surface_flux(surface_flux, tau_land_mag, u, v, f_land,
         surface_flux[0], surface_flux[1], tau_land_mag, u, v, f_land)
     rebuilt = prescribed_into_surface_flux(
         surface_flux, rho_sfc, tau_x=tx, tau_y=ty)
-    used = (tau_land_mag > 0.0) & (f_land > 0.0)
+    used = jnp.isfinite(tau_land_mag) & (tau_land_mag > 0.0) & (f_land > 0.0)
     return rebuilt[:4] + (jnp.where(used, rebuilt[4], surface_flux[4]),)
 
 
