@@ -321,3 +321,4 @@ def mixed_precision_policy(config: HardwareConfig) -> MixedPrecisionPolicy:
         compute_dtype=jnp.float32,
         param_dtype=jnp.float32,
         output_dtype=jnp.float32,
+    )
