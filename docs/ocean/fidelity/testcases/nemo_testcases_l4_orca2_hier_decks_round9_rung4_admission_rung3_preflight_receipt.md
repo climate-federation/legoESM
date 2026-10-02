@@ -127,9 +127,20 @@ per-run input manifest and its full payload is checked for fp64 exact zero.
 
 ## Gates, review, and scope
 
-- Rung-3 direct controls: **7 passed**; four preflight plants fire.
+- Focused hierarchy rounds 1 through 9 plus citation controls: **97 passed**.
+- The receipt citation gate passes with nine mapped citations, zero failures,
+  and zero unmapped citations; its rigid-shift plant fires (exit 1).  The
+  cumulative default-receipt gate passes with 274 citations and zero failures
+  or unmapped citations.
+- The one allowed `tests/ocean/fidelity -n 12` battery selected 2,257 tests,
+  reached 97% with this round's tests green, and was interrupted after the
+  known late-suite stall produced no output.  No second broad battery ran.
 - The committed launcher passes `bash -n`, stages the exact deck idempotently,
   and reports `ORCA2_HIERARCHY_RUNG3_PREFLIGHT_READY` without invoking NEMO.
+- The required separate `codex exec --sandbox read-only` review failed before
+  reading the diff: `failed to initialize in-process app-server client:
+  Read-only file system`.  Verdict: **independent review unavailable
+  in-sandbox**.
 - No file under `packages/` or `src/` changed.  GYRE is byte-identical by
   construction; its year gate was not rerun.
 - No NEMO source tree was modified.  The launcher reuses the admitted repaired
