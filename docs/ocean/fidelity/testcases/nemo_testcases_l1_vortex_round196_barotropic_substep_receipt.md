@@ -27,18 +27,18 @@ substep operands, and the statement could not be named.
 Inside `dyn_spg_ts` the sub-time-step loop runs `icycle` times
 (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:359`). Each pass
 executes, in this order: the AB3-AM4 mid-step extrapolation of the
-barotropic velocity (`dynspg_ts.f90:389`) and of the sea surface
-(`dynspg_ts.f90:401`); the mid-step face depths (`dynspg_ts.f90:414`); the
-mid-step transports (`dynspg_ts.f90:434`); the after-SSH
-(`dynspg_ts.f90:454`); the running transport sum (`dynspg_ts.f90:463`); the
-after-SSH at velocity points (`dynspg_ts.f90:478`); the half-step-back
-interpolation (`dynspg_ts.f90:489`, `dynspg_ts.f90:491`); the surface
-pressure gradient (`dynspg_ts.f90:498`); the barotropic Coriolis trend
-(`dynspg_ts.f90:503`); the explicit bottom stress (`dynspg_ts.f90:517`);
-the vector-form velocity update (`dynspg_ts.f90:535`); the face-depth
-update (`dynspg_ts.f90:581`); and the time-filter sums
-(`dynspg_ts.f90:628`). After the loop the sums are divided by the weight
-sums (`dynspg_ts.f90:648`) and the filtered quintuple is what the stages
+barotropic velocity (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:389`) and of the sea surface
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:401`); the mid-step face depths (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:414`); the
+mid-step transports (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:434`); the after-SSH
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:454`); the running transport sum (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:463`); the
+after-SSH at velocity points (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:478`); the half-step-back
+interpolation (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:489`, `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:491`); the surface
+pressure gradient (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:498`); the barotropic Coriolis trend
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:503`); the explicit bottom stress (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517`);
+the vector-form velocity update (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:535`); the face-depth
+update (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:581`); and the time-filter sums
+(`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:628`). After the loop the sums are divided by the weight
+sums (`VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:648`) and the filtered quintuple is what the stages
 consume.
 
 ## The record
@@ -173,7 +173,7 @@ itself is faithful and the growth is in a term it reads. That term is the
 **barotropic Coriolis trend**, formed at
 `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:503`
 (`CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )`; the explicit bottom
-stress at `dynspg_ts.f90:517` adds exactly nothing on this card — the
+stress at `VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517` adds exactly nothing on this card — the
 Coriolis and the post-stress trend rows are identical to the last bit at
 every substep). At the last substep it supplies `4.34e-09` of the
 `4.70e-09` injected per substep, 92% of it, against the surface-pressure
