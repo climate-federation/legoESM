@@ -168,6 +168,10 @@ FILES = {
         _ORCA2_R96SPG_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
         _ORCA2_R96SPG_COMPILED / "dynvor.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2_R96SPG_COMPILED / "domzgr.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R96SPG_COMPILED / "dommsk.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1248,6 +1252,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
         'CASE( np_EEN )',
         'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:621-631': [
+        'mbku(:,:) = MAX( NINT( zk(:,:) ), 1 )',
+        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )', 11],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:218-229': [
+        'IF (mbku(ji,jj)==1) umask(ji,jj,:) = 0._wp',
+        'IF ( MAXVAL(vmask(ji,jj,:))/=0._wp )', 12],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1369-1392': [
         'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
         ('END SUBROUTINE dyn_cor_2D', 2), 24],
