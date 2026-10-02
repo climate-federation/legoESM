@@ -1254,7 +1254,7 @@ CITATION_MAP = {
         'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:625,631': [
         'mbku(:,:) = MAX( NINT( zk(:,:) ), 1 )',
-        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )'],
+        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )', 2],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:224-225': [
         'IF (mbku(ji,jj)==1) umask(ji,jj,:) = 0._wp',
         'IF (mbkv(ji,jj)==1) vmask(ji,jj,:) = 0._wp', 2],
