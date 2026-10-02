@@ -420,8 +420,21 @@ def main() -> int:
             report = validate_record(args.record, expect_commit=args.expect_commit,
                                      plant=args.plant)
         report["worktree"] = worktree_stamp()
-    except (GateError, rung4.GateError, rung4.rung5_record.GateError,
-            rung4.rung5_deck.GateError, KeyError, OSError, TypeError, ValueError) as error:
+    except (
+        GateError,
+        rung4.GateError,
+        rung4.rung5_record.GateError,
+        rung4.rung5_deck.GateError,
+        rung4.rung5_deck.rung6.GateError,
+        rung4.rung5_deck.rung6.rung7.GateError,
+        rung4.rung5_deck.rung6.rung7.rung8.GateError,
+        rung4.rung5_deck.rung6.rung7.rung8.rung9.GateError,
+        rung4.rung5_deck.rung6.rung10.GateError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "FAIL"
         print(f"STATUS {marker}: {error}")
         return 1

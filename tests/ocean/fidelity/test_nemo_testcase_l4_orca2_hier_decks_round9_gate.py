@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -57,3 +58,34 @@ def test_runner_reuses_main_lane_zero_flux_schema_and_is_fail_closed():
     assert "variable[:] = 0.0" in runner
     assert "--admit-existing" in runner
     assert "sha256sum -c input_files.sha256" in runner
+
+
+def test_main_marks_inherited_terminal_gate_error_as_plant_fired(
+    monkeypatch, capsys
+):
+    inherited_error = (
+        gate.rung4.rung5_deck.rung6.rung7.rung8.rung9.GateError
+    )
+
+    def fail_record(*args, **kwargs):
+        raise inherited_error("planted inherited terminal failure")
+
+    monkeypatch.setattr(gate, "validate_record", fail_record)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--record",
+            "/nonexistent",
+            "--expect-commit",
+            "0" * 40,
+            "--plant",
+            "terminal-nonfinite",
+        ],
+    )
+
+    assert gate.main() == 1
+    assert capsys.readouterr().out == (
+        "STATUS PLANT-FIRED: planted inherited terminal failure\n"
+    )
