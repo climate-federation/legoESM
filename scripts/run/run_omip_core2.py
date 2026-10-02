@@ -1784,6 +1784,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
+                  nemo_een_coriolis=False,
                   lateral_side_bc=None, barotropic_coriolis=None,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
@@ -1928,6 +1929,17 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("tracer_advection", tracer_advection),
                               ("prescribed_flow", prescribed_flow),
                               ) if v is not None}
+    if nemo_een_coriolis:
+        # NEMO ORCA1 &namdyn_vor ln_dynvor_een: planetary f rides the EEN triad
+        # with the relative vorticity (een_total), which needs the Matsuno split
+        # OFF (explicit_ab2) or f is applied twice, and vor_een's face-width
+        # weighting (dynvor.F90:791-806). ponytail: vertex f = tripole f_v (v-face
+        # mean), exact where lat depends on j only; NEMO ff_f(gphif) north of the
+        # ORCA distortion is the upgrade if this goes to production.
+        _ovr.update(vorticity_scheme="een_total", coriolis_scheme="explicit_ab2",
+                    een_metric_weighting="nemo")
+        print("[setup] tripole Coriolis: NEMO EEN (een_total + explicit_ab2 + "
+              "nemo face-width weighting)")
     if pgf_scheme == "nemo_sco":
         # NOT a free choice, and the same shape as the msc_stabilize pairing
         # below: the PGF raises unless pgf_quadrature="nemo_trapezoid",
@@ -7019,6 +7031,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
     p.add_argument("--woa-s", type=str, default="data/woa18/woa18_decav_s00_01.nc")
+    p.add_argument("--nemo-een-coriolis", action="store_true",
+                   help="Tripole only: NEMO ln_dynvor_een Coriolis -- planetary f "
+                        "inside the EEN vorticity triad (vorticity_scheme=een_total, "
+                        "coriolis_scheme=explicit_ab2, NEMO face-width weighting). "
+                        "Off (default) keeps the 4-point-averaged Matsuno split.")
     p.add_argument("--ke-gradient-scheme", type=str, default=None,
                    choices=["centered", "hollingsworth"],
                    help="KE-gradient discretization for the vector-invariant "
@@ -8272,6 +8289,9 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    if args.nemo_een_coriolis and args.grid != "tripole":
+        raise SystemExit("--nemo-een-coriolis is wired on --grid tripole only "
+                         f"(got {args.grid!r}); it would be silently ignored.")
     _validate_omip_redi_selection(
         args.redi_coefficient, args.gm_slope_positions, args.gm_slope_scheme,
         args.gm_treguier, args.gm_kappa_min, args.no_gm_redi, args.redi_aht0,
@@ -8889,6 +8909,7 @@ def main() -> int:
             A_h_profile_file=args.A_h_profile_file,
             nemo_ldf_file=args.nemo_ldf_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
+            nemo_een_coriolis=args.nemo_een_coriolis,
             lateral_side_bc=args.lateral_side_bc,
             barotropic_coriolis=args.barotropic_coriolis,
             tke_kappah_min=args.tke_kappah_min,
