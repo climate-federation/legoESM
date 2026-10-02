@@ -129,8 +129,19 @@ The required separate read-only review failed before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Citation and full-suite results are recorded in the committed gate output and
-the final report for this round.
+The citation gate passes all 274 default citations and all seven citations in
+this receipt with zero failures and zero unmapped citations; shifting the new
+`stp2d` span makes it fail.
+
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,229 tests and
+reached 99%, then repeated the established silent-tail stall and was stopped
+after three empty 30-second waits. Its visible failures are unrelated
+pre-existing campaign ratchets: the worktree-stamp emitter census, the missing
+`hires_lane_surface` case-board row, SI3 scalar-math provenance, and the GYRE
+round-129 record's stale certified-step-gate digest. The last reproduces alone
+with `the certified phase-3 stepping gate moved after the members ran`. The
+round-92 focused tests pass 4/4, and the same four tests passed inside the full
+battery. There is no full-suite PASS claim.
 
 ## OPEN
 
