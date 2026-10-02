@@ -915,7 +915,7 @@ def aimip_scheme_keys_for(
 def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
     """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
 
-    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    Field-level refinement of the former class-level ownership rule: the
     class-level subtraction excluded EVERY spec parameter of a class the
     legacy route touches, which suppressed spec-only fields the legacy never
     writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of

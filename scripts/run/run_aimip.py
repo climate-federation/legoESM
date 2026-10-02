@@ -573,7 +573,7 @@ def _train_aimip_classical(
     # CANNOT. ``_splice_scheme_overrides`` runs AFTER the ``to_<x>_config``
     # methods, so a class both routes cover would be overwritten by the spec
     # value and the legacy leaf's gradient would silently go to zero — see
-    # ``aimip_legacy_owned_scheme_keys``.
+    # ``aimip_legacy_owned_fields``.
     _scheme_tier = cfg.get("aimip_trainable_schemes")
     if _scheme_tier:
         from legoesm.training.aimip_params import (

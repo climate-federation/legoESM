@@ -21,6 +21,7 @@ Usage: run_duo_stepper_modon.py --n 24 --dt 400 --days 60 --out m.npz
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 
 import numpy as np
@@ -28,11 +29,18 @@ import numpy as np
 
 def _git_sha() -> str:
     """Worktree HEAD sha (+ '-dirty') for artifact provenance."""
-    from legoesm.io.git_provenance import git_provenance
-    p = git_provenance(__file__)
-    if not p.commit:
+    try:
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[3]
+        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                             capture_output=True, text=True,
+                             check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status",
+                                "--porcelain"], capture_output=True,
+                               text=True, check=True).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except Exception:
         return "unknown"
-    return p.commit + ("-dirty" if p.dirty else "")
 
 
 def main():
