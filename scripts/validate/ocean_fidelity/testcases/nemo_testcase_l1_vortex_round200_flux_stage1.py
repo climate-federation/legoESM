@@ -85,7 +85,7 @@ def read_flux_stage_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
     parsed = checker.parse_record(path)
     require(parsed["stage"] == stage, f"{path}: parsed the wrong stage")
     raw = path.read_bytes()
-    offset = 16 + 4 * 15
+    offset = 16 + 4 * checker._FAMILIES["oracle_stage_flux_terms_kt"][1]
     out = {}
     for name, meta in parsed["groups"].items():
         offset += 32
@@ -221,6 +221,41 @@ def run(root: Path, *, plant: str | None = None,
         # pre-stage array is its own completed right-hand side.  The row is
         # reported, never used to name an owner.
         row["convention_sensitive"] = bool(convention_sensitive)
+        # WHERE the discrepancy lives, committed with the walk instead of
+        # computed in a throwaway probe: its spread over levels, whether it
+        # touches the two-cell rim, its worst size in units in the last place
+        # of its OWN cell, and -- for a three-dimensional row -- how much of
+        # it is the one depth-uniform number per column that the stage
+        # barotropic correction adds (stprk3_stg.f90:412-419) as against the
+        # part that varies with depth, which that correction cannot make.
+        bad = (candidate != reference) & active
+        idx = np.argwhere(bad)
+        structure = {"n_unequal": int(bad.sum()), "n_active": int(active.sum())}
+        if idx.size:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ulps = np.abs(delta[bad]) / np.spacing(np.abs(reference[bad]))
+            structure.update(
+                levels=(np.bincount(idx[:, -1],
+                                    minlength=reference.shape[-1]).tolist()
+                        if reference.ndim == 3 else []),
+                j_range=[int(idx[:, 0].min()), int(idx[:, 0].max())],
+                i_range=[int(idx[:, 1].min()), int(idx[:, 1].max())],
+                max_ulps_in_own_cell=float(np.nanmax(ulps)),
+                reference_magnitude=[float(np.abs(reference[bad]).min()),
+                                     float(np.abs(reference[bad]).max())],
+                on_two_cell_rim=int((
+                    (idx[:, 0] < 2) | (idx[:, 0] >= reference.shape[0] - 2)
+                    | (idx[:, 1] < 2) | (idx[:, 1] >= reference.shape[1] - 2)
+                ).sum()))
+        if reference.ndim == 3:
+            full = active.all(axis=-1)
+            if full.any():
+                cols = delta[full]
+                structure["max_abs_column_mean"] = float(
+                    np.max(np.abs(cols.mean(axis=-1))))
+                structure["max_abs_deviation_from_column_mean"] = float(
+                    np.max(np.abs(cols - cols.mean(axis=-1, keepdims=True))))
+        row["structure"] = structure
         rows.append(row)
         return row
 
@@ -286,7 +321,7 @@ def run(root: Path, *, plant: str | None = None,
         _row(f"out.{face}", groups[f"out_{face}"][..., :nlev],
              np.asarray(fields[face])[..., :nlev], masks[face],
              "stage-1 output after the barotropic correction "
-             "(stprk3_stg.F90:437-450)", plant == f"out.{face}")
+             "(stprk3_stg.f90:412-419)", plant == f"out.{face}")
 
     first = next((r for r in rows
                   if not r["bit_exact"] and not r["convention_sensitive"]),
@@ -312,6 +347,9 @@ def main(argv=None) -> int:
     parser.add_argument("--plant", choices=PLANTS,
                         help="perturb ONE scored candidate; the run MUST "
                              "report that row non-bit, or the seam is inert")
+    parser.add_argument("--clean-report", type=Path,
+                        help="a previously written unplanted report, so a "
+                             "plant run need not repeat it")
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -339,7 +377,24 @@ def main(argv=None) -> int:
             print(f"REFUSE: {len(planted)} planted rows, expected 1",
                   file=sys.stderr)
             return 2
-        visible = not planted[0]["bit_exact"]
+        # A row that is ALREADY non-bit reports VISIBLE whether or not the
+        # perturbation did anything, so the plant must be a DIFFERENCE
+        # against the unplanted run of the SAME row, never a status read.
+        clean = (json.loads(args.clean_report.read_text())
+                 if args.clean_report
+                 else run(args.oracle_dir, plant=None,
+                          allow_dirty=args.allow_dirty))
+        if clean.get("case") != report["case"] or clean.get("plant"):
+            print("REFUSE: --clean-report is not an unplanted report for "
+                  f"{report['case']}", file=sys.stderr)
+            return 2
+        before = {r["name"]: r["max_abs"] for r in clean["rows"]}
+        name = planted[0]["name"]
+        if name not in before:
+            print(f"REFUSE: the clean report has no row {name}",
+                  file=sys.stderr)
+            return 2
+        visible = planted[0]["max_abs"] != before[name]
         print(f"PLANT {args.plant} "
               f"{'VISIBLE' if visible else 'NOT VISIBLE'}")
         return 1 if visible else 0
