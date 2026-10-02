@@ -67,6 +67,8 @@ _ORCA2_R92RHS_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo")
 _ORCA2_R93SLOW_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo")
+_ORCA2_R96SPG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -162,6 +164,10 @@ FILES = {
         _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R93SLOW_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R96SPG_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_R96SPG_COMPILED / "dynvor.f90"),
     # Round 80 uses the compiled, instrumented branch that produced the
     # admitted per-step avt/avm record, rather than a nearby pristine deck.
     "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1191,6 +1197,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 97: admitted rung-0 split-explicit statement walk ---
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:580-666': [
+        '!     Compute Sea Level at step jit+1',
+        "CALL r95_spg_w2('cor_v', zv_trd)", 87],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1267': [
+        'CASE( np_EEN )',
+        ('END DO   ;   END DO', 2), 55],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1369-1392': [
+        'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
+        'END SUBROUTINE dyn_cor_2D', 24],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90:912-937': [
+        'SELECT CASE( nn_e3f_typ )',
+        'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 26],
     # --- ORCA2 round 95: independent rung-0 split-explicit substeps ---
     'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:301-316': [
         '! Lane-2 GYRE ENE operand instrument: write the eight frozen coefficient',
