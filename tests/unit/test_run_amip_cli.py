@@ -4496,3 +4496,22 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_fv3_duo_div_damp_flags_round_trip_and_validate():
+    """--fv3-duo-nord / --fv3-duo-d4-bg reach DycoreConfig (defaults = the
+    oracle deck nord=2, d4_bg=0.12); validate_strict refuses an order
+    outside 0..3, a negative coefficient, and a non-deck value off the
+    fv3_duo discretization (decision B2)."""
+    cfg = _fv3_duo_cfg([])
+    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (2, 0.12)
+    cfg = _fv3_duo_cfg(["--fv3-duo-nord", "1", "--fv3-duo-d4-bg", "0.07"])
+    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (1, 0.07)
+    cfg.validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_nord"):
+        cfg._replace(dycore=cfg.dycore._replace(fv3_duo_nord=4)).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_d4_bg"):
+        cfg._replace(dycore=cfg.dycore._replace(fv3_duo_d4_bg=-0.1)).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_nord/fv3_duo_d4_bg"):
+        cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
+    _fv3_duo_cfg([]).validate_strict()

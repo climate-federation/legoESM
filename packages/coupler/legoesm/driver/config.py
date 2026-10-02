@@ -343,6 +343,12 @@ class DycoreConfig(NamedTuple):
     # oracle deck (input.nml fill=.F.); the CAM6 deck sets it True
     # (decision B3, 2026-10-01: every-step repair cadence as on MPAS).
     fv3_duo_fill: bool = False
+    # fv3_duo d_sw5 divergence damping: order (1 = del-4, CAM6 ldiv4 class;
+    # 2 = del-6, the oracle deck) and coefficient d4_bg (sw_core.F90:1811).
+    # Defaults = the certified oracle deck; the CAM6 deck sets nord=1 with
+    # d4_bg matched to MPAS's ldiv4 by measurement (decision B2, 2026-10-01).
+    fv3_duo_nord: int = 2
+    fv3_duo_d4_bg: float = 0.12
 
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
@@ -2011,6 +2017,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "dycore.fv3_duo_fill is the fv3_duo remap's fillz; got "
                 f"dycore.discretization={d.discretization!r}")
+        if d.fv3_duo_nord not in (0, 1, 2, 3):
+            errors.append(
+                f"dycore.fv3_duo_nord must be in 0..3, got {d.fv3_duo_nord}")
+        if not (isinstance(d.fv3_duo_d4_bg, (int, float))
+                and math.isfinite(d.fv3_duo_d4_bg) and d.fv3_duo_d4_bg >= 0):
+            errors.append(
+                "dycore.fv3_duo_d4_bg must be a finite number >= 0, got "
+                f"{d.fv3_duo_d4_bg!r}")
+        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg) != (2, 0.12)
+                and d.discretization != "fv3_duo"):
+            errors.append(
+                "dycore.fv3_duo_nord/fv3_duo_d4_bg are the fv3_duo d_sw5 "
+                f"divergence damping; got dycore.discretization="
+                f"{d.discretization!r}")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:

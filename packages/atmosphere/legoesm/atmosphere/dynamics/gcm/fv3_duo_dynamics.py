@@ -117,6 +117,38 @@ class FV3DuoConfig(NamedTuple):
     #: certified parity arms), so the DEFAULT stays False; the CAM6 deck
     #: sets it explicitly (decision B3, 2026-10-01).
     fill: bool = False
+    #: d_sw5 divergence-damping ORDER and coefficient (sw_core.F90:1811
+    #: ``dd8 = (da_min_c*d4_bg)**(nord+1)`` on ``divg_d`` every acoustic
+    #: substep): nord=1 is del-4 (CAM6's ldiv4 class, FV3's own default),
+    #: nord=2 del-6.  Defaults = the certified oracle deck (DUO_TAIL_CFG);
+    #: the CAM6 deck sets nord=1 with d4_bg MATCHED to MPAS by measurement
+    #: (decision B2, 2026-10-01).  ``nord_v``/``damp_v`` (vorticity and
+    #: delp damping) are NOT exposed: outside B2.
+    nord: int = 2
+    d4_bg: float = 0.12
+
+
+def duo_sw_deck(*, nord: int, d4_bg: float):
+    """The duo's ``SWConfig`` deck with the B2 knobs applied: the union of
+    the transport deck (``DUO_DECK_CFG``) and the tail deck
+    (``DUO_TAIL_CFG``) -- disjoint except for the three keys they share
+    at equal values -- so ONE static config reaches every phase (the
+    transport phase gates the divgd exchange on ``nord``, dyn_core.F90:652,
+    the tail reads ``d4_bg``).  At the deck values this is the config the
+    phases build for ``cfg=None``, so the step is unchanged there."""
+    from legoesm.core.fv3_duo_stepper import SWConfig
+    from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
+    from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
+    shared = {k for k in DUO_DECK_CFG if k in DUO_TAIL_CFG
+              and DUO_DECK_CFG[k] != DUO_TAIL_CFG[k]}
+    if shared:
+        raise ValueError(f"duo transport/tail decks disagree on {shared}")
+    if int(nord) not in (0, 1, 2, 3):
+        raise ValueError(f"nord must be in 0..3 (sw_core del-nord), got {nord}")
+    if not (np.isfinite(d4_bg) and d4_bg >= 0.0):
+        raise ValueError(f"d4_bg must be finite and >= 0, got {d4_bg}")
+    return SWConfig.from_mapping({**DUO_DECK_CFG, **DUO_TAIL_CFG,
+                                  "nord": int(nord), "d4_bg": float(d4_bg)})
 
 
 def duo_eta_table(eta: str, km: int):
@@ -354,6 +386,7 @@ class FV3DuoDynamicsModel:
         self._step_fn = make_fv_dynamics_step_jit(
             self._ctx_jax, config.km,
             k_split=config.k_split, n_split=config.n_split,
+            cfg=duo_sw_deck(nord=config.nord, d4_bg=config.d4_bg),
             ptop=self._ptop, ak=self._ak, bk=self._bk,
             akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
             kord_mt=config.kord_mt, kord_tm=config.kord_tm,

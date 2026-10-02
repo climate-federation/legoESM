@@ -589,7 +589,9 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     dyn = FV3DuoDynamicsModel(
         bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
                              storage_dtype="float64", moist=moist, eta=eta,
-                             fill=config.dycore.fv3_duo_fill))
+                             fill=config.dycore.fv3_duo_fill,
+                             nord=config.dycore.fv3_duo_nord,
+                             d4_bg=config.dycore.fv3_duo_d4_bg))
     return FV3DuoColumnModel(
         dyn, tracer_names=registry.names,
         conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
