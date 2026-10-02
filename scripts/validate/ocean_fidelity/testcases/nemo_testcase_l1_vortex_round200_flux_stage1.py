@@ -232,15 +232,25 @@ def run(root: Path, *, plant: str | None = None,
         idx = np.argwhere(bad)
         structure = {"n_unequal": int(bad.sum()), "n_active": int(active.sum())}
         if idx.size:
+            # Units in the last place are meaningless where the reference is
+            # itself a rounding residue, so cells whose reference is below
+            # the row's own peak by more than 1e12 are left out of this
+            # statistic rather than reported as an astronomical count.
             with np.errstate(divide="ignore", invalid="ignore"):
-                ulps = np.abs(delta[bad]) / np.spacing(np.abs(reference[bad]))
+                _ref = np.abs(reference[bad])
+                _scaled = _ref > (np.abs(reference[active]).max() * 1.0e-12)
+                ulps = (np.abs(delta[bad])[_scaled]
+                        / np.spacing(_ref[_scaled])) if _scaled.any() \
+                    else np.array([np.nan])
             structure.update(
                 levels=(np.bincount(idx[:, -1],
                                     minlength=reference.shape[-1]).tolist()
                         if reference.ndim == 3 else []),
                 j_range=[int(idx[:, 0].min()), int(idx[:, 0].max())],
                 i_range=[int(idx[:, 1].min()), int(idx[:, 1].max())],
-                max_ulps_in_own_cell=float(np.nanmax(ulps)),
+                max_ulps_in_own_cell=(float(np.nanmax(ulps))
+                                      if np.isfinite(ulps).any() else None),
+                ulp_cells_scored=int(_scaled.sum()),
                 reference_magnitude=[float(np.abs(reference[bad]).min()),
                                      float(np.abs(reference[bad]).max())],
                 on_two_cell_rim=int((
