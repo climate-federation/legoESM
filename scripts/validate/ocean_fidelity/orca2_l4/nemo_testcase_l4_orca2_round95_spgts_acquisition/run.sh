@@ -14,8 +14,8 @@ trap refuse_unexpected ERR
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck) ;;
-  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck]\n' "$0" >&2; exit 63 ;;
+  --run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck|--plant-toolchain) ;;
+  *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-source-deck|--plant-toolchain]\n' "$0" >&2; exit 63 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -143,17 +143,44 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 verify_recorded_tools() {
-  local recorded=$1 path rel current recorded_digest
-  git cat-file -e "$recorded^{commit}" || { printf 'REFUSE: unknown producer commit %s\n' "$recorded" >&2; exit 70; }
-  for path in "$0" "$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG"; do
-    rel=${path#"$REPO"/}
-    current=$(sha256sum "$path" | awk '{print $1}')
-    recorded_digest=$(git show "$recorded:$rel" | sha256sum | awk '{print $1}')
-    [[ "$current" == "$recorded_digest" ]] || {
-      printf 'REFUSE: acquisition artifact moved since producer commit: %s\n' "$rel" >&2; exit 70;
+  local recorded=$1 manifest=${2:-$TARGET_RUN/toolchain.sha256} path name matches recorded_digest
+  [[ "$recorded" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'REFUSE: malformed producer token %s\n' "$recorded" >&2; exit 70;
+  }
+  [[ -f "$manifest" && "$(wc -l <"$manifest")" -eq 6 ]] || {
+    printf 'REFUSE: producer content manifest is missing or has wrong cardinality\n' >&2; exit 70;
+  }
+  for path in "$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90"; do
+    name=$(basename "$path")
+    matches=$(awk -v name="$name" '
+      { n = split($2, parts, "/"); if (parts[n] == name) count++ }
+      END { print count + 0 }
+    ' "$manifest")
+    [[ "$matches" -eq 1 ]] || {
+      printf 'REFUSE: producer content manifest has %s entries for %s\n' "$matches" "$name" >&2; exit 70;
     }
+    recorded_digest=$(awk -v name="$name" '
+      { n = split($2, parts, "/"); if (parts[n] == name) print $1 }
+    ' "$manifest")
+    [[ "$recorded_digest" =~ ^[0-9a-f]{64}$ ]] || {
+      printf 'REFUSE: malformed producer content digest for %s\n' "$name" >&2; exit 70;
+    }
+    pin "$recorded_digest" "$path" "recorded producer content $name"
   done
 }
+
+if [[ "$MODE" == --plant-toolchain ]]; then
+  plant_manifest=$dry/toolchain.sha256
+  cp "$TARGET_RUN/toolchain.sha256" "$plant_manifest"
+  sed -i '1s/^[0-9a-f]/z/' "$plant_manifest"
+  if (verify_recorded_tools "$COMMIT" "$plant_manifest") >/dev/null 2>&1; then
+    printf 'REFUSE: producer-content plant stayed green\n' >&2
+    exit 69
+  fi
+  printf 'STATUS PLANT-FIRED toolchain\n'
+  exit 69
+fi
 
 admit() {
   local plant record expected_stamp recorded

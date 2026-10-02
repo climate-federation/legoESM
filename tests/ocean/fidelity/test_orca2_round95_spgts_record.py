@@ -73,3 +73,18 @@ def test_round96_launcher_stages_admitted_deck_before_decision83_patch() -> None
     assert launcher.index(stage) < launcher.index(pin) < launcher.index(patch)
     assert "readonly TARGET_CFG=ORCA2_OMIP_L4_R96SPG" in launcher
     assert "STATUS PLANT-FIRED source-deck" in launcher
+
+
+def test_round97_launcher_pins_producer_content_not_commit_object() -> None:
+    launcher = Path(
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round95_spgts_acquisition/run.sh"
+    ).read_text(encoding="utf-8")
+    verifier = launcher.split("verify_recorded_tools() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'manifest=${2:-$TARGET_RUN/toolchain.sha256}' in verifier
+    assert '"$PATCH" "$DECISION83_PATCH" "$WRITER" "$GATE" "$PREREG"' in verifier
+    assert '"$SOURCE_ROOT/BLD/ppsrc/nemo/dynspg_ts.f90"' in verifier
+    assert 'pin "$recorded_digest" "$path"' in verifier
+    assert "git cat-file" not in verifier
+    assert "git show" not in verifier
+    assert "STATUS PLANT-FIRED toolchain" in launcher
