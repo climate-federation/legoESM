@@ -640,18 +640,17 @@ def ensemble_crps(
     n = ensemble_vals.shape[0]
     # E|X - y|: mean absolute error across members
     mae = jnp.mean(jnp.abs(ensemble_vals - observation[None]), axis=0)
-    # E|X - X'|: mean pairwise absolute difference
-    # Efficient: sum_{i<j} |x_i - x_j| * 2 / n^2
-    spread_term = jnp.float32(0.0)
+    # 0.5 * E|X - X'| over all n^2 ordered member pairs
+    #   = 0.5 * 2 * sum_{i<j} |x_i - x_j| / n^2 = sum_{i<j} |x_i - x_j| / n^2
     # Use sorted ensemble for O(n log n) instead of O(n^2)
     sorted_ens = jnp.sort(ensemble_vals, axis=0)
     # For sorted values: sum_{i<j}(x_j - x_i) = sum_k (2k - n + 1) * x_k
     weights = 2.0 * jnp.arange(n).astype(ensemble_vals.dtype) - n + 1.0
     # Reshape weights for broadcasting
     w_shape = (n,) + (1,) * (ensemble_vals.ndim - 1)
-    spread_term = jnp.sum(weights.reshape(w_shape) * sorted_ens, axis=0) / (n * n)
+    half_spread = jnp.sum(weights.reshape(w_shape) * sorted_ens, axis=0) / (n * n)
 
-    crps = mae - 0.5 * spread_term
+    crps = mae - half_spread
     return jnp.mean(crps)
 
 
