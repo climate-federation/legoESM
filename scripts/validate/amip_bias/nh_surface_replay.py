@@ -449,6 +449,54 @@ def score(a):
     return 0
 
 
+def zref(a):
+    """How often the two-leaf canopy lifts its reference height above the level
+    the driver hands it (z_ref = max(z_low, displa + 10 z0m + 2)), from the
+    captured land call: z0m and z_lowest are the land's own; displa is rebuilt
+    with the land's compute_aerodynamics from the run's static hc/rz0m/rd and
+    the LAI that reproduces the captured z0m (egvf inverted from z0m; checked
+    against the prescribed-LAI rebuild)."""
+    import jax.numpy as jnp
+    from nh_winter_land_state import build_driver
+    from legoesm.land.canopy.stability import compute_aerodynamics, _Z0MG_BARE
+    d = build_driver(a.run, a.scratch)
+    lp = d.physics.land_ml_params
+    lp_n = np.asarray(d._f_land).size
+    hc, rz0m, rd = (np.asarray(getattr(lp, k), np.float64).reshape(-1) for k in ("hc", "rz0m", "rd"))
+    lai = np.asarray(lp.LAI, np.float64).reshape(-1)
+    if hc.size != lp_n:
+        raise SystemExit(f"FATAL: params have {hc.size} columns, grid {lp_n}")
+    z0p, dp = (np.asarray(x) for x in compute_aerodynamics(
+        jnp.asarray(hc), jnp.asarray(lai), jnp.asarray(rz0m), jnp.asarray(rd)))
+    for day in a.days:
+        z = np.load(Path(a.out) / f"cap_{a.run}_d{day:04d}.npz", allow_pickle=True)
+        lat, fl = z["lat"], z["f_land"]
+        pidx = np.nonzero(fl > 0.0)[0]
+        z0, zl = np.full(lat.size, np.nan), np.full(lat.size, np.nan)
+        z0[pidx], zl[pidx] = z["land_z0"], z["land_z_lowest"]
+        top = np.log(np.maximum(hc * rz0m, _Z0MG_BARE) / _Z0MG_BARE)
+        egvf = np.where(top > 1e-6, np.log(z0 / _Z0MG_BARE) / np.where(top > 1e-6, top, 1.0),
+                        (1 - np.exp(-np.clip(lai, 0, 2))) / (1 - np.exp(-2.0)))
+        displa = hc * rd * egvf
+        lift = displa + 10.0 * z0 + 2.0
+        m = (fl > 0.5) & (lat >= 45) & (lat <= 70)
+        print(f"day {day}: control z0m rebuilt from prescribed LAI vs captured, 45-70N land: "
+              f"max|d| {np.nanmax(np.abs(z0p - z0)[m]):.2e} m, egvf range "
+              f"[{np.nanmin(egvf[m]):.3f}, {np.nanmax(egvf[m]):.3f}]")
+        for name, mm in (("45-70N land", m), ("forest (z0m>0.3 m)", m & (z0 > 0.3))):
+            up = mm & (lift > zl)
+            r = np.log(lift / z0) / np.log(zl / z0)
+            print(f"  {name}: n={mm.sum()} lifted {up.sum()} ({up.sum() / mm.sum():.1%}); "
+                  f"z_low median {np.median(zl[mm]):.1f} m; canopy lift height median "
+                  f"{np.median(lift[mm]):.1f} max {np.max(lift[mm]):.1f} m, max lift/z_low "
+                  f"{np.max((lift / zl)[mm]):.2f}; lift-z_low in lifted cells median "
+                  f"{np.median((lift - zl)[up]) if up.any() else 0:.1f} max "
+                  f"{np.max((lift - zl)[up]) if up.any() else 0:.1f} m; "
+                  f"ln(zref/z0)/ln(zlow/z0) median {np.median(r[up]) if up.any() else 1:.3f} "
+                  f"max {np.max(r[up]) if up.any() else 1:.3f}")
+    return 0
+
+
 def _put(sel, x):
     out = np.full(sel.shape, np.nan)
     out[sel] = x
@@ -469,8 +517,13 @@ def main(argv=None):
     s.add_argument("--era5", required=True, help="nh_surface_replay_era5.sh output")
     s.add_argument("--era5-an", required=True, help="nh_winter_era5_extract.sh output")
     s.add_argument("--surfdata", default=None)
+    zr = sp.add_parser("zref")
+    zr.add_argument("run")
+    zr.add_argument("--days", type=int, nargs="+", required=True)
+    zr.add_argument("--out", required=True)
+    zr.add_argument("--scratch", required=True)
     a = ap.parse_args(argv)
-    return capture(a) if a.cmd == "capture" else score(a)
+    return {"capture": capture, "score": score, "zref": zref}[a.cmd](a)
 
 
 if __name__ == "__main__":
