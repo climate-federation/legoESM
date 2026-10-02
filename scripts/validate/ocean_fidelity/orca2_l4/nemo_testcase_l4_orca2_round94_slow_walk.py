@@ -26,6 +26,9 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round93_slo
     check_record,
 )
 from scripts.validate.ocean_fidelity.testcases import (
+    nemo_testcase_l2_gyre_round16_slow_forcing as round16,
+)
+from scripts.validate.ocean_fidelity.testcases import (
     nemo_testcase_l2_gyre_round83_slow_forcing_walk as round83,
 )
 from scripts.validate.ocean_fidelity.testcases import (
@@ -97,6 +100,80 @@ def first_nonbit(rows: dict[str, dict]) -> dict | None:
         if not rows[name]["bit_exact"]:
             return {"boundary": name, **rows[name]}
     return None
+
+
+def operand_walk(
+    root: Path, operands: dict, oracle: dict[str, np.ndarray], masks: dict,
+) -> dict:
+    """Walk the rank-0 operands and arithmetic of NEMO's vertical average."""
+
+    legacy = round16.read_slow_forcing(
+        root / "oracle_slow_forcing_kt00000001.bin", dims=(94, 152, 31))
+    result = {}
+    for face in ("u", "v"):
+        native = round83.native_u if face == "u" else round83.native_v
+        candidate = {
+            "e3": native(np.asarray(operands[f"h_{face}"]))[:, :90],
+            "rhs": native(np.asarray(operands[f"d{face}_dt"]))[:, :90],
+            "mask": np.asarray(masks[face], dtype=np.float64)[:, :90],
+            "reciprocal": (
+                np.float64(1.0)
+                / native(np.asarray(operands[f"H_{face}"]))[:, :90]
+            ),
+            "depth": native(np.asarray(operands[f"depth_{face}"]))[:, :90],
+        }
+        reference = {
+            "e3": np.asarray(legacy[f"e3{face}"]),
+            "rhs": np.asarray(legacy[f"krhs_{face}"]),
+            "mask": np.asarray(legacy[f"{face}mask"]),
+            "reciprocal": np.asarray(legacy[f"r1_h{face}0"]),
+            "depth": np.asarray(legacy[f"depth_{face}"]),
+        }
+        active3 = reference["mask"] != 0.0
+        active2 = active3[..., 0]
+        cross_record = rhs_walk.score(
+            reference["depth"], oracle[f"depth_{face}"][:, :90], active2)
+        require(cross_record["bit_exact"],
+                f"rank-0 legacy and self-described depth_{face} records differ")
+        rows = {
+            "e3": rhs_walk.score(candidate["e3"], reference["e3"], active3),
+            "rhs": rhs_walk.score(candidate["rhs"], reference["rhs"], active3),
+            "mask": rhs_walk.score(candidate["mask"], reference["mask"], active3),
+            "reciprocal": rhs_walk.score(
+                candidate["reciprocal"], reference["reciprocal"], active2),
+            "production_depth": rhs_walk.score(
+                candidate["depth"], reference["depth"], active2),
+        }
+        source_candidate = round16._source_sum(
+            candidate["e3"], candidate["rhs"], candidate["mask"],
+            candidate["reciprocal"])
+        source_oracle = round16._source_sum(
+            reference["e3"], reference["rhs"], reference["mask"],
+            reference["reciprocal"])
+        recorded_reciprocal_arm = round16._source_sum(
+            candidate["e3"], candidate["rhs"], candidate["mask"],
+            reference["reciprocal"])
+        recorded_product_arm = round16._source_sum(
+            reference["e3"], reference["rhs"], reference["mask"],
+            candidate["reciprocal"])
+        arithmetic = {
+            "oracle_literal_replay": rhs_walk.score(
+                source_oracle, reference["depth"], active2),
+            "candidate_literal_replay": rhs_walk.score(
+                source_candidate, reference["depth"], active2),
+            "recorded_reciprocal_only": rhs_walk.score(
+                recorded_reciprocal_arm, reference["depth"], active2),
+            "recorded_product_only": rhs_walk.score(
+                recorded_product_arm, reference["depth"], active2),
+        }
+        require(arithmetic["oracle_literal_replay"]["bit_exact"],
+                f"rank-0 NEMO depth_{face} record does not replay its source")
+        result[face] = {
+            "cross_record_depth": cross_record,
+            "rows": rows,
+            "arithmetic_arms": arithmetic,
+        }
+    return result
 
 
 def measure(
@@ -203,6 +280,8 @@ def measure(
             "v" if name.endswith("_v") or name == "vb_after" else "ssh")
         rows[name] = rhs_walk.score(live[name], oracle[name], active[face])
 
+    depth_operands = operand_walk(record_root, operands, oracle, masks)
+
     if plant == "record-bit":
         synthetic = np.zeros((2, 2), dtype=np.float64)
         planted = synthetic.copy()
@@ -225,6 +304,7 @@ def measure(
         "rhs_trace_calibration": rhs_calibration,
         "source_order": list(SOURCE_ORDER),
         "rows": rows,
+        "depth_operand_walk_rank0": depth_operands,
         "first_non_bit_statement": first,
         "predictions": {
             "R94_P1_record_sound": True,

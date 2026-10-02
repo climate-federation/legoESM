@@ -35,3 +35,7 @@ def test_rank_complete_slow_record_assembles_and_layout_plant_fires() -> None:
     assert census["coverage"] == "exactly-once"
     with pytest.raises(gate.GateError, match="cover the domain exactly once"):
         gate.assemble_slow(RECORD, plant="layout")
+
+
+def test_source_order_covers_every_recorded_scientific_boundary() -> None:
+    assert set(gate.SOURCE_ORDER) == set(gate.check_record.NAMES) - {"cd_u", "cd_v"}
