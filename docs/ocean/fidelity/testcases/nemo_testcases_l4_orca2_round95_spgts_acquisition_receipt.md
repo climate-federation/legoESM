@@ -86,10 +86,25 @@ terminal restart to be byte-identical to round 93.
 
 ## Gates, tests, and review
 
-The acquisition preflight and its layout plant pass as quoted above. Focused
-tests pass 7/7. The receipt citation gate, its planted shift, the prescribed
-`tests/ocean/fidelity -n 12` battery, and the separate read-only review are
-recorded in the final validation commit.
+The acquisition preflight and its layout plant pass as quoted above. The
+focused record plus citation-gate battery passes 24/24. The default citation
+gate passes 274 citations and the round receipt passes all 10 citations, with
+zero unmapped citations, failures, or map-audit failures; shifting the cited
+Coriolis range by two lines makes the gate fail with exit 1.
+
+The prescribed single `tests/ocean/fidelity -n 12` run reached 97%, displayed
+the same six failures as round 93, and then reproduced the established silent
+tail: every pytest process disappeared without a summary while the launcher
+remained open. The six visible IDs were the round-51 private-hook ratchet,
+round-129 record-backed gate, round-35 stamp scope, worktree stamp, recipe case
+board, and the known SI3 scalar-math provenance gate. After three empty waits
+with no pytest process, the stranded launcher was interrupted. This receipt
+does not represent the wide battery as PASS and does not assign an unseen
+failure.
+
+The required separate `codex exec --sandbox read-only` review failed before
+reading the diff: `failed to initialize in-process app-server client:
+Read-only file system`. Verdict: **independent review unavailable in-sandbox**.
 
 The package tree is unchanged from base, so GYRE's certified trajectory is
 unchanged by construction; no claim is made about an unrun ORCA2 substep
