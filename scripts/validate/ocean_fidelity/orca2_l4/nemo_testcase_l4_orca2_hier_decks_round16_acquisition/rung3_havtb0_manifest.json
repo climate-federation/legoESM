@@ -1,0 +1,44 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 3,
+  "label": "ORCA2 rung 3 with uniform background and exact-zero surface fluxes",
+  "module_removed_from_upper_rung": "bulk surface forcing, sea-surface restoring, and freshwater budget",
+  "decision_83_change_from_superseded": "namzdf.nn_havtb: 1 -> 0",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung4/record",
+  "upper_rung_admission_sha256": "b337142222c0a0d9fc44539abc55c25c8df09ee5e2155022cbfc14676bb88089",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 plus generated exact-zero surface flux file",
+  "build": {
+    "source_configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "recorder_configuration": "ORCA2_ORCA1ICE_OMIP_L4_HIER_R7ABSENT",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "cee66aec4a9a9c2b85e755af0250c9b27cccef6ed7333b454a742af0692bc9ec",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "81304be81526980fb9f80549fdfd02c20df293b7a1a0725e94ef9b7e25c88c72",
+    "compiled_sbcmod_sha256": "f2ce40cd468c056e3b39ccaa74cdf7b76fd3d477ab6aaa08b0bf6d18e807c52b",
+    "compiled_sbcflx_sha256": "3e027b53d115bb03376fa0f2ac24fee6ba71f3ca9aa4053c1ce5cd24d8c03ee1",
+    "compiled_usrdef_sbc_sha256": "46aa4264ec30256548597b42d91594c41cd32e049e3df9051e6e574cbb29d9f2",
+    "compiled_sbcssr_sha256": "134ac06878e79ff57156cfc73b5d504f60adf569c761278cf1939d2c00eca820",
+    "compiled_sbcfwb_sha256": "c1e200df05ef9092abf9e4b4329fa48f720711f1e755a87bf25ba1a8fce8258e"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "0362b8cb572758ed20b7fceba5f151ae5dd4d8cb6b4352eb12e5cc21e7836d74",
+    "execution_namelist_cfg_sha256": "20866bcbfe851191ae91728f5e3f364d87563f7781cbfaff81bfa5d457f27469",
+    "namelist_ice_cfg_sha256": "2f3d69f0e4759142d23490b5663c291e18e3ebb0901d570bcbae69aadcaf4872"
+  },
+  "generated_input": {
+    "name": "rung3_zero_flux.nc",
+    "schema_source": "main-lane round 82",
+    "grid": [148, 180],
+    "dtype": "float64",
+    "fields": ["utau", "vtau", "qtot", "qsr", "emp"],
+    "value": 0.0
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}

@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Preflight and admit Decision 83's replacement rung-3 oracle record."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[4]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_hier_decks_round9_gate as legacy,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_hier_decks_round15_gate as upper,
+)
+
+HERE = Path(__file__).resolve().parent
+ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round16_acquisition"
+MANIFEST = ACQUISITION / "rung3_havtb0_manifest.json"
+ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung3")
+CURRENT_RECORD = ROOT / "record"
+SUPERSEDED_RECORD = ROOT / "record_havtb1_superseded"
+CURRENT_DECK = ROOT / "deck"
+SUPERSEDED_DECK = ROOT / "deck_havtb1_superseded"
+CURRENT_ADMISSION = ROOT / "rung3_admission.json"
+SUPERSEDED_ADMISSION = ROOT / "rung3_admission_havtb1_superseded.json"
+UPPER_ADMISSION = upper.CURRENT_ADMISSION
+COMPILED = legacy.COMPILED
+
+OLD_LINE = "   nn_havtb    =    1         !  horizontal shape for avtb (=1) or not (=0)"
+NEW_LINE = "   nn_havtb    =    0         !  horizontal shape for avtb (=1) or not (=0)"
+OLD_ADMISSION_SHA = "5e4ce3e944b8561e46f472b0109006c435f5dfa36552bce1668c8e1eef39238e"
+OLD_INVENTORY_SHA = "0209b7c848d7ffc31df7d289c08e7accf483101b2b8dc66c11f54b2dbf20d2eb"
+OLD_CFG_SHA = legacy.RUNG3_CFG_SHA
+OLD_EXEC_SHA = legacy.EXECUTION_CFG_SHA
+NEW_CFG_SHA = "0362b8cb572758ed20b7fceba5f151ae5dd4d8cb6b4352eb12e5cc21e7836d74"
+NEW_EXEC_SHA = "20866bcbfe851191ae91728f5e3f364d87563f7781cbfaff81bfa5d457f27469"
+UPPER_ADMISSION_SHA = "b337142222c0a0d9fc44539abc55c25c8df09ee5e2155022cbfc14676bb88089"
+
+PRECHECK_PLANTS = (
+    "deck-extra",
+    "missing-havtb",
+    "retained-coefficient",
+    "source-pin",
+    "superseded-pin",
+    "upper-pin",
+)
+RECORD_PLANTS = tuple(dict.fromkeys((*legacy.RECORD_PLANTS, "resolved-havtb")))
+PLANTS = ("none", *PRECHECK_PLANTS, *RECORD_PLANTS)
+
+
+class GateError(RuntimeError):
+    """A frozen Decision-83 rung-3 predicate failed."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise GateError(message)
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _old_paths() -> tuple[Path, Path, Path]:
+    record = SUPERSEDED_RECORD if SUPERSEDED_RECORD.exists() else CURRENT_RECORD
+    deck = SUPERSEDED_DECK if SUPERSEDED_DECK.exists() else CURRENT_DECK
+    admission = SUPERSEDED_ADMISSION if SUPERSEDED_ADMISSION.exists() else CURRENT_ADMISSION
+    return record, deck, admission
+
+
+def _replace_havtb(payload: bytes, *, plant: str = "none") -> bytes:
+    text = payload.decode()
+    require(text.count(OLD_LINE) == 1, "superseded nn_havtb line changed")
+    if plant != "missing-havtb":
+        text = text.replace(OLD_LINE, NEW_LINE)
+    if plant == "deck-extra":
+        target = "   rn_rfact    =   1.e0    !  multiplicative factor for runoff"
+        require(text.count(target) == 1, "deck-extra target changed")
+        text = text.replace(target, target.replace("1.e0", "2.e0"))
+    if plant == "retained-coefficient":
+        target = "   rn_avm0     =   1.2e-4     !  vertical eddy viscosity   [m2/s]"
+        require(text.count(target) == 1, "retained-coefficient target changed")
+        text = text.replace(target, target.replace("1.2e-4", "2.2e-4"))
+    return text.encode()
+
+
+def rung3_cfg_bytes(*, plant: str = "none") -> bytes:
+    record, _, _ = _old_paths()
+    return _replace_havtb((record / "namelist_cfg.deck").read_bytes(), plant=plant)
+
+
+def execution_cfg_bytes() -> bytes:
+    record, _, _ = _old_paths()
+    return _replace_havtb((record / "namelist_cfg").read_bytes())
+
+
+def preflight(*, plant: str = "none") -> dict[str, object]:
+    require(plant in ("none", *PRECHECK_PLANTS), f"invalid preflight plant: {plant}")
+    record, deck, admission_path = _old_paths()
+    expected_old = OLD_ADMISSION_SHA if plant != "superseded-pin" else "0" * 64
+    require(sha256(admission_path) == expected_old, "superseded admission changed")
+    require(sha256(record / "SHA256SUMS") == OLD_INVENTORY_SHA, "superseded inventory changed")
+    require(sha256(record / "namelist_cfg.deck") == OLD_CFG_SHA, "superseded exact deck changed")
+    require(sha256(record / "namelist_cfg") == OLD_EXEC_SHA, "superseded execution deck changed")
+    require(sha256(deck / "namelist_cfg") == OLD_CFG_SHA, "superseded staged deck changed")
+
+    expected_upper = UPPER_ADMISSION_SHA if plant != "upper-pin" else "0" * 64
+    require(sha256(UPPER_ADMISSION) == expected_upper, "replacement rung-4 admission changed")
+    upper_admission = json.loads(UPPER_ADMISSION.read_text())
+    require(
+        upper_admission.get("status") == "PASS_RUNG4_HAVTB0_RECORD",
+        "replacement rung 4 is not admitted",
+    )
+
+    manifest = json.loads(MANIFEST.read_text())
+    require(manifest.get("rung") == 3, "manifest rung changed")
+    require(
+        manifest.get("upper_rung_admission_sha256") == UPPER_ADMISSION_SHA,
+        "manifest upper admission changed",
+    )
+    require(
+        manifest.get("run")
+        == {
+            "mpi_ranks": 2,
+            "first_step": 1,
+            "last_step": 240,
+            "from_rest": True,
+            "initial_state_output": 1,
+        },
+        "run protocol changed",
+    )
+    for name, expected in legacy.SOURCE_SHA.items():
+        actual = sha256(COMPILED / f"{name}.f90")
+        if plant == "source-pin" and name == "sbcmod":
+            actual = "0" * 64
+        require(actual == expected, f"compiled source changed: {name}")
+        require(
+            manifest["build"].get(f"compiled_{name}_sha256") == expected,
+            f"manifest source pin changed: {name}",
+        )
+    require(sha256(record / "nemo") == legacy.rung4.BINARY_SHA, "recorder binary changed")
+
+    cfg = rung3_cfg_bytes(plant=plant)
+    require(hashlib.sha256(cfg).hexdigest() == NEW_CFG_SHA, "replacement exact deck changed")
+    require(
+        hashlib.sha256(execution_cfg_bytes()).hexdigest() == NEW_EXEC_SHA,
+        "replacement execution deck changed",
+    )
+    require(
+        manifest["namelists"]["namelist_cfg_sha256"] == NEW_CFG_SHA,
+        "manifest exact-deck pin changed",
+    )
+    require(
+        manifest["namelists"]["execution_namelist_cfg_sha256"] == NEW_EXEC_SHA,
+        "manifest execution-deck pin changed",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="orca2-rung3-havtb0-") as temporary:
+        root = Path(temporary)
+        (root / "old").mkdir()
+        (root / "new").mkdir()
+        (root / "upper").mkdir()
+        old_values = legacy._assignment_map((record / "namelist_cfg.deck").read_bytes(), root / "old")
+        new_values = legacy._assignment_map(cfg, root / "new")
+        upper_values = legacy._assignment_map(upper.rung4_cfg_bytes(), root / "upper")
+    replacement_delta = {
+        name: [legacy._token(old_values[name]), legacy._token(new_values[name])]
+        for name in sorted(set(old_values) | set(new_values))
+        if old_values.get(name) != new_values.get(name)
+    }
+    require(
+        replacement_delta == {"namzdf.nn_havtb": ["1", "0"]},
+        f"replacement delta changed: {replacement_delta}",
+    )
+    boundary_delta = {
+        name: [
+            legacy._token(upper_values[name]) if name in upper_values else "ABSENT",
+            legacy._token(new_values[name]) if name in new_values else "ABSENT",
+        ]
+        for name in sorted(set(upper_values) | set(new_values))
+        if upper_values.get(name) != new_values.get(name)
+    }
+    old_admission = json.loads(admission_path.read_text())
+    require(
+        boundary_delta == old_admission.get("deck_delta_from_rung4"),
+        f"rung-4/rung-3 boundary changed: {boundary_delta}",
+    )
+    old_lines = (record / "namelist_cfg.deck").read_text().splitlines()
+    new_lines = cfg.decode().splitlines()
+    line_delta = [
+        [index + 1, before, after]
+        for index, (before, after) in enumerate(zip(old_lines, new_lines, strict=True))
+        if before != after
+    ]
+    require(line_delta == [[419, OLD_LINE, NEW_LINE]], f"physical line delta changed: {line_delta}")
+    source = (COMPILED / "zdfphy.f90").read_text()
+    require(
+        "avtb_2d(:,:) = 1._wp" in source and "IF( nn_havtb == 1 ) THEN" in source,
+        "compiled background-shape branch changed",
+    )
+    return {
+        "status": "PREFLIGHT_PASS_RUNG3_HAVTB0",
+        "claim_label": "independent",
+        "rung": 3,
+        "decision": 83,
+        "replacement_delta": replacement_delta,
+        "line_delta": line_delta,
+        "rung4_boundary_delta": boundary_delta,
+        "superseded_record": str(record),
+        "binary_sha256": legacy.rung4.BINARY_SHA,
+    }
+
+
+def stage_deck(root: Path) -> None:
+    record, _, _ = _old_paths()
+    expected = {
+        "namelist_cfg": rung3_cfg_bytes(),
+        "namelist_ice_cfg": (record / "namelist_ice_cfg").read_bytes(),
+        "manifest.json": MANIFEST.read_bytes(),
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    for name, payload in expected.items():
+        target = root / name
+        if target.exists():
+            require(
+                target.is_file() and target.read_bytes() == payload,
+                f"existing deck differs: {target}",
+            )
+        else:
+            target.write_bytes(payload)
+    rows = "".join(
+        f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in expected.items()
+    )
+    ledger = root / "SHA256SUMS"
+    if ledger.exists():
+        require(ledger.read_text() == rows, "deck SHA256SUMS changed")
+    else:
+        ledger.write_text(rows)
+
+
+def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
+    surface_plant = plant if plant in set(legacy.RECORD_PLANTS) else "none"
+    upper_plant = plant if plant in set(upper.RECORD_PLANTS) else "none"
+    surface = legacy.validate_resolved(root, plant=surface_plant)
+    inherited = upper.validate_resolved(root, plant=upper_plant)
+    return {
+        "status": "PASS_RUNG3_HAVTB0_RESOLVED",
+        "upper_rung": inherited,
+        "surface": surface,
+    }
+
+
+def validate_record(root: Path, *, expect_commit: str, plant: str = "none") -> dict[str, object]:
+    require(plant in PLANTS, f"unknown plant: {plant}")
+    preflight(plant=plant if plant in PRECHECK_PLANTS else "none")
+    old_record, _, _ = _old_paths()
+    require((root / "producer_commit.txt").read_text().strip() == expect_commit, "producer commit differs")
+    require(sha256(root / "nemo") == legacy.rung4.BINARY_SHA, "record binary differs")
+    require((root / "namelist_cfg").read_bytes() == execution_cfg_bytes(), "execution deck differs")
+    require((root / "namelist_cfg.deck").read_bytes() == rung3_cfg_bytes(), "exact deck differs")
+    require(
+        json.loads((root / "hierarchy_manifest.json").read_text())
+        == json.loads(MANIFEST.read_text()),
+        "record manifest differs",
+    )
+    require(
+        (root / "recorder_repair_manifest.json").read_bytes()
+        == (old_record / "recorder_repair_manifest.json").read_bytes(),
+        "repair manifest differs",
+    )
+    frame_plant = (
+        plant
+        if plant in {"field-name", "truncated", "frame-nonfinite", "absent-as-zero", "owner-on", "missing-frame"}
+        else "none"
+    )
+    inherited_plant = plant if plant in set(legacy.rung4.rung5_deck.PLANTS) else "none"
+    frames = legacy.rung4.rung5_record.validate_frames(root, plant=frame_plant)
+    terminal = legacy.rung4.rung5_deck.rung6.rung7.rung8.rung9.validate_terminal(
+        root, plant=inherited_plant
+    )
+    month = legacy.rung4.rung5_deck.rung6.rung10.validate_month_products(root)
+    resolved = validate_resolved(root, plant=plant)
+    zero_flux = legacy._validate_zero_flux(root, plant=plant)
+    inventory = legacy.rung4.rung5_deck.rung6.rung10.validate_sha_inventory(
+        root, plant=inherited_plant
+    )
+    return {
+        "format": "nemo-testcase-l4-orca2-hierarchy-rung3-havtb0-record-v1",
+        "status": "PASS_RUNG3_HAVTB0_RECORD",
+        "claim_label": "independent",
+        "rung": 3,
+        "decision": 83,
+        "producer_commit": expect_commit,
+        "deck_delta_from_superseded": {"namzdf.nn_havtb": [1, 0]},
+        "deck_delta_from_rung4": preflight()["rung4_boundary_delta"],
+        "frames": frames,
+        "zero_flux": zero_flux,
+        "terminal": terminal,
+        "month_products": month,
+        "resolved": resolved,
+        "sha_inventory": inventory,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--stage-deck", type=Path)
+    parser.add_argument("--record", type=Path)
+    parser.add_argument("--expect-commit")
+    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    try:
+        if args.preflight_only:
+            report = preflight(plant=args.plant)
+            if args.stage_deck:
+                stage_deck(args.stage_deck)
+        else:
+            require(args.record is not None and args.expect_commit, "record and expected commit are required")
+            report = validate_record(args.record, expect_commit=args.expect_commit, plant=args.plant)
+        report["worktree"] = worktree_stamp()
+    except (RuntimeError, OSError, KeyError, TypeError, UnicodeError, ValueError) as error:
+        marker = "PLANT-FIRED" if args.plant != "none" else "FAIL"
+        print(f"STATUS {marker}: {error}")
+        return 1
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.write_text(rendered)
+    print(rendered, end="")
+    print(f"STATUS {report['status']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
