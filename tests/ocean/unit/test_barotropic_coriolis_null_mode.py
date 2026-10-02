@@ -929,6 +929,64 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
     assert np.isfinite(float(jax.grad(loss)(jnp.asarray(0.0))))
 
 
+def test_nemo_literal_een_v_scale_reads_u_stagger_fold_metric(monkeypatch):
+    """dynspg_ts.f90:1282-1283 uses folded e2u(:,jj+1), not south wrap."""
+    from types import SimpleNamespace
+
+    from legoesm.grids.latlon import FoldDescriptor
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+
+    ny, nx, nz = 4, 6, 2
+    shape2, shape3 = (ny, nx), (ny, nx, nz)
+    ones2, ones3 = np.ones(shape2), np.ones(shape3)
+    e2u = 2.0 + np.arange(ny * nx, dtype=np.float64).reshape(shape2)
+    raw = NemoEENBarotropicOperands(
+        ff_f=jnp.full(shape2, 1.0e-4),
+        e3u_0=jnp.full(shape3, 5.0), e3v_0=jnp.full(shape3, 6.0),
+        e3f_0=jnp.full(shape3, 7.0), umask=jnp.asarray(ones3),
+        vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
+        fe3mask=jnp.asarray(ones3), hu_0=jnp.full(shape2, 10.0),
+        hv_0=jnp.full(shape2, 12.0), hf_0=jnp.full(shape2, 14.0),
+        e1t=jnp.asarray(ones2), e2t=jnp.asarray(ones2),
+        e1u=jnp.asarray(ones2), e2u=jnp.asarray(e2u),
+        e1v=jnp.asarray(ones2), e2v=jnp.asarray(ones2),
+        e1f=jnp.asarray(ones2), e2f=jnp.asarray(ones2))
+    z = SimpleNamespace(
+        nemo_een_barotropic=raw, nemo_e3t_0=jnp.full(shape3, 7.0),
+        is_active=jnp.asarray(ones3))
+    perm_u = jnp.asarray(np.arange(nx - 1, -1, -1), dtype=jnp.int32)
+    grid = SimpleNamespace(fold=FoldDescriptor(
+        is_active=True, fold_j=ny - 1, cap_j=ny - 2,
+        perm_T=perm_u, perm_v=perm_u,
+        vector_sign_u=-1.0, vector_sign_v=-1.0,
+        pivot_row_stored=False, perm_u=perm_u, perm_f=perm_u))
+    real_e3f = bt.nemo_e3f_0vor_from_tmask
+
+    def fixed_e3f(*args, **kwargs):
+        kwargs["grid"] = None
+        return real_e3f(*args, **kwargs)
+
+    # Hold the separately tested e3f_0vor fold construction fixed so this
+    # one-variable control sees only the final e2u scale statement.
+    monkeypatch.setattr(bt, "nemo_e3f_0vor_from_tmask", fixed_e3f)
+    eta = jnp.zeros(shape2, dtype=jnp.float64)
+    unfolded = bt._nemo_literal_een_coefficients(eta, z, jnp.float64)
+    folded = bt._nemo_literal_een_coefficients(
+        eta, z, jnp.float64, grid=grid)
+
+    north_metric = e2u[-1, np.asarray(perm_u)]
+    np.testing.assert_allclose(
+        np.asarray(folded["ffv_ne"][-1]),
+        np.asarray(unfolded["ffv_ne"][-1]) * north_metric / e2u[0],
+        rtol=2.0e-15, atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(folded["ffv_nw"][-1]),
+        np.asarray(unfolded["ffv_nw"][-1]) * np.roll(north_metric, 1)
+        / np.roll(e2u[0], 1),
+        rtol=2.0e-15, atol=0.0)
+
+
 def test_nemo_literal_een_builder_requires_complete_raw_bridge_bundle():
     """The faithful selector fails red instead of rebuilding missing operands."""
     from types import SimpleNamespace
