@@ -4516,11 +4516,7 @@ def turbulence_config_for(config):
                     "clubb_liquid_partition=True requires clubb_prognostic=True: "
                     "the liquid handed back is the post-advance PDF closure's "
                     "rcm, which the diagnostic path does not produce.")
-            from legoesm.atmosphere.physics.turbulence.integration import (
-                materialize_sub_config,
-            )
-            tc = materialize_sub_config(tc)
-            tc = tc._replace(clubb=tc.clubb._replace(liquid_partition=True))
+            tc = tc._replace(liquid_partition=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => byte-identical: the scheme's own 0.0 (off) stands.
@@ -4647,15 +4643,14 @@ def turbulence_config_for(config):
         # would run a deck that asked for the liquid exchange with the closure
         # still throwing its liquid away, which looks exactly like the defect
         # the lever exists to remove.
-        _sub = getattr(tc, "clubb", None)
-        if tc.scheme != "clubb" or _sub is None or not _sub.liquid_partition:
+        if tc.scheme != "clubb" or not tc.liquid_partition:
             raise ValueError(
                 "clubb_liquid_partition=True but an explicit turbulence_override "
                 "is in force and does not select it (override "
                 f"scheme={tc.scheme!r}, liquid_partition="
-                f"{getattr(_sub, 'liquid_partition', None)!r}). The override is "
-                "authoritative, so set CLUBBConfig(liquid_partition=True) inside "
-                "it rather than relying on the experiment-level flag.")
+                f"{getattr(tc, 'liquid_partition', None)!r}). The override is "
+                "authoritative, so set TurbulenceConfig(liquid_partition=True) "
+                "on it rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

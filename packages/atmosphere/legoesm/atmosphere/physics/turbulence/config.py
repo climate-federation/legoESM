@@ -921,6 +921,12 @@ class TurbulenceConfig(NamedTuple):
     ysu: YSUConfig = YSUConfig()
     edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
     clubb: CLUBBConfig | None = None
+    # CAM's two-sided cloud-liquid exchange with the CLUBB closure
+    # (clubb_intr.F90).  A dispatch selector, so it lives here beside ``scheme``
+    # and not among CLUBBConfig's tunable leaves: the factory hands the host's
+    # q_c to the kernel and routes its dq_c_dt to the tracer; the kernel keys on
+    # q_c being supplied.  Selected by ExperimentConfig.clubb_liquid_partition.
+    liquid_partition: bool = False
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

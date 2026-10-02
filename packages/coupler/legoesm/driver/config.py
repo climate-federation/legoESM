@@ -1868,7 +1868,7 @@ class ExperimentConfig(NamedTuple):
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
 
         Not the experiment flag alone: an authoritative ``turbulence_override``
-        can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
+        can carry ``TurbulenceConfig(liquid_partition=True)`` without it ever being
         set, and that route reached a validated, built model with both
         radiative condensate floors still active (codex).
 
@@ -1894,8 +1894,7 @@ class ExperimentConfig(NamedTuple):
             return True
         _ov = self.turbulence_override
         if _ov is not None and getattr(_ov, "scheme", None) == "clubb":
-            return bool(getattr(getattr(_ov, "clubb", None),
-                                "liquid_partition", False))
+            return bool(getattr(_ov, "liquid_partition", False))
         return False
 
     def validate_strict(self) -> None:
