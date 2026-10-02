@@ -78,6 +78,12 @@ launcher to refuse before its candidate, apply the additions-only patch at
 fuzz zero, and pin the debug launcher to a fresh target with symbol and bounds
 checks. The surface parser independently reports `PASS_SURFACE_ABSENCE`.
 
+The prescribed `tests/ocean/fidelity -n 12` battery selected 2,215 tests and
+reached 99%, then repeated the established no-summary stall and was stopped
+after two silent waits. Three failures were visible: the known worktree-stamp
+ratchet, round-51 private-trace registry, and SI3 scalar-math provenance reds.
+No round-88 test failed; the battery has no suite-PASS claim.
+
 The required separate `codex exec --sandbox read-only` review did not read the
 diff: `failed to initialize in-process app-server client: Read-only file
 system`. Verdict: **independent review unavailable in-sandbox**.
