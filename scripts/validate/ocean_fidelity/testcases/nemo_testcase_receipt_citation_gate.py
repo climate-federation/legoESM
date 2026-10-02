@@ -1373,6 +1373,22 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/tramle.f90:643-684': [
         'NAMELIST/namtra_mle/ ln_mle',
         ('IF( nn_mle == 0 ) THEN', 5), 42],
+    # --- ORCA2 hierarchy decks round 11: rung-1 BBL/geothermal boundary ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/nemogcm.f90:428-434': [
+        '! Active tracers',
+        'CALL tra_ldf_init      ! lateral mixing', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbl.f90:540-564': [
+        'NAMELIST/nambbl/ ln_trabbl',
+        "CALL ctl_stop( 'STOP', 'tra_bbl_init : unable to allocate arrays' )", 25],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/trabbc.f90:200-252': [
+        'NAMELIST/nambbc/ln_trabbc',
+        "IF(lwp) WRITE(numout,*) '   ==>>>   no geothermal heat flux'", 53],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:430-458': [
+        '!* Update or Compute (VIF) advective transport',
+        'IF( kstg == 3 .AND. ln_trabbl )   CALL bbl', 29],
+    'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:523-529': [
+        '!==  complete the tracers RHS  ==!   except ZDF (implicit)',
+        'IF( ln_tradmp  )   CALL tra_dmp', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo/dia25h.f90:286-288': [
         ('IF( ln_zdftke ) THEN', 4),
         'en_25h(ji,jj,jk) = en_25h(ji,jj,jk) * r1_25', 3],
