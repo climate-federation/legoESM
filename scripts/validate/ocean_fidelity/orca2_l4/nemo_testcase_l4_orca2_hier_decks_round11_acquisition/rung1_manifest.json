@@ -1,0 +1,46 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 1,
+  "label": "ORCA2 unforced ocean deck without BBL or geothermal heating",
+  "module_removed_from_upper_rung": "bottom boundary layer and geothermal heating",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung2/record",
+  "upper_rung_admission_sha256": "b1553d791db7df6ade5d9f3da06790e789a21b0be2ab4758b88e27f21509003e",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 plus generated exact-zero surface flux file",
+  "build": {
+    "source_configuration": "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE",
+    "recorder_configuration": "ORCA2_ORCA1ICE_OMIP_L4_HIER_R7ABSENT",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "cpp_keys_sha256": "2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67",
+    "binary_sha256": "cee66aec4a9a9c2b85e755af0250c9b27cccef6ed7333b454a742af0692bc9ec",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "81304be81526980fb9f80549fdfd02c20df293b7a1a0725e94ef9b7e25c88c72",
+    "compiled_nemogcm_sha256": "3e0e832dab3e0e045ebc4ea3521399400b8efd4bcb4b755f9e157fdd0b469700",
+    "compiled_trabbl_sha256": "0d899c0aaf58a33e49e5480629150c527b1f787f5e4d35514d3ab49576d38a09",
+    "compiled_trabbc_sha256": "65e0d2f111f675d08e1224f4336bd65b0f0911c151ea2ae8b306b66937581ac6",
+    "compiled_stprk3_stg_sha256": "ec48b5d3cfc5637b0f3b4af49f3275735250078e0819b6ea48db31cae2848044"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "44a15a9d7c8e1b77bebf8704d6455edc83ba7ebea93f358d8bbe093d5e1f0670",
+    "execution_namelist_cfg_sha256": "f078d39c37ba5c94603c9bc5b12d28ee64cba03aa465debb670afccfa35a3002",
+    "namelist_ice_cfg_sha256": "2f3d69f0e4759142d23490b5663c291e18e3ebb0901d570bcbae69aadcaf4872"
+  },
+  "generated_input": {
+    "name": "rung3_zero_flux.nc",
+    "schema_source": "main-lane round 82",
+    "grid": [148, 180],
+    "dtype": "float64",
+    "fields": ["utau", "vtau", "qtot", "qsr", "emp"],
+    "value": 0.0
+  },
+  "main_rung0_deck": {
+    "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round90/acquisition/orca2_rung0_entry_stage_runoff_guarded_10step_np2/namelist_cfg",
+    "sha256": "d25c69958aeb7d4dffeeab6b08c89f6b314dd7c6d130ed94acfee7cb90643c2c"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}
