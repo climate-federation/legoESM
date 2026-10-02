@@ -983,8 +983,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
     r3f = b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))
-    e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
-    e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
+    e3u = b(e3u0 * b(one + r3u[..., None] * umask))
+    e3v = b(e3v0 * b(one + r3v[..., None] * vmask))
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
     q = b(ff[..., None] / e3f)
 
@@ -995,16 +995,24 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     def triad(a, c, d):
         return b(b(a + c) + d)
 
-    def coefficient(face, neighbor, neighbor_mask, q_factor,
+    def coefficient(face, local_mask, neighbor, neighbor_mask, q_factor,
                     neighbor_metric, local_metric, r1_h):
         term = b(b(b(face * neighbor) * neighbor_mask) * q_factor)
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
-            acc = b(acc + term[..., jk])
+            # dynspg_ts.f90:1216,1243 loops only through mbku/mbkv.
+            # Selecting the prior accumulator outside the local column keeps
+            # the initialized +0 instead of manufacturing a signed zero by
+            # evaluating a masked term for a level NEMO never visits.
+            acc = jnp.where(
+                local_mask[..., jk] != 0,
+                b(acc + term[..., jk]),
+                acc,
+            )
         return b(b(b(b(leading_scale * b(one / local_metric)) * r1_h)
                      * neighbor_metric) * acc)
 
-    def ene_coefficient(face, neighbor, neighbor_mask, e3f_divisor,
+    def ene_coefficient(face, local_mask, neighbor, neighbor_mask, e3f_divisor,
                         f_factor, neighbor_metric, local_metric, r1_h):
         """dynspg_ts.F90:1387-1409, without moving ``ff_f`` into q.
 
@@ -1018,7 +1026,11 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         term = b(term / e3f_divisor)
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
-            acc = b(acc + term[..., jk])
+            acc = jnp.where(
+                local_mask[..., jk] != 0,
+                b(acc + term[..., jk]),
+                acc,
+            )
         scale = b(quarter * b(one / local_metric))
         scale = b(scale * r1_h)
         scale = b(scale * neighbor_metric)
@@ -1086,20 +1098,22 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         if scheme == "ene":
             divisor, f_factor = ene_u_f[corner]
             out[f"ffu_{corner}"] = ene_coefficient(
-                e3u, neighbor, neighbor_mask, divisor, f_factor,
+                e3u, umask, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e1u, r1_hu)
         else:
             out[f"ffu_{corner}"] = coefficient(
-                e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
+                e3u, umask, neighbor, neighbor_mask, uq[corner],
+                metric, e1u, r1_hu)
         neighbor, neighbor_mask, metric = vn[corner]
         if scheme == "ene":
             divisor, f_factor = ene_v_f[corner]
             out[f"ffv_{corner}"] = ene_coefficient(
-                e3v, neighbor, neighbor_mask, divisor, f_factor,
+                e3v, vmask, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e2v, r1_hv)
         else:
             out[f"ffv_{corner}"] = coefficient(
-                e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
+                e3v, vmask, neighbor, neighbor_mask, vq[corner],
+                metric, e2v, r1_hv)
     return out
 
 
