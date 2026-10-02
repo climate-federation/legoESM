@@ -26,8 +26,19 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 HERE = Path(__file__).resolve().parent
 ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round6_acquisition"
 MANIFEST = ACQUISITION / "rung5_manifest.json"
-RUNG6_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6/record")
-RUNG6_ADMISSION = RUNG6_RECORD.parent / "rung6_admission.json"
+RUNG6_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6"
+)
+RUNG6_RECORD = (
+    RUNG6_ROOT / "record_havtb1_superseded"
+    if (RUNG6_ROOT / "record_havtb1_superseded").exists()
+    else RUNG6_ROOT / "record"
+)
+RUNG6_ADMISSION = (
+    RUNG6_ROOT / "rung6_admission_havtb1_superseded.json"
+    if (RUNG6_ROOT / "rung6_admission_havtb1_superseded.json").exists()
+    else RUNG6_ROOT / "rung6_admission.json"
+)
 COMPILED = rung6.COMPILED
 
 RUNG5_CFG_SHA = "f537e3d29a6e2472f89cc9a8d23ec70d18756e3ad112088e7256804698bc1d59"

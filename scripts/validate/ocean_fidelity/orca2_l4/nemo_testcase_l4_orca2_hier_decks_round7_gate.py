@@ -28,7 +28,14 @@ ARTIFACTS = HERE / "nemo_testcase_l4_orca2_hier_decks_round7_acquisition"
 PATCH = ARTIFACTS / "l4_r69_surface_round7_absent.patch"
 MANIFEST = ARTIFACTS / "rung5_absent_manifest.json"
 MODULE = HERE / "nemo_testcase_l4_orca2_round69_month_surface_acquisition" / "l4_r69_surface.F90"
-RUNG6_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6/record")
+RUNG6_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6"
+)
+RUNG6_RECORD = (
+    RUNG6_ROOT / "record_havtb1_superseded"
+    if (RUNG6_ROOT / "record_havtb1_superseded").exists()
+    else RUNG6_ROOT / "record"
+)
 MAGIC = "NEMO_L4_R69SFC1"
 FIELDS = ("utau", "vtau", "taum", "qsr", "qns", "emp", "sfx", "rnf", "fr_i", "rnf_tsc")
 RUNOFF_FIELDS = frozenset(("rnf", "rnf_tsc"))

@@ -1,0 +1,34 @@
+{
+  "format": "nemo-testcase-l4-orca2-hierarchy-deck-v1",
+  "rung": 5,
+  "decision": 83,
+  "label": "ORCA2 no-runoff deck with uniform background tracer diffusivity",
+  "module_removed_from_upper_rung": "runoff heat and water",
+  "upper_rung_record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung6/record",
+  "inputs": "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0",
+  "superseded": {
+    "record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung5/record_havtb1_superseded",
+    "admission_sha256": "9f5de467d92d2b2b7514f8907604bf008e61606cbf69ab16a61e94e0b8289b70",
+    "record_inventory_sha256": "879b8181feff012017ef217ac3c3b93056c2d54135a7d42a5566044f19aa8c7a"
+  },
+  "build": {
+    "configuration": "ORCA2_ORCA1ICE_OMIP_L4_HIER_R7ABSENT",
+    "cpp_keys": ["key_si3", "key_qco", "key_vco_1d3d", "key_RK3"],
+    "binary_sha256": "cee66aec4a9a9c2b85e755af0250c9b27cccef6ed7333b454a742af0692bc9ec",
+    "compiled_stprk3_sha256": "b9da36788bb5a3d8ccff03cae7c1123d1b3510c39a0cd86263fcc293da526422",
+    "compiled_writer_sha256": "81304be81526980fb9f80549fdfd02c20df293b7a1a0725e94ef9b7e25c88c72",
+    "recorder_repair_manifest_sha256": "089fa5ee0035c8189f1bd9892228deb10764b74a091c068871c843e7984473e1"
+  },
+  "namelists": {
+    "namelist_cfg_sha256": "9bb44379e04861da2c22d76e07afc2ac2a8a1ce82b3dcc262583b841d2e71ead",
+    "execution_namelist_cfg_sha256": "aa1c49f2c46181674b68ae3eb3aabd71b5590d973d785335cfdb1236869e7e70",
+    "execution_namzdf_tke": "inherited unread sentinel"
+  },
+  "run": {
+    "mpi_ranks": 2,
+    "first_step": 1,
+    "last_step": 240,
+    "from_rest": true,
+    "initial_state_output": 1
+  }
+}

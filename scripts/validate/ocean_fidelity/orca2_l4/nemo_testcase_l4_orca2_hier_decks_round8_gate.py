@@ -30,10 +30,19 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 HERE = Path(__file__).resolve().parent
 ACQUISITION = HERE / "nemo_testcase_l4_orca2_hier_decks_round8_acquisition"
 MANIFEST = ACQUISITION / "rung4_manifest.json"
-RUNG5_RECORD = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung5/record_absent_v2"
+RUNG5_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/rung5"
 )
-RUNG5_ADMISSION = RUNG5_RECORD.parent / "rung5_round8_admission.json"
+RUNG5_RECORD = (
+    RUNG5_ROOT / "record_havtb1_superseded"
+    if (RUNG5_ROOT / "record_havtb1_superseded").exists()
+    else RUNG5_ROOT / "record_absent_v2"
+)
+RUNG5_ADMISSION = (
+    RUNG5_ROOT / "rung5_admission_havtb1_superseded.json"
+    if (RUNG5_ROOT / "rung5_admission_havtb1_superseded.json").exists()
+    else RUNG5_ROOT / "rung5_round8_admission.json"
+)
 COMPILED = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
     "ORCA2_ORCA1ICE_OMIP_L4_R69SURFACE/BLD/ppsrc/nemo"
