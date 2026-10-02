@@ -169,6 +169,26 @@ def test_round98_coefficient_movement_separates_fold_support() -> None:
                for name in residual.COEFFICIENTS if name != "ffu_nw")
 
 
+def test_round99_coefficient_census_separates_sign_and_fold_magnitude() -> None:
+    candidate = np.zeros((3, 4), dtype=np.float64)
+    oracle = np.zeros((3, 4), dtype=np.float64)
+    candidate[0, 1] = -0.0
+    oracle[-1, 2] = 3.0
+    census = residual.coefficient_difference_census(candidate, oracle)
+    assert census == {
+        "bit_unequal": 2,
+        "signed_zero_only": 1,
+        "magnitude_unequal": 1,
+        "fold_bit_unequal": 1,
+        "fold_magnitude_unequal": 1,
+        "nonfold_magnitude_unequal": 0,
+        "first_bit_unequal_j_i": [0, 1],
+        "first_magnitude_unequal_j_i": [2, 2],
+        "candidate_negative_zero_at_unequal": 1,
+        "oracle_negative_zero_at_unequal": 0,
+    }
+
+
 def test_round98_one_ulp_coefficient_plant_reaches_output() -> None:
     u = np.arange(12, dtype=np.float64).reshape(3, 4) + 1.0
     v = np.arange(12, dtype=np.float64).reshape(4, 3) + 1.0

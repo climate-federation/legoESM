@@ -126,6 +126,44 @@ def coefficient_movement(base, candidate):
     return rows
 
 
+def coefficient_difference_census(candidate, oracle):
+    """Separate signed-zero differences from nonzero and fold differences."""
+
+    candidate = np.asarray(candidate, dtype=np.float64)
+    oracle = np.asarray(oracle, dtype=np.float64)
+    require(candidate.shape == oracle.shape,
+            "coefficient census shape mismatch")
+    bit_unequal = (
+        np.ascontiguousarray(candidate).view(np.uint64)
+        != np.ascontiguousarray(oracle).view(np.uint64)
+    )
+    signed_zero_only = bit_unequal & (candidate == 0.0) & (oracle == 0.0)
+    magnitude_unequal = candidate != oracle
+
+    def first(mask):
+        locations = np.argwhere(mask)
+        return None if locations.size == 0 else list(map(int, locations[0]))
+
+    return {
+        "bit_unequal": int(np.count_nonzero(bit_unequal)),
+        "signed_zero_only": int(np.count_nonzero(signed_zero_only)),
+        "magnitude_unequal": int(np.count_nonzero(magnitude_unequal)),
+        "fold_bit_unequal": int(np.count_nonzero(bit_unequal[-1])),
+        "fold_magnitude_unequal": int(np.count_nonzero(magnitude_unequal[-1])),
+        "nonfold_magnitude_unequal": int(np.count_nonzero(magnitude_unequal[:-1])),
+        "first_bit_unequal_j_i": first(bit_unequal),
+        "first_magnitude_unequal_j_i": first(magnitude_unequal),
+        "candidate_negative_zero_at_unequal": int(np.count_nonzero(
+            signed_zero_only
+            & (np.ascontiguousarray(candidate).view(np.uint64)
+               == np.uint64(0x8000000000000000)))),
+        "oracle_negative_zero_at_unequal": int(np.count_nonzero(
+            signed_zero_only
+            & (np.ascontiguousarray(oracle).view(np.uint64)
+               == np.uint64(0x8000000000000000)))),
+    }
+
+
 def one_ulp_sensitive_coefficient(trace, coefficients, active):
     """Return a one-cell/one-ULP coefficient plant visible at Coriolis output."""
 
@@ -311,7 +349,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     oracle_coefficient_census = None
     oracle_coefficient_identity = None
+    oracle_coefficient_difference_census = None
     oracle_coefficient_application = None
+    signed_zero_coefficient_application = None
+    fold_coefficient_application = None
     discriminator = "UNMEASURED_NO_RANK_COMPLETE_ORACLE_COEFFICIENTS"
     if coefficient_root is not None:
         oracle_coeff, oracle_coefficient_census = assemble_oracle_coefficients(
@@ -323,8 +364,26 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             )
             for name in COEFFICIENTS
         }
+        oracle_coefficient_difference_census = {
+            name: coefficient_difference_census(
+                np.asarray(source_coeff[name]), oracle_coeff[name])
+            for name in COEFFICIENTS
+        }
         oracle_coefficient_application = score_application(
             source_trace, oracle_coeff, oracle, active)
+        signed_zero_coeff = {}
+        fold_coeff = {}
+        for name in COEFFICIENTS:
+            source = np.asarray(source_coeff[name])
+            reference = oracle_coeff[name]
+            signed_zero_coeff[name] = np.where(
+                (source == 0.0) & (reference == 0.0), reference, source)
+            fold_coeff[name] = np.array(source, copy=True)
+            fold_coeff[name][-1] = reference[-1]
+        signed_zero_coefficient_application = score_application(
+            source_trace, signed_zero_coeff, oracle, active)
+        fold_coefficient_application = score_application(
+            source_trace, fold_coeff, oracle, active)
         discriminator = (
             "APPLICATION_AFTER_BIT_EXACT_COEFFICIENTS"
             if all(row["bit_exact"] for row in oracle_coefficient_identity.values())
@@ -439,7 +498,12 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "coefficient_seed_identity": coefficient_seed,
         "oracle_coefficient_census": oracle_coefficient_census,
         "oracle_coefficient_identity": oracle_coefficient_identity,
+        "oracle_coefficient_difference_census": (
+            oracle_coefficient_difference_census),
         "oracle_coefficient_application": oracle_coefficient_application,
+        "signed_zero_coefficient_application": (
+            signed_zero_coefficient_application),
+        "fold_coefficient_application": fold_coefficient_application,
         "discriminator": discriminator,
         "source_divisor_score": source_score,
         "source_associated_application": source_application,
