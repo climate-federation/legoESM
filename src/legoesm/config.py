@@ -291,16 +291,18 @@ class Config:
         """Load configuration from a YAML file."""
         with open(path, "r") as f:
             user_config = yaml.safe_load(f)
+        from legoesm.core.setup_selector import deep_merge
         config = copy.deepcopy(DEFAULT_CONFIG)
         if user_config:  # safe_load returns None for empty files
-            _deep_merge(config, user_config)
+            deep_merge(config, user_config)
         return cls(config)
 
     @classmethod
     def from_dict(cls, d: dict) -> Config:
         """Create configuration from a dictionary."""
+        from legoesm.core.setup_selector import deep_merge
         config = copy.deepcopy(DEFAULT_CONFIG)
-        _deep_merge(config, d)
+        deep_merge(config, d)
         return cls(config)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -565,12 +567,3 @@ class Config:
 
     def __repr__(self) -> str:
         return f"Config({self._data})"
-
-
-def _deep_merge(base: dict, override: dict) -> None:
-    """Recursively merge override into base (in-place)."""
-    for key, value in override.items():
-        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value

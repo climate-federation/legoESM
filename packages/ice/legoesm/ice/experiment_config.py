@@ -42,15 +42,6 @@ def _ice_matrix_spec():
     )
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    for k, v in override.items():
-        if isinstance(v, dict) and isinstance(base.get(k), dict):
-            _deep_merge(base[k], v)
-        else:
-            base[k] = v
-    return base
-
-
 class SeaIceExperimentConfig:
     """Setup-only YAML adapter for idealized sea-ice matrix cases (#388)."""
 
@@ -61,15 +52,17 @@ class SeaIceExperimentConfig:
     def from_yaml(cls, path: str) -> "SeaIceExperimentConfig":
         with open(path, "r") as f:
             user = yaml.safe_load(f)
+        from legoesm.core.setup_selector import deep_merge
         cfg = copy.deepcopy(_DEFAULT_SEAICE_CONFIG)
         if user:
-            _deep_merge(cfg, user)
+            deep_merge(cfg, user)
         return cls(cfg)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SeaIceExperimentConfig":
+        from legoesm.core.setup_selector import deep_merge
         cfg = copy.deepcopy(_DEFAULT_SEAICE_CONFIG)
-        _deep_merge(cfg, d)
+        deep_merge(cfg, d)
         return cls(cfg)
 
     def get(self, key: str, default: Any = None) -> Any:

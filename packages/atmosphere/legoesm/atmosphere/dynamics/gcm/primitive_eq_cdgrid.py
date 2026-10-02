@@ -2325,24 +2325,3 @@ def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfi
     )
     edge_min_overrides.update(overrides)
     return make_fv3_component_fidelity_pe_config(**edge_min_overrides)
-
-
-def make_legoesm_pe_min_edge_aggressive_config(
-    **overrides
-) -> CDGridPrimitiveEquationConfig:
-    """FV3_3D iter 484: PE mirror of NH iter-483 aggressive factory.
-
-    Stacks iter-466 hurting-flag drops + iter-481 corner_div boost
-    (d2_bg=5e-2).  iter-469/470 found PE T/u_d insensitive to most
-    factory flags at C8 — this aggressive config is unlikely to help
-    much on PE compared to NH, but provided for API symmetry with
-    NH iter-483.  Trade-off: over-damps physical waves.
-    """
-    aggressive_overrides = dict(
-        use_fv3_metric_aware_d_con=False,
-        heat_source_del2_iters=0,
-        d_con_top_zero_levels=0,
-        corner_div_damp_d2_bg=5e-2,
-    )
-    aggressive_overrides.update(overrides)
-    return make_fv3_component_fidelity_pe_config(**aggressive_overrides)

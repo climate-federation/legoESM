@@ -105,7 +105,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    exner_function,
+    half_to_full,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -244,15 +248,6 @@ def _full_to_half(x: jax.Array) -> jax.Array:
     half levels ``(ncol, nlev-1)`` (the ``nlev-1`` interfaces between
     consecutive full levels)."""
     return 0.5 * (x[:, :-1] + x[:, 1:])
-
-
-def _half_to_full(x_half: jax.Array, nlev: int) -> jax.Array:
-    """Interpolate half-level quantity ``(ncol, nlev-1)`` to full levels
-    ``(ncol, nlev)`` with one-sided fallback at top/surface."""
-    interior = 0.5 * (x_half[:, :-1] + x_half[:, 1:])
-    return jnp.concatenate(
-        [x_half[:, :1], interior, x_half[:, -1:]], axis=-1,
-    )
 
 
 def _compute_master_length(
@@ -634,11 +629,11 @@ def mynn25_turbulence(
     # Half-level P_S, P_B → averaged to full levels.
     P_S_half = Km_half * S2
     P_B_half = -Kh_half * N2
-    P_S = _half_to_full(P_S_half, nlev)
-    P_B = _half_to_full(P_B_half, nlev)
+    P_S = half_to_full(P_S_half)
+    P_B = half_to_full(P_B_half)
 
     # Master length on full levels (for the dissipation timescale).
-    L_full = _half_to_full(L, nlev)
+    L_full = half_to_full(L)
     L_full = jnp.maximum(L_full, _L_FLOOR)
     q_full = _safe_pow_pos(qke, 0.5)
     diss_coeff = q_full / (config.B1 * L_full)         # 1/s; ε = qke^(3/2)/(B1·L)
@@ -664,8 +659,8 @@ def mynn25_turbulence(
     qke_new = qke_after_prod.at[:, -1].set(qke_sfc)
 
     # Diagnostics: full-level Km, Kh for downstream tools.
-    Km_full = _half_to_full(Km_half, nlev)
-    Kh_full = _half_to_full(Kh_half, nlev)
+    Km_full = half_to_full(Km_half)
+    Kh_full = half_to_full(Kh_half)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
 

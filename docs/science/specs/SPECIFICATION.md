@@ -532,8 +532,6 @@ gradient_y(field, grid)           # d/dy via centered differences
 divergence(u_field, v_field, grid) # div(u,v) with vector halo exchange
 curl_z(u_field, v_field, grid)    # vorticity: dv/dx − du/dy
 laplacian(field, grid)            # 2nd-order ∇²
-advect_upwind(q, u, v, grid)     # 1st-order upwind advection
-advect_centered(q, u, v, grid)   # 2nd-order centered advection
 hyperdiffusion(field, grid, coeff) # 4th-order ∇⁴ damping (two Laplacians)
 global_integral(field, grid)      # Area-weighted integral (MPI-aware via allreduce)
 global_mean(field, grid)          # Area-weighted mean
@@ -1874,9 +1872,9 @@ ml_dtype = jnp.bfloat16
 conservation_dtype = jnp.float64
 ```
 
-### 6.4 Apple Silicon Support (`parallel/metal.py`, `core/hardware.py`)
+### 6.4 Apple Silicon Support (`parallel/metal.py`, `runtime/backend.py`)
 
-**Backend detection**: `detect_devices()` returns backend, n_devices, supports_f64, distributed status.
+**Backend detection**: `legoesm.runtime.detect_hardware()` returns a `HardwareConfig` (backend, device count, float64 support, hosts).
 Backend priority: METAL → GPU → TPU → CPU.
 
 **Metal limitations**:
@@ -2369,8 +2367,7 @@ legoESM/
 │   │   ├── operators_voronoi.py            # MPAS/Voronoi mesh operators
 │   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
-│   │   ├── smooth.py                       # Smooth approximations
-│   │   └── hardware.py                     # Device detection, backend info
+│   │   └── smooth.py                       # Smooth approximations
 │   │
 │   ├── grids/                              # Grid implementations
 │   │   ├── cubed_sphere.py                 # CubedSphereGrid (6-face gnomonic)

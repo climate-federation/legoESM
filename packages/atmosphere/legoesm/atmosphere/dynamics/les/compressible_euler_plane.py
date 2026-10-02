@@ -587,10 +587,11 @@ def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
 # --------------------------------------------------------------------- #
 
 
-def _van_leer_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _van_leer_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx``.
+    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx`` (``axis=1``;
+    ``axis=0`` gives ``-v df/dy``).
 
     Reconstruct field at face i+1/2 from a 4-cell stencil
     [f[i-1], f[i], f[i+1], f[i+2]] using a slope-limited 2nd-order
@@ -611,37 +612,25 @@ def _van_leer_advection_x(
     # Face i+1/2 reconstruction (HD-1-correct r sign) via the shared helper —
     # stencil [f[i-1], f[i], f[i+1], f[i+2]].
     phi_pos, phi_neg = van_leer_face_values(
-        jnp.roll(f, 1, axis=1), f, jnp.roll(f, -1, axis=1), jnp.roll(f, -2, axis=1))
+        jnp.roll(f, 1, axis=axis), f, jnp.roll(f, -1, axis=axis), jnp.roll(f, -2, axis=axis))
     # Face velocity: 2-point centred average of co-located cell velocities.
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
     flux_R = u_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _van_leer_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """2nd-order Van Leer TVD upwind contribution to ``-v df/dy``
-    (axis=0). Same convention as :func:`_van_leer_advection_x`."""
-    from legoesm.core.flux_limiters import van_leer_face_values
-    f = field_yxz
-    phi_pos, phi_neg = van_leer_face_values(
-        jnp.roll(f, 1, axis=0), f, jnp.roll(f, -1, axis=0), jnp.roll(f, -2, axis=0))
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_van_leer_advection_x = functools.partial(_van_leer_advection, axis=1)
+_van_leer_advection_y = functools.partial(_van_leer_advection, axis=0)
 
 
-def _centered_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _centered_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`.
+    """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`
+    (``axis=1``; ``axis=0`` gives ``-v df/dy``).
 
     ADV-SPLIT #86 (codex iter-68): a 2nd-order CENTERED, NON-diffusive momentum
     scheme matching SAM's face reconstruction (``advect2_mom_xy.f90:27``:
@@ -662,26 +651,16 @@ def _centered_advection_x(
     Face value = centred 2-pt avg; stencil [i-1, i, i+1] ⇒ halo 1 (≤ van_leer's 2).
     """
     f = field_yxz
-    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=1))         # centred face i+1/2
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=axis))         # centred face i+1/2
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     flux_R = u_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _centered_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """2nd-order CENTERED flux-form advection ``-v df/dy`` (axis=0). Momentum-leg
-    counterpart of :func:`_centered_advection_x` (= gSAM `advect2_mom`)."""
-    f = field_yxz
-    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=0))
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_centered_advection_x = functools.partial(_centered_advection, axis=1)
+_centered_advection_y = functools.partial(_centered_advection, axis=0)
 
 
 # --------------------------------------------------------------------- #
@@ -697,10 +676,11 @@ def _centered_advection_y(
 # --------------------------------------------------------------------- #
 
 
-def _weno5_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _weno5_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """5th-order WENO-Z upwind contribution to ``-u df/dx``.
+    """5th-order WENO-Z upwind contribution to ``-u df/dx`` (``axis=1``;
+    ``axis=0`` gives ``-v df/dy``).
 
     Computes the face flux ``F_{i+1/2} = u_face · phi_face`` where
     ``phi_face`` is the WENO5-Z left-/right-biased reconstruction
@@ -718,46 +698,27 @@ def _weno5_advection_x(
     f = field_yxz
     # Stencil for face i+1/2: [f[i-2], f[i-1], f[i], f[i+1], f[i+2], f[i+3]]
     stencil_R = [
-        jnp.roll(f,  2, axis=1),
-        jnp.roll(f,  1, axis=1),
+        jnp.roll(f,  2, axis=axis),
+        jnp.roll(f,  1, axis=axis),
         f,
-        jnp.roll(f, -1, axis=1),
-        jnp.roll(f, -2, axis=1),
-        jnp.roll(f, -3, axis=1),
+        jnp.roll(f, -1, axis=axis),
+        jnp.roll(f, -2, axis=axis),
+        jnp.roll(f, -3, axis=axis),
     ]
     fR_plus, fR_minus = weno5_z(stencil_R)  # at face i+1/2
     # Face velocity = arithmetic average of co-located cell velocities.
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     # Upwind selection.
     phi_R = jnp.where(u_face_R >= 0.0, fR_plus, fR_minus)
     flux_R = u_face_R * phi_R
     # Face i-1/2 is just the rolled face i+1/2 of the previous cell.
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _weno5_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """5th-order WENO-Z upwind contribution to ``-v df/dy`` (axis=0)."""
-    from legoesm.core.weno import weno5_z
-    f = field_yxz
-    stencil_R = [
-        jnp.roll(f,  2, axis=0),
-        jnp.roll(f,  1, axis=0),
-        f,
-        jnp.roll(f, -1, axis=0),
-        jnp.roll(f, -2, axis=0),
-        jnp.roll(f, -3, axis=0),
-    ]
-    fR_plus, fR_minus = weno5_z(stencil_R)
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    phi_R = jnp.where(v_face_R >= 0.0, fR_plus, fR_minus)
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_weno5_advection_x = functools.partial(_weno5_advection, axis=1)
+_weno5_advection_y = functools.partial(_weno5_advection, axis=0)
 
 
 def _variable_K_diffusion_vlast(

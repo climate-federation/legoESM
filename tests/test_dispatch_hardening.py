@@ -212,7 +212,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
         ("packages/core/legoesm/grids/factory.py", "create_regional_grid"),
         ("packages/core/legoesm/grids/halo.py", "set_halo_backend"),
-        ("packages/core/legoesm/parallel/device_config.py", "get_optimal_mesh"),
+        # parallel/device_config.py::get_optimal_mesh removed 2026-10 (ponytail
+        # #12): deleted with the function; it had zero non-test callers.
         ("packages/core/legoesm/parallel/halo_exchange_voronoi.py", "exchange_local_simulated"),
         ("packages/core/legoesm/parallel/runtime.py", "halo_exchange"),
         ("packages/core/legoesm/parallel/voronoi_mpi.py", "gather_voronoi_field"),

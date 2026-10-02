@@ -415,8 +415,6 @@ ignore_imports = [
     # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
     # component (the root inversion above); baseline the core->grids hop.
@@ -574,8 +572,6 @@ ignore_imports = [
     # baselined in contract #1 (runtime/__init__ <-> core init cycle).
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
     # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).
