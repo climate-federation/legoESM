@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 
 import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round93_rhs_walk as gate,
+)
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round93_slow_acquisition import (
+    check_record as slow_record,
 )
 
 
@@ -53,3 +57,26 @@ def test_rank_complete_record_assembles_and_layout_plant_fires() -> None:
         gate.assemble_rhs(RECORD, plant="layout")
     with pytest.raises(gate.GateError, match="jpk accumulator slot"):
         gate.assemble_rhs(RECORD, plant="bottom-slot")
+
+
+def test_slow_record_reader_uses_its_self_describing_header(tmp_path: Path) -> None:
+    path = tmp_path / "oracle_r93_slow_rank0000_kt00000001.bin"
+    payload = bytearray(slow_record.MAGIC)
+    payload.extend(struct.pack(
+        "=16i", 1, 1, 1, 3, 3, 0, 94, 152, 1, 1,
+        3, 3, 92, 150, 64, len(slow_record.NAMES)))
+    values = np.zeros(94 * 152, dtype=np.float64).tobytes()
+    for name in slow_record.NAMES:
+        payload.extend(name.encode("ascii").ljust(16, b" "))
+        payload.extend(struct.pack("=4i", 2, 94, 152, 1))
+        payload.extend(values)
+    path.write_bytes(payload)
+    record = slow_record.read_record(path)
+    assert tuple(record["fields"]) == slow_record.NAMES
+    assert record["rank"] == 0
+    for plant in ("header", "field-name", "truncation", "swapped-rank"):
+        if plant == "swapped-rank":
+            assert slow_record.read_record(path, plant)["rank"] == 1
+        else:
+            with pytest.raises(slow_record.Refusal):
+                slow_record.read_record(path, plant)

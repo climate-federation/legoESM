@@ -121,6 +121,8 @@ def score(candidate: np.ndarray, oracle: np.ndarray, active: np.ndarray) -> dict
         "argmax_jik": list(at),
         "candidate_at_argmax": float(candidate[at]),
         "oracle_at_argmax": float(oracle[at]),
+        "candidate_max_abs": float(np.max(np.abs(candidate[active]), initial=0.0)),
+        "reference_max_abs": float(np.max(np.abs(oracle[active]), initial=0.0)),
     }
 
 
@@ -230,6 +232,7 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
     require(entry_rows["first_non_bit_field"] is None,
             "independent stage-0 entry is no longer bit exact")
     freshwater, surface = _forcing(entry["ssh"].shape)
+    oracle, record_census = assemble_rhs(record_root, plant=plant)
 
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg)
@@ -258,7 +261,6 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         parts["keg_u"], parts["keg_v"],
         parts["zad_u"], parts["zad_v"],
     ))
-    oracle, record_census = assemble_rhs(record_root, plant=plant)
     masks = phase3_gate.expected_masks(card)
     active = {face: masks[face] for face in FACES}
     live = {
@@ -276,7 +278,13 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         for face in FACES
     }
     first = first_nonbit(rows)
-    require(first is not None, "all five stage-1 RHS boundaries stayed bit exact")
+    require(any(rows[face]["after_hpg"]["reference_max_abs"] > 0.0
+                for face in FACES),
+            "recorded HPG boundary is vacuously zero")
+    require(any(not np.array_equal(
+                    oracle[f"after_hpg_{face}"], oracle[f"after_ldf_{face}"])
+                for face in FACES),
+            "recorded LDF boundary is vacuous")
 
     # Known-answer control independent of the measured residual: one ULP in an
     # otherwise exact active array must become exactly one differing wet cell.
@@ -308,6 +316,14 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str, *, plant: st
         "source_order": list(BOUNDARIES),
         "rows": rows,
         "first_non_bit_statement": first,
+        "next_unmeasured_statement": (
+            None if first is not None else {
+                "statement": "vertical average of the exact 3-D RHS",
+                "compiled_source": "stp2d.f90:203-215",
+                "reason": "the admitted rank-complete record ends after ZAD",
+            }
+        ),
+        "prediction_R93_P1": "CONFIRMED" if first is not None else "REFUTED",
         "one_ulp_control": control,
     }
 
