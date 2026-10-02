@@ -346,7 +346,14 @@ class MPASOceanConfig(NamedTuple):
     # 1e-10 residual has to set the count back up explicitly.
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
-    barotropic_implicit_pcg_fixed_iters: int = 20
+    #
+    # 15 with the GLOBAL polynomial ("gpoly", below) since 2026-10-02 (owner
+    # decision). Saved L9 systems, 128 emulated devices: gpoly@15 beats the
+    # block-local poly@20 it replaces (f64 rel_res 6.4e-8 vs 8.9e-8; f32
+    # surface error vs converged 1.1e-7 m vs 2.4e-7 m). GPU weak ladder
+    # (20480 cells/GPU, f32, two repeats): step -6% / -8.5% / -10.4% at
+    # 8 / 32 / 128 GPUs. Single-device runs are unaffected (stock CG).
+    barotropic_implicit_pcg_fixed_iters: int = 15
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # "single_reduce" (Chronopoulos-Gear, one batched allreduce per
     # iteration instead of two) since 2026-09-26, owner-approved after two
@@ -375,13 +382,15 @@ class MPASOceanConfig(NamedTuple):
     # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
     # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
     # residual.
-    # "gpoly" (opt-in): the same polynomial on the GLOBAL operator, evaluated
+    # Default "gpoly" since 2026-10-02 (owner decision; see fixed_iters for
+    # the A/B): the same polynomial on the GLOBAL operator, evaluated
     # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
     # historical 2 satisfies at 4 sweeps); one exchange per iteration as
     # before, and the answer no longer depends on the device count. Same
     # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
-    # iters 10 / 15 / 20. The single-device path runs the same fixed-M PCG.
-    barotropic_implicit_pcg_precond: str = "poly"
+    # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
+    # (select "poly" there) and a single device keeps the stock CG solve.
+    barotropic_implicit_pcg_precond: str = "gpoly"
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global

@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
                    choices=["jacobi", "poly", "gpoly"],
-                   help="distributed PCG preconditioner (config default poly); "
+                   help="distributed PCG preconditioner (config default gpoly); "
                         "'poly' is the communication-free local Neumann polynomial, "
                         "'gpoly' the same polynomial on the GLOBAL operator "
                         "(evaluated on a K-ring halo, one exchange per iteration)")
