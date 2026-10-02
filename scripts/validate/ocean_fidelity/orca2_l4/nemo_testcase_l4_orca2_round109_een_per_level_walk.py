@@ -52,6 +52,9 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
     magnitude = candidate != reference
     signed_zero = unequal & ~magnitude
     locations = np.argwhere(unequal)
+    unique_j = [] if locations.size == 0 else list(map(int, np.unique(locations[:, 0])))
+    unique_k = (None if candidate.ndim < 3 else
+                ([] if locations.size == 0 else list(map(int, np.unique(locations[:, 2])))))
     return {
         "bit_unequal": int(np.count_nonzero(unequal)),
         "magnitude_unequal": int(np.count_nonzero(magnitude)),
@@ -59,6 +62,8 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
         "first_bit_unequal_j_i_k": (
             None if locations.size == 0 else list(map(int, locations[0]))
         ),
+        "bit_unequal_j_values": unique_j,
+        "bit_unequal_k_values": unique_k,
     }
 
 

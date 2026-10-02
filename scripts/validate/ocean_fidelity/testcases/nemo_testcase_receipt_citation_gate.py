@@ -1263,6 +1263,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 109: admitted EEN per-level recurrence ---
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1245': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('& ff_f(ji  ,jj-1) /', 2), 5],
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1256-1263': [
+        ('r107_zpvo_nw(ji,jj,jk) = zpvo_nw', 1),
+        ('r107_acc_after(ji,jj,jk) = ffu_nw(ji,jj)', 1), 8],
     # --- ORCA2 round 108: inherited recorder initialization chain ---
     'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1103-1104': [
         ('CALL r105_een_accum_init', 1),
