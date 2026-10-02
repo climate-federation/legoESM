@@ -56,7 +56,7 @@ of replacing the self-described group contract with the domain shape.
 The original producer manifest remains immutable. The repaired launcher pins
 the recorded old launcher and checker digests explicitly, while continuing to
 content-verify the unchanged writer, patch, preregistration, and pre-patch
-compiled source. All nine record/restart plants and the producer-content plant
+compiled source. All eight record/restart plants and the producer-content plant
 fire; `--admit-existing` ends with
 `ORCA2_ROUND98_EEN_COEFF_ACQUISITION_PASS`.
 
@@ -104,7 +104,8 @@ all-zero-payload, swapped-rank, and restart-byte plants also fire during
 admission. The one-ULP coefficient and application plants fire on the measured
 path.
 
-Focused parser, assembly, application, launcher, and control tests pass 25/25.
+Focused parser, assembly, application, launcher, control, and citation tests
+pass 42/42.
 The single `tests/ocean/fidelity -n 12` battery reached 99%, reproduced the
 same six established failures as rounds 97-98, and lost its pytest process
 without a terminal summary. It is recorded as **incomplete**, not PASS.
