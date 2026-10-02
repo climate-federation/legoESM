@@ -56,7 +56,7 @@ compressible_euler_latlon_cgrid.py compressible_euler_mpas.py
 primitive_eq_cdgrid.py             primitive_eq_latlon_cgrid.py
 primitive_eq_mpas.py               semi_implicit_cdgrid.py
 shallow_water_fv3_cdgrid.py        shallow_water_latlon_cgrid.py
-shallow_water_mpas.py              shallow_water_nesting.py
+shallow_water_mpas.py
 spectral_pe.py                     spectral_sw.py
 spectral_nh.py                     sharded_atm_latlon_step.py
 tiled_step_adapter.py              tracer_transport_latlon.py
