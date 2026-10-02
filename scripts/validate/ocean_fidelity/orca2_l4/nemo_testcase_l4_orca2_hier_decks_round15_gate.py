@@ -256,6 +256,7 @@ def stage_deck(root: Path) -> None:
 def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
     inherited_plant = plant if plant in set(upper.PLANTS) else "none"
     inherited = upper.validate_resolved(root, plant=inherited_plant)
+    rung6 = inherited.get("upper_rung")
     ocean = (root / "ocean.output").read_text(errors="strict")
     checks = {
         "ln_traqsr_false": re.search(
@@ -264,13 +265,13 @@ def validate_resolved(root: Path, *, plant: str = "none") -> dict[str, object]:
         is not None,
         "shortwave_initializer_absent": "tra_qsr_init : penetration" not in ocean,
         "rgb_print_absent": "RGB (Red-Green-Blue) light penetration" not in ocean,
+        "nn_havtb_uniform": isinstance(rung6, dict)
+        and rung6.get("nn_havtb_uniform") is True,
     }
     if plant == "shortwave-consequence":
         checks["ln_traqsr_false"] = False
-    if plant == "resolved-havtb":
-        inherited["nn_havtb_uniform"] = False
     require(
-        all(checks.values()) and inherited.get("nn_havtb_uniform") is True,
+        all(checks.values()),
         f"resolved rung-4 checks failed: {checks}, upper={inherited}",
     )
     return {"status": "PASS_RUNG4_HAVTB0_RESOLVED", "upper_rung": inherited, **checks}

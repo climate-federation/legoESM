@@ -46,19 +46,26 @@ def test_staged_deck_is_exact_and_idempotent(tmp_path):
 
 
 def test_resolved_requires_uniform_background_and_disabled_shortwave(tmp_path, monkeypatch):
+    seen = []
+
+    def resolved(root, plant="none"):
+        seen.append(plant)
+        return {
+            "status": "PASS_RUNG5_HAVTB0_RESOLVED",
+            "upper_rung": {"nn_havtb_uniform": plant != "resolved-havtb"},
+        }
+
     monkeypatch.setattr(
         gate.upper,
         "validate_resolved",
-        lambda root, plant="none": {
-            "status": "PASS_RUNG5_HAVTB0_RESOLVED",
-            "nn_havtb_uniform": True,
-        },
+        resolved,
     )
     (tmp_path / "ocean.output").write_text("Light penetration in temperature Eq. ln_traqsr = F\n")
     assert gate.validate_resolved(tmp_path)["status"] == "PASS_RUNG4_HAVTB0_RESOLVED"
     for plant in ("shortwave-consequence", "resolved-havtb"):
         with pytest.raises(gate.GateError):
             gate.validate_resolved(tmp_path, plant=plant)
+    assert seen == ["none", "none", "resolved-havtb"]
 
 
 def test_runner_is_fail_closed_and_preserves_superseded_record():
