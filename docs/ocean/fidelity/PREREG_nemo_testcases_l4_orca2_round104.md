@@ -41,3 +41,24 @@ rung-7 ten-step gates pass, shared-card gates pass, focused tests and the
 prescribed ocean-fidelity battery are run one at a time, the citation gate and
 its plant fire, and the separate read-only Codex review is recorded. Otherwise
 the round is **HELD** at the first falsified prediction.
+
+## Post-refutation preregistration — loop-bound arm
+
+Committed after R104-P1 was measured and **REFUTED**, before measuring this
+second arm. Removing the early masks caused 2,115–2,693 new non-fold magnitude
+differences per coefficient and maxima up to `2.5812540150707704e-3`; that
+failed prediction and its artifact remain part of the record.
+
+The source-order discriminator is the loop domain. NEMO evaluates the U and V
+recurrences only for `jk=1:mbku(ji,jj)` and `jk=1:mbkv(ji,jj)`
+(`dynspg_ts.f90:1215-1234,1242-1261`). The vectorized builder instead evaluates
+all levels and turns out-of-column terms into signed zeros with an extra local
+mask multiplication. Arm 2 removes the two early local masks, preserves the
+compiled neighbor-mask products, and conditionally updates the accumulator
+only where the local face mask says that level belongs to the NEMO loop.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R104-P6 | Explicit `mbku/mbkv`-equivalent loop gating owns the non-fold zero signs without changing magnitudes. | All eight coefficients have zero non-fold bit differences; only the registered 66/67 fold magnitudes remain. | Any non-fold bit difference or any new magnitude difference: **REFUTED** and hold without a model landing. |
+| R104-P7 | The source loop arm closes substep-1 U/V and leaves the independent 68-cell substep-2 U fold residual. | Same consumer rows as R104-P3. | Any other row moves: hold and name it. |
+| R104-P8 | Replacing the conditional update with unconditional masked arithmetic makes the synthetic dry-column control fail. | Direct test observes positive-zero accumulator for the skipped loop and a negative zero for the planted unconditional term. | Control stays green: no landing. |
