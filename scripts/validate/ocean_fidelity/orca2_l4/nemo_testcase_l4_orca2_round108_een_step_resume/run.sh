@@ -48,9 +48,9 @@ pin() {
 
 check_environment_contract() {
   local source=$1
-  [[ "$(grep -Fc 'export ORCA2_R105_EEN_ACCUM_DIR=$TARGET_RUN' "$source")" -eq 1 ]] &&
-  [[ "$(grep -Fc 'export ORCA2_R107_EEN_STEP_DIR=$TARGET_RUN' "$source")" -eq 1 ]] &&
-  [[ "$(grep -Fc 'both recorder directories are not absolute/pre-created' "$source")" -eq 1 ]]
+  [[ "$(grep -Ec '^  export ORCA2_R105_EEN_ACCUM_DIR=\$TARGET_RUN$' "$source")" -eq 1 ]] &&
+  [[ "$(grep -Ec '^  export ORCA2_R107_EEN_STEP_DIR=\$TARGET_RUN$' "$source")" -eq 1 ]] &&
+  [[ "$(grep -Ec "^    printf 'REFUSE: both recorder directories are not absolute/pre-created" "$source")" -eq 1 ]]
 }
 
 marker_ranks() {
