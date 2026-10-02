@@ -182,6 +182,8 @@ FILES = {
         _ORCA2_R104EENACC_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R105EENACC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R105EENACC_COMPILED / "dommsk.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1255,6 +1257,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 107: literal EEN vertical loop bounds ---
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1229-1230': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        'DO jk = 1, mbku(ji,jj)', 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1262-1263': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 2),
+        'DO jk = 1, mbkv(ji,jj)', 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90:223-230': [
+        'IF (jpk>2) THEN',
+        'IF ( MAXVAL(fmask(ji,jj,:))/=0._wp )', 8],
     # --- ORCA2 round 106: admitted live EEN accumulator/scale producer ---
     'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1231-1244': [
         'zpvo_nw = ff_f(ji-1,jj  )',
