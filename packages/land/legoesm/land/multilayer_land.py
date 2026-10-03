@@ -78,7 +78,6 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
     dry_soil_brightening,
-    ground_snow_cover,
     land_vegetation_albedo,
     snow_albedo,
     snow_cover_fraction,
@@ -391,14 +390,16 @@ def _partition_latent_root_top(soil_evap, has_snow, f_veg, le_canopy, le_soil):
 def _canopy_masked_band(snowy_fn, lp, LAI_override, swe, config, band, forcing):
     """``a -> column albedo`` of one band with the canopy hiding the snow
     (``config.canopy_snow_masking``): wraps the unmasked ``snowy_fn`` (soil band
-    -> snowy ground albedo) in :func:`canopy_masked_snow_albedo`, using the SAME
-    ground snow cover the unmasked blend uses and the LAI the canopy fluxes use."""
+    -> snowy ground albedo) in :func:`canopy_masked_snow_albedo`, with the LAI the
+    canopy fluxes use.  The burial uses the PHYSICAL snow cover (CTSM frac_sno):
+    the calibrated per-PFT ``snow_cover_scale`` is a brightness correction and
+    stays in ``snowy_fn`` only (user 2026-10-03)."""
     if lp.SAI_dom is None or lp.hbot_dom is None or lp.pft_dom is None:
         raise ValueError(
             "canopy_snow_masking needs per-column SAI_dom, hbot_dom and pft_dom in the "
             "canopy parameters (build_canopy_params / the per-step updater set "
             "them); these parameters carry none")
-    f_snow = ground_snow_cover(swe, config.land_albedo)
+    f_snow = snow_cover_fraction(swe, config.land_albedo)
     lai = lp.LAI if LAI_override is None else LAI_override
     # Snow depth [m] for the CLM5 burial of short plants: SWE over a bulk density.
     depth = swe / constants.rho_snow_land

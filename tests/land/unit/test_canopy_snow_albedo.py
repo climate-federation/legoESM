@@ -288,7 +288,7 @@ def test_land_step_switch_on_masks_forest_snow_only():
 def _pre_step_masked():
     from legoesm import constants
     from legoesm.land.multilayer_land import compute_land_albedo
-    from legoesm.surface_albedo import LandAlbedoConfig, snow_cover_fraction
+    from legoesm.surface_albedo import LandAlbedoConfig, snow_cover_fraction  # noqa: F401
     la = LandAlbedoConfig()
     swe = jnp.asarray([0.0, 200.0, 200.0, 5.0])
     age = jnp.full(NCOL, 2.0 * 86400.0)
@@ -514,3 +514,24 @@ def test_switch_off_ignores_the_new_structure_fields():
     assert len(la) == len(lb) > 10
     for x, y in zip(la, lb):
         assert np.asarray(x).tobytes() == np.asarray(y).tobytes()
+
+
+
+def test_burial_uses_physical_snow_cover_not_the_albedo_scale():
+    """User 2026-10-03: the calibrated snow_cover_scale is a brightness knob; the
+    burial sees the physical cover.  Grass under deep snow with a scale of 0.5:
+    physical cover ~1 -> fully buried -> the column is the plain snowy ground."""
+    from legoesm.land.multilayer_land import _canopy_masked_band
+    from legoesm.surface_albedo import LandAlbedoConfig
+    la = LandAlbedoConfig(snow_cover_scale=jnp.full(NCOL, 0.5))
+    cfg = MultiLayerLandConfig(snow_albedo_feedback=True, land_albedo=la,
+                               surface_scheme=TwoLeafCanopyConfig(),
+                               canopy_snow_masking=True)
+    lp = bare_canopy_params(NCOL, canopy_structure=True)._replace(
+        LAI=jnp.full(NCOL, 0.3), SAI_dom=jnp.full(NCOL, 0.4), hc=jnp.full(NCOL, 0.5),
+        hbot_dom=jnp.zeros(NCOL), pft_dom=jnp.full(NCOL, 13.0))
+    swe = jnp.full(NCOL, 300.0)                      # 1.2 m of snow
+    snowy = lambda a: a + 0.6
+    f = _canopy_masked_band(snowy, lp, None, swe, cfg, 0, _forcing())
+    out = np.asarray(f(jnp.full(NCOL, 0.1)))
+    np.testing.assert_array_equal(out, np.full(NCOL, 0.7))
