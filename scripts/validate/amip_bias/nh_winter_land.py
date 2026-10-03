@@ -195,10 +195,38 @@ def _sidecar(run, day):
     return out
 
 
+def _end_sums_from_amon(run, s0, start, ym):
+    """End-of-month sums when the run stopped AT the month end (the driver
+    writes no terminal sidecar): the closed month's Amon mean times its full
+    sample count, the per-day count measured from the start sidecar.  The
+    caller's Amon control is then tautological and is reported as such."""
+    import calendar
+    nd = calendar.monthrange(YEAR, ym[1])[1]
+    elapsed = start - (dt.date(YEAR, ym[1], 1) - dt.date(YEAR, 1, 1)).days
+    out = {}
+    for var in ("tas", "ts", "hfss", "hfls", "ps", "ta"):
+        a0, c0 = s0[(*ym, var)]
+        per_day = c0 / elapsed
+        if per_day not in (1.0, 24.0):
+            raise SystemExit(f"{run}/{var}: {c0} samples in {elapsed} days")
+        pub = np.asarray(xr.open_dataset(amon_file(run, var), decode_times=False)[var]
+                         .isel(time=-1).values, float)
+        if var == "ta":            # file (lev bottom-first, lat, lon) -> sidecar order
+            pub = np.moveaxis(pub, 0, -1)[..., ::-1]
+        n = int(per_day * nd)
+        out[(*ym, var)] = (pub * n, n)
+    return out
+
+
 def window(run, start, end, land_min):
-    s0, s1 = _sidecar(run, start), _sidecar(run, end)
     # bucket = calendar month of the window's last day (relative year 0 = YEAR)
     ym = (0, (dt.date(YEAR, 1, 1) + dt.timedelta(days=end - 1)).month)
+    s0 = _sidecar(run, start)
+    try:
+        s1 = _sidecar(run, end)
+    except FileNotFoundError:
+        s1 = _end_sums_from_amon(run, s0, start, ym)
+        print(f"# {run}: no day-{end} sidecar; end sums from the closed Amon month")
     if (dt.date(YEAR, 1, 1) + dt.timedelta(days=start)).month != ym[1]:
         raise SystemExit(f"{run}: window {start}..{end} crosses a month")
     fields = {}
