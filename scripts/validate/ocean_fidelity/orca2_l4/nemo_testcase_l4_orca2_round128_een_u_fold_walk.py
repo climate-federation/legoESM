@@ -339,6 +339,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         name: row for name, row in production_scores.items()
         if row["bit_unequal"] != 0
     }
+    for name, row in moved_production.items():
+        j, i = row["first_bit_unequal_j_i_k"][:2]
+        row["first_candidate_bits"] = hex(
+            int(np.asarray(production[name]).view(np.uint64)[j, i]))
+        row["first_oracle_bits"] = hex(
+            int(np.asarray(coefficient_oracle[name]).view(np.uint64)[j, i]))
     require(not moved_production,
             "production literal-EEN coefficients are not bit-exact: "
             f"{moved_production}")
