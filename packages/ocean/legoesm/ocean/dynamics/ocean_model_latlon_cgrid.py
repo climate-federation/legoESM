@@ -7036,7 +7036,18 @@ class LatLonCGridOceanModel:
             # That placement is inherited from the structure this target
             # already had (``H_u_pre`` and ``Hu_avg`` are both step-entry
             # quantities); round 206 changed the depth RULE, not the time
-            # level, and the time level is an open item.  Measured on VORTEX-zco: the two depths differ
+            # level, and the time level is an open item.
+            # FORM, also stated rather than implied: NEMO MULTIPLIES by a
+            # stored reciprocal, ``un_adv*(r1_hu_0/(1+r3u))``, while this
+            # DIVIDES by the summed depth.  Equal algebraically, not
+            # bitwise.  The literal operand already exists -- the same
+            # kernel returns ``r1_hu = r1_hu0/(1+r3u)`` under
+            # ``include_reciprocals=True`` (vertical.py), which
+            # ``_nemo_stage_corrected_velocity`` consumes through
+            # ``nemo_source_round``.  Round 206 landed the measured
+            # candidate the user approved, which is the divide; the
+            # association is the next walk item, not an oversight.
+            # Measured on VORTEX-zco: the two depths differ
             # by up to 0.129 m in 5000.86 m (2.58e-05 relative, 698 of 3660
             # u columns), and the stage-1 flux-form advection trend's
             # disagreement with NEMO falls from 6.285649e-11 to

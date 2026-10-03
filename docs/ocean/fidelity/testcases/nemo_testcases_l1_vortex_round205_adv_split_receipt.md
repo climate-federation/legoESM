@@ -1,5 +1,19 @@
 # VORTEX round 19 (lane round 205) — `dyn_adv_up3` split, and the divisor that owns it
 
+> **AMENDED by lane round 206 (Decision 86).**  The decision at the end of
+> this receipt was taken: the divisor MOVED to NEMO's `hu_0*(1+r3u(Kmm))`
+> and landed on the shared RK3 path.  Two names in this receipt are
+> therefore stale.  The private arm `momentum_transport_stage1_operand=
+> "qco_depth"` no longer exists — the production path now IS that divisor
+> and the arm is inverted to `"legacy_min_rule_depth"`; the retired string
+> raises.  The held patch
+> `manifests/nemo_testcase_l1_vortex_round205_transport_qco_depth_held.patch`
+> is retired in place as `..._LANDED.patch`.  Read the round-206 receipt
+> (`nemo_testcases_l1_vortex_round206_transport_depth_landing_receipt.md`)
+> for what landed, for the GYRE/vector/tank measurements this round did not
+> make, and for the review finding that the landed form is the ALGEBRAIC
+> and not the LITERAL transcription of `stprk3_stg.f90:270`.
+
 **ROUND_STATUS: HELD** — the instrument and the statement land; the FIX does
 not, because it trips the cellwise two-ULP ratchet and that is a user
 decision.  No NEMO run was needed.  No production default, scheme, deck
