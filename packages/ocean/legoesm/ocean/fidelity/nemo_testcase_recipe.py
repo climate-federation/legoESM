@@ -1839,7 +1839,7 @@ class _VortexResolution(NamedTuple):
 
     No field here is derived at use time: the card states the grid it runs on
     and the receipt prints it.  ``ni``/``nj`` ARE what ``usr_def_nam`` computes
-    from ``rn_dx`` (usrdef_nam.F90:138-143, kpi = NINT(1800e3/rn_dx)+3), but
+    from ``rn_dx`` (usrdef_nam.F90:138-139, kpi = NINT(1800e3/rn_dx)+3), but
     they are written out so a card can never silently disagree with the deck
     NEMO was run with.
     """
@@ -1882,17 +1882,37 @@ _VORTEX_RESOLUTIONS: dict[str, _VortexResolution] = {
         "-10km", 10000.0, 10000.0, 183, 183, 960.0, 6000,
         "round208_res10"),
 }
-for _rung in _VORTEX_RESOLUTIONS.values():
-    # usrdef_nam.F90:138-143 is an integer NINT, so this is the derivation
-    # itself, run as a check on the written-out value rather than as its
-    # source.  A rung whose ni disagrees with NEMO's own arithmetic would run
-    # a different box than the deck it cites.
-    if (_rung.ni, _rung.nj) != (round(1800.e3 / _rung.dx_m) + 3,
-                                round(1800.e3 / _rung.dy_m) + 3):
+def _vortex_nint(value: float) -> int:
+    """Fortran ``NINT``: round half AWAY FROM ZERO, not Python's half-to-even.
+
+    No rung here lands on a .5 case, but ``round()`` would silently disagree
+    with ``usr_def_nam`` on one that did, and the statement being transcribed
+    is Fortran's, so it is transcribed with Fortran's rounding rule.
+    """
+    if value < 0.0:
+        return -_vortex_nint(-value)
+    return int(math.floor(value + 0.5))
+
+
+def validate_vortex_resolution(rung: "_VortexResolution") -> None:
+    """Refuse a rung whose written-out cell count is not NEMO's own.
+
+    ``usrdef_nam.F90:138-139`` computes ``kpi = NINT(1800e3/rn_dx)+3`` and
+    ``kpj`` likewise; this runs that arithmetic as a CHECK on the value the
+    rung writes out, never as its source.  A rung that disagreed with it would
+    run a different box than the deck it cites.
+    """
+    want = (_vortex_nint(1800.e3 / rung.dx_m) + 3,
+            _vortex_nint(1800.e3 / rung.dy_m) + 3)
+    if (rung.ni, rung.nj) != want:
         raise ValueError(
-            f"VORTEX rung {_rung.suffix or '30km'} states {_rung.ni}x"
-            f"{_rung.nj} cells, which is not usr_def_nam's "
-            "NINT(1800e3/rn_dx)+3")
+            f"VORTEX rung {rung.suffix or '30km'} states {rung.ni}x"
+            f"{rung.nj} cells, which is not usr_def_nam's "
+            f"NINT(1800e3/rn_dx)+3 = {want[0]}x{want[1]}")
+
+
+for _rung in _VORTEX_RESOLUTIONS.values():
+    validate_vortex_resolution(_rung)
 del _rung
 # nameos rn_a0 (namelist_cfg:132).  eosbn2.F90:1890-1895 reads nameos
 # unconditionally, so usrdef_istate.F90:19,88 consumes 0.28 whichever equation
@@ -2684,6 +2704,7 @@ __all__ = (
     "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_vortex_zco_card",
+    "validate_vortex_resolution",
     "VORTEX_UNMEASURED",
     "build_nemo_testcase_card",
     "gyre_horizontal_coordinates",
