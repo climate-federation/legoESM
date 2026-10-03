@@ -250,3 +250,16 @@ def test_surface_scheme_sees_the_snow_node_temperature():
     h_cold = step(st._replace(T_snow=jnp.array([250.0]))).shflx
     h_warm = step(st._replace(T_snow=jnp.array([265.0]))).shflx
     assert float(h_warm[0] - h_cold[0]) > 10.0
+
+
+def test_snow_fallen_this_step_gets_its_own_node():
+    """Snow falling on bare ground forms a pack in the step's FINAL solve (end-
+    of-step mass): the node then decouples from the top soil."""
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+    st = init_multilayer_land_state(1, cfg, T_init=271.0, theta_init=0.25)
+    f = _forcing(1, 255.0, 2.0e-3, 2.0e-3)      # 3.6 kg/m2 of snow in 30 min
+    s2 = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                                lat=jnp.full(1, 1.0))[0])(st)
+    assert float(s2.snow_depth[0]) > 1.0
+    assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) > 1e-3
