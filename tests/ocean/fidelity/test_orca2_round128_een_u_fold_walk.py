@@ -12,6 +12,9 @@ def test_round128_northern_u_row_uses_registered_source_and_permutation():
     np.testing.assert_array_equal(result, field[-2, perm])
     np.testing.assert_raises(
         gate.GateError, gate.northern_u_row, field, np.arange(4))
+    wrong_perm = np.array([0, 4, 3, 2, 1])
+    wrong = gate.northern_u_row(field, perm, permutation=wrong_perm)
+    assert not np.array_equal(wrong, result)
 
 
 def test_round128_replaces_only_the_named_northern_neighbor():

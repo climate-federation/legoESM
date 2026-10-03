@@ -166,7 +166,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     if plant == "oracle-bit":
         recurrence_oracle = dict(recurrence_oracle)
         changed = np.array(recurrence_oracle["e3u_nw"], copy=True)
-        changed.view(np.uint64)[-1, 30, 3] ^= np.uint64(1)
+        changed.view(np.uint64)[-1, 31, 3] ^= np.uint64(1)
         recurrence_oracle["e3u_nw"] = changed
 
     scope = r112.resolved_card_scope(deck_root)
@@ -227,7 +227,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
 
     perm_u = np.asarray(fold_perm_u(card.recipe.grid.fold), dtype=np.int64)
     source_offset = -3 if plant == "wrong-row" else -2
-    association_perm = perm_f if plant == "wrong-permutation" else perm_u
+    association_perm = (np.asarray(card.recipe.grid.fold.perm_T, dtype=np.int64)
+                        if plant == "wrong-permutation" else perm_u)
     north_e3u = northern_u_row(
         np.asarray(parts["source_e3u"]), perm_u,
         source_offset=source_offset, permutation=association_perm)
