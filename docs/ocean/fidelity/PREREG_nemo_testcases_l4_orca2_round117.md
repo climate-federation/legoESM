@@ -1,6 +1,6 @@
 # Preregistration — ORCA2 round 117 remaining U EEN recurrence walk
 
-Date: 2026-10-03. Base: `a664ca4243bf0a2817e9bb321672fa07ad19574a`.
+Date: 2026-10-03. Base: `a664ca424d6d931751db5d906d0c5abe859c6957`.
 All ocean numbers in this round are **independent**: hierarchy rung 0 starts
 from NEMO's own from-rest state. No model physics, card field, configuration
 value, carried state, threshold, stabilizer, sea-ice selector, or
