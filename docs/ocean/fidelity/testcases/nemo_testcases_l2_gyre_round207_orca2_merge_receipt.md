@@ -1,15 +1,17 @@
 # GYRE lane round 207 — merge the ORCA2 lane (note BX)
 
-**Status: HELD.** The merge itself is complete, reviewed and green on every
-gate. It is held on ONE registered number: the certified GYRE from-rest year
-moves, sub-floor, and three of its eight scored days move AWAY from NEMO. The
-round order's stop condition is "any move → register and, if beyond Decision
-59's ten floor units **or away from NEMO**, STOP with DECISION_NEEDED". The
-largest move is **0.27 of one floor unit** against a ten-unit allowance, and
-the merged year reproduces, to every printed digit, the year the ORCA2 merged
-tree already registered in round 102 (note BU) — so this is the
-already-registered cross-lane sub-floor discrepancy being realized, not a new
-one. It is still a move away, so the decision is the operator's, not mine.
+**Status: LANDED.** The merge adopts the ORCA2 lane's `fe3mask` and southern
+`ff_f` statements, is green on every gate, and **re-pins the certified GYRE
+from-rest year** to this tree's measured values.
+
+The year moves, sub-floor. The operator took the decision (2026-10-03,
+superseding this round's own stop condition, which was too strict): the move
+is inside the lane's gate, because **Decision 43(a) forbids a certified row
+moving away BEYOND the floor** and none does, and **Decision 59 / note AW
+admits a registered year move under ten floor units** — the largest here is
+**0.27 of one floor unit**. Note B35 on the ORCA2 lane already applied this
+same reading to this same cross-lane gap. Note BW's year values are SUPERSEDED
+by the table below.
 
 ## Tips merged
 
@@ -19,8 +21,8 @@ one. It is still a move away, so the decision is the operator's, not mine.
 | theirs | `877e334f1` | `origin/fidelity/nemo-testcases-orca2-rounds`, ORCA2 rounds 111 + 112 |
 | merge | `345a77121` | `git merge --no-ff`, 916 commits arriving, merge base `d7de69d51` |
 
-**Round 113 is NOT in this merge, and that is a scope fact, not an omission by
-accident.** The ORCA2 lane's round 113 (southern mesh-thickness restore, 6
+**Rounds 113 AND 114 are NOT in this merge, and that is a scope fact, not an
+omission by accident.** The ORCA2 lane's round 113 (southern mesh-thickness restore, 6
 commits, local tip `faf8b0474`) LANDED on the ORCA2 lane's clone at 00:07 but
 its push gate never produced a `pushed` line, so the fetched remote branch
 stops at `877e334f1`. `faf8b0474` is not an object any remote records. The
@@ -28,8 +30,11 @@ round order allowed for this ("round 113 may have pushed — take whatever the
 tip is"); the tip is `877e334f1`. The independent reviewer was asked this
 question cold and agreed: merging unpushed commits out of another clone's
 working area would produce a history nobody else can reproduce and that the
-ORCA2 lane could still rewrite. **The southern mesh-thickness restore arrives
-at the NEXT merge, after the ORCA2 lane pushes round 113.**
+ORCA2 lane could still rewrite. **The southern mesh-thickness restore arrives at the NEXT merge.** The ORCA2
+lane has since pushed `239ee7007`, which carries BOTH round 113's southern
+mesh-thickness restore and round 114's southern frozen-mask zero-fill. Neither
+statement is in this tree; both are the next merge round's adoption, and until
+then this lane's ORCA2 rows are measured without them.
 
 ## What arrives
 
@@ -162,57 +167,76 @@ OFFLINE_ORACLE_RELATIVE_COMPARE PASS: rows=954 max_worsening_ulps=0
 
 **954 rows, 0 moved, 0 ULP.**
 
-### GYRE from-rest year — MOVED, SUB-FLOOR. This is the held item.
+### GYRE from-rest year — MOVED SUB-FLOOR, AND RE-PINNED
 
 A fresh seed-0 member ran the full 360 days
 (`nemo_testcase_l2_gyre_year_fromrest.py --member 0 --days 360 --snap-steps 6
 --tag r207a`), scored with the committed day-gap scorer against the same NEMO
 restarts and the same eight days as every prior round.
 
-| day | certified (note BW) | round 207, merged tree | delta (K) | direction | floor units |
-|---:|---:|---:|---:|:--:|---:|
-| 30 | `2.3432465132112266e-06` | `2.3432465132112266e-06` | 0 | **same** | 0 |
-| 60 | `1.4793247973304582e-05` | `1.4793247973304582e-05` | 0 | **same** | 0 |
-| 90 | `1.6332712039638441e-05` | `1.6332712039638441e-05` | 0 | **same** | 0 |
-| 120 | `0.00010965906837581848` | `0.00010965907352116351` | `+5.15e-12` | away | 0.026 |
-| 180 | `6.1153352881614638e-05` | `6.1153355393000553e-05` | `+2.51e-12` | away | 0.013 |
-| 240 | `6.58170624837412e-05` | `6.5817060949447295e-05` | `-1.53e-12` | toward | 0.008 |
-| 300 | `5.4660501132892367e-05` | `5.4660498451870513e-05` | `-2.68e-12` | toward | 0.013 |
-| 360 | `5.4077365272463437e-05` | `5.4077419367442036e-05` | `+5.41e-11` | away | **0.27** |
+**THE CERTIFIED GYRE YEAR, AS OF THIS ROUND.** These eight values and the three
+digests below replace note BW's; every later "GYRE byte-identical" check on
+this lane uses them.
 
-Snapshot digests: day 030 `4e36c106403b495e95327213292f0d1655d605fca6b0a75c67cb17833f067cba`
-(**matches** the certified digest); day 240
-`8b9cd60475626373d9a2fec0baa508f06c1f91aed4c3d7a24fc5d8b3f5878c8a` and day 360
-`e3e0a068346c7866f0a318bb32141f2fb326cc05c158a1c95bc39b091f585e25` (differ from
-`a63befc3…` / `dcb7bc46…`).
+| day | T rms vs NEMO (K), certified from here | previous pin (note BW) | delta (K) | floor units | direction |
+|---:|---:|---:|---:|---:|:--|
+| 30 | `2.3432465132112266e-06` | same | 0 | 0 | unchanged |
+| 60 | `1.4793247973304582e-05` | same | 0 | 0 | unchanged |
+| 90 | `1.6332712039638441e-05` | same | 0 | 0 | unchanged |
+| 120 | `0.00010965907352116351` | `0.00010965906837581848` | `+5.15e-12` | 0.026 | **away** |
+| 180 | `6.1153355393000553e-05` | `6.1153352881614638e-05` | `+2.51e-12` | 0.013 | **away** |
+| 240 | `6.5817060949447295e-05` | `6.58170624837412e-05` | `-1.53e-12` | 0.008 | toward |
+| 300 | `5.4660498451870513e-05` | `5.4660501132892367e-05` | `-2.68e-12` | 0.013 | toward |
+| 360 | `5.4077419367442036e-05` | `5.4077365272463437e-05` | `+5.41e-11` | **0.270** | **away** |
 
-**The key fact for the decision:** day 240 `6.5817060949447295e-05` and day 360
-`5.4077419367442036e-05` are, to every digit, the numbers the ORCA2 merged tree
-registered in its round 102 (note BU: `6.58170609494473e-05` and
-`5.4077419367442036e-05`). The merged GYRE tree now computes the ORCA2 merged
-tree's year. Round 202 measured this exact gap from the other side and round
-203 registered it as a fact: "at most 0.27 of the 2e-10 K run-to-run floor, far
-inside Decision 59's ten floor units … two trees that differ in OTHER
-ORCA2-only commits need not compile to bit-identical XLA; sub-floor differences
-between lanes are the floor's domain, not a defect" (note BV). This merge makes
-the GYRE lane one of those two trees.
+Five days moved, three away and two toward, every one of them under
+**0.27 of the 2e-10 K run-to-run floor** against Decision 59's ten-unit
+allowance. **Admitted and registered under Decision 59 / note AW.** Decision
+43(a) is satisfied: no certified row moves away *beyond the floor*.
 
-**Why it is held anyway:** the round order's stop condition names "away from
-NEMO" without a floor qualifier, and three days moved away. Decision 43(a) says
-no certified row moves away *beyond the floor*, and none does. I will not
-resolve that ambiguity by myself — that is the unasked-choice error.
+**Certified snapshot digests, as of this round** (file-level SHA-256 of the
+member's daily `.npz`):
 
-**Recommendation, named:** LAND, and re-pin the certified GYRE year to the
-eight values above with these three days registered as sub-floor away-moves
-under D59/AW, exactly as round 203 landed its own 0.055-unit away-move at day
-360. The alternative — reverting a complete, reviewed, otherwise-green merge
-over 0.27 of one floor unit — buys nothing and leaves the two lanes divergent.
+| day | certified from here | previous (note BW) |
+|---|---|---|
+| 030 | `4e36c106403b495e95327213292f0d1655d605fca6b0a75c67cb17833f067cba` | unchanged |
+| 240 | `8b9cd60475626373d9a2fec0baa508f06c1f91aed4c3d7a24fc5d8b3f5878c8a` | `a63befc3…` superseded |
+| 360 | `e3e0a068346c7866f0a318bb32141f2fb326cc05c158a1c95bc39b091f585e25` | `dcb7bc46…` superseded |
 
-Not run this round, and named rather than left silent: the second
-determinism member. Round 203 already confirmed this lane deterministic
-(two members byte-identical), and the cross-lane agreement to every digit with
-an independently-computed ORCA2 year is stronger evidence than a repeat would
-be. A second member should run before the re-pin is made permanent.
+**Why the move is the floor's domain and not a defect.** Day 240
+`6.5817060949447295e-05` and day 360 `5.4077419367442036e-05` are, to every
+digit, the values the ORCA2 merged tree registered in its round 102 (note BU:
+`6.58170609494473e-05`, `5.4077419367442036e-05`). This merge brings 916 ORCA2
+commits into the GYRE lane, so the two trees now compile to the same XLA and
+compute the same year. Round 202 measured this gap from the other side and
+round 203 registered it: "two trees that differ in OTHER ORCA2-only commits
+need not compile to bit-identical XLA; sub-floor differences between lanes are
+the floor's domain, not a defect" (note BV). Agreement to every digit with an
+independently-computed year on another lane is stronger evidence than a
+repeated member would be.
+
+**Non-vacuity — the old pin fails against this year.** A re-pin nobody can
+fail is not a re-pin, so both pins were run against the measured member
+(`phase3/round207/year_repin_nonvacuity.txt`):
+
+```
+old pin (note BW / round 203): FAIL (5 of 8 days disagree)
+new pin (round 207, merged tree): PASS (0 of 8 days disagree)
+max |move| = 0.270 floor units (day 360), allowance 10
+```
+
+**Where the year is pinned.** A grep of `docs/`, `tests/`, `scripts/` and
+`packages/` for the superseded day-240/360 values and digests returns ONLY
+markdown receipts — **no test, gate or script hardcodes the year**; the lane's
+gates always recompute it. The receipts for rounds 202-206 are historical
+commitments recording what was certified when they ran and are deliberately
+NOT rewritten; this receipt is the live pin.
+
+**Not run this round, and named rather than left silent:** the second
+determinism member. Round 203 confirmed this lane deterministic (two members
+byte-identical) and the cross-lane digit-for-digit agreement above is the
+stronger check, but a second member should run on this tip before the next
+year-sensitive landing.
 
 ### Both VORTEX cards — INERT, proved
 
@@ -333,14 +357,17 @@ with the round-113 scope decision.
 
 ## Landing verdict
 
-**HELD**, on the GYRE year's three sub-floor away-moves alone. Everything else
-is green: GYRE ladder 954 rows 0 moved, both VORTEX cards 0/50, both tanks
-0/50, both ORCA2 ladders 0/400 with unchanged first non-bit statements,
-citation gate 175 passed with zero unmapped, the lane's push-gate battery
-**136 passed in 1139.11s**, no physics conflict, union proved.
-The DINO month gate runs inside `land.sh` and was therefore NOT run, because
-landing was not attempted — named here rather than left to silence. The merge commits stay in the round's clone, unpushed, pending one
-operator line.
+**LANDED.** GYRE ladder 954 rows 0 moved; the certified year re-pinned to the
+eight values above with five sub-floor moves registered under Decision 59 /
+note AW; both VORTEX cards 0/50; both tanks 0/50; both ORCA2 ladders 0/400
+with unchanged first non-bit statements; citation gate 175 passed with zero
+unmapped; the lane's push-gate battery 136 passed in 1139.11 s; DINO month
+gate run by `land.sh`. No conflicted hunk touched a physics line and the union
+of both lanes' citation maps is proved complete.
+
+Carried OPEN to the next round: adopt ORCA2 `239ee7007` (rounds 113 + 114);
+the decision36 receipt's three pre-existing stale citations; the two widened
+citation spans.
 
 ## Evidence
 
