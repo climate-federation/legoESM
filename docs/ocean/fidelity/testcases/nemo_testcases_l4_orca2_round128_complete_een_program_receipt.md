@@ -18,7 +18,7 @@ ordinary T-pivot U-grid exchange uses its U-origin permutation and sign +1
 (`ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683`). The shared
 builder now transcribes that association (`barotropic_latlon_cgrid.py:953-974`),
 keeps NEMO's live face thicknesses unmasked, applies the literal wet-level
-loop bounds (`barotropic_latlon_cgrid.py:1079-1095`), and routes all four U
+loop bounds (`barotropic_latlon_cgrid.py:1079-1094`), and routes all four U
 and four V neighbours through the source-order recurrence and scale program
 (`barotropic_latlon_cgrid.py:1197-1233`).
 

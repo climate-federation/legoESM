@@ -1303,14 +1303,14 @@ FILES = {
 CITATION_MAP = {
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
-        ("CASE ( 'U' )", 1),
+        ("CASE ( 'U' )", 2),
         ('END DO   ;   END DO', 10), 45],
     'barotropic_latlon_cgrid.py:953-974': [
         ('def _nemo_een_north_u(field, grid):', 1),
-        ('return north', 1), 22],
-    'barotropic_latlon_cgrid.py:1079-1095': [
+        ('return north', 2), 22],
+    'barotropic_latlon_cgrid.py:1079-1094': [
         ('e3u = b(e3u0 * b(one + r3u[..., None] * umask))', 1),
-        ('jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)', 1), 17],
+        ('jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)', 1), 16],
     'barotropic_latlon_cgrid.py:1197-1233': [
         ('un = {', 1),
         ('e3v, mbkv, neighbor, neighbor_mask, vq[corner],', 1), 37],
