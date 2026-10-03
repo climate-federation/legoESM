@@ -1276,7 +1276,7 @@ CITATION_MAP = {
         ('SELECT CASE( nvor_scheme )', 1),
         ('& ff_f(ji  ,jj-1) /', 1), 8],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:252-258': [
-        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 2),
         ('fe3mask(:,:,:) = fmask(:,:,:)', 1), 7],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:135-143': [
         ('IF( iff == 0 ) THEN', 1),
