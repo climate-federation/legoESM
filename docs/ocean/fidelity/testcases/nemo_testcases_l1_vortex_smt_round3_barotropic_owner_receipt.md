@@ -251,7 +251,9 @@ Every value is identical to round 2's, to every digit it printed — which is
 the repoint's inertness, measured rather than inferred from the byte
 comparison.
 
-`GYRE-zco` kt=1..10 ladder on the final tree: see the landing line.
+`GYRE-zco` kt=1..10 ladder on the FINAL tree (same gate, same baseline as
+round 212's recorded arm): **50 rows, 0 moved**, `first_over_bar` kt=3
+T/S/u/v/ssh — unchanged.
 
 ---
 
