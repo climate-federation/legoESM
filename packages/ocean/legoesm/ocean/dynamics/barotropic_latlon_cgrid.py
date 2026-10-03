@@ -901,6 +901,11 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
+def _nemo_een_south_ff_copy(ff):
+    """NEMO ``jpfillcopy`` association for the southern F-grid halo."""
+    return jnp.concatenate([ff[:1], ff[:-1]], axis=0)
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -994,6 +999,14 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         out = jnp.roll(value, di, axis=1) if di else value
         return jnp.roll(out, dj, axis=0) if dj else out
 
+    # ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy), so the
+    # southern halo repeats the first inner row; it does not cyclically wrap
+    # the northern fold row (domhgr.f90:233-236, lbclnk.f90:1198-1225).
+    # Keep the still-open e3f/r3f/fe3mask association independent: only the
+    # numerator takes the source-exact boundary here.
+    ff_south = _nemo_een_south_ff_copy(ff)
+    q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))
+
     def triad(a, c, d):
         return b(b(a + c) + d)
 
@@ -1029,14 +1042,17 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
 
     if scheme == "een":
         uq = {
-            "nw": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-            "ne": triad(shift(q, 0, 1), q, shift(q, -1, 0)),
-            "sw": triad(q, shift(q, 0, 1), shift(q, 1, 1)),
-            "se": triad(shift(q, -1, 1), shift(q, 0, 1), q),
+            "nw": triad(shift(q, 1, 0), q, q_south_ff_copy),
+            "ne": triad(q_south_ff_copy, q, shift(q, -1, 0)),
+            "sw": triad(q, q_south_ff_copy,
+                         shift(q_south_ff_copy, 1, 0)),
+            "se": triad(shift(q_south_ff_copy, -1, 0),
+                         q_south_ff_copy, q),
         }
         vq = {
-            "se": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-            "sw": triad(shift(q, 1, 1), shift(q, 1, 0), q),
+            "se": triad(shift(q, 1, 0), q, q_south_ff_copy),
+            "sw": triad(shift(q_south_ff_copy, 1, 0),
+                         shift(q, 1, 0), q),
             "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
             "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
         }

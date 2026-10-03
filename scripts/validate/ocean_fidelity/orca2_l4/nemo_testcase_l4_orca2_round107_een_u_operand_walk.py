@@ -69,12 +69,16 @@ def _score(candidate: np.ndarray, reference: np.ndarray) -> dict:
 def literal_accumulators(eta, z_coord, dtype, *, grid,
                          source_face_thickness: bool,
                          literal_bottom_loop: bool = False,
-                         return_fraction_operands: bool = False):
+                         return_fraction_operands: bool = False,
+                         south_ff_copy: bool = False):
     """Replay compiled dynspg_ts.f90:1231-1280 with one mask choice."""
 
     import jax.numpy as jnp
 
     from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_een_south_ff_copy,
+    )
     from legoesm.ocean.vertical import nemo_e3f_0vor_from_tmask
 
     raw = z_coord.nemo_een_barotropic
@@ -136,18 +140,23 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         out = jnp.roll(value, di, axis=1) if di else value
         return jnp.roll(out, dj, axis=0) if dj else out
 
+    q_south = shift(q, 0, 1)
+    if south_ff_copy:
+        ff_south = _nemo_een_south_ff_copy(ff)
+        q_south = b(ff_south[..., None] / shift(e3f, 0, 1))
+
     def triad(a, c, d):
         return b(b(a + c) + d)
 
     uq = {
-        "nw": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-        "ne": triad(shift(q, 0, 1), q, shift(q, -1, 0)),
-        "sw": triad(q, shift(q, 0, 1), shift(q, 1, 1)),
-        "se": triad(shift(q, -1, 1), shift(q, 0, 1), q),
+        "nw": triad(shift(q, 1, 0), q, q_south),
+        "ne": triad(q_south, q, shift(q, -1, 0)),
+        "sw": triad(q, q_south, shift(q_south, 1, 0)),
+        "se": triad(shift(q_south, -1, 0), q_south, q),
     }
     vq = {
-        "se": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-        "sw": triad(shift(q, 1, 1), shift(q, 1, 0), q),
+        "se": triad(shift(q, 1, 0), q, q_south),
+        "sw": triad(shift(q_south, 1, 0), shift(q, 1, 0), q),
         "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
         "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
     }
