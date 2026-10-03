@@ -353,7 +353,15 @@ without a written expectation to contradict.
 | GYRE certified `kt=1..10` ladder | *see below* |
 | GYRE from-rest 360-day year | *see below* |
 | `tests/ocean/unit/test_nemo_vortex_card.py` + `tests/ocean/fidelity/test_fidelity_card_constructibility.py` | **94 passed** |
+| receipt citation gate | **PASS**, 274 citations, 0 unmapped, 0 failing, 0 map entries failing audit; its own can-fail test green |
 | `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round208_ladder.py` (the scorer's direct test) | **5 passed** |
+
+**One re-anchor.** The rungs inserted about 110 lines into the recipe module,
+which moved three `CITATION_MAP` entries and the one prose span that cites
+them off their symbols. They were re-anchored BY SYMBOL from the gate's own
+audit, once, in the same commit — `:2303 → :2413`, `:2306 → :2416`, and the
+last endpoint of `370,615,2287 → 2397` — as the citation re-anchor rule
+requires. No NEMO source was touched by this round, so no NEMO citation moved.
 
 **Which code changed, and why the year was run anyway.** This round touched one
 file under `packages/`: the recipe module that BUILDS the cards. No model,
