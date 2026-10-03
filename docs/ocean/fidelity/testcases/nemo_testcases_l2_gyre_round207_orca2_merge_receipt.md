@@ -243,10 +243,33 @@ The ORCA2 lane's own scripts, now in the merged tree, against its own records.
 | ladder | status | rows |
 |---|---|---:|
 | rung-0 given-entry, `--record-root round90/acquisition/orca2_rung0_entry_stage_runoff_guarded_10step_np2` | `PASS_RUNG0_TEN_STEP_LADDER` | 200 |
-| rung-7 certified, `--initial-mode decision52-bridge` | **UNMEASURED this round** — see below | 200 |
+| rung-7 certified, `--initial-mode decision52-bridge` | `LADDER_MEASURED` | 200 |
 
-**The rung-7 comparison is UNMEASURED, and the reason is my own harness error,
-not an ORCA2 row movement.** I first ran the rung-7 ladder with
+Compared against round 112's registered ladders with the ORCA2 lane's own
+comparator (`nemo_testcase_l4_orca2_round111_ladder_compare.py`):
+
+```
+STATUS PASS_R111_ORCA2_LADDER_COMPARE
+rung0: row_count 200, moved_row_count 0, bit_identical_losses 0, first non-bit unchanged
+rung7: row_count 200, moved_row_count 0, bit_identical_losses 0, first non-bit unchanged
+```
+
+**0/400 rows moved, zero exact-row losses, both first non-bit statements
+unchanged** (rung-0 `kt=1 stage1 T`; rung-7 `kt=1 stage1 T`, `UNATTRIBUTED`,
+with the same ruled-out `trasbc.f90:314-328` runoff statement and the same
+233,341 / 231,291 cell counts).
+
+A real finding, stated because the round order expected the opposite: the
+GYRE-lane statements ORCA2 has NOT yet merged — the two-solve WZV on the
+vector card (round 199), the shared stage-one ratio order (round 203) and the
+transport depth (round 206) — were predicted to move ORCA2's rows. **They move
+none of the 400.** All three are card-scoped or shared-path statements whose
+ORCA2 branch resolves the same way, so ORCA2's trajectory is unaffected.
+
+### One cost owned
+
+My first rung-7 run was mode-confounded and I nearly reported its refusal as a
+merge regression. I ran the rung-7 ladder with
 `--initial-mode independent` (copied from a round-66 invocation in the lane
 logs). The certified rung-7 ladder is the Decision-52 given-entry arm
 (`--initial-mode decision52-bridge`, the script's default), which is what
@@ -265,10 +288,12 @@ exactly that same `ssh`/`iceistate.f90` statement under
 `independent_first_non_bit_statement`. Comparing an independent-entry
 candidate against a Decision-52 base is a confounded comparison and I will not
 report it as a result either way. The correctly-moded re-run
-(`--initial-mode decision52-bridge`) was launched; its artefacts are
-`orca2_rung7_ladder_d52.{json,log}` in the evidence directory. **The rung-7
-row movement is an OPEN item for the next round, and the merge is held
-independently of it.**
+(`--initial-mode decision52-bridge`) is the measurement reported above, and it
+PASSES. The refusal was entirely my confound; artefacts
+`orca2_rung7_ladder{,_d52}.{json,log}` keep both arms so the claim is
+checkable. The lesson is the campaign's own controlled-comparison rule: an arm
+copied from an old log is not the certified arm until its mode is diffed
+against the base's.
 
 The rung-0 ladder, which was run in its single correct mode, reproduces round
 112's registered result.
@@ -309,9 +334,12 @@ with the round-113 scope decision.
 ## Landing verdict
 
 **HELD**, on the GYRE year's three sub-floor away-moves alone. Everything else
-is green: ladder 954/0, both VORTEX cards 0/50, LOCK_EXCHANGE 0/50, rung-0
-`PASS`, citation gate 175 passed with zero unmapped, no physics conflict, union
-proved. The merge commits stay in the round's clone, unpushed, pending one
+is green: GYRE ladder 954 rows 0 moved, both VORTEX cards 0/50, both tanks
+0/50, both ORCA2 ladders 0/400 with unchanged first non-bit statements,
+citation gate 175 passed with zero unmapped, the lane's push-gate battery
+**136 passed in 1139.11s**, no physics conflict, union proved.
+The DINO month gate runs inside `land.sh` and was therefore NOT run, because
+landing was not attempted — named here rather than left to silence. The merge commits stay in the round's clone, unpushed, pending one
 operator line.
 
 ## Evidence
