@@ -97,6 +97,14 @@ def replace_northern_neighbor(field: np.ndarray, north_row: np.ndarray,
     return out
 
 
+def terminal_accumulator(after: np.ndarray, bottom: np.ndarray) -> np.ndarray:
+    """Select NEMO's last executed vertical-recurrence value per column."""
+    final_level = np.asarray(bottom, dtype=np.int64) - 1
+    require(bool(np.all(final_level >= 0)), "invalid recurrence bottom index")
+    return np.take_along_axis(
+        np.asarray(after), final_level[..., None], axis=-1)[..., 0]
+
+
 def _source_rows(parts, fractions, path, bottom, executed, *, neighbor, mask):
     import jax
     import jax.numpy as jnp
@@ -280,7 +288,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                 candidate["zpvo"].view(np.uint64)[-1, 30, 0] ^= np.uint64(1)
             scores = _score_rows(candidate, reference, executed)
             if arm == "combined":
-                combined_accumulators[path] = np.asarray(candidate["after"])
+                combined_accumulators[path] = terminal_accumulator(
+                    candidate["after"], bottom)
             arm_rows[arm] = {
                 "first_non_bit_item": _first(scores),
                 "scores": scores,

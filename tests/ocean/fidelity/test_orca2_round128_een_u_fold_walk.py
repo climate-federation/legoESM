@@ -28,6 +28,13 @@ def test_round128_replaces_only_the_named_northern_neighbor():
     np.testing.assert_array_equal(nw[:-1], field[:-1])
 
 
+def test_round128_selects_each_columns_last_executed_accumulator():
+    after = np.array([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]])
+    bottom = np.array([[1.0, 3.0]])
+    np.testing.assert_array_equal(
+        gate.terminal_accumulator(after, bottom), np.array([[1.0, 6.0]]))
+
+
 def test_round128_registry_locks_baseline_and_controls():
     assert gate.EXPECTED_BASELINE["nw"]["e3u"] == (95, 95)
     assert gate.EXPECTED_BASELINE["ne"]["mask"] == (1283, 1283)
