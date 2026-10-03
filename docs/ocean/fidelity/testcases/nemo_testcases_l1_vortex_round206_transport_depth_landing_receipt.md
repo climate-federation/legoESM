@@ -250,6 +250,19 @@ pre-existing; fixing them is OPEN item 5, not this diff's business.  So
 endpoints and a passing audit — not that every pre-existing citation was
 re-verified.
 
+
+**The re-anchor was got wrong TWICE before it was got right, and the gate's
+own `audit_map()` caught it both times.**  A difflib map built against a
+tree that then GROWS is stale, and this round's source grew twice after the
+first pass (the scope note, then the form note).  Thirty, then twenty-eight
+map entries ended up one block short of their anchor symbol;
+`audit_map()` went 0 (lane tip) -> 30 -> 28 -> 0, the last only after both
+files were restored to the lane tip and re-anchored in ONE pass against the
+FINAL source (15295 -> 15336 lines, 40 spans in the map, 18 in the receipt,
+zero unmapped).  Rule for the next round: re-anchor LAST, once, after the
+final source edit, and check it with `audit_map()` — NOT with the gate's own
+run, which audits only the spans the receipt happens to cite and passed
+green while thirty map entries were broken.
 ## Choices made this round
 
 | choice | ASKED / UNASKED |
