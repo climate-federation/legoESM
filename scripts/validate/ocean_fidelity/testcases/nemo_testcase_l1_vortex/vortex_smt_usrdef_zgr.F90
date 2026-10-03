@@ -47,13 +47,22 @@ MODULE usrdef_zgr
    !!         e3u_0(ji,jj,jk) = MIN( e3t_0(ji,jj,jk), e3t_0(ji+1,jj,jk) )
    !!         e3v_0(ji,jj,jk) = MIN( e3t_0(ji,jj,jk), e3t_0(ji,jj+1,jk) )
    !!         e3f_0(ji,jj,jk) = MIN( e3v_0(ji,jj,jk), e3v_0(ji+1,jj,jk) )
-   !!     with lbc_lnk on e3u/e3v BEFORE e3f is formed (:1176-1177) and on
+   !!     with lbc_lnk on e3u/e3v BEFORE e3f is formed (:1177-1178) and on
    !!     e3f after (:1198).  That is what this module transcribes.
-   !!     DELIBERATELY NOT PORTED from zgr_zps: the ORCA-specific duplication
-   !!     of row jj=1 onto jj=2 (:1203-1207, flagged "!!gm bug ?" in NEMO),
-   !!     the ln_isfcav branches (no cavities here) and the `WHERE(e3==0)`
-   !!     repair (:1179-1184, :1200-1202) -- nothing here can be zero
-   !!     because every array is initialised to the 1-D reference first.
+   !!     DELIBERATELY NOT PORTED from zgr_zps, each with its reason
+   !!     (round 2's adversarial review re-checked all four against source):
+   !!      - the duplication of row jj=1 onto jj=2 (:1205-1209, flagged
+   !!        "!!gm bug ?" in NEMO).  It is UNCONDITIONAL there, not
+   !!        ORCA-specific -- an earlier version of this comment said
+   !!        otherwise and was wrong.  Omitting it is still exact here
+   !!        because kfillmode = jpfillcopy on the lbc_lnk above copies the
+   !!        inner edge into the southern halo, which is the same operation.
+   !!      - the ln_isfcav branches: every ice-shelf statement in zgr_zps is
+   !!        inside IF(ln_isfcav), and there are no cavities here.
+   !!      - the `WHERE(e3==0)` repair (:1180-1185, :1201-1203): unreachable,
+   !!        because all four arrays are pre-filled from pe3t_1d below and
+   !!        the only zero source in zgr_zps is its zero-filling lbc_lnk,
+   !!        which jpfillcopy replaces.
    !!   * only e3t/e3u/e3v/e3f are 3-D: under key_vco_1d3d dom_zgr calls
    !!     usr_def_zgr with exactly those four optional arrays
    !!     (src/OCE/DOM/domzgr.F90:265-269) and applies lbc_lnk to all four
@@ -65,7 +74,7 @@ MODULE usrdef_zgr
    !!                                are incompatible. Fix usrdef_zgr !' )
    !! so partial steps CANNOT be run under the certified VORTEX cards'
    !! key_vco_1d.  NEMO's own name for the partial-cell key is key_vco_1d3d
-   !! (domzgr.F90:242-243 "z-partial cells"; OVERFLOW's zps branch is
+   !! (domzgr.F90:164,:262 "z-partial cells"; OVERFLOW's zps branch is
    !! guarded by lk_vco_1d3d).  key_qco and key_RK3 are unchanged.
    !!----------------------------------------------------------------------
 
@@ -136,7 +145,10 @@ CONTAINS
       !
       INTEGER  ::   ji, jj, jk        ! dummy loop indices
       INTEGER  ::   ik                ! local integer
+      INTEGER  ::   ikbmin, ikbmax    ! global k_bot extrema (control print)
       REAL(wp) ::   ze3min            ! local scalar
+      REAL(wp) ::   zhtmin, zhtmax    ! global bathymetry extrema (control print)
+      REAL(wp) ::   ze3min_g, ze3max_g ! global bottom-e3t extrema (control print)
       REAL(wp) ::   zx, zy            ! local scalars
       REAL(wp), DIMENSION(jpi,jpj) ::   zht, z2d   ! 2D workspace
       !!----------------------------------------------------------------------
@@ -217,7 +229,7 @@ CONTAINS
             END_2D
          END DO
          CALL lbc_lnk( 'usrdef_zgr', pe3u, 'U', 1._wp, pe3v, 'V', 1._wp,   &
-            &          kfillmode = jpfillcopy )          ! zgr_zps:1176-1177
+            &          kfillmode = jpfillcopy )          ! zgr_zps:1177-1178
          DO jk = 1, jpk
             DO_2D( nn_hls, nn_hls-1, nn_hls, nn_hls )
                pe3f(ji,jj,jk) = MIN( pe3v(ji,jj,jk), pe3v(ji+1,jj,jk) )
@@ -225,17 +237,32 @@ CONTAINS
          END DO
          CALL lbc_lnk( 'usrdef_zgr', pe3f, 'F', 1._wp, kfillmode = jpfillcopy )   ! zgr_zps:1198
          !
-         ! control print: the seamount as the model actually resolved it.
+         ! Control print: the seamount as the model actually resolved it.
+         ! The reductions are GLOBAL and therefore COLLECTIVE, so they are
+         ! taken by every rank BEFORE the IF(lwp) -- a reduction inside
+         ! IF(lwp) is either rank-0-local (and mislabelled) or a deadlock.
+         ! Round 2's adversarial review found the first of those here.
+         ! They run over the INTERIOR window only: the outer global halo
+         ! carries k_top = 0 after the lbc_lnk above, so including it would
+         ! report k_bot min = 0 on every decomposition.
+         zhtmin = MINVAL( zht(Nis0:Nie0,Njs0:Nje0) )   ;   CALL mpp_min( 'usrdef_zgr', zhtmin )
+         zhtmax = MAXVAL( zht(Nis0:Nie0,Njs0:Nje0) )   ;   CALL mpp_max( 'usrdef_zgr', zhtmax )
+         ikbmin = MINVAL( k_bot(Nis0:Nie0,Njs0:Nje0) ) ;   CALL mpp_min( 'usrdef_zgr', ikbmin )
+         ikbmax = MAXVAL( k_bot(Nis0:Nie0,Njs0:Nje0) ) ;   CALL mpp_max( 'usrdef_zgr', ikbmax )
+         ze3min_g = MINVAL( pe3t(Nis0:Nie0,Njs0:Nje0,1:jpkm1) )
+         CALL mpp_min( 'usrdef_zgr', ze3min_g )
+         ze3max_g = MAXVAL( pe3t(Nis0:Nie0,Njs0:Nje0,1:jpkm1) )
+         CALL mpp_max( 'usrdef_zgr', ze3max_g )
          IF(lwp) THEN
             WRITE(numout,*)
-            WRITE(numout,*) '    VORTEX_SMT seamount, as resolved on this rank:'
+            WRITE(numout,*) '    VORTEX_SMT seamount, as resolved GLOBALLY (mpp reductions):'
             WRITE(numout,"(10x,'H0 =',f9.2,'  A =',f9.2,'  L =',f10.1,'  x0 =',f10.1,'  y0 =',f10.1,'  [m]')")   &
                &            pp_smt_H0, pp_smt_A, pp_smt_L, pp_smt_x0, pp_smt_y0
-            WRITE(numout,"(10x,'bathymetry  min =',f10.3,'  max =',f10.3,' m')") MINVAL(zht), MAXVAL(zht)
-            WRITE(numout,"(10x,'k_bot       min =',i4,'  max =',i4)") MINVAL(k_bot), MAXVAL(k_bot)
-            WRITE(numout,"(10x,'bottom e3t  min =',f10.4,'  max =',f10.4,' m')")                                  &
-               &            MINVAL( pe3t(:,:,1:jpkm1) ), MAXVAL( pe3t(:,:,1:jpkm1) )
-            WRITE(numout,*) '      i-row through the seamount centre (jj of min bathymetry):'
+            WRITE(numout,"(10x,'bathymetry  min =',f10.3,'  max =',f10.3,' m')") zhtmin, zhtmax
+            WRITE(numout,"(10x,'k_bot       min =',i4,'  max =',i4)") ikbmin, ikbmax
+            WRITE(numout,"(10x,'bottom e3t  min =',f10.4,'  max =',f10.4,' m')") ze3min_g, ze3max_g
+            WRITE(numout,*) '      i-row through the seamount centre, RANK-0 SUBDOMAIN ONLY'
+            WRITE(numout,*) '      (a local MINLOC; on a j-split the seamount row may sit on another rank):'
             jj = MINLOC( MINVAL( zht(:,:), DIM=1 ), DIM=1 )
             WRITE(numout,"(10x,' ji   glamt[km]   zht[m]   k_bot   e3t(k_bot)[m]   e3u(k_bot)[m]')")
             DO ji = 1, jpi
