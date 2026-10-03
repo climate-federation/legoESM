@@ -78,10 +78,10 @@ round-121 fraction, round-126 association, and cumulative citation machinery;
 no duplicate reader or numerical path was created. The round-119--127 plus
 cumulative-citation focused battery passes 50/50.
 
-The default citation gate passes 274 citations and this receipt passes both
-citations with zero failures or unmapped entries. Shifting
-`dynspg_ts.f90:1339-1348` makes the gate fail with `SYMBOL-NOT-AT-LINE` and
-exit 1.
+The default citation gate passes 274 citations and this receipt passes its
+compiled-source citations with zero failures or unmapped entries. Shifting
+`ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1339-1348`
+makes the gate fail with `SYMBOL-NOT-AT-LINE` and exit 1.
 
 The required `tests/ocean/fidelity -n 12` invocation collects 2,384 tests and
 reaches 95%; 2,268 tests pass before reproducing the registered xdist-controller
