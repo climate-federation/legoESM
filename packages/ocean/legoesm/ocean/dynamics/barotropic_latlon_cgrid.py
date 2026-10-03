@@ -1086,6 +1086,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     e3u_north = _nemo_een_north_u(e3u, grid)
     umask_north = _nemo_een_north_u(umask, grid)
     e2u_north = _nemo_een_north_u(e2u, grid)
+    vmask_south = _nemo_south_zero_fill(vmask)
     levels = jnp.arange(1, umask.shape[-1] + 1, dtype=jnp.int32)
     mbku = jnp.maximum(
         jnp.max(jnp.where(umask > 0.0, levels, 0), axis=-1), 1)
@@ -1196,8 +1197,9 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     un = {
         "nw": (e3v, vmask, e1v),
         "ne": (shift(e3v, -1, 0), shift(vmask, -1, 0), shift(e1v, -1, 0)),
-        "sw": (shift(e3v, 0, 1), shift(vmask, 0, 1), shift(e1v, 0, 1)),
-        "se": (shift(e3v, -1, 1), shift(vmask, -1, 1), shift(e1v, -1, 1)),
+        "sw": (shift(e3v, 0, 1), vmask_south, shift(e1v, 0, 1)),
+        "se": (shift(e3v, -1, 1), shift(vmask_south, -1, 0),
+               shift(e1v, -1, 1)),
     }
     vn = {
         "nw": (shift(e3u_north, 1, 0), shift(umask_north, 1, 0),
