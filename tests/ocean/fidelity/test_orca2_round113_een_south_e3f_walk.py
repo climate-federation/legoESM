@@ -58,8 +58,8 @@ def test_literal_builder_executes_southern_mesh_thickness_copy(monkeypatch):
     faithful = bt._nemo_literal_een_coefficients(
         eta, z_coord, jnp.float64, scheme="een")
     monkeypatch.setattr(
-        bt, "_nemo_south_copy_fill",
-        lambda value: jnp.roll(value, 1, axis=0),
+        bt, "_nemo_een_south_e3f0",
+        lambda e3f0, mesh_e3f0: jnp.roll(e3f0, 1, axis=0),
     )
     cyclic = bt._nemo_literal_een_coefficients(
         eta, z_coord, jnp.float64, scheme="een")

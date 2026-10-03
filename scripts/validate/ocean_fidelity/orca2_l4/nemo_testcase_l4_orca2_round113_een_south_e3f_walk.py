@@ -52,6 +52,7 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_een_south_e3f0,
         _nemo_south_copy_fill,
     )
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
@@ -125,8 +126,8 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
 
         south_ff = np.asarray(_nemo_south_copy_fill(jnp.asarray(ff)))
         south_e3f0 = (south(e3f0) if mesh_fill is None
-                       else np.asarray(_nemo_south_copy_fill(
-                           jnp.asarray(mesh_fill))))
+                       else np.asarray(_nemo_een_south_e3f0(
+                           jnp.asarray(e3f0), jnp.asarray(mesh_fill))))
         south_r3f = south(r3f)
         south_mask = south(mask)
         one = np.float64(1.0)

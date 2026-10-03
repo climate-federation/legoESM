@@ -1289,9 +1289,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:2021-2046': [
         ('ELSE                                                        ! southern/northern side', 3),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 3), 26],
-    'barotropic_latlon_cgrid.py:1006-1016': [
+    'barotropic_latlon_cgrid.py:909-911': [
+        ('def _nemo_een_south_e3f0(e3f0, mesh_e3f0):', 1),
+        ('return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)', 1), 3],
+    'barotropic_latlon_cgrid.py:1011-1022': [
         ('# dyn_vor_init applies the default zero fill to e3f_0vor', 1),
-        ('q_south = b(ff_south[..., None] / e3f_south)', 1), 11],
+        ('q_south = b(ff_south[..., None] / e3f_south)', 1), 12],
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
         ('IF( ln_read_cfg ) THEN', 1),
@@ -1308,7 +1311,7 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:904-906': [
         ('def _nemo_south_copy_fill(field):', 1),
         ('return jnp.concatenate([field[:1], field[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1002-1005': [
+    'barotropic_latlon_cgrid.py:1007-1010': [
         ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
         ('ff_south = _nemo_south_copy_fill(ff)', 1), 4],
     # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
@@ -4205,7 +4208,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:2744-2745': [
+    'barotropic_latlon_cgrid.py:2750-2751': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],

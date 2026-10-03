@@ -906,6 +906,11 @@ def _nemo_south_copy_fill(field):
     return jnp.concatenate([field[:1], field[:-1]], axis=0)
 
 
+def _nemo_een_south_e3f0(e3f0, mesh_e3f0):
+    """Southern ``e3f_0vor`` after zero fill and mesh-thickness restore."""
+    return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -1008,7 +1013,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     # e3f_3d was itself read with jpfillcopy (domzgr.f90:179-188), so its
     # southern value repeats the first inner row.  Keep the still-open r3f and
     # fe3mask associations cyclic here so this changes only that operand.
-    e3f0_south = _nemo_south_copy_fill(jnp.asarray(raw.e3f_0, dtype=dtype))
+    e3f0_south = _nemo_een_south_e3f0(
+        e3f0, jnp.asarray(raw.e3f_0, dtype=dtype))
     r3f_south = shift(r3f, 0, 1)
     fmask_south = shift(fmask, 0, 1)
     e3f_south = b(e3f0_south * b(
