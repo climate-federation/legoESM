@@ -94,11 +94,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.vertical import (
-        compute_layer_thickness,
-        nemo_dynvor_e3f_0vor,
-        nemo_t_fold_f_owned,
-    )
+    from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+    from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
 
     require(plant in PLANTS, f"unknown plant {plant}")
     stamp = worktree_stamp()
@@ -144,11 +141,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         e3t0, card.recipe.z_coord.is_active, grid=card.recipe.grid,
         dtype=jnp.float64, substitute_e3f=raw.e3f_0,
     )
-    mapped_ff = nemo_t_fold_f_owned(
-        jnp.asarray(raw.ff_f, dtype=jnp.float64), card.recipe.grid
-    )
+    raw_ff = jnp.asarray(raw.ff_f, dtype=jnp.float64)
+    # The card retains NEMO's pivot row and its northern halo row.  With
+    # nn_hls=2, lbcnfd's F branch maps that halo from two rows below it.
+    north_ff = raw_ff[-3, fold_perm_f(card.recipe.grid.fold)]
     if plant == "permutation-shift":
-        mapped_ff = mapped_ff.at[-1].set(jnp.roll(mapped_ff[-1], 1))
+        north_ff = jnp.roll(north_ff, 1)
     source_z = card.recipe.z_coord._replace(
         nemo_een_barotropic=raw._replace(e3f_0=source_divisor),
     )
@@ -167,7 +165,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "mbkv moved before the northern association")
     executed = np.arange(1, 31)[None, None, :] <= bottom[..., None]
     candidates = _candidate_fields(
-        parts, executed, np.asarray(mapped_ff, dtype=np.float64)[-1]
+        parts, executed, np.asarray(north_ff, dtype=np.float64)
     )
     if plant == "candidate-bit":
         changed = np.array(candidates["nw"]["3_ff"], copy=True)
@@ -175,10 +173,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         candidates["nw"]["3_ff"] = changed
 
     permutation = np.arange(179, -1, -1, dtype=np.int64)
-    source = np.asarray(raw.ff_f, dtype=np.float64)[-2, permutation]
-    mapped = np.asarray(mapped_ff, dtype=np.float64)[-1]
+    source = np.asarray(raw.ff_f, dtype=np.float64)[-3, permutation]
+    mapped = np.asarray(north_ff, dtype=np.float64)
     require(np.array_equal(mapped, source),
-            "F-fold helper is not row-146 reverse 179-i with sign +1")
+            "F-fold mapping is not row-145 reverse 179-i with sign +1")
     require(np.array_equal(np.sort(permutation), np.arange(180)),
             "northern source permutation is not bijective")
 
@@ -217,7 +215,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "card_scope": card_scope,
         "permutation": {
             "target_j": 147,
-            "source_j": 146,
+            "source_j": 145,
             "source_i_first_last": [179, 0],
             "sign": 1,
             "bijective": True,
