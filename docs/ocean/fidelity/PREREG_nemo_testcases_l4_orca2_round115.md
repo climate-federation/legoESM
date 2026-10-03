@@ -71,3 +71,21 @@ prove, a peeled-first-iteration discriminator.
 
 The addendum changes no previously measured array and is committed before the
 first-level-seed arm is run.
+
+## Frozen IEEE-zero addendum after the seed refutation
+
+R115-P5 and R115-P6 are **REFUTED**. The seed arm moves zero bits. At the first
+cell, NEMO records `acc_before=+0`, `term=-0`, and `acc_after=+0`; the JIT arm
+records `acc_before=-0` after simplifying the same first addition. The admitted
+record's independent recurrence check proves zero unequal bits for host IEEE
+`acc_before + term`, so the binary's recorded addition, not the separately
+stored product, owns this boundary.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R115-P7 | Restoring IEEE signed-zero addition only when both addends are zero closes the 1,618 `acc_before` differences without changing any nonzero result. | `acc_before` is bit-exact and the candidate is array-equal to the baseline wherever either addend is nonzero. | Any remaining before-bit or any nonzero movement refutes the arm; stop without a model change. |
+| R115-P8 | The same recurrence closes all 5,197 `acc_after` signed-zero differences. | `acc_after` is bit-exact on every executed level. | The first remaining level/cell owns the continued walk; retain the failed prediction. |
+
+This arm is an arithmetic discriminator, not a stabilizer: it changes only the
+sign bit of an exact zero to the result required by IEEE addition and by the
+admitted NEMO recurrence.
