@@ -1277,6 +1277,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 115: EEN stored product and recurrence signs ----------
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1238-1245': [
+        ('ffu_nw(:,:) = 0._wp', 1),
+        ('DO jk = 1, mbku(ji,jj)', 1), 8],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1263-1273': [
+        ('r107_zpvo_nw(ji,jj,jk) = zpvo_nw', 1),
+        ('ffu_se(ji,jj) = ffu_se(ji,jj) +', 1), 11],
     # --- ORCA2 round 114: southern frozen-mask association ----------------
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:232-258': [
         ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )", 1),
