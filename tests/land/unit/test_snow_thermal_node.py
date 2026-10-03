@@ -158,7 +158,7 @@ def test_restart_init_caps_under_snow_and_mirrors_elsewhere():
                                   np.asarray(out.T_snow))
     warm = out._replace(T_snow=jnp.array([280.0, 280.0, 280.0]))
     np.testing.assert_allclose(np.asarray(land_skin_temperature(warm)),
-                               [280.0, _TF, _TF])
+                               [278.0, _TF, _TF])
     off = init_multilayer_land_state(3, MultiLayerLandConfig(), T_init=278.0)
     assert off.T_snow is None
 
@@ -508,5 +508,21 @@ def test_held_column_reports_the_capped_skin():
     _h, held_resp, _hc, mask, _n = _hold_unsolved_columns(
         st, new, resp, sfc._replace(converged=jnp.array([False])), f, cfg, 1)
     assert bool(mask[0])
+    np.testing.assert_array_equal(np.asarray(_h.T_snow), [276.0])  # pending melt kept
     np.testing.assert_allclose(np.asarray(held_resp.T_sfc), [_TF])
     np.testing.assert_allclose(np.asarray(held_resp.T_rad), [_TF])
+
+
+def test_skin_helper_contract():
+    """Node off: top soil whatever the snow (switch-off identity). Node on:
+    snow-free -> top soil (never a stale node value); snow -> node capped at
+    T_freeze; a warm snow-free column is never capped."""
+    off = init_multilayer_land_state(2, MultiLayerLandConfig(), T_init=265.0)
+    off = off._replace(snow_depth=jnp.array([50.0, 0.0]))
+    np.testing.assert_array_equal(np.asarray(land_skin_temperature(off)),
+                                  np.asarray(off.T_soil[:, 0]))
+    on = init_multilayer_land_state(2, MultiLayerLandConfig(thermal=_TH),
+                                    T_init=300.0)
+    on = on._replace(snow_depth=jnp.array([0.0, 10.0]),
+                     T_snow=jnp.array([260.0, 276.0]))
+    np.testing.assert_allclose(np.asarray(land_skin_temperature(on)), [300.0, _TF])

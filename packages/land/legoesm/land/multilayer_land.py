@@ -1745,7 +1745,8 @@ def land_skin_temperature(state: MultiLayerLandState) -> jnp.ndarray:
     if state.T_snow is None:
         return state.T_soil[:, 0]
     return jnp.where(state.snow_depth > 0.0,
-                     jnp.minimum(state.T_snow, constants.T_freeze), state.T_snow)
+                     jnp.minimum(state.T_snow, constants.T_freeze),
+                     state.T_soil[:, 0])
 
 
 def init_snow_temperature(state: MultiLayerLandState) -> MultiLayerLandState:
