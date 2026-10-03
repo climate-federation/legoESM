@@ -901,9 +901,9 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
-def _nemo_een_south_ff_copy(ff):
-    """NEMO ``jpfillcopy`` association for the southern F-grid halo."""
-    return jnp.concatenate([ff[:1], ff[:-1]], axis=0)
+def _nemo_south_copy_fill(field):
+    """NEMO ``jpfillcopy`` association for a southern native-grid halo."""
+    return jnp.concatenate([field[:1], field[:-1]], axis=0)
 
 
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
@@ -1002,10 +1002,18 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     # ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy), so the
     # southern halo repeats the first inner row; it does not cyclically wrap
     # the northern fold row (domhgr.f90:233-236, lbclnk.f90:1198-1225).
-    # Keep the still-open e3f/r3f/fe3mask association independent: only the
-    # numerator takes the source-exact boundary here.
-    ff_south = _nemo_een_south_ff_copy(ff)
-    q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))
+    ff_south = _nemo_south_copy_fill(ff)
+    # dyn_vor_init applies the default zero fill to e3f_0vor's closed southern
+    # halo, then replaces that zero with e3f_3d (dynvor.f90:935-937).  The mesh
+    # e3f_3d was itself read with jpfillcopy (domzgr.f90:179-188), so its
+    # southern value repeats the first inner row.  Keep the still-open r3f and
+    # fe3mask associations cyclic here so this changes only that operand.
+    e3f0_south = _nemo_south_copy_fill(jnp.asarray(raw.e3f_0, dtype=dtype))
+    r3f_south = shift(r3f, 0, 1)
+    fmask_south = shift(fmask, 0, 1)
+    e3f_south = b(e3f0_south * b(
+        one + r3f_south[..., None] * fmask_south))
+    q_south = b(ff_south[..., None] / e3f_south)
 
     def triad(a, c, d):
         return b(b(a + c) + d)
@@ -1042,16 +1050,14 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
 
     if scheme == "een":
         uq = {
-            "nw": triad(shift(q, 1, 0), q, q_south_ff_copy),
-            "ne": triad(q_south_ff_copy, q, shift(q, -1, 0)),
-            "sw": triad(q, q_south_ff_copy,
-                         shift(q_south_ff_copy, 1, 0)),
-            "se": triad(shift(q_south_ff_copy, -1, 0),
-                         q_south_ff_copy, q),
+            "nw": triad(shift(q, 1, 0), q, q_south),
+            "ne": triad(q_south, q, shift(q, -1, 0)),
+            "sw": triad(q, q_south, shift(q_south, 1, 0)),
+            "se": triad(shift(q_south, -1, 0), q_south, q),
         }
         vq = {
-            "se": triad(shift(q, 1, 0), q, q_south_ff_copy),
-            "sw": triad(shift(q_south_ff_copy, 1, 0),
+            "se": triad(shift(q, 1, 0), q, q_south),
+            "sw": triad(shift(q_south, 1, 0),
                          shift(q, 1, 0), q),
             "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
             "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
