@@ -145,6 +145,16 @@ statement bites hardest, and it deserves the operator's eye.  No AT-BAR row
 became DEBT and `first_over_bar` did not move earlier on either tank, so
 Rule 12 is satisfied on both; the cellwise ratchet is red on both.
 
+### ORCA2 — NOT measured here, and the exemption is stated
+
+`orca2_vector_een_c2` inherits `momentum_time_integrator="rk3_ws"` from the
+shared testcase base, so it reaches the edited lines too.  It is NOT in
+this lane's registry set and was not measured this round: ORCA2 is scored on
+its own lane with its own rungs.  The landing reaches it at the note-BX
+merge (round 207), and **ORCA2 must be measured there, not assumed inert** —
+it is a z-partial-cell global card, i.e. the same geometry class as
+`OVERFLOW-zps`, which is the card this statement moved most.
+
 ### DINO
 
 The DINO month gate runs inside `land.sh` against reference
