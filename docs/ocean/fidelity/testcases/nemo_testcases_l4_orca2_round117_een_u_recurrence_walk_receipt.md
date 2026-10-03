@@ -104,8 +104,10 @@ the shared helper.
 
 The committed round-117 gate reports
 `STATUS MEASURED_R117_EEN_U_RECURRENCES`. Its oracle-bit, candidate-bit, and
-scope-route plants each refuse. The focused round-107/109/110/114/115/116/117
-chain passes 21/21.
+scope-route plants each refuse. The citation gate passes both its default
+receipt and this receipt with no unmapped citations; shifting the compiled
+recurrence citation by two lines makes it refuse. The focused
+round-107/109/110/114/115/116/117 chain passes 21/21.
 
 The single required `tests/ocean/fidelity -n 12` invocation collected 2,350
 tests and reached 98%, then reproduced the registered xdist-controller stall;
