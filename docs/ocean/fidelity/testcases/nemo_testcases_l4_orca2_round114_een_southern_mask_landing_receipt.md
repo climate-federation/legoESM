@@ -5,12 +5,12 @@ non-bit source-ordered EEN quotient operand was the southern association of
 the frozen `fe3mask`: 66 cells on global row `j=0`, level `k=0`, first
 `(j,i,k)=(0,29,0)`. NEMO applies the ordinary F-grid lateral boundary
 operation to `fmask` and only then freezes `fe3mask = fmask`
-(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:229-258`). The call
+(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:232-258`). The call
 passes neither a fill mode nor a fill value, so the executed double-precision
 boundary path gives the closed southern halo its default constant zero
 (`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1811-1820`,
 `ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1864-1872`, and
-`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1999-2005`). The literal
+`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1999-2004`). The literal
 EEN quotient reads this frozen mask at `jj-1`
 (`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248`).
 
