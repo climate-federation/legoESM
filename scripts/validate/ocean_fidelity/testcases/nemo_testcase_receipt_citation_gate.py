@@ -4190,7 +4190,7 @@ CITATION_MAP = {
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],
-    'eos.py:742':
+    'eos.py:747':
         '"raw-mesh e3w_int must contain only finite values > 0",',
     # D67: the e1e2-weighted SSH-average face depth NEMO divides the
     # accumulated barotropic transport by, to form puu_b/pvv_b(Kaa).
@@ -5232,7 +5232,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:7315-7325': [
         'nemo_r3t_rk3_stage1_stretch,',
         '_qt_13 = nemo_r3t_rk3_stage1_stretch(', 11],
-    'eos.py:970-1001': [
+    'eos.py:975-1006': [
         'def nemo_r3t_rk3_stage1_stretch(',
         'return jnp.where(wet, nemo_source_round(one + r3_stage), one)', 32],
     # --- restored from the lane tip (980cc6369) after the merge conflict on
