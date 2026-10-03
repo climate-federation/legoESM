@@ -25,7 +25,8 @@ from legoesm.land.multilayer_land import (
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import (
-    SoilThermalConfig, compute_heat_capacity, compute_thermal_conductivity,
+    SoilThermalConfig, compute_apparent_heat_capacity, compute_heat_capacity,
+    compute_thermal_conductivity,
     melt_snow_node_excess, snow_thermal_conductivity, solve_snow_soil_thermal,
     solve_soil_thermal)
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
@@ -89,8 +90,9 @@ def test_snow_node_flux_balance_uses_whole_pack_resistance():
     np.testing.assert_allclose(np.asarray(lhs), np.asarray(rhs), atol=1e-8)
 
 
-@pytest.mark.parametrize("n_sub,lam", [(1, None), (1, 6.0), (4, None)])
-def test_column_enthalpy_ledger(n_sub, lam):
+@pytest.mark.parametrize("n_sub,lam,ft", [(1, None, False), (1, 6.0, False),
+                                         (4, None, False), (1, 6.0, True)])
+def test_column_enthalpy_ledger(n_sub, lam, ft):
     """dE = (G - lam (T_s'-T_s) + Q_geo) dt + (swe' - swe) c_ice (T_s - Tf).
     (With sub-steps the linearised surface term is integrated per sub-step,
     so lam is checked on the one-step solve.)"""
@@ -101,13 +103,23 @@ def test_column_enthalpy_ledger(n_sub, lam):
     G = jnp.array([-25.0, 15.0, -5.0])
     dt = 1800.0
     sc = None if lam is None else jnp.full(3, lam)
-    Ts, Tn = solve_snow_soil_thermal(T_s0, swe_new, T, theta, _GRID, _HYD, _TH,
+    th = _TH._replace(enable_freeze_thaw=ft)
+    Ts, Tn = solve_snow_soil_thermal(T_s0, swe_new, T, theta, _GRID, _HYD, th,
                                      G, dt, surface_conductance=sc,
                                      n_substeps=n_sub)
     flux = G + _TH.Q_geothermal
     if lam is not None:
         flux = flux - lam * (Ts - T_s0)
-    dE = _enthalpy(Tn, theta, Ts, swe_new) - _enthalpy(T, theta, T_s0, swe_old)
+    if ft:
+        # Freeze/thaw: the solver's identity is in the linearised metric (the
+        # apparent heat capacity at the start temperature), one step.
+        C = compute_apparent_heat_capacity(T, theta, _HYD, th)
+        dE = (jnp.sum(C * _GRID.dz * (Tn - T), axis=-1)
+              + constants.c_pi * swe_new * (Ts - _TF)
+              - constants.c_pi * swe_old * (T_s0 - _TF))
+    else:
+        dE = (_enthalpy(Tn, theta, Ts, swe_new)
+              - _enthalpy(T, theta, T_s0, swe_old))
     expect = flux * dt + (swe_new - swe_old) * constants.c_pi * (T_s0 - _TF)
     np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
                                rtol=1e-10, atol=1e-4)
@@ -356,3 +368,45 @@ def test_flux_heats_the_node_and_melt_follows_from_its_enthalpy():
     melt2 = s1.snow_depth - s2.snow_depth - r2.surface_mass_flux * dt
     want = constants.c_pi * s1.snow_depth * (s1.T_snow - _TF) / constants.L_f
     np.testing.assert_allclose(np.asarray(melt2), np.asarray(want), rtol=1e-9)
+
+
+def test_full_step_energy_ledger_under_melting_conditions():
+    """Assembled land enthalpy over two SimpleSEB steps of warm air on a pack:
+    dE_sens = (G_soil - lam*(T_s' - T_s0) + Q_geo) dt - L_f * m_store,
+    E_sens = sum C dz (T - Tf) + c_ice SWE (T_snow - Tf); snow-mass changes
+    other than the stored-heat melt happen at a node already at Tf (no term)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=SimpleSEBConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 283.0, 0.0, 0.0)._replace(sw_down=500.0 * o,
+                                               lw_down=330.0 * o,
+                                               q_lowest=0.008 * o)
+    dt = 1800.0
+    step = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0)))
+
+    def E(s):
+        C = compute_heat_capacity(s.theta_soil, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (s.T_snow - _TF))
+
+    s = st
+    for _ in range(2):
+        m_store = constants.c_pi * s.snow_depth * jnp.maximum(
+            s.T_snow - _TF, 0.0) / constants.L_f
+        T_s0 = jnp.minimum(s.T_snow, _TF)
+        out = step(s)
+        s2, sfc = out[0], out[-1]
+        lam = sfc.surface_conductance
+        flux = sfc.G_soil - lam * (s2.T_snow - T_s0) + cfg.thermal.Q_geothermal
+        expect = flux * dt - constants.L_f * m_store
+        # Water moved by Richards changes C (theta) at fixed T: compare at the
+        # end-of-step theta for the soil part.
+        dE = E(s2) - E(s._replace(theta_soil=s2.theta_soil))
+        np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                                   rtol=1e-9, atol=1e-3)
+        s = s2
