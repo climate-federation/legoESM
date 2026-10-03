@@ -13,9 +13,11 @@
 # absolute repo (arm.tsv column 3; extra flags last) so arms (branch) and controls (base commit)
 # share a job.  Same as campaign_amip_bias_0929/bundle.sbatch otherwise.
 # ORDER (the shared base-commit controls are valid only if step 2 passes):
-#   1. sbatch --nodes=2 --job-name=sh_gate --export=ALL,ARMS="sh_gate_off sh_gate_base" bundle.sbatch
-#   2. python compare_gate.py $ROOT/sh_gate_off/checkpoint_day_0246.npz $ROOT/sh_gate_base/checkpoint_day_0246.npz
-#      -> must print IDENTICAL (exit 0)
+#   1. sbatch --nodes=3 --job-name=sh_gate --export=ALL,ARMS="sh_gate_off sh_gate_base sh_gate_base2" bundle.sbatch
+#   2. python compare_gate.py $ROOT/sh_gate_base/checkpoint_day_0246.npz $ROOT/sh_gate_base2/checkpoint_day_0246.npz
+#      (base vs base: the run must be reproducible for the gate to mean anything), then
+#      python compare_gate.py $ROOT/sh_gate_off/checkpoint_day_0246.npz $ROOT/sh_gate_base/checkpoint_day_0246.npz
+#      -> both must print IDENTICAL (exit 0); otherwise each arm runs its own control.
 #   3. sbatch --nodes=4 --job-name=snowheat --export=ALL,ARMS="sh_on_a sh_on_b sh_ctl_a sh_ctl_b" bundle.sbatch
 set -uo pipefail
 : "${ROOT:=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs}"

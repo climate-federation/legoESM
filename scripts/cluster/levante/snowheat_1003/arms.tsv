@@ -12,3 +12,5 @@ sh_ctl_b	255	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_base
 # 1-day bit-identity gate (switch OFF on the branch vs base, same restart)
 sh_gate_off	245	246	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat	 --no-land-snow-insulation
 sh_gate_base	245	246	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_base	
+# base twice: proves the gate can say IDENTICAL at all (run-to-run determinism)
+sh_gate_base2	245	246	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat_base	

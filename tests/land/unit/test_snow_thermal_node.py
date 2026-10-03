@@ -521,8 +521,35 @@ def test_skin_helper_contract():
     off = off._replace(snow_depth=jnp.array([50.0, 0.0]))
     np.testing.assert_array_equal(np.asarray(land_skin_temperature(off)),
                                   np.asarray(off.T_soil[:, 0]))
-    on = init_multilayer_land_state(2, MultiLayerLandConfig(thermal=_TH),
+    on = init_multilayer_land_state(3, MultiLayerLandConfig(thermal=_TH),
                                     T_init=300.0)
-    on = on._replace(snow_depth=jnp.array([0.0, 10.0]),
-                     T_snow=jnp.array([260.0, 276.0]))
-    np.testing.assert_allclose(np.asarray(land_skin_temperature(on)), [300.0, _TF])
+    on = on._replace(snow_depth=jnp.array([0.0, 10.0, 10.0]),
+                     T_snow=jnp.array([260.0, 276.0, 260.0]))
+    np.testing.assert_allclose(np.asarray(land_skin_temperature(on)),
+                               [300.0, _TF, 260.0])
+
+
+def test_snow_falling_on_warm_ground_does_not_arrive_warm():
+    """A pack created this step on a 285 K surface starts at T_freeze: the
+    land enthalpy changes only by the boundary fluxes (no c_ice*S*(285 - Tf)
+    credited to snow that never carried it)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=285.0, theta_init=0.25)
+    f = _forcing(1, 271.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
+    dt = 1800.0
+    s1, r1, _c, sfc = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0)))(st)
+    assert float(s1.snow_depth[0]) > 1.0
+
+    def E(s, theta):
+        C = compute_heat_capacity(theta, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (s.T_snow - _TF))
+
+    dE = E(s1, s1.theta_soil) - E(st, s1.theta_soil)
+    expect = (sfc.G_soil + (sfc.lhflx - r1.lhflx) + cfg.thermal.Q_geothermal) * dt
+    np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                               rtol=1e-9, atol=1e-3)
