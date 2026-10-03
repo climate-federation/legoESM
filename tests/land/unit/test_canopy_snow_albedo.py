@@ -220,10 +220,10 @@ from legoesm.land.surface_scheme import TwoLeafCanopyConfig  # noqa: E402
 NCOL, SW = 4, 300.0
 
 
-def _forcing():
+def _forcing(sw=SW):
     n = NCOL
     return AtmToSurface(
-        sw_down=jnp.full(n, SW), lw_down=jnp.full(n, 250.0),
+        sw_down=jnp.full(n, sw), lw_down=jnp.full(n, 250.0),
         precip_total=jnp.zeros(n), precip_snow=jnp.zeros(n),
         T_lowest=jnp.full(n, 268.0), q_lowest=jnp.full(n, 0.002),
         u_lowest=jnp.full(n, 5.0), v_lowest=jnp.full(n, 2.0),
@@ -233,7 +233,7 @@ def _forcing():
         has_precipitation=jnp.ones(n))
 
 
-def _step(masking):
+def _step(masking, sw=SW):
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
                                surface_scheme=TwoLeafCanopyConfig(),
                                canopy_snow_masking=masking)
@@ -247,9 +247,22 @@ def _step(masking):
         pft_index=jnp.asarray([2.0, 2.0, 0.0, 2.0]),
         ALB_VIS=jnp.full(NCOL, 0.06), ALB_NIR=jnp.full(NCOL, 0.12))
     new, resp, _, sfc = step_multilayer_land_with_diagnostics(
-        state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
+        state, _forcing(sw), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
         land_params=lp)
+    _step.n_held = int(np.asarray(sfc.n_held).sum())
     return np.asarray(resp.albedo), np.asarray(sfc.sw_net)
+
+
+def test_land_step_at_night_is_finite():
+    """No sunlight: the beam/diffuse split is 0/0, so the exported albedo must
+    fall back to the diffuse value, not NaN (it feeds the next radiation call)."""
+    a_on, _ = _step(True, sw=0.0)
+    # a NaN would be contained by the land step (column held, albedo replaced
+    # by the 0.2 fallback): so test that nothing was held and the value is
+    # the masked diffuse one, not the fallback
+    assert _step.n_held == 0
+    assert np.all(np.isfinite(a_on)), a_on
+    assert 0.05 < a_on[1] < 0.18, a_on
 
 
 def test_land_step_switch_on_masks_forest_snow_only():
