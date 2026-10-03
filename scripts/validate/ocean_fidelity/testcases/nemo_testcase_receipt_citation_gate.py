@@ -77,6 +77,8 @@ _ORCA2_R107EENSTEP_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo")
 _ORCA2_R110EENFRAC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo")
+_ORCA2_R116EENUREC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -204,6 +206,12 @@ FILES = {
         _ORCA2_R110EENFRAC_COMPILED / "dynvor.f90"),
     "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90": (
         _ORCA2_R110EENFRAC_COMPILED / "lbclnk.f90"),
+    "ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R116EENUREC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R116EENUREC_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90": (
+        _ORCA2_R116EENUREC_COMPILED / "lbclnk.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1277,6 +1285,22 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 117: remaining U recurrence and south-mask owner -----
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dynspg_ts.f90:1274-1288': [
+        ('CALL r116_een_u_before(1, ji, jj, jk, zpvo_ne', 1),
+        ('CALL r116_een_u_after(3, ji, jj, jk, ffu_se(ji,jj))', 1), 15],
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dommsk.f90:211-232': [
+        ('vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)', 1),
+        ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )", 1), 22],
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90:1816-1820': [
+        ('zland = 0._wp', 3),
+        ('IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 3), 5],
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90:1864-1872': [
+        ('! define ifill: which method should be used to fill each parts (sides+corners) of the halos', 3),
+        ('ENDIF', 76), 9],
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90:2130-2136': [
+        ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 5),
+        ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 5), 7],
     # --- ORCA2 round 115: EEN stored product and recurrence signs ----------
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1238-1245': [
         ('ffu_nw(:,:) = 0._wp', 1),
