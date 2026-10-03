@@ -94,6 +94,7 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _nemo_south_zero_fill
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
 
     require(plant in PLANTS, f"unknown plant {plant}")
@@ -155,10 +156,18 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
             "e3v": np.asarray(parts[f"neighbor_e3v_u_{label}"]),
             "mask": np.asarray(parts[f"neighbor_mask_u_{label}"], dtype=np.float64),
         }
+        candidate_prefix = dict(prefix)
+        if label in ("sw", "se"):
+            south_mask = np.asarray(_nemo_south_zero_fill(
+                jnp.asarray(raw.vmask, dtype=jnp.float64)))
+            if label == "se":
+                south_mask = np.roll(south_mask, -1, axis=1)
+            candidate_prefix["mask"] = south_mask
         baseline_term = np.asarray(parts[f"term_u_{label}"])
         candidate_term = np.asarray(nemo_source_round(
-            jnp.asarray(prefix["e3u"]) * jnp.asarray(prefix["e3v"])
-            * jnp.asarray(prefix["mask"]) * jnp.asarray(prefix["zpvo"])))
+            jnp.asarray(candidate_prefix["e3u"]) * jnp.asarray(candidate_prefix["e3v"])
+            * jnp.asarray(candidate_prefix["mask"])
+            * jnp.asarray(candidate_prefix["zpvo"])))
         baseline_before, baseline_after = jax.device_get(jax.jit(
             lambda term, mbk: r115.replay_recurrence(
                 term, mbk, ieee_zero_add=False))(
@@ -170,7 +179,7 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
         baseline = {**prefix, "term": baseline_term,
                     "before": np.asarray(baseline_before),
                     "after": np.asarray(baseline_after)}
-        candidate = {**prefix, "term": candidate_term,
+        candidate = {**candidate_prefix, "term": candidate_term,
                      "before": np.asarray(candidate_before),
                      "after": np.asarray(candidate_after)}
         reference = {"mbku": oracle["mbku"]}
@@ -227,6 +236,7 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
         "status": "MEASURED_R117_EEN_U_RECURRENCES",
         "claim_label": "independent",
         "execution": "production-jit-cpu-fp64-x64-libm",
+        "candidate_arm": "southern-vmask-zero-fill-plus-host-ieee-zero-add",
         "record_census": census,
         "card_scope": card_scope,
         "source_order": list(SOURCE_ORDER),
