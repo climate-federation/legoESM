@@ -61,7 +61,7 @@ CONTAINS
    SUBROUTINE r116_een_u_after(slot, ji, jj, jk, accumulator)
       INTEGER, INTENT(in) :: slot, ji, jj, jk
       REAL(wp), INTENT(in) :: accumulator
-      IF(.NOT.initialized) CALL ctl_stop('round116: EEN U store after initialization')
+      IF(.NOT.initialized) CALL ctl_stop('round116: EEN U after-call before initialization')
       IF(slot < 1 .OR. slot > 3) CALL ctl_stop('round116: invalid EEN U recurrence slot')
       acc_after(ji,jj,jk,slot) = accumulator
    END SUBROUTINE r116_een_u_after
