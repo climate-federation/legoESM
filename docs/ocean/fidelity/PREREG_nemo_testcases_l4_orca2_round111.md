@@ -49,4 +49,3 @@ the first-over-bar row does not move earlier, every moved row is registered,
 and the full shared-card gate passes. Otherwise the round is HELD with the
 first unequal statement and the next discriminator. No configuration choice
 is authorized.
-
