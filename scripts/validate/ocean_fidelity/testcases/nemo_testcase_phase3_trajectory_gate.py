@@ -46,6 +46,19 @@ DEFAULT_ORACLE_ROOTS = {
     # (decision 73); its own NEMO run, beside the flux card's.
     "VORTEX_VEC-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3"),
+    # Decision 74's resolution ladder (round 208, operator note BZ).  Each rung
+    # is the SAME certified executable reading a deck refined by NEMO's own
+    # rule (AGRIF_FixedGrids.in:2 ratio 3; 1_namelist_cfg:21-22,43), so a row
+    # that moves between rungs is a grid-size dependence in the transcription
+    # and nothing else.
+    "VORTEX-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/flx"),
+    "VORTEX_VEC-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/vec"),
+    "VORTEX-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/flx"),
+    "VORTEX_VEC-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/vec"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
