@@ -49,3 +49,25 @@ landing additionally requires all four V paths and the complete
 ORCA2/GYRE/DINO/tank/generic-card gates; otherwise this round is measurement
 and acquisition only.
 
+## Frozen addendum after the first falsifier
+
+The first committed walk refuted R117-P4 before recurrence arithmetic:
+southwest and southeast U each have 68 magnitude-unequal neighboring `vmask`
+values at global row `j=0`, level `k=0`; northeast U closes exactly under the
+registered zero-addition arm. No statement after the mask has been interpreted.
+
+The compiled initialization forms `vmask` and then applies its ordinary
+V-grid lateral boundary condition
+(`ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dommsk.f90:211-232`). With no
+southern MPI neighbor or meridional self-periodicity, the compiled boundary
+dispatcher selects constant fill, whose default land value is zero
+(`ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90:1815-1819,1852-1872,2129-2136`).
+The executed EEN statements then consume `vmask(ji,jj-1,jk)` and
+`vmask(ji+1,jj-1,jk)` for southwest and southeast U
+(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1271-1273`).
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R117-P6 | Replacing only the cyclic southern neighboring-V mask association with NEMO's constant-zero fill closes the 68 SW and 68 SE mask/product magnitude differences. | Mask and stored product become bit-exact on both paths; NE and every non-southern value remain unchanged. | Any remaining bit or any movement outside those 136 registered values rejects the arm. |
+| R117-P7 | With P6 applied, the already-registered IEEE-zero addition closes the remaining SW/SE recurrence sign bits without magnitude movement. | All eight recorded fields become bit-exact for NE, SW, and SE; every candidate movement beyond the 136 mask/product values is signed-zero-only. | The first remaining item owns the walk; no production change lands. |
+| R117-P8 | The next missing coverage is the four V recurrences, not another U operand. | All four U paths are exact and no equally controlled V recurrence stream exists. | An admitted V stream must be used if found; otherwise write a rank-complete additions-only acquisition. |
