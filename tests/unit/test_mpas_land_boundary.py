@@ -617,6 +617,40 @@ def test_land_stress_reaches_the_momentum_tendency(mpas_mesh, sigma_coord,
     np.testing.assert_allclose(o_with, o_bulk, rtol=1e-10, atol=1e-14)
 
 
+def test_land_stress_seed_follows_the_static_land_roughness(
+        mpas_mesh, sigma_coord, mpas_state):
+    """Before any valid land solve the drag is the neutral law of (z0m, d) at
+    the lowest level's height above the surface: rougher or more displaced
+    land must remove more lowest-level kinetic energy; a displacement far
+    above the lowest level hits the clamp (identical for any larger d)."""
+    st = _windy(mpas_state)
+    ncell = st.T.data.shape[0]
+    u_low = np.asarray(st.u.data)[:, -1]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+
+    def ke(z0m, d):
+        f = dict(_stress_forcing(ncell, 0.0, valid=False),
+                 z0m_land=jnp.full((ncell,), z0m), d_land=jnp.full((ncell,), d))
+        return np.sum(u_low * _du_low(fn(st, mpas_mesh, sigma_coord,
+                                         forcing=f)))
+    assert ke(1.0, 0.0) < ke(0.01, 0.0) < 0.0
+    assert ke(0.1, 5.0) < ke(0.1, 0.0)
+    assert ke(0.1, 1.0e5) == ke(0.1, 2.0e5)
+    assert ke(0.1, 1.0e5) < ke(0.1, 5.0)
+
+
+def test_land_stress_with_partial_keys_is_refused(
+        mpas_mesh, sigma_coord, mpas_state):
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+    f = _stress_forcing(ncell, 1.0)
+    del f["z0m_land"]
+    with pytest.raises(ValueError, match="z0m_land"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=f)
+
+
 def test_land_stress_without_land_heat_fluxes_is_refused(
         mpas_mesh, sigma_coord, mpas_state):
     ncell = mpas_state.T.data.shape[0]
@@ -670,3 +704,16 @@ def test_land_stress_auto_off_and_true_refused_off_the_mpas_lane():
     cfg.validate_strict()
     with pytest.raises(ValueError, match="not the MPAS lane"):
         cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+
+
+def test_land_stress_lane_predicate_is_the_driver_dispatch():
+    """The driver runs the MPAS lane on grid_type == 'mpas' (fv3_duo first);
+    an mpas discretization on another grid never reaches it."""
+    from legoesm.driver.config import mpas_land_stress_eligibility
+    cfg = _eligible_cfg()
+    assert mpas_land_stress_eligibility(cfg)[0]
+    for bad in (cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")),
+                cfg._replace(dycore=cfg.dycore._replace(
+                    discretization="fv3_duo"))):
+        ok, why = mpas_land_stress_eligibility(bad)
+        assert not ok and "not the MPAS lane" in why

@@ -315,7 +315,7 @@ def hold_last_valid_land_stress(prev_mag, prev_valid, new_mag, held):
     whose new solve is held (``held`` > 0.5) or non-finite keeps its previous
     value; ``valid`` becomes True once any solve has succeeded."""
     ok = (held < 0.5) & jnp.isfinite(new_mag)
-    return jnp.where(ok, jnp.where(ok, new_mag, 0.0), prev_mag), prev_valid | ok
+    return jnp.where(ok, new_mag, prev_mag), prev_valid | ok
 
 
 def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
@@ -338,8 +338,7 @@ def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
                                jnp.where(has_land, d, 0.0),
                                z_low, u, v, rho_sfc)
     use_solved = has_land & land_valid & jnp.isfinite(tau_land_mag)
-    mag = jnp.where(use_solved, jnp.where(use_solved, tau_land_mag, 0.0),
-                    jnp.where(has_land, seed, 0.0))
+    mag = jnp.where(use_solved, tau_land_mag, jnp.where(has_land, seed, 0.0))
     tx, ty = blend_land_surface_stress(
         surface_flux[0], surface_flux[1], mag, u, v, f_land)
     rebuilt = prescribed_into_surface_flux(

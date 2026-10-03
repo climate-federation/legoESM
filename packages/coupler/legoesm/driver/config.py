@@ -4823,9 +4823,10 @@ def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
     that accepts an injected surface flux, and a land scheme whose stress is
     roughness-controlled.
     """
-    d = cfg.dycore
-    if not (d.discretization == "mpas"
-            or normalize_grid_type(cfg.grid.grid_type) == "mpas"):
+    # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
+    # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
+    if (cfg.dycore.discretization == "fv3_duo"
+            or cfg.grid.grid_type != "mpas"):
         return False, "this is not the MPAS lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"

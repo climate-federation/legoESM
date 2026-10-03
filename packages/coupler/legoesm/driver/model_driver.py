@@ -11085,6 +11085,7 @@ class ModelDriver:
         _land_z0m_cells = None         # (nCells,) static land roughness [m]
         _land_d_cells = None           # (nCells,) static displacement [m]
         from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        from legoesm.land.multilayer_land import solved_stress_magnitude
         from legoesm.atmosphere.physics.turbulence.surface_layer import (
             hold_last_valid_land_stress,
         )
@@ -11281,10 +11282,7 @@ class ModelDriver:
                 # under mpas_land_stress_from_land, where a held or non-finite
                 # column keeps its last valid value (driver loop below).
                 # (sqrt guarded so a zeroed column has a finite derivative.)
-                _tau2 = resp.tau_x ** 2 + resp.tau_y ** 2
-                _taumag = jnp.where(
-                    _tau2 > 0.0, jnp.sqrt(jnp.where(_tau2 > 0.0, _tau2, 1.0)),
-                    0.0)
+                _taumag = solved_stress_magnitude(_sfc, resp)
                 _held_f = (jnp.asarray(_held_mask).reshape(-1)
                            .astype(_taumag.dtype)
                            if _held_mask is not None
@@ -11911,6 +11909,11 @@ class ModelDriver:
                            or os.environ.get("PMI_RANK", "0"))
             _trace_win = (_t0, _t0 + _tn,
                           os.path.join(_tdir, "rank" + _trace_rank))
+        if _land_stress_on and _land_taumag_cells is None:
+            raise RuntimeError(
+                "mpas_land_stress_from_land resolved ON but the land stress "
+                "was never seeded (no interactive land flux handoff on this "
+                "run); the boundary layer would silently keep the bulk stress.")
         for step in range(n_steps_total):
             if _trace_win is not None and step in _trace_win[:2]:
                 jax.block_until_ready(self.state)

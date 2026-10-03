@@ -188,7 +188,7 @@ def compute_simple_seb_fluxes(
     T_ref, z_ref = surface_reference_state(
         forcing.T_lowest, land_config.z_ref, forcing.z_lowest)
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+        tau_x, tau_y, shflx, lhflx, _ustar = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             T_ref, forcing.q_lowest,
             T_surface, q_sfc, rho,
@@ -199,7 +199,9 @@ def compute_simple_seb_fluxes(
             L_latent=L_eff,
             max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )
+        tau_mag = rho * _ustar ** 2
     else:
+        tau_mag = None   # constant-coefficient law: no friction velocity
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -305,5 +307,6 @@ def compute_simple_seb_fluxes(
         sif=sif_farq,
         stomatal_ratio=stomatal_ratio,
         surface_conductance=surface_conductance,
+        tau_mag=tau_mag,
         # Canopy-specific diagnostics left as None
     )

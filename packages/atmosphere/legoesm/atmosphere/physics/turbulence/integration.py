@@ -1038,6 +1038,12 @@ def _make_mpas_turbulence(
                 from legoesm.atmosphere.physics.turbulence.surface_layer import (
                     land_stress_into_surface_flux,
                 )
+                _missing = [k for k in ("taumag_land_valid", "z0m_land",
+                                        "d_land") if forcing.get(k) is None]
+                if _missing:
+                    raise ValueError(
+                        "forcing['taumag_land'] needs taumag_land_valid, "
+                        f"z0m_land and d_land too; missing {_missing}.")
                 _cells = lambda k: jnp.asarray(  # noqa: E731
                     forcing[k], dtype=q_sfc.dtype).reshape(nCells)
                 _surface_flux = land_stress_into_surface_flux(

@@ -104,6 +104,23 @@ def _get(lp, name: str, fallback):
     return fallback if v is None else v
 
 
+def solved_stress_magnitude(surface_out, response):
+    """The land's solved surface stress magnitude [Pa] per column.
+
+    The scheme's own ``rho*u*^2`` (``surface_out.tau_mag``) when it reports
+    one -- the ``(tau_x, tau_y)`` vector can be shortened by a wind-speed
+    floor in light wind -- else the vector length.  Non-finite stays NaN, so a
+    failed solve cannot pass as a calm one.  sqrt guarded so a zero vector
+    has a finite derivative.
+    """
+    mag = getattr(surface_out, "tau_mag", None)
+    if mag is not None:
+        return jnp.asarray(mag).reshape(response.tau_x.shape)
+    t2 = response.tau_x ** 2 + response.tau_y ** 2
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)),
+                     jnp.where(jnp.isfinite(t2), 0.0, jnp.nan))
+
+
 def static_land_roughness(land_params, config, ncol):
     """Momentum roughness z0m and displacement height d [m] of each column from
     its STATIC parameters, through the same function and defaults its surface
