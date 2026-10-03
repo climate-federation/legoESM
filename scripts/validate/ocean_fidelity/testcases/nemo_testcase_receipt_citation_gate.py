@@ -1301,6 +1301,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747': [
         ("CASE ( 'F' )", 5),
         ('END DO; END DO', 6), 26],
+    'barotropic_latlon_cgrid.py:920-937': [
+        ('def _nemo_een_north_ff(field, grid):', 1),
+        ('north = north.at[-1].set(jnp.where(nmask, fold_row, north[-1]))', 1), 18],
+    'barotropic_latlon_cgrid.py:1028-1030': [
+        ('q = b(ff[..., None] / e3f)', 1),
+        ('q_north = b(ff_north[..., None] / jnp.roll(e3f, -1, axis=0))', 1), 3],
     # --- ORCA2 round 121: northern V fraction walk -------------------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1323-1328': [
         ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
