@@ -75,6 +75,8 @@ _ORCA2_R105EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo")
 _ORCA2_R107EENSTEP_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo")
+_ORCA2_R110EENFRAC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -190,6 +192,12 @@ FILES = {
         _ORCA2_R107EENSTEP_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90": (
         _ORCA2_R107EENSTEP_COMPILED / "l4_r105_een_accum.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "domhgr.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1263,6 +1271,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1248': [
+        ('SELECT CASE( nvor_scheme )', 1),
+        ('& ff_f(ji  ,jj-1) /', 1), 8],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:252-258': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('fe3mask(:,:,:) = fmask(:,:,:)', 1), 7],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:135-143': [
+        ('IF( iff == 0 ) THEN', 1),
+        ("CALL lbc_lnk( 'dom_hgr', ff_t", 1), 9],
     # --- ORCA2 round 109: admitted EEN per-level recurrence ---
     'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1245': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),

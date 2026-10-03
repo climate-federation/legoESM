@@ -167,7 +167,7 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
         raise GateError(f"{plant} plant fired")
     return {
         "status": "MEASURED_R111_EEN_FRACTION_WALK",
-        "claim_label": "independent",
+        "claim_label": "given NEMO's recorded entry",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "dtypes": {
             "state_eta": str(np.asarray(state.eta.data).dtype),
