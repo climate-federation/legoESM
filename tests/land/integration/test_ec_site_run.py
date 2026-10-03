@@ -83,6 +83,7 @@ def test_run_ec_site_diagnostic_smoke(tmp_path):
     for flux in ("GPP", "LE", "H"):
         assert metrics[flux]["n"] > 0
         assert np.isfinite(metrics[flux]["rmse"])
+        assert 0 <= metrics[flux]["converged_only"]["n"] <= metrics[flux]["n"]
 
     # output NetCDF is well-formed and the modelled fluxes are finite + physical
     out_nc = pathlib.Path(out_dir) / "SYN-Test_ec_diagnostic.nc"
@@ -98,6 +99,11 @@ def test_run_ec_site_diagnostic_smoke(tmp_path):
     assert np.nanmax(gpp[v]) > 0.0
     # latent heat stays physical (no runaway): below ~ peak SW + slack
     assert np.nanmax(le[v]) < 1000.0
+    # the converged-only score is exactly the scoring mask AND the persisted flag
+    sv = ds.score_valid.values.astype(bool)
+    conv = ds.converged.values.astype(bool)
+    n_conv = int((sv & conv & np.isfinite(gpp) & np.isfinite(ds.gpp_obs.values)).sum())
+    assert n_conv == metrics["GPP"]["converged_only"]["n"]
 
 
 def test_run_ec_site_prognostic_smoke(tmp_path):
@@ -443,13 +449,15 @@ def test_clmml_mosaic_orchestration_area_weights(monkeypatch):
         k = len(seen)                                   # 1st tile -> 1s, 2nd -> 2s
         base = np.full(4, float(k))
         rev = np.array([0, k - 1, 0, 0])                # tile2 reverts step 1
-        # (gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)
-        return base, base * 10, base * 100, base + 290, rev, base + 280, base / 10, base / 20
+        conv = np.array([True, True, k == 1, True])     # tile2 fails step 2
+        # (gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar, converged)
+        return (base, base * 10, base * 100, base + 290, rev, base + 280,
+                base / 10, base / 20, conv)
 
     monkeypatch.setattr(mod, "_prognostic_fluxes", _stub)
     m = savanna_clmml_two_patch(tree_frac=0.4, tree_pft=7, grass_pft=15,
                                 tree_root_m=5.0, grass_root_m=0.5)
-    gpp, le, h, ts, reverted, ts_soil, swc, ustar = mod._clmml_mosaic_prognostic(
+    gpp, le, h, ts, reverted, ts_soil, swc, ustar, conv = mod._clmml_mosaic_prognostic(
         None, m, soil="default", bottom_bc="free_drainage", soil_depth_m=0.0,
         k_sat_decay_m=0.0, soil_evap_resistance_exp=2.0, z_ref=10.0, texture=None,
         interception=False, plant_wilting_point=None, clmml_turbulence="most",
@@ -466,6 +474,8 @@ def test_clmml_mosaic_orchestration_area_weights(monkeypatch):
     np.testing.assert_allclose(ustar, np.full(4, 0.4 * 0.05 + 0.6 * 0.1))
     # reverted = per-step any-tile max (tile2 reverted step 1)
     np.testing.assert_array_equal(reverted, np.array([0, 1, 0, 0]))
+    # converged = per-step all-tiles (tile2 failed step 2)
+    np.testing.assert_array_equal(conv, np.array([True, True, False, True]))
 
 
 def test_clm_pft_derived_from_site_igbp():
@@ -510,11 +520,12 @@ def test_two_leaf_mosaic_prognostic_orchestration(monkeypatch, tmp_path):
         seen.append(round(float(lc.root_depth), 3))
         k = len(seen)
         base = np.full(4, float(k))
-        return base, base * 10, base * 100, base + 290, np.zeros(4), base, base, base
+        return (base, base * 10, base * 100, base + 290, np.zeros(4), base, base,
+                base, np.ones(4, bool))
     monkeypatch.setattr(mod, "_prognostic_fluxes", _stub)
     m = savanna_two_patch(tree_frac=0.4, grass_fc4=0.0, tree_root_m=5.0,
                           grass_root_m=0.5)
-    gpp, le, h, ts, rev, tsoil, swc, ustar = mod._two_leaf_mosaic_prognostic(
+    gpp, le, h, ts, rev, tsoil, swc, ustar, conv = mod._two_leaf_mosaic_prognostic(
         d, m, soil="default", bottom_bc="free_drainage", soil_depth_m=0.0,
         k_sat_decay_m=0.0, soil_evap_resistance_exp=2.0, z_ref=10.0, texture=None,
         interception=False, plant_wilting_point=None, stress_b0=False,
@@ -645,3 +656,47 @@ def test_config_separates_soil_and_plant_wilting():
     c = MultiLayerLandConfig(theta_wp=0.15, theta_wp_plant=0.06)
     assert c.theta_wp == 0.15 and c.theta_wp_plant == 0.06
     assert MultiLayerLandConfig(theta_wp=0.15).theta_wp_plant is None   # default
+
+
+def test_skill_with_converged_scores_both_sets():
+    """Primary score keeps every valid step; the sensitivity score drops the
+    steps whose canopy root solve failed."""
+    mod = _load_driver_module()
+    model = np.array([1.0, 2.0, 30.0, 4.0])
+    obs = np.array([1.0, 2.0, 3.0, 4.0])
+    valid = np.ones(4, bool)
+    conv = np.array([True, True, False, True])
+    m = mod._skill_with_converged(model, obs, valid, conv)
+    assert m["n"] == 4 and m["rmse"] > 0.0
+    assert m["converged_only"]["n"] == 3
+    assert m["converged_only"]["rmse"] == pytest.approx(0.0)
+    assert "converged_only" not in mod._skill_with_converged(model, obs, valid, None)
+
+
+@pytest.mark.parametrize("mode", ["diagnostic", "prognostic"])
+def test_unconverged_steps_are_reported_not_hidden(tmp_path, monkeypatch, mode):
+    """Force every canopy solve to report failure: the primary score is unchanged
+    in size, the converged-only score is empty, and the flag is persisted."""
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+    if mode == "diagnostic":
+        real = mod.compute_two_leaf_canopy_fluxes
+        monkeypatch.setattr(
+            mod, "compute_two_leaf_canopy_fluxes",
+            lambda *a, **k: (lambda o: o._replace(
+                converged=o.converged & False))(real(*a, **k)))
+    else:
+        real = mod.step_multilayer_land_with_diagnostics
+
+        def failed(*a, **k):
+            ns, r, c, o = real(*a, **k)
+            return ns, r, c, o._replace(converged=o.converged & False)
+        monkeypatch.setattr(mod, "step_multilayer_land_with_diagnostics", failed)
+    out_dir = str(tmp_path / mode)
+    metrics = mod.run_site(driver_nc, mode, out_dir, chunk=96)
+    for flux in ("GPP", "LE", "H"):
+        assert metrics[flux]["n"] > 0
+        assert metrics[flux]["converged_only"]["n"] == 0
+    ds = xr.open_dataset(pathlib.Path(out_dir) / f"SYN-Test_ec_{mode}.nc")
+    assert not ds.converged.values.any()

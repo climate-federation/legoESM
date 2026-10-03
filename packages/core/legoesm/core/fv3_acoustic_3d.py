@@ -52,7 +52,6 @@ are inactive and d_con is not a parameter of this module; and the moist
 """
 from __future__ import annotations
 
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -98,9 +97,6 @@ __all__ = [
     "exchange_state_halos_3d",
     "build_nh_carry",
     "acoustic_substep_3d",
-    "make_exchange_state_halos_3d_jit",
-    "make_build_nh_carry_jit",
-    "make_acoustic_substep_3d_jit",
 ]
 
 # Orders of magnitude above anything a dry hydrostatic column can hold:
@@ -627,48 +623,6 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
 
     return {"state": state, "nh": nh, "flux_cap": flux_cap,
             "press": press, "stages": stages}
-
-
-def make_exchange_state_halos_3d_jit(ctx, km: int, *, scalars: bool,
-                                     winds: bool, w_field: bool = False):
-    """jit closure with ctx/km and the static exchange selectors bound;
-    the returned callable takes the face-stacked state (dynamic, C3)."""
-    return jax.jit(partial(exchange_state_halos_3d, ctx, km=km,
-                           scalars=scalars, winds=winds,
-                           w_field=w_field))
-
-
-def make_build_nh_carry_jit(ctx, km: int):
-    """jit closure over the static (ctx, km); the callable takes hs6."""
-    return jax.jit(partial(build_nh_carry, ctx, km))
-
-
-def make_acoustic_substep_3d_jit(ctx, km: int, *, first_substep: bool,
-                                 ptop: float, akap: float, cp_air: float,
-                                 cfg=None, a2b_ord: int = 4,
-                                 exchange: bool = True,
-                                 remap_step: bool = False,
-                                 remap_follows: bool = False,
-                                 hydrostatic: bool = True,
-                                 p_fac: float = 0.05, a_imp: float = 1.0,
-                                 use_logp: bool = False,
-                                 check_state: bool = False,
-                                 substep: int | None = None):
-    """Bind every STATIC selector (C3); the jitted callable is
-    ``(state, dt, nh=None, dp0=None, flux_cap=None)`` -- dt, the state,
-    the NH carry, dp0 and the flux capacitors are the only dynamic
-    inputs, so a new time step does not recompile.  With
-    ``check_state=True`` the closure raises on the first tracer, which
-    is the D3/C5 contract, not a bug."""
-    def _run(state, dt, nh=None, dp0=None, flux_cap=None):
-        return acoustic_substep_3d(
-            ctx, state, dt, km, first_substep=first_substep,
-            ptop=ptop, akap=akap, cp_air=cp_air, cfg=cfg,
-            a2b_ord=a2b_ord, exchange=exchange, remap_step=remap_step,
-            remap_follows=remap_follows, hydrostatic=hydrostatic, nh=nh,
-            p_fac=p_fac, a_imp=a_imp, dp0=dp0, use_logp=use_logp,
-            flux_cap=flux_cap, check_state=check_state, substep=substep)
-    return jax.jit(_run)
 
 
 # =====================================================================

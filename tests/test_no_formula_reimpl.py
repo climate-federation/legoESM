@@ -24,7 +24,7 @@ Seeded formulas:
     canonical helper → debt ratchet (ratchet down by creating a shared
     Exner/potential-temperature helper).
   * **virtual temperature** (``0.608``/``0.61`` = R_v/R_d−1) — canonical is
-    ``physics._shared.virtual_temperature``; 3 inline ``T·(1+0.608·q)`` sites →
+    ``physics._shared.virtual_temperature``; 2 inline ``T·(1+0.608·q)`` sites →
     debt; replace with the helper.
   * **Monin-Obukhov stability functions** (``psi_m``/``psi_h``/``phi_m``/
     ``stability_function``…) — canonical in ``core/bulk_flux.py``; empty budget →
@@ -340,7 +340,7 @@ CANONICAL_FORMULAS = {
             "instead of an inline ``T*(1 + 0.608*q)``"
         ),
         "budget": {
-            "packages/core/legoesm/grids/cubed_sphere.py": 3,
+            "packages/core/legoesm/grids/cubed_sphere.py": 2,
         },
     },
     "brunt_vaisala_tp_form": {

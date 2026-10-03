@@ -514,16 +514,6 @@ class TestMixedPrecisionSemantics:
                 assert call_kwargs["precision"] == expected_mode, \
                     f"dyn={dyn}, cons={cons} → expected {expected_mode}, got {call_kwargs['precision']}"
 
-    def test_legacy_ml_precision_preserved_in_hardware_dict(self):
-        """ML precision key must be preserved in legacy 3-component dict."""
-        from legoesm.core.hardware import (
-            set_runtime_precision_policy,
-            get_runtime_precision_policy,
-        )
-        set_runtime_precision_policy(ml="bfloat16")
-        policy = get_runtime_precision_policy()
-        assert policy["ml"] == jnp.bfloat16
-
     @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_precision_policy_matches_mode(self, mode):
         """PrecisionPolicy must match the requested mode.

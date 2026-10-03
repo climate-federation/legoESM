@@ -695,15 +695,11 @@ Read `src/legoesm/parallel/voronoi_partition.py` and `src/legoesm/parallel/halo_
   - Assert: result matches standard `pad_halo()`.
 - Skip if sub-face tiling (currently rejected by implementation).
 
-**13e) Async halo step — vector fields**
-- `async_halo_step_vector(u, v, ...)`: overlapped vector halo exchange.
-- Assert: matches sequential `pad_halo_vector()`.
-
 **Key imports:**
 ```python
 from legoesm.parallel.async_halo import (
     InteriorBoundaryMasks, OverlapContext,
-    overlapped_halo_compute, async_halo_step, async_halo_step_vector,
+    overlapped_halo_compute,
     jax_native_halo_exchange,
 )
 ```
@@ -733,7 +729,7 @@ Read `src/legoesm/parallel/async_halo.py` first.
 - Assert: `config.total_memory_gb >= config.device_memory_gb`.
 
 **14e) XLA flag configuration**
-- `configure_jax_for_device(config)` should set appropriate XLA flags.
+- `legoesm.runtime.configure_backend()` should set appropriate XLA flags.
 - On GPU: verify CUDA-specific flags (if applicable).
 - On TPU: verify TPU-specific flags.
 - Assert: function does not crash on any backend.
@@ -752,7 +748,8 @@ Read `src/legoesm/parallel/async_halo.py` first.
 **Key imports:**
 ```python
 from legoesm.parallel.runtime import ParallelRuntime, validate_device_count, HaloBackend, ReductionBackend
-from legoesm.parallel.device_config import detect_hardware, configure_jax_for_device, HardwareConfig, mixed_precision_policy
+from legoesm.parallel.device_config import detect_hardware, HardwareConfig, mixed_precision_policy
+from legoesm.runtime import configure_backend
 ```
 
 ---

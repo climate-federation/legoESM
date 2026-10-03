@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -54,15 +53,9 @@ from legoesm.training.scm_rce_metrics import weighted_rmse, weighted_std
 _UNITS = {"theta": "K", "qv": "kg/kg", "u": "m/s", "v": "m/s"}
 
 
-def _git_sha(repo: Path) -> str:
-    """Provenance stamp; every artifact records the tree it was measured on."""
-    try:
-        return subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
+def _git_sha(repo) -> str:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(repo).commit or "unknown"
 
 
 def decompose_case(npz_path: Path, scheme: str) -> dict[str, dict[str, float]]:

@@ -82,7 +82,7 @@ defs = [n.name for n in mod.body if isinstance(n, ast.FunctionDef)]
 print(f"PARSES OK: {len(src)} chars, {src.count(chr(10))} lines")
 print("top-level defs:", defs)
 want = {"A": ["dsw_tail_phase_3d", "make_dsw_tail_phase_3d_jit"],
-        "B": ["dgrid_pressure_phase_3d", "make_dgrid_pressure_phase_3d_jit"],
+        "B": ["dgrid_pressure_phase_3d"],
         "C": ["nh_exchanged_area6", "dgrid_nh_pressure_phase_3d",
               "make_dgrid_nh_pressure_phase_3d_jit"]}["$PART"]
 missing = [w for w in want if w not in defs]

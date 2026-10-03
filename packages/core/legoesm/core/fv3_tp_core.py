@@ -170,6 +170,7 @@ from legoesm.core.fv3_native_d_sw import (
     TP_S14,
     TP_S15,
 )
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 
 # ---------------------------------------------------------------------
 # Supported scheme selectors.  Dispatch-hardening (CLAUDE.md): an
@@ -196,52 +197,6 @@ _PPM_ORDS = (-6, -5, -4, -3, -2, -1,
 #   iord <  8 -> 1, 2, 3, 4, else {5, 6, 7}
 #   iord >= 8 -> 8, 9, 10, else {11}
 _SW_ORDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or worse, with x64 disabled the
-    whole transport would silently run in float32 -- and the oracle
-    build is ``-fdefault-real-8``.
-
-    (Byte-identical in intent to ``fv3_nh_core._require_f64_jax``.  It
-    is re-stated rather than imported because CLAUDE.md forbids
-    importing a private symbol across modules, and promoting that helper
-    to a public shared one is an edit to another lane's file, i.e. out
-    of this task's scope.  Flagged for a follow-up.)
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
-    # "no silent fp64->fp32 downcast" guarantee now lives at the model
-    # boundary; THIS gate catches an f64 metric/workspace leaking into an
-    # f32 phase (silent promotion / lax.scan carry mismatch).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _rng(lo: int, hi: int, org: int, n: int, what: str) -> slice:
@@ -316,7 +271,7 @@ def pert_ppm(a0, al, ar, iv: int):
     ``iv == 0``; ``al*ar = 0``, ``a6da = -da2`` and ``a6da = da2`` for
     ``iv != 0``.
     """
-    _require_f64_jax("pert_ppm", {"a0": a0, "al": al, "ar": ar})
+    require_uniform_float_jax("pert_ppm", {"a0": a0, "al": al, "ar": ar})
     a0 = jnp.asarray(a0)
     al = jnp.asarray(al)
     ar = jnp.asarray(ar)
@@ -413,7 +368,7 @@ def copy_corners(q, npx: int, npy: int, dir_: int, bounded_domain: bool,
     Every corner block is a pure gather (see :func:`_corner_block`); the
     four blocks run in the oracle's source order.
     """
-    _require_f64_jax("copy_corners", {"q": q})
+    require_uniform_float_jax("copy_corners", {"q": q})
     q = jnp.asarray(q)
     ng = bd.ng
     ilo, jlo = bd.isd, bd.jsd
@@ -530,7 +485,7 @@ def xppm(q, c, iord: int, is_: int, ie: int, isd: int, ied: int,
     """
     _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("xppm", "iord", iord, _PPM_ORDS)
-    _require_f64_jax("xppm", {"q": q, "c": c, "dxa": dxa})
+    require_uniform_float_jax("xppm", {"q": q, "c": c, "dxa": dxa})
     q = jnp.asarray(q)
     c = jnp.asarray(c)
     dxa = jnp.asarray(dxa)
@@ -977,7 +932,7 @@ def yppm(q, c, jord: int, ifirst: int, ilast: int, isd: int, ied: int,
     """
     _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("yppm", "jord", jord, _PPM_ORDS)
-    _require_f64_jax("yppm", {"q": q, "c": c, "dya": dya})
+    require_uniform_float_jax("yppm", {"q": q, "c": c, "dya": dya})
     q = jnp.asarray(q)
     c = jnp.asarray(c)
     dya = jnp.asarray(dya)
@@ -1422,7 +1377,7 @@ def deln_flux(nord: int, is_: int, ie: int, js: int, je: int, npx: int,
     window forward, exactly like the in-place lane.
     """
     _nn = functools.partial(_nan, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
-    _require_f64_jax("deln_flux", {
+    require_uniform_float_jax("deln_flux", {
         "q": q, "fx": fx, "fy": fy, "del6_v": del6_v, "del6_u": del6_u,
         "rarea": rarea, "mass": mass, "damp_km": damp_km})
     q = jnp.asarray(q)
@@ -1626,7 +1581,7 @@ def fv_tp_2d(q, crx, cry, npx: int, npy: int, hord: int, xfx, yfx, dxa,
     changes the pytree, which correctly forces a retrace).
     """
     _validate_ord("fv_tp_2d", "hord", hord, _PPM_ORDS)
-    _require_f64_jax("fv_tp_2d", {
+    require_uniform_float_jax("fv_tp_2d", {
         "q": q, "crx": crx, "cry": cry, "xfx": xfx, "yfx": yfx,
         "dxa": dxa, "dya": dya, "area": area, "del6_v": del6_v,
         "del6_u": del6_u, "rarea": rarea, "ra_x": ra_x, "ra_y": ra_y,
@@ -1777,7 +1732,7 @@ def xtp_u(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     """
     _nn = functools.partial(_nan, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("xtp_u", "iord", iord, _SW_ORDS)
-    _require_f64_jax("xtp_u", {"c": c, "u": u, "dx": dx, "rdx": rdx})
+    require_uniform_float_jax("xtp_u", {"c": c, "u": u, "dx": dx, "rdx": rdx})
     c = jnp.asarray(c)
     u = jnp.asarray(u)
     del v                                # dead read (signature parity)
@@ -2164,7 +2119,7 @@ def ytp_v(is_: int, ie: int, js: int, je: int, isd: int, ied: int,
     """
     _nn = functools.partial(_nan, dtype=v.dtype)  # workspace follows storage dtype (fp32/fp64)
     _validate_ord("ytp_v", "jord", jord, _SW_ORDS)
-    _require_f64_jax("ytp_v", {"c": c, "v": v, "dy": dy, "rdy": rdy})
+    require_uniform_float_jax("ytp_v", {"c": c, "v": v, "dy": dy, "rdy": rdy})
     c = jnp.asarray(c)
     v = jnp.asarray(v)
     del u                                # dead read (signature parity)

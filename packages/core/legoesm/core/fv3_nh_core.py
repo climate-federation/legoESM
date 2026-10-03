@@ -149,6 +149,7 @@ import numpy as np  # STATIC trace-time values only, never traced
 from jax import lax
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # nh_utils.F90:40-44
 from legoesm.core.fv3_native_sw_core import Bounds
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 from legoesm.core.fv3_tp_core import copy_corners, fv_tp_2d
 from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
 
@@ -164,43 +165,6 @@ _R3 = 1.0 / 3.0
 # are the repo's research cubed-sphere solvers on ``(6, n, n)`` face
 # arrays with cdgrid objects, which is a different operator (strategy
 # doc R3).
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or worse, with x64 disabled the whole
-    solve would silently run in float32 -- and the oracle build is
-    ``-fdefault-real-8``.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 def sim1_solver(dt: float, rgas: float, gama: float, kappa: float,
@@ -219,7 +183,7 @@ def sim1_solver(dt: float, rgas: float, gama: float, kappa: float,
     in place: ``pe`` is (ni, km+1), ``w2``/``dz2`` are (ni, km).
     Requires ``km >= 2`` (km=1 divides by zero in the oracle recurrence).
     """
-    _require_f64_jax("sim1_solver", {
+    require_uniform_float_jax("sim1_solver", {
         "dm2": dm2, "pm2": pm2, "pem": pem, "w2": w2, "dz2": dz2,
         "pt2": pt2, "ws": ws})
     km = dm2.shape[1]
@@ -412,7 +376,7 @@ def riem_solver_c(ms: int, dt: float, bounds, km: int, akap: float,
     j); they are batched into sim1's i axis here, which is FP-identical
     because every sim1 operation is elementwise over that axis.
     """
-    _require_f64_jax("riem_solver_c", {
+    require_uniform_float_jax("riem_solver_c", {
         "hs": hs, "w3": w3, "pt": pt, "delp": delp, "gz": gz,
         "pef": pef, "ws": ws})
     # Same 0.999 threshold as the NumPy lane: (0.5, 0.999] belongs to the
@@ -492,7 +456,7 @@ def riem_solver3(ms: int, dt: float, bounds, km: int, akap: float,
     :func:`riem_solver_c`; the j window here is js..je with NO ring
     (:87).  ``ms``/``cp`` are dead reads kept for signature parity.
     """
-    _require_f64_jax("riem_solver3", {
+    require_uniform_float_jax("riem_solver3", {
         "zs": zs, "w": w, "delz": delz, "pt": pt, "delp": delp,
         "zh": zh, "pe": pe, "ppe": ppe, "pk3": pk3, "pk": pk,
         "peln": peln, "ws": ws})
@@ -687,7 +651,7 @@ def edge_profile(q1: jnp.ndarray, q2: jnp.ndarray, j_lo: int, km: int,
         raise TypeError(
             f"edge_profile: km must be a static python int (C3; the "
             f"recurrences are unrolled over it), got {type(km).__name__}")
-    _require_f64_jax("edge_profile", {"q1": q1, "q2": q2, "dp0": dp0})
+    require_uniform_float_jax("edge_profile", {"q1": q1, "q2": q2, "dp0": dp0})
     q1 = jnp.asarray(q1)
     q2 = jnp.asarray(q2)
     dp0 = jnp.asarray(dp0)
@@ -871,7 +835,7 @@ def update_dz_c(bounds, km: int, dt: float, dp0: jnp.ndarray,
     js-2; with ng=1 the NumPy lane's fort views silently WRAP — here it
     is a loud error).
     """
-    _require_f64_jax("update_dz_c", {
+    require_uniform_float_jax("update_dz_c", {
         "dp0": dp0, "zs": zs, "area": area, "ut": ut, "vt": vt,
         "gz": gz, "ws": ws})
     is_, ie, js, je, ng = bounds
@@ -1289,7 +1253,7 @@ def update_dz_d(ndif, damp, hord, bounds, km, npx, npy, area, rarea,
     through :func:`fv_tp_2d`, so a typo cannot silently fall through to
     a neighbouring PPM branch.
     """
-    _require_f64_jax("update_dz_d", {
+    require_uniform_float_jax("update_dz_d", {
         "area": area, "rarea": rarea, "dp0": dp0, "zs": zs, "zh": zh,
         "crx": crx, "cry": cry, "xfx": xfx, "yfx": yfx, "ws": ws,
         "dxa": dxa, "dya": dya, "del6_u": del6_u, "del6_v": del6_v})

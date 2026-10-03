@@ -409,69 +409,29 @@ class TestYamlBootstrap:
 
 
 class TestLegacyCompat:
-    """Tests that legacy core.hardware imports still work."""
-
-    def test_legacy_get_backend_uppercase(self):
-        from legoesm.core.hardware import get_backend
-        backend = get_backend()
-        assert backend == backend.upper()
+    """Runtime equivalents of the deleted ``core.hardware`` wrappers."""
 
     def test_legacy_check_spectral_backend(self):
-        """check_spectral_backend should delegate to runtime."""
-        from legoesm.core.hardware import check_spectral_backend
+        """check_spectral_backend passes on CPU with x64."""
+        from legoesm.runtime import check_spectral_backend
         # On CPU with x64 enabled, should not raise.
         jax.config.update("jax_enable_x64", True)
         check_spectral_backend()
 
-    def test_legacy_unsupported_f64_constant(self):
-        from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS
-        # The canonical constant stores backend names in lowercase
-        # (matching `runtime.backend._NO_F64_BACKENDS`).  Call sites
-        # always compare with `backend.lower()` before membership
-        # (see hardware.py detect_devices).  The Apple GPU backend
-        # (jax-mps / MLX) is the float32-only entry.
-        assert "mps" in _UNSUPPORTED_F64_BACKENDS
+    def test_mps_has_no_float64(self):
+        # The Apple GPU backend (jax-mps / MLX) is the float32-only entry.
+        from legoesm.runtime import supports_float64
+        assert not supports_float64("mps")
 
-    def test_legacy_parse_precision_dtype(self):
-        from legoesm.core.hardware import _parse_precision_dtype
-        assert _parse_precision_dtype("fp32", field_name="test") == jnp.float32
-        assert _parse_precision_dtype("float64", field_name="test") == jnp.float64
-
-    def test_legacy_precision_policy_roundtrip(self):
-        from legoesm.core.hardware import (
-            set_runtime_precision_policy,
-            get_runtime_precision_policy,
-            get_runtime_precision_dtype,
-        )
-        set_runtime_precision_policy(dynamics="float32", conservation=None)
-        policy = get_runtime_precision_policy()
-        assert policy["dynamics"] == jnp.float32
-        assert policy["conservation"] is None
-        assert get_runtime_precision_dtype("dynamics") == jnp.float32
+    def test_parse_precision_dtype(self):
+        from legoesm.core.precision import parse_dtype
+        assert parse_dtype("fp32", field_name="test") == jnp.float32
+        assert parse_dtype("float64", field_name="test") == jnp.float64
 
     def test_legacy_core_init_exports(self):
         from legoesm.core import check_spectral_backend, get_backend
         assert callable(check_spectral_backend)
         assert callable(get_backend)
-
-    def test_legacy_apply_hardware_config_delegates(self):
-        """apply_hardware_config should delegate to runtime.bootstrap."""
-        from legoesm.core.hardware import apply_hardware_config
-        config = MagicMock()
-        data = {
-            "hardware.precision.dynamics": "float32",
-            "hardware.precision.ml": None,
-            "hardware.precision.conservation": None,
-            "hardware.parallelism.n_devices": "auto",
-            "hardware.parallelism.backend": None,
-            "hardware.parallelism.distributed": False,
-            "hardware.devices": "auto",
-        }
-        config.get = lambda key, default=None: data.get(key, default)
-        result = apply_hardware_config(config)
-        assert "precision" in result
-        assert "distributed" in result
-        assert "device_config" in result
 
 
 # =========================================================================
@@ -503,18 +463,6 @@ class TestNoCircularImports:
     def test_import_runtime_config(self):
         import legoesm.runtime.config
         assert callable(legoesm.runtime.config.bootstrap)
-
-    def test_import_core_hardware_after_runtime(self):
-        """Importing core.hardware after runtime must not raise."""
-        import legoesm.runtime
-        import legoesm.core.hardware
-        assert callable(legoesm.core.hardware.get_backend)
-
-    def test_import_runtime_after_core_hardware(self):
-        """Importing runtime after core.hardware must not raise."""
-        import legoesm.core.hardware
-        import legoesm.runtime
-        assert callable(legoesm.runtime.get_backend)
 
 
 # =========================================================================

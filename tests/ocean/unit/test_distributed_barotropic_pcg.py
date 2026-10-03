@@ -818,14 +818,9 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        # single_reduce since 2026-09-26 (mpas_config.py records the
-        # convergence and timing evidence); the lat-lon default stays standard.
-        assert cfg.barotropic_implicit_pcg_variant == "single_reduce"
-        # 30 since the convergence measurement (scripts/validate/
-        # ocean_fidelity/barotropic_pcg_convergence.py): on the real
-        # captured systems at the production mesh, 30 iterations put
-        # float32 on its own precision floor, which no larger count
-        # improves.  See the MPASOceanConfig field comment for the table.
+        # standard + gpoly x 15 (owner decision 2026-10-02: the recurrence
+        # gpoly x 15 was measured with; deep-halo Jacobi is opt-in).
+        assert cfg.barotropic_implicit_pcg_variant == "standard"
         # gpoly at 15 since 2026-10-02 (owner decision; A/B in mpas_config).
         assert cfg.barotropic_implicit_pcg_fixed_iters == 15
         assert cfg.barotropic_implicit_pcg_precond == "gpoly"

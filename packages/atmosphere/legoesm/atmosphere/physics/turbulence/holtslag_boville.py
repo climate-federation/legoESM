@@ -54,7 +54,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    exner_function,
+    half_to_full,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     first_crossing_height,
@@ -289,8 +293,8 @@ def holtslag_boville_turbulence(
     )
 
     # Interpolate K to full levels for diagnostics.
-    Km_full = _half_to_full(Km_half)
-    Kh_full = _half_to_full(Kh_half)
+    Km_full = half_to_full(Km_half)
+    Kh_full = half_to_full(Kh_half)
 
     # ----- Apply implicit vertical diffusion -----
     dz_layer = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
@@ -328,14 +332,6 @@ def holtslag_boville_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
-    )
-
-
-def _half_to_full(K_half: jax.Array) -> jax.Array:
-    """Interpolate interface diffusivities to full levels (diagnostic)."""
-    interior = 0.5 * (K_half[:, :-1] + K_half[:, 1:])
-    return jnp.concatenate(
-        [K_half[:, :1], interior, K_half[:, -1:]], axis=1,
     )
 
 

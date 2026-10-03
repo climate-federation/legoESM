@@ -108,6 +108,36 @@ _LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
 _LM_XSCALE = jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0e-3])
 _LM_FSCALE = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0e-3])
 
+# --- Root certificate (numerics; containment thresholds, not tunable physics) --
+# The relative gate above (residual reduced 1e8x from the SEED) cannot certify a
+# root on its own: from a far-off warm-start seed the seed residual is huge and
+# the gate admits a residual of O(10) K, and the residual also has spurious
+# fixed points far outside the range its saturation / radiation formulae are
+# valid in (measured 2026-09-29: leaf roots at 462, 891, 2300 and -1301 K,
+# q_c = -0.11 kg/kg, from seeds copied out of AMIP checkpoints).  Such a state,
+# once cached as the next step's seed, perpetuated itself: ~200-320 of 20709
+# land columns carried leaf temperatures of 13-5655 K in every AMIP run, and one
+# ran the soil and lowest air down to ~90 K.  A converged state must therefore
+# also sit inside a broad physical box and below an absolute residual ceiling.
+# Cold-started solves reach n_sq ~1e-7..1e-9; the relative gate allows <~1e-4.
+_ROOT_T_MIN_K = 150.0      # [K] below any terrestrial leaf / canopy air
+_ROOT_T_MAX_K = 360.0      # [K] above any terrestrial leaf / canopy air
+_ROOT_QC_MIN = -1.0e-10    # [kg/kg] q_c >= 0 up to round-off at the dry boundary
+_ROOT_NSQ_MAX = 1.0e-2     # [-] absolute ceiling on the scaled squared residual
+
+
+def canopy_state_admissible(x: jax.Array) -> jax.Array:
+    """True where ``x[..., :6]`` = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] is a
+    finite state inside the physical box a canopy root may occupy.
+
+    Containment, not a full physical check: Ci is only required finite (no
+    garbage state seen so far had an out-of-range Ci; the leaf temperatures and
+    q_c are what went wrong)."""
+    T = x[..., jnp.array([0, 1, 4])]
+    return (jnp.all(jnp.isfinite(x), axis=-1)
+            & jnp.all((T >= _ROOT_T_MIN_K) & (T <= _ROOT_T_MAX_K), axis=-1)
+            & (x[..., 5] >= _ROOT_QC_MIN))
+
 
 # ---------------------------------------------------------------------------
 # Forcing bundle NamedTuple — groups all per-column inputs for the closure
@@ -523,11 +553,11 @@ def solve_canopy_closure(
     -------
     x_final : shape (6,)  — the final Newton iterate
     n_iters : scalar int  — iteration count when the loop stopped
-    converged : scalar bool — whether the loop stopped because the Newton step
-        fell below ``tol`` (True) rather than because it ran out of iterations
-        or its Jacobian went singular (False).  A False here means ``x_final``
-        is NOT a root of the canopy residual, so the fluxes derived from it are
-        not physics; callers must not consume them as if they were.
+    converged : scalar bool — whether ``x_final`` is a certified root: the
+        residual fell 1e8x below the seed's, below an absolute ceiling, and the
+        state lies in the physical box (:func:`canopy_state_admissible`).  A
+        False here means ``x_final`` is NOT a usable root, so the fluxes derived
+        from it are not physics; callers must not consume them as if they were.
     """
     # Fail-early on a typo'd LE_module: the internal leaf-energy dispatch is a
     # bare ``if LE_module == "BT": ... else: # PM``, so an unknown value would
@@ -613,4 +643,6 @@ def _make_implicit_newton_solver(
         max_iters=max_iters,
         rtol=_LM_RTOL,
         atol=_LM_ATOL,
+        n_sq_max=_ROOT_NSQ_MAX,
+        admissible=canopy_state_admissible,
     )

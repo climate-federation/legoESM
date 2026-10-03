@@ -56,6 +56,7 @@ from legoesm.core.state import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
     BatchedHaloSchedule,
+    complete_cell_rings,
     VoronoiPartition,
     build_batched_halo_schedule,
     build_local_mesh,
@@ -136,6 +137,9 @@ class VoronoiPartitionLayout(NamedTuple):
     # layout time; ``None`` only for layouts constructed by hand —
     # ``make_voronoi_mpi_step`` rebuilds it on demand then.
     batched_comm: BatchedHaloSchedule | None = None
+    # Halo rings with complete local stencils, MIN over ranks (set by
+    # initialize_voronoi_mpi; 0 = uncertified).
+    complete_cell_rings: int = 0
 
 
 def voronoi_partition_metrics(
@@ -483,6 +487,10 @@ class MPASOceanHaloRefresh(NamedTuple):
     # Cell rings each refresh fills (SPMD lane); ``None`` = not declared.
     # The global-polynomial PCG preconditioner needs >= sweeps - 2.
     halo_depth: int | None = None
+    # Halo rings (around the owned block, on EVERY rank) whose cells carry
+    # their full stencil locally — the redundant-compute budget of one
+    # ``cells`` exchange.  0 = not certified (the deep-halo PCG refuses).
+    complete_cell_rings: int = 0
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -525,6 +533,7 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
                                 vertices=_vertices,
                                 owned_mask_cells=layout.owned_mask_cells,
+                                complete_cell_rings=layout.complete_cell_rings,
                                 owned_mask_edges=layout.owned_mask_edges,
                                 global_sum=_global_sum)
 
@@ -748,6 +757,9 @@ def initialize_voronoi_mpi(
         method=method, halo_depth=halo_depth,
         cell_owner=cell_owner,
     )
+    # One certificate for all ranks: the deep-halo PCG cadence must agree.
+    layout = layout._replace(complete_cell_rings=int(comm.allreduce(
+        complete_cell_rings(global_mesh, [layout.partition]), op=MPI.MIN)))
 
     logger.info(
         "Voronoi MPI init: rank=%d/%d, owned_cells=%d, halo_cells=%d, "

@@ -73,7 +73,27 @@ def main(argv=None):
     sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
     print(f"git {sha}; checkpoint {a.checkpoint}; ncol {a.ncol}")
-    T, qv, qc, qr, qi, cf, rho, p, ph = load_columns(a.checkpoint, a.ncol)
+    T, qv, qc, qr, qi, alst, rho, p, ph = load_columns(a.checkpoint, a.ncol)
+    # CAM6 ast = max(alst, aist) (clubb_intr.F90:2575; MG2 liqcldf = ast,
+    # micro_mg_cam.F90:1810).  aist from the cldfrc2m port on the stored
+    # state, default cam6 ramps (the production deck sets none).  The
+    # checkpoint has no latitudes: aist is evaluated at the two extreme
+    # analytic tropopauses (lat 0 -> 100 hPa, lat 90 -> 250 hPa) and cells
+    # where they differ are dropped from the gate (counted).
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    cc = CloudConfig(scheme="cam6_clubb")
+    ai = [np.asarray(cam6_ice_stratus_fraction(
+        jnp.asarray(qv), jnp.asarray(T), jnp.asarray(p), jnp.asarray(np.maximum(qi, 0.0)),
+        jnp.full(T.shape[0], la), cc, jnp.asarray(ph[:, :-1]))) for la in (0.0, np.pi / 2)]
+    lat_free = ai[0] == ai[1]
+    aist = ai[0]
+    cf = np.maximum(np.clip(alst, 0.0, 1.0), aist)
+    ice_wins = (aist > alst) & (qc >= 1e-6)
+    print(f"ast = max(alst, aist): ice fraction wins in {int(ice_wins.sum())} cells with "
+          f"qc >= 1e-6 (median aist-alst there "
+          f"{np.median((aist - alst)[ice_wins]) if ice_wins.any() else 0:.3f}); "
+          f"latitude-dependent cells dropped: {int((~lat_free).sum())}")
     from legoesm import constants
     dz = (ph[:, 1:] - ph[:, :-1]) / (rho * constants.g)
     print(f"{T.shape[0]} columns x {T.shape[1]} levels; cloudy cells (qc>=1e-18) "
@@ -111,11 +131,12 @@ def main(argv=None):
         # donor_clamp_scale = min(1, q_c / max(sink dt, 1e-15)): exactly 1
         # only if q_c >= 1e-15 as well
         free = ((-sinks * 1.0e-3 < np.clip(qc, 0, None) * (1 - 1e-9))
-                & (qc >= 1e-15))
+                & (qc >= 1e-15) & lat_free)
         ours = np.stack([-np.asarray(b["autoconversion"]), -np.asarray(b["accretion"])])[:, free]
         ref = np.stack([prc, pra])[:, free]
         clamped = int(((prc > 0) | (pra > 0))[~free].sum())
-        gated = f"gated prc {int((prc > 0)[free].sum())} pra {int((pra > 0)[free].sum())}"
+        gated = (f"gated prc {int((prc > 0)[free].sum())} pra {int((pra > 0)[free].sum())}"
+                 f" (ice-wins {int((ice_wins & free & (prc > 0)).sum())})")
         if not np.isfinite(ours).all():
             raise SystemExit("FATAL: non-finite rate")
         rel = np.where(ref != 0, np.abs(ours - ref) / np.abs(np.where(ref != 0, ref, 1)),
