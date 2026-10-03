@@ -34,3 +34,22 @@ def test_round122_candidate_fields_preserve_literal_fraction_order():
         fields["nw"]["3_ff"][0, 0],
         np.broadcast_to(parts["een_ff"][1, -1], (30,)),
     )
+
+
+def test_round122_candidate_fields_replace_only_northern_ff_neighbor():
+    shape = (3, 4, 30)
+    parts = {
+        "een_ff": np.arange(12, dtype=np.float64).reshape(3, 4),
+        "een_e3f0": np.ones(shape),
+        "een_r3f": np.ones((3, 4)),
+        "een_fmask": np.ones(shape),
+        "een_denom": np.ones(shape),
+        "een_q": np.zeros(shape),
+    }
+    north = np.array([103.0, 102.0, 101.0, 100.0])
+    fields = gate._candidate_fields(parts, np.ones(shape, dtype=bool), north)
+    np.testing.assert_array_equal(fields["ne"]["1_ff"][-1, :, 0], north)
+    np.testing.assert_array_equal(fields["nw"]["3_ff"][-1, :, 0], np.roll(north, 1))
+    np.testing.assert_array_equal(
+        fields["ne"]["1_ff"][:-1, :, 0], parts["een_ff"][1:]
+    )

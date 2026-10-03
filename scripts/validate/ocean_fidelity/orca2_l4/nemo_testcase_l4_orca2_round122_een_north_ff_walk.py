@@ -49,7 +49,8 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def _candidate_fields(parts: dict[str, np.ndarray], executed: np.ndarray) -> dict[str, dict[str, np.ndarray]]:
+def _candidate_fields(parts: dict[str, np.ndarray], executed: np.ndarray,
+                      north_ff: np.ndarray | None = None) -> dict[str, dict[str, np.ndarray]]:
     bases = {
         "ff": np.asarray(parts["een_ff"], dtype=np.float64),
         "e3f0": np.asarray(parts["een_e3f0"], dtype=np.float64),
@@ -66,7 +67,13 @@ def _candidate_fields(parts: dict[str, np.ndarray], executed: np.ndarray) -> dic
             r121.COMPONENTS, r121.SHIFTS[path], strict=True
         ):
             for operand in r121.OPERANDS:
-                value = r121._as_levels(r121._shift(bases[operand], di, dj))
+                if operand == "ff" and dj == -1 and north_ff is not None:
+                    shifted = np.concatenate([bases[operand][1:], north_ff[None]], axis=0)
+                    if di:
+                        shifted = np.roll(shifted, di, axis=1)
+                    value = r121._as_levels(shifted)
+                else:
+                    value = r121._as_levels(r121._shift(bases[operand], di, dj))
                 fields[f"{component}_{operand}"] = np.where(
                     executed, value, np.float64(0.0)
                 )
@@ -143,7 +150,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     if plant == "permutation-shift":
         mapped_ff = mapped_ff.at[-1].set(jnp.roll(mapped_ff[-1], 1))
     source_z = card.recipe.z_coord._replace(
-        nemo_een_barotropic=raw._replace(e3f_0=source_divisor, ff_f=mapped_ff),
+        nemo_een_barotropic=raw._replace(e3f_0=source_divisor),
     )
     _, parts = jax.device_get(jax.jit(
         lambda value: r107.literal_accumulators(
@@ -159,7 +166,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     require(r109._score(bottom, oracle["mbkv"])["bit_unequal"] == 0,
             "mbkv moved before the northern association")
     executed = np.arange(1, 31)[None, None, :] <= bottom[..., None]
-    candidates = _candidate_fields(parts, executed)
+    candidates = _candidate_fields(
+        parts, executed, np.asarray(mapped_ff, dtype=np.float64)[-1]
+    )
     if plant == "candidate-bit":
         changed = np.array(candidates["nw"]["3_ff"], copy=True)
         changed.view(np.uint64)[-1, 0, 0] ^= np.uint64(1)
