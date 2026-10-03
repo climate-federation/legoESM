@@ -18,8 +18,8 @@ def checkpoint_differences(path_a, path_b):
     diff = sorted(set(a.files) ^ set(b.files))
     for k in sorted(set(a.files) & set(b.files)):
         x, y = a[k], b[k]
-        nan = x.dtype.kind in "fc" and y.dtype.kind in "fc"
-        if x.shape != y.shape or x.dtype != y.dtype or not np.array_equal(x, y, equal_nan=nan):
+        # Bytes, not values: +0.0 vs -0.0 and NaN payloads are differences.
+        if x.shape != y.shape or x.dtype != y.dtype or x.tobytes() != y.tobytes():
             diff.append(k)
     return diff
 

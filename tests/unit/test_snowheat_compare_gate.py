@@ -27,5 +27,8 @@ def test_identical_and_each_kind_of_difference(tmp_path):
     assert cmp(tmp_path / "a.npz", tmp_path / "c.npz") == ["T"]
     np.savez(tmp_path / "d.npz", **{**base, "T": base["T"].astype(np.float32)})
     assert cmp(tmp_path / "a.npz", tmp_path / "d.npz") == ["T"]
+    np.savez(tmp_path / "z.npz", **{**base, "T": np.array([-0.0, np.nan])})
+    np.savez(tmp_path / "z0.npz", **{**base, "T": np.array([0.0, np.nan])})
+    assert cmp(tmp_path / "z0.npz", tmp_path / "z.npz") == ["T"]       # signed zero
     np.savez(tmp_path / "e.npz", **{k: v for k, v in base.items() if k != "step"})
     assert cmp(tmp_path / "a.npz", tmp_path / "e.npz") == ["step"]
