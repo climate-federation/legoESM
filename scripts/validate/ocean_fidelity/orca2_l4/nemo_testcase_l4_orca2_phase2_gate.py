@@ -18,11 +18,15 @@ EXPECTED_INPUT_SHA256 = {
         "ca00905c27078305e80130ea6dd07fc575de2ae3257fad38003b329458cf7f7a",
     "data_1m_salinity_nomask.nc":
         "ad648d972f0631bde7e1b598d98470a979b7f2649271fc9cf5ccfca158e31d0c",
+    # The six internal-wave power and decay-scale maps the card now reads.
+    "zdfiwm_forcing_orca2.nc":
+        "f4279899be77119fda4f9e20b3d5e3a70e4e478fe5ead0dc661656a1bba296c2",
 }
 EXPECTED_UNMEASURED = {
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
-    "internal_wave_mixing",
+    "internal_wave_salt_heat_differential",
+    "double_diffusive_salt_heat_split",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",

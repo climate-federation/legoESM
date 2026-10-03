@@ -67,6 +67,10 @@ class NEMORecipe(NamedTuple):
     z_coord: object
     land_mask: object
     initial_state: object
+    # Static internal-wave power / decay-scale maps for cards whose deck
+    # runs NEMO's wave-driven mixing.  None everywhere else, so every
+    # existing recipe is unchanged.
+    iwm_forcing: object = None
 
 
 @dataclass(frozen=True)

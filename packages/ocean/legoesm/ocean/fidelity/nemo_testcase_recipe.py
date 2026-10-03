@@ -321,15 +321,33 @@ def _model_config(
         return base._replace(
             eos="nemo_eos80",
             physics=physics,
+            # Round 77 (Decision 76): STATED on this card, never inherited
+            # from the shared GYRE identity above and never inferred from the
+            # time integrator.  ORCA2's OWN build runs the RK3 vector-invariant
+            # program -- stp2d.f90:145-147 takes the "Vector Inv. Form"
+            # Coriolis arm and :149 the "only KEG + ZAD in Vector Inv. Form"
+            # advection -- and that program leaves the PREVIOUS step's linear
+            # extrapolation ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
+            # in the after slot (stprk3.f90:239-241).  stp2d.f90:152 turns
+            # that slot into ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0``
+            # immediately before ``CALL wzv( ..., np_velocity )`` at
+            # stp2d.f90:156, so the first wzv call's scale-factor term is
+            # built from the extrapolation, not from a continuity prediction.
             nemo_first_wzv_after_ssh="rk3_extrapolated",
-            # Round 163 (Decision 55, note AT): ORCA2-zps resolves the SAME
-            # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does (via
-            # this shared base), but has never been measured under the
-            # second continuity solve -- explicit False, not an inference
-            # from `eos` (round-163 review BLOCKER, closed by making this an
-            # explicit per-card config choice instead).
-            nemo_stage_momentum_wzv_split=False,
+            # Round 23 (Decision 58): ORCA2-zps resolves the SAME
+            # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does and
+            # now takes NEMO's separately evaluated momentum continuity solve
+            # under its own explicit card choice.  This is not inferred from
+            # EOS or any other selector; the fail-closed field remains stated
+            # on each card that resolves the program.
+            nemo_stage_momentum_wzv_split=True,
             vorticity_scheme="een_total",
+            # ORCA2 resolves nn_ahm_ijk_t = -30 (run ocean.output:1184), so the
+            # lateral momentum viscosity coefficient is READ whole from
+            # eddy_viscosity_3D.nc rather than built from the grid metrics
+            # (ldfdyn.f90:348-353).  GYRE resolves the metric formula and keeps
+            # the shared default.
+            lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
             # nn_e3f_typ=0 and ln_dynvor_msk=F, identical source meanings to
             # the already-shared literal EEN operands used by GYRE's ENE arm.
             een_e3f_scheme="nemo_avg4",
@@ -1283,6 +1301,198 @@ def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):
     return tmask, umask, vmask, fmask
 
 
+# ORCA_R2 initial-condition hand alterations, transcribed from the compiled
+# ``dtatsd.f90:218-253`` branch that this deck executes (``cn_cfg="ORCA"`` and
+# ``nn_cfg=2`` come from the domain file's ``CfgName``/``CfgIndex``, and
+# ``namelist_cfg`` sets ``ln_tsd_dmp = .true.``, so the branch is live).  NEMO
+# applies them to the TIME-INTERPOLATED field before the land mask, and with
+# ``ln_tint = .true.`` they are re-applied from the interpolated field at every
+# call rather than accumulating.
+#
+# Index arithmetic, read off ``mppini.f90:1586-1594`` rather than inferred: the
+# source writes global halo-frame indices ``ij0 = 101 + nn_hls`` and
+# ``ii0 = 141 + nn_hls - 1``, and ``mi0``/``mj0`` map a global halo-frame index
+# to ``index - nn_hls`` in the inner domain, so every ``nn_hls`` cancels and the
+# boxes are the halo-independent inner one-based ranges below.  Level ranges are
+# Fortran one-based inclusive.
+_ORCA2_ALBORAN_BOX = (101, 109, 140, 154)      # (j0, j1, i0, i1), inner 1-based
+_ORCA2_RED_SEA_BOX = (87, 96, 147, 159)
+_ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C = ((13, 13, -0.20), (14, 15, -0.35),
+                                        (16, 25, -0.40))
+_ORCA2_ALBORAN_SALINITY_OFFSETS_PSU = ((13, 13, -0.15), (14, 15, -0.25),
+                                       (16, 17, -0.30), (18, 25, -0.35))
+_ORCA2_RED_SEA_TEMPERATURES_C = ((4, 10, 7.0), (11, 13, 6.5), (14, 20, 6.0))
+
+
+def build_orca2_ldf_dyn_coefficients(
+    viscosity_path, tmask: np.ndarray, fmask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """NEMO ``ldf_dyn_init`` with ``nn_ahm_ijk_t = -30``: the coefficient is READ.
+
+    The resolved ORCA2 run prints ``nn_ahm_ijk_t = -30``, so the compiled
+    routine computes no coefficient at all.  It opens ``eddy_viscosity_3D.nc``
+    and reads the whole three-dimensional field at T points and at F points
+    (``ldfdyn.f90:348-353``), each read carrying its own grid-point nature and
+    north-fold sign (``'T'`` and ``'F'``, both ``+1``); the read path completes
+    the field with the ordinary lateral boundary exchange for that nature
+    (``iom.f90:958-975``).  Because the resolved operator is the laplacian
+    (``ln_dynldf_lap = T``), levels one to ``jpkm1`` are then multiplied by
+    ``tmask``/``fmask`` and the last level is left alone -- no square root,
+    which is the bilaplacian arm (``ldfdyn.f90:388-393``).
+
+    ``rn_Uv`` and ``rn_Lv`` are read and printed and this arm never consults
+    them: ``zah0`` (``ldfdyn.f90:314``) is not referenced inside the
+    ``CASE( -30 )`` block.
+
+    The north-fold exchange is NOT applied here.  On the shipped input file it
+    is the identity over the owned domain for both natures, and that is a
+    MEASURED, gated statement rather than an assumption: the round-9 gate
+    refuses unless the file's last owned T row is its own mirrored left half
+    (``lbcnfd.f90:584-638``) and its last owned F row is the row below at the
+    reversed longitude (``lbcnfd.f90:722-746``).
+
+    Parameters
+    ----------
+    viscosity_path : path to ``eddy_viscosity_3D.nc``.
+    tmask, fmask : the card's own ``(n_lat, n_lon, nlev)`` masks.
+
+    Returns
+    -------
+    ahmt : (n_lat, n_lon, nlev)      T-point coefficient [m2/s].
+    ahmf : (n_lat+1, n_lon+1, nlev)  F-point coefficient on legoESM's VERTEX
+        layout, where ``vertex[j, i]`` is NEMO's F point ``(j-1, (i-1) mod
+        n_lon)``; the south row has no NEMO source and is zero (a wall).
+    """
+
+    import netCDF4  # noqa: N813
+
+    path = Path(viscosity_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 eddy viscosity file: {path}")
+    nlev = tmask.shape[-1]
+    with netCDF4.Dataset(path, "r") as ds:
+        ds.set_auto_maskandscale(False)
+        raw_t = np.asarray(ds.variables["ahmt_3d"][0], dtype=np.float64)
+        raw_f = np.asarray(ds.variables["ahmf_3d"][0], dtype=np.float64)
+    # File axes are (z, y, x); the card's are (y, x, z).
+    ahmt = np.moveaxis(raw_t, 0, -1)[..., :nlev] * tmask
+    ahmf_native = np.moveaxis(raw_f, 0, -1)[..., :nlev] * fmask
+    n_lat, n_lon = ahmf_native.shape[0], ahmf_native.shape[1]
+    ahmf = np.zeros((n_lat + 1, n_lon + 1, nlev), dtype=np.float64)
+    columns = (np.arange(n_lon + 1) - 1) % n_lon
+    ahmf[1:] = ahmf_native[:, columns]
+    return ahmt, ahmf
+
+
+def _orca2_box(field, box):
+    """Inner one-based ``(j0, j1, i0, i1)`` box as a mutable view."""
+
+    j0, j1, i0, i1 = box
+    return field[j0 - 1:j1, i0 - 1:i1]
+
+
+def apply_orca2_hand_alterations(temperature, salinity):
+    """Apply the ORCA_R2 initial hand alterations IN PLACE, in source order.
+
+    ``temperature`` and ``salinity`` are the time-interpolated, UNMASKED input
+    fields shaped ``(nlat, nlon, nlev)``.  NEMO subtracts the Alboran Sea
+    temperature then salinity increments and finally assigns the Red Sea deep
+    temperatures, all before the land mask (``dtatsd.f90:218-253``, masked at
+    ``:307-310``).
+    """
+
+    alboran_t = _orca2_box(temperature, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C:
+        alboran_t[..., k0 - 1:k1] += np.float64(offset)
+    alboran_s = _orca2_box(salinity, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_SALINITY_OFFSETS_PSU:
+        alboran_s[..., k0 - 1:k1] += np.float64(offset)
+    red_sea_t = _orca2_box(temperature, _ORCA2_RED_SEA_BOX)
+    for k0, k1, value in _ORCA2_RED_SEA_TEMPERATURES_C:
+        red_sea_t[..., k0 - 1:k1] = np.float64(value)
+
+
+def build_orca2_initial_ts(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    apply_hand_alterations: bool = True,
+):
+    """ORCA2's independent initial temperature and salinity, as NEMO builds it.
+
+    The executed order is the compiled one: read the monthly input files, do
+    ``fldread``'s two-record time interpolation, apply the ORCA_R2 hand
+    alterations (``dtatsd.f90:218-253``), then mask.  The z/zps branch
+    (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
+    are applied to the unmasked field.
+
+    ``apply_hand_alterations=False`` is an ABLATION CONTROL for the fidelity
+    gate -- it reproduces the pre-transcription state so the gate can show the
+    alterations own the whole residual.  It is not a configuration knob and no
+    card, recipe or driver exposes it; the card always takes the default, which
+    is what NEMO executes.
+    """
+
+    import netCDF4  # noqa: N813
+
+    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
+    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
+    after_weight = np.float64(249.0 / 496.0)
+    before_weight = np.float64(1.0) - after_weight
+    with netCDF4.Dataset(temperature_path, "r") as ds:
+        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
+        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
+    with netCDF4.Dataset(salinity_path, "r") as ds:
+        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
+        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
+    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
+    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
+
+    if apply_hand_alterations:
+        apply_orca2_hand_alterations(temperature, salinity)
+
+    return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
+# --- ORCA2 internal-wave mixing (NEMO zdfiwm; de Lavergne et al. 2020) ---
+# zdf_iwm_init replaces the namelist backgrounds once the wave arm is on:
+# the momentum background becomes the molecular viscosity and the tracer
+# background a very small diffusive minimum, because the wave field is now
+# what sets the interior background.
+_ORCA2_IWM_AVMB = 1.4e-6   # NEMO rnu [m2/s]
+_ORCA2_IWM_AVTB = 1.0e-10  # [m2/s]
+
+
+def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
+    """The six wave-power / decay-scale maps, as zdf_iwm_init reads them.
+
+    Delegates to the shared loader, which masks the four power maps with the
+    surface tracer mask (NEMO's ``smask0``), leaves the decay scales unmasked,
+    guards a non-positive critical-slope scale before inverting it, and stores
+    that inverse, which is what the scheme consumes.  The ORCA2 product is on
+    this card's own grid, so the loader's coordinate check takes its
+    pass-through branch and nothing is regridded; the assertion below is what
+    makes that a checked fact rather than an assumption.
+    """
+    from legoesm.ocean.forcing.curvilinear_regrid import coords_match
+    from legoesm.ocean.iwm_forcing import load_iwm_forcing, read_iwm_file
+
+    raw = read_iwm_file(str(path))
+    if not coords_match(raw["nav_lat"], raw["nav_lon"],
+                        np.asarray(lat_t, dtype=np.float64),
+                        np.asarray(lon_t, dtype=np.float64),
+                        tol_deg=1.0e-3):
+        raise ValueError(
+            "the ORCA2 internal-wave product is not on this card's grid; "
+            "this card reads it directly and never regrids it")
+    return load_iwm_forcing(
+        str(path), lat_t, lon_t,
+        land_mask=np.asarray(surface_tmask, dtype=np.float64),
+        coord_match_tol_deg=1.0e-3,
+    )
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -1302,7 +1512,15 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     domain_path = root / "ORCA_R2_zps_domcfg.nc"
     temperature_path = root / "data_1m_potential_temperature_nomask.nc"
     salinity_path = root / "data_1m_salinity_nomask.nc"
-    required = (domain_path, temperature_path, salinity_path)
+    # ldfdyn.f90:348-353 opens this exact file name in the run directory; the
+    # record's directory symlinks it to the deck, so the deck root is where it
+    # is read from here.
+    viscosity_path = root / "eddy_viscosity_3D.nc"
+    # namelist_cfg's namzdf_iwm names this root for all six wave-power and
+    # decay-scale fields, and the run log shows it opened six times.
+    iwm_path = root / "zdfiwm_forcing_orca2.nc"
+    required = (domain_path, temperature_path, salinity_path, viscosity_path,
+                iwm_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing ORCA2 deck files: {missing}")
@@ -1322,7 +1540,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             name: np.asarray(ds.variables[name][:], dtype=np.float64)
             for name in (
                 "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
-                "ff_f", "gphit",
+                "ff_f", "gphit", "glamt",
             )
         }
 
@@ -1395,9 +1613,13 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e1v_m=metric["e1v"],
         nemo_een_barotropic_m=operands,
     )
+    ahmt, ahmf = build_orca2_ldf_dyn_coefficients(
+        viscosity_path, tmask.astype(np.float64), fmask)
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
     )._replace(
+        nemo_ldf_ahmt=jnp.asarray(ahmt, dtype=jnp.float64),
+        nemo_ldf_ahmf=jnp.asarray(ahmf, dtype=jnp.float64),
         h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
         bottom_level=jnp.asarray(bottom - 1, dtype=jnp.int32),
         is_active=jnp.asarray(tmask),
@@ -1406,20 +1628,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
     )
 
-    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
-    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
-    after_weight = np.float64(249.0 / 496.0)
-    before_weight = np.float64(1.0) - after_weight
-    with netCDF4.Dataset(temperature_path, "r") as ds:
-        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
-        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
-    with netCDF4.Dataset(salinity_path, "r") as ds:
-        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
-        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
-    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
-    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
-    temperature = np.where(tmask, temperature, 0.0)
-    salinity = np.where(tmask, salinity, 0.0)
+    temperature, salinity = build_orca2_initial_ts(
+        temperature_path, salinity_path, tmask)
 
     # iceistate.F90:262-291 creates one-category ice from the surface T/S and
     # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
@@ -1528,11 +1738,36 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # (zdftke.F90:279-288).  nn_bc_bot is read for wave coupling but does
         # not guard this executed branch (declared/read only at :85/:762).
         bottom_tke_bc=True,
+        # zdfiwm.F90's initialisation runs AFTER zdf_tke_init and REPLACES the
+        # namelist backgrounds, because the wave field now supplies the
+        # interior background: avmb becomes the molecular viscosity, avtb a
+        # very small diffusive minimum, and the equatorial 2-D shape becomes
+        # uniform.  The carried avt_k/avm_k seeds above are set BEFORE that
+        # reset (zdfphy.f90:227-228) and keep the namelist values; these two
+        # floors are read AFTER it, every step, inside tke_avn's
+        # MAX(zav, avmb) / MAX(zav, avtb_2d*avtb) (zdftke.f90:709-710).
+        kappaM_min=_ORCA2_IWM_AVMB,
+        kappaH_min=_ORCA2_IWM_AVTB,
+    )
+    # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
+    # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
+    # The efficiency option is taken; the salt/heat differential is NOT, and it
+    # is not silently dropped either: legoESM's implicit tracer solve carries
+    # ONE diffusivity for both tracers, so a separate salt coefficient has
+    # nowhere to go, and the gap is declared in the card's unmeasured features
+    # below rather than hidden behind a False.  The heat and momentum halves of
+    # the arm, which are what the retired mixing-length floor was standing in
+    # for, are unaffected by that gap.
+    iwm_config = model_config.physics.vertical_mixing.iwm._replace(
+        enabled=True,
+        mevar=False,
+        tsdiff=False,
+        require_forcing_maps=True,
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config)))
+                tke=tke_config, iwm=iwm_config)))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -1540,6 +1775,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         z_coord=z_coord,
         land_mask=jnp.asarray(tmask[..., 0], dtype=jnp.float64),
         initial_state=state,
+        iwm_forcing=_orca2_iwm_forcing(
+            iwm_path, tmask[..., 0], metric["gphit"], metric["glamt"]),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",
@@ -1556,7 +1793,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         unmeasured_features=(
             "staged_gm_eiv",
             "linear_implicit_bottom_drag",
-            "internal_wave_mixing",
+            # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
+            # diffusivity from heat, and the shared-K implicit tracer solve
+            # cannot carry two.  The deck's second salt/heat differential,
+            # ln_zdfddm, is unbuilt for the same reason.
+            "internal_wave_salt_heat_differential",
+            "double_diffusive_salt_heat_split",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",
@@ -2336,6 +2578,8 @@ __all__ = (
     "build_gyre_zco_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
+    "apply_orca2_hand_alterations",
+    "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_vortex_zco_card",
     "VORTEX_UNMEASURED",

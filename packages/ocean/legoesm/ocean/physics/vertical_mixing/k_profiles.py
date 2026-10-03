@@ -1321,6 +1321,17 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     )
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
+    # Validated at routine entry on the STATIC config, before any operand is
+    # read: a configuration that loads real de Lavergne power maps must never
+    # fall through to the uniform constant-power defaults, which are different
+    # physics and would go unnoticed.
+    if iwm_fields is None and getattr(iwm_cfg, "require_forcing_maps", False):
+        raise ValueError(
+            "IWMConfig.require_forcing_maps=True but no IWMForcing maps "
+            "reached iwm_K_profile.  This configuration reads real "
+            "internal-wave power maps; the uniform constant-power fallback "
+            "is different physics, so it is refused.  Thread the maps "
+            "through the model's iwm_forcing argument.")
     constants_config = physics_config.constants
     T = state.T.data
     dtype = T.dtype

@@ -746,12 +746,14 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 "e3w_int must be omitted when e3w_source='depth_difference'")
         e3w = None
-    if eos_form not in ("seos", "teos10"):
+    if eos_form not in ("seos", "teos10", "eos80"):
         raise ValueError(
             f"compute_buoyancy_frequency_nemo_bn2 eos_form={eos_form!r} "
-            "invalid; expected 'seos' (the 3-term simplified EOS) or "
+            "invalid; expected 'seos' (the 3-term simplified EOS), "
             "'teos10' (NEMO's Roquet polynomial with the TEOS-10 coefficient "
-            "set, which is what ORCA1 runs: ln_teos10=.true.).")
+            "set, which is what ORCA1 runs: ln_teos10=.true.) or "
+            "'eos80' (the SAME Roquet polynomial with the EOS-80 coefficient "
+            "set, which is what ORCA2 runs: ln_eos80=.true.).")
     eos_gdept = jnp.asarray(gdept)
     if zrw_evaluation == "nemo_literal":
         if zrw_gdept_0 is None or zrw_stretch is None:
@@ -770,12 +772,17 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 "the private bn2 alpha/beta override must match T/S shape; "
                 f"got alpha={alpha.shape}, beta={beta.shape}, T={T.shape}")
-    elif eos_form == "teos10":
+    elif eos_form in ("teos10", "eos80"):
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
         # unchanged, because NEMO's bn2_t is shared across EOS branches.
-        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept)
+        #
+        # EOS-80 and TEOS-10 are ONE branch in the source too: rab_3d_t's
+        # ``CASE( np_teos10, np_eos80 )`` runs a single polynomial and the two
+        # forms differ only in the coefficient set and normalization that
+        # eos_init loads (rdeltaS 20 vs 32, r1_S0 1/40 vs 0.875/35.16504).
+        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept, eos_form=eos_form)
     else:
         if cfg is None:
             cfg = NemoSEOSConfig()

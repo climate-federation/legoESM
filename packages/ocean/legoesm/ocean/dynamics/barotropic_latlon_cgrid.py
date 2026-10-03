@@ -496,6 +496,31 @@ def _depth_average_to_faces(
     return U_bar, V_bar
 
 
+def _reciprocal_face_area(face_area):
+    """``1/(e1*e2)`` on a face, and exactly zero where that face has no area.
+
+    NEMO's ``r1_e1e2u``/``r1_e1e2v`` (``domain.f90:213``) are reciprocals of
+    metrics that are strictly positive everywhere in its own domain, so NEMO
+    has no statement to match here.  legoESM represents a CLOSED WALL row as a
+    v-face of zero extent -- the ORCA2 tripolar card's southernmost v-row has
+    ``e1v == e2v == 0`` on all 180 longitudes -- and a plain reciprocal makes
+    that row infinite.  The infinity then met the dry face's exactly-zero
+    ``r1_v0`` inside ``r3_v`` (``0 * inf``), so the entry inverse face depth
+    ``r1_v_entry`` was NaN on that whole row, the barotropic bottom-drag
+    statement multiplied it in, and within two substeps the sea surface, the
+    velocities and every downstream N2 divisor were NaN.
+
+    Zero is the only finite value a zero-area face can carry, and it is the
+    value the sibling statement already gives that row: ``ssh_avg_v`` is
+    zeroed on both polar rows a few lines below.  Wherever the face area is
+    positive this returns exactly ``1.0 / face_area``, so every card with a
+    non-degenerate metric is bit-identical.  The same guarded shape is already
+    used for the single metrics in this module (``r1_e2u``/``r1_e1v``).
+    """
+    positive = face_area > 0.0
+    return jnp.where(positive, 1.0 / jnp.where(positive, face_area, 1.0), 0.0)
+
+
 def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     """Loop-invariant prep for :func:`_nemo_ssh_avg_apply` (geometry-only —
     matches NEMO's frozen ``hu_0``/``hv_0``/``r1_e1e2u``).  Hoisted OUTSIDE
@@ -510,8 +535,10 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     H_u_ref, H_v_ref = _min_rule_face_depths(H_bathy * mask, mask, grid,
                                              _nfold_mask)
     _geom = ensure_geometry(grid)
-    _r1_e1e2u = (1.0 / (_geom.dx_u * _geom.dy_u)).astype(dtype)
-    _r1_e1e2v = (1.0 / (_geom.dx_v * _geom.dy_v)).astype(dtype)
+    _r1_e1e2u = _reciprocal_face_area(
+        _geom.dx_u * _geom.dy_u).astype(dtype)
+    _r1_e1e2v = _reciprocal_face_area(
+        _geom.dx_v * _geom.dy_v).astype(dtype)
     return H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask
 
 
@@ -874,6 +901,11 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
             div_damp_coeff, div_damp_area_u, div_damp_area_v)
 
 
+def _nemo_een_south_ff_copy(ff):
+    """NEMO ``jpfillcopy`` association for the southern F-grid halo."""
+    return jnp.concatenate([ff[:1], ff[:-1]], axis=0)
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -929,7 +961,9 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         jnp.asarray(raw.e3f_0, dtype=dtype), nn_e3f_typ=0, grid=grid))
     umask = jnp.asarray(raw.umask, dtype=dtype)
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
-    fmask = jnp.asarray(raw.fmask, dtype=dtype)
+    # dommsk.f90:258 freezes fe3mask before rn_shlat and strait edits fmask;
+    # dynspg_ts.f90:1241-1245 stretches e3f_0vor with that frozen mask.
+    fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
 
     def recip(depth, wet):
         return b(wet / b(depth + one - wet))
@@ -964,6 +998,14 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     def shift(value, di=0, dj=0):
         out = jnp.roll(value, di, axis=1) if di else value
         return jnp.roll(out, dj, axis=0) if dj else out
+
+    # ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy), so the
+    # southern halo repeats the first inner row; it does not cyclically wrap
+    # the northern fold row (domhgr.f90:233-236, lbclnk.f90:1198-1225).
+    # Keep the still-open e3f/r3f/fe3mask association independent: only the
+    # numerator takes the source-exact boundary here.
+    ff_south = _nemo_een_south_ff_copy(ff)
+    q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))
 
     def triad(a, c, d):
         return b(b(a + c) + d)
@@ -1000,14 +1042,17 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
 
     if scheme == "een":
         uq = {
-            "nw": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-            "ne": triad(shift(q, 0, 1), q, shift(q, -1, 0)),
-            "sw": triad(q, shift(q, 0, 1), shift(q, 1, 1)),
-            "se": triad(shift(q, -1, 1), shift(q, 0, 1), q),
+            "nw": triad(shift(q, 1, 0), q, q_south_ff_copy),
+            "ne": triad(q_south_ff_copy, q, shift(q, -1, 0)),
+            "sw": triad(q, q_south_ff_copy,
+                         shift(q_south_ff_copy, 1, 0)),
+            "se": triad(shift(q_south_ff_copy, -1, 0),
+                         q_south_ff_copy, q),
         }
         vq = {
-            "se": triad(shift(q, 1, 0), q, shift(q, 0, 1)),
-            "sw": triad(shift(q, 1, 1), shift(q, 1, 0), q),
+            "se": triad(shift(q, 1, 0), q, q_south_ff_copy),
+            "sw": triad(shift(q_south_ff_copy, 1, 0),
+                         shift(q, 1, 0), q),
             "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
             "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
         }
@@ -2479,6 +2524,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
     _nemo_raw_history_test_override=None,
+    _nemo_drag_rate_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2785,7 +2831,24 @@ def barotropic_substeps_latlon_cgrid(
     # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
     # is not built ⇒ byte-identical.
     _drag_r_u = _drag_r_v = _drag_r_t = None
-    if getattr(config, "barotropic_drag_substep", False):
+    if _nemo_drag_rate_test_override is not None:
+        if not getattr(config, "barotropic_drag_substep", False):
+            raise ValueError(
+                "barotropic drag-rate substitution requires "
+                "barotropic_drag_substep=True")
+        if len(_nemo_drag_rate_test_override) != 2:
+            raise ValueError(
+                "barotropic drag-rate substitution requires U and V arrays")
+        _drag_r_u = jnp.asarray(
+            _nemo_drag_rate_test_override[0], dtype=_dt)
+        _drag_r_v = jnp.asarray(
+            _nemo_drag_rate_test_override[1], dtype=_dt)
+        if _drag_r_u.shape != U_bar.shape or _drag_r_v.shape != V_bar.shape:
+            raise ValueError(
+                "barotropic drag-rate substitution shape mismatch: "
+                f"got {_drag_r_u.shape}/{_drag_r_v.shape}, expected "
+                f"{U_bar.shape}/{V_bar.shape}")
+    elif getattr(config, "barotropic_drag_substep", False):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_bottom_drag_rate_faces,
         )
@@ -2809,7 +2872,6 @@ def barotropic_substeps_latlon_cgrid(
             _drag_r_t = _drag_values[4]
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
-
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
     w_transport, _transport_divisor = _transport_accumulator_weights(
@@ -2916,10 +2978,10 @@ def barotropic_substeps_latlon_cgrid(
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
     if _nemo_raw_history_test_override is not None:
-        if not _ab3 or _ab3_hist is None:
+        if not _ab3:
             raise ValueError(
                 "raw barotropic-history substitution requires an AB3/AM4 "
-                "continuation step with an existing carried history")
+                "barotropic filter")
         if len(_nemo_raw_history_test_override) != 6:
             raise ValueError(
                 "raw barotropic-history substitution requires six arrays")

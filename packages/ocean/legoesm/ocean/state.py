@@ -329,6 +329,22 @@ class OceanSurfaceForcing(NamedTuple):
                                        # nn_eice).  None ⇒ no attenuation.
     tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
     tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
+    runoff_tracer_content: object = None
+    # (T_content, S_content) pair | None -- the TRACER CONTENT carried by
+    # river runoff, NEMO ``rnf_tsc`` [K.m/s and PSU.m/s] (``sbcrnf.F90``
+    # ``rnf_tsc(:,:,jp_tem) = MAX(sst_m, 0)*rnf*r1_rho0`` and its salinity
+    # twin, which is ``zrnf_sal*rnf*r1_rho0`` with ``zrnf_sal = 0``).  The
+    # deposit is ``content / h_rnf`` on levels 1..nk_rnf (``trasbc.F90``
+    # river-runoff block), and with neither depth option selected NEMO's
+    # surface arm sets ``nk_rnf = 1`` and ``h_rnf`` = the LIVE top-cell
+    # thickness, so the whole content lands in the top cell.
+    #
+    # This is the runoff's HEAT/SALT channel and is DISTINCT from its MASS
+    # channel (``FreshwaterForcing.runoff`` -> the horizontal-divergence
+    # source, ``sbcrnf.F90:253-260``) and from the depth-spreading virtual
+    # salt helper (``freshwater.runoff_spread_virtual_salt_tendency_3d``).
+    # ``None`` -> no runoff tracer source, which is every card that does not
+    # supply one.
 
 
 class OceanConfig(NamedTuple):
@@ -2417,10 +2433,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # included) -- every card whose resolved configuration reaches the
     # nemo_literal branch MUST set it, ``True`` or ``False``, or the model
     # raises rather than guessing. GYRE-zco sets ``True`` (measured, landed,
-    # round-163 receipt); ORCA2-zps sets ``False`` (resolves the same
-    # program, never measured under it). ``None`` here is a construction
-    # default only, refused by the model at STEP-TIME if the card also
-    # resolves ``nemo_literal`` without overriding it.
+    # round-163 receipt); ORCA2-zps also sets ``True`` under Decision 58 after
+    # its ten-step ladder measurement. ``None`` here is a construction default
+    # only, refused by the model at STEP-TIME if the card also resolves
+    # ``nemo_literal`` without overriding it.
     nemo_stage_momentum_wzv_split: bool | None = None
     # Which NEMO time-stepping program's after-SSH slot the FIRST wzv call
     # reads, and therefore what its scale-factor term is built from:
@@ -2465,6 +2481,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     # closing the topographic-step residual on the dyn_ldf gate rows. See
     # nemo_ldf_lap_viscosity_e3_cgrid.
     lateral_viscosity_e3_weighting: str = "off"
+    # WHERE the "nemo_div_curl" operator's ahmt/ahmf coefficient comes from,
+    # mirroring NEMO's namdyn_ldf nn_ahm_ijk_t.  "nemo_ldf_c2d" (default,
+    # bit-identical) is nn_ahm_ijk_t=20: ldf_c2d builds 1/2*rn_Uv*MAX(e1,e2)
+    # from the grid metrics.  "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
+    # 3-D field is READ (ldfdyn.f90:348-353) and supplied by the card on
+    # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h's MAGNITUDE is then unused by
+    # this operator and only its positivity still selects it, exactly as rn_Uv
+    # is unused in NEMO's own -30 arm.  Raises on anything else, on the file
+    # source without those operands, and on the file source combined with a
+    # no-slip side drag or the flux-form K_diss_h diagnostic, both of which do
+    # read the scalar A_h or a latitude profile.
+    lateral_viscosity_coefficient_source: str = "nemo_ldf_c2d"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag

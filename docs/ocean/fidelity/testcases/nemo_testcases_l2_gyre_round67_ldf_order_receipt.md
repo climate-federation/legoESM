@@ -54,8 +54,8 @@ unequal wet cells; RMS differs `1.18e-17`). Report
 | card | statement/scope | Rule-12 disposition |
 |---|---|---|
 | GYRE | executes LDF + shared WS content | **HELD** at exact kt3 gate; kt1--10/day 1--30 after arms unreached |
-| LOCK_EXCHANGE | same WS helper; NEMO LDF OFF and legoESM `gm_redi=None` (`lock_kt1_10/ocean.output:578`, `nemo_testcase_recipe.py:371-455`) | association trajectory unreached |
-| OVERFLOW | same; LDF OFF/`gm_redi=None` (`overflow_kt1_10/ocean.output:690`, `nemo_testcase_recipe.py:371-455`) | association trajectory unreached |
+| LOCK_EXCHANGE | same WS helper; NEMO LDF OFF and legoESM `gm_redi=None` (`lock_kt1_10/ocean.output:578`, `nemo_testcase_recipe.py:576-663`) | association trajectory unreached |
+| OVERFLOW | same; LDF OFF/`gm_redi=None` (`overflow_kt1_10/ocean.output:690`, `nemo_testcase_recipe.py:576-663`) | association trajectory unreached |
 | DINO | separate modified-leapfrog program | source-inert; execution gate unreached |
 | ORCA2 | topology/record absent | **UNMEASURED WITH SPEC**: resolve native card, record stage-3 post-SBC/QSR/LDF Krhs and pre/post-ZDF T/S at kt1--10, run this cumulative gate plus trajectory comparison; require exact statement replay, registered moves, and no earlier first-over-bar |
 

@@ -94,7 +94,7 @@ campaign's own attribution rule: prove the path executes before citing the line.
 I did not, and the second reviewer caught it.
 
 **So the code is reverted** to the before-arm form at
-`barotropic_latlon_cgrid.py:2692-2693`, with the refutation recorded at the call
+`barotropic_latlon_cgrid.py:2738-2739`, with the refutation recorded at the call
 site so the next reader does not repeat it.  The decision is not dropped — it is
 returned to the user in "Behaviour changes", item 4, with the real statement
 named.

@@ -242,6 +242,80 @@ def test_orca2_card_inherits_the_rn_mxl0_overwrite():
     assert float(_mxl0_anchor_floor(tke)) != tke.mxl0_min_m
 
 
+def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
+    """Decisions 75 and 76 on the ORCA2 card, measured rather than argued.
+
+    ``nemo_first_wzv_after_ssh`` is fail-closed: a card that reaches NEMO's
+    first ``wzv`` call and leaves it unset RAISES.  ORCA2's own build runs the
+    RK3 vector-invariant program -- ``stp2d.f90`` takes the "Vector Inv. Form"
+    Coriolis arm and the "only KEG + ZAD in Vector Inv. Form" advection -- and
+    that program leaves the previous step's linear extrapolation in the after
+    slot (``stprk3.f90:241``), so the card must resolve ``rk3_extrapolated``.
+
+    The lateral-mixing CFL cap must not be inherited from a library default
+    (decision 75): the card is built twice with every ``enforce_cfl`` default
+    the card could inherit flipped in between, and its resolved block must not
+    move.  Reverting either statement makes this red.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    config = build_orca2_zps_card(deck).recipe.model_config
+    assert config.momentum_time_integrator == "rk3_ws"
+    assert config.momentum_advection == "vector_invariant"
+    assert config.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+
+    # Reuse the decision-75 flip harness rather than writing a second one.
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "_vortex_card_tests_for_orca2",
+        root / "tests" / "ocean" / "unit" / "test_nemo_vortex_card.py")
+    vortex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vortex)
+    clean = build_orca2_zps_card(deck).recipe.model_config.physics
+    with vortex._lateral_mixing_defaults_flipped():
+        flipped = build_orca2_zps_card(deck).recipe.model_config.physics
+    assert flipped.lateral_mixing == clean.lateral_mixing, (
+        "ORCA2's resolved configuration follows a lateral-mixing library "
+        "default; state the field on the card instead of re-pinning")
+    assert clean.lateral_mixing.scheme == "none"
+    assert clean.lateral_mixing.harmonic.enforce_cfl is False
+    assert clean.lateral_mixing.biharmonic.enforce_cfl is True
+
+    # ... and the after-SSH form is STATED on the ORCA2 card, not inherited
+    # from the shared GYRE identity it specialises.  The shared builder is
+    # made to hand back a sentinel; a card that merely inherited would carry
+    # the sentinel through, and deleting the card's own line makes this red.
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe_module
+
+    original = recipe_module._model_config
+
+    def _sentinel_base(*args, **kwargs):
+        built = original(*args, **kwargs)
+        # Poison ONLY the shared GYRE identity the ORCA2 branch builds on,
+        # not the ORCA2 identity's own return value.
+        if kwargs.get("whole_step_identity") == "gyre_vector_ene_c2":
+            return built._replace(
+                nemo_first_wzv_after_ssh="leapfrog_continuity")
+        return built
+
+    recipe_module._model_config = _sentinel_base
+    try:
+        stated = build_orca2_zps_card(deck).recipe.model_config
+    finally:
+        recipe_module._model_config = original
+    assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+
+
 # --------------------------------------------------------------------------
 # S5 — one meaning per nn_eice value, on every integration
 # --------------------------------------------------------------------------

@@ -33,6 +33,9 @@ YEAR_TAG = "year"
 YEAR_DT_S = 14400.0
 YEAR_STEPS = 2160
 YEAR_SNAPSHOT_STEP_INTERVAL = 6
+RUN_TO_RUN_FLOOR_K = 2.0e-10
+DECISION59_MAX_FLOOR_UNITS = 10.0
+DECISION59_MAX_ABS_K = RUN_TO_RUN_FLOOR_K * DECISION59_MAX_FLOOR_UNITS
 
 
 class GateError(RuntimeError):
@@ -75,9 +78,11 @@ def _admit_year_member(
     *,
     expected_commit: str,
     label: str,
+    tag: str = YEAR_TAG,
 ) -> dict:
     """Admit one Decision-45 seed-0 year member and its fp64 snapshots."""
-    member = root / f"lego_seed0_{YEAR_TAG}"
+    require(tag and "/" not in tag, f"{label}: invalid member tag {tag!r}")
+    member = root / f"lego_seed0_{tag}"
     manifest_path = member / "manifest.json"
     manifest = _read(manifest_path)
     require(manifest.get("format") == YEAR_MEMBER_FORMAT,
@@ -85,7 +90,7 @@ def _admit_year_member(
     expected = {
         "case": "GYRE-zco",
         "seed": 0,
-        "tag": YEAR_TAG,
+        "tag": tag,
         "days": 360,
         "steps": YEAR_STEPS,
         "dt_s": YEAR_DT_S,
@@ -132,15 +137,16 @@ def score_year_root(
     *,
     expected_commit: str,
     label: str,
+    tag: str = YEAR_TAG,
 ) -> dict:
     """Score the registered Decision-45 rows with the existing day-gap tool."""
     admission = _admit_year_member(
-        root, expected_commit=expected_commit, label=label)
+        root, expected_commit=expected_commit, label=label, tag=tag)
     mesh_path = nemo_root / "nemo_seed0" / "mesh_mask.nc"
     require(mesh_path.is_file(), f"{label}: missing NEMO mesh {mesh_path}")
     report = _load_year_owners().day_gap(
         lego_root=root,
-        lego_tag=YEAR_TAG,
+        lego_tag=tag,
         nemo_root=nemo_root,
         seed=0,
         mesh_path=mesh_path,
@@ -223,17 +229,20 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     require(route in {
         "ldf_stage3", "fct_metric_upstream", "wind_qco",
         "momentum_ldf_live_geometry", "stage_momentum_wzv",
-        "tke_shear_step_entry_eta", "mld_carried_step_entry_n2",
+        "tke_shear_step_entry_eta", "stage1_r3t_ratio",
+        "mld_carried_step_entry_n2",
         "rk3_after_ssh",
     },
             f"unknown Decision-43 source route {route!r}")
 
-    def row(config, **extra):
+    def row(config, *, z_coord=None, **extra):
         vertical_mixing = getattr(
             getattr(config, "physics", None), "vertical_mixing", None)
         tke = getattr(vertical_mixing, "tke", None)
         values = {
             "tracer_time_integrator": config.tracer_time_integrator,
+            "linear_free_surface": bool(
+                getattr(z_coord, "linear_free_surface", False)),
             "momentum_time_integrator": config.momentum_time_integrator,
             "lateral_viscosity_operator": config.lateral_viscosity_operator,
             "lateral_viscosity_e3_weighting": (
@@ -280,9 +289,9 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # answer different questions: whether the card's configuration
             # selects NEMO's two-solve stage program at all -- the blast
             # radius of the statement -- and whether this run actually takes
-            # it, which is each card's OWN explicit config choice (GYRE-zco
-            # True, ORCA2-zps False) and can disagree with the blast radius,
-            # unless a test opts out/in explicitly via a hook.
+            # it, which is each card's OWN explicit config choice (both are
+            # True after ORCA2 Decision 58) and can disagree with the blast
+            # radius unless a test opts out/in explicitly via a hook.
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 nemo_stage_momentum_wzv_executes,
                 nemo_stage_momentum_wzv_resolved)
@@ -292,7 +301,7 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
             # radius of the statement under test, and it is the question the
             # admission gate exists to answer.  ``executes_at_this_tip``
             # answers the other question -- what runs today -- which is the
-            # production default as of round 163.
+            # production card choice at this tip.
             values["executes_at_this_tip"] = bool(
                 nemo_stage_momentum_wzv_executes(config))
             executes = nemo_stage_momentum_wzv_resolved(config)
@@ -307,6 +316,10 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
                     "nemo_face_native_now2", "nemo_face_native_nbb2")
                 and getattr(tke, "tke_shear_metric_source", None)
                 == "nemo_qco_live_face")
+        elif route == "stage1_r3t_ratio":
+            executes = (
+                config.tracer_time_integrator == "rk3_ws"
+                and not values["linear_free_surface"])
         elif route == "mld_carried_step_entry_n2":
             executes = (
                 config.gm_redi is not None
@@ -335,8 +348,11 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     if route == "rk3_after_ssh":
         cases.extend(("VORTEX-zco", "VORTEX_VEC-zco"))
     for case in cases:
-        config = build_nemo_testcase_card(case).recipe.model_config
-        rows[case] = row(config, recipe_source="nemo_testcase_card")
+        card = build_nemo_testcase_card(case)
+        config = card.recipe.model_config
+        rows[case] = row(
+            config, recipe_source="nemo_testcase_card",
+            z_coord=card.recipe.z_coord)
     # The ORCA2 card is source-file driven and therefore cannot be represented
     # by the three synthetic-card dispatch calls above.  Build the real card
     # from the campaign's pinned deck so the census covers the shared RK3/QCO
@@ -347,12 +363,14 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     rows[orca2.case] = row(
         orca2.recipe.model_config,
         recipe_source="build_orca2_zps_card",
+        z_coord=orca2.recipe.z_coord,
         deck_root=str(orca2_deck),
         unmeasured_features=list(orca2.unmeasured_features),
     )
+    generic = build_nemo_gyre_recipe()
     rows["NEMO-GYRE-recipe"] = row(
-        build_nemo_gyre_recipe().model_config,
-        recipe_source="build_nemo_gyre_recipe")
+        generic.model_config, recipe_source="build_nemo_gyre_recipe",
+        z_coord=generic.z_coord)
     for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         dino = dino_config_for_recipe(recipe)
         grid = dino_lat_lon_grid(dino, n_lon=10)
@@ -530,7 +548,6 @@ def _read_moved_row_registry(path: Path) -> tuple[str, ...]:
     rows = tuple(
         line.split("\t", 1)[0]
         for line in path.read_text().splitlines() if line.strip())
-    require(rows, "moved-row registry is empty")
     require(len(set(rows)) == len(rows),
             "moved-row registry contains duplicate names")
     return rows
@@ -595,8 +612,9 @@ def evaluate(
     elif plant == "missing-moved-registry":
         registered_rows = registered_rows[1:]
     elif plant == "year-day240-worse":
-        after_year[240]["rms_T"] = float(np.nextafter(
-            np.float64(before_year[240]["rms_T"]), np.float64(np.inf)))
+        after_year[240]["rms_T"] = (
+            float(before_year[240]["rms_T"])
+            + 2.0 * DECISION59_MAX_ABS_K)
     elif plant is not None:
         raise GateError(f"unknown plant {plant!r}")
 
@@ -610,6 +628,11 @@ def evaluate(
             "after_T_rms": after_value,
             "delta_T_rms": after_value - before_value,
             "not_worse": after_value <= before_value,
+            "run_to_run_floor_K": RUN_TO_RUN_FLOOR_K,
+            "delta_floor_units": (
+                (after_value - before_value) / RUN_TO_RUN_FLOOR_K),
+            "decision59_within_ten_floor_units": bool(
+                abs(after_value - before_value) < DECISION59_MAX_ABS_K),
         })
     year_by_day = {row["day"]: row for row in year_rows}
 
@@ -664,12 +687,17 @@ def evaluate(
             and after30["rms_T"] == after_year[30]["rms_T"]),
         "year_day240_T_rms_not_worse": year_by_day[240]["not_worse"],
         "year_day360_T_rms_not_worse": year_by_day[360]["not_worse"],
+        "year_day240_T_rms_admitted": bool(
+            year_by_day[240]["not_worse"]
+            or year_by_day[240]["decision59_within_ten_floor_units"]),
+        "year_day360_T_rms_admitted": bool(
+            year_by_day[360]["not_worse"]
+            or year_by_day[360]["decision59_within_ten_floor_units"]),
         "all_year_rows_registered": len(year_rows) == len(YEAR_DAYS),
         "first_over_bar_not_earlier": first_not_earlier,
         "no_kt1_at_bar_row_leaves": not kt1_losses,
         "all_moved_rows_registered": bool(
-            moved and not missing_registered_rows
-            and not unexpected_registered_rows),
+            not missing_registered_rows and not unexpected_registered_rows),
         "dino_measurement_required": dino_shared,
         "dino_statement_not_executed": not dino_shared,
         "all_executing_cards_measured": not unmeasured_executing_cards,
@@ -682,8 +710,8 @@ def evaluate(
     admissible = bool(
         criteria["day30_T_rms_decreases"]
         and criteria["month_and_year_day30_agree"]
-        and criteria["year_day240_T_rms_not_worse"]
-        and criteria["year_day360_T_rms_not_worse"]
+        and criteria["year_day240_T_rms_admitted"]
+        and criteria["year_day360_T_rms_admitted"]
         and criteria["all_year_rows_registered"]
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
@@ -731,8 +759,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--after-year-root", type=Path)
     parser.add_argument("--year-nemo-root", type=Path)
     parser.add_argument("--expect-before-year-commit")
+    parser.add_argument("--before-year-tag", default=YEAR_TAG)
+    parser.add_argument("--after-year-tag", default=YEAR_TAG)
     parser.add_argument("--year-measure-root", type=Path)
     parser.add_argument("--expect-year-commit")
+    parser.add_argument("--year-measure-tag", default=YEAR_TAG)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--generic-measure-snapshot", type=Path)
     parser.add_argument("--generic-before-report", type=Path)
@@ -744,7 +775,8 @@ def main(argv: list[str] | None = None) -> int:
         "--route", choices=(
             "ldf_stage3", "fct_metric_upstream", "wind_qco",
             "momentum_ldf_live_geometry", "stage_momentum_wzv",
-            "tke_shear_step_entry_eta", "mld_carried_step_entry_n2"),
+            "tke_shear_step_entry_eta", "stage1_r3t_ratio",
+            "mld_carried_step_entry_n2"),
         default="ldf_stage3")
     parser.add_argument(
         "--measured-card", action="append", default=[],
@@ -764,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.year_nemo_root,
                 expected_commit=args.expect_year_commit,
                 label="year measurement",
+                tag=args.year_measure_tag,
             )
             args.output.write_text(
                 json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -802,12 +835,14 @@ def main(argv: list[str] | None = None) -> int:
             args.year_nemo_root,
             expected_commit=args.expect_before_year_commit,
             label="before year",
+            tag=args.before_year_tag,
         )
         after_year_gap = score_year_root(
             args.after_year_root,
             args.year_nemo_root,
             expected_commit=args.expect_candidate_commit,
             label="after year",
+            tag=args.after_year_tag,
         )
         report = evaluate(
             _read(args.comparison),

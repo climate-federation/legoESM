@@ -699,6 +699,41 @@ def test_nemo_ws_stage1_trace_exposes_live_rhs_boundaries(monkeypatch):
     assert not np.array_equal(b1, adv_b)
 
 
+def test_nemo_ws_stage1_trace_preserves_source_statement_order(monkeypatch):
+    """EMP and runoff must enter Krhs as two ordered additions."""
+    def large_advective_rhs(a, b, *args, **kwargs):
+        fd = jnp.full_like(a, -1.0e16)
+        zero = jnp.zeros_like(a)
+        return (fd, zero), (fd, zero)
+
+    monkeypatch.setattr(
+        model_module, "compute_advection_flux_div_pair", large_advective_rhs)
+    tracer = jnp.ones((1, 1, 1), dtype=jnp.float64)
+    ones = jnp.ones_like(tracer)
+    emp = jnp.full_like(tracer, -1.0e16)
+    runoff = jnp.ones_like(tracer)
+    combined = emp + runoff
+    source_rates = ((combined, combined),) * 3
+    source_terms = (((emp, runoff), (emp, runoff)),) * 3
+
+    ordered = model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "centered", ones, ones, jnp.ones((1, 1, 2)),
+        ones, ones, ones, ones, object(), 1.0, ones,
+        stage_source_rates=source_rates, stage_source_terms=source_terms,
+        stop_after_stage=1, return_stage1_trace=True,
+    )
+    regrouped = model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "centered", ones, ones, jnp.ones((1, 1, 2)),
+        ones, ones, ones, ones, object(), 1.0, ones,
+        stage_source_rates=source_rates,
+        stop_after_stage=1, return_stage1_trace=True,
+    )
+    np.testing.assert_array_equal(np.asarray(ordered[4]), 1.0)
+    np.testing.assert_array_equal(np.asarray(ordered[5]), 1.0)
+    np.testing.assert_array_equal(np.asarray(regrouped[4]), 0.0)
+    np.testing.assert_array_equal(np.asarray(regrouped[5]), 0.0)
+
+
 def test_nemo_ws_stage1_boundary_hook_is_private_and_validated():
     with pytest.raises(ValueError, match="expose_tracer_stage1_boundary"):
         _lock_model(model_module._NEMOWSRK3TestHooks(
@@ -927,6 +962,27 @@ def test_nemo_ws_stage2_raw_exposure_precedes_mean_replacement():
     # expected structural zero; the live zonal correction proves the seam.
     np.testing.assert_array_equal(
         np.asarray(raw.v.data), np.asarray(corrected.v.data))
+
+
+def test_nemo_ws_stage3_raw_exposure_is_post_zdf_pre_barotropic():
+    """The raw-Kaa seam is passive and precedes stage-3 mean replacement."""
+    card, entry = _tilted_entry_after_one_step()
+    ordinary = _lock_model().step(entry, dt=card.dt_s)
+    raw = _lock_model(model_module._NEMOWSRK3TestHooks(
+        expose_stage3_raw_momentum=True)).step(entry, dt=card.dt_s)
+
+    assert float(np.max(np.abs(
+        np.asarray(raw.u.data) - np.asarray(ordinary.u.data)))) > 1.0e-12
+    np.testing.assert_array_equal(np.asarray(raw.T.data), np.asarray(ordinary.T.data))
+    np.testing.assert_array_equal(np.asarray(raw.S.data), np.asarray(ordinary.S.data))
+    np.testing.assert_array_equal(
+        np.asarray(raw.eta.data), np.asarray(ordinary.eta.data))
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _lock_model(model_module._NEMOWSRK3TestHooks(
+            expose_stage3_raw_momentum=True,
+            expose_stage3_momentum_rhs="post_ldf",
+        ))
 
 
 def _lock_model(hooks=None):

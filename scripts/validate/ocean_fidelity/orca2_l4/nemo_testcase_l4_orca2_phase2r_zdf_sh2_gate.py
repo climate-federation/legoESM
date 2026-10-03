@@ -177,7 +177,7 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
     arrays, allocations = read_frame(record)
     card = build_orca2_zps_card(deck)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config, iwm_forcing=card.recipe.iwm_forcing)
     state = model._seed_tke_preclosure_carry(card.recipe.initial_state)
     tke_cfg = model.config.physics.vertical_mixing.tke
     active = np.asarray(card.recipe.z_coord.is_active)[:, :OWN_X, :ACTIVE_Z]

@@ -126,12 +126,14 @@ def convective_K_A_flag(
     # (mirrors ``eos.compute_buoyancy_frequency_nemo_bn2``'s own allowed set;
     # validated HERE too so a typo raises even under an n2_mode that never
     # reaches the kernel).
-    if cfg.n2_eos_form not in ("seos", "teos10"):
+    if cfg.n2_eos_form not in ("seos", "teos10", "eos80"):
         raise ValueError(
             "Unknown EnhancedDiffusionConfig.n2_eos_form="
             f"{cfg.n2_eos_form!r}; expected 'seos' (NEMO's 3-term simplified "
-            "EOS) or 'teos10' (NEMO's Roquet polynomial with the TEOS-10 "
-            "coefficient set, which is what ORCA1 runs: ln_teos10=.true.)."
+            "EOS), 'teos10' (NEMO's Roquet polynomial with the TEOS-10 "
+            "coefficient set, which is what ORCA1 runs: ln_teos10=.true.) or "
+            "'eos80' (the same polynomial with the EOS-80 coefficient set, "
+            "which is what ORCA2 runs: ln_eos80=.true.)."
         )
 
     dz_actual = dz_ref * jacobian[..., jnp.newaxis]               # (..., nlev)

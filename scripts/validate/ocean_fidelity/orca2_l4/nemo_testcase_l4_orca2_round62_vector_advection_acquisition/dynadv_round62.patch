@@ -1,0 +1,22 @@
+--- dynadv.F90
++++ dynadv.F90
+@@ -23,5 +23,7 @@
+    USE dynzad          ! vertical advection               (dyn_zad      routine)
+    USE zdf_oce,  ONLY : ln_zad_Aimp
++   USE dynadv_round62_writer, ONLY : dynadv_round62_before, dynadv_round62_after_keg, &
++      & dynadv_round62_after_zad
+    !
+    USE in_out_manager  ! I/O manager
+    USE lib_mpp         ! MPP library
+@@ -78,8 +80,11 @@
+       SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!
+       CASE( np_VEC_c2  )                                                         != vector form =!
+          !                                                                             !* horizontal gradient of kinetic energy
++         CALL dynadv_round62_before( kt, Kmm, Krhs, puu, pvv )
+          CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )
++         CALL dynadv_round62_after_keg( kt, Krhs, puu, pvv )
+          CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection
++         CALL dynadv_round62_after_zad( kt, Kmm, Krhs, nn_dynkeg, puu, pvv )
+          !
+       CASE( np_FLX_c2  )                                                         !=  flux form  =!
+          CALL dyn_adv_cen2( kt                , Kmm, puu, pvv, Krhs, pau, pav, paw )   !* 2nd order centered scheme
