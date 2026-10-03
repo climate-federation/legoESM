@@ -103,6 +103,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.operators_latlon_cgrid import fold_perm_f
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _nemo_een_north_ff
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
 
@@ -180,7 +181,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     # the F-origin permutation, the discriminator explicitly named by P1's
     # falsification action.
     fold_perm = np.asarray(
-        r122.fold_perm_f(card.recipe.grid.fold), dtype=np.int64
+        fold_perm_f(card.recipe.grid.fold), dtype=np.int64
     )
     north_e3f = np.asarray(parts["een_e3f0"], dtype=np.float64)[-3, fold_perm]
     if plant == "cyclic-wrap":
