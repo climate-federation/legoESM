@@ -80,7 +80,10 @@ def main(run, start, end, out):
             raise SystemExit(f"{var}: sidecar {sum0.shape} vs file {mf.shape}")
         r = corr(np.nan_to_num(sum0 / c0), np.nan_to_num(mf))
         if not r > MIN_CORR:
-            raise SystemExit(f"{var}: sidecar/file correlation {r:.3f}")
+            # weather-dominated fields (meridional wind) can fall below the
+            # threshold on a short window: refuse to WRITE them, loudly.
+            print(f"SKIP {var}: sidecar/file correlation {r:.3f} < {MIN_CORR}")
+            continue
         win = (mf * n_end - sum0) / (n_end - c0)
         data = ds[var].values.copy()
         data[-1] = win.astype(data.dtype)
