@@ -157,7 +157,11 @@ def test_restart_init_caps_under_snow_and_mirrors_elsewhere():
                      T_soil=st.T_soil.at[2, 0].set(265.0))
     out = init_snow_temperature(st)
     np.testing.assert_allclose(np.asarray(out.T_snow), [278.0, _TF, 265.0])
-    assert land_skin_temperature(out) is out.T_snow
+    np.testing.assert_array_equal(np.asarray(land_skin_temperature(out)),
+                                  np.asarray(out.T_snow))
+    warm = out._replace(T_snow=jnp.array([280.0, 280.0, 280.0]))
+    np.testing.assert_allclose(np.asarray(land_skin_temperature(warm)),
+                               [280.0, _TF, _TF])
     off = init_multilayer_land_state(3, MultiLayerLandConfig(), T_init=278.0)
     assert off.T_snow is None
 
@@ -373,7 +377,8 @@ def test_flux_heats_the_node_and_melt_follows_from_its_enthalpy():
 def test_full_step_energy_ledger_under_melting_conditions():
     """Assembled land enthalpy over two SimpleSEB steps of warm air on a pack:
     dE_sens = (G_soil - lam*(T_s' - T_s0) + Q_geo) dt - L_f * m_store,
-    E_sens = sum C dz (T - Tf) + c_ice SWE (T_snow - Tf); snow-mass changes
+    with the skin in the lam term capped at Tf (the node's heat above it is
+    melt); E_sens = sum C dz (T - Tf) + c_ice SWE (T_snow - Tf); snow-mass changes
     other than the stored-heat melt happen at a node already at Tf (no term)."""
     from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
     cfg = MultiLayerLandConfig(
@@ -402,7 +407,9 @@ def test_full_step_energy_ledger_under_melting_conditions():
         out = step(s)
         s2, sfc = out[0], out[-1]
         lam = sfc.surface_conductance
-        flux = sfc.G_soil - lam * (s2.T_snow - T_s0) + cfg.thermal.Q_geothermal
+        # The linearised surface loss stops at the freezing cap of the skin.
+        flux = (sfc.G_soil - lam * (jnp.minimum(s2.T_snow, _TF) - T_s0)
+                + cfg.thermal.Q_geothermal)
         expect = flux * dt - constants.L_f * m_store
         # Water moved by Richards changes C (theta) at fixed T: compare at the
         # end-of-step theta for the soil part.
@@ -430,3 +437,24 @@ def test_canopy_ground_node_never_above_freezing_under_snow():
     s2, sfc = out[0], out[-1]
     assert float(sfc.Ts_solve[0]) <= _TF + 1e-9
     assert float(s2.T_snow[0]) > _TF        # the node did take up heat
+
+
+def test_substeps_equal_repeated_single_steps_with_freeze_thaw():
+    """The sub-stepped solve (production: freeze/thaw on, several sub-steps)
+    is exactly repeated one-step solves of dt/n, each of which closes the
+    ledger tested above."""
+    T, theta = _column()
+    T = T - 6.0                                   # straddle freezing
+    th = _TH._replace(enable_freeze_thaw=True)
+    swe = jnp.array([10.0, 40.0, 0.0])
+    T_s0 = jnp.array([262.0, 258.0, float(T[2, 0])])
+    G = jnp.array([-25.0, 15.0, -5.0])
+    n, dt = 6, 1800.0
+    Ts6, Tn6 = solve_snow_soil_thermal(T_s0, swe, T, theta, _GRID, _HYD, th,
+                                       G, dt, n_substeps=n)
+    Ts, Tn = T_s0, T
+    for _ in range(n):
+        Ts, Tn = solve_snow_soil_thermal(Ts, swe, Tn, theta, _GRID, _HYD, th,
+                                         G, dt / n)
+    np.testing.assert_allclose(np.asarray(Tn6), np.asarray(Tn), rtol=1e-13)
+    np.testing.assert_allclose(np.asarray(Ts6), np.asarray(Ts), rtol=1e-13)

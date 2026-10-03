@@ -543,6 +543,7 @@ def _solve_column(T_soil, theta, grid, hydro_config, thermal_config,
                              jnp.zeros_like(g_snow)[:, None]], axis=1)
         T_s = T_snow
         T_top0 = T_snow
+        excess_int = jnp.zeros_like(T_snow)
 
     # Backward Euler over ``n_substeps`` equal sub-steps; G_surface, Q_geo and
     # layer_source are rates held over the whole step.  The semi-implicit
@@ -602,6 +603,17 @@ def _solve_column(T_soil, theta, grid, hydro_config, thermal_config,
         sol = thomas_solve(a, jnp.concatenate([diag_s[:, None], diag], axis=1),
                            c, jnp.concatenate([rhs_s[:, None], rhs], axis=1))
         T_s, T = sol[:, 0], sol[:, 1:]
+        if surface_conductance is not None:
+            # Time-integrated node excess over freezing [K s] (see caller).
+            excess_int = excess_int + dt_sub * jnp.maximum(
+                T_s - constants.T_freeze, 0.0)
     if snow is None:
         return T, None
+    if surface_conductance is not None:
+        # A snow surface never exceeds T_freeze, so the linearised surface
+        # loss -lambda*(T_s - T_s0) must stop at T_freeze: give the node back
+        # lambda * int max(T_s - Tf, 0) dt (CLM5 puts the same dhsdT*tinc term
+        # into its phase-change energy, SoilTemperatureMod.F90:1269); the next
+        # step's stored-heat melt turns it into melt.
+        T_s = T_s + surface_conductance * excess_int / jnp.maximum(C_snow, 1e-12)
     return T_s, T

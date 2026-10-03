@@ -1735,9 +1735,13 @@ def init_multilayer_land_state(
 
 def land_skin_temperature(state: MultiLayerLandState) -> jnp.ndarray:
     """Ground skin temperature [K], (ncol,): the snow-node temperature when the
-    state carries one (snow surface under snow, top soil elsewhere), else the
-    top soil layer."""
-    return state.T_soil[:, 0] if state.T_snow is None else state.T_snow
+    state carries one (snow surface under snow, capped at T_freeze since a
+    pack's heat above freezing is melt; top soil elsewhere), else the top soil
+    layer."""
+    if state.T_snow is None:
+        return state.T_soil[:, 0]
+    return jnp.where(state.snow_depth > 0.0,
+                     jnp.minimum(state.T_snow, constants.T_freeze), state.T_snow)
 
 
 def init_snow_temperature(state: MultiLayerLandState) -> MultiLayerLandState:
