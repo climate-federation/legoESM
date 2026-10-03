@@ -184,6 +184,29 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     if plant != "none":
         raise GateError(f"{plant} plant fired")
 
+    sample_locations = np.argwhere(
+        np.ascontiguousarray(baseline["acc_before"]).view(np.uint64)
+        != np.ascontiguousarray(oracle["acc_before"]).view(np.uint64)
+    )[:10]
+
+    def value_bits(value: np.ndarray, location: tuple[int, int, int]) -> dict:
+        scalar = np.asarray(value[location], dtype=np.float64)
+        return {"value": float(scalar), "bits": f"0x{scalar.view(np.uint64):016x}"}
+
+    samples = []
+    for raw_location in sample_locations:
+        location = tuple(map(int, raw_location))
+        previous = (location[0], location[1], location[2] - 1)
+        samples.append({
+            "j_i_k": list(location),
+            "oracle_before": value_bits(oracle["acc_before"], location),
+            "baseline_before": value_bits(baseline["acc_before"], location),
+            "candidate_before": value_bits(candidate["acc_before"], location),
+            "oracle_previous_after": value_bits(oracle["acc_after"], previous),
+            "oracle_previous_term": value_bits(oracle["term_nw"], previous),
+            "candidate_previous_term": value_bits(candidate["term_nw"], previous),
+        })
+
     return {
         "status": "MEASURED_R115_EEN_PRODUCT_WALK",
         "claim_label": "given NEMO's recorded entry",
@@ -195,6 +218,7 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         "candidate_first_non_bit_item": candidate_first,
         "baseline_scores": baseline_scores,
         "candidate_scores": candidate_scores,
+        "first_accumulator_samples": samples,
         "shapes": {name: list(value.shape) for name, value in candidate.items()},
         "dtypes": {name: str(value.dtype) for name, value in candidate.items()},
         "worktree": stamp,
