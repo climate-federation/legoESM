@@ -463,7 +463,8 @@ def solve_snow_soil_thermal(
     (as CLM5 solves its snow and soil layers together):
 
     * node temperature ``T_snow`` [K] is the SNOW-SURFACE temperature: the
-      surface energy balance (``G_surface``, ``surface_conductance``) acts on it;
+      ground heat flux ``G_surface`` acts on it (explicit; a semi-implicit
+      ``surface_conductance`` is refused);
     * heat capacity ``c_ice * snow_swe`` [J/m2/K] (snow is ice; the bucket holds
       no liquid);
     * the whole pack's resistance ``R_s = (snow_swe/rho_s)/k_s`` [m2 K/W] lies
@@ -490,6 +491,14 @@ def solve_snow_soil_thermal(
 
     Returns ``(T_snow_new (ncol,), T_soil_new (ncol, n_layers))``.
     """
+    if surface_conductance is not None:
+        # A semi-implicit surface (SimpleSEB) linearises the surface loss in
+        # the skin temperature, which a snow surface caps at T_freeze; doing
+        # that consistently needs the cap inside the solve.  Only the explicit
+        # ground flux (the two-leaf canopy's Picard loop) is supported.
+        raise ValueError(
+            "solve_snow_soil_thermal does not support surface_conductance "
+            "(semi-implicit surface); use the two-leaf canopy surface scheme.")
     T_soil_bare = solve_soil_thermal(
         T_soil, theta, grid, hydro_config, thermal_config, G_surface, dt,
         surface_conductance=surface_conductance, layer_source=layer_source,
@@ -514,8 +523,8 @@ def _solve_column(T_soil, theta, grid, hydro_config, thermal_config,
     """Backward-Euler soil column, optionally with one snow node on top.
 
     ``snow`` is ``None`` (soil only: returns ``(T_soil_new, None)``) or
-    ``(T_snow, C_snow, R_snow)``: the surface flux, the semi-implicit surface
-    conductance and the heat capacity ``C_snow`` then sit on an extra top node
+    ``(T_snow, C_snow, R_snow)``: the surface flux (explicit; no semi-implicit
+    surface conductance) and the heat capacity ``C_snow`` then sit on an extra top node
     coupled to soil node 0 by ``1/(R_snow + dz0/(2 k0))``; returns
     ``(T_snow_new, T_soil_new)``.
     """
@@ -542,8 +551,6 @@ def _solve_column(T_soil, theta, grid, hydro_config, thermal_config,
         c = jnp.concatenate([-g_snow[:, None], -coeff,
                              jnp.zeros_like(g_snow)[:, None]], axis=1)
         T_s = T_snow
-        T_top0 = T_snow
-        excess_int = jnp.zeros_like(T_snow)
 
     # Backward Euler over ``n_substeps`` equal sub-steps; G_surface, Q_geo and
     # layer_source are rates held over the whole step.  The semi-implicit
@@ -597,23 +604,9 @@ def _solve_column(T_soil, theta, grid, hydro_config, thermal_config,
         diag = diag.at[:, 0].add(g_snow)
         diag_s = C_snow / dt_sub + g_snow
         rhs_s = C_snow / dt_sub * T_s + G_surface
-        if surface_conductance is not None:
-            diag_s = diag_s + surface_conductance
-            rhs_s = rhs_s + surface_conductance * T_top0
         sol = thomas_solve(a, jnp.concatenate([diag_s[:, None], diag], axis=1),
                            c, jnp.concatenate([rhs_s[:, None], rhs], axis=1))
         T_s, T = sol[:, 0], sol[:, 1:]
-        if surface_conductance is not None:
-            # Time-integrated node excess over freezing [K s] (see caller).
-            excess_int = excess_int + dt_sub * jnp.maximum(
-                T_s - constants.T_freeze, 0.0)
     if snow is None:
         return T, None
-    if surface_conductance is not None:
-        # A snow surface never exceeds T_freeze, so the linearised surface
-        # loss -lambda*(T_s - T_s0) must stop at T_freeze: give the node back
-        # lambda * int max(T_s - Tf, 0) dt (CLM5 puts the same dhsdT*tinc term
-        # into its phase-change energy, SoilTemperatureMod.F90:1269); the next
-        # step's stored-heat melt turns it into melt.
-        T_s = T_s + surface_conductance * excess_int / jnp.maximum(C_snow, 1e-12)
     return T_s, T

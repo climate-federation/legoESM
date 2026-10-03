@@ -457,11 +457,13 @@ def _step_multilayer_land_impl(
                 "config.thermal.snow_insulation is on but state.T_snow is None; "
                 "initialise the state with init_multilayer_land_state(config=...) "
                 "or init_snow_temperature(state) on a restart without it.")
-        if config.elev_bands is not None or isinstance(
-                config.surface_scheme, CLMMLCanopyConfig):
+        if (config.elev_bands is not None
+                or not isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                or isinstance(config.surface_scheme, CLMMLCanopyConfig)):
             raise ValueError(
                 "config.thermal.snow_insulation (one-layer snow thermal node) is "
-                "not supported with elevation-band snow or the CLM-ML canopy.")
+                "supported only with the two-leaf canopy surface scheme and no "
+                "elevation-band snow.")
         # Node heat above freezing melts snow BEFORE the step (phase
         # re-partition at fixed enthalpy, CLM5 unlayered-snow analogue,
         # SoilTemperatureMod.F90:1307-1320): the pack is left at T_freeze, the
@@ -469,6 +471,8 @@ def _step_multilayer_land_impl(
         # pack passes to the soil through the final solve.
         snow, T_snow0, _store_melt, _store_heat = melt_snow_node_excess(
             snow, state.T_snow)
+        # A pack melted away entirely leaves the skin to the top soil.
+        T_snow0 = jnp.where(snow > 0.0, T_snow0, T_soil[:, 0])
         T_surface = T_snow0
     else:
         T_surface = T_soil[:, 0]

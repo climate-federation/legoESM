@@ -2243,11 +2243,12 @@ class ExperimentConfig(NamedTuple):
                 "land_snow_insulation requires use_multilayer_land: only the "
                 "multilayer soil has a snow thermal node — the knob would be "
                 "silently inert.")
-        if self.land_snow_insulation and self.land_surface_scheme == "clm_ml":
+        if self.land_snow_insulation and self.land_surface_scheme != "two_leaf":
             errors.append(
-                "land_snow_insulation is not supported with the clm_ml canopy "
-                "(it reads the soil column directly); the land step would "
-                "refuse at its first call.")
+                "land_snow_insulation is not supported with land_surface_scheme="
+                f"{self.land_surface_scheme!r}: only the two-leaf canopy (explicit "
+                "ground flux) is supported; the land step would refuse at its "
+                "first call.")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
