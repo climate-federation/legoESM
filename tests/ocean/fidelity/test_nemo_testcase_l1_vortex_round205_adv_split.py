@@ -193,13 +193,26 @@ def test_the_prognostic_mean_arm_really_reads_uu_b(fp64):
             data=clean.uu_b.data + 1.0e-4 * np.asarray(clean.u_mask.data)),
         vv_b=clean.vv_b.replace(
             data=clean.vv_b.data + 1.0e-4 * np.asarray(clean.v_mask.data)))
-    # On the unperturbed state the two operands agree, so the arm is a
-    # no-op -- that is the measured fact, not an inert hook.
-    assert _moved(arm_model.step(clean, dt=card.dt_s),
-                  plain_model.step(clean, dt=card.dt_s)) == 0.0
-    # Perturb the operand the arm reads and it must separate.
-    assert _moved(arm_model.step(bumped, dt=card.dt_s),
-                  plain_model.step(bumped, dt=card.dt_s)) > 0.0
+    # On the unperturbed state the two operands agree, so the arm has
+    # nothing to do and the step barely moves.  ROUND 206: this is no
+    # longer asserted as an EXACT zero.  Alone on an idle machine it is
+    # exactly 0.0, but inside the module's own battery it comes back at
+    # 3.55e-15 -- the two hook settings compile to different programs
+    # (with the arm on, the re-reduced depth mean is dead code), and since
+    # round 206 the production target no longer shares its denominator
+    # with that mean, so the two programs fuse differently.  That is
+    # compilation, not the operand, and the EXPECTATION was wrong, not the
+    # code: exact equality was a property of the previous build, never of
+    # the statement.  What the control actually needs is a SEPARATION, and
+    # the perturbed arm gives one 5e8 times larger.
+    unperturbed = _moved(arm_model.step(clean, dt=card.dt_s),
+                         plain_model.step(clean, dt=card.dt_s))
+    assert unperturbed < 1.0e-12
+    # Perturb the operand the arm reads and it must separate, by orders.
+    perturbed = _moved(arm_model.step(bumped, dt=card.dt_s),
+                       plain_model.step(bumped, dt=card.dt_s))
+    assert perturbed > 1.0e-9
+    assert perturbed > 1.0e6 * unperturbed
     # NOT covered here, said rather than implied: the arm's refusal when a
     # state carries no uu_b/vv_b pair.  Stripping that pair makes the
     # barotropic solver raise first on this card

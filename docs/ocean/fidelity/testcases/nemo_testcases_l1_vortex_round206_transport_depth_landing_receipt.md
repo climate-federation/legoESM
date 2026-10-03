@@ -176,7 +176,7 @@ be registered, not assumed away.
 | ratchet plants on a CLEAN pair (the vector card) | `worsen-3ulp` exit 1, `at-bar-to-debt` exit 1, `improve` exit **0** — the controls fire and the benign plant stays green |
 | citation gate, `DEFAULT_RECEIPT` | **PASS** exit 0, `unmapped_citations []`, `map_entries_failing_audit []` |
 | citation gate, shifted-citation plant | exit 2 (nonzero), as required |
-| focused battery | see `phase3/round206/focused_pytest.log` |
+| focused battery (serialized) | **105 passed, 1 failed** in 586.67s; the one failure is an EXPECTATION this round invalidated, fixed and re-run **10 passed** (`phase3/round206/focused_pytest.log`, `..._round205_module.log`) |
 | generic NEMO-GYRE recipe gate | run by `land.sh` with the push gate |
 | DINO month gate | run by `land.sh`; line quoted in the ledger |
 
@@ -211,6 +211,30 @@ be registered, not assumed away.
   pre-round-206 target is built by a Python helper called only inside the
   arm, so production traces nothing extra and the registry above was
   measured on the code that ships.
+
+## The one test this landing broke, and why the EXPECTATION was wrong
+
+`test_the_prognostic_mean_arm_really_reads_uu_b` asserted that on the
+card's unperturbed initial state the refuted `prognostic_mean` arm is an
+EXACT no-op (`== 0.0`).  It now returns `3.552713678800501e-15` inside the
+module's own battery — and exactly `0.0` when run alone on an idle machine,
+which is why it took a serialized re-run to see it reproduce.
+
+**The expectation was wrong, not the code.**  The two operands (the
+prognostic `uu_b` and the re-reduced depth mean) are still equal on that
+state; what changed is compilation.  With the arm on, the re-reduced mean
+becomes dead code, and before this round the production target shared its
+denominator `H_u_pre` with that mean, so the two programs fused the same
+way.  The landed target divides by the qco depth instead, so they no longer
+do.  Exact equality was a property of the previous build, never of the
+statement.
+
+The control's content is a SEPARATION, and it is intact: perturbing
+`uu_b`/`vv_b` moves the arm away from production by
+`1.9073486328125e-06`, 5.4e8 times the unperturbed residue.  The test now
+asserts `unperturbed < 1e-12`, `perturbed > 1e-9` and
+`perturbed > 1e6 * unperturbed`, which still fails if the arm stops reading
+the operand.  Module re-run: **10 passed**.
 
 ## One cost owned
 
