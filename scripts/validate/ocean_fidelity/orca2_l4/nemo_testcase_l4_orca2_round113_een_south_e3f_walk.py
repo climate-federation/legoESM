@@ -183,11 +183,24 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
                           if baseline_scores[name]["bit_unequal"])
     candidate_first = next(name for name in r111.SOURCE_ORDER
                            if candidate_scores[name]["bit_unequal"])
+    candidate_e3f_bits = (
+        np.ascontiguousarray(candidate["south_e3f0"]).view(np.uint64)
+        != np.ascontiguousarray(oracle["south_e3f0"]).view(np.uint64))
+    candidate_e3f_locations = np.argwhere(candidate_e3f_bits)
+    candidate_e3f_samples = [
+        {
+            "j_i_k": list(map(int, location)),
+            "candidate": float(candidate["south_e3f0"][tuple(location)]),
+            "oracle": float(oracle["south_e3f0"][tuple(location)]),
+        }
+        for location in candidate_e3f_locations[:10]
+    ]
     require(baseline_first == "south_e3f0", "baseline first boundary moved")
     require(baseline_scores["south_e3f0"]["bit_unequal"] == 7,
             "baseline south_e3f0 census moved")
     require(candidate_scores["south_e3f0"]["bit_unequal"] == 0,
-            "source-copy south_e3f0 is not bit-exact")
+            "source-copy south_e3f0 is not bit-exact: "
+            f"{candidate_scores['south_e3f0']}; samples={candidate_e3f_samples}")
     require(candidate_scores["south_r3f"]["bit_unequal"] == 0,
             "south_r3f moved before the registered mask boundary")
     require(candidate_scores["south_denom"]["bit_unequal"] == 0,
