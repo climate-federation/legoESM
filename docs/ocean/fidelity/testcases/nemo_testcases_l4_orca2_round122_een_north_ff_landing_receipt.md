@@ -82,8 +82,9 @@ the three citation failures were caused by this round's initial occurrence
 anchor and were repaired before the final citation/focused gates. No round-122
 test failed.
 
-The cumulative and round-specific citation gates pass after the correction;
-their plants fire. Separate `codex exec --sandbox read-only` review was
+The final focused battery passes **74/74** in 97.38 s. The cumulative and
+round-specific citation gates pass after the correction; their plants fire.
+Separate `codex exec --sandbox read-only` review was
 attempted. Verdict: **independent review unavailable in-sandbox** (`failed to
 initialize in-process app-server client: Read-only file system`).
 
