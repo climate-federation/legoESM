@@ -82,8 +82,19 @@ ORCA2_ROUND120_EEN_V_FRACTION_PREFLIGHT_READY /data/abyssal/dbalwada/nemo-testca
 ## Validation and review
 
 The exact patched source and writer compile under the pinned rung-0 include
-set. Focused and full-battery results are recorded below after their one allowed
-invocations.
+set. The focused round-110/118/119/120 plus citation battery passes 33/33.
+The default citation gate passes 274 citations and this receipt passes its one
+citation with zero unmapped or failed entries; shifting the compiled range by
+two lines makes the gate refuse.
+
+The single required `tests/ocean/fidelity -n 12` invocation collected 2,363
+tests and reached 98%, then reproduced the registered xdist-controller stall
+after the real-pytest process census reached zero. It was interrupted without
+a summary and is **incomplete, not PASS**. Re-running the six registered IDs
+in isolation reproduces the same six pre-existing reds: SI3 scalar-math source
+provenance, the round-129 certified-year stamp, round-51 private-arm scope,
+round-35 dirty-escape scoping, worktree stamping, and the
+`hires_lane_surface` case-board row. No round-120 failure was exposed.
 
 The separate read-only Codex review returned **independent review unavailable
 in-sandbox**: `failed to initialize in-process app-server client: Read-only
