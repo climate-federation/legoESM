@@ -112,21 +112,26 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     mbku = np.asarray(parts["mbku"], dtype=np.float64)
     executed = np.arange(1, 31)[None, None, :] <= mbku[..., None]
 
-    def recurrence(term, bottom):
+    def recurrence(term, bottom, *, seed_first: bool):
         acc = jnp.zeros(term.shape[:2], dtype=term.dtype)
         before = jnp.zeros_like(term)
         after = jnp.zeros_like(term)
         for jk in range(term.shape[-1]):
             before = before.at[..., jk].set(acc)
-            updated = nemo_source_round(acc + term[..., jk])
+            if seed_first and jk == 0:
+                updated = term[..., jk]
+            else:
+                updated = nemo_source_round(acc + term[..., jk])
             acc = jnp.where(jk < bottom, updated, acc)
             after = after.at[..., jk].set(acc)
         return before, after
 
-    baseline_before, baseline_after = jax.device_get(jax.jit(recurrence)(
-        jnp.asarray(parts["term_u_nw"]), jnp.asarray(parts["mbku"])))
-    candidate_before, candidate_after = jax.device_get(jax.jit(recurrence)(
-        jnp.asarray(literal_product), jnp.asarray(parts["mbku"])))
+    baseline_before, baseline_after = jax.device_get(jax.jit(
+        lambda term, bottom: recurrence(term, bottom, seed_first=False))(
+            jnp.asarray(parts["term_u_nw"]), jnp.asarray(parts["mbku"])))
+    candidate_before, candidate_after = jax.device_get(jax.jit(
+        lambda term, bottom: recurrence(term, bottom, seed_first=True))(
+            jnp.asarray(literal_product), jnp.asarray(parts["mbku"])))
     prefix = {
         "mbku": mbku,
         "zpvo_nw": np.asarray(parts["zpvo_u_nw"]),
@@ -169,17 +174,13 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         (name for name in SOURCE_ORDER if baseline_scores[name]["bit_unequal"]), None)
     candidate_first = next(
         (name for name in SOURCE_ORDER if candidate_scores[name]["bit_unequal"]), None)
-    require(baseline_first == "term_nw",
+    require(baseline_first == "acc_before",
             "baseline first boundary moved: "
             f"{baseline_first} {baseline_scores.get(baseline_first)}")
-    require(baseline_scores["term_nw"] == {
-        "bit_unequal": 2,
-        "magnitude_unequal": 0,
-        "signed_zero_only": 2,
-        "first_bit_unequal_j_i_k": baseline_scores["term_nw"]["first_bit_unequal_j_i_k"],
-        "bit_unequal_j_values": baseline_scores["term_nw"]["bit_unequal_j_values"],
-        "bit_unequal_k_values": baseline_scores["term_nw"]["bit_unequal_k_values"],
-    }, "baseline stored-product census moved")
+    require(baseline_scores["term_nw"]["bit_unequal"] == 0,
+            "round-114 upstream closure did not make the stored product exact")
+    require(baseline_scores["acc_before"]["bit_unequal"] == 1618,
+            "baseline accumulator-before census moved")
     if plant != "none":
         raise GateError(f"{plant} plant fired")
 
