@@ -224,6 +224,8 @@ FILES = {
         _ORCA2_R120EENVFRAC_COMPILED / "domhgr.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R120EENVFRAC_COMPILED / "lbcnfd.f90"),
+    "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_R120EENVFRAC_COMPILED / "dynvor.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
