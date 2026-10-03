@@ -676,7 +676,15 @@ def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
 def nemo_literal_metric_transports(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
-    """Assemble NEMO DINO's literal ``zhU``/``zhV`` metric transports."""
+    """Assemble NEMO's literal ``zhU``/``zhV`` metric transports.
+
+    The compiled loop multiplies metric, already-associated velocity and live
+    face depth without applying ``ssumask``/``ssvmask`` (dynspg_ts.f90:
+    565-570).  Those masks were applied while the prognostic fields were
+    formed; the subsequent lateral-boundary association intentionally
+    repopulates fold/halo faces that the continuity stencil consumes.
+    ``u_mask``/``v_mask`` remain accepted for call-site compatibility.
+    """
     # Rich/fold-aware geometry carries the full 2-D u-face meridional metric.
     # Lean LatLonGrid callers retain the canonical regular-grid construction.
     e2u = (grid.dy_u if hasattr(grid, "dy_u")
@@ -686,8 +694,8 @@ def nemo_literal_metric_transports(
     # generic divergence path.
     e1v = (grid.dx_v if hasattr(grid, "dx_v")
            else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
-    zh_u = ((e2u * U) * H_u) * u_mask
-    zh_v = ((e1v * V) * H_v) * v_mask
+    zh_u = (e2u * U) * H_u
+    zh_v = (e1v * V) * H_v
     return zh_u, zh_v
 
 

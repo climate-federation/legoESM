@@ -35,8 +35,8 @@ def test_matches_nemo_literal_source_order_bitwise():
     h_u, h_v, u, v, um, vm, grid = _case()
     got_u, got_v = nemo_literal_metric_transports(h_u, h_v, u, v, um, vm, grid)
     got = nemo_literal_continuity_divergence(h_u, h_v, u, v, um, vm, grid)
-    zh_u = ((grid.dy[:, None] * 0.5 * u) * h_u) * um
-    zh_v = ((grid.dx_v * v) * h_v) * vm
+    zh_u = (grid.dy[:, None] * 0.5 * u) * h_u
+    zh_v = (grid.dx_v * v) * h_v
     expected = ((zh_u[:, 1:] - zh_u[:, :-1])
                 + (zh_v[1:] - zh_v[:-1])) * (1.0 / grid.area)
     np.testing.assert_array_equal(np.asarray(got_u), np.asarray(zh_u))
@@ -67,5 +67,5 @@ def test_rich_geometry_uses_full_u_face_metric():
                            [51227.9, 51228.9, 51229.9, 51230.9]],
                           dtype=jnp.float64)
     got_u, _ = nemo_literal_metric_transports(h_u, h_v, u, v, um, vm, grid)
-    expected = ((grid.dy_u * u) * h_u) * um
+    expected = (grid.dy_u * u) * h_u
     np.testing.assert_array_equal(np.asarray(got_u), np.asarray(expected))
