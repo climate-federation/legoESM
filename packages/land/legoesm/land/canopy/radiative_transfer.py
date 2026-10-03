@@ -574,18 +574,24 @@ _CLM_VAI_CUT = 0.05          # elai, esai < 0.05 -> 0
 _N_CLM_PFT = 17              # natural PFTs 0..16 (surfdata npft, CLM5 order)
 
 
-@functools.lru_cache(maxsize=1)
 def _clm5_pft_optics():
+    """Guarded front end of :func:`_clm5_pft_optics_cached`: the tower-site
+    override switch is checked on EVERY call, not only when the cache fills."""
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLclm_varctl
+    if MLclm_varctl.pftcon_val != 0:
+        raise ValueError("canopy snow albedo needs the CLM default PFT optics; "
+                         "pftcon_val is set to a tower-site override")
+    return _clm5_pft_optics_cached()
+
+
+@functools.lru_cache(maxsize=1)
+def _clm5_pft_optics_cached():
     """CLM5 default per-PFT leaf/stem optics, rows 0..16, columns (vis, nir):
     ``(xl, rhol, taul, rhos, taus)`` from the repo's port of CLM pftconMod, as
     host NumPy arrays (built eagerly even when first called inside a jit trace,
     so the cache never holds a tracer)."""
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import pftconMod as _pc
     from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import inir, ivis
-    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLclm_varctl
-    if MLclm_varctl.pftcon_val != 0:
-        raise ValueError("canopy snow albedo needs the CLM default PFT optics; "
-                         "pftcon_val is set to a tower-site override")
     with jax.ensure_compile_time_eval():
         pc = _pc.InitRead(_pc.InitAllocate())
     rows = slice(0, _N_CLM_PFT)
@@ -593,6 +599,27 @@ def _clm5_pft_optics():
                              axis=-1)
     return (np.asarray(pc.xl)[rows], two(pc.rhol), two(pc.taul), two(pc.rhos),
             two(pc.taus))
+
+
+def clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow, snow_depth):
+    """CLM5 leaf and stem area left exposed above the snow, ``(elai, esai)``
+    (SatellitePhenologyMod.F90 173-188): trees and shrubs (PFT 1..11) are
+    buried from ``hbot`` up to ``htop``; grasses and crops up to 0.8 ``htop``
+    (20% bending, floor 0.05 m); the burial applies on the snow-covered
+    fraction ``f_snow``; exposed areas below 0.05 are set to zero."""
+    ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
+    tall = (ip > 0) & (ip <= _CLM_TALL_PFT_MAX)
+    ol = jnp.clip(snow_depth - hbot, 0.0, htop - hbot)
+    fb_tall = 1.0 - ol / jnp.maximum(htop - hbot, 1e-6)
+    hb = jnp.maximum(_CLM_SHORT_HMIN, _CLM_SHORT_BEND * htop)
+    fb_short = 1.0 - jnp.clip(snow_depth, 0.0, hb) / hb
+    fb = jnp.where(tall, fb_tall, fb_short)
+
+    def _exposed(x):
+        e = jnp.maximum(x * (1.0 - f_snow) + x * fb * f_snow, 0.0)
+        return jnp.where(e < _CLM_VAI_CUT, 0.0, e)
+
+    return _exposed(LAI), _exposed(SAI)
 
 
 def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
@@ -617,16 +644,8 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     (fcansno = 0): a bare-branch bound."""
     xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
     ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
-    tall = (ip > 0) & (ip <= _CLM_TALL_PFT_MAX)
-    ol = jnp.clip(snow_depth - hbot, 0.0, htop - hbot)
-    fb_tall = 1.0 - ol / jnp.maximum(htop - hbot, 1e-6)
-    hb = jnp.maximum(_CLM_SHORT_HMIN, _CLM_SHORT_BEND * htop)
-    fb_short = 1.0 - jnp.clip(snow_depth, 0.0, hb) / hb
-    fb = jnp.where(tall, fb_tall, fb_short)
-
-    def _exposed(x):
-        e = jnp.maximum(x * (1.0 - f_snow) + x * fb * f_snow, 0.0)
-        return jnp.where(e < _CLM_VAI_CUT, 0.0, e)
+    elai, esai = clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow,
+                                   snow_depth)
 
     def _ts(lai, sai, ground):
         vai = lai + sai
@@ -640,7 +659,7 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     tsai = jnp.where(SAI < _CLM_VAI_CUT, 0.0, SAI)
     # Parenthesised so a zero increment returns alb_snowfree bit-exactly; no
     # plant area returns alb_snowy bit-exactly (the unmasked model value).
-    masked = alb_snowfree + (_ts(_exposed(LAI), _exposed(SAI), alb_snowy)
+    masked = alb_snowfree + (_ts(elai, esai, alb_snowy)
                              - _ts(tlai, tsai, alb_snowfree))
     return jnp.where(tlai + tsai > 0.0, masked, alb_snowy)
 

@@ -412,7 +412,7 @@ def test_optics_cache_is_safe_under_jit():
     """The PFT optics table is cached; filling the cache from inside a jit trace
     must not store a tracer (a second, differently-shaped trace would then fail)."""
     from legoesm.land.canopy import radiative_transfer as _rt
-    _rt._clm5_pft_optics.cache_clear()
+    _rt._clm5_pft_optics_cached.cache_clear()
     f = jax.jit(lambda a, s: canopy_masked_snow_albedo(
         a, s, 1, jnp.full(a.shape, 1.5), jnp.full(a.shape, 0.44),
         jnp.full(a.shape, 16.0), jnp.full(a.shape, 8.0), jnp.full(a.shape, 2.0),
@@ -433,3 +433,79 @@ def test_switch_without_land_params_raises():
     with pytest.raises(ValueError, match="canopy_snow_masking"):
         step_multilayer_land_with_diagnostics(
             state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1))
+
+
+
+# Reference values from EXECUTING the verbatim CTSM 5.1 SatellitePhenologyMod.F90
+# burial lines 173-178 and 185-188 (gfortran; scripts/validate/ctsm_burial_oracle.F90
+# + ..._cases.txt).  (pft, htop, hbot, snow_depth, frac_sno, tlai, tsai) -> (elai, esai)
+BURIAL = [
+    ((2, 16.4, 8.2, 0.30, 1.0, 1.51, 0.44), (1.5100000000000000E+00, 4.4000000000000000E-01)),
+    ((2, 16.4, 8.2, 9.00, 0.8, 1.51, 0.44), (1.3921463414634143E+00, 4.0565853658536583E-01)),
+    ((11, 0.5, 0.1, 0.30, 0.9, 0.00, 0.31), (0.0000000000000000E+00, 1.7050000000000001E-01)),
+    ((11, 0.5, 0.1, 0.60, 1.0, 0.20, 0.31), (0.0000000000000000E+00, 0.0000000000000000E+00)),
+    ((12, 0.5, 0.0, 0.20, 1.0, 0.02, 0.30), (0.0000000000000000E+00, 1.4999999999999999E-01)),
+    ((13, 0.5, 0.0, 0.50, 1.0, 0.30, 0.40), (0.0000000000000000E+00, 0.0000000000000000E+00)),
+    ((15, 0.1, 0.0, 0.0908, 0.6, 0.40, 0.10), (1.6000000000000003E-01, 0.0000000000000000E+00)),
+    ((13, 0.5, 0.0, 0.10, 0.3, 0.30, 0.40), (2.7749999999999997E-01, 3.7000000000000000E-01)),
+    ((0, 0.0, 0.0, 0.30, 1.0, 0.00, 0.00), (0.0000000000000000E+00, 0.0000000000000000E+00)),
+]
+
+
+@pytest.mark.parametrize("inp,ref", BURIAL)
+def test_burial_matches_executed_ctsm_fortran(inp, ref):
+    from legoesm.land.canopy.radiative_transfer import clm5_exposed_area
+    pft, ht, hb, sd, fs, tl, ts = inp
+    a = lambda v: np.array([float(v)])
+    elai, esai = clm5_exposed_area(a(tl), a(ts), a(ht), a(hb), a(pft), a(fs), a(sd))
+    np.testing.assert_allclose([float(elai[0]), float(esai[0])], ref, rtol=1e-12, atol=0)
+
+
+def test_tower_override_refused_even_after_cache_fill(monkeypatch):
+    from legoesm.land.canopy import radiative_transfer as _rt
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLclm_varctl
+    _rt._clm5_pft_optics()                      # fill the cache with defaults
+    monkeypatch.setattr(MLclm_varctl, "pftcon_val", 1)
+    with pytest.raises(ValueError, match="pftcon_val"):
+        _rt._clm5_pft_optics()
+
+
+def test_finite_and_bounded_over_all_plants_and_light():
+    """Sweep every PFT, sun angle, plant area, ground albedo and diffuse share:
+    a NaN here would be silently replaced by the land step's held-column
+    fallback, so it must never be produced."""
+    pft = np.arange(17.0)
+    cz = np.array([0.0, 0.02, 0.1, 0.4, 1.0])
+    vai = np.array([0.0, 0.06, 0.5, 2.0, 6.0])
+    grd = np.array([0.05, 0.5, 0.95])
+    fd = np.array([0.0, 0.5, 1.0])
+    P, C, V, G, F = (x.ravel() for x in np.meshgrid(pft, cz, vai, grd, fd, indexing="ij"))
+    for band in (0, 1):
+        out = np.asarray(canopy_masked_snow_albedo(
+            np.minimum(G, 0.3), G, band, 0.7 * V, 0.3 * V, np.full_like(V, 10.0),
+            np.full_like(V, 2.0), P, np.full_like(V, 0.8), np.full_like(V, 0.3), C, F))
+        assert np.all(np.isfinite(out)), band
+        assert np.all((out > 0.0) & (out < 1.0)), (out.min(), out.max())
+
+
+def test_switch_off_ignores_the_new_structure_fields():
+    """With the switch off, carrying SAI_dom/hbot_dom/pft_dom or not gives the
+    same land step bit for bit (the fields are read only by the masking)."""
+    cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
+                               surface_scheme=TwoLeafCanopyConfig())
+    state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
+    state = state._replace(snow_depth=jnp.asarray([0.0, 200.0, 200.0, 5.0]))
+    base = bare_canopy_params(NCOL)._replace(
+        LAI=jnp.full(NCOL, 1.5), hc=jnp.full(NCOL, 16.0),
+        ALB_VIS=jnp.full(NCOL, 0.06), ALB_NIR=jnp.full(NCOL, 0.12))
+    full = bare_canopy_params(NCOL, canopy_structure=True)._replace(
+        LAI=base.LAI, hc=base.hc, ALB_VIS=base.ALB_VIS, ALB_NIR=base.ALB_NIR,
+        SAI_dom=jnp.full(NCOL, 0.44), hbot_dom=jnp.full(NCOL, 8.0),
+        pft_dom=jnp.full(NCOL, 2.0))
+    outs = [step_multilayer_land_with_diagnostics(
+        state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1), land_params=lp)
+        for lp in (base, full)]
+    la, lb = jax.tree.leaves(outs[0][:2]), jax.tree.leaves(outs[1][:2])
+    assert len(la) == len(lb) > 10
+    for x, y in zip(la, lb):
+        assert np.asarray(x).tobytes() == np.asarray(y).tobytes()

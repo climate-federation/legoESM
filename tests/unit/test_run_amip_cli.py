@@ -4762,14 +4762,16 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
         base + ["--land-canopy-snow-masking"]), parser))
     assert cfg1.land_canopy_snow_masking is True
-    try:                      # this analytical setup fails for unrelated reasons
-        cfg1.validate_strict()
-    except ValueError as e:
-        assert "land_canopy_snow_masking" not in str(e)
+    # the production deck does not set it, and with the switch on it validates
+    p = build_arg_parser()
     rows = load_yaml_config(
-        str(_repo_root() / "config" / "amip" / "amip_production.yaml"),
-        build_arg_parser())
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
     assert "land_canopy_snow_masking" not in rows
+    p.set_defaults(**rows)
+    prod_on = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS + ["--land-canopy-snow-masking"]), p))
+    assert prod_on.land_canopy_snow_masking is True
+    prod_on.validate_strict()
     bad = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--land-canopy-snow-masking"]), parser))
     with pytest.raises(ValueError, match="land_canopy_snow_masking"):
