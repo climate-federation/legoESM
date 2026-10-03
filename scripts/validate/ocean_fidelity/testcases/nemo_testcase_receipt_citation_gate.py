@@ -1285,6 +1285,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 119: V recurrence source-ordered walk -----------------
+    'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dynspg_ts.f90:1317-1327': [
+        ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
+        ('ffv_se(ji,jj) = ffv_se(ji,jj) +', 1), 11],
     # --- ORCA2 round 118: all four V EEN recurrences -----------------------
     'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/dynspg_ts.f90:1324-1327': [
         ('ffv_nw(ji,jj) = ffv_nw(ji,jj) +', 1),
