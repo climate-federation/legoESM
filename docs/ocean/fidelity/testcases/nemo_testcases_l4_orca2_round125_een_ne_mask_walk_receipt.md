@@ -76,10 +76,21 @@ reruns. This receipt makes no month-scale claim.
 
 ## Tests, citations, and review
 
-The direct synthetic tests pass 3/3, including a nonzero-`r3f` control that
-distinguishes the correct mask from the wrong one. The cumulative focused and
-required ocean-fidelity battery results are recorded below after the final
-receipt commit.
+The round-120–125 plus cumulative-citation focused battery passes 40/40,
+including a nonzero-`r3f` control that distinguishes the correct mask from the
+wrong one. The default citation gate passes 274 citations and this receipt's
+gate passes all three citations with zero failures or unmapped entries;
+shifting the compiled `dommsk` citation makes the gate fail with
+`SYMBOL-NOT-AT-LINE`.
+
+The required `tests/ocean/fidelity -n 12` invocation collected 2,381 tests and
+reached 98%; 2,333 tests passed before reproducing the registered
+xdist-controller tail stall after the count of real pytest processes reached
+zero. It was interrupted after the grace period and is **incomplete, not
+PASS**. Its six displayed failures are the registered pre-existing SI3 scalar-
+math provenance, round-129 spread-floor stamp, round-51 private-arm scope,
+round-35 escape scope, worktree-stamp, and recipe case-board rows. No
+round-125 test failed.
 
 Separate `codex exec --sandbox read-only` review was attempted. Verdict:
 **independent review unavailable in-sandbox** (`failed to initialize
