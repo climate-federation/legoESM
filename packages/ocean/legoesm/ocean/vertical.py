@@ -1440,6 +1440,7 @@ def create_partial_cell_coordinate(
     H_bathy: jnp.ndarray,
     *,
     bottom_index_rule: str = "interface",
+    min_partial_thickness: float | None = None,
 ) -> OceanPartialCellCoordinate:
     """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
 
@@ -1462,6 +1463,27 @@ def create_partial_cell_coordinate(
         legacy near-full snap.  It requires an explicit ``z_coord.t_depth_ref``;
         no arithmetic-midpoint fallback is allowed because that changes
         ``k_bot`` on stretched external grids.
+        ``"nemo_zps_e3min"`` is the OTHER rule NEMO's shipped zps user domains
+        run, and it is NOT equivalent to ``"nemo_tpoint"``:
+        ``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:204,209-212`` sets
+        ``ze3min = 0.1*rn_dz`` and then
+
+            k_bot = jpkm1
+            DO jk = jpkm1,1,-1 ; WHERE( zht < pdepw_1d(jk)+ze3min ) k_bot = jk-1
+
+        i.e. ``k_bot`` counts the W interfaces that clear the floor, so the
+        thinnest bottom cell is a TENTH of the reference thickness where the
+        T-point rule's is a HALF.  On a uniform ladder the two disagree for
+        every column whose bathymetry lands in
+        ``[pdepw+ze3min, pdepw+0.5*dz)``.  The bottom thickness is then
+        ``MIN(H, pdepw_1d(k+1)) - pdepw_1d(k)``, in NEMO's own association
+        (``OVERFLOW:221-225``) -- not ``H - pdepw_1d(k)`` clipped, which is
+        algebraically the same and bitwise is not.  It requires
+        ``min_partial_thickness``.
+    min_partial_thickness : float, optional
+        ``ze3min`` for ``bottom_index_rule="nemo_zps_e3min"``; refused (and
+        required) for exactly that rule, so neither rule can silently run with
+        the other's floor.
 
     Returns
     -------
@@ -1480,10 +1502,17 @@ def create_partial_cell_coordinate(
     nlev = z_coord.n_levels
     abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
 
-    if bottom_index_rule not in {"interface", "nemo_tpoint"}:
+    if bottom_index_rule not in {"interface", "nemo_tpoint", "nemo_zps_e3min"}:
         raise ValueError(
-            "bottom_index_rule must be 'interface' or 'nemo_tpoint', got "
-            f"{bottom_index_rule!r}"
+            "bottom_index_rule must be 'interface', 'nemo_tpoint' or "
+            f"'nemo_zps_e3min', got {bottom_index_rule!r}"
+        )
+    if (bottom_index_rule == "nemo_zps_e3min") != (min_partial_thickness
+                                                   is not None):
+        raise ValueError(
+            "min_partial_thickness is required by, and only by, "
+            'bottom_index_rule="nemo_zps_e3min" (NEMO\'s ze3min); got rule '
+            f"{bottom_index_rule!r} with {min_partial_thickness!r}"
         )
 
     # Number of reference points strictly shallower than H_bathy.  The legacy
@@ -1500,10 +1529,18 @@ def create_partial_cell_coordinate(
                 "the wrong NEMO bottom level on a stretched grid"
             )
         index_depths = jnp.abs(z_coord.t_depth_ref)
+    elif bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:209-212.  The loop runs jk = jpkm1..1 and the LAST write
+        # wins, so k_bot is the count of jk in 1..jpkm1 whose
+        # pdepw_1d(jk)+ze3min does NOT exceed zht -- the complement of the
+        # loop's strict ``<``, hence ``<=`` here.
+        index_depths = abs_z_half[:nlev] + min_partial_thickness
     else:
         index_depths = abs_z_half
+    view = index_depths[(jnp.newaxis,) * n_lead + (slice(None),)]
     interfaces_above = jnp.sum(
-        index_depths[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        (view <= H_exp) if bottom_index_rule == "nemo_zps_e3min"
+        else (view < H_exp),
         axis=-1,
     )                                                # (...) integer
     bottom_level = interfaces_above.astype(jnp.int32) - 1
@@ -1546,7 +1583,14 @@ def create_partial_cell_coordinate(
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
     raw_partial = H - abs_z_at_bottom
     capped = jnp.minimum(raw_partial, dz_at_bottom)
-    if bottom_index_rule == "nemo_tpoint":
+    if bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:222 -- MIN(zht, pdepw_1d(ik+1)) - pdepw_1d(ik).  The MIN is
+        # INSIDE the subtraction there; clipping the difference instead is the
+        # same number in exact arithmetic and not in fp64.
+        partial_thickness = (
+            jnp.minimum(H, abs_z_half[jnp.minimum(safe_bottom + 1, nlev)])
+            - abs_z_at_bottom)
+    elif bottom_index_rule == "nemo_tpoint":
         partial_thickness = capped
     else:
         near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5

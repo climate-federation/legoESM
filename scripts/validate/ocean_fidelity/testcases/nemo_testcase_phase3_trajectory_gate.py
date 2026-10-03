@@ -59,6 +59,15 @@ DEFAULT_ORACLE_ROOTS = {
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/flx"),
     "VORTEX_VEC-10km-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/vec"),
+    # Decision 88's seamount pair (round 211 acquired, round 212 scores): the
+    # same 30 km deck with a Gaussian seamount and z partial bottom cells,
+    # built through NEMO's own usrdef_zgr hook on key_vco_1d3d.
+    "VORTEX_SMT-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "VORTEX_SMT_OMIP_L1_P3/kt1_10"),
+    "VORTEX_SMT_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
