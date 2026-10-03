@@ -169,7 +169,9 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         (name for name in SOURCE_ORDER if baseline_scores[name]["bit_unequal"]), None)
     candidate_first = next(
         (name for name in SOURCE_ORDER if candidate_scores[name]["bit_unequal"]), None)
-    require(baseline_first == "term_nw", "baseline first boundary moved")
+    require(baseline_first == "term_nw",
+            "baseline first boundary moved: "
+            f"{baseline_first} {baseline_scores.get(baseline_first)}")
     require(baseline_scores["term_nw"] == {
         "bit_unequal": 2,
         "magnitude_unequal": 0,
