@@ -113,7 +113,7 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     if plant == "stage1-count":
         report["boundaries"]["stage1_tracer"]["nonfinite"]["T"] = 1
     elif plant == "passivity":
-        report["live_trace_state_equal"]["T"] = False
+        report["ordinary_repeat_state_equal"]["T"] = False
 
     require(tuple(report.get("boundary_order", ())) == BOUNDARIES,
             "step-16 boundary order changed")
@@ -124,8 +124,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "execution policy changed")
     require(report.get("steps_completed_before_walk") == 15,
             "walk did not start from step 15")
-    require(all(report["live_trace_state_equal"].values()),
-            "live stage trace changed the ordinary step-16 state")
+    require(all(report["ordinary_repeat_state_equal"].values()),
+            "ordinary step-16 repeat changed bits")
 
     for name in BOUNDARIES:
         row = report["boundaries"][name]
@@ -162,8 +162,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
                          if report["boundaries"][name]["nonfinite_total"]],
         },
         "R131-P4": {
-            "status": "CONFIRMED",
-            "observed": report["live_trace_state_equal"],
+            "status": "UNMEASURED",
+            "observed": report["instrument_limit"],
         },
         "R131-P5": {
             "status": "CONFIRMED",
@@ -222,18 +222,16 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
     state15 = state
     returned = jax.device_get(ordinary.step(
         state15, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-
-    live = model(_NEMOWSRK3TestHooks(expose_live_stage_operands=True))
-    live_trace = jax.device_get(live.step(
+    returned_repeat = jax.device_get(ordinary.step(
         state15, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    require(len(live_trace.stage_outputs) == 3,
-            "live stage trace is incomplete")
 
     def exposed(hooks):
         return jax.device_get(model(hooks).step(
             state15, card.dt_s, freshwater=freshwater,
             surface_forcing=surface))
 
+    stage1 = exposed(_NEMOWSRK3TestHooks(expose_tracer_stage=1))
+    stage2 = exposed(_NEMOWSRK3TestHooks(expose_tracer_stage=2))
     adv_content = exposed(_NEMOWSRK3TestHooks(
         expose_stage3_advection_content=True))
     pre_content = exposed(_NEMOWSRK3TestHooks(
@@ -241,14 +239,12 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
     pre_concentration = exposed(_NEMOWSRK3TestHooks(
         expose_pre_implicit_state=True))
 
-    stage1 = live_trace.stage_outputs[0]
-    stage2 = live_trace.stage_outputs[1]
     boundaries = {
         "step15_entry": boundary_summary(_state_arrays(state15)),
         "stage1_tracer": boundary_summary(
-            _tracer_arrays(stage1[2], stage1[3])),
+            _tracer_arrays(stage1.T.data, stage1.S.data)),
         "stage2_tracer": boundary_summary(
-            _tracer_arrays(stage2[2], stage2[3])),
+            _tracer_arrays(stage2.T.data, stage2.S.data)),
         "stage3_advection_content": boundary_summary(
             _tracer_arrays(adv_content.T.data, adv_content.S.data)),
         "pre_implicit_content": boundary_summary(
@@ -271,8 +267,13 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
         "boundary_order": list(BOUNDARIES),
         "boundaries": boundaries,
         "first_nonfinite_boundary": first,
-        "live_trace_state_equal": state_bit_rows(
-            live_trace.state_after, returned),
+        "ordinary_repeat_state_equal": state_bit_rows(
+            returned_repeat, returned),
+        "instrument_limit": (
+            "the broad live-stage trace refuses constant-mixing rung 0 "
+            "because its TKE-only return contract is incomplete; existing "
+            "post-step write-only tracer exposures provide the boundary "
+            "payloads but not a paired state_after"),
         "worktree": stamp,
         "wall_seconds": time.time() - started,
         "compiled_citations": {

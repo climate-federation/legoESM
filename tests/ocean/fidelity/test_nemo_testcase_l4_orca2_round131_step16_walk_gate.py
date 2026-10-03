@@ -37,7 +37,8 @@ def _report(first: str = "stage3_advection_content") -> dict[str, object]:
         "boundary_order": list(gate.BOUNDARIES),
         "boundaries": boundaries,
         "first_nonfinite_boundary": first,
-        "live_trace_state_equal": {name: True for name in gate.FIELDS},
+        "ordinary_repeat_state_equal": {name: True for name in gate.FIELDS},
+        "instrument_limit": "synthetic fixture",
     }
 
 
