@@ -327,7 +327,7 @@ trajectory-gate cards.
 | `VORTEX_VEC-zco` | **PASS** | 50 | **0 ULP** | kt=2 u/v/ssh → unchanged |
 | `LOCK_EXCHANGE-zco` | **PASS** | 50 | **0 ULP** | kt=8 u → unchanged |
 | `OVERFLOW-zps` | **PASS** | 50 | **0 ULP** | kt=2 T/u → unchanged |
-| `GYRE-zco` | PENDING (re-run; the first attempt aborted on an uncommitted receipt, not on a comparison) | | | |
+| `GYRE-zco` (its own gate, 954 cellwise rows) | **PASS** | 954 | **0 ULP** | kt=3 T/S/u/v/ssh → unchanged |
 
 ### (c) the DINO from-rest month gate
 
