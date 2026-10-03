@@ -63,6 +63,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
+    pad_ns_scalar,
     pad_ns_vector_v,
 )
 from legoesm.ocean.vertical import (
@@ -604,6 +605,12 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         ssh_avg_v = apply_north_fold(
             ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
     H_v = nemo_source_round(H_v_ref + ssh_avg_v)
+    # The same external-mode lbc_lnk statement associates the live V-face
+    # depth before its reciprocal is formed and carried (dynspg_ts.f90:
+    # 761-779).  The northern row is a scalar V-grid fold row: sign +1 and
+    # the T-pivot permutation of the final interior V row.
+    if fold_is_local(grid) or _nfold_mask is not None:
+        H_v = pad_ns_scalar(H_v[1:-1], grid)
     r1_v_denom = nemo_source_round(nemo_source_round(H_v + 1.0) - v_mask)
     r1_v = nemo_source_round(v_mask / r1_v_denom)
     r1_v0_denom = nemo_source_round(
