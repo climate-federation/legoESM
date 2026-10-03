@@ -1,19 +1,21 @@
 program ts_oracle
   ! Build: gfortran -ffree-line-length-none ctsm_twostream_oracle.F90 -o o && ./o < ctsm_twostream_oracle_cases.txt
-  ! Input row: elai esai f_leaf(unused) xl coszen fcansno rho_vis tau_vis rho_nir tau_nir alb_g_vis alb_g_nir
+  ! Executes VERBATIM CTSM 5.1 SurfaceAlbedoMod.F90 lines 823-824 (leaf/stem weights),
+  ! 830-831 (weighted rho/tau), 1320-1338 (preamble) and 1381-1518 (per-band albedo)
+  ! on one patch.  Only edits: patch%itype(p) -> 1 (one PFT row).  mpe = 1e-6 (clm_varcon).
+  ! Input row: elai esai xl coszen fcansno rhol_v rhol_n taul_v taul_n rhos_v rhos_n taus_v taus_n albg_v albg_n
   ! Output row: albd_vis albi_vis albd_nir albi_nir.  Feeds tests/land/unit/test_canopy_snow_albedo.py::FORTRAN.
-  ! Only edit: xl(patch%itype(p)) -> xl(p) (one patch).
-  ! Executes the VERBATIM CTSM 5.1 SurfaceAlbedoMod.F90 TwoStream lines
-  ! 1320-1338 (preamble) and 1381-1518 (per-band albedo) on one patch.
   implicit none
   integer, parameter :: r8 = selected_real_kind(12)
   integer, parameter :: numrad = 2
+  real(r8), parameter :: mpe = 1.e-06_r8
   real(r8) :: omegas(numrad) = (/0.8_r8, 0.4_r8/), betads = 0.5_r8, betais = 0.5_r8
   real(r8) :: tfrz = 273.15_r8
   logical :: lSFonly = .false., snowveg_affects_radiation = .true.
   integer :: p, c, ib, ncase, k
   real(r8) :: coszen(1), xl(1), chil(1), gdir(1), twostext(1), avmu(1), temp0(1), temp2(1)
-  real(r8) :: elai(1), esai(1), fcansno(1), fwet(1), t_veg(1)
+  real(r8) :: elai(1), esai(1), fcansno(1), fwet(1), t_veg(1), wl(1), ws(1)
+  real(r8) :: rhol(1,numrad), taul(1,numrad), rhos(1,numrad), taus(1,numrad)
   real(r8) :: rho(1,numrad), tau(1,numrad), omega(1,numrad)
   real(r8) :: albgrd(1,numrad), albgri(1,numrad), albsod(1,numrad), albsoi(1,numrad)
   real(r8) :: albd(1,numrad), albi(1,numrad), ftid(1,numrad), ftdd(1,numrad), fabd(1,numrad)
@@ -22,14 +24,21 @@ program ts_oracle
   real(r8) :: cosz, phi1, phi2, temp1, omegal, asu, betadl, betail, tmp0, tmp1, tmp2, tmp3, tmp4
   real(r8) :: tmp5, tmp6, tmp7, tmp8, tmp9, betad, betai, b, c1, d, f, h, sigma, p1, p2, p3, p4
   real(r8) :: t1, s1, s2, u1, u2, u3, d1, d2, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, a1, a2
-  real(r8) :: rl, tl, rs, ts, fl
   p = 1; c = 1; fwet = 0._r8; t_veg = 260._r8
   read(*,*) ncase
   do k = 1, ncase
-    read(*,*) elai(1), esai(1), fl, xl(1), coszen(1), fcansno(1), &
-              rho(1,1), tau(1,1), rho(1,2), tau(1,2), albgrd(1,1), albgrd(1,2)
+    read(*,*) elai(1), esai(1), xl(1), coszen(1), fcansno(1), rhol(1,1), rhol(1,2), &
+              taul(1,1), taul(1,2), rhos(1,1), rhos(1,2), taus(1,1), taus(1,2), albgrd(1,1), albgrd(1,2)
     albgri = albgrd; albsod = albgrd; albsoi = albgrd
-    ! ---- CTSM lines 1320-1336 ----
+    ! ---- CTSM lines 823-824 ----
+       wl(p) = elai(p) / max( elai(p)+esai(p), mpe )
+       ws(p) = esai(p) / max( elai(p)+esai(p), mpe )
+    do ib = 1, numrad
+    ! ---- CTSM lines 830-831 ----
+          rho(p,ib) = max( rhol(1,ib)*wl(p) + rhos(1,ib)*ws(p), mpe )
+          tau(p,ib) = max( taul(1,ib)*wl(p) + taus(1,ib)*ws(p), mpe )
+    end do
+    ! ---- CTSM lines 1320-1338 ----
        ! note that the following limit only acts on cosz values > 0 and less than
        ! 0.001, not on values cosz = 0, since these zero have already been filtered
        ! out in filter_vegsol

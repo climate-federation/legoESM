@@ -57,10 +57,12 @@ clumping, kb == kd smoothness / AD).
 
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 
@@ -572,19 +574,25 @@ _CLM_VAI_CUT = 0.05          # elai, esai < 0.05 -> 0
 _N_CLM_PFT = 17              # natural PFTs 0..16 (surfdata npft, CLM5 order)
 
 
+@functools.lru_cache(maxsize=1)
 def _clm5_pft_optics():
     """CLM5 default per-PFT leaf/stem optics, rows 0..16, columns (vis, nir):
-    ``(xl, rhol, taul, rhos, taus)`` from the repo's port of CLM pftconMod."""
+    ``(xl, rhol, taul, rhos, taus)`` from the repo's port of CLM pftconMod, as
+    host NumPy arrays (built eagerly even when first called inside a jit trace,
+    so the cache never holds a tracer)."""
     from legoesm.land.canopy.clm_ml_backend.clm_src_main import pftconMod as _pc
     from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import inir, ivis
     from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLclm_varctl
     if MLclm_varctl.pftcon_val != 0:
         raise ValueError("canopy snow albedo needs the CLM default PFT optics; "
                          "pftcon_val is set to a tower-site override")
-    pc = _pc.InitRead(_pc.InitAllocate())
+    with jax.ensure_compile_time_eval():
+        pc = _pc.InitRead(_pc.InitAllocate())
     rows = slice(0, _N_CLM_PFT)
-    two = lambda a: jnp.stack([a[rows, ivis], a[rows, inir]], axis=-1)
-    return pc.xl[rows], two(pc.rhol), two(pc.taul), two(pc.rhos), two(pc.taus)
+    two = lambda a: np.stack([np.asarray(a)[rows, ivis], np.asarray(a)[rows, inir]],
+                             axis=-1)
+    return (np.asarray(pc.xl)[rows], two(pc.rhol), two(pc.taul), two(pc.rhos),
+            two(pc.taus))
 
 
 def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
@@ -607,7 +615,7 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     ``alb_snowy`` exactly; no snow -> ``alb_snowfree`` exactly.  ``band`` 0 =
     visible, 1 = near-infrared.  Intercepted canopy snow is not represented
     (fcansno = 0): a bare-branch bound."""
-    xl_t, rhol_t, taul_t, rhos_t, taus_t = _clm5_pft_optics()
+    xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
     ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
     tall = (ip > 0) & (ip <= _CLM_TALL_PFT_MAX)
     ol = jnp.clip(snow_depth - hbot, 0.0, htop - hbot)

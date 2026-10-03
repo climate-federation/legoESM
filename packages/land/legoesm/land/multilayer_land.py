@@ -78,6 +78,7 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
     dry_soil_brightening,
+    ground_snow_cover,
     land_vegetation_albedo,
     snow_albedo,
     snow_cover_fraction,
@@ -392,15 +393,12 @@ def _canopy_masked_band(snowy_fn, lp, LAI_override, swe, config, band, forcing):
     (``config.canopy_snow_masking``): wraps the unmasked ``snowy_fn`` (soil band
     -> snowy ground albedo) in :func:`canopy_masked_snow_albedo`, using the SAME
     ground snow cover the unmasked blend uses and the LAI the canopy fluxes use."""
-    if lp.SAI is None or lp.hbot is None or lp.pft_index is None:
+    if lp.SAI_dom is None or lp.hbot_dom is None or lp.pft_dom is None:
         raise ValueError(
-            "canopy_snow_masking needs per-column SAI, hbot and pft_index in the "
+            "canopy_snow_masking needs per-column SAI_dom, hbot_dom and pft_dom in the "
             "canopy parameters (build_canopy_params / the per-step updater set "
             "them); these parameters carry none")
-    la = config.land_albedo
-    f_snow = snow_cover_fraction(swe, la)
-    if la.snow_cover_scale is not None:
-        f_snow = jnp.clip(f_snow * jnp.asarray(la.snow_cover_scale), 0.0, 1.0)
+    f_snow = ground_snow_cover(swe, config.land_albedo)
     lai = lp.LAI if LAI_override is None else LAI_override
     # Snow depth [m] for the CLM5 burial of short plants: SWE over a bulk density.
     depth = swe / constants.rho_snow_land
@@ -412,8 +410,8 @@ def _canopy_masked_band(snowy_fn, lp, LAI_override, swe, config, band, forcing):
     tot = s_dir + s_dif
     f_dif = jnp.where(tot > 0.0, s_dif / jnp.where(tot > 0.0, tot, 1.0), 1.0)
     return lambda a: canopy_masked_snow_albedo(
-        a, snowy_fn(a), band, jnp.broadcast_to(lai, swe.shape), lp.SAI, lp.hc,
-        lp.hbot, lp.pft_index, f_snow, depth, forcing.cos_zenith, f_dif)
+        a, snowy_fn(a), band, jnp.broadcast_to(lai, swe.shape), lp.SAI_dom, lp.hc,
+        lp.hbot_dom, lp.pft_dom, f_snow, depth, forcing.cos_zenith, f_dif)
 
 
 def _step_multilayer_land_impl(
@@ -498,11 +496,12 @@ def _step_multilayer_land_impl(
     if config.canopy_snow_masking and (
             bands is not None
             or not isinstance(config.surface_scheme, TwoLeafCanopyConfig)
-            or not config.snow_albedo_feedback or lat is None):
+            or not config.snow_albedo_feedback or lat is None
+            or land_params is None):
         raise ValueError(
             "canopy_snow_masking is implemented only for the two-leaf canopy with "
-            "snow_albedo_feedback on, a latitude field, and no elevation bands; "
-            "anywhere else it would be silently inert")
+            "snow_albedo_feedback on, a latitude field, canopy land_params and no "
+            "elevation bands; anywhere else it would be silently inert")
     if bands is not None:
         if isinstance(config.surface_scheme,
                       (TwoLeafCanopyConfig, CLMMLCanopyConfig)):

@@ -186,7 +186,7 @@ def apply_canopy_updater(pre: CanopyUpdaterInputs, theta_top: jnp.ndarray,
         emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
         ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
         ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
-        SAI=SAI, hbot=hbot, pft_index=dom_idx.astype(LAI.dtype),
+        SAI_dom=SAI, hbot_dom=hbot, pft_dom=dom_idx.astype(LAI.dtype),
         # None when not selected -> multilayer_land._get falls back to the
         # scalar MultiLayerLandConfig values (behaviour-preserving).
         root_depth=(None if pre.lut_root_depth is None

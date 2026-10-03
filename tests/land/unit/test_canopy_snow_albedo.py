@@ -97,37 +97,41 @@ def test_closed_form_matches_ode_solve(case):
 
 
 # Reference values from EXECUTING the verbatim CTSM 5.1 SurfaceAlbedoMod.F90
-# TwoStream lines 1320-1338 and 1381-1518 (gfortran, one patch, snowveg on;
-# harness scripts/validate/ctsm_twostream_oracle.F90).  Inputs are
-# the already leaf/stem-weighted rho, tau per band (vis, nir) and one ground
-# albedo for both beam and diffuse.
-# (elai, esai, xl, coszen, fcansno, rho_v, tau_v, rho_n, tau_n, ground)
+# lines 823-824 and 830-831 (leaf/stem weighting), 1320-1338 and 1381-1518
+# (TwoStream albedo), gfortran, one patch, snowveg on; harness
+# scripts/validate/ctsm_twostream_oracle.F90 + ..._cases.txt (same rows).
+# (elai, esai, xl, coszen, fcansno, rhol_v, rhol_n, taul_v, taul_n, rhos_v,
+#  rhos_n, taus_v, taus_n, ground_v, ground_n)
 #   -> (albd_vis, albi_vis, albd_nir, albi_nir)
 FORTRAN = [
-    ((1.5015, 0.4485, 0.01, 0.15, 0.0, 0.0844, 0.0385, 0.2954, 0.0772, 0.75),
-     (4.6985547670003222E-02, 5.4124852179699257E-02, 1.6431565024278436E-01, 1.5733476633949589E-01)),
-    ((1.5015, 0.4485, 0.01, 0.30, 0.0, 0.0844, 0.0385, 0.2954, 0.0772, 0.75),
-     (4.3487246243209036E-02, 5.4124852179699257E-02, 1.4513227700748546E-01, 1.5733476633949589E-01)),
-    ((0.0, 0.55, 0.01, 0.20, 0.0, 0.16, 0.001, 0.39, 0.001, 0.70),
+    ((1.51, 0.44, 0.01, 0.15, 0.0, 0.07, 0.35, 0.05, 0.10, 0.16, 0.39, 0.001, 0.001, 0.75, 0.75),
+     (4.9571345752056475E-02, 5.6454576426496553E-02, 2.0106690286741402E-01, 1.9064478753149044E-01)),
+    ((1.51, 0.44, 0.01, 0.30, 0.0, 0.07, 0.35, 0.05, 0.10, 0.16, 0.39, 0.001, 0.001, 0.75, 0.75),
+     (4.5675123851123364E-02, 5.6454576426496553E-02, 1.7783639559774189E-01, 1.9064478753149044E-01)),
+    ((0.0, 0.55, 0.01, 0.20, 0.0, 0.07, 0.35, 0.05, 0.10, 0.16, 0.39, 0.001, 0.001, 0.70, 0.70),
      (1.7638087673267722E-01, 2.8977285821363896E-01, 2.9778662086858310E-01, 3.8278231839045324E-01)),
-    ((0.0192, 0.3008, -0.30, 0.50, 0.0, 0.2980, 0.1158, 0.5192, 0.2554, 0.60),
-     (4.2680633144274216E-01, 4.3690547457197604E-01, 5.3896985948284826E-01, 5.4547005167530960E-01)),
-    ((4.05, 0.45, 0.25, 0.70, 0.0, 0.106, 0.0451, 0.444, 0.2251, 0.12),
-     (3.3187318412708881E-02, 4.6809060320339449E-02, 2.2980739802767672E-01, 2.8796786798139018E-01)),
-    ((1.5015, 0.4485, 0.01, 0.15, 0.6, 0.0844, 0.0385, 0.2954, 0.0772, 0.75),
-     (2.7392032381651571E-01, 2.2985322847863321E-01, 1.8065533700492276E-01, 1.5869156680184110E-01)),
-    ((1.5015, 0.4485, 0.01, 0.15, 1.0, 0.0844, 0.0385, 0.2954, 0.0772, 0.75),
-     (5.2617930981239891E-01, 4.5614119854441160E-01, 1.9167008254406520E-01, 1.5969733826126503E-01)),
+    ((0.02, 0.30, -0.30, 0.50, 0.0, 0.11, 0.35, 0.05, 0.34, 0.31, 0.53, 0.12, 0.25, 0.60, 0.60),
+     (4.2661468988808698E-01, 4.3671772638670370E-01, 5.3889559077522131E-01, 5.4539470544492241E-01)),
+    ((4.05, 0.45, 0.25, 0.70, 0.0, 0.10, 0.45, 0.05, 0.25, 0.16, 0.39, 0.001, 0.001, 0.12, 0.12),
+     (3.3187318412708881E-02, 4.6809060320339449E-02, 2.2980739802767661E-01, 2.8796786798139012E-01)),
+    ((1.51, 0.44, 0.01, 0.15, 0.6, 0.07, 0.35, 0.05, 0.10, 0.16, 0.39, 0.001, 0.001, 0.75, 0.75),
+     (2.7566303715402962E-01, 2.3148597887500627E-01, 1.9517975684778313E-01, 1.7209337143057937E-01)),
+    ((1.51, 0.44, 0.01, 0.15, 1.0, 0.07, 0.35, 0.05, 0.10, 0.16, 0.39, 0.001, 0.001, 0.75, 0.75),
+     (5.2617930981239891E-01, 4.5614119854441160E-01, 1.9167008254406520E-01, 1.5969733826126509E-01)),
+    ((0.30, 0.40, -0.30, 0.05, 0.0, 0.11, 0.35, 0.05, 0.34, 0.31, 0.53, 0.12, 0.25, 0.65, 0.55),
+     (1.8782200761871046E-01, 2.9159566439368728E-01, 5.0751217169742657E-01, 4.4765209618737845E-01)),
 ]
 
 
 @pytest.mark.parametrize("inp,ref", FORTRAN)
 def test_matches_executed_ctsm_fortran(inp, ref):
-    el, es, xl, cz, fcs, rv, tv, rn, tn, g = inp
+    el, es, xl, cz, fcs, rlv, rln, tlv, tln, rsv, rsn, tsv, tsn, gv, gn = inp
+    vai = el + es
     got = []
-    for rho, tau, oms in ((rv, tv, 0.8), (rn, tn, 0.4)):
+    for rl, tl, rs, ts, g, oms in ((rlv, tlv, rsv, tsv, gv, 0.8),
+                                   (rln, tln, rsn, tsn, gn, 0.4)):
         albd, albi = clm5_two_stream_albedo(
-            np.array([el + es]), np.array([0.5]), rho, tau, rho, tau, xl,
+            np.array([vai]), np.array([el / max(vai, 1e-6)]), rl, tl, rs, ts, xl,
             np.array([cz]), np.array([g]), fcansno=fcs, omega_snow=oms)
         got += [float(albd[0]), float(albi[0])]
     np.testing.assert_allclose(got, ref, rtol=1e-12)
@@ -242,9 +246,9 @@ def _step(masking, sw=SW):
     state = state._replace(snow_depth=jnp.asarray([0.0, 200.0, 200.0, 5.0]),
                            snow_age=jnp.full(NCOL, 2.0 * 86400.0))
     lp = bare_canopy_params(NCOL, canopy_structure=True)._replace(
-        LAI=jnp.asarray([1.5, 1.5, 0.0, 1.5]), SAI=jnp.asarray([0.44, 0.44, 0.0, 0.44]),
-        hc=jnp.full(NCOL, 16.0), hbot=jnp.full(NCOL, 8.0),
-        pft_index=jnp.asarray([2.0, 2.0, 0.0, 2.0]),
+        LAI=jnp.asarray([1.5, 1.5, 0.0, 1.5]), SAI_dom=jnp.asarray([0.44, 0.44, 0.0, 0.44]),
+        hc=jnp.full(NCOL, 16.0), hbot_dom=jnp.full(NCOL, 8.0),
+        pft_dom=jnp.asarray([2.0, 2.0, 0.0, 2.0]),
         ALB_VIS=jnp.full(NCOL, 0.06), ALB_NIR=jnp.full(NCOL, 0.12))
     new, resp, _, sfc = step_multilayer_land_with_diagnostics(
         state, _forcing(sw), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
@@ -308,7 +312,7 @@ def test_switch_without_canopy_structure_raises():
                                canopy_snow_masking=True)
     state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     lp = bare_canopy_params(NCOL)
-    with pytest.raises(ValueError, match="SAI"):
+    with pytest.raises(ValueError, match="SAI_dom"):
         step_multilayer_land_with_diagnostics(
             state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
             land_params=lp)
@@ -397,8 +401,35 @@ def test_builders_carry_dominant_pft_structure():
     lp_u, _ = make_step_land_params_updater(gsd, CanopyConfig())(
         theta, jnp.asarray(350.0), jnp.asarray(2000.0))
     for lp in (lp_b, lp_u):
-        np.testing.assert_allclose(np.asarray(lp.SAI)[0], 0.44, rtol=1e-12)
-        np.testing.assert_allclose(np.asarray(lp.hbot)[0], 8.0, rtol=1e-12)
-        assert float(np.asarray(lp.pft_index)[0]) == float(nb)
+        np.testing.assert_allclose(np.asarray(lp.SAI_dom)[0], 0.44, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(lp.hbot_dom)[0], 8.0, rtol=1e-12)
+        assert float(np.asarray(lp.pft_dom)[0]) == float(nb)
         # uncovered column: bare (no stems, so the snow is never masked)
-        assert float(np.asarray(lp.SAI)[1]) == 0.0
+        assert float(np.asarray(lp.SAI_dom)[1]) == 0.0
+
+
+def test_optics_cache_is_safe_under_jit():
+    """The PFT optics table is cached; filling the cache from inside a jit trace
+    must not store a tracer (a second, differently-shaped trace would then fail)."""
+    from legoesm.land.canopy import radiative_transfer as _rt
+    _rt._clm5_pft_optics.cache_clear()
+    f = jax.jit(lambda a, s: canopy_masked_snow_albedo(
+        a, s, 1, jnp.full(a.shape, 1.5), jnp.full(a.shape, 0.44),
+        jnp.full(a.shape, 16.0), jnp.full(a.shape, 8.0), jnp.full(a.shape, 2.0),
+        jnp.full(a.shape, 0.9), jnp.full(a.shape, 0.3), jnp.full(a.shape, 0.3),
+        jnp.full(a.shape, 0.5)))
+    v1 = f(jnp.full(2, 0.12), jnp.full(2, 0.7))
+    v2 = f(jnp.full(3, 0.12), jnp.full(3, 0.7))
+    np.testing.assert_allclose(np.asarray(v2)[:2], np.asarray(v1), rtol=1e-13)
+
+
+def test_switch_without_land_params_raises():
+    """Two-leaf with no canopy parameters skips the snow layering altogether, so
+    the switch would be silently inert: refused."""
+    cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
+                               surface_scheme=TwoLeafCanopyConfig(),
+                               canopy_snow_masking=True)
+    state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
+    with pytest.raises(ValueError, match="canopy_snow_masking"):
+        step_multilayer_land_with_diagnostics(
+            state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1))

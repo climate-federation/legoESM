@@ -74,8 +74,9 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
     dependence).  Like the root fields it must match the params being filled:
     set it when those carry ``ALB_VIS_DRY``.
 
-    ``canopy_structure`` fills ``SAI``/``hbot``/``pft_index`` with the bare
-    values (0); same structure-matching rule (set it when those carry ``SAI``).
+    ``canopy_structure`` fills ``SAI_dom``/``hbot_dom``/``pft_dom`` with the
+    bare values (0); same structure-matching rule (set it when those carry
+    ``SAI_dom``).
     """
     full = lambda v: jnp.full(ncol, v)
     _bounds_kw = {}
@@ -95,7 +96,7 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
         ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
         emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
         **_root_kw, **_bounds_kw,
-        **(dict(SAI=full(0.0), hbot=full(0.0), pft_index=full(0.0))
+        **(dict(SAI_dom=full(0.0), hbot_dom=full(0.0), pft_dom=full(0.0))
            if canopy_structure else {}),
     )
 
@@ -149,7 +150,7 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
             "fallback from its pft_root_params) instead.")
     fb = (bare_canopy_params(ncol,
                              soil_bounds=land_params.ALB_VIS_DRY is not None,
-                             canopy_structure=land_params.SAI is not None)
+                             canopy_structure=land_params.SAI_dom is not None)
           if isinstance(land_params, CanopyLandParams)
           else bare_land_surface_params(ncol))
 

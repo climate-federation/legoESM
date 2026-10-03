@@ -193,8 +193,8 @@ def build_canopy_params(
         rd=jnp.asarray(np.where(is_veg > 0.0, lut["rd"][dom], 0.0)),
         ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
         ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
-        SAI=jnp.asarray(SAI), hbot=jnp.asarray(hbot),
-        pft_index=jnp.asarray(dom.astype(np.float64)),
+        SAI_dom=jnp.asarray(SAI), hbot_dom=jnp.asarray(hbot),
+        pft_dom=jnp.asarray(dom.astype(np.float64)),
         **_root_kw,
     )
 
