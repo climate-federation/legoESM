@@ -156,8 +156,15 @@ by construction.  They were re-run anyway, on the landed tree.
 | 300 | `5.466049845187051e-05` | `5.466049845187051e-05` | 0 |
 | 360 | `5.4077419367442036e-05` | `5.4077419367442036e-05` | 0 |
 
-So note BZ's certified GYRE year stands and is not re-pinned.  DINO's month
-gate runs inside `land.sh` against the pinned `2.053801168e-03`.
+So note BZ's certified GYRE year stands and is not re-pinned.
+
+**The DINO month gate did NOT run, and that is the operator script's own
+rule, not an omission.**  `land.sh` arms it only when the landing changes a
+file under `packages/` or `src/`; this commit changes none, so it computed
+`PHYS=0` and skipped it.  DINO's pinned day-30 `2.053801168e-03` therefore
+stands untested by this round and unchanged by it — no model code landed
+that could move it.  If the held patch is ever landed, that round changes
+model code and the gate arms itself.
 
 **GYRE UNDER THE HELD STATEMENT IS UNMEASURED, and that is said out loud
 rather than left to be inferred.**  The GYRE gates have no `--allow-dirty`
