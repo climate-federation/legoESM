@@ -16,6 +16,12 @@ def test_round119_source_order_and_paths_are_registered():
     assert gate.PLANTS == ("none", "oracle-bit", "candidate-bit", "scope-route")
 
 
+def test_literal_helper_exposes_every_v_recurrence_operand_name():
+    source = (gate.r107.Path(gate.r107.__file__).read_text(encoding="utf-8"))
+    for family in ("zpvo_v_", "neighbor_e3u_v_", "neighbor_mask_v_"):
+        assert family in source
+
+
 def test_ieee_zero_add_is_not_an_unregistered_magnitude_change():
     jnp = pytest.importorskip("jax.numpy")
     positive = jnp.asarray([0.0, 1.0], dtype=jnp.float64)

@@ -144,19 +144,7 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
     bottom = np.asarray(parts["mbkv"], dtype=np.float64)
     executed = np.arange(1, 31)[None, None, :] <= bottom[..., None]
 
-    def shift(value: np.ndarray, di: int = 0, dj: int = 0) -> np.ndarray:
-        shifted = np.roll(value, di, axis=1) if di else value
-        return np.roll(shifted, dj, axis=0) if dj else shifted
-
-    source_e3u = np.asarray(parts["source_e3u"])
     source_e3v = np.asarray(parts["source_e3v"])
-    umask = np.asarray(raw.umask, dtype=np.float64)
-    neighbor = {
-        "nw": (shift(source_e3u, 1, -1), shift(umask, 1, -1)),
-        "ne": (shift(source_e3u, 0, -1), shift(umask, 0, -1)),
-        "sw": (shift(source_e3u, 1, 0), shift(umask, 1, 0)),
-        "se": (source_e3u, umask),
-    }
 
     rows = {}
     for label in LABELS:
@@ -173,8 +161,8 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
             "mbkv": bottom,
             "zpvo": np.asarray(parts[f"zpvo_v_{label}"]),
             "e3v": source_e3v,
-            "e3u": neighbor[label][0],
-            "mask": neighbor[label][1],
+            "e3u": np.asarray(parts[f"neighbor_e3u_v_{label}"]),
+            "mask": np.asarray(parts[f"neighbor_mask_v_{label}"], dtype=np.float64),
             "term": baseline_term,
             "before": np.asarray(baseline_before),
             "after": np.asarray(baseline_after),

@@ -215,6 +215,12 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
            for corner in ("nw", "ne", "sw", "se")},
         **{f"neighbor_mask_u_{corner}": un[corner][1]
            for corner in ("nw", "ne", "sw", "se")},
+        **{f"zpvo_v_{corner}": vq[corner]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_e3u_v_{corner}": vn[corner][0]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_mask_v_{corner}": vn[corner][1]
+           for corner in ("nw", "ne", "sw", "se")},
         "mbku": mbku,
         "mbkv": mbkv,
         **terms,
