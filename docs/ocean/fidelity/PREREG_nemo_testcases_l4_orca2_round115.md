@@ -45,3 +45,29 @@ executing card, both ORCA2 ladders satisfy their frozen predicates, and all
 shared-card, citation, and push gates pass. Otherwise it is HELD at the first
 non-bit accumulator row. No fold, scale, later-substep, configuration, or
 independent-month change is in scope.
+
+## Frozen addition addendum after R115-P1 measurement
+
+The committed first measurement **REFUTED R115-P1**: every row through
+`term_nw` is now bit-exact, so the two stored-product sign bits reported in
+round 109 were downstream of the then-non-bit quotient and disappeared when
+rounds 111--114 closed that upstream chain. R115-P2 is therefore a null arm,
+not a product landing. R115-P3 is **CONFIRMED**: `acc_before` is first, with
+1,618 signed-zero-only differences and first `(j,i,k)=(7,42,1)`.
+
+The first unequal `acc_before` value at level index 1 is the accumulator after
+the source recurrence at level index 0. The compiled source initializes
+`ffu_nw` to positive zero, then evaluates the recurrence inside the vertical
+loop (`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1238-1245,
+1267-1270`). The exact record build uses `-O3 -funroll-all-loops` and does not
+request signed-zero preservation
+(`ORCA2_OMIP_L4_R110EENFRAC/BLD/Makefile:51`). This motivates, but does not
+prove, a peeled-first-iteration discriminator.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R115-P5 | The oracle binary's first recurrence result preserves the exact first term's zero sign, while the generic JAX `+0 + term` produces positive zero. | Replacing only level index 0's addition by assignment from the already-exact term closes `acc_before` at level index 1. | Any remaining bit at level index 1 refutes first-iteration peeling; retain it and inspect the exact operand signs. |
+| R115-P6 | After the first-level seed, ordinary source-ordered additions close the recorded `acc_before` and `acc_after` rows. | Both rows score zero unequal bits on all executed levels. | The first remaining row/index owns the next walk; do not land the seed. |
+
+The addendum changes no previously measured array and is committed before the
+first-level-seed arm is run.
