@@ -8,11 +8,14 @@ this receipt.
 **Headline.** The transcription carries **no grid-size dependence**. Every
 `kt=1` row is at bar at every rung; the first row over bar is `kt=2` on both
 cards at every rung, with the same field set; and the flux card's remaining
-error does not grow as the grid refines — it **shrinks roughly in proportion to
-the timestep** (fitted exponent −0.7 … −1.1 against `r = 30 km / dx`, where a
-pure `dt` proportionality is −1). The vector card sits at the rounding floor at
-every rung, so round 199's landing holds at 15 km and 10 km as it does at 30 km.
-That refutes this round's own prediction P3, which expected growth.
+error does not grow as the grid refines — it **shrinks**, with a fitted exponent
+against `r = 30 km / dx` of −0.7 … −1.1 on the velocity rows (a pure `dt`
+proportionality is −1) but **as steep as −1.8 on the early tracer and `ssh`
+rows**, which is nearer `r^-2` and is NOT dt-proportional. "Shrinks roughly like
+the timestep" is therefore true of the velocities only, and §5 reports the two
+families separately. The vector card sits at the rounding floor at every rung,
+so round 199's landing holds at 15 km and 10 km as it does at 30 km. All of this
+refutes this round's own prediction P3, which expected growth.
 
 ---
 
@@ -40,9 +43,15 @@ A complete `diff -u` of `tests/VORTEX/EXPREF/namelist_cfg` against
 | `rn_dx`, `rn_dy` | 30000. | 10000. | **15000.** | **10000.** | `1_namelist_cfg:21-22` |
 | `rn_Dt` | 2880. | 960. | **1440.** | **960.** | `1_namelist_cfg:43` |
 | `nn_itend` | 3000 | 6000 | *see DECISION_NEEDED below* | *see below* | `1_namelist_cfg:34` |
-| `&namagrif` sponge block | absent | `rn_sponge_tra = rn_sponge_dyn = 0.00768` | **not applied** | **not applied** | `1_namelist_cfg:103-108` |
+| `&namagrif` sponge block | absent | `rn_sponge_tra = rn_sponge_dyn = 0.00768` | **unreachable** | **unreachable** | `1_namelist_cfg:103-108` |
 
-and every value the child leaves alone, which this ladder therefore also leaves
+The sponge is not a choice this round declined: none of the four certified
+builds compiles `key_agrif` (their `cpp_*.fcm` resolves to
+`key_qco key_vco_1d key_RK3`), so the `&namagrif` block is **structurally
+unreachable** in every run here, and the acquisition also deletes the child deck
+files from the run directory so nothing can read them by accident.
+
+And every value the child leaves alone, which this ladder therefore also leaves
 alone:
 
 | parameter | value in parent and child alike | citation |
@@ -62,7 +71,10 @@ timestep three times shorter, and so does this ladder.
 
 The remaining hunks in the child diff are comment-only (`namc1d` header lines,
 a trailing-space change on `ln_dynspg_exp`, a `"key_netcdf4"` annotation) and
-change no value.
+change no value. One of them **strengthens** the rule and was missed in the
+first draft: the commented-out modified-Leapfrog timestep `!MLF rn_Dt` also goes
+1440 → 480, i.e. divided by the same 3, so NEMO scales the time step by the
+refinement ratio on both of its integrators.
 
 ### The one DECISION_NEEDED, and why the round proceeded
 
@@ -75,7 +87,13 @@ pins `nn_itend = 10` at every resolution, exactly as the certified 30 km decks
 do, and every ladder in this campaign is `kt = 1..10`. The cards' `n_steps`
 metadata carries NEMO's own cited value where one exists — 3000 at 30 km
 (parent) and 6000 at 10 km (`1_namelist_cfg:34`) — and the parent's 3000 at
-15 km, where nothing is cited. **No gate in this campaign reads that field.**
+15 km, where nothing is cited. **No gate in this campaign reads that field** —
+verified by grep rather than asserted: `NEMOTestcaseCard.n_steps` has writers
+and no readers. The reviewer's preferred shape (carry `None` at 15 km so a
+future reader fails loudly) is right and is deliberately NOT done in a
+measurement round, because `n_steps` is typed `int` and changing that is a
+production-code change this round has no mandate for. It is carried as an OPEN
+item.
 
 ### The domain size is NEMO's own derivation, not a choice
 
@@ -167,10 +185,14 @@ arithmetic, carried as it stands.
 Every resolved value is **written out** in `_VORTEX_RESOLUTIONS` rather than
 recomputed at the point of use, so a card cannot silently disagree with the deck
 NEMO ran; the written-out cell counts are nevertheless checked against
-`usr_def_nam`'s own `NINT(1800e3/rn_dx)+3` at import, and that check is shown
-able to fail (a rung edited to 122 × 122 raises
-`VORTEX rung -15km states 122x122 cells, which is not usr_def_nam's
-NINT(1800e3/rn_dx)+3`).
+`usr_def_nam`'s own `NINT(1800e3/rn_dx)+3` at import — transcribed as
+half-away-from-zero, which is Fortran's `NINT` and not Python's `round`
+(half-to-even); no shipped rung reaches a `.5` case, but a future one would
+resolve to a different box under the wrong rule. The check is shown able to
+fail by a test that calls it with a poisoned rung (a 20 km rung declaring
+63 × 63 raises
+`... which is not usr_def_nam's NINT(1800e3/rn_dx)+3 = 93x93`), and with the
+`raise` deleted that test fails `DID NOT RAISE`.
 
 What each card states, with nothing defaulted: `dx = dy` (30000 / 15000 /
 10000 m), `dz = 500 m`, `dt` (2880 / 1440 / 960 s), ten wet levels on a flat
@@ -182,9 +204,14 @@ closed-box wet-row check now derives its expected count from the card's own mask
 rungs from it.
 
 The geometry helpers take the rung as an argument **defaulting to the 30 km
-one**, so the certified pair is unchanged by construction; a test proves it
-field for field (`T`, `S`, `u`, `v`, `eta`, `ff_f` all `array_equal`), and the
-0/50 measurement in §6 proves it against the oracle.
+one**, so the certified pair is unchanged by construction. A test checks the
+default argument against the explicit `"30km"` rung field for field (`T`, `S`,
+`u`, `v`, `eta`, `ff_f` all `array_equal`) — but **that test compares new code
+with new code and cannot see a change to the 30 km arithmetic**. The real proof
+is the 0/50 measurement in §7, against a registry produced before this round,
+backed by reading every substitution in the diff: each is `_VORTEX_NI → res.ni`
+(the same `int`) or `_VORTEX_DX_M → res.dx_m` (the same `float` object, passed
+unconverted), with operand order untouched.
 
 ## 5. The three-resolution registry table
 
@@ -240,9 +267,12 @@ normalised.
 | kt10 u | 6.7335205e-15 | 6.7287755e-15 | 7.3729542e-15 | 1.00 | 1.09 |
 | kt10 v | 6.6045730e-15 | 7.7879258e-15 | 8.2759812e-15 | 1.18 | 1.25 |
 
-Full 50-row registries for all six runs: `phase3/round208/ladders/*.json`;
-the table generator is `phase3/round208/score_ladder.py` and its output
-`score_ladder.txt`.
+Full 50-row registries for all six runs: `phase3/round208/ladders/*.json`. The
+table, the exponent fit, the status crossings and the inertness control are all
+produced by one COMMITTED scorer,
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex_round208_resolution_ladder.py`
+(direct test `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round208_ladder.py`),
+whose full output is `phase3/round208/resolution_ladder.txt`.
 
 ### The scaling, fitted
 
@@ -255,16 +285,26 @@ For every flux-card row above 1e-14 at 30 km, the exponent `p` in
 | 5 | −0.71 | −0.70 | −1.31 | −1.55 |
 | 10 | −0.88 | −0.71 | −0.99 | −0.90 |
 
-(fits at `r = 3`; the `r = 2` fits agree to ±0.1; full table
-`phase3/round208/scaling.txt`.)
+(fits at `r = 3`; full table, both fits per row, in
+`phase3/round208/resolution_ladder.txt`.)
+
+**The two fits per row do NOT agree to a tenth**, and an earlier draft of this
+receipt said they did: across the 35 fitted rows the largest
+`|p(r=2) − p(r=3)|` is **0.26** (`kt9 v`), with six more rows at 0.16-0.17. The
+scorer now prints that spread so it cannot be eyeballed again. Three points is
+thin for a power law and the spread says so.
 
 A per-step injection proportional to the timestep would give `p = −1` exactly,
-because `dt ∝ 1/r`. The velocity rows sit at −0.7 … −1.1 and the tracer rows
-start steeper and relax toward −1. **PLAUSIBLE, not confirmed:** the flux card's
-remaining error is a tendency-level difference re-made once per step whose size
-is set by `dt`, which is what rounds 204-206 located in `dyn_adv_up3`. What is
-**CONFIRMED** is only the sign and order of the scaling: the residual decays as
-the grid refines; it does not grow, and it does not change character.
+because `dt ∝ 1/r`. **Two families, not one:** the velocity rows sit at
+−0.7 … −1.1 at every `kt`, consistent with `dt`; the early tracer and `ssh` rows
+are much steeper (`kt2 T` −1.78, `kt3 ssh` −1.74, `kt4 ssh` −1.69), nearer
+`r^-2`, and only relax toward −1 by `kt≈8`. **PLAUSIBLE, not confirmed:** the
+velocity family is a tendency-level difference re-made once per step whose size
+is set by `dt`, which is what rounds 204-206 located in `dyn_adv_up3`; the
+steeper tracer family is **unexplained** and is carried as an OPEN item rather
+than folded into the same sentence. What is **CONFIRMED** is only the sign and
+order: every fitted residual decays as the grid refines, none grows, and no row
+changes character.
 
 ### The only status crossings
 
@@ -309,9 +349,11 @@ without a written expectation to contradict.
 |---|---|
 | `VORTEX-zco` 50-row registry vs round 207's certified | **0/50 moved** |
 | `VORTEX_VEC-zco` 50-row registry vs round 207's certified | **0/50 moved** |
+| that comparison's own non-vacuity | the identical code reports **45/50** and **46/50** against the 15 km rung, and the scorer raises if the control finds no move |
 | GYRE certified `kt=1..10` ladder | *see below* |
 | GYRE from-rest 360-day year | *see below* |
-| `tests/ocean/unit/test_nemo_vortex_card.py` | 59 passed |
+| `tests/ocean/unit/test_nemo_vortex_card.py` + `tests/ocean/fidelity/test_fidelity_card_constructibility.py` | **94 passed** |
+| `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round208_ladder.py` (the scorer's direct test) | **5 passed** |
 
 **Which code changed, and why the year was run anyway.** This round touched one
 file under `packages/`: the recipe module that BUILDS the cards. No model,
@@ -321,13 +363,86 @@ recipe module is VORTEX-gated (`card.case.startswith(("VORTEX-",
 the diff, not a measurement — so the year was run regardless, because
 `packages/` changed.
 
-GYRE_LADDER_PLACEHOLDER
+### GYRE certified `kt=1..10` ladder — UNCHANGED
 
-GYRE_YEAR_PLACEHOLDER
+The 50-row registry is identical to round 207's, row for row, and the stricter
+cellwise comparison against the same NEMO oracle is clean. Both comparisons ran
+offline from the two runs' residual sidecars; the plants are the proof the
+comparison can fail.
+
+```text
+plant=None             exit=0  ORACLE_RELATIVE_COMPARE PASS: rows=954 max_worsening_ulps=0 first_over_bar={'T','S','u','v','ssh'} kt=3 -> unchanged
+plant=worsen-3ulp      exit=1  ORACLE_RELATIVE_COMPARE FAIL: rows=954 max_worsening_ulps=3
+plant=at-bar-to-debt   exit=1  ORACLE_RELATIVE_COMPARE FAIL: rows=954 max_worsening_ulps=0
+plant=improve          exit=0  ORACLE_RELATIVE_COMPARE PASS: rows=954 max_worsening_ulps=0
+```
+
+**954 rows, 0 moved, 0 ULP**, `first_over_bar` `kt=3` on all five fields,
+unchanged; the 50-row registry comparison independently reports **0/50 moved**.
+The run's own worktree stamp records no dirty tracked path.
+
+
+### GYRE from-rest 360-day year, scored against the note-BZ pin
+
+| day | certified (note BZ) | this round | delta (K) | floor units |
+|---:|---|---|---:|---:|
+| 30 | `2.3432465132112266e-06` | `2.3432465132112266e-06` | 0 | 0.000 |
+| 60 | `1.4793247973304582e-05` | `1.4793247973304582e-05` | 0 | 0.000 |
+| 90 | `1.633271203963844e-05` | `1.633271203963844e-05` | 0 | 0.000 |
+| 120 | `0.00010965907352116351` | `0.00010965907352116351` | 0 | 0.000 |
+| 180 | `6.115335539300055e-05` | `6.115335539300055e-05` | 0 | 0.000 |
+| 240 | `6.58170609494473e-05` | `6.58170609494473e-05` | 0 | 0.000 |
+| 300 | `5.466049845187051e-05` | `5.466049845187051e-05` | 0 | 0.000 |
+| 360 | `5.4077419367442036e-05` | `5.4077419367442036e-05` | 0 | 0.000 |
+
+**BYTE-IDENTICAL on all eight certified days**, and the three certified
+snapshot digests reproduce note BZ's to every character:
+
+| day | note BZ's pin | this round |
+|---|---|---|
+| 030 | `4e36c106403b495e…` | `4e36c106403b495e…` |
+| 240 | `8b9cd60475626373…` | `8b9cd60475626373…` |
+| 360 | `e3e0a068346c7866…` | `e3e0a068346c7866…` |
+
+So note BZ's certified GYRE year stands unchanged and is not re-pinned.
+
 
 ## 8. Review
 
-REVIEW_PLACEHOLDER
+One fresh `code-reviewer` subagent, no prior context on this round, told to try
+to break seven named things (citations, the deck rule, hidden choices, the
+scorer, the CONFIRMED/PLAUSIBLE split, test vacuity, and whether the 30 km
+arithmetic survived the parameterisation). It was given a read-only brief and —
+after it started a parallel `pytest -n 12` battery that this lane's
+one-battery-at-a-time rule forbids and that was contending with the GYRE
+certification job — was told to continue statically. That battery was killed;
+the omission was in the brief, not in the review.
+
+**Verdict: BLOCK**, on findings 2, 5 and 6. All three accepted and fixed in
+commit `674f3b037`, before landing; the GYRE gates were then re-run from the
+start on the fixed tree rather than carried over.
+
+| # | finding | severity | disposition |
+|---:|---|---|---|
+| 1 | every citation verified line by line; the reviewer's own parent↔child diff reproduces `child_deck.diff`; one hunk MISSED that strengthens the rule (`!MLF rn_Dt` 1440→480, also /3) | OK | receipt now states it |
+| 2 | "the `r = 2` fits agree to ±0.1" is **false by the round's own evidence** — 13 of 36 rows exceed 0.1, worst 0.26 | MAJOR | **fixed**: claim deleted, real spread (0.26) quoted, and the committed scorer now PRINTS it so it cannot be eyeballed again |
+| 3 | the headline exponent range hides the tracer rows (`kt2 T` −1.78, `kt3 ssh` −1.74 — nearer `r^-2`, not dt-proportional) | MAJOR | **fixed**: headline and §5 now report two families and carry the steep one as an OPEN item |
+| 4 | `scaling.txt` / `status_crossings.txt` had no committed generator | MAJOR | **fixed**: one committed scorer with its own direct test replaces all the inline probes |
+| 5 | **the non-vacuity test was itself vacuous** — it built a bad rung and asserted only that two integers differ; deleting the import-time `raise` left it green | **BLOCKER** | **fixed**: the loop body is now `validate_vortex_resolution` and the test calls it with a poisoned rung; with the `raise` removed the test fails `DID NOT RAISE` (shown) |
+| 6 | **the four new cards escaped every per-card gate** — neither `_ALL_NEMO_TESTCASE_CARDS` (the Decision 75 no-library-default check) nor the constructibility parametrize listed them | **BLOCKER** | **fixed**: both lists extended; the constructibility test's momentum branch now keys off the DECK, not an equality against `"VORTEX-zco"`, which would have sent a flux rung down the vector arm |
+| 7 | `nn_itend` is labelled DECISION_NEEDED but a value ships (classic fix-behind-a-default shape); reviewer verified by grep that `n_steps` has writers and **no readers** | MAJOR, mitigated | accepted as correct; NOT done here because `n_steps` is typed `int` and retyping it is a production change a measurement round has no mandate for. Carried as OPEN |
+| 8 | no-rebuild is sound and **stronger than claimed**: no certified build compiles `key_agrif`, so the sponge is structurally unreachable rather than a declined choice; each rung's own `ocean.output` confirms every resolved value; `cn_exp` matches the restart pattern | OK | receipt strengthened |
+| 9 | "0/50 moved" is genuinely non-vacuous: distinct files, differing `legoesm_git_sha` (so the 30 km rung really was re-run on this tip), key-set equality asserted before diffing, exact `!=` on value AND status; all §5 numbers reproduce | OK | — |
+| 10 | the 30 km-equality test compares new code with new code and cannot see a 30 km arithmetic change; §4 overstated it | MINOR | **fixed**: §4 now says the real proof is the 0/50 measurement plus reading every substitution |
+| 11 | Python `round()` is half-to-even, Fortran `NINT` is half-away-from-zero | MINOR | **fixed**: `_vortex_nint` transcribes Fortran's rule, with its own test |
+| 12 | 30 km arithmetic bit-identical by inspection — every substitution is the same `int`/`float` object, operand order untouched | OK | — |
+| 13 | "59 passed" unverified (no pytest allowed) | UNVERIFIED | re-run serially after the fixes: **94 passed** across the two card test files, plus **5 passed** for the new scorer test |
+
+Two findings were the same shape as defects this campaign has shipped before —
+a guard that cannot fail, and a new artefact that slips past the gate written to
+catch exactly its failure mode — and neither would have been caught by the
+author.
+
 
 ## 9. Verdict and OPEN
 
@@ -351,7 +466,14 @@ ladder found no grid-size dependence to fix.
    is a new, free constraint on any candidate: a statement whose fix does not
    scale with `dt` is the wrong statement.
 3. `nn_itend` at ratio 2 remains **DECISION_NEEDED** (inert).
-4. Carried from note BY: the transport divisor's association (NEMO multiplies by
+4. **The steep tracer/`ssh` scaling at early `kt`** (`p ≈ −1.7 … −1.8`, nearer
+   `r^-2` than `r^-1`) is unexplained and is a second, separate family from the
+   velocity rows. It may be the same statement seen through the tracer equation,
+   or a second one.
+5. `NEMOTestcaseCard.n_steps` should be `None` where no value is cited, so a
+   future reader fails loudly instead of consuming the parent's run length. It
+   has no reader today.
+6. Carried from note BY: the transport divisor's association (NEMO multiplies by
    the stored reciprocal `r1_hu_0/(1+r3u)`; we divide by the summed depth), and
    the proof — not the assumption — that GYRE's flat uniform box makes the
    summed depth exactly `hu_0`.
@@ -359,8 +481,8 @@ ladder found no grid-size dependence to fix.
 ## 10. Evidence
 
 `phase3/round208/`: `preregistration.md`, `child_deck.diff`, `acquire_all.{sh,log}`,
-`ladders/` (six gate JSONs, six stdouts, `run_all.{sh,log}`), `score_ladder.py`,
-`score_ladder.txt`, `scaling.txt`, `status_crossings.txt`, `gyre_gates.{sh,log}`,
+`ladders/` (six gate JSONs, six stdouts, `run_all.{sh,log}`),
+`resolution_ladder.txt` (the committed scorer's full output), `gyre_gates.{sh,log}`,
 `gyre_ladder_r208.{json,log}`, `gyre_year_r208a.log`,
 `gyre_day_gap_r208a.{json,log}`, `review_round208.md`.
 `phase3/vortex_ladder/{15km,10km}/{flx,vec}/`: the four NEMO records, their
