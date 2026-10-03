@@ -1,6 +1,6 @@
 # ORCA2 round 119 — V EEN recurrence walk
 
-Date: 2026-10-03. Base `ec024f3ca8ab205402f148d2ae52f1f33cfdc16f`;
+Date: 2026-10-03. Base `ec024f3ca832988cc3ee2593b0ba138d2d1f79f1`;
 measurement gate `d541f5fb00df5a448cafc17f2e95b0104e90eb3b`.
 Every ocean number below is **independent**: hierarchy rung 0 starts from
 NEMO's own from-rest state. No model physics, card field, configuration value,
