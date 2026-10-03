@@ -67,6 +67,7 @@ from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
+    static_canopy_roughness,
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
@@ -101,6 +102,29 @@ def _get(lp, name: str, fallback):
         return fallback
     v = getattr(lp, name, fallback)
     return fallback if v is None else v
+
+
+def static_land_roughness(land_params, config, ncol):
+    """Momentum roughness z0m and displacement height d [m] of each column from
+    its STATIC parameters, through the same function and defaults its surface
+    scheme uses (two-leaf: ``canopy.stability.compute_aerodynamics`` on the
+    prescribed LAI / hc / rz0m / rd; SimpleSEB: its per-column z0, d = 0).
+
+    Used where no solved land state may be trusted (the first host step after a
+    start or restart, before any land step has succeeded for a column): it never
+    depends on a solve.  The prognostic LAI of a carbon-coupled canopy is NOT
+    used here, only the prescribed one.
+    """
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        return static_canopy_roughness(land_params, ncol)
+    if isinstance(config.surface_scheme, SimpleSEBConfig):
+        z0 = jnp.broadcast_to(
+            jnp.asarray(_get(land_params, "z0", config.z0_land), dtype=float),
+            (ncol,))
+        return z0, jnp.zeros((ncol,), dtype=z0.dtype)
+    raise ValueError(
+        f"static_land_roughness: no static roughness for surface scheme "
+        f"{type(config.surface_scheme).__name__}")
 
 
 def resolve_plant_wilting_point(land_params, config):

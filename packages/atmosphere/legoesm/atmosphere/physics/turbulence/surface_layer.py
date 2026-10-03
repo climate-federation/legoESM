@@ -278,49 +278,73 @@ def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
 _WIND_DIR_FLOOR_MS = 1.0e-6  # coeff-ok: numerical floor for a 0/0 direction
 
 
+# Lower bound on (z - d)/z0m in the neutral land drag: ln >= 2, i.e. neutral
+# Cd <= (kappa/2)^2 = 0.04, applied to the ARGUMENT so a displacement at or
+# above the lowest level never takes the log of a non-positive number
+# (reviewers' clamp, 2026-10-03).
+_NEUTRAL_LOG_ARG_MIN = 7.38905609893065  # coeff-ok: e**2, numerical clamp
+
+
+def neutral_land_stress(z0m, d, z_low, u, v, rho):
+    """Neutral log-law stress magnitude [Pa] over land roughness ``z0m`` with
+    displacement ``d`` for a wind ``(u, v)`` at height ``z_low`` above the local
+    surface: rho (kappa |V| / ln((z_low - d)/z0m))^2, the log bounded below by 2."""
+    arg = jnp.maximum((z_low - d) / z0m, _NEUTRAL_LOG_ARG_MIN)
+    cd = (constants.kappa_vk / jnp.log(arg)) ** 2
+    return rho * cd * (u * u + v * v)
+
+
 def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
     """Surface stress with the LAND fraction's share taken from the land model.
 
     ``tau_x``/``tau_y`` [Pa] are the atmosphere's bulk stress (opposing the
-    wind, ``tau_x = -rho Cd |V| u``), which on a non-tiled surface is computed
-    with the bulk scheme's own (ocean) roughness over land as well.
-    ``tau_land_mag`` [Pa] is the land model's solved stress magnitude
-    ``rho u*^2`` (its canopy roughness and stability). The land share is laid
-    along the CURRENT lowest-level wind, opposing it, in the bulk convention;
-    the land magnitude may be up to one land step old.
-
-    A column whose land magnitude is not positive and finite was HELD by the
-    land step (its response is zeroed), has not been solved yet, or failed; it
-    keeps the bulk stress rather than receiving no drag at all.
-
-    Returns the blended ``(tau_x, tau_y)``; ``f_land = 0`` returns the bulk
-    stress unchanged.
+    wind, ``tau_x = -rho Cd |V| u``), kept on the non-land fraction only.
+    ``tau_land_mag`` [Pa] (finite, >= 0) is the land's stress magnitude
+    ``rho u*^2``, laid along the CURRENT lowest-level wind, opposing it, in the
+    bulk convention.  ``f_land = 0`` returns the bulk stress unchanged.
     """
     inv_speed = 1.0 / jnp.sqrt(u * u + v * v + _WIND_DIR_FLOOR_MS ** 2)
-    have_land = jnp.isfinite(tau_land_mag) & (tau_land_mag > 0.0)
-    mag = jnp.where(have_land, tau_land_mag, 0.0)   # no inf*0 at f_land = 0
-    tlx = jnp.where(have_land, -mag * u * inv_speed, tau_x)
-    tly = jnp.where(have_land, -mag * v * inv_speed, tau_y)
+    tlx = -tau_land_mag * u * inv_speed
+    tly = -tau_land_mag * v * inv_speed
     return ((1.0 - f_land) * tau_x + f_land * tlx,
             (1.0 - f_land) * tau_y + f_land * tly)
 
 
-def land_stress_into_surface_flux(surface_flux, tau_land_mag, u, v, f_land,
-                                  rho_sfc):
+def hold_last_valid_land_stress(prev_mag, prev_valid, new_mag, held):
+    """Per-column land stress magnitude carried between land steps: a column
+    whose new solve is held (``held`` > 0.5) or non-finite keeps its previous
+    value; ``valid`` becomes True once any solve has succeeded."""
+    ok = (held < 0.5) & jnp.isfinite(new_mag)
+    return jnp.where(ok, jnp.where(ok, new_mag, 0.0), prev_mag), prev_valid | ok
+
+
+def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
+                                  z0m, d, u, v, z_low, f_land, rho_sfc):
     """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the land stress blended in.
 
-    Stress from :func:`blend_land_surface_stress`; ``ustar`` is rebuilt as
-    ``sqrt(|tau|/rho)`` of the blended stress ONLY where the land stress is
-    used (land fraction > 0 and a solved, positive land magnitude). Ocean-only
-    and held columns keep the bulk ``ustar`` bit-for-bit, including the bulk
-    law's own low-wind floor.
+    The land magnitude is the land model's solved ``rho u*^2`` where
+    ``land_valid`` (a land step has succeeded for that column: the driver
+    carries the last valid value over held / failed solves), else the neutral
+    land drag of the column's static roughness ``z0m``, ``d``
+    (:func:`neutral_land_stress`) -- never the ocean bulk law.  A non-finite
+    land value also falls back to the neutral land drag.  ``ustar`` is rebuilt
+    as ``sqrt(|tau|/rho)`` of the blended stress where ``f_land > 0``;
+    ocean-only columns keep the bulk ``ustar`` bit-for-bit.  Land inputs on
+    columns with no land are never read (they may be fill values, even NaN):
+    those columns, and their gradients, stay exactly bulk.
     """
+    has_land = f_land > 0.0
+    seed = neutral_land_stress(jnp.where(has_land, z0m, 1.0),
+                               jnp.where(has_land, d, 0.0),
+                               z_low, u, v, rho_sfc)
+    use_solved = has_land & land_valid & jnp.isfinite(tau_land_mag)
+    mag = jnp.where(use_solved, jnp.where(use_solved, tau_land_mag, 0.0),
+                    jnp.where(has_land, seed, 0.0))
     tx, ty = blend_land_surface_stress(
-        surface_flux[0], surface_flux[1], tau_land_mag, u, v, f_land)
+        surface_flux[0], surface_flux[1], mag, u, v, f_land)
     rebuilt = prescribed_into_surface_flux(
         surface_flux, rho_sfc, tau_x=tx, tau_y=ty)
-    used = jnp.isfinite(tau_land_mag) & (tau_land_mag > 0.0) & (f_land > 0.0)
-    return rebuilt[:4] + (jnp.where(used, rebuilt[4], surface_flux[4]),)
+    return rebuilt[:4] + (jnp.where(has_land, rebuilt[4], surface_flux[4]),)
 
 
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):

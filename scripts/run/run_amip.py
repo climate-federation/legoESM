@@ -1697,13 +1697,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
     parser.add_argument("--mpas-land-stress-from-land",
-                        action=argparse.BooleanOptionalAction, default=False,
+                        action=argparse.BooleanOptionalAction, default=None,
                         dest="mpas_land_stress_from_land",
-                        help="MPAS lane only: surface stress over the land "
-                             "fraction from the land model (canopy roughness, "
+                        help="MPAS lane: surface stress over the land fraction "
+                             "from the land model (its roughness / canopy drag, "
                              "rho u*^2) instead of the atmosphere's bulk "
                              "(ocean-roughness) call; heat fluxes unchanged. "
-                             "Requires --mpas-land-beta-soil.")
+                             "Unset = AUTO (on wherever it applies: MPAS, "
+                             "multilayer land with --mpas-land-beta-soil, a "
+                             "turbulence scheme taking injected fluxes, "
+                             "two_leaf/simple_seb); --no-... = old bulk stress.")
     parser.add_argument("--mpas-land-params-refresh",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_land_params_refresh",

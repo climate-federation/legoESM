@@ -1027,18 +1027,25 @@ def _make_mpas_turbulence(
                 _us,
             )
             # ``forcing["taumag_land"]`` (mpas_land_stress_from_land): the land
-            # model's solved stress magnitude replaces the bulk (ocean-roughness)
-            # stress over the land fraction; ustar is rebuilt from the blended
-            # stress.  Absent key = the bulk stress above, unchanged.
+            # model's stress replaces the bulk (ocean-roughness) stress over the
+            # land fraction, with ``taumag_land_valid`` (a land step has
+            # succeeded for the column; the driver carries the last valid value
+            # over held solves) and the static land roughness ``z0m_land`` /
+            # ``d_land`` for the neutral land drag used before that.  Absent
+            # key = the bulk stress above, unchanged.
             _taum_land = forcing.get("taumag_land")
             if _taum_land is not None:
                 from legoesm.atmosphere.physics.turbulence.surface_layer import (
                     land_stress_into_surface_flux,
                 )
+                _cells = lambda k: jnp.asarray(  # noqa: E731
+                    forcing[k], dtype=q_sfc.dtype).reshape(nCells)
                 _surface_flux = land_stress_into_surface_flux(
-                    _surface_flux,
-                    jnp.asarray(_taum_land, dtype=q_sfc.dtype).reshape(nCells),
-                    u_col[:, -1], v_col[:, -1], _fl, rho[:, -1])
+                    _surface_flux, _cells("taumag_land"),
+                    jnp.asarray(forcing["taumag_land_valid"]).reshape(nCells),
+                    _cells("z0m_land"), _cells("d_land"),
+                    u_col[:, -1], v_col[:, -1],
+                    z_full[:, -1] - z_half[:, -1], _fl, rho[:, -1])
         elif forcing is not None and forcing.get("taumag_land") is not None:
             raise ValueError(
                 "forcing['taumag_land'] (land-model surface stress) is only "

@@ -179,7 +179,8 @@ def test_land_stress_from_land_reaches_the_winds(monkeypatch, tmp_path):
     # land scheme (which also solves a stress) stands in for the canopy.
     kw = dict(turbulence="louis", beta_soil=True,
               land_surface_scheme="simple_seb", mpas_land_params_refresh=False)
-    d_off = _build_driver(str(tmp_path / "off"), FOUR_STEPS_DAYS, **kw)
+    d_off = _build_driver(str(tmp_path / "off"), FOUR_STEPS_DAYS, **kw,
+                          mpas_land_stress_from_land=False)
     assert d_off.run() == "COMPLETED"
     d_on = _build_driver(str(tmp_path / "on"), FOUR_STEPS_DAYS, **kw,
                          mpas_land_stress_from_land=True)
