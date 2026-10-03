@@ -29,7 +29,15 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round111_een_fraction_walk as r111,
 )
 
-PLANTS = ("none", "oracle-bit", "candidate-bit")
+PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
+EXPECTED_CARD_SCOPE = {
+    "ORCA2-zps": True,
+    "GYRE-zco": False,
+    "LOCK_EXCHANGE-zco": False,
+    "OVERFLOW-zps": False,
+    "VORTEX-zco": True,
+    "VORTEX_VEC-zco": True,
+}
 
 
 class GateError(RuntimeError):
@@ -39,6 +47,41 @@ class GateError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise GateError(message)
+
+
+def resolved_card_scope(deck_root: Path) -> dict[str, dict[str, object]]:
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        build_lock_exchange_zco_card,
+        build_orca2_zps_card,
+        build_overflow_zps_card,
+        build_vortex_zco_card,
+    )
+
+    cards = {
+        "ORCA2-zps": build_orca2_zps_card(deck_root),
+        "GYRE-zco": build_gyre_zco_card(),
+        "LOCK_EXCHANGE-zco": build_lock_exchange_zco_card(),
+        "OVERFLOW-zps": build_overflow_zps_card(),
+        "VORTEX-zco": build_vortex_zco_card(),
+        "VORTEX_VEC-zco": build_vortex_zco_card("vector"),
+    }
+    rows = {}
+    for name, card in cards.items():
+        cfg = card.recipe.model_config
+        has_operands = card.recipe.z_coord.nemo_een_barotropic is not None
+        rows[name] = {
+            "barotropic_coriolis": cfg.barotropic.barotropic_coriolis,
+            "coefficient_evaluation": (
+                cfg.barotropic.barotropic_een_coefficient_evaluation),
+            "has_literal_operands": has_operands,
+            "executes_southern_een_ff_association": bool(
+                cfg.barotropic.barotropic_coriolis == "een_metric"
+                and cfg.barotropic.barotropic_een_coefficient_evaluation
+                == "nemo_literal"
+                and has_operands),
+        }
+    return rows
 
 
 def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
@@ -61,6 +104,16 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
             "fp64/libm policy is not active")
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-112 walk requires production JIT on CPU")
+
+    card_scope = resolved_card_scope(deck_root)
+    if plant == "scope-route":
+        card_scope["GYRE-zco"]["executes_southern_een_ff_association"] = True
+    observed_scope = {
+        name: bool(row["executes_southern_een_ff_association"])
+        for name, row in card_scope.items()
+    }
+    require(observed_scope == EXPECTED_CARD_SCOPE,
+            "resolved card scope moved")
 
     oracle, census = r111.assemble_record(fraction_root, "none")
     card = rung0.build_rung0_card(deck_root)
@@ -171,6 +224,7 @@ def measure(deck_root: Path, frame_root: Path, fraction_root: Path,
         "claim_label": "given NEMO's recorded entry",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "record_census": census,
+        "card_scope": card_scope,
         "baseline_first_non_bit_item": baseline_first,
         "candidate_first_non_bit_item": candidate_first,
         "baseline_scores": baseline_scores,

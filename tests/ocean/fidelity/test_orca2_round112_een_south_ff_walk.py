@@ -20,7 +20,19 @@ def test_source_copy_differs_from_cyclic_south_association():
 
 
 def test_round112_plants_are_registered():
-    assert gate.PLANTS == ("none", "oracle-bit", "candidate-bit")
+    assert gate.PLANTS == (
+        "none", "oracle-bit", "candidate-bit", "scope-route")
+
+
+def test_round112_card_scope_is_frozen():
+    assert gate.EXPECTED_CARD_SCOPE == {
+        "ORCA2-zps": True,
+        "GYRE-zco": False,
+        "LOCK_EXCHANGE-zco": False,
+        "OVERFLOW-zps": False,
+        "VORTEX-zco": True,
+        "VORTEX_VEC-zco": True,
+    }
 
 
 def test_round112_reuses_admitted_source_order():
