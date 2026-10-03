@@ -60,8 +60,7 @@ def compare(case: str, run_dir: Path) -> dict:
     card = build_nemo_testcase_card(case)
     res = _VORTEX_RESOLUTIONS["30km"]
     source = vortex_horizontal_coordinates(res)
-    _, k_bot, e3t, e3u, e3v, e3f = vortex_smt_partial_cell_geometry(
-        source, res)
+    _, k_bot, e3t, e3u, e3v, e3f = vortex_smt_partial_cell_geometry(source)
     ops = card.recipe.z_coord.nemo_een_barotropic
     nlev = e3t.shape[-1] - 1
 

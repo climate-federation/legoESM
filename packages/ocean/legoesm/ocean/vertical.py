@@ -1477,8 +1477,11 @@ def create_partial_cell_coordinate(
         every column whose bathymetry lands in
         ``[pdepw+ze3min, pdepw+0.5*dz)``.  The bottom thickness is then
         ``MIN(H, pdepw_1d(k+1)) - pdepw_1d(k)``, in NEMO's own association
-        (``OVERFLOW:221-225``) -- not ``H - pdepw_1d(k)`` clipped, which is
-        algebraically the same and bitwise is not.  It requires
+        (``OVERFLOW:221-225``).  It is written the source's way because the
+        source writes it that way; no ladder has yet been found on which it
+        differs in the bits from the other rules' clipped
+        ``MIN(H - pdepw(k), dz_ref[k])``, and the unit test says so rather
+        than implying a difference it does not demonstrate.  It requires
         ``min_partial_thickness``.
     min_partial_thickness : float, optional
         ``ze3min`` for ``bottom_index_rule="nemo_zps_e3min"``; refused (and
@@ -1581,18 +1584,17 @@ def create_partial_cell_coordinate(
     safe_bottom = jnp.maximum(bottom_level, 0)
     abs_z_at_bottom = abs_z_half[safe_bottom]       # (...)
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
-    raw_partial = H - abs_z_at_bottom
-    capped = jnp.minimum(raw_partial, dz_at_bottom)
     if bottom_index_rule == "nemo_zps_e3min":
-        # OVERFLOW:222 -- MIN(zht, pdepw_1d(ik+1)) - pdepw_1d(ik).  The MIN is
-        # INSIDE the subtraction there; clipping the difference instead is the
-        # same number in exact arithmetic and not in fp64.
-        partial_thickness = (
-            jnp.minimum(H, abs_z_half[jnp.minimum(safe_bottom + 1, nlev)])
-            - abs_z_at_bottom)
+        # OVERFLOW:222 -- MIN(zht, pdepw_1d(ik+1)) - pdepw_1d(ik), with the
+        # MIN inside the subtraction as the source writes it.  safe_bottom is
+        # at most nlev-1, so safe_bottom+1 indexes abs_z_half (nlev+1 long)
+        # in range without a clamp.
+        partial_thickness = (jnp.minimum(H, abs_z_half[safe_bottom + 1])
+                             - abs_z_at_bottom)
     elif bottom_index_rule == "nemo_tpoint":
-        partial_thickness = capped
+        partial_thickness = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
     else:
+        capped = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
         near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
         partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
 

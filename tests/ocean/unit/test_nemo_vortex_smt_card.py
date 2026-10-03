@@ -66,7 +66,16 @@ def test_zps_e3min_rule_is_not_the_t_point_rule():
 
 
 def test_zps_e3min_partial_thickness_is_nemos_association():
-    """``MIN(zht, pdepw(ik+1)) - pdepw(ik)``, OVERFLOW:222."""
+    """``MIN(zht, pdepw(ik+1)) - pdepw(ik)``, OVERFLOW:222 -- a VALUE pin.
+
+    Round 2's review checked, and this test then confirmed, that on every
+    ladder tried -- uniform and stretched -- the source's association and the
+    clipped ``MIN(H - pdepw(k), dz_ref[k])`` give the SAME BITS.  So this is
+    a pin on the resolved thickness, NOT a discriminator between the two
+    forms, and it is labelled as one rather than left to look like proof the
+    association matters.  What makes the rule itself non-vacuous is the
+    bottom-LEVEL test above, which does separate the two shipped rules.
+    """
     z = _uniform_ref()
     H = jnp.asarray([[4560.0, 4763.0722]])
     c = create_partial_cell_coordinate(
@@ -74,6 +83,13 @@ def test_zps_e3min_partial_thickness_is_nemos_association():
     h = np.asarray(c.h_partial)[0]
     assert h[0, 9] == min(4560.0, 5000.0) - 4500.0
     assert h[1, 9] == min(4763.0722, 5000.0) - 4500.0
+    # the floor really is a tenth of a cell, not a half: a 4551 m column keeps
+    # a 51 m bottom cell instead of dropping a level.
+    thin = create_partial_cell_coordinate(
+        z, jnp.asarray([[4551.0]]), bottom_index_rule="nemo_zps_e3min",
+        min_partial_thickness=50.0)
+    assert int(np.asarray(thin.bottom_level)[0, 0]) == 9
+    assert np.asarray(thin.h_partial)[0, 0, 9] == 51.0
 
 
 def test_zps_e3min_rule_requires_its_floor_and_only_it():
@@ -107,8 +123,7 @@ def test_resolved_geometry_has_a_full_summit_and_real_partial_faces():
     """
     res = _VORTEX_RESOLUTIONS["30km"]
     source = vortex_horizontal_coordinates(res)
-    zht, k_bot, e3t, e3u, e3v, e3f = vortex_smt_partial_cell_geometry(
-        source, res)
+    zht, k_bot, e3t, e3u, e3v, e3f = vortex_smt_partial_cell_geometry(source)
     assert sorted(set(np.unique(k_bot).tolist())) == [8, 9, 10]
     j, i = np.unravel_index(np.argmin(zht), zht.shape)
     assert zht[j, i] == pytest.approx(4000.0, abs=1e-9)

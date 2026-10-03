@@ -2378,7 +2378,7 @@ def vortex_smt_bathymetry(glamt_km, gphit_km) -> np.ndarray:
         -(zx * zx + zy * zy) / (_VORTEX_SMT_L_M * _VORTEX_SMT_L_M))
 
 
-def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray], res):
+def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray]):
     """NEMO's resolved zps geometry for the seamount deck, statement by statement.
 
     Returns ``(zht, k_bot, e3t, e3u, e3v, e3f)`` with ``k_bot`` ONE-BASED and
@@ -2411,12 +2411,26 @@ def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray], res):
     def min_of_neighbours(a, axis):
         """usrdef_zgr:211-217 / :222-226 -- MIN with the next point.
 
-        The last interior point reads the halo, which the hook's
-        ``lbc_lnk(..., kfillmode = jpfillcopy)`` has filled with a copy of
-        that same point, so the MIN there is the point itself.  Measured
-        bit-for-bit against ``mesh_mask.nc``'s ``e3u_0``/``e3v_0``/``e3f_0``.
+        THE LAST COLUMN/ROW, and the reason, which differs between the
+        faces (round 2's review corrected an earlier, wrong one):
+
+        * ``e3f`` is formed from ``pe3v`` AFTER the hook's
+          ``lbc_lnk(..., kfillmode = jpfillcopy)`` on ``pe3u``/``pe3v``
+          (vortex_smt_usrdef_zgr.F90:218-219), so its outside neighbour IS a
+          copy of the last point and the MIN there is that point.
+        * ``e3u``/``e3v`` are formed from ``pe3t``, whose halo is NOT
+          jpfillcopy-filled inside the hook (``dom_zgr`` fills it only after
+          the hook returns, src/OCE/DOM/domzgr.F90:272-274).  NEMO really
+          does MIN against the next T-cell there.  Copying agrees with that
+          ONLY because this bathymetry deepens monotonically away from the
+          seamount, so the cell just outside the east/north edge is never
+          shallower.  It would NOT agree for a bathymetry that shoals at the
+          edge, nor on a periodic domain, where NEMO wraps and this copies.
+          All five fields are measured bit-for-bit against the run's own
+          ``mesh_mask.nc`` by the round-2 geometry gate, which is what the
+          claim rests on.
         """
-        out = np.full_like(a, _VORTEX_DZ_M)
+        out = np.empty_like(a)
         if axis == 1:
             out[:, :-1] = np.minimum(a[:, :-1], a[:, 1:])
             out[:, -1] = a[:, -1]
@@ -2453,7 +2467,7 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
     native_3d = (res.nj, res.ni, nlev)
 
     zht, k_bot, e3t_jpk, e3u_jpk, e3v_jpk, e3f_jpk = (
-        vortex_smt_partial_cell_geometry(source, res))
+        vortex_smt_partial_cell_geometry(source))
     e3t = e3t_jpk[:, :, :nlev]
     e3u_0 = e3u_jpk[:, :, :nlev]
     e3v_0 = e3v_jpk[:, :, :nlev]
@@ -2464,10 +2478,6 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
     k_idx = np.arange(nlev)[None, None, :]
     tmask = (wet_np[..., None] > 0.0) & (k_idx < k_bot[..., None])
     tmask = tmask.astype(np.float64)
-    u_wet = wet_np * np.roll(wet_np, -1, axis=1)
-    u_wet[:, -1] = 0.0
-    v_wet = wet_np * np.roll(wet_np, -1, axis=0)
-    v_wet[-1, :] = 0.0
     umask_3d = tmask * np.concatenate(
         [tmask[:, 1:], np.zeros_like(tmask[:, :1])], axis=1)
     vmask_3d = tmask * np.concatenate(
@@ -2516,10 +2526,24 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
         bottom_index_rule="nemo_zps_e3min",
         min_partial_thickness=_VORTEX_SMT_ZE3MIN_M,
     )
-    # NEMO writes the partial thickness at ik AND at ik+1 (usrdef_zgr:205);
-    # h_partial is the MASKED column, so the raw array is carried beside it
-    # exactly as the OVERFLOW card carries its own.
-    z_coord = z_coord._replace(nemo_e3t_0=jnp.asarray(e3t))
+    # fix 5 of round 2's review: the card derives the geometry in numpy (the
+    # statement-by-statement transcription above) and the shared factory
+    # derives bottom_level / h_partial again in JAX from the same bathymetry.
+    # Nothing used to pin the two together, so they are pinned here: outside
+    # the closed box NEMO's k_bot survives unmasked (see the docstring) while
+    # the model's column is dry, which is the only place they may differ.
+    _bl = np.asarray(z_coord.bottom_level)
+    _wetcol = wet_np > 0.0
+    if not np.array_equal(_bl[_wetcol] + 1, k_bot[_wetcol]):
+        raise ValueError(
+            "VORTEX_SMT: the card's transcribed k_bot and the shared "
+            "partial-cell factory's bottom_level disagree")
+    if not np.array_equal(np.asarray(z_coord.h_partial)[
+            np.asarray(z_coord.is_active)], e3t[np.asarray(
+                z_coord.is_active)]):
+        raise ValueError(
+            "VORTEX_SMT: the card's transcribed e3t and the shared "
+            "partial-cell factory's h_partial disagree on a wet cell")
 
     ssh, temperature, salinity, u, v = vortex_initial_state_fields(
         source, tmask, ht_0=ht_0)
