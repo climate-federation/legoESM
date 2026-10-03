@@ -180,6 +180,8 @@ FILES = {
         _ORCA2_R93SLOW_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R96SPG_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
         _ORCA2_R96SPG_COMPILED / "dynvor.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90": (
@@ -1301,6 +1303,14 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 129: split-explicit boundary association walk -------
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
+        'IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)',
+        "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
+        19],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90:684-721': [
+        ("CASE ( 'V' )                               ! V-point", 5),
+        ('END DO   ;   END DO', 6), 38],
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
