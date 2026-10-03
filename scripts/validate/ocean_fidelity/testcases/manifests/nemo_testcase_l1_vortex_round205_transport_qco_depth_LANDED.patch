@@ -1,3 +1,11 @@
+# LANDED in lane round 206 (VORTEX round 20), Decision 86, 2026-10-02.
+# Kept for the record, not for re-application: the tip had already moved
+# (the round-205 review relocated the arm validation to model construction
+# and built the qco depth inside the arm), so the statement was transcribed
+# onto the new shape by hand.  The landed form divides the barotropic
+# transport target by NEMO's hu_0*(1+r3u(Kmm)) (stprk3_stg.f90:270, the
+# np_HYB branch selected by the compiled :48 default) and keeps the old
+# min-rule divisor as the private "legacy_min_rule_depth" control arm.
 --- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py	2026-10-02 20:23:55.881542449 -0400
 +++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py	2026-10-02 20:23:55.839543995 -0400
 @@ -1355,11 +1355,11 @@

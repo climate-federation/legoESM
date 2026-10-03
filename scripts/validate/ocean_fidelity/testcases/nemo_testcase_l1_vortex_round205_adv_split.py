@@ -161,7 +161,7 @@ def run(root: Path, *, plant: str | None = None,
     # (``stprk3_stg.f90:270``) instead of a depth mean re-reduced from the
     # three-dimensional velocity.  Nothing else changes.
     causal = {}
-    for arm in ("prognostic_mean", "qco_depth"):
+    for arm in ("prognostic_mean", "legacy_min_rule_depth"):
         causal[arm] = {
             face: (_frame("completed", arm)[face]
                    - _frame("pre_advection", arm)[face])
@@ -368,7 +368,7 @@ def main(argv=None) -> int:
                                           for v in row["levels_max_vadv"]))
         print("   |zub|/lvl  " + " ".join(f"{v:.3e}"
                                           for v in row["levels_max_zub"]))
-        for arm in ("prognostic_mean", "qco_depth"):
+        for arm in ("prognostic_mean", "legacy_min_rule_depth"):
             c = row[f"causal_{arm}"]
             print(f"   CAUSAL {arm:16s} cells={c['cells_unequal']:6d} "
                   f"max_abs={c['max_abs']:.6e} "

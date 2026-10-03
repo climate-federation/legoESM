@@ -1059,8 +1059,10 @@ _STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
                       "advection_horizontal", "advection_vertical",
                       "advection_zub_increment")
 # Legal values of ``momentum_transport_stage1_operand``: the production path
-# and the two one-variable swaps of stprk3_stg.f90:270's operands.
-_STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean", "qco_depth")
+# and the two one-variable swaps of stprk3_stg.f90:270's operands.  Round 206
+# landed NEMO's depth, so the depth arm is now the LEGACY one.
+_STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean",
+                                  "legacy_min_rule_depth")
 
 
 class _NEMOWSRK3TestHooks(NamedTuple):
@@ -1358,11 +1360,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # pair instead, so the difference can be scored causally.  Stage 1 only:
     # Kmm = Kbb there, so ``state.uu_b`` IS the Kmm value; stages 2 and 3
     # read a stage-updated pair (``stprk3_stg.f90:433-446``) this probe does
-    # not carry, and it refuses to touch them.  ``"qco_depth"`` swaps the
-    # OTHER operand of the same statement: NEMO divides ``un_adv`` by
-    # ``hu_0*(1+r3u(Kmm))`` while this reconcile divides by the sum of the
-    # MIN-RULE face thicknesses.  ``""`` is the production path and is
-    # unchanged by round 205.
+    # not carry, and it refuses to touch them.  ``"legacy_min_rule_depth"``
+    # restores the pre-round-206 divisor of the SAME statement: the sum of
+    # legoESM's MIN-RULE face thicknesses in place of NEMO's
+    # ``hu_0*(1+r3u(Kmm))``.  ``""`` is the production path, which since
+    # round 206 (Decision 86) uses NEMO's.
     momentum_transport_stage1_operand: str = ""
     # One-variable companion of ``stage2_momentum_rhs_override``: supply
     # NEMO's own completed stage-1 Krhs (the recorded ``adv_u``/``adv_v``)
@@ -6256,23 +6258,25 @@ class LatLonCGridOceanModel:
                             current_v_mean = (state.vv_b.data
                                               * state.v_mask.data)
                         else:
-                            # NEMO divides un_adv by ``hu_0*(1+r3u(Kmm))``
-                            # (stprk3_stg.f90:270), not by the sum of the
-                            # min-rule face thicknesses.  Built HERE, so no
-                            # card pays for a kernel only this arm reads.
-                            # Dry columns have a zero qco depth and carry no
-                            # transport, so they keep the production ratio.
+                            # The pre-round-206 behaviour, kept as the
+                            # one-variable control of what round 206 landed:
+                            # divide the barotropic transport by the sum of
+                            # the MIN-RULE face thicknesses instead of
+                            # NEMO's ``hu_0*(1+r3u(Kmm))``
+                            # (stprk3_stg.f90:270).  The production target
+                            # already carries NEMO's depth, so undoing it is
+                            # a multiply by ``qco_depth / H_pre``.  Dry
+                            # columns keep the production ratio: their qco
+                            # depth is zero and they carry no transport.
                             _qf = _nemo_ws_qco_stage_faces(
                                 state.eta.data, _ws_h_ref, _ws_u_live_mask,
                                 _ws_v_live_mask, _grid)
                             _qu = jnp.sum(_qf[0], axis=-1)
                             _qv = jnp.sum(_qf[1], axis=-1)
                             transport_u_mean = transport_u_mean * jnp.where(
-                                _qu > 0.0, H_u_pre / jnp.where(
-                                    _qu > 0.0, _qu, 1.0), 1.0)
+                                _qu > 0.0, _qu / H_u_pre, 1.0)
                             transport_v_mean = transport_v_mean * jnp.where(
-                                _qv > 0.0, H_v_pre / jnp.where(
-                                    _qv > 0.0, _qv, 1.0), 1.0)
+                                _qv > 0.0, _qv / H_v_pre, 1.0)
                     # stprk3_stg.F90:273-274: the SAME barotropic correction
                     # enters the advective transport masked by the 3-D
                     # umask/vmask -- ``zFu = e2u*e3u(Kmm)*( uu(Kmm) +
@@ -7028,19 +7032,32 @@ class LatLonCGridOceanModel:
             # height difference ACROSS the face.  The same kernel already
             # supplies the advection's own divisor
             # (``momentum_flux_face_thickness``); it can supply this one
-            # too.  THAT CHANGE IS NOT LANDED -- it is held as
-            # scripts/validate/ocean_fidelity/testcases/manifests/
-            # nemo_testcase_l1_vortex_round205_transport_qco_depth_held.patch
-            # because it trips the cellwise two-ULP ratchet, and the private
-            # ``"qco_depth"`` arm is how it is measured.  Measured on
-            # VORTEX-zco: the two depths differ by up to 0.129 m in
-            # 5000.86 m (2.58e-05 relative, 698 of 3660 u columns), and the
-            # stage-1 flux-form advection trend's disagreement with NEMO
-            # falls from 6.285649e-11 to 2.032879e-20 (u) with that divisor.
+            # too, so the stage advective transport and the trend that
+            # divides it are built on ONE column depth.  LANDED round 206
+            # (Decision 86).  Measured on VORTEX-zco: the two depths differ
+            # by up to 0.129 m in 5000.86 m (2.58e-05 relative, 698 of 3660
+            # u columns), and the stage-1 flux-form advection trend's
+            # disagreement with NEMO falls from 6.285649e-11 to
+            # 2.032879e-20 (u) with that divisor.  The private
+            # ``"legacy_min_rule_depth"`` arm restores the old divisor as
+            # the one-variable control.  This is the SHARED RK3 statement,
+            # not a card option: NEMO's :48 ``n_baro_upd = np_HYB`` default
+            # is compiled into every card's stprk3_stg, so every card that
+            # runs the WS-RK3 transport reconcile takes it.
+            _qco_tr_faces = _nemo_ws_qco_stage_faces(
+                state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                _ws_v_live_mask, _grid)
+            _H_u_transport = jnp.sum(_qco_tr_faces[0], axis=-1)
+            _H_v_transport = jnp.sum(_qco_tr_faces[1], axis=-1)
+            # Dry columns have a zero qco depth and carry no transport.
+            _H_u_transport = jnp.where(_H_u_transport > 0.0,
+                                       _H_u_transport, H_u_pre)
+            _H_v_transport = jnp.where(_H_v_transport > 0.0,
+                                       _H_v_transport, H_v_pre)
             transport_target_u = (
-                Hu_avg / H_u_pre * state.u_mask.data)
+                Hu_avg / _H_u_transport * state.u_mask.data)
             transport_target_v = (
-                Hv_avg / H_v_pre * state.v_mask.data)
+                Hv_avg / _H_v_transport * state.v_mask.data)
             _use_transport_reconcile = (
                 self._nemo_ws_test_hooks.momentum_transport_reconcile)
             _transport_target = (

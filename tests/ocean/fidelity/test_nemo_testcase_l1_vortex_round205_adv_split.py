@@ -78,8 +78,8 @@ def steps(fp64):
                 expose_stage1_momentum_rhs_split="advection_vertical")),
             ("zub", _NEMOWSRK3TestHooks(
                 expose_stage1_momentum_rhs_split="advection_zub_increment")),
-            ("qco_depth", _NEMOWSRK3TestHooks(
-                momentum_transport_stage1_operand="qco_depth")),
+            ("legacy_depth", _NEMOWSRK3TestHooks(
+                momentum_transport_stage1_operand="legacy_min_rule_depth")),
     ):
         _, model = _card_and_model(hooks)
         out[name] = model.step(initial, dt=card.dt_s)
@@ -147,11 +147,18 @@ def test_the_zub_increment_is_inside_the_horizontal_half(steps):
         assert 0.0 < zub < hadv
 
 
-def test_the_qco_depth_arm_is_live_and_finite(steps):
-    """It swaps the transport divisor, so it must move the step -- and it
-    must not put a NaN on a dry column, where the qco depth is zero."""
-    assert _moved(steps["qco_depth"], steps["plain"]) > 0.0
-    for leaf in _leaves(steps["qco_depth"]):
+def test_the_legacy_min_rule_depth_arm_is_live_and_finite(steps):
+    """ROUND 206 PIN (Decision 86).
+
+    Production divides the barotropic transport by NEMO's
+    ``hu_0*(1+r3u(Kmm))`` (``stprk3_stg.f90:270``).  The arm restores
+    legoESM's old min-rule column depth, so it MUST move the step; if
+    the landing were reverted the arm would be an exact no-op and this
+    assertion would fail.  It must also not put a NaN on a dry column,
+    where the qco depth is zero.
+    """
+    assert _moved(steps["legacy_depth"], steps["plain"]) > 0.0
+    for leaf in _leaves(steps["legacy_depth"]):
         assert np.all(np.isfinite(leaf))
 
 
@@ -205,6 +212,9 @@ def test_the_prognostic_mean_arm_really_reads_uu_b(fp64):
     ("expose_stage1_momentum_rhs_split", "qco_depth"),
     ("momentum_transport_stage1_operand", "advection_horizontal"),
     ("momentum_transport_stage1_operand", "min_rule"),
+    # Round 206 retired this name when the divisor it selected became
+    # the production path; it must now raise like any other typo.
+    ("momentum_transport_stage1_operand", "qco_depth"),
 ))
 def test_an_unknown_arm_string_raises(fp64, field, value):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
