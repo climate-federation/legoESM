@@ -71,6 +71,14 @@ readonly TEST_CASE=VORTEX
 # and ZCO for every certified variant; decision 88's VORTEX_SMT rungs
 # override them (ZPS, and 3000 steps for the 100-day record).
 steps=10
+# How many kt=1.. records the admission must find.  Equal to the run length
+# for every ladder rung, but the step-record writer only fires for the first
+# SIXTY steps -- stprk3_step_record.patch:19 is
+#   IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
+# -- so a 3000-step run has 60 records and a checker asked for 3000 would
+# refuse a perfectly good acquisition.  The RESTART the admission compares
+# is still the one at the full run length.
+record_steps=
 coord_tag=ZCO
 smt_zgr=
 
@@ -272,6 +280,7 @@ case "$variant" in
         tag=round211_smt_vec
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10 ;;
       smtflx100d)
+        record_steps=60
         # NEMO's own shipped run length, nn_itend = 3000 steps of rn_Dt =
         # 2880 s = 100 days, with nn_stock = 30 (daily) restarts -- the same
         # cadence round 210 measured the flat cards over.  The builds are the
@@ -282,6 +291,7 @@ case "$variant" in
         tag=round211_smt_flux_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_OMIP_L1_P3/day100 ;;
       smtvec100d)
+        record_steps=60
         reuse_build=1 ; steps=3000
         deck_basename=namelist_cfg_smt_vec_een_100d.patch
         ref_name=VORTEX_SMT_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
@@ -297,6 +307,7 @@ case "$variant" in
 esac
 readonly EVIDENCE=${EVIDENCE:-$default_evidence}
 readonly STEPS=$steps
+readonly RECORD_STEPS=${record_steps:-$steps}
 readonly COORD_TAG=$coord_tag
 readonly SMT_ZGR=$smt_zgr
 readonly REF_CFG=$ref_name
@@ -927,7 +938,7 @@ if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=$STAGE_FLAG_NAME; else STAGE_FLAG=; fi
 if [[ -n "$SPGTS_INSTRUMENT" ]]; then SPGTS_FLAG=--spgts-terms; else SPGTS_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
-  --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
+  --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
   ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
   --output "$EVIDENCE/vortex_${TAG}_admission.json"
 # Every plant the checker offers must turn it red.  One plant proves one
@@ -940,7 +951,7 @@ else
 fi
 for plant in "${plants[@]}"; do
   if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
-       --restart "$RESTART" --steps "$STEPS" ${RHS_FLAG:+$RHS_FLAG} \
+       --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
        ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} --plant "$plant" \
        >"$EVIDENCE/vortex_${TAG}_admission_plant_${plant}.json" 2>&1; then
     printf 'REFUSE: the %s plant did not turn the checker red\n' "$plant" >&2
