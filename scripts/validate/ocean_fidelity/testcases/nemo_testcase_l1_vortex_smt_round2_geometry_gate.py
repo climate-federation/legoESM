@@ -152,8 +152,11 @@ def compare(case: str, run_dir: Path) -> dict:
     # e3t_0, so the gate must see them DIFFER from e3t_0 somewhere.
     n_alias = int(np.count_nonzero(
         np.asarray(resolved.e3u_0) != nemo["e3t_0"][..., :nlev]))
-    rows.append({"field": "non-vacuity: resolved e3u_0 != e3t_0",
-                 "bit_identical": n_alias > 0,
+    # "bit_identical" means "this row is as it must be", which for a
+    # non-vacuity row means the counter is NON-zero; the field is named so it
+    # cannot be read as "1 164 cells differ and that is bit-identical".
+    rows.append({"field": "non-vacuity: n cells where resolved e3u_0 != e3t_0",
+                 "bit_identical": n_alias > 0, "row_is_a_counter": True,
                  "n_differing": n_alias, "max_abs_difference": 0.0})
     row("card umask", np.asarray(ops.umask), nemo["umask"][..., :nlev])
     row("card vmask", np.asarray(ops.vmask), nemo["vmask"][..., :nlev])

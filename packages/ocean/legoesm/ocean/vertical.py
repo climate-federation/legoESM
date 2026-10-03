@@ -708,8 +708,10 @@ def nemo_qco_resolved_mesh_operands(
         # exchange; `E3u_0 -> e3u_3d` under key_vco_1d3d by
         # src/OCE/DOM/domzgr_substitute.h90:94-95).  Aliasing
         # it to e3t_0 is exact ONLY on a full-step mesh; over partial cells it
-        # is wrong on every stepped face (1 084 wet U faces of VORTEX_SMT, by
-        # up to 170.38 m).
+        # is wrong on every stepped face: 686 wet U faces of VORTEX_SMT in
+        # the nlev=10 operand this routine actually returns (1 164 cells of
+        # the jpk=11 mesh array it is sliced from), by up to 170.38 m, and
+        # 18 803 U / 18 300 V cells of ORCA2 by up to 917 / 949 m.
         #
         # It is NOT re-derived here.  Re-deriving needs NEMO's mask, halo and
         # north-fold conventions, and a round-213 attempt to do that zeroed a
@@ -731,6 +733,15 @@ def nemo_qco_resolved_mesh_operands(
                 "would need NEMO's mask/halo conventions")
         e3u0 = jnp.asarray(e3u0, dtype=dtype)[..., :nlev]
         e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]
+        # The bundle is NEMO-native (U/V hold the EAST/NORTH face of each T
+        # cell), the same extent as e3t0 and the sliced masks.  A card that
+        # attached a redundant west/south layout would BROADCAST silently
+        # here rather than fail, so say the shape out loud.
+        if e3u0.shape != e3t0.shape or e3v0.shape != e3t0.shape:
+            raise ValueError(
+                "z_coord.nemo_een_barotropic.e3u_0/.e3v_0 must be on NEMO's "
+                f"native extent {e3t0.shape} (U/V on the east/north face of "
+                f"each T cell); got {e3u0.shape} and {e3v0.shape}")
         return NemoQCOMeshOperands(
             e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
