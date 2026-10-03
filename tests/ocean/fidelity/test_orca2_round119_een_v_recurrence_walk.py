@@ -14,6 +14,14 @@ def test_round119_source_order_and_paths_are_registered():
     assert gate.SOURCE_ORDER == (
         "mbkv", "zpvo", "e3v", "e3u", "mask", "term", "before", "after")
     assert gate.PLANTS == ("none", "oracle-bit", "candidate-bit", "scope-route")
+    assert gate.EXPECTED_FIRST == {
+        "nw": "zpvo", "ne": "zpvo", "sw": "before", "se": "before"}
+    assert gate.EXPECTED_BASELINE["nw"]["zpvo"] == (1431, 1431)
+    assert gate.EXPECTED_BASELINE["ne"]["zpvo"] == (1431, 1431)
+    assert gate.EXPECTED_BASELINE["sw"]["before"] == (2557, 0)
+    assert gate.EXPECTED_BASELINE["se"]["after"] == (6647, 0)
+    assert all(pair == (0, 0) for row in ("sw", "se")
+               for pair in gate.EXPECTED_CANDIDATE[row].values())
 
 
 def test_literal_helper_exposes_every_v_recurrence_operand_name():

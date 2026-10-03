@@ -39,6 +39,31 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round118_ee
 LABELS = record_gate.LABELS
 SOURCE_ORDER = ("mbkv", "zpvo", "e3v", "e3u", "mask", "term", "before", "after")
 PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
+EXPECTED_FIRST = {"nw": "zpvo", "ne": "zpvo", "sw": "before", "se": "before"}
+EXPECTED_BASELINE = {
+    "nw": {"mbkv": (0, 0), "zpvo": (1431, 1431), "e3v": (0, 0),
+           "e3u": (95, 95), "mask": (1270, 1270), "term": (1277, 1270),
+           "before": (3886, 1231), "after": (7464, 1298)},
+    "ne": {"mbkv": (0, 0), "zpvo": (1431, 1431), "e3v": (0, 0),
+           "e3u": (91, 91), "mask": (1283, 1283), "term": (1284, 1283),
+           "before": (3926, 1249), "after": (7503, 1316)},
+    "sw": {"mbkv": (0, 0), "zpvo": (0, 0), "e3v": (0, 0),
+           "e3u": (0, 0), "mask": (0, 0), "term": (0, 0),
+           "before": (2557, 0), "after": (6206, 0)},
+    "se": {"mbkv": (0, 0), "zpvo": (0, 0), "e3v": (0, 0),
+           "e3u": (0, 0), "mask": (0, 0), "term": (0, 0),
+           "before": (2998, 0), "after": (6647, 0)},
+}
+EXPECTED_CANDIDATE = {
+    "nw": {"mbkv": (0, 0), "zpvo": (1431, 1431), "e3v": (0, 0),
+           "e3u": (95, 95), "mask": (1270, 1270), "term": (1277, 1270),
+           "before": (1231, 1231), "after": (1298, 1298)},
+    "ne": {"mbkv": (0, 0), "zpvo": (1431, 1431), "e3v": (0, 0),
+           "e3u": (91, 91), "mask": (1283, 1283), "term": (1284, 1283),
+           "before": (1249, 1249), "after": (1316, 1316)},
+    "sw": {name: (0, 0) for name in SOURCE_ORDER},
+    "se": {name: (0, 0) for name in SOURCE_ORDER},
+}
 
 
 class GateError(RuntimeError):
@@ -192,6 +217,23 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
                       if baseline_scores[name]["bit_unequal"]), None)
         candidate_first = next((name for name in SOURCE_ORDER
                                 if candidate_scores[name]["bit_unequal"]), None)
+        require(first == EXPECTED_FIRST[label],
+                f"{label}: baseline first boundary moved: {first}")
+        for name in SOURCE_ORDER:
+            observed = (baseline_scores[name]["bit_unequal"],
+                        baseline_scores[name]["magnitude_unequal"])
+            require(observed == EXPECTED_BASELINE[label][name],
+                    f"{label}: baseline {name} census moved: {observed}")
+            candidate_observed = (candidate_scores[name]["bit_unequal"],
+                                  candidate_scores[name]["magnitude_unequal"])
+            require(candidate_observed == EXPECTED_CANDIDATE[label][name],
+                    f"{label}: candidate {name} census moved: {candidate_observed}")
+        if label in ("nw", "ne"):
+            require(baseline_scores["zpvo"]["bit_unequal_j_values"] == [147],
+                    f"{label}: first boundary escaped the northern fold")
+        else:
+            require(candidate_first is None,
+                    f"{label}: IEEE-zero candidate first boundary is {candidate_first}")
         samples = []
         if first is not None and first != "mbkv":
             locations = np.argwhere(
@@ -219,7 +261,7 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
     if plant != "none":
         raise GateError(f"{plant} plant fired")
     return {
-        "status": "MEASURED_R119_EEN_V_RECURRENCES_EXPLORATORY",
+        "status": "MEASURED_R119_EEN_V_RECURRENCES",
         "claim_label": "independent",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "candidate_arm": "host-ieee-zero-add-only",
