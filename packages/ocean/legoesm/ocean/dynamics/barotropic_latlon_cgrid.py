@@ -63,8 +63,6 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
-    pad_ns_scalar,
-    pad_ns_vector_v,
 )
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -605,12 +603,6 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         ssh_avg_v = apply_north_fold(
             ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
     H_v = nemo_source_round(H_v_ref + ssh_avg_v)
-    # The same external-mode lbc_lnk statement associates the live V-face
-    # depth before its reciprocal is formed and carried (dynspg_ts.f90:
-    # 761-779).  The northern row is a scalar V-grid fold row: sign +1 and
-    # the T-pivot permutation of the final interior V row.
-    if fold_is_local(grid) or _nfold_mask is not None:
-        H_v = pad_ns_scalar(H_v[1:-1], grid)
     r1_v_denom = nemo_source_round(nemo_source_round(H_v + 1.0) - v_mask)
     r1_v = nemo_source_round(v_mask / r1_v_denom)
     r1_v0_denom = nemo_source_round(
@@ -676,15 +668,7 @@ def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
 def nemo_literal_metric_transports(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
-    """Assemble NEMO's literal ``zhU``/``zhV`` metric transports.
-
-    The compiled loop multiplies metric, already-associated velocity and live
-    face depth without applying ``ssumask``/``ssvmask`` (dynspg_ts.f90:
-    565-570).  Those masks were applied while the prognostic fields were
-    formed; the subsequent lateral-boundary association intentionally
-    repopulates fold/halo faces that the continuity stencil consumes.
-    ``u_mask``/``v_mask`` remain accepted for call-site compatibility.
-    """
+    """Assemble NEMO DINO's literal ``zhU``/``zhV`` metric transports."""
     # Rich/fold-aware geometry carries the full 2-D u-face meridional metric.
     # Lean LatLonGrid callers retain the canonical regular-grid construction.
     e2u = (grid.dy_u if hasattr(grid, "dy_u")
@@ -694,8 +678,8 @@ def nemo_literal_metric_transports(
     # generic divergence path.
     e1v = (grid.dx_v if hasattr(grid, "dx_v")
            else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
-    zh_u = nemo_source_round(nemo_source_round(e2u * U) * H_u)
-    zh_v = nemo_source_round(nemo_source_round(e1v * V) * H_v)
+    zh_u = ((e2u * U) * H_u) * u_mask
+    zh_v = ((e1v * V) * H_v) * v_mask
     return zh_u, zh_v
 
 
@@ -767,10 +751,9 @@ def nemo_literal_continuity_divergence(
     """
     zh_u, zh_v = nemo_literal_metric_transports(
         H_u, H_v, U, V, u_mask, v_mask, grid)
-    du = nemo_source_round(zh_u[:, 1:] - zh_u[:, :-1])
-    dv = nemo_source_round(zh_v[1:] - zh_v[:-1])
-    flux_sum = nemo_source_round(du + dv)
-    return nemo_source_round(flux_sum * nemo_source_round(1.0 / grid.area))
+    du = zh_u[:, 1:] - zh_u[:, :-1]
+    dv = zh_v[1:] - zh_v[:-1]
+    return (du + dv) * (1.0 / grid.area)
 
 
 def _min_rule_face_depths(H_total, mask, grid, _nfold_mask):
@@ -2137,15 +2120,6 @@ def _run_substep_loop(
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
-
-        # NEMO associates every external-mode carry before the next substep.
-        # The hidden west U face is the periodic image of the stored east
-        # face.  The V member of the same call is sign-reversing across the
-        # T-pivot fold (dynspg_ts.f90:777-779; lbcnfd.f90:684-721).  Rebuild
-        # both boundary values before they become the next substep's carry.
-        U_bar_new = U_bar_new.at[:, 0].set(U_bar_new[:, -1])
-        if fold_is_local(grid) or _nfold_mask is not None:
-            V_bar_new = pad_ns_vector_v(V_bar_new[1:-1], grid)
 
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
