@@ -63,7 +63,23 @@ Separate read-only Codex review was attempted before measurement and returned
 
 ## Final validation
 
-PENDING.
+The default cumulative citation gate passes 274 citations with zero failures
+and zero unmapped entries. This receipt passes its one compiled citation; a
+two-line plant on that exact `stprk3.f90` span exits 1, so the receipt gate is
+non-vacuous.
+
+The prescribed single `tests/ocean/fidelity -n 12` invocation collected 2,404
+tests and reached 99%, then reproduced the registered xdist-controller tail
+after the corrected real-process census reached zero. It is **incomplete, not
+PASS**. Six failures were displayed: the pre-existing GYRE round-129 spread-
+record stamp, round-51 private-arm scope, round-35 escape scope, worktree-stamp
+emitter, recipe case-board, and SI3 scalar-math provenance rows. Every
+round-130 test, including both terminal plants and the colliding-ledger
+regression, passed in that battery.
+
+Final-diff read-only Codex review was attempted after the receipt was complete
+and returned the same **independent review unavailable in-sandbox** app-server
+initialization error.
 
 ## OPEN
 
