@@ -67,7 +67,12 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly TEST_CASE=VORTEX
-readonly STEPS=10
+# The ladder length and the coordinate tag cn_exp carries.  Both are 10
+# and ZCO for every certified variant; decision 88's VORTEX_SMT rungs
+# override them (ZPS, and 3000 steps for the 100-day record).
+steps=10
+coord_tag=ZCO
+smt_zgr=
 
 # TWO CARDS, ONE SCRIPT (decision 73, operator note BJ).  The vector-EEN card is
 # the SAME experiment -- same geometry, same simplified equation of state, same
@@ -236,16 +241,67 @@ case "$variant" in
     ladder_res=${variant:3:2}km ; ladder_card=${variant:5}
     default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$ladder_res/$ladder_card
     ;;
+  smtflx | smtvec | smtflx100d | smtvec100d)
+    # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
+    # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
+    # levels, every physics switch as the certified cards pin it -- with a
+    # user-defined Gaussian seamount and z-coordinate PARTIAL STEPS, through
+    # NEMO's own usrdef_zgr hook.  The shipped VORTEX_* builds and the four
+    # certified VORTEX configurations are NOT touched: these are new ones.
+    #
+    # THE ONE cpp KEY THAT CHANGES, and it is forced by NEMO, not chosen:
+    # src/OCE/DOM/domzgr.F90:259 refuses partial steps under key_vco_1d
+    #   IF( l_zps ) CALL ctl_stop('STOP','domzgr: key_vco_1d and l_zps=T are
+    #                             incompatible. Fix usrdef_zgr !')
+    # and NEMO's own name for the partial-cell key is key_vco_1d3d
+    # (domzgr.F90:242-243 "z-partial cells"; it is the key OVERFLOW's and
+    # IWAVE's zps branches are guarded by).  key_qco and key_RK3 are
+    # unchanged, and key_xios/key_agrif are dropped exactly as every other
+    # variant drops them.
+    smt_zgr=$here/vortex_smt_usrdef_zgr.F90
+    coord_tag=ZPS
+    case "$variant" in
+      smtflx)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round211_smt_flux
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_OMIP_L1_P3/kt1_10 ;;
+      smtvec)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round211_smt_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smtflx100d)
+        # NEMO's own shipped run length, nn_itend = 3000 steps of rn_Dt =
+        # 2880 s = 100 days, with nn_stock = 30 (daily) restarts -- the same
+        # cadence round 210 measured the flat cards over.  The builds are the
+        # ones the kt=1..10 rung above produced, re-proved by hash.
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt_omip_l1_100d.patch
+        ref_name=VORTEX_SMT_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round211_smt_flux_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_OMIP_L1_P3/day100 ;;
+      smtvec100d)
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt_vec_een_100d.patch
+        ref_name=VORTEX_SMT_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round211_smt_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/day100 ;;
+    esac
+    ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx or res10vec\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d or smtvec100d\n' \
       "$variant" >&2
     exit 64
     ;;
 esac
 readonly EVIDENCE=${EVIDENCE:-$default_evidence}
+readonly STEPS=$steps
+readonly COORD_TAG=$coord_tag
+readonly SMT_ZGR=$smt_zgr
 readonly REF_CFG=$ref_name
 readonly RUN_CFG=${ref_name}_P3
-readonly RESTART=${exp_name}_ZCO_00000010_restart.nc
+readonly RESTART=$(printf '%s_%s_%08d_restart.nc' "$exp_name" "$COORD_TAG" "$STEPS")
 readonly TAG=$tag
 readonly INSTRUMENT=$here/stprk3_step_record.patch
 # The second, round-4 instrument.  Empty for every variant but vecrhs.
@@ -267,7 +323,9 @@ else
 fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
-if [[ "$variant" == "stage23" ]]; then
+if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" ]]; then
+  # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
+  # instrumented build, so it carries the SAME stage-2/3 term writer.
   STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
   DYNADV_INSTRUMENT=$here/dynadv_stage_terms_record.patch
   STAGE_MODULE=$here/vortex_r8_stage_terms.F90
@@ -356,6 +414,37 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
       exit 66
     fi
   done
+fi
+if [[ -n "$SMT_ZGR" ]]; then
+  # Decision 88's seamount hook.  It REPLACES tests/VORTEX/MY_SRC/usrdef_zgr.F90
+  # in the new configuration only; the shipped file is never edited.
+  [[ -f "$SMT_ZGR" ]] \
+    || { printf 'REFUSE: missing seamount source %s\n' "$SMT_ZGR" >&2; exit 66; }
+  [[ -f "$SRC_CASE/MY_SRC/usrdef_zgr.F90" ]] \
+    || { printf 'REFUSE: the shipped case has no usrdef_zgr.F90 to replace\n' >&2; exit 66; }
+  if cmp -s "$SMT_ZGR" "$SRC_CASE/MY_SRC/usrdef_zgr.F90"; then
+    printf 'REFUSE: the seamount source is identical to the shipped flat-bottom one\n' >&2
+    exit 67
+  fi
+  # The three things the configuration IS.  A copy that lost any of them
+  # would silently run the flat box under the seamount's name.
+  grep -q 'ld_zps    = .TRUE.' "$SMT_ZGR" \
+    || { printf 'REFUSE: the seamount source does not select partial steps\n' >&2; exit 67; }
+  for want in 'pp_smt_H0 =  5000._wp' 'pp_smt_A  =  1000._wp' \
+              'pp_smt_L  =   150.e3_wp' 'pp_smt_x0 =  -300.e3_wp' \
+              'pp_smt_y0 =     0.e3_wp'; do
+    grep -qF "$want" "$SMT_ZGR" \
+      || { printf 'REFUSE: the seamount source does not pin %s\n' "$want" >&2; exit 67; }
+  done
+  # NEMO refuses partial steps under key_vco_1d (domzgr.F90:259), so the
+  # shipped key set CANNOT be carried unchanged here.  Prove that refusal
+  # still exists in this tree rather than quoting a comment at it.
+  grep -q "key_vco_1d and l_zps=T are incompatible" "$NEMO_ROOT/src/OCE/DOM/domzgr.F90" \
+    || { printf 'REFUSE: domzgr no longer refuses zps under key_vco_1d; re-read the coordinate rules\n' >&2
+         exit 66; }
+  grep -q 'key_vco_1d' "$SRC_CASE/cpp_${TEST_CASE}.fcm" \
+    || { printf 'REFUSE: cpp_%s.fcm no longer compiles key_vco_1d; re-read the case\n' "$TEST_CASE" >&2
+         exit 66; }
 fi
 [[ -d "$SRC_CASE/MY_SRC" && -d "$SRC_CASE/EXPREF" ]] \
   || { printf 'REFUSE: %s is not the shipped test case\n' "$SRC_CASE" >&2; exit 66; }
@@ -527,9 +616,9 @@ fi
 # a deck that silently carried the other card's pair would run the other card
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
-  flux | stage123flx | res15flx | res10flx)
+  flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d)
       want_vec='.false.' ; want_up3='.true.'  ;;
-  vec | vecrhs | stage23 | spgts | res15vec | res10vec)
+  vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d)
       want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
@@ -617,8 +706,16 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
 cd "$NEMO_ROOT"
 build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   local name=$1 instrumented=$2 cfg=$NEMO_ROOT/tests/$1
-  ./makenemo -a "$TEST_CASE" -n "$name" -m conda-scalarmath \
-    del_key 'key_xios key_agrif'
+  if [[ -n "$SMT_ZGR" ]]; then
+    # key_vco_1d -> key_vco_1d3d is NEMO's own requirement for partial
+    # steps (domzgr.F90:259 refuses l_zps under key_vco_1d; :242-243 names
+    # key_vco_1d3d the "z-partial cells" key).  key_qco and key_RK3 stay.
+    ./makenemo -a "$TEST_CASE" -n "$name" -m conda-scalarmath \
+      del_key 'key_xios key_agrif key_vco_1d' add_key 'key_vco_1d3d'
+  else
+    ./makenemo -a "$TEST_CASE" -n "$name" -m conda-scalarmath \
+      del_key 'key_xios key_agrif'
+  fi
   # cp -r, NOT cp -a: preserved mtimes let fcm skip a patched file.
   cp -r "$SRC_CASE/EXPREF/." "$cfg/EXP00/"
   cp -r "$SRC_CASE/MY_SRC/." "$cfg/MY_SRC/"
@@ -626,6 +723,20 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   # cannot be read by accident.
   rm -f "$cfg/EXP00/1_"* "$cfg/EXP00/AGRIF_FixedGrids.in"
   patch "$cfg/EXP00/namelist_cfg" <"$DECK"
+  if [[ -n "$SMT_ZGR" ]]; then
+    cp -f "$SMT_ZGR" "$cfg/MY_SRC/usrdef_zgr.F90"
+    # The resolved key set must be exactly the shipped one with vco_1d
+    # swapped for vco_1d3d -- read it back, never assume makenemo obeyed.
+    grep -q 'key_vco_1d3d' "$cfg/cpp_${name}.fcm" \
+      || { printf 'REFUSE: %s did not take key_vco_1d3d\n' "$name" >&2; exit 69; }
+    if grep -qE '(^| )key_vco_1d( |$)' "$cfg/cpp_${name}.fcm"; then
+      printf 'REFUSE: %s still carries key_vco_1d\n' "$name" >&2; exit 69
+    fi
+    for key in key_qco key_RK3; do
+      grep -q "$key" "$cfg/cpp_${name}.fcm" \
+        || { printf 'REFUSE: %s lost %s\n' "$name" "$key" >&2; exit 69; }
+    done
+  fi
   if [[ "$instrumented" -eq 1 ]]; then
     [[ ! -e "$cfg/MY_SRC/stprk3.F90" ]]
     cp "$SHIPPED_STP" "$cfg/MY_SRC/stprk3.F90"
@@ -661,6 +772,12 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   fi
   if ! grep -q 'VORTEX' "$cfg/BLD/ppsrc/nemo/usrdef_hgr.f90"; then
     printf 'REFUSE: %s did not compile the VORTEX usrdef_hgr\n' "$name" >&2; exit 69
+  fi
+  if [[ -n "$SMT_ZGR" ]]; then
+    grep -q 'pp_smt_H0' "$cfg/BLD/ppsrc/nemo/usrdef_zgr.f90" \
+      || { printf 'REFUSE: %s compiled a usrdef_zgr without the seamount\n' "$name" >&2; exit 69; }
+    grep -q 'lk_vco_1d3d = .TRUE.' "$cfg/BLD/ppsrc/nemo/dom_oce.f90" \
+      || { printf 'REFUSE: %s did not resolve lk_vco_1d3d\n' "$name" >&2; exit 69; }
   fi
   if grep -q 'NEMO_L1_ENTRY_1' "$cfg/BLD/ppsrc/nemo/stprk3.f90"; then
     if [[ "$instrumented" -ne 1 ]]; then
@@ -753,6 +870,8 @@ if [[ "$reuse_build" -eq 1 ]]; then
   case "$variant" in
     res15flx | res10flx) certified_manifest=$certified_manifest/round2/binaries.sha256 ;;
     res15vec | res10vec) certified_manifest=$certified_manifest/round3/binaries.sha256 ;;
+    smtflx100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smtvec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
