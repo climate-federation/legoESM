@@ -94,8 +94,20 @@ worktree stamp, resolved-card scope, full-longitude support, and both-rank
 support. Its oracle-bit, candidate-bit, rank-seam, and scope-route plants each
 refuse.
 
-Validation summary will be finalized after the clean-receipt citation gate,
-focused battery, and one required full `tests/ocean/fidelity -n 12` invocation.
+The default citation gate passes 274 citations and this receipt passes its two
+citations, each with zero unmapped or failed entries. Shifting the compiled
+fraction citation by two lines makes the gate refuse. The focused
+round-119/120/121 plus citation battery passes 28/28.
+
+The single required `tests/ocean/fidelity -n 12` invocation collected 2,366
+tests and reached 98%, then reproduced the registered xdist-controller stall
+after every real pytest process had exited. It was interrupted after the
+one-minute grace period without a summary and is **incomplete, not PASS**.
+Re-running the six displayed failing IDs together reproduces the same six
+registered pre-existing reds: SI3 scalar-math source provenance, the round-129
+certified-year stamp, round-51 private-arm scope, round-35 dirty-escape
+scoping, worktree stamping, and the `hires_lane_surface` case-board row. No
+round-121 failure was exposed.
 
 The separate read-only Codex review returned **independent review unavailable
 in-sandbox**: `failed to initialize in-process app-server client: Read-only
