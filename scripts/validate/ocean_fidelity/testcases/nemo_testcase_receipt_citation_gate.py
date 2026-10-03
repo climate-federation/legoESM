@@ -1304,7 +1304,7 @@ CITATION_MAP = {
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
-        ('END DO   ;   END DO', 10), 45],
+        ('END DO   ;   END DO', 5), 45],
     'barotropic_latlon_cgrid.py:953-974': [
         ('def _nemo_een_north_u(field, grid):', 1),
         ('return north', 2), 22],
