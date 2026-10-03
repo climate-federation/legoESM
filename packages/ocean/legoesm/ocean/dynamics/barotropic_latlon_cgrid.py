@@ -2139,11 +2139,11 @@ def _run_substep_loop(
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
 
         # NEMO associates every external-mode carry before the next substep.
-        # The V member of the compiled lbc_lnk call is sign-reversing across
-        # the T-pivot fold (dynspg_ts.f90:777-779; lbcnfd.f90:684-721).  The
-        # stored last V row is a boundary row, so rebuild it from the final
-        # interior row exactly as the shared vector-fold operator does.  This
-        # is a no-op away from the tripolar northern band.
+        # The hidden west U face is the periodic image of the stored east
+        # face.  The V member of the same call is sign-reversing across the
+        # T-pivot fold (dynspg_ts.f90:777-779; lbcnfd.f90:684-721).  Rebuild
+        # both boundary values before they become the next substep's carry.
+        U_bar_new = U_bar_new.at[:, 0].set(U_bar_new[:, -1])
         if fold_is_local(grid) or _nfold_mask is not None:
             V_bar_new = pad_ns_vector_v(V_bar_new[1:-1], grid)
 
