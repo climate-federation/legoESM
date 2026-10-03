@@ -1585,7 +1585,7 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
            for name in new_state._fields})
 
     # Inert-surface response for a held column.
-    T_prev = state.T_soil[:, 0] if state.T_snow is None else state.T_snow
+    T_prev = land_skin_temperature(state)
     eps = jnp.full(ncol, config.emissivity_land)
     inert = dict(
         T_sfc=T_prev, T_rad=T_prev,

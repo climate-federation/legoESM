@@ -487,3 +487,26 @@ def test_trace_pack_stays_bounded_and_canopy_converges(swe):
     assert int(sfc.n_held) == 0
     assert np.isfinite(float(s2.T_snow[0]))
     assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) < 5.0
+    # ...and it responds to the cooling flux through that conductance: the
+    # snow surface ends colder than the soil top it drains.
+    assert float(s2.T_snow[0]) < float(s2.T_soil[0, 0])
+
+
+def test_held_column_reports_the_capped_skin():
+    """A column the canopy fails to solve is held at its previous skin, which
+    for a snow node above freezing (pending melt) is T_freeze."""
+    from legoesm.land.multilayer_land import (
+        _hold_unsolved_columns, step_multilayer_land_with_diagnostics)
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([10.0]), T_snow=jnp.array([276.0]))
+    f = _forcing(1, 262.0, 0.0, 0.0)
+    new, resp, _c, sfc = step_multilayer_land_with_diagnostics(
+        st, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0))
+    _h, held_resp, _hc, mask, _n = _hold_unsolved_columns(
+        st, new, resp, sfc._replace(converged=jnp.array([False])), f, cfg, 1)
+    assert bool(mask[0])
+    np.testing.assert_allclose(np.asarray(held_resp.T_sfc), [_TF])
+    np.testing.assert_allclose(np.asarray(held_resp.T_rad), [_TF])

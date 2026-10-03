@@ -519,6 +519,12 @@ def merge_land_restart_into_template(loaded, template):
     for name in _MULTILAYER_OPTIONAL_ARRAY_FIELDS:
         arr = getattr(loaded, name, None)
         ref = getattr(template, name, None)
+        if name == "T_snow" and arr is not None and ref is None:
+            # A prognostic temperature, not a mass reservoir: dropping it would
+            # silently turn a snow-node state into a heat-free bucket.
+            raise ValueError(
+                "land restart carries the snow-node temperature 'T_snow' but "
+                "this run has no snow thermal node; refusing to discard it.")
         if arr is None or ref is None:
             continue  # feature off on one end -> keep template structure, invent no mass
         if hasattr(arr, "shape") and hasattr(ref, "shape") and arr.shape != ref.shape:

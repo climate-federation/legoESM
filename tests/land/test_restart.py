@@ -488,3 +488,10 @@ def test_snow_node_temperature_round_trips_and_grafts(tmp_path):
                                expected_land_mode="multilayer",
                                expected_ncol=_NCOL, expected_n_layers=_NLAY)
     assert st3.T_snow is None
+
+
+def test_snow_node_restart_into_a_run_without_it_is_refused():
+    from legoesm.land.restart import merge_land_restart_into_template
+    st = _fake_state(seed=6)._replace(T_snow=jnp.full(_NCOL, 260.0))
+    with pytest.raises(ValueError, match="T_snow"):
+        merge_land_restart_into_template(st, _fake_state(seed=7))
