@@ -59,7 +59,11 @@ import jax.numpy as jnp
 
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
-from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+from legoesm.grids.operators_latlon_cgrid import (
+    fold_ghost_source_T,
+    fold_perm_f,
+    fold_perm_u,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
@@ -946,6 +950,42 @@ def _nemo_een_north_ff(field, grid):
     return _nemo_een_north_f(field, grid)
 
 
+def _nemo_een_north_u(field, grid):
+    """NEMO T-pivot/U-point association for an EEN northern operand.
+
+    ``domzgr`` and ``dommsk`` apply the ordinary U-grid lateral boundary to
+    ``e3u_3d`` and ``umask`` before ``dyn_cor_2D_init`` reads ``jj+1``.  On a
+    de-haloed T-pivot mesh, that northern value is the U-permuted row below
+    the stored pivot; scalar geometry and masks use sign +1.
+    """
+    north = jnp.roll(field, -1, axis=0)
+    fold = getattr(grid, "fold", None)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        source = fold_ghost_source_T(field, fold)[0]
+        fold_row = source[fold_perm_u(fold)]
+        if fold_is_local(grid):
+            north = north.at[-1].set(fold_row)
+        else:
+            selector = nmask
+            while selector.ndim < fold_row.ndim:
+                selector = selector[..., None]
+            north = north.at[-1].set(jnp.where(selector, fold_row, north[-1]))
+    return north
+
+
+def _nemo_ieee_add(acc, addend):
+    """NEMO host IEEE addition, including exact-zero sign semantics."""
+    updated = nemo_source_round(acc + addend)
+    both_zero = (acc == 0.0) & (addend == 0.0)
+    both_negative = jnp.signbit(acc) & jnp.signbit(addend)
+    signed_zero = jnp.copysign(
+        jnp.zeros_like(acc),
+        jnp.where(both_negative, -jnp.ones_like(acc), jnp.ones_like(acc)),
+    )
+    return jnp.where(both_zero, signed_zero, updated)
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -1034,13 +1074,23 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
     r3f = b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))
-    e3u = b(e3u0 * b(one + r3u[..., None] * umask) * umask)
-    e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
+    # dynspg_ts.f90:1339-1348 leaves the local and neighbouring live face
+    # thicknesses unmasked, then applies the one written neighbouring U mask.
+    e3u = b(e3u0 * b(one + r3u[..., None] * umask))
+    e3v = b(e3v0 * b(one + r3v[..., None] * vmask))
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
     q = b(ff[..., None] / e3f)
     ff_north = _nemo_een_north_f(ff, grid)
     e3f_north = _nemo_een_north_f(e3f, grid)
     q_north = b(ff_north[..., None] / e3f_north)
+    e3u_north = _nemo_een_north_u(e3u, grid)
+    umask_north = _nemo_een_north_u(umask, grid)
+    e2u_north = _nemo_een_north_u(e2u, grid)
+    levels = jnp.arange(1, umask.shape[-1] + 1, dtype=jnp.int32)
+    mbku = jnp.maximum(
+        jnp.max(jnp.where(umask > 0.0, levels, 0), axis=-1), 1)
+    mbkv = jnp.maximum(
+        jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)
 
     def shift(value, di=0, dj=0):
         out = jnp.roll(value, di, axis=1) if di else value
@@ -1069,16 +1119,17 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     def triad(a, c, d):
         return b(b(a + c) + d)
 
-    def coefficient(face, neighbor, neighbor_mask, q_factor,
+    def coefficient(face, bottom, neighbor, neighbor_mask, q_factor,
                     neighbor_metric, local_metric, r1_h):
         term = b(b(b(face * neighbor) * neighbor_mask) * q_factor)
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
-            acc = b(acc + term[..., jk])
+            acc = jnp.where(
+                jk < bottom, _nemo_ieee_add(acc, term[..., jk]), acc)
         return b(b(b(b(leading_scale * b(one / local_metric)) * r1_h)
                      * neighbor_metric) * acc)
 
-    def ene_coefficient(face, neighbor, neighbor_mask, e3f_divisor,
+    def ene_coefficient(face, bottom, neighbor, neighbor_mask, e3f_divisor,
                         f_factor, neighbor_metric, local_metric, r1_h):
         """dynspg_ts.F90:1387-1409, without moving ``ff_f`` into q.
 
@@ -1092,7 +1143,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         term = b(term / e3f_divisor)
         acc = jnp.zeros_like(r1_h)
         for jk in range(term.shape[-1]):
-            acc = b(acc + term[..., jk])
+            acc = jnp.where(
+                jk < bottom, _nemo_ieee_add(acc, term[..., jk]), acc)
         scale = b(quarter * b(one / local_metric))
         scale = b(scale * r1_h)
         scale = b(scale * neighbor_metric)
@@ -1148,8 +1200,9 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         "se": (shift(e3v, -1, 1), shift(vmask, -1, 1), shift(e1v, -1, 1)),
     }
     vn = {
-        "nw": (shift(e3u, 1, -1), shift(umask, 1, -1), shift(e2u, 1, -1)),
-        "ne": (shift(e3u, 0, -1), shift(umask, 0, -1), shift(e2u, 0, -1)),
+        "nw": (shift(e3u_north, 1, 0), shift(umask_north, 1, 0),
+               shift(e2u_north, 1, 0)),
+        "ne": (e3u_north, umask_north, e2u_north),
         "sw": (shift(e3u, 1, 0), shift(umask, 1, 0), shift(e2u, 1, 0)),
         "se": (e3u, umask, e2u),
     }
@@ -1161,20 +1214,22 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         if scheme == "ene":
             divisor, f_factor = ene_u_f[corner]
             out[f"ffu_{corner}"] = ene_coefficient(
-                e3u, neighbor, neighbor_mask, divisor, f_factor,
+                e3u, mbku, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e1u, r1_hu)
         else:
             out[f"ffu_{corner}"] = coefficient(
-                e3u, neighbor, neighbor_mask, uq[corner], metric, e1u, r1_hu)
+                e3u, mbku, neighbor, neighbor_mask, uq[corner],
+                metric, e1u, r1_hu)
         neighbor, neighbor_mask, metric = vn[corner]
         if scheme == "ene":
             divisor, f_factor = ene_v_f[corner]
             out[f"ffv_{corner}"] = ene_coefficient(
-                e3v, neighbor, neighbor_mask, divisor, f_factor,
+                e3v, mbkv, neighbor, neighbor_mask, divisor, f_factor,
                 metric, e2v, r1_hv)
         else:
             out[f"ffv_{corner}"] = coefficient(
-                e3v, neighbor, neighbor_mask, vq[corner], metric, e2v, r1_hv)
+                e3v, mbkv, neighbor, neighbor_mask, vq[corner],
+                metric, e2v, r1_hv)
     return out
 
 

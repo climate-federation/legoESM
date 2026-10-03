@@ -60,7 +60,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round120_ee
 PATHS = ("nw", "ne")
 SOURCE_ORDER = r119.SOURCE_ORDER
 ARMS = ("baseline", "thickness-only", "mask-only", "combined")
-PLANTS = ("none", "oracle-bit", "candidate-bit", "wrong-row",
+PLANTS = ("none", "oracle-bit", "candidate-bit", "production-bit", "wrong-row",
           "wrong-permutation", "scope-route")
 EXPECTED_BASELINE = {
     "nw": {"mbkv": (0, 0), "zpvo": (0, 0), "e3v": (0, 0),
@@ -319,12 +319,33 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "associated_final": r109._score(candidate_final, oracle_final),
         }
 
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_een_coefficients,
+    )
+    production = jax.device_get(jax.jit(
+        lambda value: _nemo_literal_een_coefficients(
+            value, source_z, jnp.float64, "een", grid=card.recipe.grid))(
+                jnp.asarray(state.eta.data, dtype=jnp.float64)))
+    if plant == "production-bit":
+        changed = np.array(production["ffv_ne"], copy=True)
+        changed.view(np.uint64)[147, 31] ^= np.uint64(1)
+        production = dict(production, ffv_ne=changed)
+    production_scores = {
+        name: r109._score(np.asarray(production[name]),
+                          np.asarray(coefficient_oracle[name]))
+        for name in sorted(coefficient_oracle)
+    }
+    require(all(row["bit_unequal"] == 0 for row in production_scores.values()),
+            "production literal-EEN coefficients are not bit-exact")
+
     if plant == "oracle-bit":
         require(rows["nw"]["combined"]["scores"]["e3u"]["bit_unequal"] != 0,
                 "oracle-bit plant stayed green")
     elif plant == "candidate-bit":
         require(rows["ne"]["combined"]["first_non_bit_item"] == "zpvo",
                 "candidate-bit plant stayed green")
+    elif plant == "production-bit":
+        raise GateError("production-bit plant fired")
     elif plant in ("wrong-row", "wrong-permutation"):
         require(any(rows[path]["combined"]["scores"][name]["magnitude_unequal"]
                     for path in PATHS for name in ("e3u", "mask")),
@@ -356,6 +377,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "combined_all_rows_exact": combined_exact,
         "paths": rows,
         "scale_and_final": scale_and_final,
+        "production_coefficients": production_scores,
         "worktree": stamp,
     }
 
