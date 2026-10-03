@@ -767,9 +767,10 @@ def nemo_literal_continuity_divergence(
     """
     zh_u, zh_v = nemo_literal_metric_transports(
         H_u, H_v, U, V, u_mask, v_mask, grid)
-    du = zh_u[:, 1:] - zh_u[:, :-1]
-    dv = zh_v[1:] - zh_v[:-1]
-    return (du + dv) * (1.0 / grid.area)
+    du = nemo_source_round(zh_u[:, 1:] - zh_u[:, :-1])
+    dv = nemo_source_round(zh_v[1:] - zh_v[:-1])
+    flux_sum = nemo_source_round(du + dv)
+    return nemo_source_round(flux_sum * nemo_source_round(1.0 / grid.area))
 
 
 def _min_rule_face_depths(H_total, mask, grid, _nfold_mask):
