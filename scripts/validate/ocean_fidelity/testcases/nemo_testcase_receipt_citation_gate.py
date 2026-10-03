@@ -220,6 +220,8 @@ FILES = {
         _ORCA2_R118EENVREC_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R120EENVFRAC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R120EENVFRAC_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/domhgr.f90": (
         _ORCA2_R120EENVFRAC_COMPILED / "domhgr.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90": (
@@ -1299,6 +1301,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 125: northeast northern frozen-mask association ------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dommsk.f90:232-258': [
+        ("CALL lbc_lnk( 'dommsk', umask, 'U'", 1),
+        ('fe3mask(:,:,:) = fmask(:,:,:)', 1), 27],
     # --- ORCA2 round 123: northeast northern e3f_0vor association ---------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynvor.f90:912-937': [
         ('SELECT CASE( nn_e3f_typ )', 1),
