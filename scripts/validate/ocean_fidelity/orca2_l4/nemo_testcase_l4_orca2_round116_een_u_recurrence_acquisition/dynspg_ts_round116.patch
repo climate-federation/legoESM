@@ -1,0 +1,26 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -63,0 +64,2 @@
++   USE l4_r116_een_u_recurrence, ONLY : r116_een_u_init, r116_een_u_before, &
++      & r116_een_u_after, r116_een_u_dump ! round-116 write-only U recurrences
+@@ -1467,0 +1470 @@
++      CALL r116_een_u_init
+@@ -1644,0 +1648,3 @@
++               CALL r116_een_u_before(1, ji, jj, jk, zpvo_ne, e3u(ji,jj,jk,Kmm), &
++                  & e3v(ji+1,jj,jk,Kmm), vmask(ji+1,jj,jk), ffu_ne(ji,jj))
++               !
+@@ -1645,0 +1652,4 @@
++               CALL r116_een_u_after(1, ji, jj, jk, ffu_ne(ji,jj))
++               CALL r116_een_u_before(2, ji, jj, jk, zpvo_sw, e3u(ji,jj,jk,Kmm), &
++                  & e3v(ji,jj-1,jk,Kmm), vmask(ji,jj-1,jk), ffu_sw(ji,jj))
++               !
+@@ -1646,0 +1657,4 @@
++               CALL r116_een_u_after(2, ji, jj, jk, ffu_sw(ji,jj))
++               CALL r116_een_u_before(3, ji, jj, jk, zpvo_se, e3u(ji,jj,jk,Kmm), &
++                  & e3v(ji+1,jj-1,jk,Kmm), vmask(ji+1,jj-1,jk), ffu_se(ji,jj))
++               !
+@@ -1647,0 +1662 @@
++               CALL r116_een_u_after(3, ji, jj, jk, ffu_se(ji,jj))
+@@ -1664,0 +1680,2 @@
++         CALL r116_een_u_dump(mbku)
++         !
