@@ -170,6 +170,28 @@ def test_traced_beta_soil_reaches_turbulence(monkeypatch, tmp_path):
         "surface flux")
 
 
+def test_land_stress_from_land_reaches_the_winds(monkeypatch, tmp_path):
+    """mpas_land_stress_from_land hands the land tile's stress magnitude to the
+    turbulence (forcing['taumag_land']); the run must differ from the same run
+    with the bulk stress, and only in the winds' surface drag path."""
+    _patch_land_loaders(monkeypatch)
+    # The synthetic map carries no per-PFT canopy tables, so the bulk-flux
+    # land scheme (which also solves a stress) stands in for the canopy.
+    kw = dict(turbulence="louis", beta_soil=True,
+              land_surface_scheme="simple_seb", mpas_land_params_refresh=False)
+    d_off = _build_driver(str(tmp_path / "off"), FOUR_STEPS_DAYS, **kw,
+                          mpas_land_stress_from_land=False)
+    assert d_off.run() == "COMPLETED"
+    d_on = _build_driver(str(tmp_path / "on"), FOUR_STEPS_DAYS, **kw,
+                         mpas_land_stress_from_land=True)
+    assert d_on.run() == "COMPLETED"
+    u_on = np.asarray(d_on.state.u.data)
+    assert np.isfinite(u_on).all()
+    assert np.max(np.abs(u_on - np.asarray(d_off.state.u.data))) > 0.0, (
+        "mpas_land_stress_from_land=True left the winds bit-identical — the "
+        "land stress is not reaching the turbulence")
+
+
 def test_beta_soil_without_multilayer_land_is_refused(monkeypatch, tmp_path):
     """Inert-corner rejection: the flag without the multilayer land has no
     soil moisture to derive beta from — refused FAIL-EARLY at config

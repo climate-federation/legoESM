@@ -11078,6 +11078,21 @@ class ModelDriver:
         _land_shflx_cells = None       # (nCells,) land's own sensible flux
         _land_lhflx_cells = None       # (nCells,) land's own latent flux
         _land_evap_cells = None        # (nCells,) land's own water flux [kg/m2/s]
+        _land_taumag_cells = None      # (nCells,) land's last valid |stress| [Pa]
+        _land_taumag_valid = None      # (nCells,) a land step has succeeded
+        _land_z0m_cells = None         # (nCells,) static land roughness [m]
+        _land_d_cells = None           # (nCells,) static displacement [m]
+        from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        from legoesm.land.multilayer_land import solved_stress_magnitude
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            hold_last_valid_land_stress,
+        )
+        _land_stress_on = resolve_mpas_land_stress_from_land(cfg)
+        print(f"  Land surface stress to the boundary layer: "
+              f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
+              f"(mpas_land_stress_from_land="
+              f"{getattr(cfg, 'mpas_land_stress_from_land', None)!r}"
+              f"{' -> auto' if getattr(cfg, 'mpas_land_stress_from_land', None) is None else ''})")
         _land_a2s_sum = None           # cadence: running forcing sum
         _land_a2s_n = 0                # cadence: steps accumulated
         if _land_ml_on:
@@ -11250,14 +11265,26 @@ class ModelDriver:
                 # holds separately, so the log can tell a frozen continent
                 # from noise on discarded columns (codex, 2026-08-23: the
                 # undivided counter read as half the mesh held when the
-                # physically-meaningful share was unknown).
+                # physically-meaningful share was unknown).  Any land
+                # fraction counts: a coastal column's land fluxes and stress
+                # are blended in by its fraction, so its hold is not discarded.
                 _held_mask = getattr(_sfc, "held", None)
                 _n_held_land = (
                     jnp.sum((jnp.asarray(_held_mask).reshape(-1)
-                             & (jnp.asarray(_f_land_cols_p) > 0.5))
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # The land's solved stress magnitude rho*u*^2 [Pa] (its canopy
+                # roughness and stability) and the held mask; consumed only
+                # under mpas_land_stress_from_land, where a held or non-finite
+                # column keeps its last valid value (driver loop below).
+                # (sqrt guarded so a zeroed column has a finite derivative.)
+                _taumag = solved_stress_magnitude(_sfc, resp)
+                _held_f = (jnp.asarray(_held_mask).reshape(-1)
+                           .astype(_taumag.dtype)
+                           if _held_mask is not None
+                           else jnp.zeros_like(_taumag))
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -11272,10 +11299,12 @@ class ModelDriver:
                                 o, _land_pack_idx, _land_ncol_full)
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
-                                    resp.shflx, resp.lhflx, resp.surface_mass_flux))
+                                    resp.shflx, resp.lhflx, resp.surface_mass_flux,
+                                    _taumag, _held_f))
                             + (_n_held, _n_held_land))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
+                        _taumag, _held_f,
                         _n_held, _n_held_land)
               return _land_step
 
@@ -11852,6 +11881,18 @@ class ModelDriver:
                 _land_shflx_cells = jnp.zeros_like(_q_air0)
                 _land_lhflx_cells = jnp.zeros_like(_q_air0)
                 _land_evap_cells = jnp.zeros_like(_q_air0)
+                if _land_stress_on:
+                    # No solved land stress yet (start / restart): the first
+                    # host step uses the neutral drag of the static roughness.
+                    from legoesm.land.multilayer_land import (
+                        static_land_roughness,
+                    )
+                    _land_taumag_cells = jnp.zeros_like(_q_air0)
+                    _land_taumag_valid = jnp.zeros(_q_air0.shape, dtype=bool)
+                    _land_z0m_cells, _land_d_cells = (
+                        jnp.asarray(a, dtype=_q_air0.dtype).reshape(-1)
+                        for a in static_land_roughness(
+                            _lml_params, _lml_cfg, int(_q_air0.size)))
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -11898,6 +11939,11 @@ class ModelDriver:
                            or os.environ.get("PMI_RANK", "0"))
             _trace_win = (_t0, _t0 + _tn,
                           os.path.join(_tdir, "rank" + _trace_rank))
+        if _land_stress_on and _land_taumag_cells is None:
+            raise RuntimeError(
+                "mpas_land_stress_from_land resolved ON but the land stress "
+                "was never seeded (no interactive land flux handoff on this "
+                "run); the boundary layer would silently keep the bulk stress.")
         for step in range(n_steps_total):
             if _trace_win is not None and step in _trace_win[:2]:
                 jax.block_until_ready(self.state)
@@ -12136,6 +12182,14 @@ class ModelDriver:
                     _forcing["shflx_land"] = _land_shflx_cells
                     _forcing["lhflx_land"] = _land_lhflx_cells
                     _forcing["evap_land"] = _land_evap_cells
+                if _land_taumag_cells is not None:
+                    # Land-model stress over the land fraction: last valid
+                    # solved value, else the neutral drag of the column's
+                    # static land roughness (never the ocean bulk law).
+                    _forcing["taumag_land"] = _land_taumag_cells
+                    _forcing["taumag_land_valid"] = _land_taumag_valid
+                    _forcing["z0m_land"] = _land_z0m_cells
+                    _forcing["d_land"] = _land_d_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -12279,6 +12333,7 @@ class ModelDriver:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
+                     _land_taumag_step, _land_held_step,
                      _land_n_held_step, _land_n_held_land_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64),
@@ -12315,6 +12370,13 @@ class ModelDriver:
                         _land_shflx_cells = _land_shflx_step
                         _land_lhflx_cells = _land_lhflx_step
                         _land_evap_cells = _land_evap_step
+                        if _land_stress_on:
+                            # Last valid land stress per column: a held or
+                            # non-finite solve keeps the previous value.
+                            (_land_taumag_cells,
+                             _land_taumag_valid) = hold_last_valid_land_stress(
+                                _land_taumag_cells, _land_taumag_valid,
+                                _land_taumag_step, _land_held_step)
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).
@@ -12337,7 +12399,7 @@ class ModelDriver:
                         # held as well, and the worst single step.
                         logger.warning(
                             "land: %d column-steps held in the last %d "
-                            "steps (%d of them on LAND columns — the "
+                            "steps (%d of them on columns with any land — the "
                             "physically meaningful share; the rest are "
                             "ocean columns whose land output is "
                             "discarded), on %d of those steps (a held "

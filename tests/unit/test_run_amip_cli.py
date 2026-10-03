@@ -939,6 +939,20 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     assert cfg_off.mpas_land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
+def test_mpas_land_stress_from_land_flag_flows_to_config():
+    """--mpas-land-stress-from-land round-trip; unset = AUTO (None), resolved
+    from the run's eligibility; --no-... is an explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_stress_from_land is None
+    for flag, want in (("--mpas-land-stress-from-land", True),
+                       ("--no-mpas-land-stress-from-land", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.mpas_land_stress_from_land is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

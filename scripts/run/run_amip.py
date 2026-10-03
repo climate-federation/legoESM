@@ -1719,6 +1719,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-stress-from-land",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="mpas_land_stress_from_land",
+                        help="MPAS lane: surface stress over the land fraction "
+                             "from the land model (its roughness / canopy drag, "
+                             "rho u*^2) instead of the atmosphere's bulk "
+                             "(ocean-roughness) call; heat fluxes unchanged. "
+                             "Unset = AUTO (on wherever it applies: MPAS, "
+                             "multilayer land with --mpas-land-beta-soil, a "
+                             "turbulence scheme taking injected fluxes, "
+                             "two_leaf/simple_seb); --no-... = old bulk stress.")
     parser.add_argument("--mpas-land-params-refresh",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_land_params_refresh",
@@ -2592,6 +2603,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_stress_from_land=args.mpas_land_stress_from_land,
         mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s

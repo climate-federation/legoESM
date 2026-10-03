@@ -37,6 +37,7 @@ from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 from legoesm.atmosphere.physics.turbulence.integration import (
     _make_mpas_turbulence,
     make_turbulence_physics,
+    schemes_accepting_surface_flux,
 )
 
 
@@ -478,3 +479,290 @@ def test_undefined_land_fluxes_over_ocean_cells_do_not_poison(mpas_mesh,
         a, b = np.asarray(a), np.asarray(b)
         assert np.isfinite(a).all(), f"{name}: NaN leaked through the land blend"
         np.testing.assert_array_equal(a[~land], b[~land], err_msg=name)
+
+
+# ---------------------------------------------------------------------------
+# Land-model surface stress over the land fraction (mpas_land_stress_from_land)
+# ---------------------------------------------------------------------------
+
+from legoesm import constants as _const
+
+
+def _lsf(n, **kw):
+    """Inputs of land_stress_into_surface_flux for n columns; wind (3, 4)."""
+    d = dict(
+        surface_flux=(jnp.full(n, -0.03), jnp.full(n, -0.04), jnp.full(n, 10.0),
+                      jnp.full(n, 20.0), jnp.full(n, 0.123)),
+        tau_land_mag=jnp.full(n, 0.5), land_valid=jnp.ones(n, bool),
+        z0m=jnp.full(n, 1.0), d=jnp.full(n, 10.0), u=jnp.full(n, 3.0),
+        v=jnp.full(n, 4.0), z_low=jnp.full(n, 50.0), f_land=jnp.ones(n),
+        rho_sfc=jnp.full(n, 1.25))
+    d.update(kw)
+    return d
+
+
+def _call(**kw):
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        land_stress_into_surface_flux,
+    )
+    return land_stress_into_surface_flux(**kw)
+
+
+def test_land_stress_direction_sign_and_fraction_isolation():
+    """Opposes the wind (bulk convention), any direction (45 degrees too);
+    blends linearly by land fraction (25/50/100 %), ocean-only bit-identical;
+    heat fluxes untouched."""
+    n = 4
+    f = jnp.array([1.0, 0.5, 0.25, 0.0])
+    out = _call(**_lsf(n, f_land=f))
+    tx, ty = np.asarray(out[0]), np.asarray(out[1])
+    np.testing.assert_allclose([tx[0], ty[0]], [-0.3, -0.4], rtol=1e-9)
+    for k, fk in ((1, 0.5), (2, 0.25)):
+        np.testing.assert_allclose(
+            [tx[k], ty[k]], [(1 - fk) * -0.03 + fk * -0.3,
+                             (1 - fk) * -0.04 + fk * -0.4], rtol=1e-12)
+    np.testing.assert_array_equal([tx[3], ty[3]], [-0.03, -0.04])
+    np.testing.assert_array_equal(np.asarray(out[2]), 10.0)
+    np.testing.assert_array_equal(np.asarray(out[3]), 20.0)
+    # 45-degree wind: magnitude kept, components equal and negative
+    o45 = _call(**_lsf(1, u=jnp.array([5.0]), v=jnp.array([5.0])))
+    np.testing.assert_allclose([float(o45[0][0]), float(o45[1][0])],
+                               [-0.5 / np.sqrt(2)] * 2, rtol=1e-9)
+
+
+def test_land_stress_magnitude_follows_land_not_wind_between_land_steps():
+    """Between land steps the solved magnitude is held and only the direction
+    follows the current wind (documented cadence)."""
+    for u, v in ((3.0, 4.0), (-8.0, 1.0), (0.5, -0.2)):
+        o = _call(**_lsf(1, u=jnp.array([u]), v=jnp.array([v])))
+        np.testing.assert_allclose(np.hypot(float(o[0][0]), float(o[1][0])),
+                                   0.5, rtol=1e-9)
+        assert float(o[0][0]) * u + float(o[1][0]) * v < 0.0
+
+
+def test_land_stress_before_any_valid_solve_is_neutral_land_drag_not_ocean():
+    """No valid land solve yet (start / restart) or a non-finite value: the
+    neutral log-law drag of the column's static land roughness, opposing the
+    wind; never the bulk (ocean) stress."""
+    rho, z, d, z0, U2 = 1.25, 50.0, 10.0, 1.0, 25.0
+    expect = rho * (_const.kappa_vk / np.log((z - d) / z0)) ** 2 * U2
+    for kw in (dict(land_valid=jnp.zeros(1, bool)),
+               dict(tau_land_mag=jnp.array([jnp.nan])),
+               dict(tau_land_mag=jnp.array([jnp.inf]))):
+        o = _call(**_lsf(1, **kw))
+        np.testing.assert_allclose([float(o[0][0]), float(o[1][0])],
+                                   [-expect * 0.6, -expect * 0.8], rtol=1e-9)
+    # displacement at/above the lowest level: log argument clamped (Cd <= 0.04)
+    o = _call(**_lsf(1, land_valid=jnp.zeros(1, bool), d=jnp.array([60.0])))
+    np.testing.assert_allclose(np.hypot(float(o[0][0]), float(o[1][0])),
+                               rho * (_const.kappa_vk / 2.0) ** 2 * U2,
+                               rtol=1e-9)
+
+
+def test_land_stress_ignores_fill_values_on_columns_without_land():
+    """NaN roughness / stress on a column with no land (fill values) must leave
+    it exactly bulk, with finite gradients."""
+    nan = jnp.array([jnp.nan])
+    kw = dict(f_land=jnp.zeros(1), z0m=nan, d=nan, tau_land_mag=nan)
+    for valid in (True, False):
+        o = _call(**_lsf(1, land_valid=jnp.array([valid]), **kw))
+        np.testing.assert_array_equal([float(x[0]) for x in o],
+                                      [-0.03, -0.04, 10.0, 20.0, 0.123])
+        g = jax.grad(lambda u: jnp.sum(jnp.stack(_call(**_lsf(
+            1, u=u, land_valid=jnp.array([valid]), **kw)))))(jnp.array([3.0]))
+        assert np.isfinite(np.asarray(g)).all()
+
+
+def test_hold_last_valid_land_stress():
+    """Held or non-finite solve keeps the previous magnitude; validity latches."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        hold_last_valid_land_stress,
+    )
+    prev = jnp.array([0.1, 0.2, 0.3, 0.4])
+    pv = jnp.array([True, False, True, False])
+    new = jnp.array([0.9, 0.8, jnp.nan, jnp.inf])
+    held = jnp.array([0.0, 1.0, 0.0, 0.0])
+    mag, valid = hold_last_valid_land_stress(prev, pv, new, held)
+    np.testing.assert_array_equal(mag, [0.9, 0.2, 0.3, 0.4])
+    np.testing.assert_array_equal(valid, [True, False, True, False])
+    mag, valid = hold_last_valid_land_stress(mag, valid, jnp.full(4, 0.5),
+                                             jnp.zeros(4))
+    np.testing.assert_array_equal(mag, [0.5] * 4)
+    assert bool(valid.all())
+
+
+def test_land_stress_ustar_bulk_off_land_rebuilt_on_land():
+    """ustar: bulk bit-for-bit on ocean-only columns, sqrt(|tau|/rho) of the
+    blended stress wherever there is land."""
+    f = jnp.array([1.0, 0.5, 0.0])
+    o = _call(**_lsf(3, f_land=f))
+    us = np.asarray(o[4])
+    assert us[2] == 0.123
+    np.testing.assert_allclose(us[0], np.sqrt(0.5 / 1.25), rtol=1e-9)
+    np.testing.assert_allclose(us[1], np.sqrt(0.5 * (0.05 + 0.5) / 1.25),
+                               rtol=1e-9)
+
+
+def test_land_stress_gradient_finite_calm_seed_and_nan():
+    """Calm air, the neutral seed, a clamped displacement and a NaN land value
+    must not produce NaN gradients."""
+    def f(u, mag, valid, dd):
+        o = _call(**_lsf(1, u=u, v=jnp.zeros(1), tau_land_mag=mag,
+                         land_valid=valid, d=dd))
+        return jnp.sum(o[0] + o[1] + o[4])
+    for u, mag, valid, dd in ((0.0, 0.3, True, 10.0), (5.0, 0.3, False, 10.0),
+                              (0.0, 0.0, False, 10.0), (5.0, np.nan, True, 10.0),
+                              (5.0, 0.3, False, 60.0)):
+        g = jax.grad(f, argnums=(0, 1, 3))(
+            jnp.array([u]), jnp.array([mag]), jnp.array([valid]),
+            jnp.array([dd]))
+        assert all(np.isfinite(np.asarray(x)).all() for x in g), (u, mag, g)
+
+
+def _windy(mpas_state):
+    rng = np.random.default_rng(0)
+    u_e = jnp.asarray(10.0 * rng.standard_normal(mpas_state.u.data.shape))
+    return mpas_state._replace(u=mpas_state.u.replace(data=u_e))
+
+
+def _du_low(out):
+    if isinstance(out, tuple):
+        out = out[0]
+    return np.asarray(out.du_dt.data)[:, -1]
+
+
+def _stress_forcing(ncell, mag, valid=True):
+    return dict(_land_forcing(ncell, 0.0, 0.0),
+                taumag_land=jnp.full((ncell,), mag),
+                taumag_land_valid=jnp.full((ncell,), valid),
+                z0m_land=jnp.full((ncell,), 0.5), d_land=jnp.full((ncell,), 5.0))
+
+
+@pytest.mark.parametrize("scheme", schemes_accepting_surface_flux())
+def test_land_stress_reaches_the_momentum_tendency(mpas_mesh, sigma_coord,
+                                                   mpas_state, scheme):
+    """Every scheme the land stress can be handed to (no scheme may recompute
+    the stress from the bulk law and drop it): a land stress far above the
+    bulk one must DECELERATE the lowest-level
+    wind more (sign pinned via the kinetic-energy tendency); an all-ocean
+    column must reproduce the bulk stress."""
+    st = _windy(mpas_state)
+    ncell = st.T.data.shape[0]
+    u_low = np.asarray(st.u.data)[:, -1]
+    land = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.ones((ncell,)))
+    base_f = _land_forcing(ncell, 0.0, 0.0)
+    bulk = _du_low(land(st, mpas_mesh, sigma_coord, forcing=base_f))
+    strong = _du_low(land(st, mpas_mesh, sigma_coord,
+                          forcing=_stress_forcing(ncell, 5.0)))
+    assert np.sum(u_low * strong) < np.sum(u_low * bulk) < 0.0, (
+        f"{scheme}: a 5 Pa land stress must remove lowest-level kinetic "
+        "energy faster than the bulk stress")
+    ocean = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.zeros((ncell,)))
+    o_bulk = _du_low(ocean(st, mpas_mesh, sigma_coord, forcing=base_f))
+    o_with = _du_low(ocean(st, mpas_mesh, sigma_coord,
+                           forcing=_stress_forcing(ncell, 5.0)))
+    np.testing.assert_allclose(o_with, o_bulk, rtol=1e-10, atol=1e-14)
+
+
+def test_land_stress_seed_follows_the_static_land_roughness(
+        mpas_mesh, sigma_coord, mpas_state):
+    """Before any valid land solve the drag is the neutral law of (z0m, d) at
+    the lowest level's height above the surface: rougher or more displaced
+    land must remove more lowest-level kinetic energy; a displacement far
+    above the lowest level hits the clamp (identical for any larger d)."""
+    st = _windy(mpas_state)
+    ncell = st.T.data.shape[0]
+    u_low = np.asarray(st.u.data)[:, -1]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+
+    def ke(z0m, d):
+        f = dict(_stress_forcing(ncell, 0.0, valid=False),
+                 z0m_land=jnp.full((ncell,), z0m), d_land=jnp.full((ncell,), d))
+        return np.sum(u_low * _du_low(fn(st, mpas_mesh, sigma_coord,
+                                         forcing=f)))
+    assert ke(1.0, 0.0) < ke(0.01, 0.0) < 0.0
+    assert ke(0.1, 5.0) < ke(0.1, 0.0)
+    assert ke(0.1, 1.0e5) == ke(0.1, 2.0e5)
+    assert ke(0.1, 1.0e5) < ke(0.1, 5.0)
+
+
+def test_land_stress_with_partial_keys_is_refused(
+        mpas_mesh, sigma_coord, mpas_state):
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+    f = _stress_forcing(ncell, 1.0)
+    del f["z0m_land"]
+    with pytest.raises(ValueError, match="z0m_land"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=f)
+
+
+def test_land_stress_without_land_heat_fluxes_is_refused(
+        mpas_mesh, sigma_coord, mpas_state):
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=jnp.ones((ncell,)))
+    with pytest.raises(ValueError, match="taumag_land"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=dict(
+            _land_forcing(ncell), taumag_land=jnp.ones((ncell,))))
+
+
+def _eligible_cfg(**kw):
+    kw.setdefault("use_multilayer_land", True)
+    kw.setdefault("mpas_land_beta_soil", True)
+    kw.setdefault("turbulence", "clubb")
+    kw.setdefault("land_surface_scheme", "two_leaf")
+    return _mpas_cfg(**kw)
+
+
+@pytest.mark.parametrize("kw,why", [
+    (dict(), None),
+    (dict(land_surface_scheme="simple_seb"), None),
+    (dict(use_multilayer_land=False, mpas_land_beta_soil=False),
+     "use_multilayer_land"),
+    (dict(mpas_land_beta_soil=False), "mpas_land_beta_soil"),
+    (dict(turbulence="ysu"), "turbulence"),
+    (dict(land_surface_scheme="clm_ml"), "land_surface_scheme"),
+])
+def test_land_stress_auto_resolution_per_predicate(kw, why):
+    """AUTO (None) is ON exactly where eligible and OFF for each failing
+    predicate (validation unchanged); explicit True is refused there; explicit
+    False is always accepted and resolves off."""
+    from legoesm.driver.config import (
+        mpas_land_stress_eligibility, resolve_mpas_land_stress_from_land,
+    )
+    cfg = _eligible_cfg(**kw)
+    ok, reason = mpas_land_stress_eligibility(cfg)
+    assert ok is (why is None), reason
+    assert resolve_mpas_land_stress_from_land(cfg) is ok
+    assert resolve_mpas_land_stress_from_land(
+        cfg._replace(mpas_land_stress_from_land=False)) is False
+    if why is not None:
+        assert why in reason
+        with pytest.raises(ValueError, match="mpas_land_stress_from_land=True"):
+            cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+
+
+def test_land_stress_auto_off_and_true_refused_off_the_mpas_lane():
+    from legoesm.driver.config import resolve_mpas_land_stress_from_land
+    cfg = _cdgrid_cfg()
+    assert resolve_mpas_land_stress_from_land(cfg) is False
+    cfg.validate_strict()
+    with pytest.raises(ValueError, match="not the MPAS lane"):
+        cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+
+
+def test_land_stress_lane_predicate_is_the_driver_dispatch():
+    """The driver runs the MPAS lane on grid_type == 'mpas' (fv3_duo first);
+    an mpas discretization on another grid never reaches it."""
+    from legoesm.driver.config import mpas_land_stress_eligibility
+    cfg = _eligible_cfg()
+    assert mpas_land_stress_eligibility(cfg)[0]
+    for bad in (cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")),
+                cfg._replace(dycore=cfg.dycore._replace(
+                    discretization="fv3_duo"))):
+        ok, why = mpas_land_stress_eligibility(bad)
+        assert not ok and "not the MPAS lane" in why

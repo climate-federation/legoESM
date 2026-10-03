@@ -1544,6 +1544,15 @@ class ExperimentConfig(NamedTuple):
     # measured to deliver about a tenth of the solved flux.  With it off the mesh
     # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
+    # MPAS lane: the surface STRESS over the land fraction comes from the land
+    # model (its own roughness / canopy drag and stability, rho u*^2) instead of
+    # the atmosphere's bulk call, which on the non-tiled surface uses the bulk
+    # scheme's OCEAN roughness over land too.  Heat and moisture fluxes are the
+    # land's already.  Tri-state (user decision 2026-10-03, "a major default"):
+    # None = AUTO, on exactly where it applies (see
+    # ``resolve_mpas_land_stress_from_land``); True = required (refused where it
+    # cannot apply); False = explicit off, the old bulk stress (comparison runs).
+    mpas_land_stress_from_land: bool | None = None
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -4123,6 +4132,14 @@ class ExperimentConfig(NamedTuple):
                     "See docs/user-guide/climateeval_evaluation.md."
                 )
 
+        if self.mpas_land_stress_from_land is True:
+            _ok, _why = mpas_land_stress_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "mpas_land_stress_from_land=True hands the land model's "
+                    f"surface stress to the boundary layer, but {_why}; it "
+                    "would be silently inert. Leave it unset (auto) or false.")
+
         # Seasonal insolation alignment (radiation-only; see the field doc).
         if self.insolation_start_doy is not None:
             _doy = self.insolation_start_doy
@@ -4785,3 +4802,48 @@ def load_experiment_config(path: Path | str, *,
     """
     with open(path) as f:
         return experiment_config_from_dict(json.load(f), strict=strict)
+
+
+# Land schemes whose exported stress is the land's own roughness-controlled drag
+# on the MPAS lane (both run the coupled land with a fixed-roughness MOST law;
+# clm_ml is refused on this lane by run_amip).
+_LAND_STRESS_SCHEMES = ("two_leaf", "simple_seb")
+
+
+def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
+    """Can the land model's surface stress reach the boundary layer in ``cfg``?
+
+    Returns ``(eligible, reason_if_not)``.  Every predicate is static: the MPAS
+    lane, the interactive multilayer land, its flux handoff
+    (``mpas_land_beta_soil`` publishes the land's fluxes), a turbulence kernel
+    that accepts an injected surface flux, and a land scheme whose stress is
+    roughness-controlled.
+    """
+    # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
+    # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
+    if (cfg.dycore.discretization == "fv3_duo"
+            or cfg.grid.grid_type != "mpas"):
+        return False, "this is not the MPAS lane"
+    if not cfg.use_multilayer_land:
+        return False, "use_multilayer_land is off (no land model)"
+    if not cfg.mpas_land_beta_soil:
+        return False, ("mpas_land_beta_soil is off (the land's fluxes are not "
+                       "handed to the atmosphere)")
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        schemes_accepting_surface_flux,
+    )
+    if cfg.turbulence not in schemes_accepting_surface_flux():
+        return False, (f"turbulence={cfg.turbulence!r} takes no injected "
+                       "surface flux")
+    if cfg.land_surface_scheme not in _LAND_STRESS_SCHEMES:
+        return False, (f"land_surface_scheme={cfg.land_surface_scheme!r} is not "
+                       f"one of {_LAND_STRESS_SCHEMES} on this lane")
+    return True, ""
+
+
+def resolve_mpas_land_stress_from_land(cfg) -> bool:
+    """The resolved value of the tri-state ``mpas_land_stress_from_land``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.mpas_land_stress_from_land is None:
+        return mpas_land_stress_eligibility(cfg)[0]
+    return bool(cfg.mpas_land_stress_from_land)
