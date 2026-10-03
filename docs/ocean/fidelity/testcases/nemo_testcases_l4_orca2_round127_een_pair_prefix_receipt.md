@@ -73,9 +73,29 @@ month-scale claim.
 
 ## Tests, citations, and review
 
-The round-127 direct unit tests pass 3/3. Final focused/full battery, citation
-gate, planted citation, and separate read-only review results are recorded in
-the final validation commit for this receipt.
+The pre-implementation search found and reused the round-119 recurrence,
+round-121 fraction, round-126 association, and cumulative citation machinery;
+no duplicate reader or numerical path was created. The round-119--127 plus
+cumulative-citation focused battery passes 50/50.
+
+The default citation gate passes 274 citations and this receipt passes both
+citations with zero failures or unmapped entries. Shifting
+`dynspg_ts.f90:1339-1348` makes the gate fail with `SYMBOL-NOT-AT-LINE` and
+exit 1.
+
+The required `tests/ocean/fidelity -n 12` invocation collects 2,384 tests and
+reaches 95%; 2,268 tests pass before reproducing the registered xdist-controller
+tail stall after the count of real pytest processes reaches zero. It is
+interrupted after the grace period and is **incomplete, not PASS**. Its five
+displayed failures are the registered pre-existing SI3 scalar-math provenance,
+round-51 private-arm scope, round-35 escape scope, worktree-stamp, and recipe
+case-board rows. The five-ID serial replay reproduces exactly those failures;
+no round-127 test fails.
+
+Separate `codex exec --sandbox read-only` review was attempted. Verdict:
+**independent review unavailable in-sandbox** (`failed to initialize
+in-process app-server client: Read-only file system`). A second external
+reviewer was not callable in this sandbox.
 
 ## OPEN
 
