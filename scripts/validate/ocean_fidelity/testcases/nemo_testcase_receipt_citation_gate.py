@@ -1300,7 +1300,7 @@ CITATION_MAP = {
         ('ENDIF', 76), 9],
     'ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90:2130-2136': [
         ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 5),
-        ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 5), 7],
+        ('END DO   ;   END DO   ;   END DO   ;   END DO', 19), 7],
     # --- ORCA2 round 115: EEN stored product and recurrence signs ----------
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1238-1245': [
         ('ffu_nw(:,:) = 0._wp', 1),
