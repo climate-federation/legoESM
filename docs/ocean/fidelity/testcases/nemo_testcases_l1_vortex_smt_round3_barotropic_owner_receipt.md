@@ -1,4 +1,9 @@
-# Round 213 / VORTEX_SMT round 3 — the records re-acquired, and the first non-bit partial-cell statement
+# Round 213 / VORTEX_SMT round 3 — the records re-acquired; the partial-cell face-thickness statement MEASURED and HELD
+
+**VERDICT: the re-acquisition LANDS; both candidate statements are HELD.** A
+fresh adversarial reviewer returned **DO NOT SHIP** on the first candidate and
+was right (§2.4): the repair as written replaced one wrong array with a
+differently wrong one. No model code changes in this commit.
 
 **Decision 88 (user, 2026-10-03), operator note CC addendum 3.** Two items:
 re-acquire the four seamount records with the committed (print-fixed) hook and
@@ -95,20 +100,26 @@ MEASURED, geometry only, before any time step: on `VORTEX_SMT_VEC-zps` the
 aliased and the correct face thickness differ on **1 084 wet U cells** by up to
 **170.38 m**.
 
-**Where it executes, proved rather than assumed.** The alias lives in the one
-shared qco operand builder (`nemo_qco_resolved_mesh_operands`), whose consumer
-on this card is `nemo_qco_wzv_operands` — the `zad_qco_evaluation="nemo_literal"`
-arm that every NEMO testcase card selects, i.e. NEMO's `CALL wzv` at
-`stp2d.f90:153`, the FIRST statement in the step that reads a U-face thickness.
-`dyn_zad` is called only in the vector branch of `stp2d`'s `SELECT CASE`
-(`np_VEC_c2`), and the flux branch calls `dyn_adv_up3` instead — which is
-exactly the measured pattern below.
+**Where it executes.** The alias lives in the one shared qco operand builder
+(`nemo_qco_resolved_mesh_operands`), whose consumer on this card is
+`nemo_qco_wzv_operands` — the `zad_qco_evaluation="nemo_literal"` arm that
+every NEMO testcase card selects, i.e. NEMO's `CALL wzv` at `stp2d.f90:153`.
 
-**THE FIX IS THE ROOT CAUSE, NOT A CARD PATCH:** the alias is deleted and the
-shared min rule is applied, in the one kernel, so every card that carries
-NEMO's raw mesh gets NEMO's face thickness.  On a full-step mesh the two
-neighbours carry the same number and the minimum is that number bitwise, which
-is why every full-step card below is unmoved at zero ULP.
+**RETRACTED, by the reviewer and verified:** an earlier draft of this receipt
+and the first commit message called that "the FIRST statement in the step that
+reads a U-face thickness".  It is not.  `CALL dyn_vor` runs at `stp2d.f90:142`
+and `vor_een` reads `e3u_3d`/`e3v_3d` at `dynvor.f90:766-767`, before `wzv`.
+What is true is narrower and is what the measurement supports: the EEN
+vorticity path reads the card's OWN `e3u_0`/`e3v_0` — the bundle round 2
+proved exact against `mesh_mask.nc` at zero ULP — so it is not affected by the
+alias, and `wzv` is the first statement that reaches the ALIASED operand.
+
+**THE DEFECT IS REAL; THE REPAIR TRIED THIS ROUND IS NOT CORRECT.** The arm
+measured below deleted the alias and applied the shared min rule inside the
+one kernel.  The reviewer refuted that repair (§2.4) and it is HELD, not
+landed (`manifests/nemo_testcase_l1_vortex_smt_round213_e3u0_min_rule_held.patch`).
+The numbers below are therefore a MEASUREMENT of what the statement is worth,
+not a landing.
 
 #### S1 — ONE VARIABLE, BEFORE vs AFTER, both cards, bar 1e-15
 
@@ -119,8 +130,35 @@ is why every full-step card below is unmoved at zero ULP.
 | v | 4.742908e-08 | 4.742908e-08 | 1.607001e-07 | **4.037530e-08** (4.0x) |
 | ssh | 3.726197e-07 | 3.726197e-07 | 3.664757e-07 | 3.664757e-07 |
 
-The flux card is **exactly unmoved**, which is the statement's own control: the
-arm it corrects is the one NEMO runs only under vector-invariant momentum.
+The flux card is **exactly unmoved**.  An earlier draft explained that by
+"NEMO calls `dyn_zad` only in the vector branch of `stp2d`'s `SELECT CASE`".
+**RETRACTED:** `CALL wzv` at `stp2d.f90:153` sits OUTSIDE that `SELECT CASE`
+(which opens at `:157`), so NEMO computes `wzv` unconditionally.  The correct
+reading of the unmoved flux card is a FINDING, not a control: legoESM
+materialises this operand only for the `zad` arm, which the flux card does not
+run, where NEMO's `wzv` is unconditional.  Whether that conditionality is
+itself a fidelity gap on the flux card is an OPEN item.
+
+### 2.4 THE ADVERSARIAL REVIEW, AND WHY THE REPAIR IS HELD
+
+A fresh reviewer (not the author, read-only, given the diff, the receipt and
+the compiled NEMO sources) returned **DO NOT SHIP**, with one finding that is
+decisive and three that correct this receipt.  Its findings, and what was done:
+
+| # | finding | taken |
+|---|---|---|
+| MAJOR 1 | the rebuilt face thickness is NOT NEMO's: `min_cell_to_vface` ZEROES the northern row, so on `VORTEX_SMT_VEC-zps` the rebuilt `e3v_0` differs from the card's own NEMO-verified bundle on **630 cells, by up to 500.0 m** (the whole `j=62` row is 0.0 where NEMO carries 500.0), and `e3u_0` differs on 5 cells of `i=62` by 3.05e-05 m (periodic WRAP vs the card's COPY).  It also SPLITS provenance: the vorticity path reads the card's correct `e3u_0` and the qco path would read a different one. | **ACCEPTED, decisive.** The repair is withdrawn and HELD.  The correct repair is to READ the card's own `nemo_een_barotropic.e3u_0/.e3v_0` (round 2 proved them exact against `mesh_mask.nc` at 0 ULP), or to attach them as raw operands, not to re-derive them. |
+| MAJOR 2 | the "bit-identical on a full-step mesh" argument holds for `e3u_0` and NOT for `e3v_0`, whose northern row comes back exactly 0.0 where NEMO never has 0 (`usrdef_zgr.F90:196` init, `lbc_lnk jpfillcopy :219`, `zgr_zps:1182` zero repair).  The four zero-ULP ladders pass only because that row is the stripped land ring — a card whose north row is NOT land (ORCA2's fold, DINO) would move. | **ACCEPTED.** The claim as written is false and is withdrawn with the repair. |
+| MAJOR 3 | "the FIRST statement in the step that reads a U-face thickness" is refuted: `CALL dyn_vor` at `stp2d.f90:142` precedes `CALL wzv` at `:153`, and `vor_een` reads `e3u_3d`/`e3v_3d` at `dynvor.f90:766-767`. | **ACCEPTED and RETRACTED in §2.1.** |
+| MAJOR 4 | the flux card's unmoved rows are not the control the receipt claimed, because `CALL wzv` is OUTSIDE the `SELECT CASE`. | **ACCEPTED and RETRACTED in §2.1**, and re-stated as a finding. |
+| MAJOR 5 | untested blast radius: `GYRE-zco` pending, DINO absent, and two of the four "inertness" rows cannot move by construction. | **ACCEPTED**, §3. |
+| minor 6 | `tools/DOMAINcfg/src/domzgr.F90::zgr_zps` is an OFFLINE TOOL, not compiled into these builds; the statements that actually execute are `tests/VORTEX_SMT_VEC_R8_OMIP_L1_P3/MY_SRC/usrdef_zgr.F90:213,216`.  The rule and the macro resolution (`domzgr_substitute.h90:92-95`, `E3u_0 -> e3u_3d` under `key_vco_1d3d`) are confirmed correct. | **ACCEPTED**: the executing citation is the hook's own lines; `zgr_zps` is where the rule was transcribed FROM, which is a different claim and is now said that way. |
+| minor 7 | the rewritten unit test's prose claims it measures a vertical velocity and it does not; two lines are dead.  The test is non-vacuous. | moot — the test is withdrawn with the repair. |
+| minor 8 | the oracle repoint checks out; `0eb82c675` is additive and refuses unknown variants. | noted. |
+
+The reviewer also recorded, unprompted, that the step-order walk, the
+preregistered S2 falsifier and the decision to HOLD S2 on a 1.3x result
+against a 10x bar were done well.  That does not change the verdict.
 
 ### 2.2 THE ssh OWNER IS STILL OPEN — round 2's falsifier, answered
 
@@ -183,10 +221,37 @@ that reaches it.
 | `VORTEX-zco` | 50 | **0** | 0 / 150 | unchanged |
 | `VORTEX_VEC-zco` | 50 | **0** | 0 / 150 | unchanged |
 | `LOCK_EXCHANGE-zco` | 50 | **0** | 0 / 150 | unchanged |
-| `OVERFLOW-zps` | 50 | PENDING | PENDING | PENDING |
-| `GYRE-zco` | 954 | PENDING | PENDING | PENDING |
+| `OVERFLOW-zps` (the other partial-cell card) | 50 | **0** | 0 / 150 | unchanged |
 
-GYRE year, DINO from-rest month gate: below.
+**TWO OF THOSE FOUR ROWS ARE WEAK, and the reviewer said so.**
+`LOCK_EXCHANGE-zco` and `OVERFLOW-zps` do not carry NEMO's raw mesh operands,
+so they cannot reach the changed branch at all; their zeros are a
+construction, not a test.  The two VORTEX rows are real (they carry the raw
+set and are full-step).  `GYRE-zco` and DINO — the two other raw-mesh cards,
+i.e. exactly the ones the branch changes — were NOT measured under the arm,
+because the arm was withdrawn before the gates finished.  That gap is one more
+reason this statement is HELD.
+
+Because the landed commit changes NO file under `packages/` or `src/`, the
+GYRE year and the DINO month gate are inert BY CONSTRUCTION this round; the
+GYRE kt=1..10 ladder is run anyway and reported in §3.1.
+
+### 3.1 WHAT THE LANDED COMMIT ITSELF MOVES: NOTHING
+
+With both statements withdrawn, the only behavioural question left is the
+oracle repoint.  Both seamount ladders were re-run on the FINAL tree against
+the R3 records and reproduce round 2's registry exactly:
+
+| card | kt=2 T / u / v / ssh | AT-BAR | `first_over_bar` |
+|---|---|---:|---|
+| `VORTEX_SMT-zps` | 4.259549e-10 / 6.308422e-08 / 4.742908e-08 / 3.726197e-07 | 10 / 50 | kt=2 T,u,v,ssh |
+| `VORTEX_SMT_VEC-zps` | 1.733725e-09 / 1.748385e-07 / 1.607001e-07 / 3.664757e-07 | 9 / 50 | kt=2 T,u,v,ssh |
+
+Every value is identical to round 2's, to every digit it printed — which is
+the repoint's inertness, measured rather than inferred from the byte
+comparison.
+
+`GYRE-zco` kt=1..10 ladder on the final tree: see the landing line.
 
 ---
 
@@ -196,10 +261,17 @@ GYRE year, DINO from-rest month gate: below.
 |---|---|
 | four new `run.sh` variants into NEW build directories | ASKED — note CC addendum 3 item 1 |
 | the R3 records become the admitted ones (`DEFAULT_ORACLE_ROOTS` repointed) | ASKED — same note; and they are bit-identical, so the repoint is inert |
-| S1 landed unconditionally in the shared kernel rather than behind a card flag | ASKED in the sense that it is a DEFECT REPAIR with no behaviour change on any full-step card (measured), not a new option; RULE 3 does not bite because no default preserves the old behaviour anywhere |
-| S2 HELD rather than landed | **DECISION_NEEDED, raised here** — see §6 |
+| BOTH candidate statements HELD rather than landed | FORCED by the evidence, not chosen: S1's repair was refuted by the reviewer (§2.4 MAJOR 1/2), S2 missed its own preregistered falsifier (§2.3). No model file changes in this commit. |
+| the GYRE year and the DINO month gate not run | FORCED: the landed commit touches no file under `packages/` or `src/`, so both are inert by construction and `land.sh` skips the DINO gate on the same test. Said out loud rather than left implicit. |
 
 **UNASKED list: EMPTY.**
+
+**COMPLIANCE, stated because no gate checks it (RULE 2):** ONE fresh
+adversarial review was run (§2.4), not two. Per the lane's standing note the
+second reviewer is codex, which is paused on this account; the second opinion
+is therefore MISSING, and that is a gap rather than an exemption. It matters
+less than usual here only because the one review that did run returned DO NOT
+SHIP and the statement is held.
 
 ---
 
@@ -233,6 +305,13 @@ now**, because the measurement above shows it is not the kt=2 owner and it
 moves one row away from NEMO; revisit in round 4 with the per-substep record.
 The patch is committed and the measurement is in §2.3, so nothing has to be
 re-derived to take the other branch.
+
+**S1 is NOT a decision, it is unfinished work:** the defect is real and
+measured, the repair tried here was wrong, and the correct repair is named in
+§2.4 (read the card's own NEMO-verified `e3u_0`/`e3v_0` instead of
+re-deriving them). It is the first item of round 4, and until it lands every
+raw-mesh card — GYRE, DINO and ORCA2 included — still runs `e3u_0 = e3t_0`
+in the qco path.
 
 ---
 

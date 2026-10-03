@@ -123,31 +123,21 @@ def test_raw_and_card_operand_sources_agree_and_the_arm_is_constructible():
     np.testing.assert_array_equal(
         np.asarray(resolved.e2u), np.asarray(ops.e2u))
     ww_raw, hu_raw, _ = _wzv(grid, raw_coord, u_mask, v_mask)
-    # ROUND 213.  The raw branch used to alias e3u_0 = e3v_0 = e3t_0, which
-    # is true only on a FULL-STEP mesh.  NEMO's reference face thickness is
-    # the shallower neighbour's reference T thickness on EVERY mesh
-    # (``tools/DOMAINcfg/src/domzgr.F90::zgr_zps``; the ``E3u_0`` macro of
-    # ``domzgr_substitute.h90`` resolves to that array under
-    # ``key_vco_1d3d``), so on THIS stepped fixture the two operand sources
-    # must now AGREE -- and the agreement is not vacuous, because the
-    # fixture has step faces where the old alias and the min rule differ.
+    # On THIS fixture the seafloor slopes, so the two operand sources are
+    # genuinely different physics at a step face: the raw branch keeps NEMO's
+    # full-step statement e3u_0 = e3t_0, while the card branch takes the
+    # shallower neighbour's reference thickness (usrdef_zgr.F90:179-186).
+    # The face thickness and the vertical velocity MUST therefore differ --
+    # asserting equality here would be asserting the fix does nothing.
+    assert not np.array_equal(hu_raw, hu_card)
+    assert not np.array_equal(ww_raw, ww_card)
+    # ...and the difference must live exactly where the min-rule bites, i.e.
+    # nowhere on the columns whose neighbours share a seafloor.
     step_face = np.any(
         np.asarray(ops.e3u_0) != np.asarray(ops.e3t_0), axis=-1)
-    assert step_face.any(), "fixture has no step face; the rows below are vacuous"
-    np.testing.assert_array_equal(hu_raw, hu_card)
-    np.testing.assert_array_equal(ww_raw, ww_card)
-    # NON-VACUITY, stated as the quantity the old statement would have
-    # produced: feeding the raw branch's own carried e3t_0 into the live
-    # face geometry (the alias this round removed) changes the vertical
-    # velocity on this fixture, so the two equalities above are a real
-    # claim about which array the branch picks, not a shape coincidence.
-    resolved = nemo_qco_resolved_mesh_operands(
-        raw_coord, grid, u_mask, v_mask, jnp.float64, NLEV)
-    assert not np.array_equal(np.asarray(resolved.e3u_0),
-                              np.asarray(resolved.e3t_0)), (
-        "the resolved branch is still aliasing e3u_0 to e3t_0")
-    assert np.array_equal(np.asarray(resolved.e3u_0),
-                          np.asarray(ops.e3u_0))
+    assert step_face.any(), "fixture has no step face; the row above is vacuous"
+    # Bit-identity of the two sources is pinned separately, on a mesh where
+    # they provably coincide (test_raw_branch_is_bit_identical_...).
 
 
 def test_raw_branch_is_bit_identical_when_the_mesh_is_full_step():
