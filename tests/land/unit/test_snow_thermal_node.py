@@ -328,3 +328,31 @@ def test_canopy_ground_node_is_the_snow_surface():
     Tg = float(sfc.Ts_solve[0])
     assert abs(Tg - float(s2.T_snow[0])) < 1.0
     assert float(s2.T_soil[0, 0]) - Tg > 5.0
+
+
+def test_flux_heats_the_node_and_melt_follows_from_its_enthalpy():
+    """Enthalpy-method melt: a pack starting at freezing is not melted by the
+    surface flux in the same step (so it can never melt AND end below
+    freezing); the heat it gained above freezing melts exactly
+    c_ice*S*(T - Tf)/L_f at the next step; the exported skin stays <= Tf."""
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=SimpleSEBConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 283.0, 0.0, 0.0)._replace(sw_down=500.0 * o,
+                                               lw_down=330.0 * o,
+                                               q_lowest=0.008 * o)
+    dt = 1800.0
+    step = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, dt,
+                                                  lat=jnp.full(1, 1.0)))
+    s1, r1, _ = step(st)
+    melt1 = st.snow_depth - s1.snow_depth - r1.surface_mass_flux * dt
+    np.testing.assert_allclose(np.asarray(melt1), 0.0, atol=1e-9)
+    assert float(r1.T_sfc[0]) <= _TF
+    assert float(s1.T_snow[0]) > _TF            # flux heated the node
+    s2, r2, _ = step(s1)
+    melt2 = s1.snow_depth - s2.snow_depth - r2.surface_mass_flux * dt
+    want = constants.c_pi * s1.snow_depth * (s1.T_snow - _TF) / constants.L_f
+    np.testing.assert_allclose(np.asarray(melt2), np.asarray(want), rtol=1e-9)

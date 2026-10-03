@@ -583,10 +583,15 @@ def _step_multilayer_land_impl(
         # Richards on unchanged theta, so they carry no moisture fusion source.
         def _soil_thermal_cb(G, dt_):
             if _snow_node:
-                # Ground node = snow surface (start-of-step snow mass).
-                return solve_snow_soil_thermal(
+                # Ground node = snow surface (start-of-step snow mass).  A pack
+                # cannot be warmer than freezing: heat that would lift it above
+                # T_freeze is melt (taken from the node's enthalpy at the next
+                # step start), so the canopy sees a melting surface at T_freeze.
+                _Ts = solve_snow_soil_thermal(
                     T_snow0, snow, T_soil, theta, grid,
                     config.hydraulics, config.thermal, G, dt_)[0]
+                return jnp.where(snow > 0.0,
+                                 jnp.minimum(_Ts, constants.T_freeze), _Ts)
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
                 config.hydraulics, config.thermal,
@@ -889,7 +894,12 @@ def _step_multilayer_land_impl(
     else:
         snow_new, snow_age_new, snow_melt = update_snow(
             snow, snow_age, T_surface, precip_snow_eff, dt,
-            Q_net=G_surface,
+            # Snow node on: melt is NOT taken from the surface flux here.  The
+            # flux heats the node in the coupled solve and the node's heat
+            # above freezing melts snow at the next step start (enthalpy
+            # method, as CLM5's phase change after its temperature solve), so a
+            # pack never both melts and ends the step below freezing.
+            Q_net=(jnp.zeros_like(G_surface) if _snow_node else G_surface),
             snow_melt_rate=config.snow_melt_rate,
             T_snow_melt=config.T_snow_melt,
             snow_age_activation_K=config.land_albedo.snow_age_activation_K,
@@ -1238,7 +1248,12 @@ def _step_multilayer_land_impl(
     )
 
     # --- Post-step surface state for coupler ---
-    T_surface_new = T_snow_new if _snow_node else T_soil_new[:, 0]
+    # Exported skin: a pack's surface is at most freezing (its heat above
+    # T_freeze is melt, released at the next step start).
+    T_surface_new = (jnp.where(snow_new > 0.0,
+                               jnp.minimum(T_snow_new, constants.T_freeze),
+                               T_snow_new)
+                     if _snow_node else T_soil_new[:, 0])
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
     # handed to the coupler (drives the next radiation step) is consistent with the updated
     # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
