@@ -209,7 +209,12 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         "source_e3v": source_e3v,
         "current_e3u": current_e3u,
         "current_e3v": current_e3v,
-        "zpvo_u_nw": uq["nw"],
+        **{f"zpvo_u_{corner}": uq[corner]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_e3v_u_{corner}": un[corner][0]
+           for corner in ("nw", "ne", "sw", "se")},
+        **{f"neighbor_mask_u_{corner}": un[corner][1]
+           for corner in ("nw", "ne", "sw", "se")},
         "mbku": mbku,
         "mbkv": mbkv,
         **terms,

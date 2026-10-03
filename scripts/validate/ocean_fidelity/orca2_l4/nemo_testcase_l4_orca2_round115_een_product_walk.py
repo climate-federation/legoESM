@@ -43,6 +43,41 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def host_ieee_zero_add(acc, addend):
+    """Return ordinary IEEE addition with explicit exact-zero signs."""
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    updated = nemo_source_round(acc + addend)
+    both_zero = (acc == 0.0) & (addend == 0.0)
+    both_negative = jnp.signbit(acc) & jnp.signbit(addend)
+    signed_zero = jnp.copysign(
+        jnp.zeros_like(acc),
+        jnp.where(both_negative, -jnp.ones_like(acc), jnp.ones_like(acc)),
+    )
+    return jnp.where(both_zero, signed_zero, updated)
+
+
+def replay_recurrence(term, bottom, *, ieee_zero_add: bool):
+    """Replay NEMO's vertical recurrence, optionally with host zero signs."""
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    acc = jnp.zeros(term.shape[:2], dtype=term.dtype)
+    before = jnp.zeros_like(term)
+    after = jnp.zeros_like(term)
+    for jk in range(term.shape[-1]):
+        before = before.at[..., jk].set(acc)
+        addend = term[..., jk]
+        updated = (host_ieee_zero_add(acc, addend) if ieee_zero_add
+                   else nemo_source_round(acc + addend))
+        acc = jnp.where(jk < bottom, updated, acc)
+        after = after.at[..., jk].set(acc)
+    return before, after
+
+
 def measure(deck_root: Path, frame_root: Path, step_root: Path,
             expect_commit: str, plant: str) -> dict:
     import jax
@@ -112,32 +147,13 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     mbku = np.asarray(parts["mbku"], dtype=np.float64)
     executed = np.arange(1, 31)[None, None, :] <= mbku[..., None]
 
-    def recurrence(term, bottom, *, ieee_zero_add: bool):
-        acc = jnp.zeros(term.shape[:2], dtype=term.dtype)
-        before = jnp.zeros_like(term)
-        after = jnp.zeros_like(term)
-        for jk in range(term.shape[-1]):
-            before = before.at[..., jk].set(acc)
-            addend = term[..., jk]
-            updated = nemo_source_round(acc + addend)
-            if ieee_zero_add:
-                both_zero = (acc == 0.0) & (addend == 0.0)
-                both_negative = jnp.signbit(acc) & jnp.signbit(addend)
-                signed_zero = jnp.copysign(
-                    jnp.zeros_like(acc),
-                    jnp.where(both_negative, -jnp.ones_like(acc),
-                              jnp.ones_like(acc)),
-                )
-                updated = jnp.where(both_zero, signed_zero, updated)
-            acc = jnp.where(jk < bottom, updated, acc)
-            after = after.at[..., jk].set(acc)
-        return before, after
-
     baseline_before, baseline_after = jax.device_get(jax.jit(
-        lambda term, bottom: recurrence(term, bottom, ieee_zero_add=False))(
+        lambda term, bottom: replay_recurrence(
+            term, bottom, ieee_zero_add=False))(
             jnp.asarray(parts["term_u_nw"]), jnp.asarray(parts["mbku"])))
     candidate_before, candidate_after = jax.device_get(jax.jit(
-        lambda term, bottom: recurrence(term, bottom, ieee_zero_add=True))(
+        lambda term, bottom: replay_recurrence(
+            term, bottom, ieee_zero_add=True))(
             jnp.asarray(literal_product), jnp.asarray(parts["mbku"])))
     prefix = {
         "mbku": mbku,
