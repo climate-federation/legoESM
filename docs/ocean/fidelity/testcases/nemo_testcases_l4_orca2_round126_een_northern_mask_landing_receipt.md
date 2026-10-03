@@ -92,9 +92,24 @@ stop-at-first-debt comparisons are the results above.
 
 ## Tests, citations, and review
 
-The round-122–126 plus literal-builder focused battery passes 42/42. Citation,
-full fidelity, and final review results are recorded in the final validation
-commit.
+The round-120–126 plus cumulative-citation focused battery passes 44/44. The
+default citation gate passes 274 citations and this receipt passes all four
+citations with zero failures or unmapped entries; shifting
+`barotropic_latlon_cgrid.py:1004-1010` makes the gate fail with
+`SYMBOL-NOT-AT-LINE`.
+
+The required `tests/ocean/fidelity -n 12` invocation collects 2,381 tests and
+reaches 98%; 2,346 tests pass before reproducing the registered xdist-controller
+tail stall after the count of real pytest processes reaches zero. It is
+interrupted after the grace period and is **incomplete, not PASS**. Its six
+displayed failures are the registered pre-existing SI3 scalar-math provenance,
+round-129 spread-floor stamp, round-51 private-arm scope, round-35 escape
+scope, worktree-stamp, and recipe case-board rows. No round-126 test fails.
+
+Separate `codex exec --sandbox read-only` claim and final-diff reviews were
+attempted. Verdict: **independent review unavailable in-sandbox** (`failed to
+initialize in-process app-server client: Read-only file system`). A second
+external reviewer was not callable in this sandbox.
 
 ## OPEN
 
