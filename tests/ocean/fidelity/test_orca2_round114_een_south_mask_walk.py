@@ -39,7 +39,9 @@ def test_literal_builder_executes_southern_zero_mask(monkeypatch):
 
     monkeypatch.setattr(bt, "_nemo_south_zero_fill", observed)
     test_literal_builder_executes_southern_mesh_thickness_copy(monkeypatch)
-    assert called == [(3, 4, 2), (3, 4, 2)]
+    # EEN and ENE each apply the frozen F-mask fill and the V-mask fill used
+    # by the two southern U coefficients.
+    assert called == [(3, 4, 2)] * 4
 
 
 def test_round114_plants_and_complete_fraction_walk_are_registered():
