@@ -285,3 +285,164 @@ partial steps, or a bottom-level loop), the shared-statement reading is
 refuted and the walk moves there. Both candidates are reachable from the
 records already admitted; neither needs a new NEMO run.
 
+---
+
+## 5. EVERYTHING ELSE IS INERT — MEASURED, NOT ASSUMED
+
+Two of the three functions this round touched are executed by the certified
+cards (`vortex_initial_state_fields` and `_vortex_barotropic_velocity` were
+generalised from a scalar 5000 m / 500 m geometry to an optional array one),
+and the shared partial-cell factory gained a third rule. So inertness is a
+claim about rewritten code, and it is measured three independent ways.
+
+### (a) card state digests — before vs after, sha256
+
+`sha256` over `(T, S, u, v, eta, uu_b, vv_b, h_partial, bottom_level)` of each
+card's initial state under the fp64 policy. BEFORE is the lane tip
+`5b03f9bf5` checked out at `phase3/lanes/gyre`; AFTER is this round's tree.
+Full table: `phase3/vortex_smt/round2/card_state_digests.txt`.
+
+| card | BEFORE | AFTER |
+|---|---|---|
+| `VORTEX-zco` | `8eb55acbb1f6fdb3f78d0805` | `8eb55acbb1f6fdb3f78d0805` |
+| `VORTEX_VEC-zco` | `8eb55acbb1f6fdb3f78d0805` | `8eb55acbb1f6fdb3f78d0805` |
+| `VORTEX-15km-zco` | `323d8ed6c59e409087fcbcbf` | `323d8ed6c59e409087fcbcbf` |
+| `VORTEX_VEC-10km-zco` | `c1510b4c763989bb0fbe460c` | `c1510b4c763989bb0fbe460c` |
+| `GYRE-zco` | `febe570ff68950c023e8a49b` | `febe570ff68950c023e8a49b` |
+| `OVERFLOW-zps` | `69c51cec009099f25ad55985` | `69c51cec009099f25ad55985` |
+| `LOCK_EXCHANGE-zco` | `9b88732fb310bb992a984bb7` | `9b88732fb310bb992a984bb7` |
+
+All seven identical, and identical again after the review-fix commit.
+
+### (b) the kt=1..10 ladders, cellwise against the SAME NEMO oracle
+
+Each card's ladder was run on the lane tip and on this tree and compared with
+`--compare-to` (per-cell oracle-relative ULP movement, not just the 50-row
+registry). The runs were repeated after the review-fix commit for the four
+trajectory-gate cards.
+
+| card | verdict | rows | max worsening | `first_over_bar` |
+|---|---|---:|---:|---|
+| `VORTEX-zco` | **PASS** | 50 | **0 ULP** | kt=2 T/u/v/ssh → unchanged |
+| `VORTEX_VEC-zco` | **PASS** | 50 | **0 ULP** | kt=2 u/v/ssh → unchanged |
+| `LOCK_EXCHANGE-zco` | **PASS** | 50 | **0 ULP** | kt=8 u → unchanged |
+| `OVERFLOW-zps` | **PASS** | 50 | **0 ULP** | kt=2 T/u → unchanged |
+| `GYRE-zco` | PENDING (re-run; the first attempt aborted on an uncommitted receipt, not on a comparison) | | | |
+
+### (c) the DINO from-rest month gate
+
+Run by `land.sh` because `packages/` changed; reference `2.053801168e-03` K.
+Result in the landing line below.
+
+### Why GYRE cannot reach any of this, as a reading of the diff
+
+`build_gyre_zco_card` calls neither `vortex_initial_state_fields` nor
+`_vortex_barotropic_velocity` nor `create_partial_cell_coordinate` — it builds
+a full-step coordinate (`create_full_step_coordinate`) from its own
+`_GYRE_E3T_1D` ladder. That is a reading of the code, so the ladder was
+measured anyway, exactly as round 208 did.
+
+---
+
+## 6. CHOICES MADE THIS ROUND
+
+| choice | ASKED? |
+|---|---|
+| fix the hook's rank-0-local control print to a global `mpp` reduction | ASKED — note CC addendum 2 orders "review it FIRST … fix" |
+| NOT re-acquiring the four round-1 records after that fix | **FORCED, not chosen** — the fix is print-only (shown above) and moving the round-1 build directories aside, which the acquisition tool requires, was refused by the session's permission boundary. Reported, not worked around. |
+| the new bottom-level rule is `ze3min`, not the existing T-point rule | ASKED — it is NEMO's own statement in the hook the records were produced with; the alternative would not reproduce them |
+| `bottom_index_rule="nemo_zps_e3min"` added to the SHARED coordinate factory rather than computed inside the card | ASKED — RULE 4 (extend, never a second implementation) |
+| the land ring keeps its partial `e3t` in the card | ASKED — it is what NEMO's `mesh_mask` carries; measured, not chosen |
+| the two cards carry the flat cards' momentum programs and run-length pins | ASKED — decision 88 says every other namelist value is the shipped 30 km deck |
+| the geometry gate pins the fp64 precision policy itself | ASKED — the ladder scores under fp64; under the process-default float32 the partial cells are lost and the gate goes red, which is the demonstration that the pin matters |
+| re-anchoring four citation-map line numbers shifted by this diff | ASKED — the CITATION RE-ANCHOR RULE |
+
+**UNASKED list: EMPTY.**
+
+No namelist value, scheme selection, tunable, threshold, cadence or data source
+was changed for any existing card. The two new cards add names; they remove
+none.
+
+---
+
+## 7. OPEN
+
+1. **Re-acquire the four VORTEX_SMT records with the committed (print-fixed)
+   hook and show the restarts byte-identical to round 1's.** Blocked this round
+   by a permission boundary on moving the round-1 build directories aside.
+   Cheap: two 2-second runs and two ~110-second runs, plus their builds.
+   **Round 3's first item.**
+2. **The first non-bit producer.** Candidate named in §4 with its falsifier:
+   the partial-cell operands of the shared free-surface / split-explicit
+   barotropic path, because kt=2 `ssh` is the same size (3.7e-07) under both
+   momentum programs while the flat pair is at the bar there. Walk it on the
+   VECTOR card (the clean instrument: its flat twin is at the bar at kt=2), in
+   NEMO's stage order, from the records already admitted. If the per-substep
+   barotropic terms are at the bar, move to the HPG over partial steps and then
+   the bottom-level loops.
+3. **The 100-day comparison** (decision 88 deliverable 4, scored like round
+   210). NEMO's side is already acquired and admitted.
+4. **`e3w` and `gdept` under `key_vco_1d3d` are NOT corrected for the partial
+   bottom cell** — NEMO leaves both on the 1-D ladder (`domzgr_substitute.h90:
+   71-80`) where `tools/DOMAINcfg`'s `zgr_zps` corrects them. The cards are
+   faithful to the key. Recorded as a fact about what this test exercises, not
+   as debt: a configuration that wanted the corrected geometry would be a
+   different key and a different card.
+5. Carried from rounds 202/203, untouched here: the stage-one stretch helper's
+   missing 1e-6 floor, and the untranscribed `r3u`/`r3v` stage-one ratios.
+6. **ORCA2 pointer.** ORCA2 is the other partial-cell card on this identity,
+   and it builds its geometry from a `domain_cfg` file rather than from a rule.
+   The `"nemo_zps_e3min"` rule added here is therefore NOT on ORCA2's path and
+   cannot move it; if a future ORCA2 round needs a rule-built zps geometry it
+   should select this one rather than add a third.
+
+### VORTEX_SMT-zps — 50-row registry (bar 1e-15)
+
+| kt | T | S | u | v | ssh |
+|---:|---|---|---|---|---|
+| 1 | 0.000000e+00 * | 0.000000e+00 * | 2.220446e-16 * | 2.220446e-16 * | 1.355253e-20 * |
+| 2 | 4.259549e-10 | 6.090366e-16 * | 6.308422e-08 | 4.742908e-08 | 3.726197e-07 |
+| 3 | 1.404789e-09 | 8.120488e-16 * | 1.179715e-07 | 9.240946e-08 | 3.457073e-07 |
+| 4 | 2.500010e-09 | 8.120488e-16 * | 1.679292e-07 | 1.342742e-07 | 3.073886e-07 |
+| 5 | 3.349731e-09 | 8.120488e-16 * | 2.125474e-07 | 1.808545e-07 | 2.586147e-07 |
+| 6 | 3.871705e-09 | 8.120488e-16 * | 4.467711e-07 | 2.271896e-07 | 2.766841e-07 |
+| 7 | 4.353797e-09 | 1.218073e-15 | 1.078023e-06 | 5.549262e-07 | 2.696879e-07 |
+| 8 | 9.949206e-09 | 1.015061e-15 | 2.060173e-06 | 1.518193e-06 | 2.616467e-07 |
+| 9 | 1.824535e-08 | 1.218073e-15 | 3.221034e-06 | 2.946753e-06 | 2.368281e-07 |
+| 10 | 2.796192e-08 | 1.421085e-15 | 3.976053e-06 | 4.380958e-06 | 2.437744e-07 |
+
+`* = AT-BAR`; 10/50 at the bar, 40/50 DEBT; first_over_bar {'fields': ['T', 'u', 'v', 'ssh'], 'kt': 2}.
+
+### VORTEX_SMT_VEC-zps — 50-row registry (bar 1e-15)
+
+| kt | T | S | u | v | ssh |
+|---:|---|---|---|---|---|
+| 1 | 0.000000e+00 * | 0.000000e+00 * | 2.220446e-16 * | 2.220446e-16 * | 1.355253e-20 * |
+| 2 | 1.733725e-09 | 4.060244e-16 * | 1.748385e-07 | 1.607001e-07 | 3.664757e-07 |
+| 3 | 1.131661e-08 | 6.090366e-16 * | 8.451106e-07 | 7.503557e-07 | 3.751772e-07 |
+| 4 | 3.314905e-08 | 8.120488e-16 * | 1.739690e-06 | 1.496950e-06 | 5.062954e-07 |
+| 5 | 6.091760e-08 | 8.120488e-16 * | 2.428854e-06 | 2.276414e-06 | 6.821700e-07 |
+| 6 | 8.841869e-08 | 1.015061e-15 | 4.118234e-06 | 2.983406e-06 | 8.047049e-07 |
+| 7 | 9.671946e-08 | 1.015061e-15 | 5.671359e-06 | 3.182048e-06 | 1.037097e-06 |
+| 8 | 1.306352e-07 | 1.015061e-15 | 6.373057e-06 | 3.276859e-06 | 1.383918e-06 |
+| 9 | 1.623062e-07 | 1.218073e-15 | 6.486351e-06 | 4.497433e-06 | 1.637297e-06 |
+| 10 | 1.786773e-07 | 1.218073e-15 | 8.666645e-06 | 5.743456e-06 | 2.100024e-06 |
+
+`* = AT-BAR`; 9/50 at the bar, 41/50 DEBT; first_over_bar {'fields': ['T', 'u', 'v', 'ssh'], 'kt': 2}.
+
+---
+
+## 8. EVIDENCE AND REVIEWS
+
+All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round2/`:
+`predictions.md` (pre-registered), `gdept_statement.json`,
+`geometry_gate.json`, `ladder_smt_{flux,vec}.{json,log}`, `registries.md`,
+`card_state_digests.txt`, `inert/` (the before/after ladders and their
+`cmp_*.json` comparisons), `battery.log`.
+
+**Two independent adversarial reviews, both before landing.** Review 1: the
+Fortran hook, verdict FAITHFUL-WITH-DEFECTS, four fixes applied (§0).
+Review 2: the legoESM diff, verdict SHIP-WITH-FIXES, five findings, all five
+applied — including one that showed a test of mine COULD NOT FAIL and one
+unsupported bitwise claim, both of which are now stated honestly rather than
+defended. Neither reviewer was the author.
