@@ -198,6 +198,10 @@ FILES = {
         _ORCA2_R110EENFRAC_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90": (
         _ORCA2_R110EENFRAC_COMPILED / "domhgr.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "domzgr.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "dynvor.f90"),
     "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90": (
         _ORCA2_R110EENFRAC_COMPILED / "lbclnk.f90"),
     "l4_r104_een_accum.F90": (
@@ -1278,17 +1282,17 @@ CITATION_MAP = {
         ('SELECT CASE( nn_e3f_typ )', 1),
         ('WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 1), 26],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1811-1820': [
-        ('! take care of optional parameters', 2),
-        ('IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 2), 10],
+        ('! take care of optional parameters', 3),
+        ('IF( PRESENT(kfillmode) )   ifill_nfd = kfillmode', 3), 10],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1864-1872': [
-        ('! define ifill: which method should be used to fill each parts (sides+corners) of the halos', 2),
-        ('ENDIF', 25), 9],
+        ('! define ifill: which method should be used to fill each parts (sides+corners) of the halos', 3),
+        ('ENDIF', 76), 9],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domzgr.f90:179-188': [
         ('ELSEIF( lk_vco_1d3d ) THEN', 1),
         ("CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F', psgn = 1._wp, kfill = jpfillcopy )", 1), 10],
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:2021-2046': [
-        ('ELSE                                                        ! southern/northern side', 3),
-        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 3), 26],
+        ('ELSE                                                        ! southern/northern side', 4),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 4), 26],
     'barotropic_latlon_cgrid.py:909-911': [
         ('def _nemo_een_south_e3f0(e3f0, mesh_e3f0):', 1),
         ('return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)', 1), 3],
