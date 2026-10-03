@@ -1,0 +1,31 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -65,0 +66,2 @@
++   USE l4_r118_een_v_recurrence, ONLY : r118_een_v_init, r118_een_v_before, &
++      & r118_een_v_after, r118_een_v_dump ! round-118 write-only V recurrences
+@@ -1470,0 +1473 @@
++      CALL r118_een_v_init
+@@ -1697,0 +1701,3 @@
++               CALL r118_een_v_before(1, ji, jj, jk, zpvo_nw, e3v(ji,jj,jk,Kmm), &
++                  & e3u(ji-1,jj+1,jk,Kmm), umask(ji-1,jj+1,jk), ffv_nw(ji,jj))
++               !
+@@ -1698,0 +1705,4 @@
++               CALL r118_een_v_after(1, ji, jj, jk, ffv_nw(ji,jj))
++               CALL r118_een_v_before(2, ji, jj, jk, zpvo_ne, e3v(ji,jj,jk,Kmm), &
++                  & e3u(ji,jj+1,jk,Kmm), umask(ji,jj+1,jk), ffv_ne(ji,jj))
++               !
+@@ -1699,0 +1710,4 @@
++               CALL r118_een_v_after(2, ji, jj, jk, ffv_ne(ji,jj))
++               CALL r118_een_v_before(3, ji, jj, jk, zpvo_sw, e3v(ji,jj,jk,Kmm), &
++                  & e3u(ji-1,jj,jk,Kmm), umask(ji-1,jj,jk), ffv_sw(ji,jj))
++               !
+@@ -1700,0 +1715,4 @@
++               CALL r118_een_v_after(3, ji, jj, jk, ffv_sw(ji,jj))
++               CALL r118_een_v_before(4, ji, jj, jk, zpvo_se, e3v(ji,jj,jk,Kmm), &
++                  & e3u(ji,jj,jk,Kmm), umask(ji,jj,jk), ffv_se(ji,jj))
++               !
+@@ -1701,0 +1720 @@
++               CALL r118_een_v_after(4, ji, jj, jk, ffv_se(ji,jj))
+@@ -1714,0 +1734,2 @@
++         CALL r118_een_v_dump(mbkv)
++         !
