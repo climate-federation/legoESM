@@ -88,7 +88,24 @@ do not. This is scope evidence, not authorization for a partial landing.
 The committed round-119 gate reports
 `STATUS MEASURED_R119_EEN_V_RECURRENCES`. It locks every baseline and candidate
 field census. Its oracle-bit, candidate-bit, and scope-route plants each
-refuse. Validation results are filled below before the receipt commit.
+refuse. The citation gate passes both its default receipt and this receipt with
+zero unmapped citations; shifting the compiled statement citation by two lines
+makes it refuse. The focused round-107/109/110/114--119 plus citation chain
+passes 52/52.
+
+The single required `tests/ocean/fidelity -n 12` invocation collected 2,358
+tests and reached 99%, then reproduced the registered xdist-controller stall
+after every visible worker process had exited. It was interrupted after more
+than a minute without output and is **incomplete, not PASS**. Re-running the
+six displayed failing IDs together reproduces the same six registered
+pre-existing reds: SI3 scalar-math source provenance, round-51 private-arm
+scope, round-35 dirty-escape scoping, worktree stamping, the round-129
+certified-year fixture, and the `hires_lane_surface` case-board row. No new
+round-119 failure was exposed.
+
+The separate read-only Codex review returned **independent review unavailable
+in-sandbox**: `failed to initialize in-process app-server client: Read-only
+file system`.
 
 No model or card file changed, so ORCA2 rung-0/rung-7, GYRE, DINO, tank, and
 generic-card trajectories cannot move and are not represented as rerun gates.
