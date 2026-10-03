@@ -4,12 +4,12 @@
 source-ordered EEN quotient operand was the southern `ff_f` association: 180
 cells on global row `j=0`, level `k=0`. NEMO reads `ff_f` from the configured
 domain file on the live `ln_read_cfg` branch
-(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-109`) and requests
+(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108`) and requests
 `jpfillcopy` for that F-grid field
 (`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:233-236`). The boundary
 code copies the nearest interior row rather than cyclically wrapping the
 northern fold row
-(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1199-1225`), before the
+(`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1199-1224`), before the
 literal EEN quotient consumes `ff_f(ji,jj-1)`
 (`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248`).
 
@@ -22,7 +22,9 @@ state, stabiliser, sea-ice selector, or `unmeasured_features` entry changed.
 
 ## Retraction and compiled-path correction
 
-Round 111 described `domhgr.f90:135-143` as the source of this copy-fill.
+Round 111 described
+`ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:135-143` as the source
+of this copy-fill.
 That call is in the user-defined-grid arm and is **dead on ORCA2**, whose
 resolved deck has `ln_read_cfg=.true.`. That source attribution is retracted.
 The measured 180-cell first boundary is not retracted; this round binds it to
