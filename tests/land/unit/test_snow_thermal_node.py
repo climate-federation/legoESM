@@ -465,3 +465,25 @@ def test_node_mirrors_top_soil_once_the_pack_is_gone():
                                                 lat=jnp.full(1, 0.8))[0])(st)
     assert float(s2.snow_depth[0]) == 0.0
     assert float(s2.T_snow[0]) == float(s2.T_soil[0, 0])
+
+
+@pytest.mark.parametrize("swe", [1.0e-3, 1.0e-2, 1.0e-1])
+def test_trace_pack_stays_bounded_and_canopy_converges(swe):
+    """A dusting is a nearly massless node, but it is tied to the top soil by
+    the conductance of its thin pack, so the node stays within a few kelvin of
+    the soil top and the canopy closure converges (no held column)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([swe]), T_snow=jnp.array([266.0]))
+    o = jnp.ones(1)
+    f = _forcing(1, 250.0, 0.0, 0.0)._replace(sw_down=0.0 * o,
+                                               lw_down=180.0 * o)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0)))(st)
+    s2, sfc = out[0], out[-1]
+    assert int(sfc.n_held) == 0
+    assert np.isfinite(float(s2.T_snow[0]))
+    assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) < 5.0
