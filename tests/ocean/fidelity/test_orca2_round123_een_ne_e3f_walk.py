@@ -14,6 +14,12 @@ def test_round123_frozen_registry_is_complete():
     assert gate.EXPECTED_AFTER["1_mask"] == (1160, 1160)
 
 
+def test_round123_discriminator_is_the_preregistered_preceding_row_f_permutation():
+    source = gate.Path(gate.__file__).read_text(encoding="utf-8")
+    assert '[-3, fold_perm]' in source
+    assert '"source_j": 145' in source
+
+
 def test_round123_arm_replaces_only_ne_first_fraction_descendants():
     shape = (3, 4, 2)
     fields = {}

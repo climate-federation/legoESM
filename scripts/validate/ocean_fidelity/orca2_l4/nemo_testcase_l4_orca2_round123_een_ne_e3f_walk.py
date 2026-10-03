@@ -175,7 +175,14 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     baseline = r122._candidate_fields(
         parts, executed, np.asarray(north_ff, dtype=np.float64)
     )
-    north_e3f = np.asarray(parts["een_e3f0"], dtype=np.float64)[-1]
+    # R123-P1 (holding the builder's final row) refused at 228/228.  The
+    # compiled nn_hls=2 F exchange instead sources native row 145 and applies
+    # the F-origin permutation, the discriminator explicitly named by P1's
+    # falsification action.
+    fold_perm = np.asarray(
+        r122.fold_perm_f(card.recipe.grid.fold), dtype=np.int64
+    )
+    north_e3f = np.asarray(parts["een_e3f0"], dtype=np.float64)[-3, fold_perm]
     if plant == "cyclic-wrap":
         north_e3f = np.asarray(parts["een_e3f0"], dtype=np.float64)[0]
     candidate_ne = _replace_ne_north_e3f(baseline["ne"], north_e3f, executed)
@@ -220,6 +227,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "card_scope": observed_scope,
         "ne": {
             "first_after_arm": first,
+            "association": {
+                "target_j": 147,
+                "source_j": 145,
+                "source_i_first_last": [int(fold_perm[0]), int(fold_perm[-1])],
+                "sign": 1,
+            },
             "before": {name: before[name] for name in EXPECTED_BEFORE},
             "after": {name: after[name] for name in EXPECTED_AFTER},
         },
