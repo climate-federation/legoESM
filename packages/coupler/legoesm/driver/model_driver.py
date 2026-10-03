@@ -11085,6 +11085,9 @@ class ModelDriver:
         _land_z0m_cells = None         # (nCells,) static land roughness [m]
         _land_d_cells = None           # (nCells,) static displacement [m]
         from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            hold_last_valid_land_stress,
+        )
         _land_stress_on = resolve_mpas_land_stress_from_land(cfg)
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
