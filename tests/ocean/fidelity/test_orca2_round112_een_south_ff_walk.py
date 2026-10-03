@@ -26,6 +26,8 @@ def test_round112_plants_are_registered():
 
 def test_round112_card_scope_is_frozen():
     assert gate.EXPECTED_CARD_SCOPE == {
+        "DINO-nemo_dino_kamm": True,
+        "DINO-nemo_dino_kamm_mlf": True,
         "ORCA2-zps": True,
         "GYRE-zco": False,
         "LOCK_EXCHANGE-zco": False,

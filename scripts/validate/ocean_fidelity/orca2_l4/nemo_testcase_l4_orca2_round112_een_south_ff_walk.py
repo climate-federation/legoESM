@@ -31,6 +31,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
 EXPECTED_CARD_SCOPE = {
+    "DINO-nemo_dino_kamm": True,
+    "DINO-nemo_dino_kamm_mlf": True,
     "ORCA2-zps": True,
     "GYRE-zco": False,
     "LOCK_EXCHANGE-zco": False,
@@ -50,6 +52,10 @@ def require(condition: bool, message: str) -> None:
 
 
 def resolved_card_scope(deck_root: Path) -> dict[str, dict[str, object]]:
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe,
+        nemo_faithful_dino_domain,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
         build_lock_exchange_zco_card,
@@ -80,6 +86,21 @@ def resolved_card_scope(deck_root: Path) -> dict[str, dict[str, object]]:
                 and cfg.barotropic.barotropic_een_coefficient_evaluation
                 == "nemo_literal"
                 and has_operands),
+        }
+    dino_domain = nemo_faithful_dino_domain()
+    dino_has_operands = dino_domain.z_coord.nemo_een_barotropic is not None
+    for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
+        cfg = dino_config_for_recipe(recipe)
+        rows[f"DINO-{recipe}"] = {
+            "barotropic_coriolis": cfg.barotropic_coriolis,
+            "coefficient_evaluation": (
+                cfg.barotropic_een_coefficient_evaluation),
+            "has_literal_operands": dino_has_operands,
+            "executes_southern_een_ff_association": bool(
+                cfg.barotropic_coriolis == "een_metric"
+                and cfg.barotropic_een_coefficient_evaluation
+                == "nemo_literal"
+                and dino_has_operands),
         }
     return rows
 

@@ -955,7 +955,6 @@ def candidate_trajectory(
     *,
     max_step: int = 10,
     bridge_ssh: bool = True,
-    clear_jax_caches_per_step: bool = False,
 ) -> dict[str, object]:
     """Run production ORCA2 with either its own or Decision-52 entry SSH."""
 
@@ -1093,15 +1092,6 @@ def candidate_trajectory(
                         surface_fields),
                 }
         state = trace.state_after
-        if clear_jax_caches_per_step:
-            # The ORCA2 whole-step trace is large enough to hit the host's
-            # per-process compiler-cache limit across ten eager calls.  Stage
-            # outputs are dead after scoring; retain only the prognostic state
-            # and clear executable caches.  This changes no model operand.
-            import gc
-            del trace
-            gc.collect()
-            jax.clear_caches()
 
     require(first_non_bit is not None, "candidate trajectory unexpectedly stayed bit-exact")
     require(first_field is not None, "first non-bit field was not recorded")
@@ -1161,7 +1151,6 @@ def run_gate(
     max_step: int = 10,
     initial_mode: str = "decision52-bridge",
     plant: str | None = None,
-    clear_jax_caches_per_step: bool = False,
 ) -> dict[str, object]:
     stamp = provenance_stamp()
     source = validate_compiled_source(compiled_source)
@@ -1225,7 +1214,6 @@ def run_gate(
             card,
             max_step=max_step,
             bridge_ssh=initial_mode == "decision52-bridge",
-            clear_jax_caches_per_step=clear_jax_caches_per_step,
         )
         status = trajectory.get("execution_blocker", {}).get(
             "status",
@@ -1285,10 +1273,6 @@ def main() -> int:
     )
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
-        "--clear-jax-caches-per-step", action="store_true",
-        help="drop dead stage traces and compiler caches after each scored step",
-    )
-    parser.add_argument(
         "--plant", choices=("kt1_T", "surface_hash", "eos80_coeff"))
     args = parser.parse_args()
     try:
@@ -1301,7 +1285,6 @@ def main() -> int:
             max_step=args.max_step,
             initial_mode=args.initial_mode,
             plant=args.plant,
-            clear_jax_caches_per_step=args.clear_jax_caches_per_step,
         )
     except (GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
