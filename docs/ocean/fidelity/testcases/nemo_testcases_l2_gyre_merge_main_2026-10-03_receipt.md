@@ -114,7 +114,7 @@ receipt. Landed as `268a88c2b`.
 **Non-vacuity.** Before the re-anchor the gate was `FAIL` with those exact two
 entries `SYMBOL-NOT-AT-LINE` and 0 unmapped
 (`merge_main_2026-10-03/citation_gate.log`); after it, `PASS`
-(`citation_gate_after.log`). The gate's own nine planted shifts all fired.
+(`citation_gate_after.log`). The gate's seven planted shifts all fired; its two unplanted baselines passed.
 
 **The merge commit alone is gate-red**, as in round 207: the re-anchor is in
 the following commit, so a bisect landing exactly on `d8f908a41` fails the
@@ -126,7 +126,10 @@ Every number below is measured on the merged tree with the scripts the recent
 receipts cite, not carried over. All of it ran on the merge plus the
 re-anchor commit (`268a88c2b`) with a clean worktree; three of the eight card
 gates were stamped at `d8f908a41` (the merge alone) because they completed
-before the re-anchor landed, and five at `268a88c2b` — the re-anchor touches
+before the re-anchor landed, and five at `268a88c2b` (those five had to be
+re-run: my mid-run edit of three tracked files made the worktree dirty and
+their provenance stamp refused, producing no report the first time -- the
+first attempt's logs are kept) — the re-anchor touches
 only `docs/` and the gate script, no `packages/` file, so the two stamps name
 the same model code.
 
@@ -266,7 +269,7 @@ numbers are not reported as findings.
 = 140 failed, 9435 passed, 179 skipped, 2 xfailed, 88 warnings, 10 errors in 4079.79s (1:07:59) =
 ```
 
-Seven workers still died with `Fatal Python error: Aborted`, so this run is
+Eight workers still died with `Fatal Python error: Aborted`, so this run is
 also not taken at face value. The two runs' failing sets overlap in only **47
 of 184 / 150** IDs — a failing set that is not reproducible between two runs of
 the *same tree* is the scheduler, not the code. Those 47 were then re-run
@@ -285,7 +288,12 @@ empty). So:
 | genuine merge interaction | **0** |
 | lane debt, red before the merge and after it | **25** |
 | `main`'s own debt arriving with the merge | **0** |
-| xdist worker-pressure collateral, not reproducible serially | the remaining 115-159 |
+| xdist worker-pressure collateral, not reproducible between two runs of the same tree | the remaining 115-159 |
+
+The scope of "0 genuine merge interactions" is those 47 IDs. The other ~100
+failures in each run were classified by their non-reproducibility across two
+runs of the same tree, not by individual inspection; that is stated rather
+than implied.
 
 The 25 are the campaign's known-red categories, unchanged by this merge: the
 worktree-stamp ratchet and its scope test, four float32 advection-gradient
@@ -305,6 +313,41 @@ It printed **0 while this PR's own push battery was running**, because
 plain `python -m pytest`, which `ps` shows as `python -m pytest`. The rule as
 written does not see the campaign's own batteries. Reported, not fixed — it is
 the brief's rule to change, not mine.
+
+## Independent review
+
+Codex is reserved for the ORCA2 lane, so two fresh `code-reviewer` subagents
+ran instead, each told to refute rather than agree.
+
+**Reviewer 1, on the merge diff and the conflict dispositions: SHIP WITH
+FIXES** — three MAJORs, all in this receipt's prose, none in the merged bytes.
+All three are taken and corrected above: the citation map is not a union; the
+certified path imports six symbols from `barotropic_common`, not four, and my
+line-grep could not see the two deferred imports; and `make_none_physics_fn`
+IS on the certified path, so `main` does have one edited line a certified card
+executes. It also proved the merge stronger than I had: `git merge-tree
+--write-tree 4646a680e 87144e259` yields `74004f5e401f30e97bb12e60a2922af983f6ee21`,
+identical to `d8f908a41^{tree}` over the WHOLE tree, not only `packages/`.
+
+**Reviewer 2, on the PR body's claims against the receipts: SHIP WITH FIXES**
+— no fabricated number; every value, SHA and citation reproduced. Two MAJORs,
+both taken: "the vector card is AT THE BAR at kt=2" is contradicted by the
+gate's own `DEBT` status (the rows sit at one to two times the `1e-15` bar,
+which is the rounding floor, and the refined grids are 20-30% larger, not
+equal); and the year moved **all eight** certified days against the PR's
+starting point, not the three I listed. Six minors taken: OVERFLOW's
+cell-level direction, the plant/baseline split in the citation gate's
+self-test, the worker-crash count, the "70-row" label, the five re-run cards,
+and the scope of the battery classification.
+
+## Landing verdict
+
+**MERGED AND GATED.** 0 conflicts, 0 physics conflicts, 0 entries dropped from
+either parent's citation map. GYRE ladder 954 rows 0 moved; the GYRE year
+byte-identical to the certified pin including snapshot digests; all eight
+cards 0/50; ORCA2 0/400; DINO unchanged; citation gate 274 citations 0
+unmapped; push battery 136 passed; 0 genuine merge interactions in the broad
+battery.
 
 ## Evidence
 
