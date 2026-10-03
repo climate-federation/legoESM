@@ -1058,6 +1058,9 @@ class _NEMOVerticalSolveTestInput(NamedTuple):
 _STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
                       "advection_horizontal", "advection_vertical",
                       "advection_zub_increment")
+# Legal values of ``momentum_transport_stage1_operand``: the production path
+# and the two one-variable swaps of stprk3_stg.f90:270's operands.
+_STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean", "qco_depth")
 
 
 class _NEMOWSRK3TestHooks(NamedTuple):
@@ -2868,6 +2871,17 @@ class LatLonCGridOceanModel:
                 raise ValueError(f"{_name} must be a bool")
         _stage1_split = (
             self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+        _tr_operand = (
+            self._nemo_ws_test_hooks.momentum_transport_stage1_operand)
+        if _tr_operand not in _STAGE1_TRANSPORT_OPERAND_ARMS:
+            # At CONSTRUCTION, like its sibling below: validating this inside
+            # the stage branch would silently accept a typo on any card whose
+            # transport reconcile is off or whose integrator is not WS-RK3,
+            # and the walk would score the production path under the arm's
+            # name (review finding).
+            raise ValueError(
+                "momentum_transport_stage1_operand must be one of "
+                f"{_STAGE1_TRANSPORT_OPERAND_ARMS!r}; got {_tr_operand!r}")
         if _stage1_split not in _STAGE1_SPLIT_ARMS:
             raise ValueError(
                 "expose_stage1_momentum_rhs_split must be one of "
@@ -6219,31 +6233,40 @@ class LatLonCGridOceanModel:
                     current_v_mean = (
                         jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                         * state.v_mask.data)
+                    # Validated at construction (see
+                    # ``_STAGE1_TRANSPORT_OPERAND_ARMS``), so only the legal
+                    # strings reach here.
                     _tr_arm = (self._nemo_ws_test_hooks
                                .momentum_transport_stage1_operand)
-                    if _tr_arm not in ("", "prognostic_mean", "qco_depth"):
-                        raise ValueError(
-                            "momentum_transport_stage1_operand must be '', "
-                            "'prognostic_mean' or 'qco_depth'; got "
-                            f"{_tr_arm!r}")
                     if _tr_arm and stage_index == 1:
-                        if (_tr_arm == "prognostic_mean"
-                                and state.uu_b is not None
-                                and state.vv_b is not None):
+                        if _tr_arm == "prognostic_mean":
                             # stprk3_stg.f90:270 subtracts uu_b(:,:,Kmm),
                             # the external mode's own prognostic, NOT a
                             # depth mean re-reduced from the 3-D velocity.
+                            if state.uu_b is None or state.vv_b is None:
+                                raise ValueError(
+                                    "momentum_transport_stage1_operand="
+                                    "'prognostic_mean' needs the NEMO "
+                                    "prognostic uu_b/vv_b pair; this state "
+                                    "has none, and falling through would "
+                                    "report the production path under the "
+                                    "arm's name")
                             current_u_mean = (state.uu_b.data
                                               * state.u_mask.data)
                             current_v_mean = (state.vv_b.data
                                               * state.v_mask.data)
-                        elif _tr_arm == "qco_depth":
+                        else:
                             # NEMO divides un_adv by ``hu_0*(1+r3u(Kmm))``
                             # (stprk3_stg.f90:270), not by the sum of the
-                            # min-rule face thicknesses.  Dry columns have a
-                            # zero qco depth and carry no transport, so they
-                            # keep the production ratio.
-                            _qu, _qv = _ws_qco_transport_depth
+                            # min-rule face thicknesses.  Built HERE, so no
+                            # card pays for a kernel only this arm reads.
+                            # Dry columns have a zero qco depth and carry no
+                            # transport, so they keep the production ratio.
+                            _qf = _nemo_ws_qco_stage_faces(
+                                state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                                _ws_v_live_mask, _grid)
+                            _qu = jnp.sum(_qf[0], axis=-1)
+                            _qv = jnp.sum(_qf[1], axis=-1)
                             transport_u_mean = transport_u_mean * jnp.where(
                                 _qu > 0.0, H_u_pre / jnp.where(
                                     _qu > 0.0, _qu, 1.0), 1.0)
@@ -7006,20 +7029,14 @@ class LatLonCGridOceanModel:
             # supplies the advection's own divisor
             # (``momentum_flux_face_thickness``); it can supply this one
             # too.  THAT CHANGE IS NOT LANDED -- it is held as
-            # ``manifests/nemo_testcase_l1_vortex_round205_transport_qco_
-            # depth_held.patch`` because it trips the cellwise two-ULP
-            # ratchet, and the private ``"qco_depth"`` arm below is how it
-            # is measured.  Measured on VORTEX-zco: the
-            # two depths differ by up to 0.129 m in 5000.86 m (2.58e-05
-            # relative, 698 of 3660 u columns), and the stage-1 flux-form
-            # advection trend's disagreement with NEMO falls from
-            # 6.285649e-11 to 2.032879e-20 (u) when this divisor is used.
-            _qco_faces = _nemo_ws_qco_stage_faces(
-                state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                _ws_v_live_mask, _grid)
-            _ws_qco_transport_depth = (
-                jnp.sum(_qco_faces[0], axis=-1),
-                jnp.sum(_qco_faces[1], axis=-1))
+            # scripts/validate/ocean_fidelity/testcases/manifests/
+            # nemo_testcase_l1_vortex_round205_transport_qco_depth_held.patch
+            # because it trips the cellwise two-ULP ratchet, and the private
+            # ``"qco_depth"`` arm is how it is measured.  Measured on
+            # VORTEX-zco: the two depths differ by up to 0.129 m in
+            # 5000.86 m (2.58e-05 relative, 698 of 3660 u columns), and the
+            # stage-1 flux-form advection trend's disagreement with NEMO
+            # falls from 6.285649e-11 to 2.032879e-20 (u) with that divisor.
             transport_target_u = (
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (

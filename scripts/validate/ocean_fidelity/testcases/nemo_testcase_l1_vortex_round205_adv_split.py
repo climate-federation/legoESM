@@ -204,7 +204,8 @@ def run(root: Path, *, plant: str | None = None,
             "name": f"{CASE}.stage1.advsplit.{face}",
             "nemo_boundary": "dyn_adv_up3's trend (stprk3_stg.f90:316)",
             "execution_regime": "production_step_jit",
-            "planted": plant in (f"hadv.{face}", f"vadv.{face}"),
+            "planted": plant in (f"hadv.{face}", f"vadv.{face}",
+                                 f"zub.{face}"),
             "cells_unequal": int(np.count_nonzero(
                 (total_lego != total_nemo)[active])),
             "max_abs": float(np.max(np.abs(delta[active]))),
@@ -336,6 +337,10 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--oracle-dir", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path)
+    # SCOPE: a plant perturbs the scored ARRAY after it is read, so it
+    # proves the row's reduction reacts -- NOT that the exposure is live.
+    # Seam liveness is ``require_live``, which refuses any exposure that
+    # handed back the ordinary step output.
     parser.add_argument("--plant", choices=PLANTS)
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
