@@ -64,10 +64,10 @@ DEFAULT_ORACLE_ROOTS = {
     # built through NEMO's own usrdef_zgr hook on key_vco_1d3d.
     "VORTEX_SMT-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
-        "VORTEX_SMT_OMIP_L1_P3/kt1_10"),
+        "round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10"),
     "VORTEX_SMT_VEC-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
-        "VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10"),
+        "round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate

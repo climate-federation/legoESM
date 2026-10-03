@@ -694,11 +694,26 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
-        # branch serves; keeping the raw statement preserves the certified
-        # DINO arithmetic bit for bit.
+        # NEMO's reference face thickness is the SHALLOWER NEIGHBOUR's
+        # reference T thickness -- ``e3u_0(ji,jj,jk) = MIN( e3t_0(ji,jj,jk),
+        # e3t_0(ji+1,jj,jk) )`` and the j-analogue for ``e3v_0``
+        # (``tools/DOMAINcfg/src/domzgr.F90::zgr_zps``), which is what the
+        # ``E3u_0`` macro resolves to under ``key_vco_1d3d``
+        # (``domzgr_substitute.h90``).  On a FULL-STEP mesh the two
+        # neighbours carry the same number and the minimum is that number
+        # bitwise, so the certified DINO/GYRE arithmetic is untouched; over
+        # PARTIAL CELLS they differ by up to a whole cell and aliasing
+        # ``e3u_0`` to ``e3t_0`` gave the wrong face thickness to every qco
+        # consumer (``wzv``/``div_hor``, the Kmm velocity cycle).  The rule
+        # is the SHARED one ``nemo_qco_card_mesh_operands`` already applies.
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            min_cell_to_uface,
+            min_cell_to_vface,
+        )
+        e3u0 = min_cell_to_uface(e3t0)[:, 1:, :]
+        e3v0 = min_cell_to_vface(e3t0, grid)[1:, :, :]
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
