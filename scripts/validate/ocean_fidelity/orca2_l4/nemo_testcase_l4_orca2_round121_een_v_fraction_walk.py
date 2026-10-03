@@ -50,8 +50,28 @@ SHIFTS = {
     "nw": ((0, 0), (1, 0), (1, -1)),
 }
 EXPECTED_FIRST_COMPONENT = {"ne": "1", "nw": "3"}
+EXPECTED_FIRST = {"ne": "1_ff", "nw": "3_ff"}
 EXPECTED_FINAL = {"ne": (1431, 1431), "nw": (1431, 1431)}
-EXPECTED_SCORES: dict[str, dict[str, tuple[int, int]]] = {}
+EXPECTED_SCORES = {
+    path: {name: (0, 0) for name in SOURCE_ORDER} for path in PATHS
+}
+EXPECTED_SCORES["ne"].update({
+    "1_ff": (1431, 1431),
+    "1_e3f0": (514, 514),
+    "1_mask": (1160, 1160),
+    "1_denom": (514, 514),
+    "1_frac": (1431, 1431),
+    "partial": (1431, 1431),
+    "sum": (1431, 1431),
+})
+EXPECTED_SCORES["nw"].update({
+    "3_ff": (1431, 1431),
+    "3_e3f0": (521, 521),
+    "3_mask": (1154, 1154),
+    "3_denom": (521, 521),
+    "3_frac": (1431, 1431),
+    "sum": (1431, 1431),
+})
 PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
 
 
@@ -101,10 +121,6 @@ def _shift(value: np.ndarray, di: int, dj: int) -> np.ndarray:
 
 def _as_levels(value: np.ndarray) -> np.ndarray:
     return np.broadcast_to(value[..., None], (*value.shape, 30)) if value.ndim == 2 else value
-
-
-def _first_component(name: str | None) -> str | None:
-    return None if name is None or name in ("partial", "sum") else name.split("_", 1)[0]
 
 
 def _value_bits(value: np.ndarray, location: tuple[int, int, int]) -> dict:
@@ -211,18 +227,17 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         first = next((name for name in SOURCE_ORDER
                       if scores[name]["bit_unequal"]), None)
         require(first is not None, f"{path}: all recorded fractions unexpectedly exact")
-        require(_first_component(first) == EXPECTED_FIRST_COMPONENT[path],
-                f"{path}: first unequal component moved: {first}")
+        require(first == EXPECTED_FIRST[path],
+                f"{path}: first unequal item moved: {first}")
         require(scores["sum"]["bit_unequal"] == EXPECTED_FINAL[path][0]
                 and scores["sum"]["magnitude_unequal"] == EXPECTED_FINAL[path][1],
                 f"{path}: completed zpvo census moved")
         require(scores[first]["bit_unequal_j_values"] == [147],
                 f"{path}: first boundary escaped the northern fold")
-        if EXPECTED_SCORES:
-            for name in SOURCE_ORDER:
-                observed = (scores[name]["bit_unequal"], scores[name]["magnitude_unequal"])
-                require(observed == EXPECTED_SCORES[path][name],
-                        f"{path}: {name} census moved: {observed}")
+        for name in SOURCE_ORDER:
+            observed = (scores[name]["bit_unequal"], scores[name]["magnitude_unequal"])
+            require(observed == EXPECTED_SCORES[path][name],
+                    f"{path}: {name} census moved: {observed}")
         locations = np.argwhere(
             np.ascontiguousarray(candidate[first]).view(np.uint64)
             != np.ascontiguousarray(reference[first]).view(np.uint64))[:5]

@@ -14,6 +14,16 @@ def test_round121_literal_fraction_registry_is_complete():
         "nw": ((0, 0), (1, 0), (1, -1)),
     }
     assert gate.EXPECTED_FIRST_COMPONENT == {"ne": "1", "nw": "3"}
+    assert gate.EXPECTED_FIRST == {"ne": "1_ff", "nw": "3_ff"}
+    assert gate.EXPECTED_SCORES["ne"]["1_ff"] == (1431, 1431)
+    assert gate.EXPECTED_SCORES["ne"]["1_e3f0"] == (514, 514)
+    assert gate.EXPECTED_SCORES["nw"]["3_ff"] == (1431, 1431)
+    assert gate.EXPECTED_SCORES["nw"]["3_mask"] == (1154, 1154)
+    assert all(
+        gate.EXPECTED_SCORES[path][name] == (0, 0)
+        for path, names in {"ne": ("2_ff", "3_frac"), "nw": ("1_ff", "partial")}.items()
+        for name in names
+    )
     assert gate.SOURCE_ORDER.index("partial") > gate.SOURCE_ORDER.index("2_frac")
     assert gate.SOURCE_ORDER[-1] == "sum"
 
