@@ -1,6 +1,6 @@
 # Preregistration — ORCA2 round 115 EEN product signed-zero walk
 
-Date: 2026-10-03. Base: `239ee70072c8d2178bd254be3581aa25a51cc4ce`.
+Date: 2026-10-03. Base: `239ee70072833b8e5dbe8a20f119e7c008bfb2e6`.
 Scope is one hierarchy-rung-0 arithmetic boundary, measured **given NEMO's
 recorded entry**. No configuration, forcing, initial state, carried state,
 threshold, stabilizer, sea-ice selector, or `unmeasured_features` entry may
