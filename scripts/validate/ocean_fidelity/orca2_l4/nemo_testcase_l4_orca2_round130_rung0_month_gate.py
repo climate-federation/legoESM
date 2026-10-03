@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -90,6 +91,28 @@ def validate_admission(path: Path) -> dict[str, object]:
         "binary_sha256": report["binary_sha256"],
         "month_step": report["month_step"],
     }
+
+
+def terminal_ledger_rows(path: Path, month_root: Path) -> dict[str, str]:
+    """Select the two terminal shards by full path from the cumulative ledger."""
+
+    require(path.is_file(), f"missing cumulative restart ledger: {path}")
+    wanted = {
+        f"ORCA2_{STEPS:08d}_restart_{rank:04d}.nc" for rank in (0, 1)
+    }
+    rows: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        fields = line.split(maxsplit=1)
+        require(len(fields) == 2 and len(fields[0]) == 64,
+                f"malformed cumulative SHA-256 row: {line!r}")
+        target = Path(fields[1].lstrip("* "))
+        if target.parent == month_root and target.name in wanted:
+            require(target.name not in rows,
+                    f"duplicate month terminal row: {target.name}")
+            rows[target.name] = fields[0]
+    require(set(rows) == wanted,
+            f"terminal ledger coverage changed: {sorted(rows)}")
+    return rows
 
 
 def first_nonfinite(fields: dict[str, np.ndarray]) -> dict[str, object] | None:
@@ -244,8 +267,18 @@ def run_month(
     card = rung0.build_rung0_card(deck_root)
     rung0.validate_rung0_card(card)
     require(card.n_steps == STEPS, "rung-0 card month length changed")
-    oracle, restart = prior_month.read_terminal_restart(
-        month_root, restart_ledger, card)
+    ledger_rows = terminal_ledger_rows(restart_ledger, month_root)
+    with tempfile.TemporaryDirectory(prefix="orca2-r130-ledger-") as temporary:
+        filtered_ledger = Path(temporary) / "terminal.sha256"
+        filtered_ledger.write_text("".join(
+            f"{digest}  {name}\n" for name, digest in sorted(ledger_rows.items())))
+        oracle, restart = prior_month.read_terminal_restart(
+            month_root, filtered_ledger, card)
+    restart["cumulative_ledger"] = {
+        "path": str(restart_ledger),
+        "sha256": sha256(restart_ledger),
+        "selected_rows": len(ledger_rows),
+    }
 
     state = card.recipe.initial_state
     initial_fields = rung0.candidate_fields(state)

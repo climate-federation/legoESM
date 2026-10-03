@@ -92,3 +92,23 @@ def test_score_field_reports_argmax_and_bit_census() -> None:
     assert row["unequal"] == 1
     assert row["argmax_jik"] == [1, 0]
     assert row["max_abs"] == 3.0
+
+
+def test_terminal_ledger_selects_full_month_paths_despite_twin_basenames(
+    tmp_path,
+) -> None:
+    month = tmp_path / "month"
+    twin = tmp_path / "twin"
+    month.mkdir()
+    twin.mkdir()
+    names = [f"ORCA2_00000240_restart_{rank:04d}.nc" for rank in (0, 1)]
+    ledger = tmp_path / "outputs.sha256"
+    ledger.write_text("".join(
+        [f"{'a' * 64}  {twin / names[0]}\n",
+         f"{'b' * 64}  {month / names[0]}\n",
+         f"{'c' * 64}  {month / names[1]}\n"]
+    ))
+    assert gate.terminal_ledger_rows(ledger, month) == {
+        names[0]: "b" * 64,
+        names[1]: "c" * 64,
+    }
