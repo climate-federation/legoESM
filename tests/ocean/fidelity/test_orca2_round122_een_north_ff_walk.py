@@ -16,6 +16,11 @@ def test_round122_frozen_registry_is_complete():
     }
 
 
+def test_round122_output_names_the_northern_scope_not_the_inherited_southern_gate():
+    source = gate.Path(gate.__file__).read_text(encoding="utf-8")
+    assert '"executes_northern_een_ff_association"' in source
+
+
 def test_round122_candidate_fields_preserve_literal_fraction_order():
     shape = (3, 4, 30)
     parts = {

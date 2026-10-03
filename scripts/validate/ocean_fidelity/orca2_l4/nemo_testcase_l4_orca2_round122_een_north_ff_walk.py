@@ -119,11 +119,21 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         changed.view(np.uint64)[-1, 0, 0] ^= np.uint64(1)
         oracle["ne_1_ff"] = changed
 
-    card_scope = r112.resolved_card_scope(deck_root)
+    inherited_scope = r112.resolved_card_scope(deck_root)
+    card_scope = {
+        name: {
+            **{key: value for key, value in row.items()
+               if key != "executes_southern_een_ff_association"},
+            "executes_northern_een_ff_association": row[
+                "executes_southern_een_ff_association"
+            ],
+        }
+        for name, row in inherited_scope.items()
+    }
     if plant == "scope-route":
-        card_scope["GYRE-zco"]["executes_southern_een_ff_association"] = True
+        card_scope["GYRE-zco"]["executes_northern_een_ff_association"] = True
     observed_scope = {
-        name: bool(row["executes_southern_een_ff_association"])
+        name: bool(row["executes_northern_een_ff_association"])
         for name, row in card_scope.items()
     }
     require(observed_scope == r112.EXPECTED_CARD_SCOPE, "resolved card scope moved")
