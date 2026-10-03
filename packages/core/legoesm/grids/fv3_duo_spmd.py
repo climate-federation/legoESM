@@ -53,9 +53,6 @@ __all__ = [
     "make_tiled_ext_vector_sixface_from_splits",
     "to_blocked",
     "from_blocked",
-    "assert_blocked_coherent",
-    "emulate_tiled_from_split",
-    "emulate_tiled_ext_vector_sixface",
 ]
 
 
@@ -1391,37 +1388,13 @@ def from_blocked_traced(xb, kt: int, nl: int):
          for j in range(kt)], axis=2)
 
 
-def assert_blocked_coherent(xb, kt: int, nl: int, name: str = "blocked"):
-    """Duplicated shared rows/cols must be BIT-identical across the tiles
-    that store them (byte compare -- NaN-safe)."""
-    xb = np.asarray(xb)
-    kt, nl = int(kt), int(nl)
-    t0, t1 = xb.shape[1] // kt, xb.shape[2] // kt
-    e0, e1 = t0 - nl, t1 - nl
-    for i in range(kt - 1):
-        a = xb[:, i * t0 + nl:(i + 1) * t0]
-        b = xb[:, (i + 1) * t0:(i + 1) * t0 + e0]
-        if a.tobytes() != b.tobytes():
-            raise AssertionError(
-                f"{name}: duplicated shared rows diverge between tile "
-                f"rows {i} and {i + 1}")
-    for j in range(kt - 1):
-        a = xb[:, :, j * t1 + nl:(j + 1) * t1]
-        b = xb[:, :, (j + 1) * t1:(j + 1) * t1 + e1]
-        if a.tobytes() != b.tobytes():
-            raise AssertionError(
-                f"{name}: duplicated shared cols diverge between tile "
-                f"cols {j} and {j + 1}")
-
-
 # ---------------------------------------------------------------------------
 # tiled runtime -- one shard_map body per split (or composed pipeline)
 # ---------------------------------------------------------------------------
 
 def _apply_phase_ops(ph, me, work, cur, scr):
     """Apply one phase's split tables for device ``me`` (traced scalar
-    under shard_map, python int in the serial emulator -- SAME code, so
-    the emulator is the schedule's single-device twin by construction).
+    under shard_map).
 
     ``work`` = state + landed receive buffer, ``cur`` = state; snapshot
     semantics: every op reads ``work``, writes into a fresh copy."""
@@ -2212,7 +2185,7 @@ def _dense_c2l(bundle, me, u_t, v_t):
     """Per-tile c2l (D: c2l_ord2_face / C: c2l_ord2_cgrid_face), the flat
     arithmetic verbatim on the blocked windows; the flat NaN window is
     selected by the static per-tile mask.  ``me`` is a traced scalar
-    under shard_map or a python int in the serial emulator."""
+    under shard_map."""
     import jax.numpy as jnp
 
     dxb = jnp.asarray(bundle.dense["dx"])[me]        # (nl, nl+1)
@@ -2570,153 +2543,3 @@ def build_tile_comm(tab, mesh) -> DuoTileComm:
     # census is ALL-family, so these agree; max kept as the binding record)
     tc.depth = max(int(s.depth) for s in splits.values())
     return tc
-
-
-# ---------------------------------------------------------------------------
-# serial schedule emulator -- the single-device twin of the tiled runtime
-# ---------------------------------------------------------------------------
-#
-# Executes EXACTLY the split schedule (same send/place tables, same
-# `_apply_phase_ops`, python-int ``me``) with ppermute replaced by direct
-# placement, on whatever single jax backend is active.  Purpose: the
-# GPU-backend bitness arm (GLM: CPU bitness does not transfer to GPU
-# fusion) on a single GPU, where a 6*kt^2-device mesh cannot exist; the
-# emulator itself is validated bitwise against the shard_map runtime on
-# CPU before its GPU number is quoted.
-
-def _emulate_phases(split, curs, order_rng=None):
-    """``order_rng`` (an ``np.random.Generator``) is the GLM M3
-    LINEARIZATION-FUZZ knob: it shuffles, per phase, both the transfer
-    placement order and the tile execution order.  The schedule is
-    snapshot-phased (every transfer lands in its own receive slot, every
-    tile writes only its own state from the shared snapshot), so ANY
-    linearization must be bitwise identical -- a divergence is a
-    serial-benign race in the schedule.  ``None`` = canonical order."""
-    import jax.numpy as jnp
-
-    scr = split.scr
-    for ph in split.phases:
-        nb = ph.n_rbuf
-        kk = curs[0].shape[1]
-        rbufs = [jnp.full((nb + 1, kk), jnp.nan, dtype=curs[0].dtype)
-                 for _ in range(split.ndev)]
-        pairs = [(c, s_, d_) for c, perm in enumerate(ph.perms)
-                 for s_, d_ in perm]
-        if order_rng is not None:
-            order_rng.shuffle(pairs)
-        for c, s_, d_ in pairs:
-            payload = curs[s_][np.asarray(ph.send_idx[s_, c])]
-            rbufs[d_] = rbufs[d_].at[
-                np.asarray(ph.place_idx[d_, c])].set(payload)
-        devs = list(range(split.ndev))
-        if order_rng is not None:
-            order_rng.shuffle(devs)
-        new = [None] * split.ndev
-        for dev in devs:
-            work = (jnp.concatenate([curs[dev], rbufs[dev][:nb]])
-                    if nb else curs[dev])
-            new[dev] = _apply_phase_ops(ph, dev, work, curs[dev], scr)
-        curs = new
-    return curs
-
-
-def _blocked_dev_split(arrs, split):
-    """Blocked global arrays -> per-device flattened local states."""
-    import jax.numpy as jnp
-
-    kt = split.kt
-    curs = []
-    for dev in range(split.ndev):
-        f = dev // (kt * kt)
-        ti, tj = (dev // kt) % kt, dev % kt
-        parts = []
-        for a, (t0, t1) in zip(arrs, split.tiles):
-            blk = jnp.asarray(a)[f, ti * t0:(ti + 1) * t0,
-                                 tj * t1:(tj + 1) * t1]
-            parts.append(blk.reshape(t0 * t1, -1))
-        curs.append(jnp.concatenate(parts) if len(parts) > 1
-                    else parts[0])
-    return curs
-
-
-def _blocked_dev_join(curs, split, shapes):
-    """Per-device local states -> blocked global numpy arrays."""
-    kt = split.kt
-    outs = []
-    off = 0
-    for (t0, t1), sz, shp in zip(split.tiles, split.sizes, shapes):
-        out = np.empty(shp, dtype=np.asarray(curs[0]).dtype)
-        for dev in range(split.ndev):
-            f = dev // (kt * kt)
-            ti, tj = (dev // kt) % kt, dev % kt
-            blk = np.asarray(curs[dev][off:off + sz])
-            out[f, ti * t0:(ti + 1) * t0, tj * t1:(tj + 1) * t1] = \
-                blk.reshape((t0, t1) + shp[3:])
-        outs.append(out)
-        off += sz
-    return outs
-
-
-def emulate_tiled_from_split(split: DuoTiledSplit, *arrs, order_rng=None):
-    """Serial (single-device) execution of a split on blocked global
-    arrays; bitwise twin of :func:`make_tiled_from_split`'s runtime.
-    ``order_rng`` = linearization fuzz (see :func:`_emulate_phases`)."""
-    kt = split.kt
-    blocked = tuple((6, kt * t0, kt * t1) for (t0, t1) in split.tiles)
-    _check_blocked_args(f"emulate[{split.name}]", [np.asarray(a)
-                                                   for a in arrs], blocked)
-    curs = _blocked_dev_split(arrs, split)
-    curs = _emulate_phases(split, curs, order_rng)
-    outs = _blocked_dev_join(curs, split,
-                             [np.asarray(a).shape for a in arrs])
-    return tuple(outs) if len(outs) > 1 else outs[0]
-
-
-def emulate_tiled_ext_vector_sixface(bundle: DuoTiledVectorSplits,
-                                     u6, v6, order_rng=None):
-    """Serial twin of the composed C/D shard_map body (same stages, same
-    dense helpers, python-int ``me``).  ``order_rng`` = linearization
-    fuzz over every table phase (see :func:`_emulate_phases`)."""
-    import jax.numpy as jnp
-
-    kt, nl = bundle.kt, bundle.nl
-    (tu0, tu1), (tv0, tv1) = bundle.split_ex.tiles
-    su, sv = tu0 * tu1, tv0 * tv1
-    (tg0, tg1) = bundle.split_geo.tiles[0]
-    sg = tg0 * tg1
-    sa = nl * nl
-    blocked = ((6, kt * tu0, kt * tu1), (6, kt * tv0, kt * tv1))
-    u6, v6 = np.asarray(u6), np.asarray(v6)
-    _check_blocked_args(f"emulate ext_vector[{bundle.grid}]", (u6, v6),
-                        blocked)
-    curs = _blocked_dev_split((u6, v6), bundle.split_ex)
-    curs = _emulate_phases(bundle.split_ex, curs, order_rng)
-    ndev = bundle.ndev
-    kk = curs[0].shape[1]
-    u_ts, v_ts, curgs = [], [], []
-    for dev in range(ndev):
-        u_t = curs[dev][:su].reshape(tu0, tu1, kk)
-        v_t = curs[dev][su:].reshape(tv0, tv1, kk)
-        u_ts.append(u_t)
-        v_ts.append(v_t)
-        ua, va = _dense_c2l(bundle, dev, u_t, v_t)
-        step = jnp.concatenate([ua.reshape(sa, kk), va.reshape(sa, kk)],
-                               axis=1)
-        geo0 = jnp.full((sg, 2 * kk), jnp.nan, dtype=curs[dev].dtype)
-        curgs.append(jnp.concatenate([geo0, step]))
-    curgs = _emulate_phases(bundle.split_geo, curgs, order_rng)
-    curws = []
-    for dev in range(ndev):
-        ug = curgs[dev][:sg, :kk].reshape(tg0, tg1, kk)
-        vg = curgs[dev][:sg, kk:].reshape(tg0, tg1, kk)
-        p_u, p_v = _dense_project(bundle, dev, ug, vg)
-        curws.append(jnp.concatenate(
-            [u_ts[dev].reshape(su, kk), v_ts[dev].reshape(sv, kk),
-             p_u.reshape(-1, kk), p_v.reshape(-1, kk)]))
-    curws = _emulate_phases(bundle.split_wr, curws, order_rng)
-    finals = [c[:su + sv] for c in curws]
-    if bundle.split_cn is not None:
-        finals = _emulate_phases(bundle.split_cn, finals, order_rng)
-    outs = _blocked_dev_join(finals, bundle.split_ex,
-                             [u6.shape, v6.shape])
-    return outs[0], outs[1]

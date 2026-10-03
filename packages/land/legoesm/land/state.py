@@ -77,9 +77,10 @@ class MultiLayerLandState(NamedTuple):
     # Warm-start cache for the two-leaf canopy Newton closure: the last
     # CONVERGED solution per column, ``(ncol, 6)``, NaN where a column has never
     # converged (which the canopy reads as "cold start").  NOT a prognostic
-    # variable — it carries no physics, only the seed the iteration starts from,
-    # and the fixed point it converges to is seed-independent (the solve's
-    # adjoint returns a zero cotangent for its seed).  Present iff the surface
+    # variable — it carries no physics, only the seed the iteration starts from
+    # (the solve's adjoint returns a zero cotangent for it).  A seed outside the
+    # physical box is discarded for a cold start (``canopy_state_admissible``),
+    # since a far-off seed can reach a spurious root.  Present iff the surface
     # scheme is the two-leaf canopy; ``None`` otherwise, which restores the
     # cold-start-every-step behaviour exactly.  Appended last (positional-ABI).
     canopy_x: Any | None = None

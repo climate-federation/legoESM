@@ -69,6 +69,43 @@ def test_grad_matches_finite_difference():
             assert abs(float(gi.flatten()[fi]) - fd) < 1e-5
 
 
+def test_grad_with_broadcast_inputs_matches_expanded_inputs():
+    """A shared diagonal (1, n) or a 1-D band (n,) against a batched RHS must
+    differentiate: the cotangent comes back in the PRIMAL's shape, equal to the
+    expanded-input gradient summed over the broadcast axes.  Before the fix the
+    custom_vjp raised on the shape mismatch under jax.grad."""
+    a, b, c, d = _random_dd_system((4, 6))
+    b1 = b[:1]                     # shared diagonal, broadcast over the batch
+    c1 = c[0]                      # 1-D super-diagonal
+    f = lambda b_, c_: jnp.sum(thomas_solve(a, b_, c_, d) ** 2)
+    gb1, gc1 = jax.grad(f, argnums=(0, 1))(b1, c1)
+    assert gb1.shape == b1.shape and gc1.shape == c1.shape
+    gb, gc = jax.grad(f, argnums=(0, 1))(jnp.broadcast_to(b1, b.shape),
+                                         jnp.broadcast_to(c1, c.shape))
+    np.testing.assert_allclose(np.asarray(gb1), np.asarray(gb.sum(0, keepdims=True)),
+                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(gc1), np.asarray(gc.sum(0)),
+                               rtol=1e-12, atol=1e-12)
+
+
+def test_grad_with_singleton_bands_matches_raw_autodiff():
+    """A constant band given as shape (1,) against an n-long system: the adjoint
+    must shift the band on the FULL system axis (codex: shifting before the
+    broadcast dropped the repeated sub-diagonal and gave wrong gradients for
+    every operand, RHS included)."""
+    from legoesm.timestepping.tridiagonal import _thomas_solve_impl
+    a1 = jnp.array([-0.3]); c1 = jnp.array([-0.25])
+    b = jnp.array([2.0, 2.2, 2.1, 2.4]); d = jnp.array([0.3, -1.0, 0.7, 0.1])
+
+    def f(fn):
+        return lambda a_, c_, d_: jnp.sum(fn(a_, b, c_, d_) ** 3)
+    got = jax.grad(f(thomas_solve), argnums=(0, 1, 2))(a1, c1, d)
+    want = jax.grad(f(_thomas_solve_impl), argnums=(0, 1, 2))(a1, c1, d)
+    for g, w in zip(got, want):
+        assert g.shape == w.shape
+        np.testing.assert_allclose(np.asarray(g), np.asarray(w), rtol=1e-10, atol=1e-12)
+
+
 def test_grad_no_regression_vs_raw_autodiff():
     """On a well-conditioned system the analytic adjoint must equal the raw
     element-wise autodiff to machine precision (the existing behaviour)."""

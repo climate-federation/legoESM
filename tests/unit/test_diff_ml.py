@@ -1186,10 +1186,8 @@ class TestConservationCorrectors:
         assert float(jnp.max(jnp.abs(g_land[2:]))) == 0.0, (
             "ocean cells influence land-cell eta — the mask gate leaked")
 
-    @pytest.mark.parametrize("which", ["heat", "salt"])
-    def test_ocean_tracer_correctors_pin_the_volume_integral(self, which):
-        from legoesm.ml.conservation import correct_ocean_heat, correct_ocean_salt
-        fn = correct_ocean_heat if which == "heat" else correct_ocean_salt
+    def test_ocean_tracer_corrector_pins_the_volume_integral(self):
+        from legoesm.ml.conservation import correct_ocean_tracer as fn
         mask = jnp.ones((_NLAT, _NLON))
         h_old = jnp.full((_NLAT, _NLON, NLEV), 50.0)
         h_new = h_old
@@ -1208,7 +1206,7 @@ class TestConservationCorrectors:
         g_local = jax.grad(
             lambda xn: jnp.sum(
                 fn(xn, x_old, h_new, h_old, GRID_T5, mask)[0, 0] ** 2))(x_new)
-        _finite_and_nonzero(g_local, f"correct_ocean_{which} local gradient")
+        _finite_and_nonzero(g_local, "correct_ocean_tracer local gradient")
 
 
 # ============================================================================

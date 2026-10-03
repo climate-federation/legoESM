@@ -1052,10 +1052,15 @@ def reorder_voronoi_for_sharding(
     edge_order : str
         Order of edges and vertices INSIDE each owner block: ``"hilbert"``
         (along the cells' Hilbert curve; faster MPAS atmosphere step) or
-        ``"owner"`` (generator order, the layout before the Hilbert relabel).
-        The ocean MPAS lanes pass ``"owner"``: the relabel slowed the ocean
-        GPU step, and restarts written under the old order stay loadable.
-        Values are identical either way; only the layout differs.
+        ``"owner"`` (generator order, the layout before the Hilbert relabel),
+        or ``"block"``: generator order, but each edge belongs to the device
+        BLOCK of its smaller (reordered) cell index and every block is padded
+        to the same size, so a device's edge shard holds exactly the edges of
+        its own cells (see :func:`_block_align_edges`).  The ocean MPAS lanes
+        pass ``"block"``: with even chunks the edge shards drift off the cell
+        shards and every device's halo grows by the foreign cells (s7 @ 128
+        devices: 2745 -> ~2322 local cells per device).  Values are
+        identical; only the layout (and the padded edge count) differs.
 
     Returns
     -------
@@ -1094,10 +1099,10 @@ def reorder_voronoi_for_sharding(
     method = resolve_partition_method(method)
     if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
-    if edge_order not in ("hilbert", "owner"):
+    if edge_order not in ("hilbert", "owner", "block"):
         raise ValueError(
-            f"reorder_voronoi_for_sharding: edge_order must be 'hilbert' or "
-            f"'owner', got {edge_order!r}")
+            f"reorder_voronoi_for_sharding: edge_order must be 'hilbert', "
+            f"'owner' or 'block', got {edge_order!r}")
     if n_devices <= 1:
         return mesh
 
@@ -1233,5 +1238,134 @@ def reorder_voronoi_for_sharding(
                    else reorder_1d(mesh.land_frac, cell_perm)),
     )
 
+    if edge_order == "block":
+        reordered = _block_align_edges(reordered, n_devices)
     # --- Pad so that nCells and nEdges are divisible by n_devices ---
     return _pad_voronoi_for_sharding(reordered, n_devices)
+
+
+def _block_align_edges(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
+    """Group edges by the device block of their smaller cell index and pad
+    EACH block to the largest block's size, so device ``d``'s contiguous edge
+    shard holds exactly the edges whose owning cell lies in its contiguous
+    cell shard (cells are padded at the tail to ``ceil(nCells/n)`` per block).
+
+    With even edge chunks over owner-grouped edges (``"owner"``/``"hilbert"``)
+    the chunk boundaries drift from the cell blocks, so a device owns edges of
+    other devices' cells and its halo must carry those cells plus their
+    closure rings (measured s7 @ 128: 2745 local cells per device vs 2322
+    within four rings).  Ghost edges use the inert tail recipe of
+    :func:`_pad_voronoi_for_sharding`, except that they reference a cell (and
+    a vertex of that cell) of their OWN block, so no device's halo is pulled
+    toward another block.  Expects an unpadded, already reordered mesh.
+    """
+    n_cells = int(mesh.nCells)
+    cp = -(-n_cells // n_devices)
+    coe = np.asarray(mesh.cellsOnEdge)
+    if np.any(coe < 0):
+        raise ValueError("block edge order needs every edge to have two cells")
+    block = coe.min(axis=0) // cp
+    order = np.argsort(block, kind="stable")
+    counts = np.bincount(block, minlength=n_devices)
+    e_max = int(counts.max())
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    rank_in_block = np.arange(order.size) - np.repeat(starts, counts)
+    pos = np.empty(order.size, dtype=np.int64)
+    pos[order] = block[order] * e_max + rank_in_block   # old edge -> new slot
+    n_new = n_devices * e_max
+    ghost = np.ones(n_new, dtype=bool)
+    ghost[pos] = False
+    ghost_block = np.flatnonzero(ghost) // e_max
+    # Ghosts reference the block cell FARTHEST from the block boundary, so no
+    # other device's halo holds it (a ghost whose cell sits in a neighbour's
+    # halo becomes a halo edge there and rides every edge exchange).
+    coc = np.asarray(mesh.cellsOnCell)
+    nb_blk = np.where(coc >= 0, np.maximum(coc, 0) // cp, -1)
+    cell_blk = np.arange(n_cells) // cp
+    depth = np.where(((nb_blk != cell_blk) & (nb_blk >= 0)).any(axis=0), 0, -1)
+    k = 0
+    while (depth < 0).any():
+        front = depth == k
+        nxt = np.zeros(n_cells, dtype=bool)
+        nb = coc[:, front].ravel()
+        nxt[nb[nb >= 0]] = True
+        new = nxt & (depth < 0)
+        if not new.any():
+            break
+        depth[new] = k + 1
+        k += 1
+    deepest = np.full(n_devices, -1, dtype=np.int64)
+    order_d = np.lexsort((-depth, cell_blk))          # per block, deepest first
+    first = np.unique(cell_blk[order_d], return_index=True)
+    deepest[first[0]] = order_d[first[1]]
+    ghost_cell = deepest[ghost_block]
+    ghost_cell = np.where(ghost_cell >= 0, ghost_cell, n_cells - 1)
+    ghost_vert = np.asarray(mesh.verticesOnCell)[0, ghost_cell]
+
+    def col(arr, fill, ghost_vals=None):
+        a = np.asarray(arr)
+        shape = (n_new,) if a.ndim == 1 else (a.shape[0], n_new)
+        out = np.full(shape, fill, dtype=a.dtype)
+        out[..., pos] = a
+        if ghost_vals is not None:
+            out[..., ghost] = ghost_vals
+        return jnp.asarray(out)
+
+    def remap(conn):
+        a = np.asarray(conn)
+        return jnp.asarray(np.where(a >= 0, pos[np.maximum(a, 0)], -1).astype(a.dtype))
+
+    eoe = np.asarray(mesh.edgesOnEdge)
+    eoe_new = np.where(eoe >= 0, pos[np.maximum(eoe, 0)], -1).astype(eoe.dtype)
+    return mesh._replace(
+        nEdges=n_new,
+        latEdge=col(mesh.latEdge, 0.0), lonEdge=col(mesh.lonEdge, 0.0),
+        xEdge=col(mesh.xEdge, 0.0), yEdge=col(mesh.yEdge, 0.0),
+        zEdge=col(mesh.zEdge, 0.0),
+        cellsOnEdge=col(mesh.cellsOnEdge, 0, ghost_cell),
+        verticesOnEdge=col(mesh.verticesOnEdge, 0, ghost_vert),
+        edgesOnEdge=col(eoe_new, -1),
+        nEdgesOnEdge=col(mesh.nEdgesOnEdge, 0),
+        dcEdge=col(mesh.dcEdge, 1.0), dvEdge=col(mesh.dvEdge, 0.0),
+        angleEdge=col(mesh.angleEdge, 0.0),
+        weightsOnEdge=col(mesh.weightsOnEdge, 0.0),
+        fEdge=col(mesh.fEdge, 0.0),
+        edgesOnCell=remap(mesh.edgesOnCell),
+        edgesOnVertex=remap(mesh.edgesOnVertex),
+    )
+
+
+def complete_cell_rings(mesh: VoronoiMesh, partitions, max_rings: int = 8) -> int:
+    """Largest k such that, on EVERY partition, all cells within k cellsOnCell
+    hops of the owned block (owned cells included) are local cells AND have
+    every incident edge and every neighbour cell local — so a cell -> edge ->
+    cell stencil evaluated on the local mesh equals the owner's value on rings
+    0..k.  (Neighbours are checked explicitly: the MPI partition keeps an edge
+    when only ONE of its cells is local.)  Capped at ``max_rings``.
+    """
+    coc = np.asarray(mesh.cellsOnCell)
+    eoc = np.asarray(mesh.edgesOnCell)
+    neoc = np.asarray(mesh.nEdgesOnCell)
+    slot = np.arange(eoc.shape[0])[:, None]
+    best = max_rings
+    for part in partitions:
+        is_lc = np.zeros(coc.shape[1], bool)
+        is_lc[np.asarray(part.local_cells)] = True
+        is_le = np.zeros(int(mesh.nEdges), bool)
+        is_le[np.asarray(part.local_edges)] = True
+        seen = np.zeros(coc.shape[1], bool)
+        ring = np.asarray(part.local_cells[:part.n_owned_cells])
+        seen[ring] = True
+        k = -1
+        while k < best:
+            e = np.where(slot < neoc[ring], eoc[:, ring], -1)
+            nb = np.where(slot < neoc[ring], coc[:, ring], -1).ravel()
+            nb = np.unique(nb[nb >= 0])
+            if not (is_lc[ring].all() and is_le[e[e >= 0]].all()
+                    and is_lc[nb].all()):
+                break
+            k += 1
+            ring = nb[~seen[nb]]
+            seen[ring] = True
+        best = min(best, k)
+    return max(best, 0)

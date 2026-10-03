@@ -35,6 +35,7 @@ def _fake_tile(shape, lhflx=50.0):
         lw_up=jnp.full(shape, 400.0),
         shflx=jnp.full(shape, 10.0),
         lhflx=jnp.full(shape, lhflx),   # >0 => evaporation, drives evap channel
+        surface_mass_flux=jnp.full(shape, lhflx) / constants.L_v,
         tau_x=z, tau_y=z,
     )
 
@@ -147,3 +148,33 @@ class TestRunoffReachesOcean(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOceanEvapUsesTileMassFlux(unittest.TestCase):
+    def test_evap_is_tile_surface_mass_flux_not_lhflx_over_constant_Lv(self):
+        """Ocean P-E must use the tile's evaporation mass flux (lhflx over the
+        latent heat the flux used, e.g. SST-dependent L_vap under aerobulk), not
+        lhflx / constant L_v."""
+        from unittest import mock
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+
+        shape = (3, 4)
+        tile = _fake_tile(shape, lhflx=100.0)
+        tile.surface_mass_flux = jnp.full(shape, 100.0 / 2.44e6)  # != /L_v
+        sst = jnp.full(shape, 290.0)
+        cur = jnp.zeros(shape)
+        stub = types.SimpleNamespace(
+            _coupler_cfg=None, _last_sfc_response=None,
+            _ocean_surface_KuvC=lambda: (sst, cur, cur),
+        )
+        atm_forcing = types.SimpleNamespace(
+            sw_down=jnp.full(shape, 300.0), lw_down=jnp.full(shape, 350.0),
+            precip_total=jnp.full(shape, 2.0e-5),
+        )
+        with mock.patch("legoesm.coupler.coupler.ocean_tile_response",
+                        return_value=tile):
+            _, fw = CoupledESMDriver._assemble_ocean_forcing(stub, atm_forcing)
+        self.assertTrue(jnp.allclose(
+            net_freshwater_flux(fw),
+            atm_forcing.precip_total - tile.surface_mass_flux,
+            rtol=1e-12, atol=0.0))

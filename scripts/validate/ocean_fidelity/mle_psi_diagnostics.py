@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -39,13 +38,9 @@ _NATIVE_J = slice(0, 331)
 _NATIVE_I = slice(1, 361)
 
 
-def _git_sha(repo: Path) -> str:
-    try:
-        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              check=True).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return "unknown"
+def _git_sha(repo) -> str:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(repo).commit or "unknown"
 
 
 def _native2(a):

@@ -128,6 +128,7 @@ from legoesm.core.fv3_native_mapz import (
     W_MIN_MAPZ,
     ppm_profile_is_unported,
 )
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 
 __all__ = [
     "CONSV_MIN", "T_MIN", "W_MAX_MAPZ", "W_MIN_MAPZ",
@@ -150,48 +151,6 @@ __all__ = [
 _IDX = jnp.int32
 
 
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit).  A float32 operand would
-    otherwise be silently upcast -- or, with x64 disabled, the WHOLE
-    remap would run in float32 -- and the oracle build is
-    ``-fdefault-real-8``.  Stated locally rather than imported because
-    the NH lane's copy is private and this repo forbids importing
-    private symbols across modules.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
-    # "no silent fp64->fp32 downcast" guarantee now lives at the model
-    # boundary; THIS gate catches an f64 metric/workspace leaking into an
-    # f32 phase (silent promotion / lax.scan carry mismatch).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
-
-
 def pad1(a):
     """0-based ``(im, nk)`` -> 1-based ``(im, nk+1)`` with a dummy k=0.
 
@@ -199,7 +158,7 @@ def pad1(a):
     is here).
     """
     a = jnp.asarray(a)
-    _require_f64_jax("pad1", {"a": a})
+    require_uniform_float_jax("pad1", {"a": a})
     return jnp.concatenate([jnp.zeros((a.shape[0], 1), a.dtype), a], axis=1)
 
 
@@ -211,7 +170,7 @@ def unpad1(a):
     (JAX arrays are immutable, so there is nothing to alias).
     """
     a = jnp.asarray(a)
-    _require_f64_jax("unpad1", {"a": a})
+    require_uniform_float_jax("unpad1", {"a": a})
     return a[:, 1:]
 
 
@@ -315,7 +274,7 @@ def cs_limiters(a4, extm, iv: int):
     margin on that identity is a decisive off-switch test.
     """
     a4 = jnp.asarray(a4)
-    _require_f64_jax("cs_limiters", {"a4": a4})
+    require_uniform_float_jax("cs_limiters", {"a4": a4})
     a1 = a4[1]
     a2 = a4[2]
     a3 = a4[3]
@@ -810,7 +769,7 @@ def _profile(a4, delp, km: int, iv: int, kord: int, qmin, qs):
     ppm_profile_is_unported(kord)
     a4 = jnp.asarray(a4)
     delp = jnp.asarray(delp)
-    _require_f64_jax("profile", {"a4": a4, "delp": delp, "qs": qs})
+    require_uniform_float_jax("profile", {"a4": a4, "delp": delp, "qs": qs})
     if a4.shape[0] != 5 or a4.shape[2] != km + 1:
         raise ValueError(
             f"a4 must be 1-based (5, im, km+1) for km={km}, got {a4.shape}")
@@ -1080,7 +1039,7 @@ def _map_common(pe1, q1, pe2, km: int, kn: int, name: str):
     pe1 = jnp.asarray(pe1)
     q1 = jnp.asarray(q1)
     pe2 = jnp.asarray(pe2)
-    _require_f64_jax(name, {"pe1": pe1, "q1": q1, "pe2": pe2})
+    require_uniform_float_jax(name, {"pe1": pe1, "q1": q1, "pe2": pe2})
     im = q1.shape[0]
     if pe1.shape != (im, km + 2):
         raise ValueError(f"{name}: pe1 must be 1-based (im, km+2) = "
@@ -1134,7 +1093,7 @@ def map1_q2(pe1, q1, pe2, dp2, km: int, kn: int, iv: int, kord: int,
     """
     pe1, q1, pe2 = _map_common(pe1, q1, pe2, km, kn, "map1_q2")
     dp2 = jnp.asarray(dp2)
-    _require_f64_jax("map1_q2", {"dp2": dp2})
+    require_uniform_float_jax("map1_q2", {"dp2": dp2})
     if dp2.shape != (q1.shape[0], kn + 1):
         raise ValueError(f"map1_q2: dp2 must be 1-based (im, kn+1) = "
                          f"({q1.shape[0]}, {kn + 1}), got {dp2.shape}")
@@ -1361,7 +1320,7 @@ def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
     compiled program differs rather than branching on a traced value.
     """
     pt = jnp.asarray(pt)
-    _require_f64_jax("close_out_pt", {"pt": pt, "pkz": pkz})
+    require_uniform_float_jax("close_out_pt", {"pt": pt, "pkz": pkz})
     ia = ng
     win = pt[ia:ia + n, ia:ia + n, :]
     # BRANCH ON THE STATIC FLAG, NOT ON dtmp'S VALUE. dtmp is a TRACED
@@ -1553,7 +1512,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                           jnp.asarray(u), jnp.asarray(v), jnp.asarray(ps))
     ak, bk = jnp.asarray(ak), jnp.asarray(bk)
     q = [jnp.asarray(x) for x in q]
-    _require_f64_jax("lagrangian_to_eulerian", {
+    require_uniform_float_jax("lagrangian_to_eulerian", {
         "pe": pe, "peln": peln, "pk": pk, "pkz": pkz, "delp": delp,
         "pt": pt, "u": u, "v": v, "ps": ps, "ak": ak, "bk": bk,
         "omga": omga, "w": w, "delz": delz, "ws": ws,
