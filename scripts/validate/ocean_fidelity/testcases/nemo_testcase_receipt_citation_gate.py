@@ -79,6 +79,8 @@ _ORCA2_R110EENFRAC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo")
 _ORCA2_R116EENUREC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo")
+_ORCA2_R118EENVREC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -212,6 +214,8 @@ FILES = {
         _ORCA2_R116EENUREC_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo/lbclnk.f90": (
         _ORCA2_R116EENUREC_COMPILED / "lbclnk.f90"),
+    "ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R118EENVREC_COMPILED / "dynspg_ts.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
