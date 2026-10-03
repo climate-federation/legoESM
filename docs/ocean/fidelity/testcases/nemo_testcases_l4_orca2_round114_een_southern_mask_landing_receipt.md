@@ -87,11 +87,18 @@ their first non-bit rows.
 ## Tests, citations, and review
 
 The focused fraction-chain, routing, VORTEX, and barotropic battery passes
-**44/44**. The single required `tests/ocean/fidelity -n 12` battery is reported
-in the final round commit after its one invocation.
+**44/44**. The single required `tests/ocean/fidelity -n 12` invocation
+collected 2,340 tests, reached 99%, and reproduced the registered inert
+xdist-controller stall after all real pytest processes exited. It emitted
+exactly the six pre-existing failure markers carried by rounds 112-113: SI3
+scalar-math provenance, GYRE round-51 private/default-off operands, round-35
+escape scope, worktree stamping, the recipe case-board row, and the GYRE
+round-129 record stamp. No round-114 test failed, and the battery was not
+rerun.
 
-The cumulative citation gate and this receipt's planted citation check are
-required before the final commit. The edited model file's cumulative map was
+The cumulative citation gate passes 274 citations and this receipt passes 7,
+with zero failures, unmapped citations, or map-audit failures. Its planted
+model citation exits nonzero. The edited model file's cumulative map was
 re-anchored from a `difflib.SequenceMatcher` pre/post map; no rigid-shift
 guess was used. Separate `codex exec --sandbox read-only` review was attempted.
 Verdict: **independent review unavailable in-sandbox** (`failed to initialize
