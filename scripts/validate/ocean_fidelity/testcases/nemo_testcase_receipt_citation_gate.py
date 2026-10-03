@@ -1296,9 +1296,9 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:909-911': [
         ('def _nemo_een_south_e3f0(e3f0, mesh_e3f0):', 1),
         ('return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1011-1022': [
+    'barotropic_latlon_cgrid.py:1016-1030': [
         ('# dyn_vor_init applies the default zero fill to e3f_0vor', 1),
-        ('q_south = b(ff_south[..., None] / e3f_south)', 1), 12],
+        ('q_south = b(ff_south[..., None] / e3f_south)', 1), 15],
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
         ('IF( ln_read_cfg ) THEN', 1),
@@ -4212,7 +4212,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:2750-2751': [
+    'barotropic_latlon_cgrid.py:2758-2759': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],

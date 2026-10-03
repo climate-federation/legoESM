@@ -911,6 +911,11 @@ def _nemo_een_south_e3f0(e3f0, mesh_e3f0):
     return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)
 
 
+def _nemo_south_zero_fill(field):
+    """NEMO default constant-zero association for a southern halo."""
+    return jnp.concatenate([jnp.zeros_like(field[:1]), field[:-1]], axis=0)
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -1011,12 +1016,15 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     # dyn_vor_init applies the default zero fill to e3f_0vor's closed southern
     # halo, then replaces that zero with e3f_3d (dynvor.f90:935-937).  The mesh
     # e3f_3d was itself read with jpfillcopy (domzgr.f90:179-188), so its
-    # southern value repeats the first inner row.  Keep the still-open r3f and
-    # fe3mask associations cyclic here so this changes only that operand.
+    # southern value repeats the first inner row.  Keep the r3f association
+    # cyclic here because it is already exact on the admitted
+    # record.  dommsk freezes fe3mask only after fmask's ordinary F-grid lbc,
+    # whose closed southern halo receives the default constant zero
+    # (dommsk.f90:229-258, lbclnk.f90:1811-1820,1864-1872,1999-2005).
     e3f0_south = _nemo_een_south_e3f0(
         e3f0, jnp.asarray(raw.e3f_0, dtype=dtype))
     r3f_south = shift(r3f, 0, 1)
-    fmask_south = shift(fmask, 0, 1)
+    fmask_south = _nemo_south_zero_fill(fmask)
     e3f_south = b(e3f0_south * b(
         one + r3f_south[..., None] * fmask_south))
     q_south = b(ff_south[..., None] / e3f_south)
