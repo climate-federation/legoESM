@@ -1297,6 +1297,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 123: northeast northern e3f_0vor association ---------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynvor.f90:912-937': [
+        ('SELECT CASE( nn_e3f_typ )', 1),
+        ('WHERE( e3f_0vor(:,:,:) == 0._wp )', 1), 26],
     # --- ORCA2 round 122: northern F-grid copy-fill association -----------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747': [
         ("CASE ( 'F' )", 5),
