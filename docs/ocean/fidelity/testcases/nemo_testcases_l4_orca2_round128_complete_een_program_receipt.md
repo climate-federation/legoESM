@@ -76,12 +76,25 @@ The heartbeat-protected commands above completed and alone supply the verdicts.
 
 ## Tests, citations, and review
 
-PENDING_FINAL_VALIDATION.
+The round-115/122/124/126/127/128 plus cumulative-citation focused chain
+passes 41/41. The default citation gate and this receipt both pass with zero
+unmapped citations; shifting the new production-helper citation makes the gate
+refuse. The citation-map audit passes 17/17.
+
+The required single `tests/ocean/fidelity -n 12` invocation collected 2,394
+tests and reached 99%; 2,364 tests passed before the registered xdist-controller
+tail stall after the real pytest-process count reached zero. It is **incomplete,
+not PASS**. Seven failures were displayed: the six registered pre-existing
+SI3 scalar-math provenance, round-129 record stamp, round-51 private-arm scope,
+round-35 escape scope, worktree-stamp, and recipe case-board rows, plus one
+round-114 consumer-count expectation changed by this landing. That round-114
+expectation was updated to register all four EEN/ENE southern-mask consumers
+and its failing ID passes in isolation. No round-128 test failed.
 
 Separate read-only Codex claim review was attempted and returned
 **independent review unavailable in-sandbox**: `failed to initialize in-process
 app-server client: Read-only file system`. Final-diff review is repeated after
-this receipt is complete.
+this receipt is complete and returned the same unavailable verdict.
 
 ## OPEN
 
