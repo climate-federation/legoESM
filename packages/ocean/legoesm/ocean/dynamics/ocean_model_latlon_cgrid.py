@@ -6259,24 +6259,18 @@ class LatLonCGridOceanModel:
                                               * state.v_mask.data)
                         else:
                             # The pre-round-206 behaviour, kept as the
-                            # one-variable control of what round 206 landed:
-                            # divide the barotropic transport by the sum of
-                            # the MIN-RULE face thicknesses instead of
-                            # NEMO's ``hu_0*(1+r3u(Kmm))``
-                            # (stprk3_stg.f90:270).  The production target
-                            # already carries NEMO's depth, so undoing it is
-                            # a multiply by ``qco_depth / H_pre``.  Dry
-                            # columns keep the production ratio: their qco
-                            # depth is zero and they carry no transport.
-                            _qf = _nemo_ws_qco_stage_faces(
-                                state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                                _ws_v_live_mask, _grid)
-                            _qu = jnp.sum(_qf[0], axis=-1)
-                            _qv = jnp.sum(_qf[1], axis=-1)
-                            transport_u_mean = transport_u_mean * jnp.where(
-                                _qu > 0.0, _qu / H_u_pre, 1.0)
-                            transport_v_mean = transport_v_mean * jnp.where(
-                                _qv > 0.0, _qv / H_v_pre, 1.0)
+                            # EXACT one-variable control of what round 206
+                            # landed: the target built on the sum of the
+                            # MIN-RULE face thicknesses instead of NEMO's
+                            # ``hu_0*(1+r3u(Kmm))`` (stprk3_stg.f90:270).
+                            # Taken as the whole array rather than undone by
+                            # a second multiply, so the arm is a BITWISE
+                            # revert of the landed statement and goes
+                            # exactly inert if that statement is reverted --
+                            # which is what makes the test that asserts it
+                            # moves the step a pin and not a smoke test.
+                            transport_u_mean, transport_v_mean = (
+                                _transport_target_legacy())
                     # stprk3_stg.F90:273-274: the SAME barotropic correction
                     # enters the advective transport masked by the 3-D
                     # umask/vmask -- ``zFu = e2u*e3u(Kmm)*( uu(Kmm) +
@@ -7032,9 +7026,17 @@ class LatLonCGridOceanModel:
             # height difference ACROSS the face.  The same kernel already
             # supplies the advection's own divisor
             # (``momentum_flux_face_thickness``); it can supply this one
-            # too, so the stage advective transport and the trend that
-            # divides it are built on ONE column depth.  LANDED round 206
-            # (Decision 86).  Measured on VORTEX-zco: the two depths differ
+            # too.  LANDED round 206 (Decision 86).
+            # SCOPE, stated because the code does not carry it: this target
+            # is built ONCE per step from the step-entry (Kbb) sea surface,
+            # while NEMO re-evaluates :270 inside every stage with that
+            # stage's own ``r3u(Kmm)`` and legoESM's own stage transport
+            # (``_nemo_ws_stage_transport``) does use the per-stage ssh.  So
+            # stages 2 and 3 divide by the step-entry column depth here.
+            # That placement is inherited from the structure this target
+            # already had (``H_u_pre`` and ``Hu_avg`` are both step-entry
+            # quantities); round 206 changed the depth RULE, not the time
+            # level, and the time level is an open item.  Measured on VORTEX-zco: the two depths differ
             # by up to 0.129 m in 5000.86 m (2.58e-05 relative, 698 of 3660
             # u columns), and the stage-1 flux-form advection trend's
             # disagreement with NEMO falls from 6.285649e-11 to
@@ -7058,6 +7060,17 @@ class LatLonCGridOceanModel:
                 Hu_avg / _H_u_transport * state.u_mask.data)
             transport_target_v = (
                 Hv_avg / _H_v_transport * state.v_mask.data)
+            def _transport_target_legacy():
+                """The pre-round-206 target, for the private control arm.
+
+                A function, not a value, so production traces NOTHING extra
+                and the landed graph is the one the registry was measured
+                on.  Identical to the two lines above when the landed
+                statement is reverted -- which is the non-vacuity of the
+                test that pins it.
+                """
+                return (Hu_avg / H_u_pre * state.u_mask.data,
+                        Hv_avg / H_v_pre * state.v_mask.data)
             _use_transport_reconcile = (
                 self._nemo_ws_test_hooks.momentum_transport_reconcile)
             _transport_target = (
