@@ -1301,6 +1301,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 127: northern V recurrence prefix -------------------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1339-1348': [
+        ('CALL r118_een_v_before(1, ji, jj, jk, zpvo_nw', 1),
+        ('CALL r118_een_v_after(2, ji, jj, jk, ffv_ne(ji,jj))', 1), 10],
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1360-1367': [
+        ('r105_acc_v_nw(ji,jj) = ffv_nw(ji,jj)', 1),
+        ('ffv_ne(ji,jj) = r1_12 * r1_e2v(ji,jj)', 1), 8],
     # --- ORCA2 round 126: complete northern frozen-mask association ------
     'barotropic_latlon_cgrid.py:1004-1010': [
         ('# dommsk.f90:232-258 applies the ordinary F-grid lateral boundary before', 1),
