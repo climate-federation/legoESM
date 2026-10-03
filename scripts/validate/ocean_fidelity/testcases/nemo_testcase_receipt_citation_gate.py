@@ -198,6 +198,8 @@ FILES = {
         _ORCA2_R110EENFRAC_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90": (
         _ORCA2_R110EENFRAC_COMPILED / "domhgr.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "lbclnk.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1271,6 +1273,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-109': [
+        ('IF( ln_read_cfg ) THEN', 1),
+        ('&              iff   , ff_f  , ff_t', 1), 9],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:233-236': [
+        ("IF(  iom_varid( inum, 'ff_f'", 1),
+        ("CALL iom_get( inum, jpdom_global, 'ff_f'", 1), 4],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1199-1225': [
+        ('ELSE                                                        ! southern/northern side', 1),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 1), 27],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('& ff_f(ji  ,jj-1) /', 1), 5],
+    'barotropic_latlon_cgrid.py:904-906': [
+        ('def _nemo_een_south_ff_copy(ff):', 1),
+        ('return jnp.concatenate([ff[:1], ff[:-1]], axis=0)', 1), 3],
+    'barotropic_latlon_cgrid.py:1002-1008': [
+        ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
+        ('q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))', 1), 7],
     # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1248': [
         ('SELECT CASE( nvor_scheme )', 1),
