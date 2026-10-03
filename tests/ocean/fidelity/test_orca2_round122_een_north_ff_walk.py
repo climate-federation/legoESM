@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round122_een_north_ff_walk as gate,
@@ -53,3 +54,19 @@ def test_round122_candidate_fields_replace_only_northern_ff_neighbor():
     np.testing.assert_array_equal(
         fields["ne"]["1_ff"][:-1, :, 0], parts["een_ff"][1:]
     )
+
+
+def test_round122_production_north_ff_uses_pivot_f_permutation():
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _nemo_een_north_ff
+
+    field = np.arange(5 * 4, dtype=np.float64).reshape(5, 4)
+    fold = SimpleNamespace(
+        is_active=True,
+        fold_j=4,
+        pivot_row_stored=True,
+        perm_f=np.array([3, 2, 1, 0]),
+        perm_v=np.array([0, 3, 2, 1]),
+    )
+    associated = np.asarray(_nemo_een_north_ff(field, SimpleNamespace(fold=fold)))
+    np.testing.assert_array_equal(associated[:-1], field[1:])
+    np.testing.assert_array_equal(associated[-1], field[-3, ::-1])

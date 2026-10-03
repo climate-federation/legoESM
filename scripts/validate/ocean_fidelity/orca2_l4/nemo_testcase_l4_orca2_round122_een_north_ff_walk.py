@@ -94,7 +94,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _nemo_een_north_ff
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
 
     require(plant in PLANTS, f"unknown plant {plant}")
@@ -142,9 +142,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         dtype=jnp.float64, substitute_e3f=raw.e3f_0,
     )
     raw_ff = jnp.asarray(raw.ff_f, dtype=jnp.float64)
-    # The card retains NEMO's pivot row and its northern halo row.  With
-    # nn_hls=2, lbcnfd's F branch maps that halo from two rows below it.
-    north_ff = raw_ff[-3, fold_perm_f(card.recipe.grid.fold)]
+    north_ff = _nemo_een_north_ff(raw_ff, card.recipe.grid)[-1]
     if plant == "permutation-shift":
         north_ff = jnp.roll(north_ff, 1)
     source_z = card.recipe.z_coord._replace(

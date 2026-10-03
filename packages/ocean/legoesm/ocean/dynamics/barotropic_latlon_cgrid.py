@@ -59,6 +59,7 @@ import jax.numpy as jnp
 
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
+from legoesm.grids.operators_latlon_cgrid import fold_perm_f
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
@@ -916,6 +917,27 @@ def _nemo_south_zero_fill(field):
     return jnp.concatenate([jnp.zeros_like(field[:1]), field[:-1]], axis=0)
 
 
+def _nemo_een_north_ff(field, grid):
+    """NEMO T-pivot/F-point association for EEN's northern ``ff_f``.
+
+    The ORCA domain array retains both the pivot and northern halo rows.  The
+    compiled ``lbc_nfd`` F-point branch with ``nn_hls=2`` fills that halo from
+    the row two places below it, using the F-stagger permutation and sign +1.
+    Non-fold rows retain the existing cyclic north-neighbour association.
+    """
+    north = jnp.roll(field, -1, axis=0)
+    fold = getattr(grid, "fold", None)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        source_index = -3 if bool(getattr(fold, "pivot_row_stored", False)) else -2
+        fold_row = field[source_index, fold_perm_f(fold)]
+        if fold_is_local(grid):
+            north = north.at[-1].set(fold_row)
+        else:
+            north = north.at[-1].set(jnp.where(nmask, fold_row, north[-1]))
+    return north
+
+
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
                                    *, grid=None):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
@@ -1004,6 +1026,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     e3v = b(e3v0 * b(one + r3v[..., None] * vmask) * vmask)
     e3f = b(e3f0 * b(one + r3f[..., None] * fmask))
     q = b(ff[..., None] / e3f)
+    ff_north = _nemo_een_north_ff(ff, grid)
+    q_north = b(ff_north[..., None] / jnp.roll(e3f, -1, axis=0))
 
     def shift(value, di=0, dj=0):
         out = jnp.roll(value, di, axis=1) if di else value
@@ -1073,8 +1097,8 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
             "se": triad(shift(q, 1, 0), q, q_south),
             "sw": triad(shift(q_south, 1, 0),
                          shift(q, 1, 0), q),
-            "ne": triad(shift(q, 0, -1), q, shift(q, 1, 0)),
-            "nw": triad(q, shift(q, 1, 0), shift(q, 1, -1)),
+            "ne": triad(q_north, q, shift(q, 1, 0)),
+            "nw": triad(q, shift(q, 1, 0), shift(q_north, 1, 0)),
         }
     else:
         # dynspg_ts.F90 np_ENE:1383-1410.  The northern U pair shares
