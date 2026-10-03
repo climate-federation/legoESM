@@ -1001,9 +1001,13 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
         jnp.asarray(raw.e3f_0, dtype=dtype), nn_e3f_typ=0, grid=grid))
     umask = jnp.asarray(raw.umask, dtype=dtype)
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
-    # dommsk.f90:258 freezes fe3mask before rn_shlat and strait edits fmask;
-    # dynspg_ts.f90:1241-1245 stretches e3f_0vor with that frozen mask.
+    # dommsk.f90:232-258 applies the ordinary F-grid lateral boundary before
+    # freezing fe3mask, then dynspg_ts.f90:1241-1245 stretches e3f_0vor with
+    # that frozen mask.  Preserve the associated northern halo as an operand,
+    # rather than relying on its multiplication by a recorded-zero r3f to hide
+    # the difference (ORCA2 rounds 125-126).
     fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
+    fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])
 
     def recip(depth, wet):
         return b(wet / b(depth + one - wet))

@@ -11,7 +11,7 @@ T-pivot/F-point boundary branch fills the northern halo from the row two places
 below it under `nn_hls=2`, with the F permutation and sign `+1`
 (`ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747`). The literal
 EEN builder now transcribes that association (`barotropic_latlon_cgrid.py:920-941`)
-before forming the northern quotient (`barotropic_latlon_cgrid.py:1036-1039`).
+before forming the northern quotient (`barotropic_latlon_cgrid.py:1040-1043`).
 
 No configuration, forcing, entry state, carried state, stabiliser, sea-ice
 selector, or `unmeasured_features` entry changed.

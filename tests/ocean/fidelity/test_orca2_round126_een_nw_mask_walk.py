@@ -61,3 +61,12 @@ def test_round126_wrong_mask_changes_descendants_when_r3f_is_nonzero():
     np.testing.assert_array_equal(result["3_frac"][-1], 2.0)
     np.testing.assert_array_equal(wrong["3_denom"][-1], 2.0)
     np.testing.assert_array_equal(wrong["3_frac"][-1], 1.0)
+
+
+def test_round126_production_builder_associates_the_frozen_mask():
+    source = gate.Path(
+        gate.REPO_ROOT
+        / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py"
+    ).read_text(encoding="utf-8")
+    assert "dommsk.f90:232-258 applies the ordinary F-grid lateral boundary" in source
+    assert "fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])" in source

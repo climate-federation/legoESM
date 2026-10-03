@@ -23,7 +23,7 @@ fraction 3 consumes the associated northern value at `(ji-1,jj+1)`
 (`ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1323-1328`). The
 shared literal EEN builder now applies the same association to both 2-D
 `ff_f` and 3-D `e3f_0vor` (`barotropic_latlon_cgrid.py:920-941`) before the
-northern division (`barotropic_latlon_cgrid.py:1036-1039`).
+northern division (`barotropic_latlon_cgrid.py:1040-1043`).
 
 ## Frozen prediction disposition
 
