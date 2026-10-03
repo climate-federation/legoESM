@@ -205,9 +205,9 @@ def test_an_advection_only_perturbation_misses_the_pre_advection_frame(steps):
 
 @pytest.mark.parametrize("hooks_kwargs,match", [
     ({"expose_stage1_momentum_rhs_split": "advection"},
-     "must be '', 'pre_advection', or 'completed'"),
+     "must be one of"),
     ({"expose_stage1_momentum_rhs_split": True},
-     "must be '', 'pre_advection', or 'completed'"),
+     "must be one of"),
     ({"expose_stage1_momentum_rhs_split": "completed",
       "expose_stage1_momentum_rhs": True}, "share the returned u/v slots"),
     ({"expose_stage1_momentum_rhs_split": "pre_advection",

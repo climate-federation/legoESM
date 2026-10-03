@@ -78,8 +78,6 @@ def steps(fp64):
                 expose_stage1_momentum_rhs_split="advection_vertical")),
             ("zub", _NEMOWSRK3TestHooks(
                 expose_stage1_momentum_rhs_split="advection_zub_increment")),
-            ("prognostic_mean", _NEMOWSRK3TestHooks(
-                momentum_transport_stage1_operand="prognostic_mean")),
             ("qco_depth", _NEMOWSRK3TestHooks(
                 momentum_transport_stage1_operand="qco_depth")),
     ):
@@ -149,23 +147,57 @@ def test_the_zub_increment_is_inside_the_horizontal_half(steps):
         assert 0.0 < zub < hadv
 
 
-@pytest.mark.parametrize("arm", ("prognostic_mean", "qco_depth"))
-def test_each_causal_transport_arm_is_live(steps, arm):
-    """NON-VACUITY, and the reason this test exists: round 205 REFUTES one of
-    these two arms by measuring that it changes nothing at the scale in
-    question.  That refutation is only worth anything if the arm ran.  An
-    arm that silently fell through its guard would look identical."""
-    moved = _moved(steps[arm], steps["plain"])
-    assert moved > 0.0, arm
-    assert np.isfinite(moved), arm
-    for leaf in _leaves(steps[arm]):
-        assert np.all(np.isfinite(leaf)), arm
+def test_the_qco_depth_arm_is_live_and_finite(steps):
+    """It swaps the transport divisor, so it must move the step -- and it
+    must not put a NaN on a dry column, where the qco depth is zero."""
+    assert _moved(steps["qco_depth"], steps["plain"]) > 0.0
+    for leaf in _leaves(steps["qco_depth"]):
+        assert np.all(np.isfinite(leaf))
 
 
-def test_the_two_arms_do_different_things(steps):
-    """They swap different operands of the same statement, so they must not
-    be the same perturbation."""
-    assert _moved(steps["qco_depth"], steps["prognostic_mean"]) > 0.0
+def test_the_prognostic_mean_arm_really_reads_uu_b(fp64):
+    """NON-VACUITY FOR A REFUTATION.
+
+    Round 205 refutes the ``prognostic_mean`` hypothesis by measuring that
+    swapping that operand does not move the stage-1 advection trend at the
+    scale in question.  A refutation is worthless if the arm never ran, and
+    on THIS card's own initial state the arm is a no-op for a real reason:
+    the prognostic ``uu_b`` and the depth mean re-reduced from the
+    three-dimensional velocity are equal there (on the record-seeded state
+    the walk scores they differ by 5.551115e-17, one unit in the last
+    place, and the arm moves the trend by 1.355e-20).
+
+    So liveness is proven by a CONTROL instead of by a number: perturb
+    ``uu_b``/``vv_b`` and the arm's step must move AWAY from the production
+    step, which it cannot do unless it reads them.  The unperturbed pair is
+    the other half of the control -- there the two steps agree exactly.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks,
+    )
+
+    card, plain_model = _card_and_model()
+    _, arm_model = _card_and_model(_NEMOWSRK3TestHooks(
+        momentum_transport_stage1_operand="prognostic_mean"))
+    clean = card.recipe.initial_state
+    assert clean.uu_b is not None and clean.vv_b is not None
+    bumped = clean._replace(
+        uu_b=clean.uu_b.replace(
+            data=clean.uu_b.data + 1.0e-4 * np.asarray(clean.u_mask.data)),
+        vv_b=clean.vv_b.replace(
+            data=clean.vv_b.data + 1.0e-4 * np.asarray(clean.v_mask.data)))
+    # On the unperturbed state the two operands agree, so the arm is a
+    # no-op -- that is the measured fact, not an inert hook.
+    assert _moved(arm_model.step(clean, dt=card.dt_s),
+                  plain_model.step(clean, dt=card.dt_s)) == 0.0
+    # Perturb the operand the arm reads and it must separate.
+    assert _moved(arm_model.step(bumped, dt=card.dt_s),
+                  plain_model.step(bumped, dt=card.dt_s)) > 0.0
+    # NOT covered here, said rather than implied: the arm's refusal when a
+    # state carries no uu_b/vv_b pair.  Stripping that pair makes the
+    # barotropic solver raise first on this card
+    # (barotropic_latlon_cgrid.py, the carried NEMO depth mean), so the
+    # refusal cannot be reached from a card and is left unexercised.
 
 
 @pytest.mark.parametrize("field,value", (
@@ -179,6 +211,8 @@ def test_an_unknown_arm_string_raises(fp64, field, value):
         _NEMOWSRK3TestHooks,
     )
 
-    card, model = _card_and_model(_NEMOWSRK3TestHooks(**{field: value}))
+    # The guard is at CONSTRUCTION, not at step entry (round 205 review
+    # finding): a typo must not survive to a card whose stage branch never
+    # reads the hook.
     with pytest.raises(ValueError, match=field):
-        model.step(card.recipe.initial_state, dt=card.dt_s)
+        _card_and_model(_NEMOWSRK3TestHooks(**{field: value}))
