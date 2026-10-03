@@ -1301,6 +1301,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 128: complete literal-EEN source program ------------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
+        ("CASE ( 'U' )", 1),
+        ('END DO   ;   END DO', 10), 45],
+    'barotropic_latlon_cgrid.py:953-974': [
+        ('def _nemo_een_north_u(field, grid):', 1),
+        ('return north', 1), 22],
+    'barotropic_latlon_cgrid.py:1079-1095': [
+        ('e3u = b(e3u0 * b(one + r3u[..., None] * umask))', 1),
+        ('jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)', 1), 17],
+    'barotropic_latlon_cgrid.py:1197-1233': [
+        ('un = {', 1),
+        ('e3v, mbkv, neighbor, neighbor_mask, vq[corner],', 1), 37],
     # --- ORCA2 round 127: northern V recurrence prefix -------------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1339-1348': [
         ('CALL r118_een_v_before(1, ji, jj, jk, zpvo_nw', 1),
