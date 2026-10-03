@@ -232,7 +232,9 @@ case "$variant" in
                 ref_name=VORTEX_VEC_OMIP_L1 ; exp_name=VORTEX_VEC_R21_10KM
                 tag=round208_res10_vec ;;
     esac
-    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$tag
+    # phase3/vortex_ladder/<resolution>/<card>, per the round-208 brief.
+    ladder_res=${variant:3:2}km ; ladder_card=${variant:5}
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$ladder_res/$ladder_card
     ;;
   *)
     printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx or res10vec\n' \
