@@ -76,7 +76,22 @@ not represented as reruns. This receipt makes no month-scale claim.
 
 ## Tests, citations, and review
 
-Pending final validation.
+The focused round-120/121/122/123 and cumulative-citation battery passes
+33/33. The required `tests/ocean/fidelity -n 12` invocation collected 2,374
+tests and reached 97%; 2,291 tests passed before reproducing the registered
+xdist-controller tail stall after the count of real pytest processes reached
+zero. It was interrupted after the grace period and is **incomplete, not
+PASS**. Its six displayed failures are the registered pre-existing SI3 scalar-
+math provenance, round-129 stamp, round-51 private-arm scope, round-35 escape
+scope, worktree-stamp, and recipe case-board rows. No round-123 test failed.
+
+The default citation gate and this receipt's citation gate both pass with zero
+unmapped or failed entries; shifting the compiled `dynvor` citation exits 1.
+Separate `codex exec --sandbox read-only` review was attempted. Verdict:
+**independent review unavailable in-sandbox** (`failed to initialize
+in-process app-server client: Read-only file system`). A second external
+reviewer was not available in this sandbox; the measurement remains guarded by
+the five independent runtime plants and the focused tests above.
 
 ## OPEN
 
