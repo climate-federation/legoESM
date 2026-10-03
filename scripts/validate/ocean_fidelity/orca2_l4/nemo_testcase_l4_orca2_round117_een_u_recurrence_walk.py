@@ -39,6 +39,14 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round116_ee
 LABELS = record_gate.LABELS
 SOURCE_ORDER = ("mbku", "zpvo", "e3u", "e3v", "mask", "term", "before", "after")
 PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
+EXPECTED_BASELINE = {
+    "ne": {"first": "before", "mask": (0, 0), "term": (0, 0),
+           "before": (1314, 0), "after": (4893, 0)},
+    "sw": {"first": "mask", "mask": (68, 68), "term": (68, 68),
+           "before": (3171, 0), "after": (6927, 68)},
+    "se": {"first": "mask", "mask": (68, 68), "term": (68, 68),
+           "before": (3350, 0), "after": (7106, 68)},
+}
 
 
 class GateError(RuntimeError):
@@ -201,12 +209,30 @@ def measure(deck_root: Path, frame_root: Path, recurrence_root: Path,
         }
         movement = {
             name: r109._score(candidate[name], baseline[name])
-            for name in ("term", "before", "after")
+            for name in ("mask", "term", "before", "after")
         }
         first = next((name for name in SOURCE_ORDER
                       if baseline_scores[name]["bit_unequal"]), None)
         candidate_first = next((name for name in SOURCE_ORDER
                                 if candidate_scores[name]["bit_unequal"]), None)
+        expected = EXPECTED_BASELINE[label]
+        require(first == expected["first"],
+                f"{label}: baseline first boundary moved: {first}")
+        for name in ("mask", "term", "before", "after"):
+            expected_bits, expected_magnitude = expected[name]
+            require(
+                (baseline_scores[name]["bit_unequal"],
+                 baseline_scores[name]["magnitude_unequal"])
+                == (expected_bits, expected_magnitude),
+                f"{label}: baseline {name} census moved",
+            )
+            require(candidate_scores[name]["bit_unequal"] == 0,
+                    f"{label}: candidate {name} is not bit-exact")
+        require(candidate_first is None,
+                f"{label}: candidate first boundary is {candidate_first}")
+        for name in ("mbku", "zpvo", "e3u", "e3v"):
+            require(baseline_scores[name]["bit_unequal"] == 0,
+                    f"{label}: upstream {name} moved")
         samples = []
         locations = np.argwhere(
             np.ascontiguousarray(baseline["before"]).view(np.uint64)

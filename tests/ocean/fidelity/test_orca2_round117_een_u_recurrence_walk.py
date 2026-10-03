@@ -14,6 +14,14 @@ def test_round117_source_order_paths_and_plants_are_registered():
     assert gate.SOURCE_ORDER == (
         "mbku", "zpvo", "e3u", "e3v", "mask", "term", "before", "after")
     assert gate.PLANTS == ("none", "oracle-bit", "candidate-bit", "scope-route")
+    assert gate.EXPECTED_BASELINE == {
+        "ne": {"first": "before", "mask": (0, 0), "term": (0, 0),
+               "before": (1314, 0), "after": (4893, 0)},
+        "sw": {"first": "mask", "mask": (68, 68), "term": (68, 68),
+               "before": (3171, 0), "after": (6927, 68)},
+        "se": {"first": "mask", "mask": (68, 68), "term": (68, 68),
+               "before": (3350, 0), "after": (7106, 68)},
+    }
 
 
 def test_ieee_zero_add_preserves_negative_zero_only_for_two_negative_inputs():
