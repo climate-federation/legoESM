@@ -36,4 +36,5 @@ def test_round121_shift_matches_fortran_neighbor_association():
 
 
 def test_round121_plants_cover_oracle_candidate_and_scope():
-    assert gate.PLANTS == ("none", "oracle-bit", "candidate-bit", "scope-route")
+    assert gate.PLANTS == (
+        "none", "oracle-bit", "candidate-bit", "rank-seam", "scope-route")

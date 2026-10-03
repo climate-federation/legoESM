@@ -72,7 +72,7 @@ EXPECTED_SCORES["nw"].update({
     "3_frac": (1431, 1431),
     "sum": (1431, 1431),
 })
-PLANTS = ("none", "oracle-bit", "candidate-bit", "scope-route")
+PLANTS = ("none", "oracle-bit", "candidate-bit", "rank-seam", "scope-route")
 
 
 class GateError(RuntimeError):
@@ -240,9 +240,20 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                     f"{path}: {name} census moved: {observed}")
         locations = np.argwhere(
             np.ascontiguousarray(candidate[first]).view(np.uint64)
-            != np.ascontiguousarray(reference[first]).view(np.uint64))[:5]
+            != np.ascontiguousarray(reference[first]).view(np.uint64))
+        if plant == "rank-seam" and path == "ne":
+            locations = locations[locations[:, 1] < 90]
+        i_values = np.unique(locations[:, 1])
+        support_by_rank = {
+            "rank0_i_0_89": int(np.count_nonzero(locations[:, 1] < 90)),
+            "rank1_i_90_179": int(np.count_nonzero(locations[:, 1] >= 90)),
+        }
+        require(all(value > 0 for value in support_by_rank.values()),
+                f"{path}: first boundary is confined to one rank")
+        require(i_values.size > 2 and bool(np.all(np.diff(i_values) == 1)),
+                f"{path}: first boundary is rank-edge-only or discontinuous")
         samples = []
-        for raw_location in locations:
+        for raw_location in locations[:5]:
             location = tuple(map(int, raw_location))
             samples.append({
                 "j_i_k": list(location),
@@ -252,6 +263,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         paths[path] = {
             "first_non_bit_item": first,
             "scores": scores,
+            "first_boundary_i_values": list(map(int, i_values)),
+            "first_boundary_support_by_rank": support_by_rank,
             "first_boundary_samples": samples,
         }
 

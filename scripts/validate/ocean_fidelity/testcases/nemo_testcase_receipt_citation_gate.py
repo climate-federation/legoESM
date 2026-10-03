@@ -81,6 +81,8 @@ _ORCA2_R116EENUREC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R116EENUREC/BLD/ppsrc/nemo")
 _ORCA2_R118EENVREC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo")
+_ORCA2_R120EENVFRAC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo")
 _OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
 _OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
 _OVERFLOW_R50PAIR_COMPILED = (
@@ -216,6 +218,8 @@ FILES = {
         _ORCA2_R116EENUREC_COMPILED / "lbclnk.f90"),
     "ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R118EENVREC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R120EENVFRAC_COMPILED / "dynspg_ts.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1289,6 +1293,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 121: northern V fraction walk -------------------------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1323-1328': [
+        ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
+        ('& ff_f(ji-1,jj+1) /', 1), 6],
     # --- ORCA2 round 120: northern V three-fraction acquisition -----------
     'ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo/dynspg_ts.f90:1320-1325': [
         ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
