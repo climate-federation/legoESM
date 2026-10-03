@@ -28,7 +28,7 @@ from legoesm.land.soil_thermal import (
     SoilThermalConfig, compute_heat_capacity, compute_thermal_conductivity,
     melt_snow_node_excess, snow_thermal_conductivity, solve_snow_soil_thermal,
     solve_soil_thermal)
-from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 
 pytestmark = pytest.mark.skipif(
     not jax.config.jax_enable_x64, reason="needs JAX_ENABLE_X64=1")
@@ -165,7 +165,8 @@ def _forcing(ncol, T_air, precip, precip_snow):
 def test_full_step_conserves_water_with_warm_pack(scheme):
     """Snow + soil + pond water closes over steps that melt a pack whose node
     starts above freezing (the stored-heat melt) and accumulate new snow."""
-    kw = {} if scheme == "seb" else {"surface_scheme": TwoLeafCanopyConfig()}
+    kw = {"surface_scheme": (SimpleSEBConfig() if scheme == "seb"
+                             else TwoLeafCanopyConfig())}
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH, **kw)
     ncol = 2
@@ -243,9 +244,11 @@ def test_solver_gradient_matches_finite_difference():
 def test_surface_scheme_sees_the_snow_node_temperature():
     """The start-of-step skin handed to the surface scheme is the snow node:
     two states differing ONLY in T_snow (under snow) give different sensible
-    heat."""
+    heat.  SimpleSEB evaluates its fluxes at that skin directly (the two-leaf
+    canopy relaxes its ground node toward the thermal callback instead)."""
     cfg = MultiLayerLandConfig(
-        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=SimpleSEBConfig())
     st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
     st = st._replace(snow_depth=jnp.array([30.0]))
     f = _forcing(1, 262.0, 0.0, 0.0)
@@ -307,3 +310,21 @@ def test_full_step_gradient_wrt_snow_mass_is_finite_and_matches_fd():
     fd = (lj(swe + eps) - lj(swe - eps)) / (2 * eps)
     assert np.isfinite(float(g[0])) and abs(float(g[0])) > 0.0
     np.testing.assert_allclose(float(g[0]), float(fd), rtol=1e-4)
+
+
+def test_canopy_ground_node_is_the_snow_surface():
+    """Two-leaf canopy: the Picard loop's converged ground temperature is the
+    snow-node solve (close to the final T_snow), not the warm top soil."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=272.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([40.0]), T_snow=jnp.array([255.0]))
+    f = _forcing(1, 252.0, 0.0, 0.0)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0)))(st)
+    s2, sfc = out[0], out[-1]
+    Tg = float(sfc.Ts_solve[0])
+    assert abs(Tg - float(s2.T_snow[0])) < 1.0
+    assert float(s2.T_soil[0, 0]) - Tg > 5.0
