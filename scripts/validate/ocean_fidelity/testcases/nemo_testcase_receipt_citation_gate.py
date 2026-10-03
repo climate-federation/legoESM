@@ -222,6 +222,8 @@ FILES = {
         _ORCA2_R120EENVFRAC_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/domhgr.f90": (
         _ORCA2_R120EENVFRAC_COMPILED / "domhgr.f90"),
+    "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R120EENVFRAC_COMPILED / "lbcnfd.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1295,6 +1297,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 122: northern F-grid copy-fill association -----------
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747': [
+        ("CASE ( 'F' )", 1),
+        ('END DO; END DO', 1), 26],
     # --- ORCA2 round 121: northern V fraction walk -------------------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1323-1328': [
         ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
