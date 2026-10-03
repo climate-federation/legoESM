@@ -1051,6 +1051,15 @@ class _NEMOVerticalSolveTestInput(NamedTuple):
     replace: object
 
 
+# Legal values of the private ``expose_stage1_momentum_rhs_split`` hook: the
+# empty default, the two frames round 204 added, and the two halves round 205
+# splits the removed advection content into.  A closed set so an unknown
+# string cannot select an exposure silently.
+_STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
+                      "advection_horizontal", "advection_vertical",
+                      "advection_zub_increment")
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -1327,7 +1336,31 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # per-term decomposition perturbed nothing.  Both substitute the returned
     # u/v slots only after the ordinary step has completed, and no card
     # constructs either.
+    # Round 205 splits the removed half in two, so the operator NEMO calls
+    # at ``stprk3_stg.f90:316`` can be scored part by part against the
+    # recorded total: ``"advection_horizontal"`` publishes the flux-form
+    # ``-div(transport (x) velocity)`` trend plus the ``zub`` transport
+    # increment (``dynadv_up3.f90:174-215``), ``"advection_vertical"`` the
+    # vertical UP3 term plus the stage ZAD increment
+    # (``dynadv_up3.f90:245-360``).  The two sum to what ``"completed"``
+    # minus ``"pre_advection"`` gives.
     expose_stage1_momentum_rhs_split: str = ""
+    # Round 205 ONE-VARIABLE CAUSAL PROBE, default off.  NEMO's advective
+    # transport subtracts the SEPARATELY PROGNOSTIC depth-mean velocity
+    # ``uu_b(:,:,Kmm)`` (``stprk3_stg.f90:270``, the ``n_baro_upd = np_HYB``
+    # branch the compiled module's :48 default selects), while legoESM's
+    # momentum path RE-REDUCES the three-dimensional velocity to get that
+    # mean.  The two are algebraically equal and numerically are not.  With
+    # this arm set, the STAGE-1 momentum transport subtracts the prognostic
+    # pair instead, so the difference can be scored causally.  Stage 1 only:
+    # Kmm = Kbb there, so ``state.uu_b`` IS the Kmm value; stages 2 and 3
+    # read a stage-updated pair (``stprk3_stg.f90:433-446``) this probe does
+    # not carry, and it refuses to touch them.  ``"qco_depth"`` swaps the
+    # OTHER operand of the same statement: NEMO divides ``un_adv`` by
+    # ``hu_0*(1+r3u(Kmm))`` while this reconcile divides by the sum of the
+    # MIN-RULE face thicknesses.  ``""`` is the production path and is
+    # unchanged by round 205.
+    momentum_transport_stage1_operand: str = ""
     # One-variable companion of ``stage2_momentum_rhs_override``: supply
     # NEMO's own completed stage-1 Krhs (the recorded ``adv_u``/``adv_v``)
     # immediately before the literal stage update, so the update statement
@@ -2835,10 +2868,10 @@ class LatLonCGridOceanModel:
                 raise ValueError(f"{_name} must be a bool")
         _stage1_split = (
             self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
-        if _stage1_split not in ("", "pre_advection", "completed"):
+        if _stage1_split not in _STAGE1_SPLIT_ARMS:
             raise ValueError(
-                "expose_stage1_momentum_rhs_split must be '', "
-                f"'pre_advection', or 'completed'; got {_stage1_split!r}")
+                "expose_stage1_momentum_rhs_split must be one of "
+                f"{_STAGE1_SPLIT_ARMS!r}; got {_stage1_split!r}")
         _stage1_selected = [_name for _name, _flag in _stage1_slots if _flag]
         if _stage1_split:
             # It writes the SAME returned u/v slots as the two bools above.
@@ -5692,6 +5725,17 @@ class LatLonCGridOceanModel:
             # with the rotation terms and is therefore published apart
             # (zero on every vector-invariant card, where the KE gradient
             # inside ``advection_u`` carries the horizontal half instead).
+            # Carried APART as well as summed: on a flux-form card
+            # ``advection_u`` is the vertical UP3 term alone (the kinetic
+            # energy gradient is zeroed there and the WENO D-term is
+            # inactive) and ``flux_form_hadv_u`` is the horizontal flux
+            # divergence, which are the two halves ``dyn_adv_up3`` writes
+            # (dynadv_up3.f90:174-215 and :245-360).
+            _nemo_ws_stage1_advection_halves = (
+                (_live_operands["flux_form_hadv_u"].data,
+                 _live_operands["flux_form_hadv_v"].data),
+                (_live_operands["advection_u"].data,
+                 _live_operands["advection_v"].data))
             _nemo_ws_stage1_main_advection = (
                 _live_operands["advection_u"].data
                 + _live_operands["flux_form_hadv_u"].data,
@@ -5707,6 +5751,7 @@ class LatLonCGridOceanModel:
             tend = _tend_result
             _nemo_ws_stage1_operator_operands = None
             _nemo_ws_stage1_main_advection = None
+            _nemo_ws_stage1_advection_halves = None
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -6174,6 +6219,37 @@ class LatLonCGridOceanModel:
                     current_v_mean = (
                         jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                         * state.v_mask.data)
+                    _tr_arm = (self._nemo_ws_test_hooks
+                               .momentum_transport_stage1_operand)
+                    if _tr_arm not in ("", "prognostic_mean", "qco_depth"):
+                        raise ValueError(
+                            "momentum_transport_stage1_operand must be '', "
+                            "'prognostic_mean' or 'qco_depth'; got "
+                            f"{_tr_arm!r}")
+                    if _tr_arm and stage_index == 1:
+                        if (_tr_arm == "prognostic_mean"
+                                and state.uu_b is not None
+                                and state.vv_b is not None):
+                            # stprk3_stg.f90:270 subtracts uu_b(:,:,Kmm),
+                            # the external mode's own prognostic, NOT a
+                            # depth mean re-reduced from the 3-D velocity.
+                            current_u_mean = (state.uu_b.data
+                                              * state.u_mask.data)
+                            current_v_mean = (state.vv_b.data
+                                              * state.v_mask.data)
+                        elif _tr_arm == "qco_depth":
+                            # NEMO divides un_adv by ``hu_0*(1+r3u(Kmm))``
+                            # (stprk3_stg.f90:270), not by the sum of the
+                            # min-rule face thicknesses.  Dry columns have a
+                            # zero qco depth and carry no transport, so they
+                            # keep the production ratio.
+                            _qu, _qv = _ws_qco_transport_depth
+                            transport_u_mean = transport_u_mean * jnp.where(
+                                _qu > 0.0, H_u_pre / jnp.where(
+                                    _qu > 0.0, _qu, 1.0), 1.0)
+                            transport_v_mean = transport_v_mean * jnp.where(
+                                _qv > 0.0, H_v_pre / jnp.where(
+                                    _qv > 0.0, _qv, 1.0), 1.0)
                     # stprk3_stg.F90:273-274: the SAME barotropic correction
                     # enters the advective transport masked by the 3-D
                     # umask/vmask -- ``zFu = e2u*e3u(Kmm)*( uu(Kmm) +
@@ -6921,6 +6997,29 @@ class LatLonCGridOceanModel:
             else:
                 raise ValueError(
                     "NEMO prognostic depth mean requires both uu_b and vv_b")
+            # stprk3_stg.f90:270 (the ``n_baro_upd = np_HYB`` branch the
+            # compiled module's :48 default selects) divides the barotropic
+            # transport by ``hu_0*(1+r3u(Kmm))`` -- the surface-height-ratio
+            # column depth -- NOT by the sum of legoESM's min-rule face
+            # thicknesses, which is first order wrong in the sea-surface
+            # height difference ACROSS the face.  The same kernel already
+            # supplies the advection's own divisor
+            # (``momentum_flux_face_thickness``); it can supply this one
+            # too.  THAT CHANGE IS NOT LANDED -- it is held as
+            # ``manifests/nemo_testcase_l1_vortex_round205_transport_qco_
+            # depth_held.patch`` because it trips the cellwise two-ULP
+            # ratchet, and the private ``"qco_depth"`` arm below is how it
+            # is measured.  Measured on VORTEX-zco: the
+            # two depths differ by up to 0.129 m in 5000.86 m (2.58e-05
+            # relative, 698 of 3660 u columns), and the stage-1 flux-form
+            # advection trend's disagreement with NEMO falls from
+            # 6.285649e-11 to 2.032879e-20 (u) when this divisor is used.
+            _qco_faces = _nemo_ws_qco_stage_faces(
+                state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                _ws_v_live_mask, _grid)
+            _ws_qco_transport_depth = (
+                jnp.sum(_qco_faces[0], axis=-1),
+                jnp.sum(_qco_faces[1], axis=-1))
             transport_target_u = (
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (
@@ -7460,6 +7559,38 @@ class LatLonCGridOceanModel:
                         "with adaptive_implicit_vertadv disabled")
                 if _stage1_split_arm == "completed":
                     _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+                elif _stage1_split_arm in ("advection_horizontal",
+                                           "advection_vertical",
+                                           "advection_zub_increment"):
+                    # The two halves of the SAME removed content, published
+                    # apart so ``dyn_adv_up3``'s horizontal flux divergence
+                    # (dynadv_up3.f90:174-215) and its vertical block
+                    # (:245-360) can be scored part by part.  Each stage
+                    # increment belongs to exactly one half: the ``zub``
+                    # transport increment reaches the flux-form horizontal
+                    # term alone, the stage ZAD increment reaches dyn_zad's
+                    # operands alone.
+                    _hpart, _vpart = _nemo_ws_stage1_advection_halves
+                    _dt_u = (_stage1_rhs_post_transport[0]
+                             - _stage1_rhs_base[0])
+                    _dt_v = (_stage1_rhs_post_transport[1]
+                             - _stage1_rhs_base[1])
+                    _dz_u = (_stage1_rhs_post_zad[0]
+                             - _stage1_rhs_post_transport[0])
+                    _dz_v = (_stage1_rhs_post_zad[1]
+                             - _stage1_rhs_post_transport[1])
+                    if _stage1_split_arm == "advection_zub_increment":
+                        # The horizontal half's barotropic cross-term on its
+                        # own: what replacing the raw Kmm velocity by the
+                        # zub-corrected transport velocity
+                        # (stprk3_stg.f90:264-277) does to the trend.
+                        _nemo_ws_exposed_stage1_rhs = (_dt_u, _dt_v)
+                    elif _stage1_split_arm == "advection_horizontal":
+                        _nemo_ws_exposed_stage1_rhs = (
+                            _hpart[0] + _dt_u, _hpart[1] + _dt_v)
+                    else:
+                        _nemo_ws_exposed_stage1_rhs = (
+                            _vpart[0] + _dz_u, _vpart[1] + _dz_v)
                 else:
                     # ``_stage1_rhs_base`` is the stage-1 right-hand side
                     # before the three addends that follow it, and ALL THREE
