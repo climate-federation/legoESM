@@ -44,7 +44,8 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import moisture_fusion_heat_source, solve_soil_thermal
+from legoesm.land.soil_thermal import (
+    moisture_fusion_heat_source, solve_snow_soil_thermal, solve_soil_thermal)
 
 # Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
 # 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
@@ -445,8 +446,24 @@ def _step_multilayer_land_impl(
     # single-wilting-point behaviour exactly.
     theta_wp_plant = resolve_plant_wilting_point(lp, config)
 
-    # Start-of-step skin temperature = top soil layer.
-    T_surface = T_soil[:, 0]
+    # Start-of-step skin temperature = top soil layer, or -- with the snow
+    # thermal node on -- the snow-surface node (which mirrors the top soil
+    # wherever there is no snow).
+    _snow_node = bool(config.thermal.snow_insulation)
+    if _snow_node:
+        if state.T_snow is None:
+            raise ValueError(
+                "config.thermal.snow_insulation is on but state.T_snow is None; "
+                "initialise the state with init_multilayer_land_state(config=...) "
+                "or init_snow_temperature(state) on a restart without it.")
+        if config.elev_bands is not None or isinstance(
+                config.surface_scheme, CLMMLCanopyConfig):
+            raise ValueError(
+                "config.thermal.snow_insulation (one-layer snow thermal node) is "
+                "not supported with elevation-band snow or the CLM-ML canopy.")
+        T_surface = state.T_snow
+    else:
+        T_surface = T_soil[:, 0]
     ncol = T_surface.shape[0]
 
     # --- Sub-grid elevation-band snow (opt-in gaps 1,2,4) ---
@@ -557,6 +574,11 @@ def _step_multilayer_land_impl(
         # advances soil thermal tentatively between passes.  These run before
         # Richards on unchanged theta, so they carry no moisture fusion source.
         def _soil_thermal_cb(G, dt_):
+            if _snow_node:
+                # Ground node = snow surface (start-of-step snow mass).
+                return solve_snow_soil_thermal(
+                    state.T_snow, snow, T_soil, theta, grid,
+                    config.hydraulics, config.thermal, G, dt_)[0]
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
                 config.hydraulics, config.thermal,
@@ -871,6 +893,18 @@ def _step_multilayer_land_impl(
         refreeze = jnp.zeros_like(snow_new)
         blow_subl = jnp.zeros_like(snow_new)
         cap_runoff = jnp.zeros_like(snow_new)
+    if _snow_node:
+        # Snow node warmer than freezing (heated from below by the soil, or a
+        # pack created on warm ground): its heat above T_freeze melts snow, as
+        # CLM5 melts unlayered snow from the top soil layer's excess heat
+        # (SoilTemperatureMod.F90:1307-1320).  The L_f is charged through
+        # ``melt_energy`` below, i.e. drawn from the snow node by the final solve.
+        _excess = (constants.c_pi * snow
+                   * jnp.maximum(state.T_snow - constants.T_freeze, 0.0))
+        _melt_store = jnp.minimum(snow_new, _excess / constants.L_f)
+        snow_new = snow_new - _melt_store
+        snow_melt = snow_melt + _melt_store
+        snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
     # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
     # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
     # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
@@ -1123,15 +1157,24 @@ def _step_multilayer_land_impl(
             T_soil, theta, richards_out.theta_new, dz,
             config.thermal, dt)
         if config.thermal.enable_freeze_thaw else None)
-    T_soil_new = solve_soil_thermal(
-        T_soil, richards_out.theta_new, grid,
-        config.hydraulics, config.thermal,
-        G_surface, dt,
+    _thermal_kw = dict(
         surface_conductance=surface_out.surface_conductance,
         layer_source=_fusion_source,
         n_substeps=(FINAL_THERMAL_SUBSTEPS
                     if config.thermal.enable_freeze_thaw else 1),
     )
+    if _snow_node:
+        # End-of-step snow mass: snowfall, melt and sublimation enter the node
+        # at its start-of-step temperature (see solve_snow_soil_thermal).
+        T_snow_new, T_soil_new = solve_snow_soil_thermal(
+            state.T_snow, snow_new, T_soil, richards_out.theta_new, grid,
+            config.hydraulics, config.thermal, G_surface, dt, **_thermal_kw)
+    else:
+        T_soil_new = solve_soil_thermal(
+            T_soil, richards_out.theta_new, grid,
+            config.hydraulics, config.thermal,
+            G_surface, dt, **_thermal_kw)
+        T_snow_new = None
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---
     if state.TgC is not None:
@@ -1190,10 +1233,11 @@ def _step_multilayer_land_impl(
         canopy_x=(_match(surface_out.canopy_x, state.canopy_x)
                   if (state.canopy_x is not None
                       and surface_out.canopy_x is not None) else None),
+        T_snow=_match(T_snow_new, state.T_snow),
     )
 
     # --- Post-step surface state for coupler ---
-    T_surface_new = T_soil_new[:, 0]
+    T_surface_new = T_snow_new if _snow_node else T_soil_new[:, 0]
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
     # handed to the coupler (drives the next radiation step) is consistent with the updated
     # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
@@ -1322,10 +1366,10 @@ def _step_multilayer_land_impl(
             # Re-derive via compute_effective_beta on post-step state so
             # the carbon cycle sees a consistent end-of-step GPP.
             _, gpp_override, _ = compute_effective_beta(
-                T_surface_new, forcing, beta_soil_new, config, carbon_state,
+                T_soil_new[:, 0], forcing, beta_soil_new, config, carbon_state,
                 dt, land_params=lp)
         carbon_state_new, co2_flux = step_carbon(
-            carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
+            carbon_state, forcing.sw_down, T_soil_new[:, 0], forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon,
             dt, gpp_override=gpp_override,
             soil_frozen_fraction=soil_frozen_fraction,
@@ -1521,7 +1565,7 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
            for name in new_state._fields})
 
     # Inert-surface response for a held column.
-    T_prev = state.T_soil[:, 0]
+    T_prev = state.T_soil[:, 0] if state.T_snow is None else state.T_snow
     eps = jnp.full(ncol, config.emissivity_land)
     inert = dict(
         T_sfc=T_prev, T_rad=T_prev,
@@ -1668,7 +1712,30 @@ def init_multilayer_land_state(
                   if (isinstance(config.surface_scheme, TwoLeafCanopyConfig)
                       and not isinstance(config.surface_scheme,
                                          CLMMLCanopyConfig)) else None),
+        # Snow thermal node: no snow at a cold start, so it mirrors the top soil.
+        T_snow=(T_soil[:, 0] if config.thermal.snow_insulation else None),
     )
+
+
+def land_skin_temperature(state: MultiLayerLandState) -> jnp.ndarray:
+    """Ground skin temperature [K], (ncol,): the snow-node temperature when the
+    state carries one (snow surface under snow, top soil elsewhere), else the
+    top soil layer."""
+    return state.T_soil[:, 0] if state.T_snow is None else state.T_snow
+
+
+def init_snow_temperature(state: MultiLayerLandState) -> MultiLayerLandState:
+    """Give a state that lacks it a snow-node temperature ``T_snow``.
+
+    For a restart from a run without the snow thermal node: under snow the node
+    starts at the top-soil temperature capped at freezing; elsewhere it mirrors
+    the top soil (user decision 2026-10-03).  The pack's ice enthalpy relative
+    to ``T_freeze`` appears once, at this initialisation.
+    """
+    T0 = state.T_soil[:, 0]
+    T_snow = jnp.where(state.snow_depth > 0.0,
+                       jnp.minimum(T0, constants.T_freeze), T0)
+    return state._replace(T_snow=T_snow.astype(T0.dtype))
 
 
 def aridity_theta_init(rh_surface, theta_wp, theta_fc):

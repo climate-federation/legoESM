@@ -84,3 +84,8 @@ class MultiLayerLandState(NamedTuple):
     # scheme is the two-leaf canopy; ``None`` otherwise, which restores the
     # cold-start-every-step behaviour exactly.  Appended last (positional-ABI).
     canopy_x: Any | None = None
+    # One-layer snow thermal node temperature [K], (ncol,): the SNOW-SURFACE
+    # temperature where the column holds snow, the top-soil temperature where
+    # it does not.  Present iff ``config.thermal.snow_insulation``; ``None``
+    # (default) keeps the legacy heat-free snow bucket.  Appended last.
+    T_snow: jax.Array | None = None

@@ -303,6 +303,9 @@ multilayer_soil_depth: 3.0
 # Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
 # ran; the land calibration's tables were fitted with it off.
 land_soil_freeze_thaw: true
+# One-layer snow thermal node OFF (record only; A/B switch added 2026-10-03,
+# user decision: off until the Sep-Dec arm verdict).
+land_snow_insulation: false
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true

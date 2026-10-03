@@ -808,6 +808,38 @@ def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
         cfg.validate_strict()
 
 
+def test_land_snow_insulation_round_trip_and_production_deck():
+    """The snow-thermal-node flag reaches ExperimentConfig both ways, and the
+    production deck records it explicitly OFF (user 2026-10-03)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_snow_insulation is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-snow-insulation"]), parser))
+    assert cfg1.land_snow_insulation is True
+    cfg2 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-snow-insulation"]), parser))
+    assert cfg2.land_snow_insulation is False
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_snow_insulation") is False
+    p.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS), p))
+    assert cfg.land_snow_insulation is False
+
+
+def test_land_snow_insulation_without_multilayer_land_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-snow-insulation"]), parser))
+    with pytest.raises(ValueError, match="land_snow_insulation"):
+        cfg.validate_strict()
+
+
 @pytest.mark.parametrize("bad", ["0.1", "500"])
 def test_land_snow_tau_days_out_of_range_is_refused(bad):
     """0.5 d is melting spring snow and 400 d spans the cold plateau; outside

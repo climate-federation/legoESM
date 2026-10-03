@@ -180,3 +180,34 @@ def test_canopy_warm_start_cache_is_not_a_checkpoint_field(tmp_path):
             assert getattr(dst._land_ml_state, f) is None
             continue
         np.testing.assert_allclose(getattr(dst._land_ml_state, f), want)
+
+
+def test_snow_node_initialised_when_checkpoint_lacks_it(tmp_path):
+    """A run with the snow thermal node restarting from a checkpoint written
+    without it: the restore initialises T_snow (top soil, capped at freezing
+    under snow) instead of refusing; any OTHER missing field still refuses."""
+    saved = _state(1.0)          # T_snow None: an older / switch-off checkpoint
+    saved = saved._replace(T_soil=np.full((4, 6), 280.0, np.float32),
+                           snow_depth=np.array([0, 5, 0, 5], np.float32))
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
+        config=SimpleNamespace(convection="none"),
+    )
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_T_snow" not in aux
+    np.savez(tmp_path / "c.npz", **aux)
+    loaded = dict(np.load(tmp_path / "c.npz"))
+    tmpl = _state(99.0)._replace(T_snow=np.zeros(4, np.float32))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=dict(loaded), _land_ml_state=tmpl)
+    ModelDriver._restore_land_ml_from_carry_aux(dst)
+    np.testing.assert_allclose(np.asarray(dst._land_ml_state.T_snow),
+                               [280.0, 273.15, 280.0, 273.15], rtol=1e-6)
+    # Other prognostic fields are still mandatory.
+    short = {k: v for k, v in loaded.items() if k != "land_ml_snow_age"}
+    dst2 = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                           _carry_aux=short, _land_ml_state=tmpl)
+    with pytest.raises(ValueError, match="snow_age"):
+        ModelDriver._restore_land_ml_from_carry_aux(dst2)
