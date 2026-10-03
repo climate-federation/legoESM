@@ -3511,6 +3511,10 @@ class ModelDriver:
         _ft = bool(self.config.land_soil_freeze_thaw)
         cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
         logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        _csm = bool(self.config.land_canopy_snow_masking)
+        cfg = cfg._replace(canopy_snow_masking=_csm)
+        logger.info("  land canopy snow masking (trees hide snow): %s",
+                    "ON" if _csm else "off")
         from legoesm.land.multilayer_land import FINAL_THERMAL_SUBSTEPS
         logger.info("  land soil thermal sub-steps per land step: %d",
                     FINAL_THERMAL_SUBSTEPS if _ft else 1)

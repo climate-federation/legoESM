@@ -169,6 +169,10 @@ class MultiLayerLandConfig(NamedTuple):
     # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
     # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
     elev_bands: ElevationSnowBandConfig | None = None
+    # Canopy hides ground snow in the column albedo (CLM5 two-stream over the
+    # snow-buried leaf + stem area; snow-free albedo unchanged).  Two-leaf canopy
+    # only.  Off = the unmasked snow blend.
+    canopy_snow_masking: bool = False
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     # ``theta_wp`` is the SOIL wilting point [m3/m3] — the moisture reference for

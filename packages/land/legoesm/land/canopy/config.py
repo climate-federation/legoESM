@@ -494,6 +494,15 @@ class CanopyLandParams(NamedTuple):
     ALB_NIR_DRY: jax.Array | None = None
     ALB_NIR_SAT: jax.Array | None = None
 
+    # ---- Canopy structure for the canopy-over-snow albedo (optional) ----
+    # Dominant-PFT stem area index [m2/m2], canopy-bottom height [m] and CLM5
+    # PFT index (0..16, stored as float so float pytree maps stay valid), same
+    # dominant-PFT convention as ``LAI``.  Read only when
+    # ``MultiLayerLandConfig.canopy_snow_masking`` is on; ``None`` = not built.
+    SAI: jax.Array | None = None
+    hbot: jax.Array | None = None
+    pft_index: jax.Array | None = None
+
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
 # scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):

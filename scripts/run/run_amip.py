@@ -988,6 +988,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "store, throughfall, wet-leaf evaporation). "
                              "Default off. Requires --use-multilayer-land "
                              "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-snow-masking",
+                        dest="land_canopy_snow_masking",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_masking,
+                        help="Trees hide ground snow in the land albedo (CLM5 "
+                             "two-stream over buried leaf + stem area, snow "
+                             "increment only, no canopy snow). Default off. "
+                             "Requires the two-leaf multilayer land with snow "
+                             "albedo feedback.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -2537,6 +2546,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
+        land_canopy_snow_masking=args.land_canopy_snow_masking,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

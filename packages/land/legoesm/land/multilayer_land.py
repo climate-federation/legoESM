@@ -65,7 +65,11 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
-from legoesm.land.canopy.radiative_transfer import broadband_albedo
+from legoesm.land.canopy.radiative_transfer import (
+    broadband_albedo,
+    canopy_masked_snow_albedo,
+    split_sw_components,
+)
 from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
@@ -383,6 +387,35 @@ def _partition_latent_root_top(soil_evap, has_snow, f_veg, le_canopy, le_soil):
     return evap_bare, evap_transp
 
 
+def _canopy_masked_band(snowy_fn, lp, LAI_override, swe, config, band, forcing):
+    """``a -> column albedo`` of one band with the canopy hiding the snow
+    (``config.canopy_snow_masking``): wraps the unmasked ``snowy_fn`` (soil band
+    -> snowy ground albedo) in :func:`canopy_masked_snow_albedo`, using the SAME
+    ground snow cover the unmasked blend uses and the LAI the canopy fluxes use."""
+    if lp.SAI is None or lp.hbot is None or lp.pft_index is None:
+        raise ValueError(
+            "canopy_snow_masking needs per-column SAI, hbot and pft_index in the "
+            "canopy parameters (build_canopy_params / the per-step updater set "
+            "them); these parameters carry none")
+    la = config.land_albedo
+    f_snow = snow_cover_fraction(swe, la)
+    if la.snow_cover_scale is not None:
+        f_snow = jnp.clip(f_snow * jnp.asarray(la.snow_cover_scale), 0.0, 1.0)
+    lai = lp.LAI if LAI_override is None else LAI_override
+    # Snow depth [m] for the CLM5 burial of short plants: SWE over a bulk density.
+    depth = swe / constants.rho_snow_land
+    # This step's diffuse share of the band, from the SAME Erbs split the canopy
+    # RT absorbs with; no light (night) -> diffuse albedo.
+    par_dir, par_dif, nir_dir, nir_dif, _ = split_sw_components(
+        forcing.sw_down, forcing.cos_zenith)
+    s_dir, s_dif = (par_dir, par_dif) if band == 0 else (nir_dir, nir_dif)
+    tot = s_dir + s_dif
+    f_dif = jnp.where(tot > 0.0, s_dif / jnp.where(tot > 0.0, tot, 1.0), 1.0)
+    return lambda a: canopy_masked_snow_albedo(
+        a, snowy_fn(a), band, jnp.broadcast_to(lai, swe.shape), lp.SAI, lp.hc,
+        lp.hbot, lp.pft_index, f_snow, depth, forcing.cos_zenith, f_dif)
+
+
 def _step_multilayer_land_impl(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -462,6 +495,14 @@ def _step_multilayer_land_impl(
     # area-weighted band aggregates; ``band_net_radiation`` (below) replaces the
     # cell-mean radiation in ``G_surface`` with the banded per-band balance.
     bands = config.elev_bands
+    if config.canopy_snow_masking and (
+            bands is not None
+            or not isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+            or not config.snow_albedo_feedback or lat is None):
+        raise ValueError(
+            "canopy_snow_masking is implemented only for the two-leaf canopy with "
+            "snow_albedo_feedback on, a latitude field, and no elevation bands; "
+            "anywhere else it would be silently inert")
     if bands is not None:
         if isinstance(config.surface_scheme,
                       (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
@@ -638,7 +679,12 @@ def _step_multilayer_land_impl(
             _band = lambda a: compute_land_albedo(
                 lat, snow, snow_age, config.land_albedo,
                 base_albedo=jnp.broadcast_to(a, T_surface.shape))
-            lp = lp._replace(ALB_VIS=_band(lp.ALB_VIS), ALB_NIR=_band(lp.ALB_NIR))
+            _vis, _nir = _band, _band
+            if config.canopy_snow_masking:
+                _vis, _nir = (_canopy_masked_band(_band, lp, LAI_override, snow,
+                                                  config, ib, forcing)
+                              for ib in (0, 1))
+            lp = lp._replace(ALB_VIS=_vis(lp.ALB_VIS), ALB_NIR=_nir(lp.ALB_NIR))
             _alpha_applied = broadband_albedo(lp.ALB_VIS, lp.ALB_NIR)
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
@@ -1252,8 +1298,14 @@ def _step_multilayer_land_impl(
             _band_new = lambda a: compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
                 base_albedo=jnp.broadcast_to(a, T_surface_new.shape))
-            alpha_new = broadband_albedo(_band_new(_lp_new.ALB_VIS),
-                                         _band_new(_lp_new.ALB_NIR))
+            _vis_new, _nir_new = _band_new, _band_new
+            if config.canopy_snow_masking:
+                _vis_new, _nir_new = (
+                    _canopy_masked_band(_band_new, _lp_new, LAI_override,
+                                        snow_new, config, ib, forcing)
+                    for ib in (0, 1))
+            alpha_new = broadband_albedo(_vis_new(_lp_new.ALB_VIS),
+                                         _nir_new(_lp_new.ALB_NIR))
         elif getattr(_lp_soil, "ALB_VIS_DRY", None) is not None:
             # Two-leaf without snow layering: the soil bands at the post-step
             # water, i.e. what the next step absorbs with (same hand-off as
