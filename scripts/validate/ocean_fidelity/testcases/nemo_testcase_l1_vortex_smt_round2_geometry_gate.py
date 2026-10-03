@@ -111,6 +111,50 @@ def compare(case: str, run_dir: Path) -> dict:
         nemo["e3v_0"][..., :nlev])
     row("card e3f_0 (operand)", np.asarray(ops.e3f_0),
         nemo["e3f_0"][..., :nlev])
+    # ROUND 214: and the arrays the SOLVER RESOLVES.  The rows above prove the
+    # card CARRIES NEMO's faces; they say nothing about what the shared qco
+    # operand builder hands wzv/div_hor, which until this round aliased
+    # e3u_0 = e3v_0 = e3t_0 on every raw-mesh card.  These two rows are that
+    # statement's identity proof, and they are the non-vacuous ones: on this
+    # seamount e3u_0 != e3t_0 on 1 084 wet U faces.
+    from legoesm.ocean.vertical import nemo_qco_resolved_mesh_operands
+    import jax.numpy as jnp
+    umask_red = np.concatenate(
+        [np.zeros_like(np.asarray(ops.umask)[:, :1]), np.asarray(ops.umask)],
+        axis=1)
+    vmask_red = np.concatenate(
+        [np.zeros_like(np.asarray(ops.vmask)[:1]), np.asarray(ops.vmask)],
+        axis=0)
+    resolved = nemo_qco_resolved_mesh_operands(
+        card.recipe.z_coord, card.recipe.grid, jnp.asarray(umask_red),
+        jnp.asarray(vmask_red), jnp.float64, nlev)
+    row("RESOLVED e3u_0 (qco arm)", np.asarray(resolved.e3u_0),
+        nemo["e3u_0"][..., :nlev])
+    row("RESOLVED e3v_0 (qco arm)", np.asarray(resolved.e3v_0),
+        nemo["e3v_0"][..., :nlev])
+    # The northern row, named explicitly because the round-213 repair zeroed
+    # it (630 cells of e3v_0 at j = nj-1 came back 0.0 where NEMO carries
+    # 500.0).  Counted, not asserted in prose.
+    north_bad = int(np.count_nonzero(
+        (np.asarray(resolved.e3v_0)[-1] == 0.0)
+        & (nemo["e3v_0"][..., :nlev][-1] != 0.0)))
+    rows.append({"field": "northern row e3v_0 wrongly zeroed",
+                 "bit_identical": north_bad == 0,
+                 "n_differing": north_bad, "max_abs_difference": 0.0})
+    # The same question for the east column, which the round-213 repair got
+    # wrong by a periodic WRAP where this mesh is closed.
+    east_bad = int(np.count_nonzero(
+        np.asarray(resolved.e3u_0)[:, -1] != nemo["e3u_0"][..., :nlev][:, -1]))
+    rows.append({"field": "east column e3u_0 differing",
+                 "bit_identical": east_bad == 0,
+                 "n_differing": east_bad, "max_abs_difference": 0.0})
+    # Non-vacuity: if the alias were still in place these two rows would be
+    # e3t_0, so the gate must see them DIFFER from e3t_0 somewhere.
+    n_alias = int(np.count_nonzero(
+        np.asarray(resolved.e3u_0) != nemo["e3t_0"][..., :nlev]))
+    rows.append({"field": "non-vacuity: resolved e3u_0 != e3t_0",
+                 "bit_identical": n_alias > 0,
+                 "n_differing": n_alias, "max_abs_difference": 0.0})
     row("card umask", np.asarray(ops.umask), nemo["umask"][..., :nlev])
     row("card vmask", np.asarray(ops.vmask), nemo["vmask"][..., :nlev])
     tmask_card = (np.asarray(card.recipe.z_coord.is_active)

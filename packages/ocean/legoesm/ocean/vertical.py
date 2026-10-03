@@ -676,8 +676,10 @@ def nemo_qco_resolved_mesh_operands(
     """One qco operand set, from NEMO's own mesh when the card carries it.
 
     The NEMO arm of ``wzv``/``div_hor`` needs exactly these fields.  Cards
-    built from NEMO's ``mesh_mask.nc`` (DINO, GYRE) hand over the raw arrays
-    unchanged, so their executed arithmetic is untouched; cards that are not
+    built from NEMO's ``mesh_mask.nc`` (DINO, GYRE, ORCA2, VORTEX) hand over
+    the raw arrays unchanged -- including the reference FACE thicknesses
+    ``e3u_0``/``e3v_0``, which NEMO carries separately from ``e3t_0`` and
+    which this routine must not invent; cards that are not
     (LOCK_EXCHANGE, OVERFLOW, ORCA1) get the identical quantities rebuilt
     from their own grid and reference ladder by
     :func:`nemo_qco_card_mesh_operands`.  This is what makes the NEMO arm a
@@ -694,11 +696,43 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
-        # branch serves; keeping the raw statement preserves the certified
-        # DINO arithmetic bit for bit.
+        # THE REFERENCE FACE THICKNESS IS THE SHALLOWER NEIGHBOUR'S, NOT THE
+        # T THICKNESS.  NEMO builds it once, in the domain builder, as
+        #     pe3u(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji+1,jj,jk) )
+        #     pe3v(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji,jj+1,jk) )
+        #     CALL lbc_lnk( ..., pe3u,'U', pe3v,'V', kfillmode=jpfillcopy )
+        # (the executing statements on these builds are
+        # tests/VORTEX_SMT_R3{,_VEC_R8}_OMIP_L1_P3/MY_SRC/usrdef_zgr.F90:225
+        # and :228, with their :231 lbc_lnk, transcribed from
+        # tools/DOMAINcfg/src/domzgr.F90::zgr_zps:1166-1167 and its :1177-1178
+        # exchange; `E3u_0 -> e3u_3d` under key_vco_1d3d by
+        # src/OCE/DOM/domzgr_substitute.h90:94-95).  Aliasing
+        # it to e3t_0 is exact ONLY on a full-step mesh; over partial cells it
+        # is wrong on every stepped face (1 084 wet U faces of VORTEX_SMT, by
+        # up to 170.38 m).
+        #
+        # It is NOT re-derived here.  Re-deriving needs NEMO's mask, halo and
+        # north-fold conventions, and a round-213 attempt to do that zeroed a
+        # whole northern row.  The card already carries the arrays NEMO
+        # itself built, verified against its `mesh_mask.nc` at zero ULP, on
+        # the EEN barotropic operand bundle; read them, the way
+        # `nemo_ldf_reference_e3f` above reads `e3f_0` from the same bundle,
+        # and fail closed rather than silently fall back to the alias.
+        raw_een = getattr(z_coord, "nemo_een_barotropic", None)
+        e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)
+        e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)
+        if e3u0 is None or e3v0 is None:
+            raise ValueError(
+                "a card carrying NEMO's raw qco mesh operands must also carry "
+                "NEMO's own reference face thicknesses e3u_0/e3v_0 on "
+                "z_coord.nemo_een_barotropic: they are the shallower "
+                "neighbour's thickness (usrdef_zgr.F90:225,228; DOMAINcfg "
+                "zgr_zps:1166-1167), not e3t_0, and re-deriving them here "
+                "would need NEMO's mask/halo conventions")
+        e3u0 = jnp.asarray(e3u0, dtype=dtype)[..., :nlev]
+        e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
