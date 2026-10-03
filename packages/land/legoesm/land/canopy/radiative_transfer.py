@@ -638,8 +638,9 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
     canopy RT reflects that one value off both beam and diffuse light, so the
     blend makes the reflected total exact for this step's split), elai/esai the
     CLM5 snow-buried leaf/stem area and ``alb_snowy`` the ground albedo with
-    snow already blended on (the unmasked model value).  No plant area ->
-    ``alb_snowy`` exactly; no snow -> ``alb_snowfree`` exactly.  ``band`` 0 =
+    snow already blended on (the unmasked model value).  No exposed plant area
+    (none, or all of it buried) -> ``alb_snowy`` exactly; no snow ->
+    ``alb_snowfree`` exactly.  ``band`` 0 =
     visible, 1 = near-infrared.  Intercepted canopy snow is not represented
     (fcansno = 0): a bare-branch bound."""
     xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
@@ -657,11 +658,13 @@ def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
 
     tlai = jnp.where(LAI < _CLM_VAI_CUT, 0.0, LAI)
     tsai = jnp.where(SAI < _CLM_VAI_CUT, 0.0, SAI)
-    # Parenthesised so a zero increment returns alb_snowfree bit-exactly; no
-    # plant area returns alb_snowy bit-exactly (the unmasked model value).
+    # Parenthesised so a zero increment returns alb_snowfree bit-exactly.  No
+    # EXPOSED plant area (none at all, or all buried) returns alb_snowy
+    # bit-exactly, the unmasked model value: CTSM puts elai + esai = 0 in its
+    # non-vegetated albedo filter (SurfaceAlbedoMod 805-814).
     masked = alb_snowfree + (_ts(elai, esai, alb_snowy)
                              - _ts(tlai, tsai, alb_snowfree))
-    return jnp.where(tlai + tsai > 0.0, masked, alb_snowy)
+    return jnp.where(elai + esai > 0.0, masked, alb_snowy)
 
 
 # ---------------------------------------------------------------------------

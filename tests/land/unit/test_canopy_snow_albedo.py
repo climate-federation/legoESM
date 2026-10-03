@@ -187,15 +187,17 @@ def test_delta_form_limits_are_exact():
     # no plant area (bare / glacier / fully buried): the unmasked snowy value
     assert _masked(0.11, 0.74, LAI=np.array([0.0]), SAI=np.array([0.0])) == 0.74
     # grass (PFT 13, 0.5 m) under 0.5 m of snow is buried -> unmasked
-    # (CLM5: burial height 0.8 htop = 0.4 m < 0.5 m of snow): the snowy column is
-    # the bare snowy ground, minus the canopy's snow-free two-stream albedo
+    # (CLM5: burial height 0.8 htop = 0.4 m < 0.5 m of snow): no exposed area
+    # left, so the column is the plain snowy ground (CTSM non-vegetated filter)
     v = _masked(0.11, 0.74, pft_index=np.array([13.0]), htop=np.array([0.5]),
                 hbot=np.array([0.0]), LAI=np.array([0.3]), SAI=np.array([0.4]),
                 snow_depth=np.array([0.5]))
-    _, ts_free = clm5_two_stream_albedo(      # C3 grass, visible: CLM5 pftcon
-        np.array([0.7]), np.array([0.3 / 0.7]), 0.11, 0.05, 0.31, 0.12, -0.30,
-        np.array([1.0]), np.array([0.11]))
-    assert abs(v - (0.11 + (0.74 - float(ts_free[0])))) < 1e-12
+    assert v == 0.74
+    # half-buried grass (0.2 m of snow): masked, darker than the bare snow
+    h = _masked(0.11, 0.74, pft_index=np.array([13.0]), htop=np.array([0.5]),
+                hbot=np.array([0.0]), LAI=np.array([0.3]), SAI=np.array([0.4]),
+                snow_depth=np.array([0.2]))
+    assert 0.3 < h < 0.74, h
 
 
 def test_boreal_forest_hides_snow():
@@ -479,11 +481,14 @@ def test_finite_and_bounded_over_all_plants_and_light():
     vai = np.array([0.0, 0.06, 0.5, 2.0, 6.0])
     grd = np.array([0.05, 0.5, 0.95])
     fd = np.array([0.0, 0.5, 1.0])
-    P, C, V, G, F = (x.ravel() for x in np.meshgrid(pft, cz, vai, grd, fd, indexing="ij"))
+    depth = np.array([0.0, 0.3, 1.0, 3.0])   # reaches short plants AND hbot = 2 m
+    fsn = np.array([0.3, 1.0])
+    P, C, V, G, F, D, S = (x.ravel() for x in np.meshgrid(
+        pft, cz, vai, grd, fd, depth, fsn, indexing="ij"))
     for band in (0, 1):
         out = np.asarray(canopy_masked_snow_albedo(
             np.minimum(G, 0.3), G, band, 0.7 * V, 0.3 * V, np.full_like(V, 10.0),
-            np.full_like(V, 2.0), P, np.full_like(V, 0.8), np.full_like(V, 0.3), C, F))
+            np.full_like(V, 2.0), P, S, D, C, F))
         assert np.all(np.isfinite(out)), band
         assert np.all((out > 0.0) & (out < 1.0)), (out.min(), out.max())
 
