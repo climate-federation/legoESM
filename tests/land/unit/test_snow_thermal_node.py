@@ -26,7 +26,8 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import (
     SoilThermalConfig, compute_heat_capacity, compute_thermal_conductivity,
-    snow_thermal_conductivity, solve_snow_soil_thermal, solve_soil_thermal)
+    melt_snow_node_excess, snow_thermal_conductivity, solve_snow_soil_thermal,
+    solve_soil_thermal)
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 
 pytestmark = pytest.mark.skipif(
@@ -60,9 +61,12 @@ def test_jordan_conductivity_is_clm5():
 def test_snow_free_columns_bit_identical_to_soil_solve():
     T, theta = _column()
     G = jnp.array([-30.0, 5.0, 40.0])
-    ref = solve_soil_thermal(T, theta, _GRID, _HYD, _TH, G, 1800.0)
+    lam = jnp.full(3, 8.0)
+    ref = solve_soil_thermal(T, theta, _GRID, _HYD, _TH, G, 1800.0,
+                             surface_conductance=lam)
     Ts, Tn = solve_snow_soil_thermal(T[:, 0] + 3.0, jnp.zeros(3), T, theta,
-                                     _GRID, _HYD, _TH, G, 1800.0)
+                                     _GRID, _HYD, _TH, G, 1800.0,
+                                     surface_conductance=lam)
     np.testing.assert_array_equal(np.asarray(Tn), np.asarray(ref))
     np.testing.assert_array_equal(np.asarray(Ts), np.asarray(ref[:, 0]))
 
@@ -199,7 +203,7 @@ def test_full_step_conserves_water_with_warm_pack(scheme):
     assert np.all(np.isfinite(np.asarray(s.T_snow)))
 
 
-def test_full_step_jit_parity_and_gradient():
+def test_full_step_jit_parity():
     cfg = MultiLayerLandConfig(
         soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
     st = init_multilayer_land_state(2, cfg, T_init=270.0, theta_init=0.25)
@@ -263,3 +267,43 @@ def test_snow_fallen_this_step_gets_its_own_node():
                                                 lat=jnp.full(1, 1.0))[0])(st)
     assert float(s2.snow_depth[0]) > 1.0
     assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) > 1e-3
+
+
+def test_stored_heat_melt_conserves_enthalpy_and_leaves_pack_at_freezing():
+    """c_ice S (T - Tf) == m L_f + leftover; the remaining pack sits at Tf;
+    leftover heat only where the whole pack melted; cold packs untouched."""
+    S = jnp.array([20.0, 0.05, 10.0, 0.0])
+    T = jnp.array([278.0, 290.0, 260.0, 280.0])
+    S2, T2, m, heat = melt_snow_node_excess(S, T)
+    E = constants.c_pi * S * jnp.maximum(T - _TF, 0.0)
+    np.testing.assert_allclose(np.asarray(m * constants.L_f + heat),
+                               np.asarray(E), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(S2 + m), np.asarray(S), rtol=1e-14)
+    np.testing.assert_allclose(np.asarray(T2[:2]), _TF)
+    assert float(heat[0]) == 0.0 and float(heat[1]) == 0.0
+    np.testing.assert_array_equal(np.asarray(T2[2:]), np.asarray(T[2:]))
+    assert float(m[2]) == 0.0 and float(m[3]) == 0.0
+    # Whole-pack melt with heat to spare: needs c S dT > L_f S, i.e. dT > 158 K
+    S3, T3, m3, h3 = melt_snow_node_excess(jnp.array([1.0]), jnp.array([_TF + 200.0]))
+    assert float(S3[0]) == 0.0 and float(h3[0]) > 0.0
+
+
+def test_full_step_gradient_wrt_snow_mass_is_finite_and_matches_fd():
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+    st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
+    f = _forcing(1, 258.0, 0.0, 0.0)
+
+    def loss(swe):
+        s = st._replace(snow_depth=swe, T_snow=jnp.array([262.0]))
+        s2 = step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                  lat=jnp.full(1, 1.0))[0]
+        return s2.T_soil[0, 1] + s2.T_snow[0]
+
+    swe = jnp.array([30.0])
+    g = jax.jit(jax.grad(loss))(swe)
+    lj = jax.jit(loss)
+    eps = 1e-3
+    fd = (lj(swe + eps) - lj(swe - eps)) / (2 * eps)
+    assert np.isfinite(float(g[0])) and abs(float(g[0])) > 0.0
+    np.testing.assert_allclose(float(g[0]), float(fd), rtol=1e-4)

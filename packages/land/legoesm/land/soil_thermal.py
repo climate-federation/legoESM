@@ -421,6 +421,27 @@ def snow_thermal_conductivity(rho_snow):
     ) * (_JORDAN_TKICE_W_M_K - _JORDAN_TKAIR_W_M_K)
 
 
+def melt_snow_node_excess(snow_swe, T_snow):
+    """Melt snow with the snow node's heat above ``T_freeze`` (fixed enthalpy).
+
+    The node holds ``E = c_ice * snow_swe * max(T_snow - T_freeze, 0)``
+    [J/m2].  It melts ``m = min(snow_swe, E / L_f)`` [kg/m2]; the remaining
+    pack sits at ``T_freeze`` and ``heat = E - m * L_f >= 0`` [J/m2] is what is
+    left once the whole pack has melted (nonzero only then).  Exactly
+    ``c_ice*S*(T-Tf) == m*L_f + heat``.  Returns
+    ``(snow_swe - m, T_snow_new, m, heat)``; columns with no excess are
+    unchanged.
+    """
+    tf = constants.T_freeze
+    excess = constants.c_pi * snow_swe * jnp.maximum(T_snow - tf, 0.0)
+    melt = jnp.minimum(snow_swe, excess / constants.L_f)
+    # Leftover only where the whole pack melted (exact zero elsewhere, not a
+    # rounding residue of excess - melt*L_f).
+    heat = jnp.where(melt < snow_swe, 0.0, excess - melt * constants.L_f)
+    T_new = jnp.where(excess > 0.0, tf, T_snow)
+    return snow_swe - melt, T_new, melt, heat
+
+
 def solve_snow_soil_thermal(
     T_snow: jnp.ndarray,
     snow_swe: jnp.ndarray,

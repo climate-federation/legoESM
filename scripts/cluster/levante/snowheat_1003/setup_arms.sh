@@ -3,7 +3,8 @@
 # Usage: setup_arms.sh <name> [<name> ...]   (names from arms.tsv)
 # Each dir gets a read-only COPY of its pinned mv3y_vl checkpoint (never a
 # pointer to a live run), a .device_count stamp of 4, and arm.tsv
-# (name, target, extra, repo) for bundle.sbatch.
+# (name, target, repo, extra -- extra LAST: it may be empty, and bash collapses
+# adjacent tab delimiters) for bundle.sbatch.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${ROOT:=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs}"
@@ -23,7 +24,7 @@ for want in "$@"; do
     cp -f "${ck}" "${d}/"
     chmod a-w "${d}/$(basename "${ck}")"
     echo 4 > "${d}/.device_count"
-    printf '%s\t%s\t%s\t%s\n' "${name}" "${target}" "${extra}" "${repo}" > "${d}/arm.tsv"
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${target}" "${repo}" "${extra}" > "${d}/arm.tsv"
     cp -f "${HERE}/PREREG.md" "${d}/PREREG.md"
     echo "${name}: restart ${day}, target ${target}, repo ${repo} @ $(git -c safe.directory='*' -C "${repo}" rev-parse --short HEAD), extra '${extra}'"
   done < "${HERE}/arms.tsv"

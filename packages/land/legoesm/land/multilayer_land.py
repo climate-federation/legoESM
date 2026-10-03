@@ -45,7 +45,8 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import (
-    moisture_fusion_heat_source, solve_snow_soil_thermal, solve_soil_thermal)
+    melt_snow_node_excess, moisture_fusion_heat_source,
+    solve_snow_soil_thermal, solve_soil_thermal)
 
 # Sub-steps of the final soil-thermal solve when soil freeze/thaw is on: at the
 # 1800 s land step a single apparent-heat-capacity step overshoots the 0 C
@@ -461,7 +462,14 @@ def _step_multilayer_land_impl(
             raise ValueError(
                 "config.thermal.snow_insulation (one-layer snow thermal node) is "
                 "not supported with elevation-band snow or the CLM-ML canopy.")
-        T_surface = state.T_snow
+        # Node heat above freezing melts snow BEFORE the step (phase
+        # re-partition at fixed enthalpy, CLM5 unlayered-snow analogue,
+        # SoilTemperatureMod.F90:1307-1320): the pack is left at T_freeze, the
+        # meltwater infiltrates this step, and heat beyond what melts the whole
+        # pack passes to the soil through the final solve.
+        snow, T_snow0, _store_melt, _store_heat = melt_snow_node_excess(
+            snow, state.T_snow)
+        T_surface = T_snow0
     else:
         T_surface = T_soil[:, 0]
     ncol = T_surface.shape[0]
@@ -577,7 +585,7 @@ def _step_multilayer_land_impl(
             if _snow_node:
                 # Ground node = snow surface (start-of-step snow mass).
                 return solve_snow_soil_thermal(
-                    state.T_snow, snow, T_soil, theta, grid,
+                    T_snow0, snow, T_soil, theta, grid,
                     config.hydraulics, config.thermal, G, dt_)[0]
             T_tent = solve_soil_thermal(
                 T_soil, theta, grid,
@@ -893,18 +901,6 @@ def _step_multilayer_land_impl(
         refreeze = jnp.zeros_like(snow_new)
         blow_subl = jnp.zeros_like(snow_new)
         cap_runoff = jnp.zeros_like(snow_new)
-    if _snow_node:
-        # Snow node warmer than freezing (heated from below by the soil, or a
-        # pack created on warm ground): its heat above T_freeze melts snow, as
-        # CLM5 melts unlayered snow from the top soil layer's excess heat
-        # (SoilTemperatureMod.F90:1307-1320).  The L_f is charged through
-        # ``melt_energy`` below, i.e. drawn from the snow node by the final solve.
-        _excess = (constants.c_pi * snow
-                   * jnp.maximum(state.T_snow - constants.T_freeze, 0.0))
-        _melt_store = jnp.minimum(snow_new, _excess / constants.L_f)
-        snow_new = snow_new - _melt_store
-        snow_melt = snow_melt + _melt_store
-        snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
     # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
     # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
     # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
@@ -977,6 +973,10 @@ def _step_multilayer_land_impl(
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
+    if _snow_node:
+        # Pre-step stored-heat meltwater infiltrates with the rest (its L_f was
+        # paid by the node's own heat, so it is NOT in ``melt_energy``).
+        melt_rate = melt_rate + _store_melt / dt
 
     # --- Canopy interception, phase 1: intercept rain into the store ----------
     # Only the THROUGHFALL (direct + drip) infiltrates, so the water-availability
@@ -1167,8 +1167,9 @@ def _step_multilayer_land_impl(
         # End-of-step snow mass: snowfall, melt and sublimation enter the node
         # at its start-of-step temperature (see solve_snow_soil_thermal).
         T_snow_new, T_soil_new = solve_snow_soil_thermal(
-            state.T_snow, snow_new, T_soil, richards_out.theta_new, grid,
-            config.hydraulics, config.thermal, G_surface, dt, **_thermal_kw)
+            T_snow0, snow_new, T_soil, richards_out.theta_new, grid,
+            config.hydraulics, config.thermal,
+            G_surface + _store_heat / dt, dt, **_thermal_kw)
     else:
         T_soil_new = solve_soil_thermal(
             T_soil, richards_out.theta_new, grid,

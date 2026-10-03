@@ -832,6 +832,15 @@ def test_land_snow_insulation_round_trip_and_production_deck():
     assert cfg.land_snow_insulation is False
 
 
+def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-snow-insulation"]), parser))._replace(land_surface_scheme="clm_ml")
+    with pytest.raises(ValueError, match="land_snow_insulation is not supported"):
+        cfg.validate_strict()
+
+
 def test_land_snow_insulation_without_multilayer_land_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
