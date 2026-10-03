@@ -57,7 +57,7 @@ def first_operand_nonzero(rows: list[dict]) -> dict | None:
     return next((row for row in rows if row["operand_absolute_max"] > 0.0), None)
 
 
-def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dict]:
+def _score_substep(trace, oracle, active, area, index: int, *, plant: str) -> list[dict]:
     """Score one external substep in compiled ``dynspg_ts`` statement order."""
 
     step = index + 1
@@ -83,6 +83,10 @@ def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dic
         "mid_depth_v": r97._native_v(trace["transport_face_depth_v"][index]),
         "transport_u": r97._native_u(trace["transport_metric_u"][index]),
         "transport_v": r97._native_v(trace["transport_metric_v"][index]),
+        "continuity_du": np.asarray(trace["continuity_du"][index]),
+        "continuity_dv": np.asarray(trace["continuity_dv"][index]),
+        "continuity_divergence": np.asarray(
+            trace["continuity_divergence"][index]),
         "after_ssh": np.asarray(trace["eta_continuity"][index]),
         "transport_sum_u": r97._native_u(trace["transport_sum_u_exit"][index]),
         "transport_sum_v": r97._native_v(trace["transport_sum_v_exit"][index]),
@@ -102,6 +106,13 @@ def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dic
         "exit_inverse_u": r97._native_u(trace["r1_face_depth_u_exit"][index]),
         "exit_inverse_v": r97._native_v(trace["r1_face_depth_v_exit"][index]),
     }
+    oracle_du = oracle[f"{prefix}_zhU"] - np.roll(
+        oracle[f"{prefix}_zhU"], 1, axis=1)
+    oracle_v_south = np.concatenate(
+        [np.zeros_like(oracle[f"{prefix}_zhV"][:1]),
+         oracle[f"{prefix}_zhV"][:-1]], axis=0)
+    oracle_dv = oracle[f"{prefix}_zhV"] - oracle_v_south
+    oracle_divergence = (oracle_du + oracle_dv) * (1.0 / area)
     reference = {
         "entry_u": oracle[entry_names[0]],
         "entry_v": oracle[entry_names[1]],
@@ -115,6 +126,9 @@ def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dic
         "mid_depth_v": oracle[f"{prefix}_hvp2_e"],
         "transport_u": oracle[f"{prefix}_zhU"],
         "transport_v": oracle[f"{prefix}_zhV"],
+        "continuity_du": oracle_du,
+        "continuity_dv": oracle_dv,
+        "continuity_divergence": oracle_divergence,
         "after_ssh": oracle[f"{prefix}_ssha_e"],
         "transport_sum_u": oracle[f"{prefix}_un_adv"],
         "transport_sum_v": oracle[f"{prefix}_vn_adv"],
@@ -139,7 +153,9 @@ def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dic
         "entry_inverse_u": "u", "entry_inverse_v": "v",
         "mid_u": "u", "mid_v": "v", "mid_ssh": "t",
         "mid_depth_u": "u", "mid_depth_v": "v",
-        "transport_u": "u", "transport_v": "v", "after_ssh": "t",
+        "transport_u": "u", "transport_v": "v",
+        "continuity_du": "t", "continuity_dv": "t",
+        "continuity_divergence": "t", "after_ssh": "t",
         "transport_sum_u": "u", "transport_sum_v": "v",
         "face_ssh_u": "u", "face_ssh_v": "v", "back_ssh": "t",
         "pressure_u": "u", "pressure_v": "v",
@@ -244,7 +260,9 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     }
     rows = []
     for index in range(2):
-        rows.extend(_score_substep(trace, oracle, active, index, plant=plant))
+        rows.extend(_score_substep(
+            trace, oracle, active, np.asarray(card.recipe.grid.area), index,
+            plant=plant))
 
     coefficient_rows = {}
     for name in r98.COEFFICIENTS:
