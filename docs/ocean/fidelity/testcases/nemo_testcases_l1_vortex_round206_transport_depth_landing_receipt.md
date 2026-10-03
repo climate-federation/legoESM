@@ -198,6 +198,15 @@ be registered, not assumed away.
   vector card's, which moved 0 of 50): the two violating plants go red and
   the benign one stays green.  Running them on the flux card's pair would
   prove nothing this round, because that pair is already red by design.
+* **The arm is an exact control of the RHS path ONLY.**
+  `_nemo_ws_velocity_stages` reads `transport_target_u/v` directly and the
+  arm does not invert that consumer, so "bitwise revert" means the stage
+  right-hand side, not every reader of the target.  Said rather than
+  widened.
+* **The registry numbers still cover the tip.**  They were measured at
+  `0ab3f9999`; `git diff 0ab3f9999..HEAD` on the ocean module is
+  COMMENT-ONLY (no non-comment line changed) across the four later commits,
+  so nothing after the measurement can have moved a row.
 * **The landed graph is the measured graph.**  The control arm's
   pre-round-206 target is built by a Python helper called only inside the
   arm, so production traces nothing extra and the registry above was
