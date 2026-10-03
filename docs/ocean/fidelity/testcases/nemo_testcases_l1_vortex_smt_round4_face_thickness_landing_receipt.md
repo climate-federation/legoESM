@@ -256,6 +256,34 @@ produced**, which is what the round order predicted it would be.
 **ORCA2's rung-7 certified ladder** (`--initial-mode decision52-bridge`) is
 reported in §8.1 with the rest of the gate lines.
 
+**FOR THE ORCA2 LANE, PLAINLY: this statement moves ORCA2's certified
+ladders, 185 of 200 rows on each of rung 0 and rung 7.** That contradicts the
+ORCA2 lane's round-129 reading, which recorded that "ORCA2 builds its zps
+geometry from `domain_cfg`, so the new rule is not on its path and cannot
+move it". Both readings are about different code paths, and both are correct
+about the path they looked at:
+
+* The round-129 reading looked at **where the geometry COMES FROM**. It is
+  right: ORCA2 does not need the min-of-neighbours rule applied to it,
+  because NEMO already applied it offline and ORCA2's card reads the finished
+  `e3u_0`/`e3v_0`/`e3f_0` straight out of `domain_cfg`
+  (`nemo_testcase_recipe.py:1579-1581`). Nothing in this round re-derives
+  those arrays or changes them.
+* This round looked at **where the geometry is CONSUMED**. The card read
+  those correct arrays and then handed them only to the EEN barotropic
+  bundle; the shared qco operand builder, which is what `wzv`/`div_hor`
+  actually read through, ignored the bundle and substituted `e3t_0`
+  (`vertical.py:701`, the line this commit replaces). So ORCA2 carried
+  NEMO's correct faces and ran with the wrong ones — on 18 803 U and 18 300
+  V cells, by up to 917 m.
+
+The round-129 sentence should be read as scoped to the geometry build and not
+to the qco consumer; it is not retracted, it is narrowed. **The practical
+consequence for the ORCA2 lane: take this by merge, expect 185/200 rows to
+move on each ladder with zero exact-row losses and both first non-bit
+statements unchanged, and re-pin rather than treat the move as a
+regression.**
+
 **What the ORCA2 lane should do next:** re-pin its registered rung-0 ladder to
 these numbers with the 185 rows registered, then look at the 73 max-abs rows
 that move away — on a change this size a mixed max-abs direction with a
@@ -267,11 +295,13 @@ own per-cell instruments can say whether those 73 are the same cells.
 | choice | ASKED? |
 |---|---|
 | read the faces from `nemo_een_barotropic`, not from a new raw `z_coord` field | ASKED — note CC addendum 4 names "the card's verified arrays"; the bundle is where every card already carries them, and `nemo_ldf_reference_e3f` is the existing precedent for reading `e3f_0` from it |
-| raise instead of falling back to the alias when a raw-mesh card carries no face thicknesses | **UNASKED, and offered for revert.** It makes a previously-tolerated configuration a hard error. It is UNREACHABLE by every card in the tree (§1 table: all six raw-mesh card families attach the bundle), the `nemo_ldf_reference_e3f` sibling already fails closed on the same bundle, and the alternative default is the defect itself (RULE 3). Say the word and it becomes a documented fallback instead |
+| raise instead of falling back to the alias when a raw-mesh card carries no face thicknesses | **ASKED AND KEPT.** It was raised as the round's one unasked item — it makes a previously-tolerated configuration a hard error — and the operator kept it: it is the lane's "unset raises" convention, it is UNREACHABLE by every card in the tree (§1 table: all six raw-mesh card families attach the bundle), the `nemo_ldf_reference_e3f` sibling already fails closed on the same bundle, and the alternative default is the defect itself (RULE 3) |
 | the geometry gate gains four rows (resolved faces, northern row, east column, non-vacuity) | ASKED — note CC addendum 4 names the identity proof and says to extend the round-2 instrument |
 | the test file's two pre-existing reds repaired in this diff | not a choice of behaviour: the fixture lacked a now-required argument and could not run at all; proven pre-existing by re-running on the stashed clean tree |
 
-**UNASKED list: one item, named above, offered for revert in this message.**
+**UNASKED list: EMPTY.** The one item that was on it (the fail-closed
+raise) was raised before landing and kept by the operator, so it is recorded
+ASKED above rather than carried as a silent choice.
 
 **COMPLIANCE, stated because no gate checks it (RULE 2):**
 * **DUAL review: ONE fresh adversarial reviewer ran, not two.** The second is
