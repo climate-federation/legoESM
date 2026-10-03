@@ -335,8 +335,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                           np.asarray(coefficient_oracle[name]))
         for name in sorted(coefficient_oracle)
     }
-    require(all(row["bit_unequal"] == 0 for row in production_scores.values()),
-            "production literal-EEN coefficients are not bit-exact")
+    moved_production = {
+        name: row for name, row in production_scores.items()
+        if row["bit_unequal"] != 0
+    }
+    require(not moved_production,
+            "production literal-EEN coefficients are not bit-exact: "
+            f"{moved_production}")
 
     if plant == "oracle-bit":
         require(rows["nw"]["combined"]["scores"]["e3u"]["bit_unequal"] != 0,
