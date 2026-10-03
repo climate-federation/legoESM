@@ -126,7 +126,7 @@ while [[ $# -gt 0 ]]; do
     --run) do_run=1 ;;
     --variant) shift; variant=${1:-} ;;
     --variant=*) variant=${1#--variant=} ;;
-    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs|stage23|spgts|stage123flx]\n' "$0" >&2 ; exit 64 ;;
+    *) printf 'Usage: %s [--run] [--variant flux|vec|vecrhs|stage23|spgts|stage123flx|...]\n' "$0" >&2 ; exit 64 ;;
   esac
   shift
 done
@@ -249,7 +249,8 @@ case "$variant" in
     ladder_res=${variant:3:2}km ; ladder_card=${variant:5}
     default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$ladder_res/$ladder_card
     ;;
-  smtflx | smtvec | smtflx100d | smtvec100d)
+  smtflx | smtvec | smtflx100d | smtvec100d | \
+  smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -297,10 +298,45 @@ case "$variant" in
         ref_name=VORTEX_SMT_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round211_smt_vec_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/day100 ;;
+      # ---- ROUND 213 / VORTEX_SMT round 3 (operator note CC addendum 3,
+      # item 1).  Round 2 fixed a defect in the seamount hook's CONTROL PRINT
+      # (rank-local MINVAL/MAXVAL -> global mpp_min/mpp_max) and could not
+      # re-run, so the committed hook is not the one that produced the
+      # admitted evidence.  These four variants re-acquire with the committed
+      # hook into NEW configurations, VORTEX_SMT_R3_*; round 1's four build
+      # directories and four evidence directories are NOT touched, so the
+      # bit-identity of the two sets is a measurement rather than a claim.
+      # The experiment name (hence cn_exp, hence the restart file name) is
+      # the SAME, because the deck is the same deck: only the build directory
+      # and the evidence directory are new.  Exactly the `vecrhs` pattern.
+      smtflxr3)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R3_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round213_smt_flux
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10 ;;
+      smtvecr3)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round213_smt_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smtflx100dr3)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt_omip_l1_100d.patch
+        ref_name=VORTEX_SMT_R3_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round213_smt_flux_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/day100 ;;
+      smtvec100dr3)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt_vec_een_100d.patch
+        ref_name=VORTEX_SMT_R3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round213_smt_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/day100 ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d or smtvec100d\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3 or smtvec100dr3\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -334,7 +370,8 @@ else
 fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
-if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" ]]; then
+if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
+   || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
   STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
@@ -627,9 +664,11 @@ fi
 # a deck that silently carried the other card's pair would run the other card
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
-  flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d)
+  flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d \
+  | smtflxr3 | smtflx100dr3)
       want_vec='.false.' ; want_up3='.true.'  ;;
-  vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d)
+  vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
+  | smtvecr3 | smtvec100dr3)
       want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
@@ -883,6 +922,8 @@ if [[ "$reuse_build" -eq 1 ]]; then
     res15vec | res10vec) certified_manifest=$certified_manifest/round3/binaries.sha256 ;;
     smtflx100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtvec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smtflx100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smtvec100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
