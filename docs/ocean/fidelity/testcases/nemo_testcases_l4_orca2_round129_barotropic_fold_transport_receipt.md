@@ -68,6 +68,27 @@ Separate read-only Codex review was attempted before the arm and returned
 **independent review unavailable in-sandbox**: `failed to initialize in-process
 app-server client: Read-only file system`.
 
+## Tests, controls, citations, and review
+
+The final reverted tip reproduces the registered baseline: substep-2 U has 68
+active unequal cells and maximum `2.9617669311254642e-08`; all eight EEN
+coefficients remain exact. The record-bit, trace-bit, and coefficient-bit
+plants each exit 2 with `STATUS PLANT-FIRED`. Focused round-129, literal-
+continuity, and citation tests pass 24/24.
+
+The default citation gate and this receipt pass with zero unmapped citations;
+shifting the new `dynspg_ts` span by two lines makes the gate refuse. The one
+required `tests/ocean/fidelity -n 12` invocation collected 2,397 tests and
+reached 98%, then reproduced the registered xdist-controller tail after the
+corrected process census reached zero. It is **incomplete, not PASS**. The six
+displayed failures are the pre-existing SI3 scalar-math provenance, GYRE
+round-129 spread-record stamp, round-51 private-arm scope, round-35 escape
+scope, worktree-stamp, and recipe case-board rows. No ORCA2 round-129 test
+failed.
+
+Final-diff Codex review was attempted again and returned the same
+**independent review unavailable in-sandbox** verdict and app-server error.
+
 ## OPEN
 
 1. Build a committed rung-0 independent-month scorer for the admitted
