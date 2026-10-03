@@ -99,6 +99,15 @@ readonly STEPS=10
 # operator's call, never this script's.
 variant=flux
 do_run=0
+# Round 208 / VORTEX round 21 (decision 74, operator note BZ): the resolution
+# rungs REUSE the certified executables instead of rebuilding.  NEMO derives
+# the whole grid at RUN time -- usrdef_nam.f90:138-144 of VORTEX_OMIP_L1_P3
+# sets kpi = NINT(1800e3/rn_dx)+3, kpj likewise and kpk = NINT(5000/rn_dz)+1
+# from the namelist it has just read -- so a refined deck needs a new namelist
+# and nothing else.  Rebuilding would produce the same binary and would destroy
+# the control: reusing the certified one proves the rungs differ in the DECK
+# alone.  The hashes are checked against the committed manifest below.
+reuse_build=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run) do_run=1 ;;
@@ -190,8 +199,43 @@ case "$variant" in
     exp_name=VORTEX_VEC_OMIP_L1
     tag=round196_spgts
     ;;
+  res15flx | res15vec | res10flx | res10vec)
+    # DECISION 74's resolution ladder.  The deck rule is NEMO's OWN: its VORTEX
+    # ships an AGRIF zoom at refinement ratio 3 3 3
+    # (tests/VORTEX/EXPREF/AGRIF_FixedGrids.in:2 "22 41 22 41 3 3 3"), and the
+    # child namelist it ships for that zoom
+    # (tests/VORTEX/EXPREF/1_namelist_cfg) changes exactly three things against
+    # the parent: rn_dx and rn_dy 30000 -> 10000 (:21-22), rn_Dt 2880 -> 960
+    # (:43) and nn_itend 3000 -> 6000 (:34); it also adds a &namagrif sponge
+    # block (:103-108) which has no meaning in a non-nested run.  rn_dz (:23),
+    # rn_ppgphi0, rn_ppumax, nn_rot, nn_e = 48 (:222) and every physics switch
+    # are UNCHANGED, and both lateral diffusion operators are OFF in parent and
+    # child alike, so there is no viscosity to rescale.  The rule is therefore
+    # dx -> dx/r and dt -> dt/r with everything else held; the 10 km rung IS
+    # NEMO's child deck, and the 15 km rung is the same rule at r = 2.
+    # nn_itend is the RUN LENGTH: the child's 6000 is not 3*3000, so no ratio-2
+    # analogue exists.  It is registered as DECISION_NEEDED in the receipt and
+    # is inert here, because this acquisition pins nn_itend = 10 at EVERY
+    # resolution, exactly as the 30 km records do.
+    reuse_build=1
+    case "$variant" in
+      res15flx) deck_basename=namelist_cfg_omip_l1_15km.patch
+                ref_name=VORTEX_OMIP_L1 ; exp_name=VORTEX_R21_15KM
+                tag=round208_res15_flux ;;
+      res15vec) deck_basename=namelist_cfg_vec_een_15km.patch
+                ref_name=VORTEX_VEC_OMIP_L1 ; exp_name=VORTEX_VEC_R21_15KM
+                tag=round208_res15_vec ;;
+      res10flx) deck_basename=namelist_cfg_omip_l1_10km.patch
+                ref_name=VORTEX_OMIP_L1 ; exp_name=VORTEX_R21_10KM
+                tag=round208_res10_flux ;;
+      res10vec) deck_basename=namelist_cfg_vec_een_10km.patch
+                ref_name=VORTEX_VEC_OMIP_L1 ; exp_name=VORTEX_VEC_R21_10KM
+                tag=round208_res10_vec ;;
+    esac
+    default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$tag
+    ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts or stage123flx\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx or res10vec\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -481,8 +525,10 @@ fi
 # a deck that silently carried the other card's pair would run the other card
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
-  flux | stage123flx)   want_vec='.false.' ; want_up3='.true.'  ;;
-  vec | vecrhs | stage23 | spgts)  want_vec='.true.'  ; want_up3='.false.' ;;
+  flux | stage123flx | res15flx | res10flx)
+      want_vec='.false.' ; want_up3='.true.'  ;;
+  vec | vecrhs | stage23 | spgts | res15vec | res10vec)
+      want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
   printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
@@ -521,12 +567,23 @@ if [[ "$do_run" -eq 0 ]]; then
 fi
 
 # ------------------------------------------------------------------ acquire
-for target in "$ref_cfg" "$run_cfg" "$EVIDENCE"; do
-  if [[ -e "$target" ]]; then
-    printf 'REFUSE: target already exists: %s\n' "$target" >&2
-    exit 64
-  fi
-done
+if [[ "$reuse_build" -eq 1 ]]; then
+  # The configurations are the CERTIFIED ones and must already exist; only the
+  # evidence directory may not.
+  for target in "$ref_cfg" "$run_cfg"; do
+    [[ -x "$target/BLD/bin/nemo.exe" ]] \
+      || { printf 'REFUSE: certified build %s is absent\n' "$target" >&2; exit 64; }
+  done
+  [[ ! -e "$EVIDENCE" ]] \
+    || { printf 'REFUSE: target already exists: %s\n' "$EVIDENCE" >&2; exit 64; }
+else
+  for target in "$ref_cfg" "$run_cfg" "$EVIDENCE"; do
+    if [[ -e "$target" ]]; then
+      printf 'REFUSE: target already exists: %s\n' "$target" >&2
+      exit 64
+    fi
+  done
+fi
 for mount in /tmp "$(dirname "$EVIDENCE")" "$NEMO_ROOT"; do
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
   if [[ "$free_kb" -lt 2097152 ]]; then
@@ -662,15 +719,83 @@ run_one() {            # $1 = config name, $2 = run directory
   fi
 }
 
+run_one_reuse() {       # $1 = certified config name, $2 = run directory
+  # The 30 km EXP00 inside the certified configuration is PART OF THE CERTIFIED
+  # RECORD and is not touched.  The run directory is assembled from the shipped
+  # EXPREF and the resolution deck patch, so the only difference between this
+  # rung and the certified one is the namelist.
+  local cfg=$NEMO_ROOT/tests/$1 dir=$2
+  mkdir -p "$dir"
+  cp -L "$SRC_CASE"/EXPREF/*.xml "$dir/"
+  cp -L "$SRC_CASE/EXPREF/namelist_cfg" "$SRC_CASE/EXPREF/namelist_ref" "$dir/"
+  rm -f "$dir"/1_* "$dir/AGRIF_FixedGrids.in"
+  patch "$dir/namelist_cfg" <"$DECK"
+  cp "$cfg/BLD/bin/nemo.exe" "$dir/nemo"
+  (
+    cd "$dir"
+    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+    printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.log
+    mpirun -np 1 --oversubscribe ./nemo >>run.user.log 2>&1
+    tail -n 20 run.user.log
+    printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      >>run.user.log
+  )
+  [[ -f "$dir/$RESTART" ]] \
+    || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
+}
+
+if [[ "$reuse_build" -eq 1 ]]; then
+  # PROVE the reuse: these must be the very executables the certified 30 km
+  # records were produced with, so the rung differs in the deck ALONE.
+  certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex
+  case "$variant" in
+    res15flx | res10flx) certified_manifest=$certified_manifest/round2/binaries.sha256 ;;
+    res15vec | res10vec) certified_manifest=$certified_manifest/round3/binaries.sha256 ;;
+  esac
+  [[ -f "$certified_manifest" ]] \
+    || { printf 'REFUSE: certified binary manifest %s is absent\n' \
+           "$certified_manifest" >&2; exit 65; }
+  for exe in "$ref_cfg/BLD/bin/nemo.exe" "$run_cfg/BLD/bin/nemo.exe"; do
+    # The manifest may record either spelling of this tree (/home/dbalwada is a
+    # symlink to /data/abyssal/dbalwada), so match on the path BELOW tests/,
+    # which is the same in both.
+    want=$(awk -v t="/tests/${exe#*/tests/}" 'index($2, t) {print $1}' \
+             "$certified_manifest")
+    [[ -n "$want" ]] \
+      || { printf 'REFUSE: %s is not named in %s\n' "$exe" "$certified_manifest" >&2
+           exit 65; }
+    got=$(sha256sum "$exe" | awk '{print $1}')
+    [[ "$got" == "$want" ]] \
+      || { printf 'REFUSE: %s is not the certified executable (%s != %s)\n' \
+             "$exe" "$got" "$want" >&2; exit 65; }
+    printf 'CERTIFIED_BUILD_REUSED %s %s\n' "$exe" "$got"
+  done
+  # The instrumented build must still carry the writer and the reference must
+  # still not: the passivity premise is re-proved, never assumed.
+  grep -q 'NEMO_L1_ENTRY_1' "$run_cfg/BLD/ppsrc/nemo/stprk3.f90" \
+    || { printf 'REFUSE: the reused instrumented build carries no writer\n' >&2; exit 69; }
+  if grep -q 'NEMO_L1_ENTRY_1' "$ref_cfg/BLD/ppsrc/nemo/stprk3.f90"; then
+    printf 'REFUSE: the reused REFERENCE build carries the writer\n' >&2; exit 69
+  fi
+else
 build_one "$REF_CFG" 0
 build_one "$RUN_CFG" 1
+fi
 sha256sum "$ref_cfg/BLD/bin/nemo.exe" "$run_cfg/BLD/bin/nemo.exe" \
   >"$manifest/binaries.sha256"
-# The two decks must be the SAME deck; only the compiled writer may differ.
-cmp "$ref_cfg/EXP00/namelist_cfg" "$run_cfg/EXP00/namelist_cfg"
+if [[ "$reuse_build" -eq 1 ]]; then
+  run_one_reuse "$REF_CFG" "$EVIDENCE/reference"
+  run_one_reuse "$RUN_CFG" "$EVIDENCE"
+else
+  # The two decks must be the SAME deck; only the compiled writer may differ.
+  cmp "$ref_cfg/EXP00/namelist_cfg" "$run_cfg/EXP00/namelist_cfg"
 
-run_one "$REF_CFG" "$EVIDENCE/reference"
-run_one "$RUN_CFG" "$EVIDENCE"
+  run_one "$REF_CFG" "$EVIDENCE/reference"
+  run_one "$RUN_CFG" "$EVIDENCE"
+fi
+# Both arms of the rung must have read the SAME deck; only the compiled writer
+# may differ between them.
+cmp "$EVIDENCE/reference/namelist_cfg" "$EVIDENCE/namelist_cfg"
 cp "$manifest"/*.sha256 "$EVIDENCE/"
 cp "$manifest/legoesm_git_sha.txt" "$EVIDENCE/"
 
