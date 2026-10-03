@@ -694,8 +694,8 @@ def nemo_literal_metric_transports(
     # generic divergence path.
     e1v = (grid.dx_v if hasattr(grid, "dx_v")
            else (grid.radius * grid.dlon * vface_zonal_cos_lat(grid))[:, jnp.newaxis])
-    zh_u = (e2u * U) * H_u
-    zh_v = (e1v * V) * H_v
+    zh_u = nemo_source_round(nemo_source_round(e2u * U) * H_u)
+    zh_v = nemo_source_round(nemo_source_round(e1v * V) * H_v)
     return zh_u, zh_v
 
 
