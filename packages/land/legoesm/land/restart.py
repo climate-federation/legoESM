@@ -71,6 +71,9 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     # Intercepted canopy-water store (present iff interception is enabled); real
     # mass, so it must round-trip or the warm start leaks it.
     "W_canopy",
+    # Snow thermal node temperature (present iff the snow node is enabled);
+    # prognostic, so it must round-trip rather than be re-initialised.
+    "T_snow",
 )
 
 

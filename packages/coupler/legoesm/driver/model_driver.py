@@ -3881,6 +3881,7 @@ class ModelDriver:
         _template = init_multilayer_land_state(
             ncol, cfg, T_init=T_init, theta_init=theta_init)
         _land_ic_path = getattr(self.config, "land_ic_path", "")
+        _ic_has_snow_node = False
         if _land_ic_path:
             # #746 item 1: a spun-up land IC (offline run_land_spinup restart)
             # REPLACES the cold-start soil column with an equilibrated one, so
@@ -3929,6 +3930,7 @@ class ModelDriver:
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
             _merged = merge_land_restart_into_template(_ic_state, _template)
+            _ic_has_snow_node = getattr(_ic_state, "T_snow", None) is not None
             # The spin-up's matric potential belongs to ITS hydraulics.  Water
             # content is the conserved quantity: keep it (moved into the band
             # the Richards step can hold, column water conserved) and re-derive
@@ -4001,9 +4003,10 @@ class ModelDriver:
                 "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
                 cfg.soil_grid.n_layers, ncol,
             )
-        if cfg.thermal.snow_insulation:
-            # The IC graft keeps the template's cold-start T_snow; re-derive it
-            # from the grafted soil and snow (no-op on the cold-start template).
+        if cfg.thermal.snow_insulation and not _ic_has_snow_node:
+            # An IC without a snow node keeps the template's cold-start T_snow;
+            # re-derive it from the grafted soil and snow (no-op on the
+            # cold-start template).  An IC that carries T_snow keeps it.
             from legoesm.land.multilayer_land import init_snow_temperature
             self._land_ml_state = init_snow_temperature(self._land_ml_state)
 
