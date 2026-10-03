@@ -410,3 +410,23 @@ def test_full_step_energy_ledger_under_melting_conditions():
         np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
                                    rtol=1e-9, atol=1e-3)
         s = s2
+
+
+def test_canopy_ground_node_never_above_freezing_under_snow():
+    """Warm air and strong sun on a pack at freezing: the two-leaf canopy's
+    converged ground temperature is capped at T_freeze (a melting surface)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([15.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 285.0, 0.0, 0.0)._replace(sw_down=700.0 * o,
+                                               lw_down=340.0 * o,
+                                               cos_zenith=0.8 * o)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 0.8)))(st)
+    s2, sfc = out[0], out[-1]
+    assert float(sfc.Ts_solve[0]) <= _TF + 1e-9
+    assert float(s2.T_snow[0]) > _TF        # the node did take up heat
