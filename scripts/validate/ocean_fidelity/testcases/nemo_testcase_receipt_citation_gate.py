@@ -220,6 +220,8 @@ FILES = {
         _ORCA2_R118EENVREC_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R120EENVFRAC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/domhgr.f90": (
+        _ORCA2_R120EENVFRAC_COMPILED / "domhgr.f90"),
     "l4_r104_een_accum.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
         "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
@@ -1297,6 +1299,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1323-1328': [
         ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
         ('& ff_f(ji-1,jj+1) /', 1), 6],
+    'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/domhgr.f90:233-237': [
+        ("IF(  iom_varid( inum, 'ff_f'", 1),
+        ("CALL iom_get( inum, jpdom_global, 'ff_t'", 1), 5],
     # --- ORCA2 round 120: northern V three-fraction acquisition -----------
     'ORCA2_OMIP_L4_R118EENVREC/BLD/ppsrc/nemo/dynspg_ts.f90:1320-1325': [
         ('zpvo_ne = ff_f(ji  ,jj+1)', 1),
