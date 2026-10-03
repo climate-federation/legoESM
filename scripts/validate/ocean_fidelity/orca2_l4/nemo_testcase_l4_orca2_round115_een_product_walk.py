@@ -112,25 +112,32 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     mbku = np.asarray(parts["mbku"], dtype=np.float64)
     executed = np.arange(1, 31)[None, None, :] <= mbku[..., None]
 
-    def recurrence(term, bottom, *, seed_first: bool):
+    def recurrence(term, bottom, *, ieee_zero_add: bool):
         acc = jnp.zeros(term.shape[:2], dtype=term.dtype)
         before = jnp.zeros_like(term)
         after = jnp.zeros_like(term)
         for jk in range(term.shape[-1]):
             before = before.at[..., jk].set(acc)
-            if seed_first and jk == 0:
-                updated = term[..., jk]
-            else:
-                updated = nemo_source_round(acc + term[..., jk])
+            addend = term[..., jk]
+            updated = nemo_source_round(acc + addend)
+            if ieee_zero_add:
+                both_zero = (acc == 0.0) & (addend == 0.0)
+                both_negative = jnp.signbit(acc) & jnp.signbit(addend)
+                signed_zero = jnp.copysign(
+                    jnp.zeros_like(acc),
+                    jnp.where(both_negative, -jnp.ones_like(acc),
+                              jnp.ones_like(acc)),
+                )
+                updated = jnp.where(both_zero, signed_zero, updated)
             acc = jnp.where(jk < bottom, updated, acc)
             after = after.at[..., jk].set(acc)
         return before, after
 
     baseline_before, baseline_after = jax.device_get(jax.jit(
-        lambda term, bottom: recurrence(term, bottom, seed_first=False))(
+        lambda term, bottom: recurrence(term, bottom, ieee_zero_add=False))(
             jnp.asarray(parts["term_u_nw"]), jnp.asarray(parts["mbku"])))
     candidate_before, candidate_after = jax.device_get(jax.jit(
-        lambda term, bottom: recurrence(term, bottom, seed_first=True))(
+        lambda term, bottom: recurrence(term, bottom, ieee_zero_add=True))(
             jnp.asarray(literal_product), jnp.asarray(parts["mbku"])))
     prefix = {
         "mbku": mbku,
@@ -169,6 +176,10 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
     }
     candidate_scores = {
         name: r109._score(candidate[name], oracle[name]) for name in SOURCE_ORDER
+    }
+    candidate_movement = {
+        name: r109._score(candidate[name], baseline[name])
+        for name in ("term_nw", "acc_before", "acc_after")
     }
     baseline_first = next(
         (name for name in SOURCE_ORDER if baseline_scores[name]["bit_unequal"]), None)
@@ -218,6 +229,7 @@ def measure(deck_root: Path, frame_root: Path, step_root: Path,
         "candidate_first_non_bit_item": candidate_first,
         "baseline_scores": baseline_scores,
         "candidate_scores": candidate_scores,
+        "candidate_vs_baseline": candidate_movement,
         "first_accumulator_samples": samples,
         "shapes": {name: list(value.shape) for name, value in candidate.items()},
         "dtypes": {name: str(value.dtype) for name, value in candidate.items()},
