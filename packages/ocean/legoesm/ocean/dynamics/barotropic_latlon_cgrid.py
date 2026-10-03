@@ -63,6 +63,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
+    pad_ns_vector_v,
 )
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -2120,6 +2121,15 @@ def _run_substep_loop(
                 eta_new = jnp.maximum(eta_new, eta_floor) * mask
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
+
+        # NEMO associates every external-mode carry before the next substep.
+        # The V member of the compiled lbc_lnk call is sign-reversing across
+        # the T-pivot fold (dynspg_ts.f90:777-779; lbcnfd.f90:684-721).  The
+        # stored last V row is a boundary row, so rebuild it from the final
+        # interior row exactly as the shared vector-fold operator does.  This
+        # is a no-op away from the tripolar northern band.
+        if fold_is_local(grid) or _nfold_mask is not None:
+            V_bar_new = pad_ns_vector_v(V_bar_new[1:-1], grid)
 
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
