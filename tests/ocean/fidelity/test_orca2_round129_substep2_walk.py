@@ -16,3 +16,11 @@ def test_first_nonbit_preserves_source_order():
 
 def test_first_nonbit_accepts_an_exact_walk():
     assert gate.first_nonbit([{"bit_exact": True}]) is None
+
+
+def test_first_operand_nonzero_ignores_signed_zero_only_rows():
+    rows = [
+        {"boundary": "entry", "operand_absolute_max": 0.0},
+        {"boundary": "transport", "operand_absolute_max": 1.0},
+    ]
+    assert gate.first_operand_nonzero(rows) is rows[1]

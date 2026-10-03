@@ -51,6 +51,12 @@ def first_nonbit(rows: list[dict]) -> dict | None:
     return next((row for row in rows if not row["bit_exact"]), None)
 
 
+def first_operand_nonzero(rows: list[dict]) -> dict | None:
+    """Return the first full recorded operand with a magnitude difference."""
+
+    return next((row for row in rows if row["operand_absolute_max"] > 0.0), None)
+
+
 def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dict]:
     """Score one external substep in compiled ``dynspg_ts`` statement order."""
 
@@ -149,11 +155,27 @@ def _score_substep(trace, oracle, active, index: int, *, plant: str) -> list[dic
         planted[tuple(location)] = np.nextafter(
             planted[tuple(location)], np.float64(np.inf))
         candidate["mid_v"] = planted
-    return [
-        {"substep": step, "boundary": name,
-         **rhs_walk.score(candidate[name], reference[name], active[faces[name]])}
-        for name in order
-    ]
+    rows = []
+    for name in order:
+        active_row = rhs_walk.score(
+            candidate[name], reference[name], active[faces[name]])
+        # Fold/pole operands can be masked as prognostic faces yet still feed a
+        # neighbouring active T/U stencil.  Keep the ordinary active score and
+        # independently score every recorded operand bit so that the mask
+        # cannot hide the first source dependency (the round-129 discriminator).
+        operand_row = rhs_walk.score(
+            candidate[name], reference[name],
+            np.ones_like(reference[name], dtype=bool))
+        rows.append({
+            "substep": step,
+            "boundary": name,
+            **active_row,
+            "operand_bit_exact": operand_row["bit_exact"],
+            "operand_differing_cells": operand_row["differing_cells"],
+            "operand_absolute_max": operand_row["absolute_max"],
+            "operand_argmax_jik": operand_row["argmax_jik"],
+        })
+    return rows
 
 
 def measure(deck_root: Path, frame_root: Path, spg_root: Path,
@@ -252,6 +274,9 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "coefficient_rows": coefficient_rows,
         "rows": rows,
         "first_non_bit": first,
+        "first_operand_non_bit": next(
+            (row for row in rows if not row["operand_bit_exact"]), None),
+        "first_operand_nonzero": first_operand_nonzero(rows),
         "worktree": stamp,
     }
 
