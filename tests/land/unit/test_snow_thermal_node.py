@@ -553,3 +553,32 @@ def test_snow_falling_on_warm_ground_does_not_arrive_warm():
     expect = (sfc.G_soil + (sfc.lhflx - r1.lhflx) + cfg.thermal.Q_geothermal) * dt
     np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
                                rtol=1e-9, atol=1e-3)
+
+
+def test_new_pack_after_melt_out_starts_at_cold_soil():
+    """Fresh snow on refrozen ground: the new node starts at the (cold) top
+    soil, not at a freezing-point leftover of an earlier pack."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(T_snow=jnp.array([_TF]))       # stale node, no snow
+    f = _forcing(1, 258.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
+    dt = 1800.0
+    s1, r1, _c, sfc = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0)))(st)
+
+    def E(s, T_node, theta):
+        C = compute_heat_capacity(theta, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (T_node - _TF))
+
+    # Ledger with the new pack's start at T_soil0 (262 K): snowfall carries
+    # c_ice*S*(262 - Tf) < 0; starting from the stale Tf would add zero.
+    S = s1.snow_depth
+    dE = E(s1, s1.T_snow, s1.theta_soil) - E(st, st.T_soil[:, 0], s1.theta_soil) \
+        - constants.c_pi * S * (st.T_soil[:, 0] - _TF)
+    expect = (sfc.G_soil + (sfc.lhflx - r1.lhflx) + cfg.thermal.Q_geothermal) * dt
+    np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                               rtol=1e-9, atol=1e-3)

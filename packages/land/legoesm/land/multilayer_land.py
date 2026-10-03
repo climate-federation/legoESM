@@ -1180,11 +1180,13 @@ def _step_multilayer_land_impl(
     if _snow_node:
         # End-of-step snow mass: snowfall, melt and sublimation enter the node
         # at its start-of-step temperature (see solve_snow_soil_thermal).  A
-        # pack created this step (no snow at the start) starts at the top-soil
-        # skin capped at freezing, the same rule as a restart without a node:
-        # snow cannot arrive warmer than T_freeze.
+        # pack created this step (no snow at the start-of-step, after the
+        # stored-heat melt) starts at the top-soil temperature capped at
+        # freezing, the same rule as a restart without a node: snow cannot
+        # arrive warmer than T_freeze.  (A snow-free node already mirrors the
+        # top soil; reading T_soil makes the rule independent of that.)
         _T_start = jnp.where(snow > 0.0, T_snow0,
-                             jnp.minimum(T_snow0, constants.T_freeze))
+                             jnp.minimum(T_soil[:, 0], constants.T_freeze))
         T_snow_new, T_soil_new = solve_snow_soil_thermal(
             _T_start, snow_new, T_soil, richards_out.theta_new, grid,
             config.hydraulics, config.thermal,

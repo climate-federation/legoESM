@@ -30,5 +30,12 @@ def test_identical_and_each_kind_of_difference(tmp_path):
     np.savez(tmp_path / "z.npz", **{**base, "T": np.array([-0.0, np.nan])})
     np.savez(tmp_path / "z0.npz", **{**base, "T": np.array([0.0, np.nan])})
     assert cmp(tmp_path / "z0.npz", tmp_path / "z.npz") == ["T"]       # signed zero
+    p1 = np.array([np.nan, 0.0])
+    p2 = p1.copy()
+    p2.view(np.uint64)[0] ^= np.uint64(1)                              # NaN payload
+    assert np.isnan(p2[0])
+    np.savez(tmp_path / "n1.npz", **{**base, "T": p1})
+    np.savez(tmp_path / "n2.npz", **{**base, "T": p2})
+    assert cmp(tmp_path / "n1.npz", tmp_path / "n2.npz") == ["T"]
     np.savez(tmp_path / "e.npz", **{k: v for k, v in base.items() if k != "step"})
     assert cmp(tmp_path / "a.npz", tmp_path / "e.npz") == ["step"]
