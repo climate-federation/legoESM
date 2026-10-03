@@ -36,3 +36,4 @@ def test_round128_registry_locks_baseline_and_controls():
         "none", "oracle-bit", "candidate-bit", "wrong-row",
         "wrong-permutation", "scope-route",
     )
+    assert gate.SOURCE_ORDER[-2:] == ("before", "after")

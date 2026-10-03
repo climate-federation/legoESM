@@ -49,6 +49,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round127_een_pair_walk as r127,
 )
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round98_coriolis_residual as r98,
+)
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round120_een_v_fraction_acquisition import (
     check_record as record_gate,
 )
@@ -142,6 +145,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.grids.operators_latlon_cgrid import fold_perm_f, fold_perm_u
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _nemo_een_north_f
     from legoesm.ocean.vertical import compute_layer_thickness, nemo_dynvor_e3f_0vor
@@ -163,6 +167,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "round-120 record is not admitted")
     fraction_oracle, fraction_census = r121.assemble_record(record_root, "none")
     recurrence_oracle, recurrence_census = r119.assemble_record(record_root, "none")
+    accumulator_oracle, accumulator_census = r98.assemble_oracle_accumulators(
+        record_root)
+    coefficient_oracle, coefficient_census = r98.assemble_oracle_coefficients(
+        record_root)
     if plant == "oracle-bit":
         recurrence_oracle = dict(recurrence_oracle)
         changed = np.array(recurrence_oracle["e3u_nw"], copy=True)
@@ -235,8 +243,19 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     north_umask = northern_u_row(
         np.asarray(raw.umask, dtype=np.float64), perm_u,
         source_offset=source_offset, permutation=association_perm)
+    baseline_scales = jax.device_get(jax.jit(
+        lambda value: r98.literal_een_scales(
+            value, source_z, jnp.float64, grid=card.recipe.grid,
+            fold_metric=False))(
+                jnp.asarray(state.eta.data, dtype=jnp.float64)))
+    associated_scales = jax.device_get(jax.jit(
+        lambda value: r98.literal_een_scales(
+            value, source_z, jnp.float64, grid=card.recipe.grid,
+            fold_metric=True))(
+                jnp.asarray(state.eta.data, dtype=jnp.float64)))
 
     rows = {}
+    combined_accumulators = {}
     for path in PATHS:
         baseline_e3u = np.asarray(parts[f"neighbor_e3u_v_{path}"], dtype=np.float64)
         baseline_mask = np.asarray(parts[f"neighbor_mask_v_{path}"], dtype=np.float64)
@@ -260,6 +279,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                 candidate["zpvo"] = np.array(candidate["zpvo"], copy=True)
                 candidate["zpvo"].view(np.uint64)[-1, 30, 0] ^= np.uint64(1)
             scores = _score_rows(candidate, reference, executed)
+            if arm == "combined":
+                combined_accumulators[path] = np.asarray(candidate["after"])
             arm_rows[arm] = {
                 "first_non_bit_item": _first(scores),
                 "scores": scores,
@@ -270,6 +291,24 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             require(observed == expected,
                     f"{path}: baseline {name} census moved: {observed}")
         rows[path] = arm_rows
+
+    scale_and_final = {}
+    for path in PATHS:
+        scale_name = f"scl_v_{path}"
+        final_name = f"ffv_{path}"
+        baseline_scale = np.asarray(baseline_scales[scale_name])
+        associated_scale = np.asarray(associated_scales[scale_name])
+        oracle_scale = np.asarray(accumulator_oracle[scale_name])
+        oracle_final = np.asarray(coefficient_oracle[final_name])
+        candidate_final = np.asarray(jax.device_get(jax.jit(
+            lambda scale, acc: nemo_source_round(scale * acc))(
+                    jnp.asarray(associated_scale),
+                    jnp.asarray(combined_accumulators[path]))))
+        scale_and_final[path] = {
+            "baseline_scale": r109._score(baseline_scale, oracle_scale),
+            "associated_scale": r109._score(associated_scale, oracle_scale),
+            "associated_final": r109._score(candidate_final, oracle_final),
+        }
 
     if plant == "oracle-bit":
         require(rows["nw"]["combined"]["scores"]["e3u"]["bit_unequal"] != 0,
@@ -301,10 +340,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "admission": admission,
         "fraction_record_census": fraction_census,
         "recurrence_record_census": recurrence_census,
+        "accumulator_record_census": accumulator_census,
+        "coefficient_record_census": coefficient_census,
         "card_scope": observed_scope,
         "source_order": list(SOURCE_ORDER),
         "combined_all_rows_exact": combined_exact,
         "paths": rows,
+        "scale_and_final": scale_and_final,
         "worktree": stamp,
     }
 
