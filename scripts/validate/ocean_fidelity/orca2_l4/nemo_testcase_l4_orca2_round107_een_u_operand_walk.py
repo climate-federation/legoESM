@@ -71,7 +71,8 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
                          literal_bottom_loop: bool = False,
                          return_fraction_operands: bool = False,
                          south_ff_copy: bool = False,
-                         south_e3f0_fill=None):
+                         south_e3f0_fill=None,
+                         south_mask_zero: bool = False):
     """Replay compiled dynspg_ts.f90:1231-1280 with one mask choice."""
 
     import jax.numpy as jnp
@@ -80,6 +81,7 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         _nemo_een_south_e3f0,
         _nemo_south_copy_fill,
+        _nemo_south_zero_fill,
     )
     from legoesm.ocean.vertical import nemo_e3f_0vor_from_tmask
 
@@ -149,8 +151,10 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
         if south_e3f0_fill is not None:
             e3f0_south = _nemo_een_south_e3f0(
                 e3f0, jnp.asarray(south_e3f0_fill, dtype=dtype))
+            fmask_south = (_nemo_south_zero_fill(fmask) if south_mask_zero
+                           else shift(fmask, 0, 1))
             south_e3f = b(e3f0_south * b(
-                one + shift(r3f, 0, 1)[..., None] * shift(fmask, 0, 1)))
+                one + shift(r3f, 0, 1)[..., None] * fmask_south))
         q_south = b(ff_south[..., None] / south_e3f)
 
     def triad(a, c, d):
