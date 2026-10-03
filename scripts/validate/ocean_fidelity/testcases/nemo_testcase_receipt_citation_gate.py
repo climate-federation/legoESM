@@ -1301,6 +1301,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 126: complete northern frozen-mask association ------
+    'barotropic_latlon_cgrid.py:1004-1010': [
+        ('# dommsk.f90:232-258 applies the ordinary F-grid lateral boundary before', 1),
+        ('fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])', 1), 7],
     # --- ORCA2 round 125: northeast northern frozen-mask association ------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/dommsk.f90:232-258': [
         ("CALL lbc_lnk( 'dommsk', umask, 'U'", 1),
