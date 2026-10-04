@@ -5752,10 +5752,10 @@ CITATION_MAP = {
         ('pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 2),
         4,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-878': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-876': [
         ('zup = MAX(', 2),
         ('zbetdo(ji,jj,ik) = ( paft(ji,jj,jk) - zdo ) / zneg * zbt', 1),
-        26,
+        24,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),

@@ -47,7 +47,7 @@ the final clean run; neither refused artifact is cited for a scientific value.
 ## Source-ordered target census
 
 The compiled limiter builds the neighbourhood extrema and beta ratios at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-878`, then selects the V-face
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-876`, then selects the V-face
 coefficient from adjacent `zbetup/zbetdo` values at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910-913`.
 
@@ -98,7 +98,7 @@ Verdict: **independent review unavailable in-sandbox**.
 
 1. At V face `(87,159,3)`, expose the two adjacent cells' `zup`, `zdo`,
    `zpos`, `zneg`, `zbt`, `zbetup`, and `zbetdo` in the exact compiled order
-   at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-878`; name the first
+   at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-876`; name the first
    finite-to-non-finite beta operand before changing production code.
 2. Keep the separate global averaged-upstream-flux overflow at `(87,160,5)`
    distinct. It may feed the beta stencil, but that ownership is unmeasured
