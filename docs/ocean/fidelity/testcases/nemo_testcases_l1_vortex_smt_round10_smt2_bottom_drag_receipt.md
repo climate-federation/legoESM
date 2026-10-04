@@ -147,8 +147,10 @@ Every value is stated, none inherited:
 
 The card validator refuses a SMT-2 card that drops the scheme, either
 coefficient, the no-boost/bottom-cell-only trio, or any member of the implicit
-composition; and it refuses ANY OTHER rung that acquires a drag law, because
-those decks resolve `ln_drg_OFF` (`namelist_cfg:114`).  Thirteen card tests
+composition; and — after the reviewer's R-3, which found the guard nested one level too
+deep — it refuses ANY OTHER VORTEX card that acquires a drag law, scheme or
+implicit composition, because every one of those decks resolves `ln_drg_OFF`
+(`namelist_cfg:114`).  Thirteen card tests
 plus six new ones: **19 passed**.
 
 **Geometry identity: 18/18 rows EXACT, 0 ULP**, the round-220 row set including
@@ -223,7 +225,7 @@ zwd(ji,iku) = zwd(ji,iku) - zDt_2 *( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) )
             / (e3u_3d(ji,jj,iku) *(1._wp+r3u(ji,jj,Kaa)*umask(ji,jj,iku)))
 ```
 
-Next operand: the prefactor.  `zDt_2 = rDt*0.5` (`dynzdf.f90:117`) multiplies
+Next operand: the prefactor.  `zDt_2 = rDt*0.5` (`dynzdf.f90:116`) multiplies
 the SUM of the two T-point rates, i.e. `rDt` times their AVERAGE, which is
 exactly what legoESM applies — that operand is NEMO's and is not the owner.
 
@@ -253,8 +255,13 @@ arithmetic predicts a worst-case damping ratio of **0.43278**.  Independently,
 the two ladders give the drag's realised effect on kt=2 `u` as
 `lego(SMT2) - lego(SMT1)` against `NEMO(SMT2) - NEMO(SMT1)`, cell by cell over
 the 272 bottom cells where NEMO's effect exceeds 1e-7: median ratio 0.99471,
-p05 0.70130, **minimum 0.42618**.  Predicted 0.43278 against measured 0.42618 —
-**1.5 %**.  The divisor is the owner, and the probe is not measuring a
+p05 0.70130, **minimum 0.42618 at face (33, 16, 9)**.  The prediction evaluated
+AT THAT SAME FACE is **0.43278**, which is also its minimum over all 3660
+bottom faces — so the two extrema are PAIRED, not two unrelated minima:
+predicted 0.43278 against measured 0.42618 at one cell, **1.5 %**.  Both sides
+are emitted by the one committed probe (`--smt2-residuals/--smt1-residuals`),
+which finds the row by name through the gate's own registry rather than by
+index arithmetic, so the number in this paragraph is re-runnable.  The divisor is the owner, and the probe is not measuring a
 coincidence: on GYRE-zco, whose bottom is flat, it predicts and finds EXACTLY
 zero difference on all 580 bottom faces.
 

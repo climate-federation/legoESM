@@ -103,15 +103,116 @@ def walk(case: str) -> dict:
     return out
 
 
+def measured(case: str, smt2_npz: Path, smt1_npz: Path, kt: int = 2,
+             field: str = "u", floor: float = 1e-7) -> dict:
+    """The REALISED drag ratio, paired FACE BY FACE with the prediction.
+
+    The two ladders start from the SAME recorded entry, so
+    ``lego(SMT2) - lego(SMT1)`` is legoESM's own drag effect and
+    ``oracle(SMT2) - oracle(SMT1)`` is NEMO's, on the same cells.  Their
+    ratio is what the divisor statement predicts.  Both the predicted and
+    the measured minimum are reported WITH THEIR CELL INDEX so the campaign's
+    argmax rule can be applied: a prediction and a measurement that agree in
+    value but sit on different faces are not the same statement.
+    """
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "_traj_gate", here / "nemo_testcase_phase3_trajectory_gate.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    card = build_nemo_testcase_card(case)
+    mask = np.asarray(gate.expected_masks(card)[field])
+    z2, z1 = np.load(smt2_npz), np.load(smt1_npz)
+
+    def row(z, npz_path):
+        """Find the row by NAME, through the registry the gate wrote beside it.
+
+        The npz keys are NOT in the JSON's row order (the gate writes extra
+        arrays between steps), so the row is identified by matching the
+        named row's own ``normalized_max_abs`` -- never by index arithmetic.
+        """
+        reg = json.loads(
+            Path(str(npz_path).replace(".residuals.npz", ".json")).read_text())
+        case_name = reg["case"]
+        want_name = f"{case_name}.kt{kt}.before.{field}"
+        target = next(r["normalized_max_abs"] for st in reg["steps"]
+                      for r in st["rows"] if r["name"] == want_name)
+        n = int(mask.sum())
+        hits = [k[:-len("_residual")] for k in z.files
+                if k.endswith("_residual") and z[k].shape == (n,)
+                and float(np.max(np.abs(z[k]))) == target]
+        if len(hits) != 1:
+            raise SystemExit(
+                f"REFUSE: {want_name} matched {len(hits)} residual arrays")
+        return hits[0]
+
+    k2, k1 = row(z2, smt2_npz), row(z1, smt1_npz)
+
+    def unflat(a):
+        f = np.zeros(mask.shape)
+        f[mask] = a
+        return f
+
+    nemo = unflat(z2[k2 + "_oracle"]) - unflat(z1[k1 + "_oracle"])
+    lego = unflat(z2[k2 + "_candidate"]) - unflat(z1[k1 + "_candidate"])
+
+    e3t = np.asarray(card.recipe.z_coord.h_partial)
+    bl = np.asarray(card.recipe.z_coord.bottom_level)
+    bl_mask = np.where(mask.any(-1), mask.sum(-1) - 1, -1)
+    lev = np.arange(mask.shape[-1])
+    isbot = (lev[None, None, :] == bl_mask[..., None]) & mask
+
+    a = np.minimum(e3t, np.roll(e3t, -1, axis=1))          # NEMO e3u_3d
+    b = 0.5 * (e3t + np.roll(e3t, -1, axis=1))             # legoESM divisor
+    r = RN_CD0 * RN_UC0
+    pred = ((1.0 - 1.0 / (1.0 + RDT_S * r / b))
+            / (1.0 - 1.0 / (1.0 + RDT_S * r / a)))         # per cell
+
+    sel = isbot & (np.abs(nemo) > floor)
+    ratio = np.where(sel, lego / np.where(nemo == 0.0, 1.0, nemo), np.nan)
+    flat = np.argmin(np.where(sel, ratio, np.inf))
+    cell = np.unravel_index(flat, ratio.shape)
+    rr = ratio[sel]
+    return {
+        "kt": kt, "field": field, "floor": floor,
+        "cells_scored": int(sel.sum()),
+        "measured_median": float(np.median(rr)),
+        "measured_p05": float(np.percentile(rr, 5)),
+        "measured_min": float(rr.min()),
+        "measured_min_cell": [int(x) for x in cell],
+        "predicted_at_measured_min_cell": float(pred[cell]),
+        "predicted_min_over_bottom_faces": float(np.min(pred[isbot])),
+        "nemo_effect_max_at_bottom": float(np.max(np.abs(nemo[isbot]))),
+        "nemo_effect_max_above_bottom":
+            float(np.max(np.abs(nemo[mask & ~isbot]))),
+        "lego_effect_max_at_bottom": float(np.max(np.abs(lego[isbot]))),
+        "residual_max_at_bottom":
+            float(np.max(np.abs((lego - nemo)[isbot]))),
+        "residual_max_above_bottom":
+            float(np.max(np.abs((lego - nemo)[mask & ~isbot]))),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", default="VORTEX_SMT2_VEC-zps")
+    ap.add_argument("--smt2-residuals", type=Path)
+    ap.add_argument("--smt1-residuals", type=Path)
     ap.add_argument("--also", nargs="*", default=["GYRE-zco"],
                     help="cards the statement must be inert on")
     ap.add_argument("--output", type=Path)
     args = ap.parse_args()
     res = {"primary": walk(args.case),
            "inert_check": [walk(c) for c in args.also]}
+    if args.smt2_residuals and args.smt1_residuals:
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        res["measured"] = measured(
+            args.case, args.smt2_residuals, args.smt1_residuals)
     text = json.dumps(res, indent=2, sort_keys=True)
     print(text)
     if args.output:

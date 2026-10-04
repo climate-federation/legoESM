@@ -399,6 +399,13 @@ def test_smt2_validator_refuses_a_card_that_drops_a_drag_value():
             bottom_drag_uc0=0.5)), "rn_Uc0"),
         (cfg._replace(zdf_drag_in_matrix=False), "ln_drgimp"),
         (cfg._replace(barotropic_drag_substep=False), "ln_drgimp"),
+        (cfg._replace(zdf_baroclinic_only=False), "ln_drgimp"),
+        (cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_cd0=2.0e-3)), "rn_Cd0"),
+        (cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_bbl_thickness=10.0)), "bottom "),
+        (cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_r=1.0e-4)), "bottom "),
     ):
         with pytest.raises(ValueError, match=match):
             validate_nemo_testcase_card(card._replace(
@@ -417,6 +424,18 @@ def test_smt1_still_refuses_a_drag_law_it_does_not_resolve():
     with pytest.raises(ValueError, match="ln_drg_OFF"):
         validate_nemo_testcase_card(card._replace(
             recipe=card.recipe._replace(model_config=bad)))
+    # Reviewer R-3: the guard must reach the cards OUTSIDE the mini-ladder
+    # too -- they resolve ln_drg_OFF just as hard, and the older
+    # bottom_drag_r test lets a NEMO scheme through at r = 0.
+    for other in ("VORTEX_SMT_VEC-zps", "VORTEX_VEC-zco"):
+        c2 = build_nemo_testcase_card(other)
+        g2 = c2.recipe.model_config
+        with pytest.raises(ValueError, match="ln_drg_OFF"):
+            validate_nemo_testcase_card(c2._replace(
+                recipe=c2.recipe._replace(model_config=g2._replace(
+                    bottom_drag=g2.bottom_drag._replace(
+                        bottom_drag_scheme="nemo_linear"),
+                    zdf_drag_in_matrix=True))))
 
 
 def test_smt2_geometry_and_initial_state_are_the_smt1_ones():

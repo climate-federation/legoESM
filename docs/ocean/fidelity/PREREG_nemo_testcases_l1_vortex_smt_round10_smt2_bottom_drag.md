@@ -23,7 +23,7 @@ different block.  Verified against the compiled `drg_init`, which reads
 `namdrg_bot` for `cd_topbot == 'BOTTOM'`.
 
 Resolved linear coefficient: `rCdU_bot = -rn_Cd0 * rn_Uc0 * ssmask = -4.0e-4 m/s`
-(`zdfdrg.f90:532` `pCd0 = rn_Cd0 * zmsk_boost`, `:259` `pCdU = - pCd0 * rn_Uc0`).
+(`zdfdrg.f90:532` `pCd0 = rn_Cd0 * zmsk_boost`, `:262` `pCdU = - pCd0 * rn_Uc0`).
 
 ## Predictions and falsifiers
 

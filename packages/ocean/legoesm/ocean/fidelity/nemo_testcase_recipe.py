@@ -3095,6 +3095,17 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             raise ValueError(
                 "VORTEX-zco requires ln_traldf_OFF, ln_dynldf_OFF and "
                 "ln_drg_OFF (no lateral diffusion, no bottom drag)")
+        # EVERY VORTEX card but rung SMT-2 resolves ln_drg_OFF
+        # (namelist_cfg:114), so none of them may carry a drag law -- checked
+        # here, outside the rung block, because the older bottom_drag_r test
+        # above passes any NEMO scheme whose legacy rate happens to be zero.
+        if card.case != "VORTEX_SMT2_VEC-zps" and (
+                cfg.bottom_drag.bottom_drag_scheme != "legacy"
+                or cfg.zdf_drag_in_matrix
+                or cfg.barotropic_drag_substep):
+            raise ValueError(
+                f"{card.case} resolves ln_drg_OFF (namelist_cfg:114); "
+                "only rung SMT-2 carries a drag law")
         # Decision 93 rung SMT-1 moves exactly this pair, and the enhanced
         # vertical diffusion that rung 0 runs beside it; every other card on
         # this identity keeps the shipped VORTEX namzdf block.
@@ -3152,10 +3163,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                         "is one composition: the implicit bottom-cell "
                         "diagonal, the baroclinic-only solve and the frozen "
                         "rCdU_bot in the external-mode substeps")
-            elif _bd.bottom_drag_scheme != "legacy" or cfg.zdf_drag_in_matrix:
-                raise ValueError(
-                    f"{card.case} resolves ln_drg_OFF (namelist_cfg:114); "
-                    "only rung SMT-2 carries a drag law")
         elif (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
             raise ValueError(
                 "VORTEX-zco requires rn_avm0=1.0e-4 and rn_avt0=0.0")
