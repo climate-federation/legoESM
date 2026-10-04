@@ -1329,12 +1329,12 @@ CITATION_MAP = {
         'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb),'],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:816-845': [
         ('! 2nd option', 1), ('END DO   ;   END DO', 52), 30],
-    'advection.py:839-866': [
+    'advection.py:839-873': [
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
         'return_limiter_activity: bool = False,', 28],
-    'advection.py:1197-1214': [
+    'advection.py:1225-1242': [
         'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 29), 18],
-    'advection.py:1282-1283': [
+    'advection.py:1310-1311': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],
     # --- ORCA2 round 138: passive FCT beta-operand walk ------------
@@ -1346,19 +1346,19 @@ CITATION_MAP = {
         '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
         'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
-    'advection.py:968-982': [
+    'advection.py:975-990': [
         ('raise ValueError(', 2),
         '"NEMO trace returns require the NEMO RK3 two-step predictor")', 15],
-    'advection.py:1228-1243': [
+    'advection.py:1256-1271': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
-    'advection.py:1245-1250': [
+    'advection.py:1273-1278': [
         'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
         'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 6],
-    'advection.py:1765-1788': [
+    'advection.py:1795-1818': [
         ('if return_nemo_beta_trace:', 5),
         'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
-    'advection.py:1843-1844': [
+    'advection.py:1873-1874': [
         ('if return_nemo_beta_trace:', 6),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
     'ocean_model_latlon_cgrid.py:13190-13205': [
@@ -2164,7 +2164,7 @@ CITATION_MAP = {
         '* rnfmsk(ji,jj) * wmask(ji,jj,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359':
         'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:107-109': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109': [
         ('MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12', 1),
         ('p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
         3,

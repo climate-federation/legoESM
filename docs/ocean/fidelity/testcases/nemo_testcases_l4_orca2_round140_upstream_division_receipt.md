@@ -66,7 +66,7 @@ The instantiated rung-0 card prints `scheme=enhanced_diffusion` and
 `K_conv=100.0 m²/s`. The compiled deck dispatches EVD at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359`. Its tracer arm replaces `avt`
 where the two-time-level N² trigger fires at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:107-109`; the separately guarded
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109`; the separately guarded
 momentum arm is at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121-135`.
 
@@ -97,9 +97,10 @@ DINO and tank integrations were not repeated for this default-off diagnostic.
 
 ## Tests, citations, and review
 
-The default receipt has no `advection.py` citation, so the required
-SequenceMatcher old-to-new audit has zero spans to re-anchor. The round's
-citation gate and focused tests are recorded in the evidence directory.
+The default receipt has no `advection.py` citation. A SequenceMatcher
+old-to-new line map nevertheless re-anchored all eight affected citation-map
+entries and their round-138/139 receipt spans; no rigid shift was used. The
+round's citation gate and focused tests are recorded in the evidence directory.
 
 The required `codex exec --sandbox read-only` review could not initialize:
 `failed to initialize in-process app-server client: Read-only file system`.

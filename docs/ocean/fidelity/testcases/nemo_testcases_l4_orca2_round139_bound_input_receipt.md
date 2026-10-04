@@ -68,9 +68,9 @@ output values, with maximum absolute movement `1.696251e-15`. Those outputs
 are rejected. The admitted construction follows the existing private step-hook
 pattern: it uses separately compiled ordinary outputs and attaches only the
 otherwise-unused trace payload. The payload registry/default-off selector is
-at `advection.py:839-866`, the source-ordered stencil readout is isolated at
-`advection.py:1197-1214`, and only the private return uses it at
-`advection.py:1282-1283`. The final registry, state passivity, ordinary-output,
+at `advection.py:839-873`, the source-ordered stencil readout is isolated at
+`advection.py:1225-1242`, and only the private return uses it at
+`advection.py:1310-1311`. The final registry, state passivity, ordinary-output,
 association, source-order, selected-input, `zup`-link, and payload-separation
 plants each emit `STATUS PLANT-FIRED`.
 
