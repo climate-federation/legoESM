@@ -13,7 +13,7 @@ The ORCA2 stage program dispatches stage 3 to FCT at
 routine then executes, in order:
 
 1. the two-step upstream predictor and averaged low-order fluxes
-   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610`);
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-609`);
 2. centred high-order minus low-order antidiffusive fluxes
    (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266`);
 3. the nonoscillatory limiter

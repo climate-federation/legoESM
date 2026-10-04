@@ -5670,10 +5670,10 @@ CITATION_MAP = {
         ('nn_fct_imp )', 1),
         3,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-609': [
         ('! *** 1st step', 1),
         ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt_b(ji,jj,jk) + zDt * ztra ) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem', 1),
-        116,
+        115,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266': [
         ('!* horizontal anti-diffusive fluxes', 1),
@@ -5685,7 +5685,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:316,743-938': [
         ('CALL nonosc(', 1),
         ('SUBROUTINE nonosc(', 1),
-        ('END SUBROUTINE nonosc', 1),
+        ('END SUBROUTINE nonosc', 2),
         197,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329': [

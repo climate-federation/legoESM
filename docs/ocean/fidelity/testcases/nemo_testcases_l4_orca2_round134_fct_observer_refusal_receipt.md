@@ -25,7 +25,7 @@ The resolved ORCA2 dispatcher takes FCT at
 routine the required source order is:
 
 1. the two-step upstream predictor and low-order fluxes at
-   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610`;
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-609`;
 2. the horizontal and vertical antidiffusive fluxes at
    `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266`;
 3. the limiter call and implementation at
