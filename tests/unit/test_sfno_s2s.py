@@ -925,3 +925,48 @@ def test_coupled_rollout_raises_when_the_slab_returns_nan_sst(tmp_path: Path, mo
             stochastic_config=S2SStochasticConfig(
                 ensemble_members=1, noise_channels=0, use_time_signal=False),
         )
+
+
+class _PassThroughTQModel(eqx.Module):
+    def __call__(self, x, grid):
+        del grid
+        return x[..., :4]   # t, q at 2 levels: no wind channels
+
+
+def _uncoupled(config, model):
+    return coupled_rollout_to_dataset(
+        model,
+        config,
+        sample_index=0,
+        coupled=False,
+        surface_forcing=None,
+        stochastic_config=S2SStochasticConfig(
+            ensemble_members=1, noise_channels=0, use_time_signal=False),
+    )
+
+
+def test_uncoupled_rollout_needs_no_wind_channels(tmp_path: Path):
+    """The fixed-SST control never builds slab forcing, so a t/q-only model runs."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    ds = _uncoupled(config, _PassThroughTQModel())
+    assert ds.sizes["lead_day"] == 2
+    assert np.isfinite(ds["prediction"].values).all()
+
+
+def test_uncoupled_rollout_does_not_step_the_slab(tmp_path: Path, monkeypatch):
+    """A slab that would return NaN must not matter to the fixed-SST control."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
+    real_make_ocean = s2s_coupling.make_ocean
+
+    def _nan_ocean(ocean_config):
+        step = real_make_ocean(ocean_config)
+
+        def poisoned(state, forcing, dt):
+            new_state, sst, a, b = step(state, forcing, dt)
+            return new_state, jnp.full_like(jnp.asarray(sst), jnp.nan), a, b
+        return poisoned
+
+    monkeypatch.setattr(s2s_coupling, "make_ocean", _nan_ocean)
+    ds = _uncoupled(config, _PassThroughCoupledAtmosModel())
+    assert np.isfinite(ds["forcing"].values).all()

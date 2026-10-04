@@ -312,40 +312,41 @@ def coupled_rollout_to_dataset(
             lw_down = np.asarray(surface_forcing["lw_down"].isel(lead_day=day).values, dtype=np.float32)
             sea_ice_cover = np.asarray(surface_forcing["sea_ice_cover"].isel(lead_day=day).values, dtype=np.float32)
 
-        forcing = _build_atm_to_surface(
-            prediction_physical,
-            {"sp": sp, "sw_down": sw_down, "lw_down": lw_down},
-            channel_labels=channel_labels,
-            pressure_levels=data_config.pressure_levels,
-            config=config,
-        )
-        state_new, sst_new, _, _ = ocean_step(ocean_state, forcing, config.dt_seconds)
-        sst_new = np.asarray(sst_new, dtype=np.float32)
-        n_bad = int(np.size(sst_new) - np.isfinite(sst_new).sum())
-        if n_bad:
-            raise FloatingPointError(
-                f"slab ocean returned non-finite SST at {n_bad} cells on lead day {day}; "
-                "refusing to carry the previous SST forward."
-            )
-        if sea_ice_cover is not None:
-            sst_new = np.where(
-                sea_ice_cover >= config.sea_ice_threshold,
-                np.float32(config.ocean.T_freeze),
-                sst_new,
-            )
-        sst_new = _sst_state_from_masked_array(
-            sst_new,
-            ocean_mask,
-            freeze_temperature=config.ocean.T_freeze,
-        )
-        sst_new_physical = _sst_from_ocean_units(sst_new, uses_celsius=sst_uses_celsius)
-        ocean_state = SlabOceanState(
-            T_sfc=state_new.T_sfc.replace(data=jnp.asarray(sst_new, dtype=float)),
-            T_deep=state_new.T_deep,
-        )
-
         next_forcing_physical = np.asarray(target_forcing_physical[day], dtype=np.float32).copy()
         if coupled:
+            # Only the coupled run uses the slab: its forcing, step and NaN check live
+            # here so an uncoupled (fixed-SST) control never builds or steps it.
+            forcing = _build_atm_to_surface(
+                prediction_physical,
+                {"sp": sp, "sw_down": sw_down, "lw_down": lw_down},
+                channel_labels=channel_labels,
+                pressure_levels=data_config.pressure_levels,
+                config=config,
+            )
+            state_new, sst_new, _, _ = ocean_step(ocean_state, forcing, config.dt_seconds)
+            sst_new = np.asarray(sst_new, dtype=np.float32)
+            n_bad = int(np.size(sst_new) - np.isfinite(sst_new).sum())
+            if n_bad:
+                raise FloatingPointError(
+                    f"slab ocean returned non-finite SST at {n_bad} cells on lead day {day}; "
+                    "refusing to carry the previous SST forward."
+                )
+            if sea_ice_cover is not None:
+                sst_new = np.where(
+                    sea_ice_cover >= config.sea_ice_threshold,
+                    np.float32(config.ocean.T_freeze),
+                    sst_new,
+                )
+            sst_new = _sst_state_from_masked_array(
+                sst_new,
+                ocean_mask,
+                freeze_temperature=config.ocean.T_freeze,
+            )
+            sst_new_physical = _sst_from_ocean_units(sst_new, uses_celsius=sst_uses_celsius)
+            ocean_state = SlabOceanState(
+                T_sfc=state_new.T_sfc.replace(data=jnp.asarray(sst_new, dtype=float)),
+                T_deep=state_new.T_deep,
+            )
             next_forcing_physical[..., sst_index] = np.asarray(sst_new_physical, dtype=np.float32)
             sst_output = _masked_output(sst_new_physical, ocean_mask)
         else:
