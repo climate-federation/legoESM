@@ -251,7 +251,7 @@ case "$variant" in
     ;;
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
-  smtflxspgts | smtvecspgts | smtvecrhs)
+  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -350,6 +350,18 @@ case "$variant" in
         ref_name=VORTEX_SMT_R5_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
         tag=round215_smt_flux_spgts
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5_OMIP_L1_P3/spgts ;;
+      # ---- ROUND 216 / VORTEX_SMT round 6 (operator note CC addendum 6).
+      # Round 5's flux substep acquisition never ran (its launcher was edited
+      # while it was executing), so its VORTEX_SMT_R5_OMIP_L1{,_P3} pair is
+      # left exactly where it is and this round builds its OWN pair.  Same
+      # deck, same instrument, new directories and a new evidence root: the
+      # additions-only proof is the step-10 restart against round 3's
+      # ADMITTED flux run.
+      smtflxspgts6)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R6_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round216_smt_flux_spgts
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round6/VORTEX_SMT_R6_OMIP_L1_P3/spgts ;;
       smtvecspgts)
         deck_basename=namelist_cfg_smt_vec_een.patch
         ref_name=VORTEX_SMT_R5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
@@ -372,7 +384,7 @@ case "$variant" in
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtvecspgts or smtvecrhs\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts or smtvecrhs\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -396,7 +408,7 @@ fi
 readonly RHS_INSTRUMENT
 readonly SHIPPED_STP2D=$NEMO_ROOT/src/OCE/stp2d.F90
 if [[ "$variant" == "spgts" || "$variant" == "smtflxspgts" \
-   || "$variant" == "smtvecspgts" ]]; then
+   || "$variant" == "smtflxspgts6" || "$variant" == "smtvecspgts" ]]; then
   SPGTS_INSTRUMENT=$here/dynspg_ts_substep_record.patch
   SPGTS_MODULE=$here/vortex_r12_spgts_terms.F90
   SPGTS_STUBS=$here/vortex_r12_spgts_terms_syntax_stubs.F90
@@ -409,7 +421,7 @@ readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
    || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
-   || "$variant" == "smtvecspgts" ]]; then
+   || "$variant" == "smtflxspgts6" || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
   STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
@@ -703,7 +715,7 @@ fi
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
   flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d \
-  | smtflxr3 | smtflx100dr3 | smtflxspgts)
+  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
   | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs)
