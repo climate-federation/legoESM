@@ -52,8 +52,23 @@ until the operator run ends with `PASS_R141_GROWTH_RECORD`.
 
 ## Validation and review
 
-Citation, focused, full fidelity, and independent-review results are recorded
-after the receipt commit.
+The default citation gate passes 274 citations and the round-142 gate passes
+its one compiled citation, both with zero failures, unmapped citations, or
+map-audit failures. Shifting that compiled citation by two lines makes the
+round gate fail as required.
+
+The unchanged round-141 focused battery passes **11/11**. The required
+`tests/ocean/fidelity -n 12` battery reached 99% and then entered the known
+silent xdist tail with zero live pytest processes; it is **incomplete, not
+PASS**. Four pre-existing reds appeared and reproduced alone: SI3 scalar-math
+source provenance, the certified GYRE spread-floor record's stale harness pin,
+round-35 allow-dirty escape scope, and the worktree-stamp grow-only ratchet.
+The round changes none of their code or records, and no round-142 focused test
+failed. Logs are preserved under the evidence root.
+
+The required `codex exec --sandbox read-only` review could not initialize:
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**.
 
 ## OPEN
 
