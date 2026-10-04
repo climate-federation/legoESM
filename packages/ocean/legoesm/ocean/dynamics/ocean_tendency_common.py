@@ -950,7 +950,9 @@ def bbl_distributed_drag_face_column(
 # coefficient back to the velocity faces (NEMO's dynzdf 2-point average
 # of ``rCdU_bot``).
 
-BOTTOM_DRAG_SCHEMES = ("legacy", "nemo_quadratic", "nemo_loglayer")
+BOTTOM_DRAG_SCHEMES = (
+    "legacy", "nemo_quadratic", "nemo_loglayer", "nemo_linear",
+)
 
 
 def validate_bottom_drag_scheme(scheme: str) -> str:
@@ -1030,6 +1032,7 @@ def nemo_effective_bottom_drag_r(
     z0: float,
     ke0: float,
     von_karman: float,
+    uc0: float | None = None,
 ) -> jnp.ndarray:
     """NEMO non-linear bottom-drag coefficient ``r = Cd·|U|`` at tracer points.
 
@@ -1072,8 +1075,9 @@ def nemo_effective_bottom_drag_r(
         Bottom-cell thickness at the tracer point [m] (used by
         ``nemo_loglayer`` only).
     scheme : str
-        ``"nemo_quadratic"`` (zdfdrg np_non_lin) or ``"nemo_loglayer"``
-        (np_loglayer).  ``"legacy"`` is rejected — callers keep the
+        ``"nemo_quadratic"`` (zdfdrg np_non_lin), ``"nemo_loglayer"``
+        (np_loglayer) or ``"nemo_linear"`` (np_lin, the velocity-independent
+        ``Cd0*Uc0``).  ``"legacy"`` is rejected — callers keep the
         historical MOM6-style path for it and must not route here.
     cd0, cd_max, z0, ke0 : float
         NEMO ``rn_Cd0``, ``rn_Cdmax``, ``rn_z0``, ``rn_ke0`` (ORCA1:
@@ -1089,7 +1093,7 @@ def nemo_effective_bottom_drag_r(
     return nemo_drag_r_from_speed_sq(
         u_bot * u_bot + v_bot * v_bot, h_bot,
         scheme=scheme, cd0=cd0, cd_max=cd_max, z0=z0, ke0=ke0,
-        von_karman=von_karman,
+        von_karman=von_karman, uc0=uc0,
     )
 
 
@@ -1103,6 +1107,7 @@ def nemo_drag_r_from_speed_sq(
     z0: float,
     ke0: float,
     von_karman: float,
+    uc0: float | None = None,
 ) -> jnp.ndarray:
     """Speed-squared form of :func:`nemo_effective_bottom_drag_r`.
 
@@ -1113,6 +1118,24 @@ def nemo_drag_r_from_speed_sq(
     sign convention as the component form (which delegates here).
     """
     validate_bottom_drag_scheme(scheme)
+    if scheme == "nemo_linear":
+        # zdfdrg.F90 np_lin.  drg_init stores the masked coefficient
+        #     pCd0(ji,jj) = rn_Cd0 * zmsk_boost(ji,jj)
+        # and zdf_drg_lin then writes, ONCE and for the whole run,
+        #     pCdU(ji,jj) = - pCd0(ji,jj) * rn_Uc0
+        # (zdfdrg.F90 zdf_drg_lin, CASE( np_lin )).  The rate does not read
+        # the velocity at all, so there is no square root here and
+        # ``l_zdfdrg`` is .FALSE.: NEMO never updates it after init.  The
+        # land masking NEMO carries in ``zmsk_boost`` is applied by the
+        # callers' bottom-level face indicator, which is empty on a face
+        # whose adjacent column is dry.
+        if uc0 is None:
+            raise ValueError(
+                "bottom_drag_scheme='nemo_linear' needs NEMO's rn_Uc0 "
+                "(bottom_drag_uc0); it has no default here because the "
+                "reference velocity is a property of the run's namelist."
+            )
+        return jnp.full_like(jnp.asarray(speed_sq), cd0 * uc0)
     if scheme == "nemo_loglayer":
         cd = nemo_loglayer_cd(
             h_bot, z0=z0, cd_min=cd0, cd_max=cd_max, von_karman=von_karman,

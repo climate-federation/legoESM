@@ -10555,6 +10555,7 @@ class LatLonCGridOceanModel:
             cd_max=float(_cfg_b.bottom_drag.bottom_drag_cdmax),
             z0=float(_cfg_b.bottom_drag.bottom_drag_z0),
             ke0=float(_cfg_b.bottom_drag.bottom_drag_ke0),
+            uc0=float(_cfg_b.bottom_drag.bottom_drag_uc0),
             von_karman=constants.kappa_von_karman,
         )
         from legoesm.ocean.physics.vertical_mixing.tke import (

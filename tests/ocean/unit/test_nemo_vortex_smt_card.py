@@ -229,9 +229,11 @@ def test_smt1_geometry_and_initial_state_are_the_smt0_ones():
 
 def test_smt1_is_vector_only_and_the_rung_dispatch_is_fail_closed():
     with pytest.raises(ValueError, match="mini-ladder rung"):
-        build_vortex_smt_zps_card("vector", "smt2")
+        build_vortex_smt_zps_card("vector", "smt3")
     with pytest.raises(ValueError, match="VECTOR deck only"):
         build_vortex_smt_zps_card("flux", "smt1")
+    with pytest.raises(ValueError, match="VECTOR deck only"):
+        build_vortex_smt_zps_card("flux", "smt2")
 
 
 def test_smt1_validator_refuses_a_card_that_drops_a_rung0_value():
@@ -318,3 +320,113 @@ def test_smt1_stated_evd_is_executed_and_measured_inert_on_this_rung():
     act = _np.asarray(z.is_active)
     wet = act[..., 1:] & act[..., :-1]
     assert float(_np.min(n2[..., :wet.shape[-1]][wet])) > 1.0e-6
+
+
+# --- rung SMT-2 (decision 93): ORCA2 rung 0's linear bottom drag -----------
+
+
+def test_smt2_card_carries_rung0_linear_drag_and_nothing_else():
+    """SMT-2 is SMT-1 plus namdrg, and namdrg alone."""
+    base = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    card = build_nemo_testcase_card("VORTEX_SMT2_VEC-zps")
+    cfg, base_cfg = card.recipe.model_config, base.recipe.model_config
+
+    # rung-0 namelist_cfg:270 ln_lin; namelist_ref:834 rn_Cd0, :835 rn_Uc0
+    assert cfg.bottom_drag.bottom_drag_scheme == "nemo_linear"
+    assert cfg.bottom_drag.bottom_drag_cd0 == 1.0e-3
+    assert cfg.bottom_drag.bottom_drag_uc0 == 0.4
+    # namelist_ref:839 ln_boost = .false., and NEMO drags the bottom cell only
+    assert cfg.bottom_drag.bottom_drag_bbl_thickness == 0.0
+    assert cfg.bottom_drag.bottom_drag_bg_velocity == 0.0
+    assert cfg.bottom_drag.bottom_drag_r == 0.0
+    # namelist_ref:817 ln_drgimp = .true. with ln_dynspg_ts = .true.
+    assert cfg.zdf_drag_in_matrix is True
+    assert cfg.barotropic_drag_substep is True
+    assert cfg.zdf_baroclinic_only is True
+    # SMT-1 resolves ln_drg_OFF and must stay there
+    assert base_cfg.bottom_drag.bottom_drag_scheme == "legacy"
+    assert base_cfg.zdf_drag_in_matrix is False
+    assert base_cfg.barotropic_drag_substep is False
+
+    moved = {name for name in cfg._fields
+             if getattr(cfg, name) != getattr(base_cfg, name)}
+    assert moved == {"bottom_drag", "zdf_drag_in_matrix",
+                     "barotropic_drag_substep"}, moved
+
+
+def test_smt2_linear_rate_is_nemos_constant_and_reads_no_velocity():
+    """zdfdrg np_lin: rCdU_bot = -rn_Cd0*rn_Uc0, the SAME at every speed."""
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        nemo_effective_bottom_drag_r,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT2_VEC-zps")
+    bd = card.recipe.model_config.bottom_drag
+    kw = dict(scheme=bd.bottom_drag_scheme, cd0=bd.bottom_drag_cd0,
+              cd_max=bd.bottom_drag_cdmax, z0=bd.bottom_drag_z0,
+              ke0=bd.bottom_drag_ke0, uc0=bd.bottom_drag_uc0,
+              von_karman=0.4)
+    rest = nemo_effective_bottom_drag_r(
+        jnp.zeros((3, 3)), jnp.zeros((3, 3)), jnp.full((3, 3), 500.0), **kw)
+    fast = nemo_effective_bottom_drag_r(
+        jnp.full((3, 3), 3.0), jnp.full((3, 3), -2.0),
+        jnp.full((3, 3), 17.0), **kw)
+    want = 1.0e-3 * 0.4
+    np.testing.assert_array_equal(np.asarray(rest), np.full((3, 3), want))
+    np.testing.assert_array_equal(np.asarray(fast), np.full((3, 3), want))
+
+
+def test_nemo_linear_refuses_a_missing_reference_velocity():
+    """rn_Uc0 has no default in the law: an unstated one is an error."""
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        nemo_drag_r_from_speed_sq,
+    )
+    with pytest.raises(ValueError, match="rn_Uc0"):
+        nemo_drag_r_from_speed_sq(
+            jnp.zeros((2, 2)), jnp.ones((2, 2)), scheme="nemo_linear",
+            cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3, von_karman=0.4)
+
+
+def test_smt2_validator_refuses_a_card_that_drops_a_drag_value():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        validate_nemo_testcase_card,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT2_VEC-zps")
+    cfg = card.recipe.model_config
+    for bad_cfg, match in (
+        (cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_scheme="nemo_quadratic")), "linear"),
+        (cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_uc0=0.5)), "rn_Uc0"),
+        (cfg._replace(zdf_drag_in_matrix=False), "ln_drgimp"),
+        (cfg._replace(barotropic_drag_substep=False), "ln_drgimp"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_nemo_testcase_card(card._replace(
+                recipe=card.recipe._replace(model_config=bad_cfg)))
+
+
+def test_smt1_still_refuses_a_drag_law_it_does_not_resolve():
+    """ln_drg_OFF on every rung but SMT-2 -- and the gate says so."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        validate_nemo_testcase_card,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    cfg = card.recipe.model_config
+    bad = cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+        bottom_drag_scheme="nemo_linear"))
+    with pytest.raises(ValueError, match="ln_drg_OFF"):
+        validate_nemo_testcase_card(card._replace(
+            recipe=card.recipe._replace(model_config=bad)))
+
+
+def test_smt2_geometry_and_initial_state_are_the_smt1_ones():
+    base = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    card = build_nemo_testcase_card("VORTEX_SMT2_VEC-zps")
+    z0, z1 = base.recipe.z_coord, card.recipe.z_coord
+    for name in ("h_partial", "bottom_level", "is_active"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(z0, name)), np.asarray(getattr(z1, name)))
+    for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(base.recipe.initial_state, name).data),
+            np.asarray(getattr(card.recipe.initial_state, name).data))
