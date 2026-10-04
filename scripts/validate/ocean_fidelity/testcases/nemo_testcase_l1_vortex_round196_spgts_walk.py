@@ -35,6 +35,15 @@ from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
 )
 
 CASE = "VORTEX_VEC-zco"
+# Round 215 / VORTEX_SMT round 5: the SAME walk on the seamount pair.  The
+# routine under test is shared -- dyn_spg_ts is one compiled subroutine and
+# legoESM has one barotropic solve -- so the card is a PARAMETER here rather
+# than a second copy of this file.  Each card names the evidence root its own
+# acquisition wrote; nothing is defaulted across cards.
+SMT_CASES = {
+    "VORTEX_SMT-zps": "VORTEX_SMT_R5_OMIP_L1_P3",
+    "VORTEX_SMT_VEC-zps": "VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3",
+}
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round196/"
     "oracle_spgts_substeps")
@@ -153,7 +162,7 @@ def _lego_plane(values, stagger):
     return values
 
 
-def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
+def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         plant: str | None = None, substeps: int | None = None,
         nemo_entry_forcing: bool = False,
         nemo_entry_velocity: bool = False,
@@ -187,14 +196,14 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
     require(plant is None or plant in valid,
             f"unknown plant {plant!r}; expected one of {valid}")
 
-    card = build_nemo_testcase_card(CASE)
+    card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     masks3 = expected_masks(card)
     masks = {"u": np.asarray(masks3["u"])[..., 0],
              "v": np.asarray(masks3["v"])[..., 0],
              "t": np.asarray(masks3["ssh"], dtype=bool)}
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", CASE,
+    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", case,
                        expect_interior=interior)
     seed = _seed_from_record(card.recipe.initial_state, entry, nlev)
 
@@ -271,7 +280,7 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         nonlocal first
         planted = plant == name
         use = masks[stagger]
-        row = score(f"{CASE}.spgts.j{substep:03d}.{name}", reference,
+        row = score(f"{case}.spgts.j{substep:03d}.{name}", reference,
                     candidate, use, plant=planted)
         active = np.asarray(use, dtype=bool)
         row["cells_unequal"] = int(np.count_nonzero(
@@ -348,7 +357,7 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
 
     bad_scalars = [s for s in scalars if not s["bit_exact"]]
     report = {
-        "case": CASE, "kt": kt, "git_sha": sha, "worktree": tree,
+        "case": case, "kt": kt, "git_sha": sha, "worktree": tree,
         "oracle_root": str(root),
         "record": meta, "bar": BAR,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
@@ -389,7 +398,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
     return report
 
 
-def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
+def conditioning(root: Path, *, case: str = CASE, kt: int = 1,
+                 allow_dirty: bool = False) -> dict:
     """How much does the solve amplify ONE last-bit change at its entry?
 
     A walk that finds every boundary inside the loop at the rounding floor
@@ -412,10 +422,10 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_nemo_testcase_card(CASE)
+    card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", CASE,
+    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", case,
                        expect_interior=interior)
     seed = _seed_from_record(card.recipe.initial_state, entry, nlev)
     masks3 = expected_masks(card)
@@ -466,7 +476,7 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
     first = next((r["max_abs"] for r in rows if r["max_abs"] > 0.0), 0.0)
     final = rows[-1]["max_abs"]
     return {
-        "case": CASE, "kt": kt, "git_sha": sha, "arm": "one_ulp_entry_probe",
+        "case": case, "kt": kt, "git_sha": sha, "arm": "one_ulp_entry_probe",
         "perturbed_faces": int(np.count_nonzero(use)),
         "largest_cell": [int(where[0]), int(where[1]) + 1],
         "perturbation_at_largest_cell": float(
@@ -483,6 +493,10 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--oracle-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--case", default=CASE,
+                        choices=(CASE, *sorted(SMT_CASES)),
+                        help="which card the walk runs; the seamount "
+                             "cards need their own --oracle-root")
     parser.add_argument("--kt", type=int, default=1)
     parser.add_argument("--substeps", type=int, default=None,
                         help="walk only the first N substeps (the whole loop "
@@ -510,7 +524,7 @@ def main(argv=None) -> int:
                              "the per-substep response")
     args = parser.parse_args(argv)
     if args.one_ulp_entry_probe:
-        report = conditioning(args.oracle_root, kt=args.kt,
+        report = conditioning(args.oracle_root, case=args.case, kt=args.kt,
                               allow_dirty=args.allow_dirty)
         if args.output:
             args.output.write_text(
@@ -521,7 +535,8 @@ def main(argv=None) -> int:
         print("amplification:", report["amplification"])
         return 0
     try:
-        report = run(args.oracle_root, kt=args.kt, allow_dirty=args.allow_dirty,
+        report = run(args.oracle_root, case=args.case, kt=args.kt,
+                     allow_dirty=args.allow_dirty,
                      plant=args.plant, substeps=args.substeps,
                      nemo_entry_forcing=args.nemo_entry_forcing,
                      nemo_entry_velocity=args.nemo_entry_velocity,
