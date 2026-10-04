@@ -841,6 +841,12 @@ NEMO_FCT_STENCIL_TRACE_FIELDS = (
     "zbup_north", "zbup_above", "zbup_below",
     "pbef", "paft", "wet", "zup",
 )
+NEMO_FCT_UP1_TRACE_FIELDS = (
+    "first_u_raw", "first_v_raw", "first_w_raw", "first_div",
+    "midpoint", "average_u_raw", "average_v_raw", "average_w_raw",
+    "explicit_ztra", "implicit_ztra", "total_ztra", "base_content",
+    "dt_ztra", "numerator", "after_thickness", "paft",
+)
 
 
 def fct_tracer_advection(
@@ -863,6 +869,7 @@ def fct_tracer_advection(
     return_nemo_trace: bool = False,
     return_nemo_beta_trace: bool = False,
     return_nemo_stencil_trace: bool = False,
+    return_nemo_up1_trace: bool = False,
     return_limiter_activity: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
@@ -969,7 +976,8 @@ def fct_tracer_advection(
             f"Unknown FCT low_order_predictor {low_order_predictor!r}; "
             "expected 'one_step' or 'nemo_rk3_two_step'")
     trace_returns = (
-        return_nemo_trace, return_nemo_beta_trace, return_nemo_stencil_trace)
+        return_nemo_trace, return_nemo_beta_trace, return_nemo_stencil_trace,
+        return_nemo_up1_trace)
     if any(trace_returns):
         if return_nemo_split or return_limiter_activity:
             raise ValueError(
@@ -1055,6 +1063,11 @@ def fct_tracer_advection(
     pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+    if return_nemo_up1_trace:
+        up1_first_u = flux_u_low
+        up1_first_v = flux_v_low
+        up1_first_w = F_vert_low
+        up1_first_div = -(div_h_low + vert_div_low)
     if return_nemo_trace:
         trace_first_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
         trace_first_div = -(div_h_low + vert_div_low)
@@ -1096,6 +1109,14 @@ def fct_tracer_advection(
             F_vert_low_int + w_int * qmid_face)
         F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
         vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+
+    if return_nemo_up1_trace:
+        up1_explicit_ztra = -(div_h_low + vert_div_low)
+        up1_implicit_ztra = -implicit_mass_div
+        up1_total_ztra = up1_explicit_ztra + up1_implicit_ztra
+        up1_base_content = h_base * base
+        up1_dt_ztra = dt * up1_total_ztra
+        up1_numerator = up1_base_content + up1_dt_ztra
 
     if return_nemo_trace:
         trace_average_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
@@ -1162,6 +1183,13 @@ def fct_tracer_advection(
         jnp.maximum(h_new, eps),
         h_new > t_grad_h,
     )
+    if return_nemo_up1_trace:
+        up1_trace = jax.lax.optimization_barrier((
+            up1_first_u, up1_first_v, up1_first_w, up1_first_div,
+            q_mid, flux_u_low, flux_v_low, F_vert_low,
+            up1_explicit_ztra, up1_implicit_ztra, up1_total_ztra,
+            up1_base_content, up1_dt_ztra, up1_numerator, h_new, q_td,
+        ))
 
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
@@ -1281,6 +1309,8 @@ def fct_tracer_advection(
         )
     if return_nemo_stencil_trace:
         return div_h_fct, vert_div_fct, stencil_trace
+    if return_nemo_up1_trace:
+        return div_h_fct, vert_div_fct, up1_trace
     if return_limiter_activity:
         # WRITE-only branch census for the developed-state fidelity walk.
         # A cell is active when a non-zero antidiffusive flux on any incident

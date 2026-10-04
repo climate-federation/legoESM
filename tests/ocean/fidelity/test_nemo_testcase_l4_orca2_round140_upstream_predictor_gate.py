@@ -12,7 +12,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 def _report():
-    rows = [{"field": name, "nonfinite": int(name == "average_u")}
+    rows = [{"field": name, "nonfinite": int(name == "average_u_raw")}
             for name in gate.SOURCE_FIELDS]
     return {
         "claim_label": "independent",
@@ -23,13 +23,15 @@ def _report():
         "source_field_order": list(gate.SOURCE_FIELDS),
         "ordinary_repeat_state_equal": {name: True for name in gate.passive.FIELDS},
         "observer_state_equal": {"T": True, "S": True},
+        "ordinary_fct_outputs_equal": {"horizontal": True, "vertical": True},
+        "raw_paft_equal_stencil": True,
         "returned_first_nonfinite": {
             "field": "T", "index": list(gate.RETURNED_TARGET), "value": "nan"},
         "round139_link": {"cell": list(gate.TARGET),
                           "pbef_nonfinite": False, "paft_nonfinite": True,
                           "paft": "inf"},
         "target_rows": rows,
-        "first_target_nonfinite_field": "average_u",
+        "first_target_nonfinite_field": "average_u_raw",
     }
 
 

@@ -28,6 +28,7 @@ from legoesm.ocean.advection import (
     NEMO_FCT_BETA_TRACE_FIELDS,
     NEMO_FCT_STENCIL_TRACE_FIELDS,
     NEMO_FCT_TRACE_FIELDS,
+    NEMO_FCT_UP1_TRACE_FIELDS,
     _zalesak_signsplit_face_alphas,
     fct_tracer_advection,
 )
@@ -257,6 +258,40 @@ class TestConservation:
         center = NEMO_FCT_STENCIL_TRACE_FIELDS.index("zbup_center")
         assert not np.array_equal(
             np.asarray(planted[center]), np.asarray(trace[center]))
+
+    def test_write_only_nemo_up1_trace_preserves_outputs_and_is_live(
+        self, grid_small, smooth_state,
+    ):
+        from legoesm.grids.latlon import create_latlon_geometry
+
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        cgrid = create_latlon_geometry(
+            grid_small.n_lat, grid_small.n_lon, radius=grid_small.radius)
+
+        def run(u_transport, expose):
+            return fct_tracer_advection(
+                tracer, u_transport, mv, w_half, h_k, cgrid, dt,
+                high_order="centred2", tracer_before=tracer,
+                low_order_predictor="nemo_rk3_two_step",
+                base_thickness=h_k, after_thickness=h_k,
+                return_nemo_up1_trace=expose)
+
+        ordinary = jax.jit(lambda value: run(value, False))(mu)
+        exposed = jax.jit(lambda value: run(value, True))(mu)
+        observed = ordinary[:2] + (exposed[2],)
+        for got, want in zip(observed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        trace = observed[2]
+        assert len(trace) == len(NEMO_FCT_UP1_TRACE_FIELDS)
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in trace)
+
+        planted_mu = np.asarray(mu).copy()
+        planted_mu[0, 0, 0] = np.nextafter(planted_mu[0, 0, 0], np.inf)
+        planted = jax.jit(lambda value: run(value, True))(
+            jnp.asarray(planted_mu))[2]
+        first_u = NEMO_FCT_UP1_TRACE_FIELDS.index("first_u_raw")
+        assert not np.array_equal(
+            np.asarray(planted[first_u]), np.asarray(trace[first_u]))
 
 
 # ---------------------------------------------------------------------------
