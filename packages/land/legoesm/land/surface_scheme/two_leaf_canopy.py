@@ -494,13 +494,10 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (vmap), so this costs nothing.
-    # A pass that did not converge still relaxes the soil boundary, with the
-    # cold-state FALLBACK ground flux below: the same flux the land step closes
-    # and accepts if the column ends unsolved.  Freezing the boundary instead made
-    # a never-converging column repeat passes 0/1 at its start-of-step soil
-    # temperature (desert columns held at ~342 K).  Acceptance stays tied to the
-    # LAST pass.
+    # every column anyway (vmap), so this costs nothing.  A failed pass still
+    # relaxes the soil boundary with its cold-state fallback flux (the one the
+    # land step accepts if the column ends unsolved); freezing it held desert
+    # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)

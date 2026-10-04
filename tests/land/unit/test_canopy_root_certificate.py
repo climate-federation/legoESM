@@ -130,9 +130,10 @@ _COLD_MAX = 300.0
 _WARM_BAD = [330.0, 330.0, 280.0, 280.0, 330.0, 0.01]   # admissible, but "leads astray"
 
 
-def _stub_run(monkeypatch, seed_arr, converge_on_passes=None):
+def _stub_run(monkeypatch, seed_arr, converge_on_passes=None, soil_offset=0.0):
     import legoesm.land.surface_scheme.two_leaf_canopy as tl
     calls = {"n": 0}
+    seen_Ts = []
 
     def fake(x0, bun):
         k = calls["n"]
@@ -143,14 +144,15 @@ def _stub_run(monkeypatch, seed_arr, converge_on_passes=None):
         return (x0, jnp.array(1), ok, z, z, z, z)
 
     def counted(*a, **k):
+        seen_Ts.append(a[1].Ts_bc)
         out = jax.vmap(fake)(*a)
         calls["n"] += 1
         return out
 
     monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
     seen_G = []
-    out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G)
-    return out, seen_G, calls["n"]
+    out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G, soil_offset=soil_offset)
+    return out, seen_G, calls["n"], seen_Ts
 
 
 class _VmapProxy:
@@ -166,7 +168,7 @@ class _VmapProxy:
 
 def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
     seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
-    out, seen_G, n = _stub_run(monkeypatch, seed)
+    out, seen_G, n, _ = _stub_run(monkeypatch, seed)
     assert n == 6
     # pass 0 (warm seed) fails everywhere: the soil sees its finite cold-state
     # fallback flux; pass 1 (cold) converges and the soil sees its root's flux
@@ -177,57 +179,35 @@ def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
     assert bool(jnp.all(out.canopy_x[:, 0] < _COLD_MAX))
 
 
-def _record_boundaries(monkeypatch, converges):
-    """Stand-in solver that converges where ``converges(x0)``; returns the soil
-    boundary each pass was solved at.  The soil callback returns the boundary's
-    start-of-step soil + 5 K, so every relaxation step moves the boundary up by
-    omega * (5 K - accumulated move)."""
-    import legoesm.land.surface_scheme.two_leaf_canopy as tl
-    seen_Ts = []
-
-    def fake(x0, bun):
-        z = jnp.zeros((), x0.dtype)
-        return (x0, jnp.array(1), converges(x0), z, z, z, z)
-
-    def counted(*a, **k):
-        seen_Ts.append(a[1].Ts_bc)
-        return jax.vmap(fake)(*a)
-
-    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
-    seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
-    out = _canopy_call(seed_arr=seed, soil_offset=5.0)
-    return out, seen_Ts
+_SEED = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
 
 
 def test_a_failed_pass_moves_the_soil_boundary_with_its_fallback_flux(monkeypatch):
-    """Pass 0 (warm seed) fails everywhere; it still relaxes the boundary by
-    omega * 5 K, as the converged pass 1 does after it."""
+    """The soil callback returns the start-of-step soil + 5 K.  Pass 0 (warm
+    seed) fails everywhere and still relaxes the boundary by omega * 5 K."""
     from legoesm.land.surface_scheme.two_leaf_canopy import _DEFAULT_PICARD_OMEGA
-    _, seen_Ts = _record_boundaries(monkeypatch, lambda x0: x0[0] < _COLD_MAX)
-    assert len(seen_Ts) >= 3
+    _, _, _, seen_Ts = _stub_run(monkeypatch, _SEED, soil_offset=5.0)
     step0 = seen_Ts[1] - seen_Ts[0]
     assert float(jnp.max(jnp.abs(step0 - _DEFAULT_PICARD_OMEGA * 5.0))) < 1e-4
     assert float(jnp.min(seen_Ts[2] - seen_Ts[1])) > 0.0
 
 
 def test_a_never_converging_column_relaxes_its_boundary(monkeypatch):
-    """No pass converges: the boundary still relaxes toward the soil callback on
-    every pass, instead of staying at the start-of-step soil temperature (the
-    frozen boundary that held desert columns at ~342 K)."""
+    """No pass converges: the boundary still relaxes on every pass instead of
+    staying at the start-of-step soil temperature."""
     from legoesm.land.surface_scheme.two_leaf_canopy import (
         _DEFAULT_N_PICARD, _DEFAULT_PICARD_OMEGA)
-    out, seen_Ts = _record_boundaries(monkeypatch, lambda x0: x0[0] < 0.0)
+    out, _, _, seen_Ts = _stub_run(monkeypatch, _SEED, converge_on_passes=set(),
+                                   soil_offset=5.0)
     assert not bool(jnp.any(out.converged))
-    assert len(seen_Ts) == _DEFAULT_N_PICARD
-    moved = out.Ts_solve - seen_Ts[0]
     expect = 5.0 * (1.0 - (1.0 - _DEFAULT_PICARD_OMEGA) ** _DEFAULT_N_PICARD)
-    assert float(jnp.max(jnp.abs(moved - expect))) < 1e-4
+    assert float(jnp.max(jnp.abs(out.Ts_solve - seen_Ts[0] - expect))) < 1e-4
     assert bool(jnp.all(jnp.isfinite(out.shflx)))
 
 
 def test_acceptance_is_the_last_pass(monkeypatch):
     """Converged on pass 0 only: cached, but the call reports NOT converged."""
-    out, seen_G, _ = _stub_run(monkeypatch, None, converge_on_passes={0})
+    out, seen_G, _, _ = _stub_run(monkeypatch, None, converge_on_passes={0})
     assert not bool(jnp.any(out.converged))
     assert bool(jnp.all(jnp.isfinite(out.canopy_x)))
     # the failed passes after pass 0 still feed the soil a finite fallback flux
