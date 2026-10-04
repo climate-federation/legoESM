@@ -54,8 +54,11 @@ def _evd_flag(card, T, S):
     recipe = card.recipe
     z = recipe.z_coord
     st = recipe.initial_state
-    st = st._replace(T=st.T.replace(data=jnp.asarray(T)),
-                     S=st.S.replace(data=jnp.asarray(S)))
+    # NEMO's record carries jpk = nlev + 1 levels (the last is the closed
+    # bottom NEMO never prognoses); the card carries nlev.  Slice, never pad.
+    nlev = z.n_levels
+    st = st._replace(T=st.T.replace(data=jnp.asarray(T)[..., :nlev]),
+                     S=st.S.replace(data=jnp.asarray(S)[..., :nlev]))
     cc = recipe.model_config.physics.constants
     cfg = recipe.model_config.physics.convection.enhanced_diffusion
     jac = compute_ocean_jacobian(st.eta.data, st.H_bathy.data, z)
@@ -66,7 +69,23 @@ def _evd_flag(card, T, S):
         rho, z.dz_ref, jac, cfg, T=st.T.data, S=st.S.data,
         t_depth=t_depth, w_depth=w_depth, e3w_int=e3w,
         g=cc.g, rho_ref=cc.rho_0)
-    return np.asarray(flag)
+
+    # SECOND ARM, and the one that answers the physical question: the model's
+    # nemo_bn2 branch builds alpha/beta from ``NemoSEOSConfig()`` DEFAULTS --
+    # the DINO coefficient set -- because no recipe threads its own
+    # (enhanced_diffusion.py, the comment above the call).  This deck's S-EOS
+    # is rn_a0 = 0.28 with EVERY other coefficient zero (decision 69), which
+    # is a different fluid.  Score NEMO's own bn2 with the CARD's
+    # coefficients and report both counts; the difference is the measure of
+    # that defaulted-coefficient gap, not a physical result.
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import _VORTEX_SEOS
+    n2_deck = compute_buoyancy_frequency_nemo_bn2(
+        st.T.data, st.S.data, t_depth, w_depth, _VORTEX_SEOS, g=cc.g,
+        eos_form="seos", e3w_int=e3w)
+    wet = np.asarray(z.is_active)[..., 1:] & np.asarray(z.is_active)[..., :-1]
+    n2_deck = np.asarray(n2_deck)
+    return np.asarray(flag), n2_deck, wet
 
 
 def main() -> int:
@@ -89,25 +108,28 @@ def main() -> int:
                  "steps": {}}
     total_fired = 0
     for kt in range(1, args.steps + 1):
-        name = f"oracle_entry_kt{kt:08d}.bin"
+        name = f"oracle_step_entry_kt{kt:08d}.bin"
         a = read_entry(args.smt1 / name, CASE)
         b = read_entry(args.smt0 / name, CASE)
-        flag = _evd_flag(card, a["T"], a["S"])
+        flag, n2_deck, wet = _evd_flag(card, a["T"], a["S"])
         fired = int(np.count_nonzero(flag))
         total_fired += fired
+        n2w = n2_deck[..., :wet.shape[-1]][wet]
+        fired_deck = int(np.count_nonzero(n2w <= EVD_N2_THRESHOLD))
         row = {
             "nan": int(sum(int(np.isnan(a[f]).sum())
                            for f in ("T", "S", "u", "v", "ssh"))),
             "max_abs_ssh_m": float(np.max(np.abs(a["ssh"]))),
             "max_abs_u_m_s": float(np.max(np.abs(a["u"]))),
             "max_abs_T_K": float(np.max(np.abs(a["T"]))),
-            "evd_fired_cells": fired,
+            "evd_fired_cells_model_default_seos": fired,
+            "evd_fired_cells_deck_seos": fired_deck,
+            "min_n2_deck_seos": float(np.min(n2w)),
             "vs_smt0": {f: float(np.max(np.abs(a[f] - b[f])))
                         for f in ("T", "S", "u", "v", "ssh")},
         }
         out["steps"][str(kt)] = row
-    out["evd_fired_cells_total"] = total_fired
-    out["verdict_evd_inert"] = total_fired == 0
+    out["evd_fired_cells_total_model_default_seos"] = total_fired
     text = json.dumps(out, indent=2, sort_keys=True)
     print(text)
     if args.output:
