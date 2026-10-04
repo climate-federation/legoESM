@@ -309,7 +309,9 @@ def _nemo_ordered_solve(
     diagonal: jax.Array,
     upper: jax.Array,
     rhs: jax.Array,
-) -> jax.Array:
+    *,
+    return_trace: bool = False,
+) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
     """NEMO's three source-ordered Thomas recurrences.
 
     Unlike :func:`thomas_solve`, NEMO first eliminates the complete diagonal,
@@ -376,9 +378,12 @@ def _nemo_ordered_solve(
 
     _, reverse_rows = jax.lax.scan(
         reverse_step, terminal, reverse_inputs)
-    return jnp.concatenate(
+    solution = jnp.concatenate(
         [jnp.moveaxis(reverse_rows, 0, -1)[..., ::-1],
          terminal[..., None]], axis=-1)
+    if return_trace:
+        return solution, (eliminated, work)
+    return solution
 
 
 # The three recurrences under a name other modules may import.  It IS
@@ -492,21 +497,27 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
                content_rhs_2 / divisor * wet_f)
         if return_matrix_trace:
             zero = jnp.zeros_like(content_rhs_1)
-            return (*out, (zero, divisor, zero))
+            return (*out, (zero, divisor, zero, divisor, content_rhs_1))
         return out
 
     wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
     lower, diagonal, upper = nemo_tracer_tridiagonal(
         K, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
         dtype=content_rhs_1.dtype)
-    out_1 = nemo_ordered_tridiagonal_solve(
-        lower, diagonal, upper, content_rhs_1) * wet_f
+    if return_matrix_trace:
+        out_1_raw, (eliminated_1, forward_1) = _nemo_ordered_solve(
+            lower, diagonal, upper, content_rhs_1, return_trace=True)
+        out_1 = out_1_raw * wet_f
+    else:
+        out_1 = nemo_ordered_tridiagonal_solve(
+            lower, diagonal, upper, content_rhs_1) * wet_f
     out_2 = nemo_ordered_tridiagonal_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
     if return_matrix_trace:
         # WRITE-only diagnostic: these are the exact arrays consumed by the
         # two production recurrences above, not a second reconstruction.
-        return out_1, out_2, (lower, diagonal, upper)
+        return out_1, out_2, (
+            lower, diagonal, upper, eliminated_1, forward_1)
     return out_1, out_2
 
 

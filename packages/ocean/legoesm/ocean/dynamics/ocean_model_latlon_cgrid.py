@@ -1419,6 +1419,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # left as legoESM's.  Private diagnostic only; ``None`` keeps the live
     # right-hand side.
     stage1_momentum_rhs_override: object = None
+    # Same-graph known-answer control for the override boundary above.  A
+    # callable receives the live ``(u_rhs, v_rhs)`` and returns the pair the
+    # stage update consumes.  The identity callable must reproduce the
+    # ordinary step bit for bit, while a perturbing callable proves the
+    # boundary is live.  This avoids comparing separately compiled hook
+    # programs, whose fusion can legitimately differ in their last bits.
+    # Private fidelity control only; no public card constructs it.
+    stage1_momentum_rhs_transform: object = None
     # WRITE-only stage-3 momentum-RHS gauge.  ``"post_ldf"`` publishes the
     # complete stage-3 Krhs that enters the implicit vertical solve, the
     # operand NEMO hands ``dyn_zdf`` (``stprk3_stg.F90:430``); ``"pre_ldf"``
@@ -1630,6 +1638,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # so Round 124's smaller return graph remains an unchanged fusion control;
     # Round 126 runs both observers from the same ordinary entry state.
     vertical_solve_trace: bool = False
+    # Minimal card-general companion: return only the literal tracer-ZDF
+    # operands and recurrences, paired with an independently compiled ordinary
+    # state.  Unlike ``tracer_process_trace`` this does not require GYRE's
+    # QSR/GM process program, so the unforced ORCA2 hierarchy can observe its
+    # own ``tra_zdf`` boundary without enabling an absent module.
+    tracer_zdf_trace: bool = False
 
 
 def rk3_stage_velocity_update(
@@ -2984,6 +2998,18 @@ class LatLonCGridOceanModel:
                 raise ValueError(f"{_name} must be a bool")
         _stage1_split = (
             self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+        _stage1_rhs_transform = (
+            self._nemo_ws_test_hooks.stage1_momentum_rhs_transform)
+        if (_stage1_rhs_transform is not None
+                and not callable(_stage1_rhs_transform)):
+            raise ValueError(
+                "stage1_momentum_rhs_transform must be callable or None")
+        if (_stage1_rhs_transform is not None
+                and self._nemo_ws_test_hooks.stage1_momentum_rhs_override
+                is not None):
+            raise ValueError(
+                "stage1_momentum_rhs_transform and "
+                "stage1_momentum_rhs_override are mutually exclusive")
         _tr_operand = (
             self._nemo_ws_test_hooks.momentum_transport_stage1_operand)
         if _tr_operand not in _STAGE1_TRANSPORT_OPERAND_ARMS:
@@ -3088,6 +3114,21 @@ class LatLonCGridOceanModel:
                 and _process_trace is None):
             raise ValueError(
                 "vertical_solve_trace requires tracer_process_trace")
+        if not isinstance(self._nemo_ws_test_hooks.tracer_zdf_trace, bool):
+            raise ValueError("tracer_zdf_trace must be bool")
+        if (self._nemo_ws_test_hooks.tracer_zdf_trace
+                and _process_trace is not None):
+            raise ValueError(
+                "tracer_zdf_trace and tracer_process_trace are mutually "
+                "exclusive")
+        if self._nemo_ws_test_hooks.tracer_zdf_trace and (
+                self.config.outer_integrator != "forward_euler"
+                or self.config.tracer_time_integrator != "rk3_ws"
+                or self.config.zdf_implicit_solver_evaluation
+                != "nemo_literal"):
+            raise ValueError(
+                "tracer_zdf_trace requires the forward-Euler WS-RK3 "
+                "NEMO-literal tracer solve")
         if ((self._nemo_ws_test_hooks.tracer_process_branch_activity or self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None)
                 and _process_trace is None):
             raise ValueError(
@@ -5592,6 +5633,7 @@ class LatLonCGridOceanModel:
                    _return_barotropic_substeps: bool = False,
                    _return_live_stage_operands: bool = False,
                    _return_tracer_process_trace: bool = False,
+                   _return_tracer_zdf_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -6396,7 +6438,11 @@ class LatLonCGridOceanModel:
         _nemo_ws_qsr_association = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
-        _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
+        _nemo_ws_vertical_solve_trace = None
+        _return_vertical_solve_trace = (
+            (_return_tracer_process_trace
+             and self._nemo_ws_test_hooks.vertical_solve_trace)
+            or _return_tracer_zdf_trace)
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -8094,6 +8140,11 @@ class LatLonCGridOceanModel:
             if self._nemo_ws_test_hooks.stage1_momentum_rhs_override is not None:
                 _u1_rhs, _v1_rhs = (
                     self._nemo_ws_test_hooks.stage1_momentum_rhs_override)
+            if (self._nemo_ws_test_hooks.stage1_momentum_rhs_transform
+                    is not None):
+                _u1_rhs, _v1_rhs = (
+                    self._nemo_ws_test_hooks.stage1_momentum_rhs_transform(
+                        _u1_rhs, _v1_rhs))
             u1_raw = rk3_stage_velocity_update(
                 u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
@@ -10316,6 +10367,15 @@ class LatLonCGridOceanModel:
                 qsr_association=_nemo_ws_qsr_association,
                 vertical_solve=_nemo_ws_vertical_solve_trace,
                 fct_activity=_nemo_ws_fct_activity, ldf_diagnostics=_nemo_ws_ldf_diagnostics,
+            )
+        if _return_tracer_zdf_trace:
+            if (_nemo_ws_vertical_solve_trace is None
+                    or _nemo_ws_tracer_content_rhs is None):
+                raise ValueError("WS-RK3 tracer ZDF trace is incomplete")
+            return _NEMOWSTracerZDFTrace(
+                state_after=state_new,
+                content_T=_nemo_ws_tracer_content_rhs[0],
+                solve=_nemo_ws_vertical_solve_trace,
             )
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
@@ -12638,8 +12698,8 @@ class LatLonCGridOceanModel:
                                 or _trace_isoneutral_K is None):
                             raise ValueError(
                                 "tracer solve trace missed its K components")
-                        _trace_lower, _trace_diagonal, _trace_upper = (
-                            _trace_matrix)
+                        (_trace_lower, _trace_diagonal, _trace_upper,
+                         _trace_eliminated, _trace_forward) = _trace_matrix
                         _tracer_solve_trace = _NEMOWSTracerSolveTrace(
                             heat_K=_trace_heat_K,
                             isoneutral_K=_trace_isoneutral_K,
@@ -12651,6 +12711,8 @@ class LatLonCGridOceanModel:
                             lower=_trace_lower,
                             diagonal=_trace_diagonal,
                             upper=_trace_upper,
+                            eliminated_T=_trace_eliminated,
+                            forward_T=_trace_forward,
                             solved_T=T_new,
                             viscosity_K=A_v_cell,
                         )
@@ -13112,6 +13174,19 @@ class LatLonCGridOceanModel:
                     _nemo_stage1_zad_eta_after_override=(
                         _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
+            if self._nemo_ws_test_hooks.tracer_zdf_trace:
+                # A larger diagnostic return can change fusion.  The carried
+                # state comes from the ordinary compiled graph; only ``solve``
+                # is read from the trace graph.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
+                return result._replace(state_after=state_after)
             return result
 
     @partial(jax.jit, static_argnums=(0,))
@@ -13198,6 +13273,18 @@ class LatLonCGridOceanModel:
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 _return_tracer_process_trace=True,
+                _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
+        if self._nemo_ws_test_hooks.tracer_zdf_trace:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "tracer_zdf_trace is a private forward_euler WS-RK3 hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_tracer_zdf_trace=True,
                 _vertical_K_test_override=_vertical_K_test_override,
                 _nemo_stage1_zad_eta_after_override=(
                     _nemo_stage1_zad_eta_after_override))
@@ -15797,8 +15884,18 @@ class _NEMOWSTracerSolveTrace(NamedTuple):
     lower: object
     diagonal: object
     upper: object
+    eliminated_T: object
+    forward_T: object
     solved_T: object
     viscosity_K: object
+
+
+class _NEMOWSTracerZDFTrace(NamedTuple):
+    """Private card-general literal tracer-ZDF side output for round 136."""
+
+    state_after: object
+    content_T: object
+    solve: object
 
 
 class _NEMOWSQsrAssociationTrace(NamedTuple):

@@ -307,3 +307,28 @@ def test_the_ordered_sweep_rounds_its_multiply_separately():
         jnp.asarray(lower), jnp.asarray(diagonal),
         jnp.asarray(upper), jnp.asarray(rhs)))
     assert (solved != separate).sum() == 0
+
+
+def test_the_ordered_sweep_trace_is_the_live_recurrence():
+    """The diagnostic publishes the arrays made by the production sweep."""
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _nemo_ordered_solve,
+    )
+
+    lower = jnp.asarray([[0.0, -0.2, -0.3]])
+    diagonal = jnp.asarray([[1.2, 1.4, 1.6]])
+    upper = jnp.asarray([[-0.1, -0.2, 0.0]])
+    rhs = jnp.asarray([[0.5, -0.25, 0.75]])
+    ordinary = _nemo_ordered_solve(lower, diagonal, upper, rhs)
+    observed, (eliminated, forward) = _nemo_ordered_solve(
+        lower, diagonal, upper, rhs, return_trace=True)
+
+    np.testing.assert_array_equal(np.asarray(observed), np.asarray(ordinary))
+    assert eliminated.shape == rhs.shape
+    assert forward.shape == rhs.shape
+    np.testing.assert_array_equal(np.asarray(eliminated[..., :1]),
+                                  np.asarray(diagonal[..., :1]))
+    np.testing.assert_array_equal(np.asarray(forward[..., :1]),
+                                  np.asarray(rhs[..., :1]))
