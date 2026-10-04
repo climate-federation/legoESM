@@ -947,9 +947,11 @@ def _uncoupled(config, model):
 
 def test_uncoupled_rollout_needs_no_wind_channels(tmp_path: Path):
     """The fixed-SST control never builds slab forcing, so a t/q-only model runs."""
-    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q"))   # no u/v: the old head raised here
     ds = _uncoupled(config, _PassThroughTQModel())
     assert ds.sizes["lead_day"] == 2
+    assert ds.sizes["channel"] == 4
     assert np.isfinite(ds["prediction"].values).all()
 
 
