@@ -153,7 +153,7 @@ def measure(deck_root: Path, expect_commit: str,
         passive.TARGET = old_target
 
     previous = json.loads(round136_json.read_text())
-    content_row = previous["rows"]["content_T"]
+    content_row = previous["rows"]["pre_zdf_content"]
     report.update({
         "format": "nemo-testcase-l4-orca2-round137-step36-fct-content-v1",
         "target": list(TARGET),
