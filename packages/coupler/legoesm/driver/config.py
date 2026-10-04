@@ -2777,7 +2777,6 @@ class ExperimentConfig(NamedTuple):
                 # conductance a second time.
                 "land_stomatal_beta": (self.land_stomatal_beta, False),
                 "land_surface_scheme": (self.land_surface_scheme, "two_leaf"),
-                "land_canopy_max_iters": (self.land_canopy_max_iters, 60),
                 "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
                 "multilayer_soil_depth": (self.multilayer_soil_depth,
                                           _grid.total_depth),
@@ -3496,6 +3495,7 @@ class ExperimentConfig(NamedTuple):
                 f"land_soil_init must be one of {_soil_init_modes}, got "
                 f"{self.land_soil_init!r}.")
         if not (isinstance(self.land_canopy_max_iters, int)
+                and not isinstance(self.land_canopy_max_iters, bool)
                 and self.land_canopy_max_iters >= 1):
             raise ValueError(
                 "land_canopy_max_iters (two-leaf canopy solver iteration cap) "

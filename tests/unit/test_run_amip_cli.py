@@ -612,11 +612,24 @@ def test_land_canopy_max_iters_flag_flows_to_config():
         "--dataset", "analytical", "--land-canopy-max-iters", "10",
     ]), parser))
     assert cfg.land_canopy_max_iters == 10
-    for bad in (0, -1, 2.5):
+    for bad in (0, -1, 2.5, True):
         with pytest.raises(ValueError, match="land_canopy_max_iters"):
             cfg._replace(land_canopy_max_iters=bad).validate_strict()
+    # the calibrated decks (land_calibrated_physics) accept any cap: the cap
+    # is a solver setting, not one of the values the tables were fitted under
+    cfg._replace(land_canopy_max_iters=10).validate_strict()
     src = inspect.getsource(ModelDriver._setup_multilayer_land)
     assert "max_iters=int(self.config.land_canopy_max_iters)" in src
+    # ... and the calibration applied right after it must not put 60 back
+    from legoesm.land.config import (
+        MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
+    )
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    base = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=10))
+    cal = apply_biophysics_lmip_two_leaf(base)
+    assert isinstance(cal.surface_scheme, TwoLeafCanopyConfig)
+    assert cal.surface_scheme.max_iters == 10
+    assert cal.surface_scheme.LE_module == TwoLeafCanopyConfig().LE_module
 
 
 def test_land_surface_scheme_flag_flows_to_config():
