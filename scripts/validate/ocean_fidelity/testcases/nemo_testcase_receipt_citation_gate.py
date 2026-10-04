@@ -1343,10 +1343,10 @@ CITATION_MAP = {
         '_u1_rhs, _v1_rhs))', 5],
     'ocean_model_latlon_cgrid.py:10371-10378': [
         'if _return_tracer_zdf_trace:',
-        'solve=_nemo_ws_vertical_solve_trace,', 8],
+        ('solve=_nemo_ws_vertical_solve_trace,', 2), 8],
     'ocean_model_latlon_cgrid.py:13177-13189': [
         ('if self._nemo_ws_test_hooks.tracer_zdf_trace:', 1),
-        'return result._replace(state_after=state_after)', 13],
+        ('return result._replace(state_after=state_after)', 3), 13],
     # --- ORCA2 round 129: split-explicit boundary association walk -------
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
         'IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)',
