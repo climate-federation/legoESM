@@ -511,7 +511,7 @@ including that ORCA2's `traadv_fct.f90` is BYTE-IDENTICAL to the
 seamount's, both 67105 bytes, so the line numbers transfer).  The reviewer
 did not re-run the walk.
 
-**FINAL VERDICT: BLOCK CLEARED, after three passes.**  Finding 1 is
+**FINAL VERDICT: SHIP** (the BLOCK was cleared on the reviewer's third pass).  Finding 1 is
 RETRACTED by the reviewer as the residue's owner and stands only as what
 is registered here: a measured 7-cell, 1-ULP term.  Before clearing it the
 reviewer ran its own control on my measurement — the identity arm's drive
