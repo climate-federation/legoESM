@@ -5666,7 +5666,7 @@ CITATION_MAP = {
         ('CASE ( np_FCT )', 1),
         ('CALL tra_adv_fct ( kt, nit000,', 1),
         ('nn_fct_imp )', 1),
-        4,
+        3,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
