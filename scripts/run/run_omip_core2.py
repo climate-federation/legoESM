@@ -6508,6 +6508,37 @@ class _SurfaceFluxAccumulator:
         return out
 
 
+class _ZdfTrendAccumulator:
+    """Host-side running mean of the implicit vertical-diffusion T tendency.
+
+    The model hands each step's solve change ``(T_new - T_in)/dt`` [degC/s]
+    through ``io_callback`` (NEMO's ``ttrd_zdf``); the snapshot writes the
+    window mean as ``ttrd_zdf_mean``.  Read-only: the state is never touched.
+    """
+
+    def __init__(self):
+        self._sum, self._n, self._total = None, 0, 0
+
+    def __call__(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        self._sum = x.copy() if self._sum is None else self._sum + x
+        self._n += 1
+        self._total += 1
+
+    def drain(self, dt=None):
+        if self._n == 0 and self._total > 0:
+            return {}   # final snapshot right after a drained window
+        if self._n == 0:
+            raise SystemExit(
+                "--trd-accumulate: no vertical-diffusion tendency reached the "
+                "accumulator this window; this lane does not emit it (only the "
+                "prognostic-TKE implicit solve of the lat-lon/tripole step does)")
+        out = {"ttrd_zdf_mean": self._sum / self._n,
+               "ttrd_zdf_n_steps": np.asarray(self._n)}
+        self._sum, self._n = None, 0
+        return out
+
+
 def _mld_now(state, z_coord):
     """MLD at this state, in the THREE-WAY SCORER'S OWN CONVENTION.
 
@@ -6549,6 +6580,8 @@ def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):
         extra.update(_kprofiles(model, state, sf, dt, z_coord) or {})
     if flux_acc is not None:
         extra.update(flux_acc.drain(dt))
+    if getattr(model, "_trd_callback", None) is not None:
+        extra.update(model._trd_callback.drain(dt))
     return extra or None
 
 
@@ -7809,6 +7842,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "instantaneous 00 UTC snapshot against it carries the "
                         "diurnal phase (nino3 SST +0.49 at 00 UTC vs +0.12 "
                         "window-matched, 2026-09-25).")
+    p.add_argument("--trd-accumulate", action="store_true",
+                   help="Tripole only: write the window mean of the implicit "
+                        "vertical-diffusion temperature tendency (NEMO "
+                        "ttrd_zdf, degC/s) into each snapshot as "
+                        "ttrd_zdf_mean. Read-only diagnostic; costs one "
+                        "device-to-host copy of T per step.")
     p.add_argument("--flux-accumulate", action="store_true",
                    help="Accumulate the APPLIED ocean surface heat flux "
                         "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
@@ -8318,6 +8357,9 @@ def main() -> int:
         raise SystemExit("--nemo-een-coriolis with --momentum-rk3 is refused: the "
                          "implicit_cn barotropic solve then steps the barotropic "
                          "Coriolis forward-Euler (unstable rotation).")
+    if args.trd_accumulate and args.grid != "tripole":
+        raise SystemExit("--trd-accumulate is wired on --grid tripole only "
+                         f"(got {args.grid!r}); it would be silently ignored.")
     if args.nemo_een_coriolis and args.grid != "tripole":
         raise SystemExit("--nemo-een-coriolis is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -9013,6 +9055,8 @@ def main() -> int:
                                          False)),
         )
         app_grid_type = "tripole"
+        if args.trd_accumulate:
+            model._trd_callback = _ZdfTrendAccumulator()
     elif args.grid == "cubed_sphere":
         grid, z_coord, model, state, H_bathy = build_cubed_sphere(
             args.nlev, args.H_max, args.mesh, n=args.cube_n,
@@ -10072,6 +10116,7 @@ def main() -> int:
         # forcing it is handed, so enabling it must not make a parent leg's
         # restart un-resumable.
         "flux_accumulate", "mld_accumulate", "state_accumulate",
+        "trd_accumulate",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative

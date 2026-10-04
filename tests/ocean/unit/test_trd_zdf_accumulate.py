@@ -1,0 +1,126 @@
+"""``--trd-accumulate``: the implicit vertical-diffusion T tendency (NEMO
+``ttrd_zdf``) handed from the tripole/lat-lon solve to a host accumulator."""
+from __future__ import annotations
+
+import os
+import sys
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+_N_LAT, _N_LON, _NLEV, _H, _DT = 8, 16, 6, 600.0, 1800.0
+
+
+@pytest.fixture(autouse=True)
+def _fp64():
+    from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
+
+
+def _core2():
+    import scripts.run.run_omip_core2 as core2
+    return core2
+
+
+def _setup():
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star, compute_layer_thickness
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig, SurfaceTracerForcing
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig, TKEConfig
+    grid = create_latlon_grid(_N_LAT, _N_LON)
+    z = create_ocean_z_star(n_levels=_NLEV, H_max=_H)
+    lm = np.ones((_N_LAT, _N_LON)); lm[:2] = 0.0; lm[-2:] = 0.0
+    st = rest_state_latlon_cgrid_ocean(grid, z, land_mask_override=jnp.asarray(lm),
+                                       H_bathy_override=jnp.full((_N_LAT, _N_LON), _H))
+    T = 25.0 - 3.0 * jnp.arange(_NLEV)[None, None, :] * jnp.ones((_N_LAT, _N_LON, 1))
+    st = st._replace(T=st.T.replace(data=T), S=st.S.replace(data=jnp.full_like(T, 35.0)))
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="tke", tke=TKEConfig(prognostic=True)),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None)
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=2.0e4, implicit_vertical_mixing=True, enable_runtime_checks=False,
+        barotropic_solver="rigid_lid", outer_integrator="forward_euler",
+        K_v=1.0e-2, physics=physics)
+    m = LatLonCGridOceanModel(grid, z, cfg)
+    m._ensure_rigid_lid_data(st)
+    tke0 = (jnp.where(lm[..., None] > 0.5, 1.0e-3, 0.0) * jnp.ones((1, 1, _NLEV - 1)))
+    rate = np.zeros((_N_LAT, _N_LON, _NLEV)); rate[:, :, 0] = 1.0e-4 * lm
+    src = SurfaceTracerForcing(
+        dT_dt=Field(data=jnp.asarray(rate), name="dT", dims=("lat", "lon", "level"), units="degC/s"),
+        dS_dt=Field(data=jnp.zeros((_N_LAT, _N_LON, _NLEV)), name="dS",
+                    dims=("lat", "lon", "level"), units="PSU/s"))
+    dz = np.asarray(compute_layer_thickness(st.eta.data, st.H_bathy.data, z))
+    return m, st, tke0, src, rate, lm, dz
+
+
+def test_emitted_tendency_is_the_solve_alone_and_conserves_column_heat():
+    m, st, tke0, src, rate, lm, dz = _setup()
+    got = []
+    out, _ = m._apply_implicit_vertical_mixing(
+        st, _DT, None, tke_old=tke0, return_tke=True,
+        surface_tracer_forcing=src, trd_callback=lambda x: got.append(np.asarray(x)))
+    assert len(got) == 1
+    trd = got[0]
+    T0, T1 = np.asarray(st.T.data), np.asarray(out.T.data)
+    wet = lm > 0.5
+    # The surface source is EXCLUDED: trd = (T1 - (T0 + dt*src)) / dt.
+    np.testing.assert_allclose(trd, (T1 - (T0 + _DT * rate)) / _DT, rtol=0, atol=1e-15)
+    # Zero-flux implicit diffusion conserves each column's heat ...
+    col = (trd * dz).sum(-1)[wet]
+    assert np.abs(col).max() < 1e-12 * np.abs(trd * dz).sum(-1)[wet].max()
+    # ... and is not vacuous: it moves heat, and the total change does not conserve.
+    assert np.abs(trd[wet]).max() > 1e-9
+    total = (((T1 - T0) / _DT) * dz).sum(-1)[wet]
+    assert np.abs(total).min() > 1e3 * np.abs(col).max()
+
+
+def test_callback_is_read_only_and_fires_under_jit():
+    m, st, tke0, src, *_ = _setup()
+    got = []
+    f = lambda s, cb: m._apply_implicit_vertical_mixing(
+        s, _DT, None, tke_old=tke0, return_tke=True, trd_callback=cb)[0].T.data
+    with_cb = jax.jit(lambda s: f(s, lambda x: got.append(np.asarray(x))))(st)
+    without = jax.jit(lambda s: f(s, None))(st)
+    np.testing.assert_array_equal(np.asarray(with_cb), np.asarray(without))
+    assert len(got) == 1 and got[0].shape == st.T.data.shape
+
+
+def test_accumulator_mean_empty_window_and_never_fed():
+    acc = _core2()._ZdfTrendAccumulator()
+    with pytest.raises(SystemExit, match="does not emit"):
+        acc.drain(_DT)
+    acc(np.full((2, 3), 1.0)); acc(np.full((2, 3), 3.0))
+    out = acc.drain(_DT)
+    np.testing.assert_array_equal(out["ttrd_zdf_mean"], np.full((2, 3), 2.0))
+    assert int(out["ttrd_zdf_n_steps"]) == 2
+    assert acc.drain(_DT) == {}
+
+
+def test_non_tripole_grid_is_refused(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "mpas", "--trd-accumulate"])
+    with pytest.raises(SystemExit, match="tripole only"):
+        _core2().main()

@@ -6880,7 +6880,8 @@ class LatLonCGridOceanModel:
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                z_coord=z_coord, config=config, iwm_fields=iwm_fields,
+                trd_callback=getattr(self, "_trd_callback", None))
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
@@ -8189,6 +8190,7 @@ class LatLonCGridOceanModel:
         nemo_aimp_momentum_w_u=None,
         nemo_aimp_momentum_w_v=None,
         z_coord=None, config=None, iwm_fields=None,
+        trd_callback=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -9105,6 +9107,13 @@ class LatLonCGridOceanModel:
                                   else mask_3d > 0.5)
             T_new = jnp.where(_tracer_apply_mask, T_new, state.T.data)
             S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
+            if trd_callback is not None:
+                # Read-only diagnostic: this solve's own temperature change,
+                # NEMO's ttrd_zdf (implicit vertical diffusion incl. the K33
+                # diagonal); handed to a host accumulator, state untouched.
+                from jax.experimental import io_callback
+                io_callback(trd_callback, None, (T_new - T_solve_in) / dt,
+                            ordered=True)
         if do_momentum:
             if _zdf_baroclinic_only:
                 # Re-add the SAME depth mean that was subtracted before the
