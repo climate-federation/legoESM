@@ -252,7 +252,7 @@ case "$variant" in
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
   smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
-  smtflxtra | smtvectra)
+  smtflxtra | smtvectra | smt1vec | smt1vec100d)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -400,10 +400,34 @@ case "$variant" in
         ref_name=VORTEX_SMT_R7_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round218_smt_vec_tracer
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round7/VORTEX_SMT_R7_VEC_R8_OMIP_L1_P3/tracer ;;
+      # ---- ROUND 220 / VORTEX_SMT round 9 -- DECISION 93 (operator note CE),
+      # rung SMT-1 of the seamount mini-ladder.  The SAME seamount vector deck
+      # as smtvecr3, with ONE module's switches moved to ORCA2 rung 0's
+      # values: the background vertical mixing pair and the enhanced vertical
+      # diffusion scheme.  Five namelist lines, each cited to the rung-0 deck
+      # (orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/
+      # namelist_cfg):409 ln_zdfevd, :410 nn_evdm, :411 rn_evd, :417 rn_avm0,
+      # :418 rn_avt0.  Everything else -- geometry, seamount hook, cpp keys,
+      # equation of state, momentum scheme set, barotropic settings -- is
+      # byte-identical to the certified SMT vector deck, and the committed
+      # patch pair makes that diff readable.  New build directories; round 3's
+      # and round 7's are untouched.
+      smt1vec)
+        deck_basename=namelist_cfg_smt1_vec_een.patch
+        ref_name=VORTEX_SMT1_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round220_smt1_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smt1vec100d)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt1_vec_een_100d.patch
+        ref_name=VORTEX_SMT1_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round220_smt1_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/day100 ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra or smtvectra\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec or smt1vec100d\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -440,6 +464,7 @@ readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
    || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
+   || "$variant" == "smt1vec" || "$variant" == "smt1vec100d" \
    || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
@@ -1005,6 +1030,7 @@ if [[ "$reuse_build" -eq 1 ]]; then
     smtvec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtflx100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtvec100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smt1vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
