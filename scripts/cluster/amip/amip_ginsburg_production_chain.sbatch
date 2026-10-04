@@ -128,5 +128,5 @@ if [ "${new_day:-0}" -le "${cur_day:-0}" ]; then
 fi
 
 echo "[chain] $new_day/$TARGET_DAYS days done; submitting the next link."
-sbatch --nodes="$AMIP_NODES" --gres="gpu:${_PER_NODE}" --output="$OUTDIR/slurm_%j.out" \
+sbatch --nodes="$AMIP_NODES" --ntasks="$AMIP_N_GPUS" --ntasks-per-node="${_PER_NODE}" --gres="gpu:${_PER_NODE}" --output="$OUTDIR/slurm_%j.out" \
   --export="ALL,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,AMIP_NODES=$AMIP_NODES,AMIP_N_GPUS=$AMIP_N_GPUS" "$0"
