@@ -126,8 +126,41 @@ in `dino_month.log` and the test outcome below.
 
 ## Tests, review, and citation controls
 
-This section is completed by the final round commit after the sequential test
-batteries and read-only review finish.
+The corrected real-process census printed 0 before each battery.
+
+| control | result |
+|---|---|
+| focused ORCA2 push battery | **138 passed in 1033.79 s** |
+| DINO planted violation | **FIRES** |
+| DINO real CPU month | **PASS**, T3D RMS 2.053801168e-3 K against bar 2.244317642e-3 K |
+| seamount geometry | **GEOMETRY IDENTICAL**, 17/17 rows on both cards |
+| default citation gate | **PASS**, 274 citations, zero failures/unmapped/audit failures |
+| this receipt's citation gate | **PASS**, zero failures and zero unmapped citations |
+| rigid +2 compiled-source citation plant | **FIRES** with `SYMBOL-NOT-AT-LINE` |
+
+The single required `tests/ocean/fidelity -n 12` battery reached 99% and then
+entered the campaign's known silent xdist tail, so it is **incomplete, not
+PASS**. A named rerun exposed seven markers. Six are the established red set
+already recorded by ORCA2 rounds 97-98:
+
+- `test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`;
+- `test_nemo_testcase_l2_gyre_round51_live_operands.py::test_live_trace_and_raw_history_arms_are_private_and_off_by_default`;
+- `test_nemo_testcase_round35_stamp_scope.py::test_every_driver_that_arms_the_escape_scopes_it`;
+- `test_recipe_case_board.py::test_every_oracle_comparison_has_a_row`;
+- `test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree`;
+- `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants`.
+
+The seventh was an incoming stale unit expectation, not a physics failure:
+rounds 204/205 added `base_noadv.{u,v}` and `advtrend.{u,v}` to the committed
+stage-1 walker, while round 200's tuple test still named the older 12 entries.
+The test-only repair adds those four entries in their actual source order; the
+isolated test passes (`isolated_vortex_round200_fixed.log`). No production
+code changes in that repair.
+
+The required separate `codex exec --sandbox read-only` review did not reach
+the diff: `failed to initialize in-process app-server client: Read-only file
+system`. Verdict: **independent review unavailable in-sandbox**
+(`codex_review.log`).
 
 ## OPEN
 
@@ -143,4 +176,3 @@ batteries and read-only review finish.
    branch and climb to rung 1 (+ interior T/S damping).
 4. The rung-7 first non-bit statement remains unattributed beyond runoff being
    ruled out. No rung-7 physics lands until the hierarchy reaches it.
-
