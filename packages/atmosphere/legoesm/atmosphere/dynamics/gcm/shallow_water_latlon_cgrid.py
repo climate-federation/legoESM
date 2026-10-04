@@ -565,7 +565,7 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         ``dt`` is only consumed when ``config.nu_del4 > 0`` (the del-4
         pole stability cap is dt-dependent); when omitted it falls back
         to the constructor ``dt`` so the no-argument
-        ``model.tendencies(state)`` path (e.g. ``DycoreComponent``)
+        ``model.tendencies(state)`` path
         keeps working with the biharmonic enabled.
         """
         if dt is None:

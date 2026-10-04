@@ -40,7 +40,7 @@ dependencies = [
     "legoesm-land~=1.0.0",
     "legoesm-ice~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
-    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
     # (a uv-workspace cycle), unlike the four independent components above.
     "legoesm-coupler~=1.0.0",
