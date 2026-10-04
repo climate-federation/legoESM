@@ -494,10 +494,13 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (vmap), so this costs nothing; for a column that never
-    # converges, its frozen soil boundary makes later passes repeat passes 0/1.
-    # A pass that did not converge must not move the soil boundary either: its
-    # ground flux is not physics.  Acceptance stays tied to the LAST pass.
+    # every column anyway (vmap), so this costs nothing.
+    # A pass that did not converge still relaxes the soil boundary, with the
+    # cold-state FALLBACK ground flux below: the same flux the land step closes
+    # and accepts if the column ends unsolved.  Freezing the boundary instead made
+    # a never-converging column repeat passes 0/1 at its start-of-step soil
+    # temperature (desert columns held at ~342 K).  Acceptance stays tied to the
+    # LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
@@ -517,10 +520,8 @@ def compute_two_leaf_canopy_fluxes(
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
-        Ts_thermal = soil_thermal_fn(jnp.where(converged, G_k, 0.0), dt)
-        Ts_bc_k = jnp.where(converged,
-                            (1.0 - omega) * Ts_bc_k + omega * Ts_thermal,
-                            Ts_bc_k)
+        Ts_thermal = soil_thermal_fn(G_k, dt)
+        Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
     # ---- Converged state ----
     # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].
