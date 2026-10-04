@@ -2035,10 +2035,6 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     "dycore.fv3_duo_column_lane needs "
                     f"dycore.discretization='fv3_duo', got {d.discretization!r}")
-            if d.fv3_duo_windows is not None:
-                errors.append(
-                    "dycore.fv3_duo_column_lane runs on six faces; the window "
-                    "layout is certification rung 7 (drop fv3_duo_windows)")
         if d.fv3_duo_fill and d.discretization != "fv3_duo":
             errors.append(
                 "dycore.fv3_duo_fill is the fv3_duo remap's fillz; got "

@@ -397,6 +397,13 @@ def _pals_local_device_ids() -> list[int]:
     DIFFERENT devices instead of all contending for GPU 0 (the
     fake/contended-GPU row).  Falls back to ``[0]``.
     """
+    if _non_gpu_platform_selected():
+        # JAX_PLATFORMS=cpu on a GPU node: the one CPU device is local id 0
+        # whatever CUDA_VISIBLE_DEVICES says, and the launcher local-rank
+        # vs visible-GPU check below is a GPU-only launch rule (same class
+        # as pin_local_gpu's CPU branch; the 6-rank CPU column parity died
+        # here on a 2-GPU node, job 10201546).
+        return [0]
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     n_visible = len([x for x in cvd.split(",") if x.strip()]) if cvd else 0
     if n_visible == 1:

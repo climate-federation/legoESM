@@ -4790,6 +4790,15 @@ class ModelDriver:
         into a failure — it just leaves reproduce --check without a reference,
         which it reports honestly.
         """
+        # multi-process SPMD: the state may carry non-addressable leaves
+        # (the M7 column lane's native bundle); gather them COLLECTIVELY
+        # on every process BEFORE the root gate, or the root's np
+        # conversion fails (swallowed below) and a gather placed after
+        # the gate would hang the others (codex M7 claim review)
+        state, tracers = self.state, self.tracers
+        if self._is_spmd_multiprocess():
+            state = self._gather_spmd_tree_to_host(state)
+            tracers = self._gather_spmd_tree_to_host(tracers)
         if self._mpi_rank is not None and self._mpi_rank != 0:
             return
         try:
@@ -4803,9 +4812,7 @@ class ModelDriver:
                 return
             # Backend-agnostic digest of the full final state (prognostic state +
             # tracers + carry), so spectral/MPAS layouts are covered too.
-            digest = pytree_state_digest(
-                self.state, self.tracers, self._carry_aux
-            )
+            digest = pytree_state_digest(state, tracers, self._carry_aux)
             record_state_digest(manifest_file, digest)
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
@@ -6353,7 +6360,11 @@ class ModelDriver:
             # keeps flowing through the shared machinery above.
             _col = self._fv3_duo_column_model()
             if _col is not None:
-                _bundle = _col.to_bundle(s)
+                # M7: the native bundle is on the step's layout (face-
+                # sharded / window-stacked, possibly non-addressable);
+                # ONE seam to six host faces -- a collective gather first
+                # under multi-process, so it runs on every process
+                _bundle = self._fv3_duo_host_faces(_col.to_bundle(s))
                 _save.update(self._fv3_duo_flatten_bundle(_bundle))
                 _save.update(self._fv3_duo_checkpoint_stamps(
                     _col.config, step, day, len(_bundle["q"])))
@@ -6366,9 +6377,19 @@ class ModelDriver:
                 _save["fv3duo_hs6"] = self._fv3_duo_column_hs6(_col)
                 _save["fv3duo_tracer_names"] = np.asarray(
                     list(_col.tracer_names))
-            np.savez(ckpt_path, **_save)
-            logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
-            self._save_cmor_accumulator_sidecar(day)
+            # multi-process SPMD (M7 column lane): every process holds the
+            # same host payload; process 0 writes, the others rendezvous
+            # on its success (a root-only exception must not leave them
+            # hanging in the next collective)
+            _err = None
+            if not self._is_spmd_multiprocess() or jax.process_index() == 0:
+                try:
+                    np.savez(ckpt_path, **_save)
+                    logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
+                    self._save_cmor_accumulator_sidecar(day)
+                except Exception as exc:  # noqa: BLE001 - re-raised below
+                    _err = exc
+            self._spmd_barrier_on_root_error(_err)
             return
 
         # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
@@ -7545,6 +7566,11 @@ class ModelDriver:
             f"checkpointing and exiting cleanly for restart.")
         if step != self._last_checkpoint_step:
             ckpt_fn(step, day)
+        if self._is_spmd_multiprocess() and jax.process_index() != 0:
+            # the checkpoint above was the collective part; the
+            # diagnostics/CMOR files are the root's (identical host
+            # accumulators on every process)
+            sys.exit(0)
         self.diagnostics.flush_to_disk(self._output_dir)
         # Write the CMOR tables that the normal end-of-run ``save`` would emit
         # but this ``sys.exit(0)`` never reaches — flushing only COMPLETED
@@ -7877,6 +7903,15 @@ class ModelDriver:
             or (self._voronoi_layout is not None and _world <= 1)
             # Multi-rank Voronoi cell partition: the owned-cell gather (#1517).
             or _is_mpas_cell_partitioned(self)
+            # M7: the FV3 duo column lane under multi-process SPMD -- every
+            # process holds the GLOBAL columns (the model gathers its column
+            # leaves to each host every step), so the serial feed binning
+            # the global field with the global weights is exact on every
+            # process; the files are root-gated (codex diff review
+            # 2026-10-04: the #1545 tripwire fired on this lane).
+            or (self._voronoi_layout is None
+                and self._is_spmd_multiprocess()
+                and self._fv3_duo_column_model() is not None)
         )
         wants_cmip = diag is not None and (
             getattr(diag, "_spatial_monthly", None) is not None
@@ -9524,14 +9559,21 @@ class ModelDriver:
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
             FV3DuoColumnModel,
         )
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-            FV3DuoDynamicsModel,
+        from legoesm.driver.component_factory import (
+            fv3_duo_dynamics_for_layout,
         )
         old = self.model
         old_grid = self.grid
+        # the rebuilt dynamics takes the SAME layout policy the factory
+        # used (face-shard / windows / single device) and the column
+        # model the same positivity knobs: a terrain rebuild that silently
+        # dropped the decomposition or reset the knobs would be a hidden
+        # choice (codex M7 claim review, 2026-10-02)
         self.model = FV3DuoColumnModel(
-            FV3DuoDynamicsModel(grid, old.dyn.config),
-            tracer_names=old.tracer_names)
+            fv3_duo_dynamics_for_layout(self.config, grid, old.dyn.config),
+            tracer_names=old.tracer_names,
+            conservative_tracer_clamp=old.conservative_tracer_clamp,
+            energy_consistent_moisture_clip=old.energy_consistent_moisture_clip)
         # a rebuild changes terrain only: the geometry every setup-time
         # regrid was placed on must be unchanged (asserted, not assumed)
         for k in ("latCell", "lonCell", "areaCell"):
@@ -11311,6 +11353,13 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # the canopy Newton's iteration count, MAX over columns: a
+                # vmapped while_loop runs to the slowest column, so this is
+                # the number that sets the land step's cost (M7 G0)
+                _n_it = getattr(_sfc, "n_iters", None)
+                _n_iter_max = (jnp.max(jnp.asarray(_n_it)).astype(jnp.int32)
+                               if _n_it is not None
+                               else jnp.zeros((), jnp.int32))
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -11326,9 +11375,10 @@ class ModelDriver:
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx))
-                            + (_n_held, _n_held_land))
+                            + (_n_held, _n_held_land, _n_iter_max))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx, _n_held, _n_held_land)
+                        resp.shflx, resp.lhflx, _n_held, _n_held_land,
+                        _n_iter_max)
               return _land_step
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -11918,7 +11968,35 @@ class ModelDriver:
         # flushed after the loop so a partial window is not lost).
         _sed_req_window = None
         from legoesm.forcing.time_utils import daily_forcing_bucket
+        # LEGOESM_PHASE_TIMERS=1: per-phase wall split of the loop (model.step
+        # = dynamics + physics apply, land, everything else = host/diagnostics),
+        # each phase blocked to completion -- a measurement instrument (M7 G0:
+        # the single-rank CAM6 column lane ran 12.8 s/step), off by default
+        _PHASE_TIMERS = os.environ.get("LEGOESM_PHASE_TIMERS") == "1"
+        _phase_t = {"model.step": 0.0, "land": 0.0, "loop": 0.0,
+                    "land_iter_max": 0}
+        _phase_n = 0
+        _loop_t0 = 0.0
+        _PHASE_LOG_EVERY = 24
         for step in range(n_steps_total):
+            if _PHASE_TIMERS:
+                _now = time.perf_counter()
+                if _phase_n:
+                    _phase_t["loop"] += _now - _loop_t0
+                _loop_t0 = _now
+                _phase_n += 1
+                if _phase_n > 1 and (_phase_n - 1) % _PHASE_LOG_EVERY == 0:
+                    _k = _PHASE_LOG_EVERY
+                    logger.info(
+                        "  phase timers (last %d steps, s/step): model.step "
+                        "%.3f  land %.3f  other %.3f  total %.3f  "
+                        "(land canopy Newton max iters %d)", _k,
+                        _phase_t["model.step"] / _k, _phase_t["land"] / _k,
+                        (_phase_t["loop"] - _phase_t["model.step"]
+                         - _phase_t["land"]) / _k, _phase_t["loop"] / _k,
+                        _phase_t["land_iter_max"])
+                    _phase_t = {k: (0 if k == "land_iter_max" else 0.0)
+                                for k in _phase_t}
             # Enter the daily-boundary block also when a coupler segment_callback
             # is present, so the ocean/land still steps even on a coupled run with
             # radiation=none (where _sst_forcing is False) — else coupling would
@@ -12180,9 +12258,13 @@ class ModelDriver:
             else:
                 _pfn = ((physics_fn if _use_rad else physics_fn_norad)
                         if _is_phys_step else physics_fn_held)
+                _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
                 self.state = self.model.step(
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
+                if _PHASE_TIMERS:
+                    jax.block_until_ready(self.state.T.data)
+                    _phase_t["model.step"] += time.perf_counter() - _pt0
                 _phys_state = self.model._phys_state
                 # Budget-ledger accumulation (#1311): the per-step per-column
                 # ledger rides the same eager side-channel as _phys_state.
@@ -12287,12 +12369,19 @@ class ModelDriver:
                                 else _land_step_boot_fn)
                     _land_a2s_sum = None
                     _land_a2s_n = 0
+                    _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step,
-                     _land_n_held_step, _land_n_held_land_step) = _land_fn(
+                     _land_n_held_step, _land_n_held_land_step,
+                     _land_n_iter_max) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    if _PHASE_TIMERS:
+                        jax.block_until_ready(_land_T_skin)
+                        _phase_t["land"] += time.perf_counter() - _pt0
+                        _phase_t["land_iter_max"] = max(
+                            _phase_t["land_iter_max"], int(_land_n_iter_max))
                     # Mirror the land tile's skin and surface humidity onto
                     # the driver, the same way the ice skin above is mirrored:
                     # the CMOR ``tas`` diagnostic runs in a different method and
@@ -13726,6 +13815,8 @@ class ModelDriver:
                 return nan
             return np.array(v, dtype=np.float64)
 
+        if self._is_spmd_multiprocess() and jax.process_index() != 0:
+            return          # identical series on every process; root writes
         np.savez(
             out_dir / "timeseries.npz",
             days=days,

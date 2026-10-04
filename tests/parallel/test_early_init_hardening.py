@@ -78,6 +78,14 @@ def test_pals_local_device_ids(monkeypatch):
     monkeypatch.setenv("PALS_LOCAL_RANKID", "7")
     with pytest.raises(RuntimeError, match="more local ranks"):
         ei._pals_local_device_ids()
+    # ... unless the run selected a NON-GPU platform: JAX_PLATFORMS=cpu on
+    # a 2-GPU node with 3 local ranks is a CPU launch, its one CPU device is
+    # local id 0 (the 6-rank CPU column parity died here, job 10201546).
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    assert ei._pals_local_device_ids() == [0]
+    monkeypatch.delenv("JAX_PLATFORMS")
+    with pytest.raises(RuntimeError, match="more local ranks"):
+        ei._pals_local_device_ids()
 
 
 def test_local_rank_launcher_families(monkeypatch):

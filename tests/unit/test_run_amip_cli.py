@@ -4114,7 +4114,8 @@ def test_fv3_duo_fill_flag_round_trips_and_validates():
 
 def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     """--fv3-duo-column-lane reaches DycoreConfig (default False) and
-    validate_strict refuses it with the window layout."""
+    validate_strict accepts it with the window layout (M7: the column
+    lane runs on the closed lane's layouts)."""
     cfg = _fv3_duo_cfg([])
     assert cfg.dycore.fv3_duo_column_lane is False
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
@@ -4122,8 +4123,8 @@ def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     cfg.validate_strict()
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
                         "--fv3-duo-window-pad", "5"])
-    with pytest.raises(ValueError, match="rung 7"):
-        cfg.validate_strict()
+    cfg.validate_strict()
+    assert cfg.dycore.fv3_duo_windows == 2
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
     cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
     with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):

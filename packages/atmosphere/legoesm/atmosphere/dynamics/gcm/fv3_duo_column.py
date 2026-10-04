@@ -19,7 +19,19 @@ bundle as such a column model:
   pressures rebuilt).  NO additive surface-pressure fixer: FV3 conserves
   dry mass by construction and the layer mass follows the water.
 
-Six faces only; the window (SPMD) layout is certification rung 7.
+Layouts (M7): the model runs on whatever layout its dynamics was built
+for -- six faces on one device, the FACE-sharded bundle (2/3/6 devices,
+``step_out_shardings``) or the WINDOW-stacked bundle (``step_windows``,
+one window per device).  The column numerics are always the six-face
+ones: under windows the bundle is scattered to faces inside the jit
+(``scatter_owned``, the closed lane's Held-Suarez / Kessler window seam),
+the view / increments / positivity run on the faces, and the moved
+leaves are gathered back (``gather_windows``) and pinned to the step
+sharding.  The physics-facing columns stay in FACE order and are pinned
+to one contiguous band per device, so physics is sharded without any
+per-column structure of the driver being permuted.  Multi-process: the
+column leaves the driver holds are gathered to every host each step
+(``process_allgather``); the native bundle stays sharded.
 """
 
 from __future__ import annotations
@@ -158,10 +170,11 @@ class FV3DuoColumnModel:
     def __init__(self, dyn: FV3DuoDynamicsModel, *, tracer_names=None,
                  conservative_tracer_clamp: bool = True,
                  energy_consistent_moisture_clip: bool = False):
-        if dyn.window_layout is not None:
+        if dyn.window_layout is not None and dyn.window_layout.nb == 6:
             raise NotImplementedError(
-                "FV3DuoColumnModel runs on six faces; the window layout is "
-                "certification rung 7")
+                "FV3DuoColumnModel: kt=1 windows stack like six faces, so a "
+                "window bundle could not be told from a face bundle by "
+                "shape; use the face layout (step_spmd_mesh over 6 devices)")
         if not dyn.config.hydrostatic:
             raise NotImplementedError(
                 "FV3DuoColumnModel: the column increments rebuild the "
@@ -224,10 +237,163 @@ class FV3DuoColumnModel:
             p_ref=constants.p_ref, dtype=jnp.float64)
         self._post_fns = {}
         self._last = None      # the column state this model last returned
+        # LEGOESM_PHASE_TIMERS=1: dynamics vs physics+apply wall split, each
+        # blocked to completion (M7 G0 instrument; off by default)
+        import os
+        self._phase_timers = ({"dynamics": 0.0, "physics": 0.0, "n": 0}
+                              if os.environ.get("LEGOESM_PHASE_TIMERS") == "1"
+                              else None)
+        # M7 layout: the dynamics' window layout / step sharding, and the
+        # band sharding of the physics columns (one contiguous face-order
+        # band per device of the step's mesh)
+        self.lay = dyn.window_layout
+        self._sh = dyn.step_out_shardings
+        self._col_sharding = None
+        self._rep_sharding = None
+        mesh = dyn.step_spmd_mesh
+        if mesh is not None:
+            from jax.sharding import NamedSharding, PartitionSpec
+            n_dev = int(np.prod(mesh.devices.shape))
+            if (6 * self.n * self.n) % n_dev:
+                raise ValueError(
+                    f"FV3DuoColumnModel: {6 * self.n * self.n} columns do "
+                    f"not split evenly over the {n_dev} devices of the step "
+                    f"mesh {tuple(mesh.devices.shape)}")
+            self._col_sharding = NamedSharding(
+                mesh, PartitionSpec(tuple(mesh.axis_names)))
+            self._rep_sharding = NamedSharding(mesh, PartitionSpec())
 
     # ------------------------------------------------------------------
     # layouts
     # ------------------------------------------------------------------
+
+    @property
+    def window_layout(self):
+        return self.dyn.window_layout
+
+    @property
+    def step_out_shardings(self):
+        return self.dyn.step_out_shardings
+
+    @property
+    def step_spmd_mesh(self):
+        return self.dyn.step_spmd_mesh
+
+    def to_flat(self, bundle):
+        """Window-stacked -> six-face host bundle (identity on faces)."""
+        return self.dyn.to_flat(bundle)
+
+    def to_windows(self, bundle):
+        return self.dyn.to_windows(bundle)
+
+    @staticmethod
+    def _pin(x, sharding):
+        if sharding is None:
+            return x
+        return jax.lax.with_sharding_constraint(x, sharding)
+
+    def _is_windowed(self, bundle) -> bool:
+        return (self.lay is not None
+                and int(np.shape(bundle["state"]["pt"])[0]) == self.lay.nb)
+
+    def _faces6(self, bundle):
+        """The six-face view of a native bundle for the column numerics:
+        identity on the face layouts; under windows every horizontal
+        leaf of ``state`` / ``press`` / ``q`` scattered from its owner
+        window (``scatter_owned``, inside the jit).  ``omga`` / ``nh``
+        are not read by the column numerics and are left as they are."""
+        if not self._is_windowed(bundle):
+            return bundle
+        from legoesm.grids.fv3_duo_windows import (horizontal_axes,
+                                                   scatter_owned)
+        lay = self.lay
+
+        def conv(a):
+            if (hasattr(a, "ndim")
+                    and horizontal_axes(lay, a.shape, lay.nb) is not None):
+                return scatter_owned(lay, a, jnp)
+            return a
+        return {**bundle,
+                "state": {k: conv(v) for k, v in bundle["state"].items()},
+                "press": {k: conv(v) for k, v in bundle["press"].items()},
+                "q": [conv(v) for v in bundle["q"]]}
+
+    def _rejoin(self, bundle, faces, st, press, q):
+        """The moved leaves back onto the native layout (windows:
+        ``gather_windows``), pinned to the step sharding; a leaf the
+        face numerics returned unchanged (same object) keeps its native
+        array, so nothing is gathered for nothing."""
+        windowed = self._is_windowed(bundle)
+        if windowed:
+            from legoesm.grids.fv3_duo_windows import gather_windows
+
+        def back(native, f_in, f_out):
+            if f_out is f_in:
+                return native
+            out = gather_windows(self.lay, f_out, jnp) if windowed else f_out
+            return self._pin(out, self._sh)
+        return {**bundle,
+                "state": {k: back(bundle["state"][k], faces["state"][k], v)
+                          for k, v in st.items()},
+                "press": {k: back(bundle["press"][k], faces["press"][k], v)
+                          for k, v in press.items()},
+                "q": [back(bundle["q"][i], faces["q"][i], v)
+                      for i, v in enumerate(q)]}
+
+    def _place(self, bundle):
+        """A HOST six-face bundle (fresh IC, restart) onto the native
+        layout: windows through ``dyn.to_windows`` (host gather, then
+        ``make_array_from_callback`` on the window sharding); the face
+        sharding through the same callback idiom the driver's multi-
+        process reshard uses (every process holds identical host data).
+        A bundle already on the layout passes through."""
+        if self.lay is not None:
+            return bundle if self._is_windowed(bundle) else self.to_windows(bundle)
+        sh = self._sh
+        if sh is None:
+            return bundle
+
+        def put(a):
+            if not (hasattr(a, "ndim") and a.ndim >= 3 and a.shape[0] == 6):
+                return a
+            if isinstance(a, jax.core.Tracer):
+                return a            # inside a jit: placement is XLA's
+            if isinstance(a, jax.Array) and (
+                    not a.is_fully_addressable
+                    or a.sharding.is_equivalent_to(sh, a.ndim)):
+                return a
+            h = np.asarray(a)
+            return jax.make_array_from_callback(
+                h.shape, sh, lambda idx, h=h: h[idx])
+        return {**bundle,
+                "state": {k: put(v) for k, v in bundle["state"].items()},
+                "press": {k: put(v) for k, v in bundle["press"].items()},
+                "q": [put(v) for v in bundle["q"]],
+                **({"omga": put(bundle["omga"])} if "omga" in bundle else {})}
+
+    @staticmethod
+    def _to_host(tree):
+        """Every non-fully-addressable leaf (multi-process) gathered to a
+        process-local replicated array (the driver's
+        ``_gather_spmd_tree_to_host`` idiom) so the MPAS lane's host
+        touchpoints see whole columns; everything else passes through."""
+        def leaf(x):
+            if isinstance(x, jax.Array) and not x.is_fully_addressable:
+                from jax.experimental import multihost_utils as mhu
+                return jnp.asarray(np.asarray(mhu.process_allgather(
+                    x, tiled=True)))
+            return x
+        return jax.tree_util.tree_map(leaf, tree)
+
+    def _host_state(self, state):
+        """The column leaves of *state* on the host (the native bundle
+        stays sharded)."""
+        if self._sh is None:
+            return state
+        return state._replace(
+            u=self._to_host(state.u), v=self._to_host(state.v),
+            T=self._to_host(state.T), p_s=self._to_host(state.p_s),
+            tracers=self._to_host(state.tracers))
 
     def _columns(self, a6):
         """``(6, n, n[, km])`` compute window -> ``(6*n*n[, km])``."""
@@ -248,14 +414,22 @@ class FV3DuoColumnModel:
     def column_view(self, bundle):
         """The physics-facing columns of a native bundle (and the D-wind
         view the increments need): ``(state, view)``."""
-        view = column_view_sixface_jax(bundle["state"], self._tab, self._amat6,
+        state, view, _ = self._view3(bundle)
+        return state, view
+
+    def _view3(self, bundle):
+        """``(state, view, faces)``: the columns, the D-wind view and the
+        six-face bundle both were computed on (the increments' input)."""
+        faces = self._faces6(bundle)
+        view = column_view_sixface_jax(faces["state"], self._tab, self._amat6,
                                        n=self.n, ng=self.ng, km=self.km)
         ci = slice(self.ng, self.ng + self.n)
         _, _, ua6, va6 = view
-        cols = lambda a: jnp.reshape(a[:, ci, ci],  # noqa: E731
-                                     (self.mesh.nCells,) + a.shape[3:])
+        cols = lambda a: self._pin(jnp.reshape(  # noqa: E731
+            a[:, ci, ci], (self.mesh.nCells,) + a.shape[3:]),
+            self._col_sharding)
         fld = lambda a, nm, un: Field(data=a, name=nm, units=un)  # noqa: E731
-        q = bundle["q"]
+        q = faces["q"]
         if len(q) < len(self.tracer_names):
             raise ValueError(
                 f"FV3DuoColumnModel: {len(self.tracer_names)} tracer names "
@@ -265,11 +439,11 @@ class FV3DuoColumnModel:
                    for i, nm in enumerate(self.tracer_names)}
         state = FV3DuoColumnState(
             u=fld(cols(ua6), "u", "m/s"), v=fld(cols(va6), "v", "m/s"),
-            T=fld(cols(bundle["state"]["pt"]), "T", "K"),
-            p_s=fld(cols(bundle["press"]["ps"]), "p_s", "Pa"),
+            T=fld(cols(faces["state"]["pt"]), "T", "K"),
+            p_s=fld(cols(faces["press"]["ps"]), "p_s", "Pa"),
             phis=fld(jnp.asarray(self._phis), "phis", "m^2/s^2"),
             tracers=tracers, native=bundle)
-        return state, view
+        return state, view, faces
 
     @property
     def zvir(self) -> float:
@@ -283,11 +457,16 @@ class FV3DuoColumnModel:
         return self._native_of(state)
 
     def from_bundle(self, bundle):
+        """The column state of a bundle: a HOST six-face bundle (IC,
+        restart) is placed on the native layout first; the step's own
+        output passes through.  The column leaves are host-visible on
+        every process (``_host_state``)."""
+        bundle = self._place(bundle)
         fn = self._post_fns.get("view")
         if fn is None:
-            fn = jax.jit(lambda b: self.column_view(b)[0])
+            fn = jax.jit(lambda b: self._view3(b)[0])
             self._post_fns["view"] = fn
-        self._last = fn(bundle)
+        self._last = self._host_state(fn(bundle))
         return self._last
 
     def _native_of(self, state):
@@ -314,12 +493,8 @@ class FV3DuoColumnModel:
         bundle = state.native
         if state.T is last.T and state.tracers is last.tracers:
             return bundle
-        ci = slice(self.ng, self.ng + self.n)
-        st = dict(bundle["state"])
-        if state.T is not last.T:
-            st["pt"] = jnp.asarray(bundle["state"]["pt"]).at[:, ci, ci].set(
-                self._faces(state.T.data))
-        q = list(bundle["q"])
+        T = state.T.data if state.T is not last.T else None
+        q_cols = {nm: None for nm in self.tracer_names}
         if state.tracers is not last.tracers:
             # key SET, not order: a jitted output dict comes back with
             # its keys sorted (pytree flattening), the driver copies it
@@ -327,11 +502,30 @@ class FV3DuoColumnModel:
                 raise ValueError(
                     f"FV3DuoColumnModel.step: tracers {tuple(state.tracers)} "
                     f"!= the model's {self.tracer_names}")
-            for i, nm in enumerate(self.tracer_names):
+            for nm in self.tracer_names:
                 if state.tracers[nm] is not last.tracers[nm]:
-                    q[i] = jnp.asarray(q[i]).at[:, ci, ci].set(
-                        self._faces(state.tracers[nm].data))
-        return {**bundle, "state": st, "q": q}
+                    q_cols[nm] = state.tracers[nm].data
+        fn = self._post_fns.get("writeback")
+        if fn is None:
+            fn = jax.jit(self._write_back)
+            self._post_fns["writeback"] = fn
+        return fn(bundle, T, q_cols)
+
+    def _write_back(self, bundle, T, q_cols):
+        """The driver's column edits (``T`` / tracers, ``None`` = not
+        edited) set into the compute window of the six faces and
+        rejoined to the native layout."""
+        ci = slice(self.ng, self.ng + self.n)
+        faces = self._faces6(bundle)
+        st = dict(faces["state"])
+        if T is not None:
+            st["pt"] = jnp.asarray(st["pt"]).at[:, ci, ci].set(self._faces(T))
+        q = list(faces["q"])
+        for i, nm in enumerate(self.tracer_names):
+            if q_cols.get(nm) is not None:
+                q[i] = jnp.asarray(q[i]).at[:, ci, ci].set(
+                    self._faces(q_cols[nm]))
+        return self._rejoin(bundle, faces, st, faces["press"], q)
 
     # ------------------------------------------------------------------
     # the MPAS lane's step contract
@@ -346,12 +540,24 @@ class FV3DuoColumnModel:
         FV3 conserves dry mass by construction."""
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="FV3DuoColumnModel.step()")
+        timers = self._phase_timers
+        if timers is not None:
+            import time
+            t0 = time.perf_counter()
         bundle = self.dyn.step(self._native_of(state), dt)
+        if timers is not None:
+            jax.block_until_ready(bundle["state"]["pt"])
+            t1 = time.perf_counter()
+            timers["dynamics"] += t1 - t0
         if physics_fn is None:
             fn = self._post_fns.get(None)
             if fn is None:
-                fn = jax.jit(lambda b: {**b, "q": self._positivity(
-                    b["state"], list(b["q"]))})
+                def _pos(b):
+                    f = self._faces6(b)
+                    return self._rejoin(b, f, f["state"], f["press"],
+                                        self._positivity(f["state"],
+                                                         list(f["q"])))
+                fn = jax.jit(_pos)
                 self._post_fns[None] = fn
             return self.from_bundle(fn(bundle))
         fn = self._post_fns.get(physics_fn)
@@ -361,6 +567,20 @@ class FV3DuoColumnModel:
             self._post_fns[physics_fn] = fn
         state_new, phys_out, sfc_diag = fn(bundle, float(dt), forcing,
                                            phys_state)
+        if timers is not None:
+            jax.block_until_ready(state_new.T.data)
+            timers["physics"] += time.perf_counter() - t1
+            timers["n"] += 1
+            if timers["n"] % 24 == 0:        # after THIS step's two samples
+                import logging
+                logging.getLogger(__name__).info(
+                    "  column phase timers (last 24 steps, s/step): dynamics "
+                    "%.3f  physics+apply %.3f", timers["dynamics"] / 24,
+                    timers["physics"] / 24)
+                timers["dynamics"] = timers["physics"] = 0.0
+        state_new = self._host_state(state_new)
+        phys_out = self._to_host(phys_out)
+        sfc_diag = self._to_host(sfc_diag)
         self._last = state_new
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
@@ -394,9 +614,18 @@ class FV3DuoColumnModel:
         from legoesm.core.conservation import (
             apply_water_positivity, cell_mass_weight)
         ci = slice(self.ng, self.ng + self.n)
-        dp_w = cell_mass_weight(st["delp"][:, ci, ci, :],
-                                self._faces(self.mesh.areaCell))
-        tr_w = {nm: q[i][:, ci, ci, :]
+        # the global residual redistribution and its any() gate reduce
+        # over every cell: pinned REPLICATED so every device reduces the
+        # same full arrays (identical result on every device, so the gate
+        # cannot disagree across devices -- both reviewers 2026-10-02: a
+        # re-partitioned sum could flip it).  Replication is a PLACEMENT
+        # guarantee, not a reduction-order one; parity with one device is
+        # measured (test_fv3_duo_column_spmd: 1e-11 of peak).
+        rep = self._rep_sharding
+        dp_w = self._pin(cell_mass_weight(st["delp"][:, ci, ci, :],
+                                          self._faces(self.mesh.areaCell)),
+                         rep)
+        tr_w = {nm: self._pin(q[i][:, ci, ci, :], rep)
                 for i, nm in enumerate(self.tracer_names)}
         fixed, _ = apply_water_positivity(
             tr_w, None, dp_w, conservative=self.conservative_tracer_clamp,
@@ -407,7 +636,7 @@ class FV3DuoColumnModel:
 
     def _physics_and_apply(self, bundle, dt, physics_fn, forcing, phys_state):
         from legoesm.core.state import MPAS_SFC_DIAG_EXTRA_KEYS
-        cols, view = self.column_view(bundle)
+        cols, view, faces = self._view3(bundle)
         pr = physics_fn(cols, self.mesh, self.sigma_coord,
                         phys_state=phys_state, forcing=forcing)
         tend, phys_out = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
@@ -441,12 +670,12 @@ class FV3DuoColumnModel:
                 "the DRY deck (FV3DuoConfig.moist=False ignores humidity in "
                 "the dycore); run the moist deck")
         st, press, q = apply_column_increments_sixface_jax(
-            bundle["state"], bundle["press"], list(bundle["q"]), view,
+            faces["state"], faces["press"], list(faces["q"]), view,
             self._tab, self._wv6, u_dt_c, v_dt_c, t_dt_c, q_dt_c, dt=dt,
             n=self.n, ng=self.ng, km=self.km, ptop=self.dyn.ptop,
             akap=FV3_KAPPA, moist_cp=self.config.moist, nwat=self.nwat)
         q = self._positivity(st, q)
-        new_bundle = {**bundle, "state": st, "press": press, "q": q}
+        new_bundle = self._rejoin(bundle, faces, st, press, q)
         sfc = (getattr(tend, "sw_net_sfc", None),
                getattr(tend, "lw_net_sfc", None),
                getattr(tend, "precip", None)) + tuple(
