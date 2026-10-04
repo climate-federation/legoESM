@@ -1194,6 +1194,21 @@ class BarotropicConfig(NamedTuple):
     # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
     # thickness and its separately associated reciprocal describe one state.
     barotropic_seed_evaluation: str = "generic"
+    # How the SLOW FORCING is depth-averaged onto the barotropic faces --
+    # NEMO's ``Ue_rhs``/``Ve_rhs`` (``stp2d.F90:177-186``).
+    # ``min_rule_live`` (DEFAULT, main's behaviour): the per-level minimum of
+    # the two neighbouring LIVE (ssh-stretched) T thicknesses, divided by
+    # their own column sum.  On a full-step mesh the two columns share one
+    # reference ladder, so that minimum is the reference face thickness times
+    # a single per-face scalar which cancels against the divisor.
+    # ``nemo_literal``: NEMO's own statement, which carries no stretching at
+    # all -- the REFERENCE face thickness ``e3u_0`` (the min of the two
+    # neighbouring REFERENCE thicknesses, ``domain.F90``/``zgr_zps``) times
+    # the stored reciprocal ``r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)``
+    # (``domain.F90``), with ``hu_0 = SUM_k e3u_0*umask``.  The two disagree
+    # only where the per-level minimum can follow a DIFFERENT column than the
+    # reference minimum does, i.e. over PARTIAL CELLS.  Unknown value raises.
+    barotropic_slow_forcing_depth_evaluation: str = "min_rule_live"
     # Does this card CARRY NEMO's prognostic external mode (``uu_b``/``vv_b``,
     # NEMO ``oce.F90:39,99``) as model state, so the barotropic window seeds
     # from it (``dynspg_ts.F90:484-500``) instead of re-reducing the 3-D

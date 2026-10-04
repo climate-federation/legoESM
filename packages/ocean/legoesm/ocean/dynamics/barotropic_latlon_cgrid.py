@@ -1387,7 +1387,8 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      z_coord=None,
                                      pre=None,
                                      return_pre=False,
-                                     scheme="een"):
+                                     scheme="een",
+                                     barotropic_velocity=None):
     """Pre-step EEN barotropic Coriolis ``(cor_u, cor_v)`` for the live split.
 
     NEMO ``dynspg_ts.F90:296-300`` subtracts ``dyn_cor_2D(puu_b, pvv_b)`` — the
@@ -1417,8 +1418,20 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
             eta=eta,
             z_coord=z_coord,
             scheme=scheme)
-    U_bar, V_bar = _depth_average_to_faces(
-        u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
+    if barotropic_velocity is not None:
+        # NEMO hands dyn_cor_2D the CARRIED external mode, puu_b(:,:,Kmm)
+        # (dynspg_ts.f90:292) -- the very array the substep loop is seeded
+        # from (dynspg_ts.F90:484-500) -- and forms it ONCE, by the
+        # reference-thickness depth mean at istate.f90:149-152 (kt = nit000)
+        # and dynatf_qco.f90:220-231 thereafter.  Re-reducing the 3-D
+        # velocity here with a different face-thickness rule than the seed
+        # gives a DIFFERENT barotropic velocity to the two halves of one
+        # cancellation; on a full-cell mesh the two rules agree and on
+        # partial cells they do not.
+        U_bar, V_bar = barotropic_velocity
+    else:
+        U_bar, V_bar = _depth_average_to_faces(
+            u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
     if scheme == "ene":
         cor_u, cor_v = ene_barotropic_coriolis(U_bar, V_bar, pre)
     else:

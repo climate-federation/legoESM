@@ -2584,6 +2584,13 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
                              else "vortex_vector_een_c2"),
         tke_langmuir_evaluation=None,
     )
+    # stp2d.F90:177-186 depth-averages the slow forcing with the REFERENCE
+    # face thickness and the stored reciprocal, not with the live min-rule
+    # thickness; the two differ only over partial cells (round 213).  Stated
+    # on the card, explicitly, because it is a statement choice.
+    model_config = model_config._replace(
+        barotropic=model_config.barotropic._replace(
+            barotropic_slow_forcing_depth_evaluation="nemo_literal"))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
