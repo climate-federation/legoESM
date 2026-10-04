@@ -172,10 +172,15 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--records-root", type=Path, required=True)
     p.add_argument("--json", type=Path)
+    # The mini-ladder's rungs (decision 93) live under their own round
+    # directory, so a run that scores one card cannot share a records root
+    # with the others.  Default: every case, exactly as before.
+    p.add_argument("--case", choices=tuple(CASES), action="append")
     a = p.parse_args()
     out = {}
     ok = True
-    for case, build in CASES.items():
+    selected = {c: CASES[c] for c in (a.case or list(CASES))}
+    for case, build in selected.items():
         res = compare(case, a.records_root / build / "kt1_10")
         out[case] = res
         ok = ok and res["all_bit_identical"]
