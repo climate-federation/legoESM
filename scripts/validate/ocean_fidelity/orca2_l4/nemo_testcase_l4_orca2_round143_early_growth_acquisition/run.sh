@@ -128,7 +128,7 @@ for name in stprk3 traadv; do
 done
 printf 'SYNTAX_PROOF_PASS l4_r143_growth.f90 stprk3.f90 traadv.f90\n'
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND141_GROWTH_PREFLIGHT_READY %s\n' "$TARGET_RUN"
+  printf 'ORCA2_ROUND143_EARLY_GROWTH_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
 fi
 
