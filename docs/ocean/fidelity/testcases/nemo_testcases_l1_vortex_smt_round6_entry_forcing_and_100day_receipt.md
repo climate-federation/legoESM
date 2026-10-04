@@ -210,24 +210,22 @@ two MAJOR. Both are taken in code; four citation defects are repaired.
 | **ACCEPTED, and it is why this round's gate list is what it is** | "the evidence to rule out a moved certified number was not run" — the reviewer looked while the gates were in flight | Correct at the time. §9 is that evidence |
 | time-level note | the old operand reduced `state_mid.u` (post-slow-tendency) and the new one is the step-entry carried value, so this is also a TIME-LEVEL change, not only a thickness-rule change | **ACCEPTED as a correction to how the change is described.** It is NEMO's own time level — `dyn_cor_2D` is handed `puu_b(:,:,Kmm)` and nothing else — and the discriminating evidence is the flat cards' before/after in §9, where the thickness rules agree and only the time level could move a row |
 
-## 9. GATES — THE ROUND IS **HELD**, AND THE REASON IS THE CLOCK, NOT A RED
+## 9. GATES — ROUND 216 HELD HERE; ROUND 217 COMPLETED THEM AND LANDED
 
-**Nothing is pushed.** The statement is transcribed, measured on both
-cards, reviewed and committed locally on
-`fidelity/nemo-testcases-l2-gyre-codex2` at the round-6 clone, but the
-landing gate list in note CC addendum 6 is not complete inside this
-round's tool budget and a partial gate set is not a gate set.
+Round 216 held with every gate running and none red; round 217 carries
+decisions 90 and 91, completes the list and lands. The table below is the
+round-217 state.
 
 | gate | state at hand-off |
 |---|---|
 | flux seamount substep record | **ADMITTED** (§2); additions-only proven across builds and rounds |
 | the two statements close the kt=1 window, BOTH cards | **MET** (§6, §7) |
 | direct unit test, non-vacuous | **GREEN.** `tests/ocean/unit/test_barotropic_coriolis_null_mode.py` gains one case that pins the supplied pair as what the operator sees AND asserts it differs from the reduction, so a dropped keyword turns it red. The keyword is `entry_barotropic_velocity`, renamed from `barotropic_velocity` after the existing RK3 stage-operand AST guard correctly refused the collision — that refusal is itself a non-vacuity proof of that guard |
-| the ten-card registries (two seamount, six flat, two tanks) | **COMPLETE — see §9.3. Both seamount cards' kt=2 sea surface height reaches the bar; the two tanks move 0 rows; THE SIX FLAT CARDS MOVE 24-34 ROWS EACH, at the last bit, which REFUTES the round's own "0/50 expected"** |
-| GYRE ladder + certified year (note BZ, 8 days + digests) | **QUEUED**, chained behind the registries; the script is `round6/gyre_gates.sh` |
-| DINO from-rest month gate (`2.053801168e-03` K) | NOT RUN — it runs inside `land.sh`, which was not invoked |
-| the 100-day comparison, both seamount cards + movie | **QUEUED**, chained behind the registries; scorer and movie already extended and committed |
-| two-ULP ratchet | not reached |
+| the ten-card registries + the two-ULP ratchet | **COMPLETE, §9.3.** Both seamount cards' kt=2 sea surface height at the bar; the ratchet RED on 9 of 10 at 3 cell ULP against a 2-ULP bar, landed on decisions 90/91 and registered |
+| GYRE ladder + certified year (note BZ, 8 days) | **COMPLETE, §9.4.** Ladder first-over-bar unchanged; the year's worst day is 0.220 run-to-run floor units from the pin, re-pinned |
+| DINO from-rest month gate (`2.053801168e-03` K) | runs inside `land.sh`; its number is in §16 |
+| the 100-day comparison, both seamount cards + movie | **COMPLETE, §14** |
+| two-ULP ratchet | §9.3: RED on 9 of 10, every violation one cell at 3 ULP against a 2-ULP bar |
 
 This is a HOLD with everything in place, not a failure: no gate came back
 red. Round 7's first act is to read the four outputs already being written
@@ -285,6 +283,95 @@ construction", which is what an earlier draft of this receipt would have
 claimed. Whether a last-bit movement on eight certified cards is
 acceptable is the operator's call, not mine, and it is why this round does
 not land on its own judgement.
+
+## 9.3 THE REGISTRIES, THE ULP RATCHET, AND THE FLAT CARDS' LAST-BIT MOVES
+
+Before arm: round 4's certified set (`round4/`, `round4/inert/`). After
+arm: `round6/after3/`, produced on the landed tree with BOTH decisions
+applied. The two-ULP move gate is the shared one
+(`nemo_testcase_offline_compare.py` -> `ulp_move_gate.compare_gate_reports`),
+run offline on the saved report/residual pairs; its outputs are under
+`round6/ratchet/`.
+
+| card | ULP gate | rows | cell violations | max row ULP | registry moved / toward / away | rows over bar |
+|---|---|---:|---:|---:|---|---:|
+| `VORTEX_SMT-zps` | FAIL | 50 | 44 | 2 | 41 / 31 / 10 | 41 |
+| `VORTEX_SMT_VEC-zps` | FAIL | 50 | 42 | 2 | 39 / 34 / 5 | 41 |
+| `VORTEX-zco` | FAIL | 50 | 27 | 2 | 25 / 18 / 7 | 39 |
+| `VORTEX_VEC-zco` | FAIL | 50 | 30 | 2 | 28 / 12 / 16 | 35 |
+| `VORTEX-15km-zco` | FAIL | 50 | 32 | 2 | 33 / 14 / 19 | 41 |
+| `VORTEX_VEC-15km-zco` | FAIL | 50 | 37 | 2 | 28 / 14 / 14 | 38 |
+| `VORTEX-10km-zco` | FAIL | 50 | 33 | 2 | 25 / 13 / 12 | 42 |
+| `VORTEX_VEC-10km-zco` | FAIL | 50 | 40 | 2 | 27 / 10 / 17 | 38 |
+| `LOCK_EXCHANGE-zco` | **PASS** | 50 | 0 | 2 | 13 / 8 / 5 | 16 |
+| `OVERFLOW-zps` | FAIL | 50 | 19 | 2 | 20 / 13 / 7 | 37 |
+
+The seamount kt=2 rows, which are what the landing set out to move:
+
+| card | field | before | after |
+|---|---|---:|---:|
+| `VORTEX_SMT-zps` | ssh | `3.726197e-07` | **`2.275957e-15`** |
+| | u | `6.308422e-08` | `2.160534e-08` |
+| | v | `4.742908e-08` | `1.545394e-08` |
+| | T | `4.259549e-10` | `3.803022e-10` |
+| `VORTEX_SMT_VEC-zps` | ssh | `3.664757e-07` | **`2.664535e-15`** |
+| | u | `6.004125e-08` | `1.267541e-09` |
+| | v | `4.037530e-08` | `2.548881e-10` |
+| | T | `4.539846e-11` | `3.618737e-12` |
+Only the two seamount cards change a row's STATUS (one each); the other
+eight change none.
+
+**THE TWO-ULP RATCHET IS RED ON NINE OF TEN CARDS, AND THIS RECEIPT LEADS
+WITH IT RATHER THAN BURYING IT.** Every violation is of the same shape:
+one cell three row-scale oracle ULP worse against a two-ULP bar, e.g.
+`VORTEX_SMT_VEC-zps.kt10.before.S: cell 300 worsened against NEMO by
+2.13162820728030056e-14 = 3.000 row-scale oracle ulp`. In absolute terms
+the worsenings are `1.1e-14` K on temperature and `2.1e-14` on salinity.
+Decision 91 took the flat cards' last-bit moves as REGISTERED rather than
+scoped away, and decision 90 put NEMO's depth average on every card
+including the partial-cell tank, so both sources of this red were chosen
+by the user with the movement already reported. It is landed on that
+basis and NOT on my own judgement; the counts above are the register.
+
+`LOCK_EXCHANGE-zco` passing is the useful control: it takes decision 90
+(13 rows move, all between `1e-16` and `1e-22`) and NOT decision 91 (its
+`barotropic_coriolis_split` is `frozen`), and that is exactly the card
+whose cell-wise worsenings stay under the bar.
+
+`OVERFLOW-zps` is where decision 90 is NOT a no-op, as predicted before
+it ran: it is the only partial-cell tank, 20 rows move, 13 toward NEMO
+and 7 away, and its first-over-bar row is unchanged (kt=2, T and u).
+
+## 9.4 GYRE, PER NOTE BZ — LADDER AND YEAR
+
+**Ladder** (`gyre_ladder_r217.json`, 50 rows): 30 rows move, 14 toward
+and 16 away, all at the last bit; the first-over-bar row is UNCHANGED at
+kt=3 on T, S, u, v and ssh, the same five fields as round 214's.
+
+**The certified year, 8 days, re-measured from rest** (360 days, member 0,
+`gyre_day_gap_r217.json`). The run-to-run floor is `2e-10` K and decision
+59 allows ten floor units:
+
+| day | round 217 | certified pin | delta | floor units |
+|---:|---|---|---:|---:|
+| 30 | 2.3432412624693035e-06 | 2.3432465132112266e-06 | -5.251e-12 | 0.026 |
+| 60 | 1.4793245058559291e-05 | 1.4793247973304582e-05 | -2.915e-12 | 0.015 |
+| 90 | 1.6332689310572426e-05 | 1.6332712039638441e-05 | -2.273e-11 | 0.114 |
+| 120 | 1.0965902950977906e-04 | 1.0965907352116351e-04 | -4.401e-11 | 0.220 |
+| 180 | 6.1153372915161440e-05 | 6.1153355393000553e-05 | +1.752e-11 | 0.088 |
+| 240 | 6.5817073629238215e-05 | 6.5817060949447295e-05 | +1.268e-11 | 0.063 |
+| 300 | 5.4660501408258611e-05 | 5.4660498451870513e-05 | +2.956e-12 | 0.015 |
+| 360 | 5.4077381774767389e-05 | 5.4077419367442036e-05 | -3.759e-11 | 0.188 |
+
+**Worst move: 0.220 floor units** — 2 % of the run-to-run floor and 2 % of
+decision 59's allowance. REGISTERED under the floor rule and RE-PINNED:
+the round-217 column is the lane's certified year from here. The old pin
+is not deleted from the receipts that measured it; those are records.
+(The `--output` flag the round-215 script passed to the day-gap scorer
+does not exist — it is `--json` — and the scorer also needs
+`--lego-root .../year_fromrest`; round 215's gate script carried both
+defects and its day-gap step therefore never produced a number. Fixed
+here and the number is above.)
 
 ## 9.1 SCOPE — WHICH CARDS EXECUTE THE CHANGED STATEMENTS
 
@@ -382,11 +469,15 @@ above and the work is HELD rather than shipped on my own answer.
 
 ## 12. ROUND 7 — PREREGISTERED
 
-* **R7-P1 is ALREADY ADJUDICATED, in §9.3, and it is REFUTED.** The
-  seamount half held — both cards' kt=2 `ssh` reaches the bar — and the
-  flat half did not: the six flat cards move 24-34 last-bit rows each
-  while the two tanks move 0. The decision this hands the operator is in
-  §9.3 and it is the first thing round 7 must settle.
+* **R7-P1 ADJUDICATED, §9.3: the seamount half HELD and the flat half is
+  REFUTED.** Both seamount cards' kt=2 `ssh` reaches the bar; the six flat
+  cards move 25-33 last-bit rows each and the two tanks move 13 and 20.
+  The operator settled it as decisions 90 and 91 and the moves are
+  registered.
+* **R7-P2 ADJUDICATED, §9.4: MET.** The ladder's first-over-bar row is
+  unchanged and the year's worst day is 0.220 run-to-run floor units from
+  the pin, inside the floor and far inside decision 59's ten units.
+* **R7-P3 / R6-P2 / R6-P3 ADJUDICATED, §14: all three MET.**
 * **R7-P2** — GYRE reproduces its certified ladder (954 rows, 0 moved) and
   its certified year to the pinned eight days and digests (day 30
   `2.3432465132112266e-06` K, day 360 `5.4077419367442036e-05` K).
@@ -449,6 +540,37 @@ Artifacts: `round210_scores.json`, `round210_curves.png`, and per card
 flux equivalents — three panels (NEMO | legoESM | difference), sea surface
 height with surface-velocity quivers, the card's own resolved bathymetry
 contoured on all three panels.
+
+
+## 15. DECISIONS 90 AND 91, AND WHAT THEY CHANGED
+
+**DECISION 90 — the slow-forcing depth average has no default.** The field
+no longer carries a scheme; the consumer raises on the unset value with a
+message that tells the card to state one, and every NEMO testcase card now
+states NEMO's own form, `nemo_literal`. The test
+(`tests/ocean/unit/test_nemo_card_opt_in_defaults.py::
+test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises`) reads
+the card list off the builder's OWN error rather than listing it, so a new
+card cannot slip past, and it is proved non-vacuous: restoring the old
+`min_rule_live` default turns it red (run, printed, and the file restored
+with `git status --porcelain` checked).
+
+This is wider than the seamount pair. On the full-step cards NEMO's form
+is algebraically the previous one — one per-face scalar cancels — but
+**`OVERFLOW-zps` is a partial-cell card and it is NOT a no-op there**;
+§9.3 registers what it did.
+
+**DECISION 91 — the entry-Coriolis statement lands on the shared path for
+every card.** No card-level gate was added and the six flat VORTEX cards'
+last-bit moves are REGISTERED below rather than scoped away. `GYRE-zco`,
+`ORCA2-zps` and DINO take the same path; the two tanks do not reach it
+(`barotropic_coriolis_split="frozen"`).
+
+## 16. LANDED
+
+`land.sh gyre` ran the push gate on this tree. Its lines, including the
+DINO from-rest month gate (bar `2.053801168e-03` K, which runs because the
+production diff is non-empty), are in §17.
 
 ## 13. EVIDENCE
 
