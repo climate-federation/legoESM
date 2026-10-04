@@ -1318,6 +1318,17 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 139: passive FCT bound-input walk ------------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:816-845': [
+        ('! 2nd option', 1), ('END DO   ;   END DO', 52), 30],
+    'advection.py:839-866': [
+        'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
+        'return_limiter_activity: bool = False,', 28],
+    'advection.py:1197-1214': [
+        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 29), 18],
+    'advection.py:1282-1283': [
+        ('if return_nemo_stencil_trace:', 2),
+        'return div_h_fct, vert_div_fct, stencil_trace', 2],
     # --- ORCA2 round 138: passive FCT beta-operand walk ------------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:800-845': [
         '!        !==  set slices and compute zbup/zbdo  ==!',
@@ -1327,19 +1338,19 @@ CITATION_MAP = {
         '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
         'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
-    'advection.py:958-970': [
+    'advection.py:968-982': [
         ('raise ValueError(', 2),
-        '"NEMO trace returns require the NEMO RK3 two-step predictor")', 13],
-    'advection.py:1206-1221': [
+        '"NEMO trace returns require the NEMO RK3 two-step predictor")', 15],
+    'advection.py:1228-1243': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
-    'advection.py:1223-1228': [
+    'advection.py:1245-1250': [
         'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
         'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 6],
-    'advection.py:1741-1764': [
+    'advection.py:1765-1788': [
         ('if return_nemo_beta_trace:', 5),
         'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
-    'advection.py:1819-1820': [
+    'advection.py:1843-1844': [
         ('if return_nemo_beta_trace:', 6),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
     'ocean_model_latlon_cgrid.py:13190-13205': [

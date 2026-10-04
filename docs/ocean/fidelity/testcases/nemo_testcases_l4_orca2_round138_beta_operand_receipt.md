@@ -58,12 +58,12 @@ owner: round 139 must split the seven `zbup` inputs at the north cell and then
 the selected input's `pbef`/`paft` pair.
 
 The trace implementation is default-off and mutually exclusive with the
-existing diagnostics at `advection.py:958-970`. Its duplicated beta arithmetic
-is protected from the live limiter graph at `advection.py:1206-1221`; the live
+existing diagnostics at `advection.py:968-982`. Its duplicated beta arithmetic
+is protected from the live limiter graph at `advection.py:1228-1243`; the live
 production fluxes still use the original coefficients at
-`advection.py:1223-1228`. The source-aligned readout is assembled only in the
-private branch at `advection.py:1741-1764`, and its return is gated at
-`advection.py:1819-1820`. The model pairs the private FCT payload with an
+`advection.py:1245-1250`. The source-aligned readout is assembled only in the
+private branch at `advection.py:1765-1788`, and its return is gated at
+`advection.py:1843-1844`. The model pairs the private FCT payload with an
 independently compiled ordinary state at
 `ocean_model_latlon_cgrid.py:13190-13205`.
 

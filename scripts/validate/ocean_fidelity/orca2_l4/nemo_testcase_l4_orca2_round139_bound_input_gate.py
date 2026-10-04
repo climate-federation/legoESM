@@ -42,7 +42,7 @@ TRACE_FIELDS = tuple(f"zbup_{name}" for name in STENCIL_NAMES) + (
     "pbef", "paft", "wet", "zup")
 PLANTS = (
     "none", "registry", "passivity", "outputs", "association",
-    "source-order", "selected-input", "zup-link",
+    "source-order", "selected-input", "zup-link", "payload-separation",
 )
 
 
@@ -76,6 +76,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         report["selected_sources"]["bound_reproduced"] = False
     elif plant == "zup-link":
         report["zup_link"]["beta_zup_target_equal"] = False
+    elif plant == "payload-separation":
+        report["trace_payload_separate"] = False
 
     require(report.get("claim_label") == "independent"
             and report.get("initial_mode") == "card_own_state",
