@@ -251,7 +251,7 @@ case "$variant" in
     ;;
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
-  smtflxspgts | smtvecspgts)
+  smtflxspgts | smtvecspgts | smtvecrhs)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -355,10 +355,22 @@ case "$variant" in
         ref_name=VORTEX_SMT_R5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round215_smt_vec_spgts
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3/spgts ;;
+      # The barotropic substep walk (round 215) names the loop-entry
+      # depth-averaged slow forcing as the first non-bit operand, and NEMO's
+      # own depth-average statement (stp2d.f90:176-178) accounts for only
+      # part of it -- the rest is inside the 3-D right-hand side that
+      # statement averages (hpg, ldf, vor, wzv, keg, zad; stp2d.f90:134-170).
+      # No seamount record carries those per-term boundaries; this variant is
+      # round 4's stp2d per-term writer on the seamount vector deck.
+      smtvecrhs)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R5R_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round215_smt_vec_rhs
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5R_VEC_R8_OMIP_L1_P3/rhs ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts or smtvecspgts\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtvecspgts or smtvecrhs\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -374,7 +386,7 @@ readonly RESTART=$(printf '%s_%s_%08d_restart.nc' "$exp_name" "$COORD_TAG" "$STE
 readonly TAG=$tag
 readonly INSTRUMENT=$here/stprk3_step_record.patch
 # The second, round-4 instrument.  Empty for every variant but vecrhs.
-if [[ "$variant" == "vecrhs" ]]; then
+if [[ "$variant" == "vecrhs" || "$variant" == "smtvecrhs" ]]; then
   RHS_INSTRUMENT=$here/stp2d_rhs_terms_record.patch
 else
   RHS_INSTRUMENT=
@@ -692,7 +704,7 @@ case "$variant" in
   | smtflxr3 | smtflx100dr3 | smtflxspgts)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
-  | smtvecr3 | smtvec100dr3 | smtvecspgts)
+  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs)
       want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
