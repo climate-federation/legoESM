@@ -929,10 +929,26 @@ def _step_multilayer_land_impl(
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
     snow_after_melt = snow_new
     max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
-    # Inverses of the L the surface solve charged (surface_latent_heat at T_surface).
-    from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+    from legoesm.thermo import charged_latent_heat, latent_heat_sublimation
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        _lsch = "clm_ml"
+    elif isinstance(config.surface_scheme, SimpleSEBConfig):
+        _lsch = "simple_seb"
+    elif isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        _lsch = "two_leaf"
+    else:
+        raise ValueError(
+            f"no latent-heat charge known for surface_scheme "
+            f"{type(config.surface_scheme)!r}")
+    # Snow stream: the driver re-charges snow-routed latent energy as sublimation
+    # at L_s(T_surface) for every scheme (phase split, audit F13; the remainder
+    # returns to the ground heat flux via evap_excess_energy below).
     _L_s_T = latent_heat_sublimation(T_surface)
-    _L_v_T = latent_heat_vaporization(T_surface)
+    # Soil / plant-water stream: exactly what the surface solve charged.  CLM-ML
+    # evaluates its latent heat at its reference air temperature (the forcing
+    # T_lowest), every other scheme at T_surface.
+    _L_v_T = charged_latent_heat(
+        _lsch, forcing.T_lowest if _lsch == "clm_ml" else T_surface)
     sublim_demand = snow_latent / _L_s_T
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)

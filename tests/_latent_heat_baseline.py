@@ -6,7 +6,6 @@ entry when its file reaches zero."""
 
 LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/dynamics/crm/rce_diagnostics.py': 3,
-    'packages/atmosphere/legoesm/atmosphere/dynamics/crm/rce_surface_flux.py': 1,
     'packages/atmosphere/legoesm/atmosphere/dynamics/crm/sam_case_setup.py': 1,
     'packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py': 2,
     'packages/atmosphere/legoesm/atmosphere/forcing/scm/dephy_scm.py': 1,
