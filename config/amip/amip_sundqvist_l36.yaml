@@ -348,6 +348,8 @@ multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 # Explicit OFF: this deck reproduces arms that ran sensible-only soil.
 land_soil_freeze_thaw: false
+# Explicit bulk snowpack: this deck reproduces arms that ran the one-reservoir pack.
+land_snow_scheme: bulk
 # Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep
 # 3 m soil cold-starts too wet, feeding over-evaporation cold-cloudy land (#730).
 land_soil_moisture_init_frac: 0.25

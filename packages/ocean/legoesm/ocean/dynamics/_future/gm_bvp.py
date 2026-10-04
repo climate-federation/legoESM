@@ -1,5 +1,9 @@
 """Ferrari et al. (2010) boundary-value problem for the GM eddy streamfunction.
 
+PARKED in ``_future/`` (ponytail #11, user-approved 2026-10-02): not wired —
+no production driver, factory or registry imports this module, and its tests
+are skipped.  Wire it into production (moving it back) or delete it.
+
 What this replaces
 ------------------
 The DIAGNOSTIC GM closure sets the eddy streamfunction pointwise from the

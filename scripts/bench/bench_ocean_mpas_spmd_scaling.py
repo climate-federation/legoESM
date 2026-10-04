@@ -74,19 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--probe-steps", type=int, default=3)
     p.add_argument("--multicontroller", action="store_true")
     # No bench-side default for either: unset means MPASOceanConfig's own
-    # default (poly, 4), so a ladder arm measures the production solver.
+    # default (gpoly, 4 sweeps), so a ladder arm measures the production solver.
     # A "jacobi" default here silently ran the whole 2026-09-21 CPU ladder
     # on the retired preconditioner (RULE 3: a flag default that keeps the
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
                    choices=["jacobi", "poly", "gpoly"],
-                   help="distributed PCG preconditioner (config default poly); "
+                   help="distributed PCG preconditioner (config default gpoly); "
                         "'poly' is the communication-free local Neumann polynomial, "
                         "'gpoly' the same polynomial on the GLOBAL operator "
-                        "(evaluated on a K-ring halo, one exchange per iteration)")
+                        "(evaluated on a max(2, K-2)-ring halo, one exchange per "
+                        "iteration)")
     p.add_argument("--halo-depth", type=int, default=None,
                    help="cell-halo rings of the SPMD layout (default: what the "
-                        "config needs -- 2, or K for gpoly); set it to price a "
+                        "config needs -- 2, or max(2, K-2) for gpoly); set it to "
+                        "price a "
                         "deeper halo on its own")
     p.add_argument("--pcg-poly-sweeps", type=int, default=None,
                    help="sweeps K of the local polynomial preconditioner "
@@ -101,11 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
-                   help="unset = MPASOceanConfig default (single_reduce_deep); "
-                        "single_reduce_deep needs --pcg-precond jacobi (poly/gpoly need "
+                   help="unset = MPASOceanConfig default (standard); "
+                        "single_reduce_deep needs --pcg-precond jacobi and, for the "
+                        "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
                         "--pcg-variant single_reduce or standard)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 30); "
+                   help="distributed PCG iteration count (config default 15); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
