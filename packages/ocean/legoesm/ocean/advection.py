@@ -1672,13 +1672,15 @@ def _zalesak_signsplit_face_alphas(
     if _is_2d_dy:
         P_in_h = (in_u_w + in_v_w) / area
         P_out_h = (out_u_w + out_v_w) / area
-        zpos_h = in_u_w + in_v_w
-        zneg_h = out_u_w + out_v_w
+        if return_nemo_beta_trace:
+            zpos_h = in_u_w + in_v_w
+            zneg_h = out_u_w + out_v_w
     else:
         P_in_h = (in_u * face_dy + in_v_w) / area
         P_out_h = (out_u * face_dy + out_v_w) / area
-        zpos_h = in_u * face_dy + in_v_w
-        zneg_h = out_u * face_dy + out_v_w
+        if return_nemo_beta_trace:
+            zpos_h = in_u * face_dy + in_v_w
+            zneg_h = out_u * face_dy + out_v_w
 
     # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
     # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,
