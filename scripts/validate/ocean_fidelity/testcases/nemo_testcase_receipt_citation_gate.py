@@ -1319,6 +1319,12 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 139: passive FCT bound-input walk ------------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:171': [
+        'CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt,',
+        'CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt,'],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:316': [
+        'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb),',
+        'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb),'],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:816-845': [
         ('! 2nd option', 1), ('END DO   ;   END DO', 52), 30],
     'advection.py:839-866': [
