@@ -71,3 +71,26 @@ def test_vertical_momentum_flag_reaches_the_mpas_builder():
     assert "vertical_momentum_scheme" in inspect.signature(_core2().build_mpas_ocean).parameters
     assert inspect.getsource(_core2().main).count(
         "vertical_momentum_scheme=args.vertical_momentum_scheme") == 2
+
+
+def test_dm2dc_hold_needs_dm2dc_and_a_day_divisor(monkeypatch):
+    for extra in (["--dm2dc-hold-s", "14400"],                      # no --dm2dc
+                  ["--dm2dc", "--dm2dc-hold-s", "7000", "--dt", "100"],   # not a day divisor
+                  ["--dm2dc", "--dm2dc-hold-s", "14400", "--dt", "7000"]):  # not a dt multiple
+        monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole", *extra])
+        with pytest.raises(SystemExit, match="dm2dc-hold-s"):
+            _core2().main()
+
+
+def test_hold_window_mean_conserves_the_daily_shortwave():
+    """Block means over 4 h must integrate to the same daily SW as the per-step
+    windows (both normalise to a daily mean of 1)."""
+    import numpy as np
+    from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
+    lon, lat = np.array([230.0, 10.0]), np.array([0.0, 45.0])
+    blocks = [diurnal_sw_factor(lon, lat, day_of_year=15, t_frac_lo=b / 6, t_frac_up=(b + 1) / 6)
+              for b in range(6)]
+    steps = [diurnal_sw_factor(lon, lat, day_of_year=15, t_frac_lo=k / 96, t_frac_up=(k + 1) / 96)
+             for k in range(96)]
+    np.testing.assert_allclose(np.mean(blocks, 0), np.mean(steps, 0), rtol=1e-10)
+    assert float(np.max(blocks)) < float(np.max(steps))   # the noon peak is smoothed

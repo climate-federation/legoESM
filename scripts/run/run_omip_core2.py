@@ -7041,6 +7041,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "with --adaptive-implicit-vertadv it is the explicit part of "
                         "the Courant split, as ln_zad_Aimp). Default (None) keeps the "
                         "1st-order upwind of the baroclinic perturbation.")
+    p.add_argument("--dm2dc-hold-s", type=float, default=None,
+                   help="With --dm2dc: average the diurnal shortwave over blocks of "
+                        "this many seconds aligned at 00 UTC and hold it (NEMO "
+                        "nn_fsbc*rn_Dt; ORCA1 = 4*3600 = 14400). Default None keeps "
+                        "the per-step window. Shortwave only (NEMO also holds qns/tau/emp). "
+                        "Must divide a day and be a multiple of --dt.")
     p.add_argument("--nemo-een-coriolis", action="store_true",
                    help="Tripole only: NEMO ln_dynvor_een Coriolis -- planetary f "
                         "inside the EEN vorticity triad (vorticity_scheme=een_total, "
@@ -8302,6 +8308,12 @@ def main() -> int:
     if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas"):
         raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas only "
                          f"(got {args.grid!r}); it would be silently ignored.")
+    if args.dm2dc_hold_s is not None:
+        _h = float(args.dm2dc_hold_s)
+        if (not args.dm2dc or _h <= 0 or 86400.0 % _h != 0.0
+                or (_h / float(args.dt)) % 1.0 != 0.0):
+            raise SystemExit("--dm2dc-hold-s needs --dm2dc, a positive divisor of "
+                             "86400 s and a multiple of --dt")
     if args.nemo_een_coriolis and args.momentum_rk3:
         raise SystemExit("--nemo-een-coriolis with --momentum-rk3 is refused: the "
                          "implicit_cn barotropic solve then steps the barotropic "
@@ -11098,11 +11110,19 @@ def main() -> int:
             _t_mid = (step - 0.5) * dt
             _sec_of_day = _t_mid % _SEC_PER_DAY
             _t_lo = (_sec_of_day - 0.5 * dt) / _SEC_PER_DAY
+            _win = dt
+            if args.dm2dc_hold_s is not None:
+                # NEMO nn_fsbc: sbcdcy averages the diurnal SW over the whole
+                # SBC interval (nn_fsbc*rn_Dt, aligned at 00 UTC) and holds it.
+                _win = float(args.dm2dc_hold_s)
+                _blk = ((step - 1) * dt // _win) * _win
+                _t_mid = _blk + 0.5 * _win
+                _t_lo = (_blk % _SEC_PER_DAY) / _SEC_PER_DAY
             _dm2dc_win = (
                 int((_t_mid / _SEC_PER_DAY) % 365.0) + 1,   # day_of_year
                 365.0,
                 _t_lo,
-                _t_lo + dt / _SEC_PER_DAY,
+                _t_lo + _win / _SEC_PER_DAY,
             )
         # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): rotate the
         # beginning-of-step ocean surface current to GEOGRAPHIC (the frame the
