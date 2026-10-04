@@ -1243,19 +1243,13 @@ def compute_most_fluxes(
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
     # bulk wind incl. gust/floor, one raw wind component for direction and
     # magnitude); reduces to u/|U| exactly when U_eff == wind_speed.
-    # Thermodynamic convention (#762): the constants converting MOST scales
-    # into fluxes are part of the transcribed schemes' definitions.
-    # 'aerobulk' = the NEMO/AeroBulk/COARE set (SST-dependent L_vap, moist
-    # cp_air(q)); 'legoesm' = the historical constant L_v / dry c_pd
-    # (default, byte-identical).  An explicit ``L_latent`` always wins
-    # (the OMIP NEMO-parity path and the oracle tests inject their own).
-    if L_latent is not None:
-        _L = L_latent
-    elif thermo_convention == "aerobulk":
-        from legoesm.thermo import latent_heat_vaporization_sst
-        _L = latent_heat_vaporization_sst(T_sfc)
-    else:
-        _L = constants.L_v
+    # Thermodynamic convention (#762) now selects only the heat capacity:
+    # 'aerobulk' = NEMO/AeroBulk moist cp_air(q); 'legoesm' = dry c_pd.  The
+    # latent heat is the Kirchhoff L_v(T_sfc) in BOTH (user decision
+    # 2026-09-28); an explicit ``L_latent`` always wins (ice passes L_s, the
+    # OMIP NEMO-parity path and the oracle tests inject their own).
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     if thermo_convention == "aerobulk":
         from legoesm.thermo import moist_air_cp
         _cp = moist_air_cp(q_atm)
@@ -1702,7 +1696,8 @@ def simple_bulk_fluxes(
     lhflx : array
         Latent heat flux [W/m2] (positive upward = surface moister).
     """
-    _L = constants.L_v if L_latent is None else L_latent
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     tau_x = -rho * Cd * wind_speed * u_lowest
     tau_y = -rho * Cd * wind_speed * v_lowest
     shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)

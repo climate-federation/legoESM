@@ -96,6 +96,7 @@ class TestTileBlendingGrad:
             ocean_stress_y=jnp.zeros(shape),
             surface_mass_flux=jnp.zeros(shape),
             salt_flux=jnp.zeros(shape),
+            lhflx_exchange=jnp.zeros(shape),
         )
 
     def test_grad_wrt_ice_concentration(self):

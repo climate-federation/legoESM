@@ -44,6 +44,7 @@ from legoesm.land.canopy.stability import (
 )
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
+    canopy_state_admissible,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -398,7 +399,8 @@ def compute_two_leaf_canopy_fluxes(
     q_atm = forcing.q_lowest
     rhoa  = forcing.rho_lowest
     Tv_atm = Ta * (1.0 + _VIRT_T_COEF * q_atm)
-    lam   = constants.L_v
+    from legoesm.thermo import latent_heat_vaporization
+    lam   = latent_heat_vaporization(T_soil_top)   # the L the multilayer inverts (same T)
     Cp    = constants.c_pd
     Ca    = forcing.co2_ppmv
 
@@ -412,24 +414,24 @@ def compute_two_leaf_canopy_fluxes(
     cold_state = jnp.stack(
         [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
 
-    # ---- Warm start (numerical cache; cannot change the answer) ----
+    # ---- Warm start (numerical cache) ----
     # ``canopy_seed`` is the previous timestep's LAST CONVERGED solution, carried
     # by the caller.  A column whose seed is not finite (never solved yet, or the
-    # previous solve failed) falls back to the cold start above, so the first
-    # step and every non-canopy caller behave exactly as before.  The seed is
-    # sanitised BEFORE the select: ``where`` evaluates both branches, and a NaN
-    # in the discarded one would poison a reverse-mode tangent.
+    # previous solve failed) OR lies outside the physical box a root may occupy
+    # (a cache written before that box was enforced -- restarts heal here) falls
+    # back to the cold start above.  The seed is sanitised BEFORE the select:
+    # ``where`` evaluates both branches, and a NaN in the discarded one would
+    # poison a reverse-mode tangent.
     #
-    # This cannot move the converged answer: the solve's adjoint returns a ZERO
-    # cotangent for its seed by construction (see ``solver.solve_bwd``, asserted
-    # by ``tests/land/unit/test_canopy_solver_grad.py``), and the fixed point
-    # itself does not depend on where the iteration started.  What it changes is
-    # WHICH columns reach that fixed point inside the iteration budget.
+    # The solve's adjoint returns a ZERO cotangent for its seed (``solver.
+    # solve_bwd``), but that does NOT make the answer seed-independent: the
+    # residual has spurious roots, and which one a far-off seed reaches is the
+    # defect the admissibility box exists to reject.
     if canopy_seed is None:
         initial_state = cold_state
     else:
         _seed = jnp.asarray(canopy_seed, cold_state.dtype)
-        _ok = jnp.all(jnp.isfinite(_seed), axis=-1, keepdims=True)
+        _ok = canopy_state_admissible(_seed)[:, None]
         initial_state = jnp.where(_ok, jnp.nan_to_num(_seed), cold_state)
 
     def _bcast(v):
@@ -489,19 +491,34 @@ def compute_two_leaf_canopy_fluxes(
     # ``x_conv`` holds the last CONVERGED solution per column, NaN until one
     # exists; it is both the next pass's seed and (after the loop) the cache
     # handed back to the caller.
+    # A column with no converged solution yet alternates its seed across passes
+    # between the caller's seed and the COLD state, so a warm seed that led the
+    # solve astray gets a cold retry inside the same call.  The passes run over
+    # every column anyway (vmap), so this costs nothing; for a column that never
+    # converges, its frozen soil boundary makes later passes repeat passes 0/1.
+    # A pass that did not converge must not move the soil boundary either: its
+    # ground flux is not physics.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
+        _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
-                            jnp.nan_to_num(x_conv), initial_state)
+                            jnp.nan_to_num(x_conv), _fallback)
         (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
          hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
+        # A rejected iterate may be non-finite: evaluate the fluxes of a failed
+        # column at the (finite) cold state instead, so no NaN enters a
+        # reverse-mode tangent.  Those fluxes are not physics either way -- the
+        # column reports converged=False and the caller holds it.
+        x_final = jnp.where(converged[:, None], x_final, cold_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
-        Ts_thermal = soil_thermal_fn(G_k, dt)
-        Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
+        Ts_thermal = soil_thermal_fn(jnp.where(converged, G_k, 0.0), dt)
+        Ts_bc_k = jnp.where(converged,
+                            (1.0 - omega) * Ts_bc_k + omega * Ts_thermal,
+                            Ts_bc_k)
 
     # ---- Converged state ----
     # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].

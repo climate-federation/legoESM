@@ -2016,7 +2016,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 reorder_voronoi_for_sharding,
             )
             _n0 = mesh.nCells
-            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices, edge_order="owner")
+            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices,
+                                                edge_order=MPAS_SPMD_EDGE_ORDER)
             print(f"  MPAS SPMD mesh: reordered for {spmd_n_devices} devices, "
                   f"{_n0} -> {mesh.nCells} cells ({mesh.nCells - _n0} padded "
                   f"ghosts, land)")
@@ -2973,7 +2974,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
-    fw = jra55_to_freshwater(slc, tile_resp.lhflx)
+    fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
         q_net=q_net,
@@ -4602,6 +4603,9 @@ _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
 # Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
 # writer has no view of the SPMD layout).  [0] = serial order.
 _MPAS_SPMD_N_DEVICES = [0]
+# Edge layout of the MPAS SPMD reorder (recorded in restarts and checked on
+# load, so a restart from another layout is refused, never scrambled).
+MPAS_SPMD_EDGE_ORDER = "block"
 
 
 def _save_restart(state, day, step, output_dir, ice_state=None,
@@ -4664,6 +4668,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         # 0 = serial cell order; >1 = MPAS SPMD reordered+padded order for
         # that device count (set once by run_omip_single's SPMD wiring).
         "mpas_spmd_n_devices": int(_MPAS_SPMD_N_DEVICES[0]),
+        # Edge layout of that order (reorder_voronoi_for_sharding edge_order).
+        "mpas_spmd_edge_order": MPAS_SPMD_EDGE_ORDER,
     }
     for f in state._fields:
         if f in _RESTART_DIAGNOSTIC_SLOTS:
@@ -4816,6 +4822,17 @@ def _load_restart(restart_path, template_state, grid_type=None,
             f"Restart {restart_path} was written by an MPAS SPMD run over "
             f"{_saved_nd} device(s) (0 = serial order) but this run uses "
             f"{int(mpas_spmd_n_devices)}; the cell order differs.")
+    # Same for the EDGE order: SPMD restarts written before the "block" edge
+    # layout (no key) hold u in another edge order — a scrambled velocity.
+    if _saved_nd > 1:
+        _saved_eo = (str(data["mpas_spmd_edge_order"])
+                     if "mpas_spmd_edge_order" in data else "owner")
+        if _saved_eo != MPAS_SPMD_EDGE_ORDER:
+            raise ValueError(
+                f"Restart {restart_path} stores MPAS SPMD edges in the "
+                f"{_saved_eo!r} layout but this build uses "
+                f"{MPAS_SPMD_EDGE_ORDER!r}; its velocity would load scrambled. "
+                "Re-spin, or resume with a build from before the change.")
     if grid_type is not None and "grid_type" in data:
         saved_grid_type = str(data["grid_type"])
         if saved_grid_type != grid_type:

@@ -74,7 +74,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
-from legoesm.atmosphere.physics.thermodynamics import latent_heat_vaporization
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
 )

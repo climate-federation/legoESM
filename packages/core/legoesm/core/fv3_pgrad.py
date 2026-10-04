@@ -177,11 +177,8 @@ Deliberate deviations from the NumPy twin (each one declared)
    ``geopk``.  The NumPy lane's ``fort`` views index ``i - ilo``, so a
    too-small halo WRAPS to the far edge and returns numbers; here it is
    a loud error (same class as ``fv3_nh_core.update_dz_c``'s ng guard).
-6. **``_require_f64_jax`` is REPLICATED, not imported.**  The pattern-
-   setter's copy is ``fv3_nh_core._require_f64_jax`` -- a private symbol,
-   and ``tests/test_no_private_cross_imports.py`` forbids cross-module
-   private imports with a permanently EMPTY allowlist.  Promoting it
-   would edit the pattern-setter, which is outside this unit's scope.
+6. **The dtype gate is shared**: ``fv3_phase3d_common.require_uniform_float_jax``
+   (one public helper; the seven per-module private copies were merged).
 
 Differentiability
 ---------------------------------------------------------------------
@@ -251,6 +248,7 @@ from legoesm.core.fv3_native_d_sw import (
     A2B_R3,
 )
 from legoesm.core.fv3_native_sw_core import BIG_NUMBER
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 
 __all__ = [
     "a2b_gridstruct_view",
@@ -280,44 +278,6 @@ __all__ = [
 # The ten geometry arrays a2b_ord4 associates (a2b_gridstruct_view).
 _A2B_GEOM_KEYS = ("grid_lon", "grid_lat", "agrid_lon", "agrid_lat",
                   "dxa", "dya", "edge_w", "edge_e", "edge_s", "edge_n")
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Replicated rather than imported from ``fv3_nh_core`` -- see deviation
-    (6) in the module docstring.  Reads only ``.dtype`` (static under
-    jit): a float32 operand would otherwise be silently upcast -- or
-    worse, with x64 disabled the whole chain would silently run in
-    float32 -- and the oracle build is ``-fdefault-real-8``.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _w(lo: int, ia: int, ib: int) -> slice:
@@ -377,7 +337,7 @@ def a2b_gridstruct_view(gs: dict, bd) -> dict:
             f"a2b_gridstruct_view: gridstruct is missing {missing}; "
             f"a2b_ord4 associates all of {list(_A2B_GEOM_KEYS)}")
     out = {k: jnp.asarray(gs[k]) for k in _A2B_GEOM_KEYS}
-    _require_f64_jax("a2b_gridstruct_view", out)
+    require_uniform_float_jax("a2b_gridstruct_view", out)
     return out
 
 
@@ -953,7 +913,7 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
         raise ValueError(f"geopk: km must be >= 1, got {km!r}")
     _require_bool("geopk", "cg", cg)
     _require_bool("geopk", "sw_dynamics", sw_dynamics)
-    _require_f64_jax("geopk", {"delp": delp, "pt": pt, "hs": hs})
+    require_uniform_float_jax("geopk", {"delp": delp, "pt": pt, "hs": hs})
     del q_con  # unreferenced without -DUSE_COND; kept for interface fidelity
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
@@ -1134,7 +1094,7 @@ def p_grad_c(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd, *,
         del delpc  # hydrostatic branch never reads it (see docstring)
     else:
         gate["delpc"] = delpc
-    _require_f64_jax("p_grad_c", gate)
+    require_uniform_float_jax("p_grad_c", gate)
 
     pkc = jnp.asarray(pkc)
     gz = jnp.asarray(gz)
@@ -1273,7 +1233,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
         ng = bd.ng
     _check_a2b_origin("one_grad_p", bd, ng)
 
-    _require_f64_jax("one_grad_p", {
+    require_uniform_float_jax("one_grad_p", {
         "u": u, "v": v, "pk": pk, "gz": gz, "divg2": divg2,
         "rdx": gs["rdx"], "rdy": gs["rdy"]})
     u = jnp.asarray(u)
@@ -1424,7 +1384,7 @@ def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx: int,
         ng = bd.ng
     _check_a2b_origin("nh_p_grad", bd, ng)
 
-    _require_f64_jax("nh_p_grad", {
+    require_uniform_float_jax("nh_p_grad", {
         "u": u, "v": v, "pp": pp, "gz": gz, "delp": delp, "pk3": pk3,
         "rdx": gs["rdx"], "rdy": gs["rdy"]})
     u = jnp.asarray(u)
@@ -1575,7 +1535,7 @@ def pk3_halo(pk3, delp, bd, *, npz: int, ptop: float, akap: float):
     DISJOINT in j, so no column is written twice and the write order
     cannot matter.
     """
-    _require_f64_jax("pk3_halo", {"pk3": pk3, "delp": delp})
+    require_uniform_float_jax("pk3_halo", {"pk3": pk3, "delp": delp})
     _require_column_depth("pk3_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
@@ -1604,7 +1564,7 @@ def pln_halo(pk3, delp, bd, *, npz: int, ptop: float):
     contract.  Functional: RETURNS the updated ``pk3``.  Dead on the
     pinned deck (USE_LOGP=F) but ten lines away.
     """
-    _require_f64_jax("pln_halo", {"pk3": pk3, "delp": delp})
+    require_uniform_float_jax("pln_halo", {"pk3": pk3, "delp": delp})
     _require_column_depth("pln_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
@@ -1641,7 +1601,7 @@ def pe_halo(pe, delp, bd, *, npz: int, ptop: float):
     accumulator, so the columns are independent and only the k sum is
     sequential (``lax.scan``).
     """
-    _require_f64_jax("pe_halo", {"pe": pe, "delp": delp})
+    require_uniform_float_jax("pe_halo", {"pe": pe, "delp": delp})
     _require_column_depth("pe_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd

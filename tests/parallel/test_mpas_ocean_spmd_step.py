@@ -65,7 +65,7 @@ def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2, partial_cells=False):
 
     mesh0 = create_voronoi_mesh(level)
     n_real = mesh0.nCells
-    mesh = reorder_voronoi_for_sharding(mesh0, n_dev, edge_order="owner")
+    mesh = reorder_voronoi_for_sharding(mesh0, n_dev, edge_order="block")
     z = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     config = MPASOceanConfig(**config_kwargs)
     state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
@@ -256,7 +256,7 @@ def test_vertex_lane_restores_global_ids():
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout, spmd_vertex_refresh_probe,
     )
-    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV, edge_order="owner")
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(2), N_DEV, edge_order="block")
     try:
         layout = build_mpas_ocean_spmd_layout(mesh, N_DEV, nlev=1)
         assert layout.vppermute_perms, "fixture has no vertex exchange"
@@ -358,34 +358,38 @@ def test_cfl_check_ignores_padded_edges():
 
 
 # --- global-polynomial preconditioner ("gpoly") ------------------------------
-# gpoly is the SAME fixed-M PCG on one device and on the SPMD lane (single
-# device runs it without a halo), so at a SMALL M — where the preconditioner
-# still shapes the answer — the sharded result must equal the serial one to
-# the re-association floor at every device count. A ring-validity error in
-# the redundant halo evaluation (too few rings, stale coefficients, edge
-# depth) changes the answer on partition seams and breaks this.
+# gpoly is partition-independent, so at a SMALL M — where the preconditioner
+# still shapes the answer — the 4-device result must equal the SAME SPMD solve
+# on 2 devices (same reordered mesh and inputs; different seams) to the
+# re-association floor. (The layout refuses a 1-device mesh.) A ring-validity error in the
+# redundant halo evaluation (too few rings, stale coefficients, edge depth)
+# changes the answer on partition seams and breaks this. (The serial model
+# keeps stock CG to tolerance, so it is not the reference here.)
 _GPOLY = dict(barotropic_solver="implicit_cn", tracer_advection="superbee",
               K_zeta_bih=1.0e13, n_barotropic_substeps=10,
               barotropic_implicit_pcg_precond="gpoly",
+              barotropic_implicit_pcg_variant="standard",
               barotropic_implicit_pcg_fixed_iters=3)
-
 
 # At 300 s on ico4 the Helmholtz is ~identity and 3 iterations converge
 # whatever the preconditioner, which made the parity test blind to it.
 _GPOLY_DT = 3600.0
 
 
-def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
+def _gpoly_pair(n_dev, sweeps=4, variant="standard", **spmd_kw):
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
     from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
     # level 4 (2562 cells): on the ico2 fixture two rings already reach ~85%
     # of the mesh, so a missing ring could not show.
     mesh, n_real, model, state, forcing = _build(
-        dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps), n_dev=n_dev,
+        dict(_GPOLY, barotropic_implicit_pcg_poly_sweeps=sweeps,
+             barotropic_implicit_pcg_variant=variant), n_dev=n_dev,
         level=4)
     spmd_kw.setdefault("halo_depth", halo_depth_for_config(model.config))
-    ref = _run_serial(model, state, forcing, _GPOLY_DT, 3)
     try:
+        ref, _ = _run_spmd(model, mesh, n_real, state, forcing, _GPOLY_DT, 3,
+                           "superbee", n_dev=2,
+                           halo_depth=halo_depth_for_config(model.config))
         got, layout = _run_spmd(model, mesh, n_real, state, forcing, _GPOLY_DT, 3,
                                 "superbee", n_dev=n_dev, **spmd_kw)
     finally:
@@ -394,10 +398,13 @@ def _gpoly_pair(n_dev, sweeps=4, **spmd_kw):
     return _compare(ref, got, n_real, mesh), layout
 
 
-@pytest.mark.parametrize("n_dev", [2, 3, 4])
-def test_gpoly_spmd_matches_serial_at_small_m(n_dev):
+@pytest.mark.parametrize("variant", ["standard", "single_reduce"])
+@pytest.mark.parametrize("n_dev", [3, 4])
+def test_gpoly_spmd_partition_independent_at_small_m(n_dev, variant):
+    """gpoly x M with the default "standard" recurrence (owner decision
+    2026-10-02) and the opt-in "single_reduce": 3 or 4 devices vs 2."""
     _need_devices(n_dev)
-    worst, layout = _gpoly_pair(n_dev)
+    worst, layout = _gpoly_pair(n_dev, variant=variant)
     assert layout.halo_depth == 2      # K=4 fits the historical depth
     bad = {k: v for k, v in worst.items() if v[0] > _ATOL[k]}
     assert not bad, (bad, worst)
@@ -439,13 +446,14 @@ def test_gpoly_refuses_shallow_halo():
 
 
 def test_poly_unchanged_by_deeper_halo():
-    """The production block-local preconditioner on a depth-4 layout: same
+    """The block-local preconditioner on a depth-4 layout: same
     parity against serial as on depth 2 (the deeper halo changes nothing
     else in the step)."""
     _need_devices(N_DEV)
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
-    kw = _CASES["implicit_superbee_del4"]
-    mesh, n_real, model, state, forcing = _build(dict(kw))
+    kw = dict(_CASES["implicit_superbee_del4"], barotropic_implicit_pcg_precond="poly",
+              barotropic_implicit_pcg_variant="single_reduce")
+    mesh, n_real, model, state, forcing = _build(kw)
     ref = _run_serial(model, state, forcing, 300.0, 3)
     try:
         got, layout = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3,
@@ -459,21 +467,223 @@ def test_poly_unchanged_by_deeper_halo():
     assert not bad, (bad, worst)
 
 
-def test_gpoly_serial_gradient_matches_finite_difference():
-    """Reverse mode through the unrolled global-polynomial solve (single
-    device): d/ds sum(eta^2) after one step from s * eta0 vs a central
-    difference. (The SPMD step's reverse mode is NaN for the production
-    preconditioner too — a pre-existing defect outside this path.)"""
-    mesh, n_real, model, state, (fw, sf, sp) = _build(dict(_GPOLY), level=4)
+def test_gpoly_sharded_gradient_matches_finite_difference():
+    """Reverse mode through the sharded fixed-M gpoly solve with the standard
+    recurrence (the SPMD default since 2026-10-02): d/ds sum(eta^2) after one
+    step from s * eta0 vs a central difference.  Padding edges (dvEdge = 0) made this NaN before the
+    del2 divisor guard."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import (
+        build_mpas_ocean_spmd_layout, halo_depth_for_config,
+        make_sharded_mpas_ocean_step, shard_state_mpas_ocean_spmd)
+    mesh, n_real, model, state, (fw, sf, sp) = _build(dict(_GPOLY), level=3)
+    try:
+        layout = build_mpas_ocean_spmd_layout(
+            mesh, N_DEV, n_cells_real=n_real, tracer_advection="superbee",
+            nlev=state.T.data.shape[1],
+            halo_depth=halo_depth_for_config(model.config))
+        step = make_sharded_mpas_ocean_step(model, layout)
+        st = shard_state_mpas_ocean_spmd(state, layout)
+        put = lambda x: jax.device_put(x, layout.cell_sharding)  # noqa: E731
+        fw_s, sf_s = jax.tree.map(put, fw), jax.tree.map(put, sf)
+        sp_s = sp._replace(gamma=put(sp.gamma))
 
-    def loss(s):
-        st = state._replace(eta=state.eta.replace(data=state.eta.data * s))
-        out = model._step_impl(st, _GPOLY_DT, freshwater=fw, surface_forcing=sf,
-                               sponge=sp)
-        return jnp.sum(out.eta.data ** 2)
+        def loss(s):
+            out = step(st._replace(eta=st.eta.replace(data=st.eta.data * s)),
+                       _GPOLY_DT, freshwater=fw_s, surface_forcing=sf_s,
+                       sponge=sp_s)
+            return jnp.sum(out.eta.data ** 2)
 
-    g = float(jax.jit(jax.grad(loss))(1.0))
-    h = 1e-4
-    fd = (float(jax.jit(loss)(1.0 + h)) - float(jax.jit(loss)(1.0 - h))) / (2 * h)
+        g = float(jax.jit(jax.grad(loss))(1.0))
+        h = 1e-4
+        fd = (float(jax.jit(loss)(1.0 + h))
+              - float(jax.jit(loss)(1.0 - h))) / (2 * h)
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
     assert np.isfinite(g) and g != 0.0
     np.testing.assert_allclose(g, fd, rtol=1e-6)
+
+
+def test_single_device_ignores_gpoly():
+    """One device keeps the stock CG solve to tolerance whatever the
+    preconditioner (owner decision 2026-10-02): gpoly and poly give the
+    bit-identical serial step."""
+    out = {}
+    for pc in ("gpoly", "poly"):
+        mesh, n_real, model, state, forcing = _build(
+            dict(_GPOLY, barotropic_implicit_pcg_precond=pc), level=3)
+        out[pc] = np.asarray(_run_serial(model, state, forcing, _GPOLY_DT, 1).eta.data)
+    np.testing.assert_array_equal(out["gpoly"], out["poly"])
+
+
+# --- deep-halo Jacobi PCG ("single_reduce_deep") ---------------------------
+_DEEP_BASE = dict(barotropic_solver="implicit_cn", n_barotropic_substeps=10,
+                  barotropic_implicit_pcg_precond="jacobi",
+                  barotropic_implicit_pcg_fixed_iters=7)
+# 7 iterations at dt = 1800 s, NOT converged: at dt = 300 s Jacobi PCG
+# converges in a few iterations and washes a stale-halo defect down to the
+# solve tolerance (measured: claiming 4 or 30 rings moved eta by only
+# 3.6e-12 / 8.5e-12, identical at 7 and 20 iterations), so the parity and its
+# mutation controls run where the iterates still differ materially.
+_DEEP_DT = 1800.0
+
+
+def _spmd_pair(variant, *, level=4, n=3, rings=None, monkeypatch=None):
+    """SPMD state after ``n`` steps with the given PCG variant (optionally
+    with the layout's certified ring count overridden)."""
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    import legoesm.parallel.voronoi_spmd_ocean as vso
+    if rings is not None:
+        monkeypatch.setattr(vso, "complete_cell_rings", lambda *a, **k: rings)
+    mesh, n_real, model, state, forcing = _build(
+        dict(_DEEP_BASE, barotropic_implicit_pcg_variant=variant), level=level)
+    try:
+        got, layout = _run_spmd(model, mesh, n_real, state, forcing, _DEEP_DT, n, "upwind")
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    return got, layout, mesh, n_real
+
+
+def _owned_gap(a, b, n_real, mesh):
+    return _compare(a, b, n_real, mesh)
+
+
+def test_deep_halo_pcg_matches_per_iteration_exchange():
+    """Same Jacobi PCG, same 7 iterations: exchanging (r, s) once every
+    ``complete_cell_rings`` iterations and recomputing the halo must give the
+    per-iteration-exchange result to round-off (the mesh is large enough that
+    the certified rings do not cover a whole rank's neighbourhood)."""
+    _need_devices(N_DEV)
+    ref, lay_ref, mesh, n_real = _spmd_pair("single_reduce")
+    got, lay, _, _ = _spmd_pair("single_reduce_deep")
+    assert lay.complete_cell_rings == 3
+    assert lay.max_lc < mesh.nCells, "halo covers the whole mesh: test vacuous"
+    worst = _owned_gap(ref, got, n_real, mesh)
+    print("parity", worst)
+    atol = {"T": 1e-11, "S": 1e-11, "eta": 1e-12, "w": 1e-12, "u": 1e-12}
+    bad = {k: v for k, v in worst.items() if v[0] > atol[k]}
+    assert not bad, (bad, worst)
+
+
+@pytest.mark.parametrize("rings", [4, 30])
+def test_deep_halo_pcg_overclaimed_rings_break_parity(rings, monkeypatch):
+    """Non-vacuity: claiming one ring more than the layout has (cadence 4), or
+    so many that the loop never refreshes (r, s), must break the parity."""
+    _need_devices(N_DEV)
+    ref, _, mesh, n_real = _spmd_pair("single_reduce")
+    got, lay, _, _ = _spmd_pair("single_reduce_deep", rings=rings,
+                                monkeypatch=monkeypatch)
+    assert lay.complete_cell_rings == rings
+    worst = _owned_gap(ref, got, n_real, mesh)
+    print("mutation", rings, worst)
+    assert worst["eta"][0] > 1e-9, worst
+
+
+def test_deep_halo_pcg_gradient_matches():
+    """Reverse mode through the sharded step: d(sum eta_new^2)/d(eta_old)
+    with the deep-halo solver equals the per-iteration-exchange gradient."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import (
+        build_mpas_ocean_spmd_layout, make_sharded_mpas_ocean_step,
+        shard_state_mpas_ocean_spmd)
+    grads = {}
+    for variant in ("single_reduce", "single_reduce_deep"):
+        mesh, n_real, model, state, (fw, sf, sp) = _build(
+            dict(_DEEP_BASE, barotropic_implicit_pcg_variant=variant), level=4)
+        try:
+            layout = build_mpas_ocean_spmd_layout(
+                mesh, N_DEV, n_cells_real=n_real, nlev=state.T.data.shape[1])
+            step = make_sharded_mpas_ocean_step(model, layout)
+            st = shard_state_mpas_ocean_spmd(state, layout)
+            put = lambda x: jax.device_put(x, layout.cell_sharding)  # noqa: E731
+            fw_s, sf_s = jax.tree.map(put, fw), jax.tree.map(put, sf)
+            sp_s = sp._replace(gamma=put(sp.gamma))
+
+            def loss(eta):
+                out = step(st._replace(eta=st.eta.replace(data=eta)), _DEEP_DT,
+                           freshwater=fw_s, surface_forcing=sf_s, sponge=sp_s)
+                return jnp.sum(out.eta.data ** 2)
+
+            g = jax.jit(jax.grad(loss))(st.eta.data)
+            grads[variant] = np.asarray(jax.device_get(g))
+        finally:
+            set_halo_backend("local")
+            set_spmd_mesh(None)
+    a, b = grads["single_reduce"], grads["single_reduce_deep"]
+    # Every row finite: padding edges (dvEdge = 0) once made the del2
+    # momentum diffusion divide 0/0, NaN-ing the gradient at the first owned
+    # cell of every rank that carries padding edges.
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b)), (
+        np.flatnonzero(~np.isfinite(a)), np.flatnonzero(~np.isfinite(b)))
+    assert np.max(np.abs(a)) > 0
+    assert np.max(np.abs(a - b)) <= 1e-9 * np.max(np.abs(a)), (
+        np.max(np.abs(a - b)), np.max(np.abs(a)))
+
+
+def test_complete_cell_rings_counts_local_stencils():
+    """3 rings on the production-shaped layout (halo depth 2 + two closure
+    passes); dropping one local edge of a ring-1 cell lowers it to 0."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.sharded_dynamics import build_voronoi_partition_infra
+    from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
+    from legoesm.parallel.voronoi_spmd_ocean import complete_cell_rings
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(4), N_DEV, edge_order="block")
+    parts = build_voronoi_partition_infra(mesh, N_DEV, halo_depth=2)[7]
+    assert complete_cell_rings(mesh, parts) == 3
+    p = parts[0]
+    coe = np.asarray(mesh.cellsOnEdge)
+    owned = set(np.asarray(p.local_cells[:p.n_owned_cells]).tolist())
+    le = np.asarray(p.local_edges)
+    # a local edge between an owned cell and a ring-1 cell (owned or halo:
+    # under the block edge order rank 0 owns all of its boundary edges)
+    k = next(i for i in range(len(le))
+             if (int(coe[0, le[i]]) in owned) != (int(coe[1, le[i]]) in owned))
+    parts[0] = p._replace(local_edges=np.delete(le, k))
+    assert complete_cell_rings(mesh, parts) == 0
+
+
+def test_complete_cell_rings_mpi_partition_is_one():
+    """The MPI-per-rank partition (2-ring halo, edges kept when ONE cell is
+    local, no closure) certifies exactly 1 ring: ring-2 cells have edges
+    whose far cell is not local."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.voronoi_partition import (
+        complete_cell_rings, partition_voronoi_mesh)
+    mesh = create_voronoi_mesh(4)
+    parts = [partition_voronoi_mesh(mesh, N_DEV, r, method="geometric", halo_depth=2)
+             for r in range(N_DEV)]
+    assert complete_cell_rings(mesh, parts) == 1
+
+
+def test_deep_halo_pcg_refusals():
+    """Selecting the deep variant where it cannot be exact is loud."""
+    from legoesm.ocean.dynamics.barotropic_common import solve_helmholtz_implicit
+    x = jnp.ones(4)
+    kw = dict(distributed=True, fixed_iters=3, residual_tol=1e-10,
+              stock_cg_tol=1e-10, stock_cg_maxiter=10, dot_weight=x)
+    with pytest.raises(ValueError, match="deep_halo"):
+        solve_helmholtz_implicit(lambda v: v, x, lambda v: v, x,
+                                 pcg_variant="single_reduce_deep", **kw)
+    for variant in ("single_reduce", "standard"):
+        with pytest.raises(ValueError, match="deep_halo"):
+            solve_helmholtz_implicit(lambda v: v, x, lambda v: v, x,
+                                     pcg_variant=variant,
+                                     deep_halo=(lambda *f: f, x, 3), **kw)
+
+
+def test_deep_halo_pcg_refuses_poly_preconditioner():
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    mesh, n_real, model, state, forcing = _build(dict(
+        _DEEP_BASE, barotropic_implicit_pcg_precond="poly",
+        barotropic_implicit_pcg_variant="single_reduce_deep"))
+    try:
+        with pytest.raises(NotImplementedError, match="pointwise"):
+            _run_spmd(model, mesh, n_real, state, forcing, 300.0, 1, "upwind")
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)

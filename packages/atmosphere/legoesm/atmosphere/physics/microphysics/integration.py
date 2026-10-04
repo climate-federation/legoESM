@@ -48,6 +48,7 @@ from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.fast_sbm.column import (
@@ -180,6 +181,7 @@ def make_microphysics_physics(
     microphysics_config: MicrophysicsConfig,
     model_type: str = "hydrostatic",
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
+    cloud_config=None,
 ) -> Callable:
     """Create a physics function for microphysics matching a model's signature.
 
@@ -191,6 +193,9 @@ def make_microphysics_physics(
         One of "hydrostatic", "nonhydrostatic", "spectral_pe".
     dt : float
         Model time step [s].
+    cloud_config : CloudConfig, optional
+        The run's cloud config (scheme ``cam6_clubb``); read only by Morrison
+        ``warm_rain_incloud`` for the CAM6 ice-stratus fraction ``aist``.
 
     Returns
     -------
@@ -203,7 +208,9 @@ def make_microphysics_physics(
     # grid lat/lon — works identically for cubed-sphere ``(face, n, n)``,
     # lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi ``(nCells,)``.
     if model_type in ("hydrostatic", "mpas"):
-        return _make_hydrostatic_microphysics(microphysics_config, dt)
+        return _make_hydrostatic_microphysics(microphysics_config, dt,
+                                              cloud_config=cloud_config,
+                                              model_type=model_type)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "plane":
@@ -227,6 +234,8 @@ def make_microphysics_physics(
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
+    cloud_config=None,
+    model_type: str = "hydrostatic",
 ) -> Callable:
     """Create microphysics physics_fn for PrimitiveEquationModel.
 
@@ -250,6 +259,17 @@ def _make_hydrostatic_microphysics(
     )
 
     _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
+    if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
+        raise ValueError(
+            "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
+            "ice-stratus fraction needs the cam6_clubb cloud config, got "
+            f"{getattr(cloud_config, 'scheme', None)!r}.")
+    if _incloud and model_type != "mpas":
+        # Checked at build time, not the first step: aist's tropopause
+        # switch needs MPAS cell latitudes (mesh.latCell).
+        raise ValueError(
+            "warm_rain_incloud=True is wired on the MPAS lane only (aist "
+            f"needs mesh.latCell); got model_type={model_type!r}.")
 
     def physics_fn(
         state: HydrostaticState,
@@ -413,7 +433,20 @@ def _make_hydrostatic_microphysics(
                     raise ValueError(
                         "warm_rain_incloud=True but no cloud_fraction carry "
                         "reached the microphysics (needs CLUBB turbulence).")
-                _kw["cloud_fraction"] = _cf.reshape(ncol, nlev)
+                if not hasattr(grid, "latCell"):
+                    raise ValueError(
+                        "warm_rain_incloud=True: the aist tropopause switch "
+                        "needs cell latitudes (MPAS mesh latCell).")
+                # CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with
+                # clubb_intr.F90:2575 ast = max(alst, aist); aist is
+                # cldfrc2m aist_vector on the post-CLUBB state (:2556),
+                # which is this sub-step's input state.
+                _aist = cam6_ice_stratus_fraction(
+                    q_v_col, T_col, p_full_col, hydrometeors.q_i,
+                    jnp.asarray(grid.latCell).reshape(ncol), cloud_config,
+                    p_half_col[:, :-1])
+                _kw["cloud_fraction"] = jnp.maximum(
+                    jnp.clip(_cf.reshape(ncol, nlev), 0.0, 1.0), _aist)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,

@@ -4331,20 +4331,6 @@ def dino_mpas_model_config(
     return model_config, physics_config
 
 
-# Convenience: surface-layer restoring timescales derived from heat-flux
-# coefficients (eq 8 of paper). Useful for sanity printouts.
-def restoring_timescale_T_days(cfg: DINOConfig) -> float:
-    """τ_T = ρ₀ · c_p · Δz₀ / A_Θ, in days (≈ 11.85 d for default)."""
-    seconds = cfg.rho_0 * cfg.c_p * cfg.dz_min / cfg.A_theta
-    return seconds / 86400.0
-
-
-def restoring_timescale_S_days(cfg: DINOConfig) -> float:
-    """τ_S = ρ₀ · Δz₀ / A_S, in days (≈ 30.8 d for default)."""
-    seconds = cfg.rho_0 * cfg.dz_min / cfg.A_S
-    return seconds / 86400.0
-
-
 # ---------------------------------------------------------------------
 # Experiment-registry interface (expected by AVAILABLE_EXPERIMENTS in
 # legoesm.ocean.experiments.__init__). Thin grid-type dispatchers that

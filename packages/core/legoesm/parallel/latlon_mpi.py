@@ -77,10 +77,7 @@ if TYPE_CHECKING:
     # it would make the low-level parallel layer depend UP on the ocean
     # component, which blocks component independence (see import-linter contracts).
 
-from legoesm.grids.halo_latlon import (
-    fold_pole_rows,
-    fold_pole_rows_3d,
-)
+from legoesm.grids.halo_latlon import fold_pole_rows
 from legoesm.parallel.halo_exchange import get_sendrecv_vjp
 
 
@@ -1349,13 +1346,8 @@ def pad_halo_latlon_mpi(
         # Pole-fold the lon-padded first ``halo`` rows.  Uses
         # ``fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
         # — for lon-padded input that's exactly ``(n_lon + 2*halo) // 2``
-        # which is the serial convention.
-        if data.ndim == 2:
-            south_halo, _ = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
-        else:
-            south_halo, _ = fold_pole_rows_3d(
-                lon_padded, halo, negate=is_vector_v,
-            )
+        # which is the serial convention (2-D and 3-D alike).
+        south_halo, _ = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
     else:
         # MPI sendrecv with south neighbour — exchanges the
         # lon-padded boundary rows.  AD-safe via get_sendrecv_vjp.
@@ -1395,12 +1387,8 @@ def pad_halo_latlon_mpi(
             else:
                 north_halo = jnp.pad(
                     north_unpadded, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
-        elif data.ndim == 2:
-            _, north_halo = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
         else:
-            _, north_halo = fold_pole_rows_3d(
-                lon_padded, halo, negate=is_vector_v,
-            )
+            _, north_halo = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
     else:
         try:
             import mpi4jax

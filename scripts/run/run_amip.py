@@ -1027,6 +1027,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         type=float, default=None, help="imposed cloud fraction; None = 0.8")
     parser.add_argument("--cloud-cap-floor-q-c", dest="cloud_cap_floor_q_c",
                         type=float, default=None, help="[kg/kg] imposed in-cloud liquid; None = 5e-5")
+    for _nm, _lo, _hi, _dv in (("rhmini", 0.5, 0.99, 0.80), ("rhmaxi", 1.0, 1.1, 1.0),
+                               ("rhminis", 0.85, 1.0, 1.0), ("rhmaxis", 1.0, 1.1, 1.0)):
+        parser.add_argument(f"--cloud-cam6-{_nm}", dest=f"cloud_cam6_{_nm}",
+                            type=float, default=None,
+                            help=f"CAM6 ice-stratus ramp cldfrc2m {_nm} "
+                                 f"(cloud scheme cam6_clubb; bounds {_lo}..{_hi}); "
+                                 f"None = {_dv} (CAM6 CLUBB default)")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -1767,13 +1774,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hines-launch-p", type=float, default=None,
                         dest="hines_launch_p",
                         help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
-                             "(e.g. 70000 = 700 hPa). Unset/0 keeps the legacy "
-                             "SURFACE launch, where the wave is born "
-                             "supersaturated in the weakly stratified boundary "
-                             "layer (sigma_sat = N/m_star is smallest there) "
-                             "and breaks at its own launch level instead of "
-                             "aloft. No drag is deposited at or below the "
-                             "launch level.")
+                             "(default 70000 = 700 hPa; legal 30000-90000). "
+                             "No drag is deposited at or below the launch "
+                             "level.")
     parser.add_argument("--hines-fmax", type=float, default=None,
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
@@ -1889,11 +1892,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "morrison_warm_rain_incloud"],
                         dest="morrison_warm_rain_incloud",
                         help="CAM6 MG2 in-cloud warm rain: autoconversion "
-                             "and accretion on cloud water divided by CLUBB's "
-                             "(liquid) cloud fraction, tendencies scaled "
-                             "back by it (CAM6 MG2; CAM6 uses max(liquid, "
-                             "ice) fraction). "
-                             "Needs --turbulence clubb and "
+                             "and accretion on cloud water divided by CAM6's "
+                             "ast = max(CLUBB liquid, aist ice) cloud "
+                             "fraction, tendencies scaled back by it. "
+                             "Needs --turbulence clubb, cloud scheme "
+                             "cam6_clubb and "
                              "cld_macmic_num_steps>=2.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
@@ -2531,6 +2534,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        cloud_cam6_rhmini=args.cloud_cam6_rhmini,
+        cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
+        cloud_cam6_rhminis=args.cloud_cam6_rhminis,
+        cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
@@ -2625,7 +2632,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
         hines_launch_p=(
             args.hines_launch_p
-            if args.hines_launch_p is not None else 0.0),
+            if args.hines_launch_p is not None
+            else _EXPERIMENT_DEFAULTS.hines_launch_p),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
         e3sm_cam_source=(args.e3sm_cam_source

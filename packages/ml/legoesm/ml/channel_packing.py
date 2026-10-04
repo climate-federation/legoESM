@@ -44,18 +44,6 @@ WB2_PRESSURE_LEVELS = (
 )
 
 
-class SWChannelSpec(NamedTuple):
-    """Channel layout for shallow water packing.
-
-    4 channels: vor, div, phi, phis
-    """
-    n_channels: int = 4
-    vor_idx: int = 0
-    div_idx: int = 1
-    phi_idx: int = 2
-    phis_idx: int = 3
-
-
 class PE3DChannelSpec(NamedTuple):
     """Channel layout for 3D primitive equation packing.
 

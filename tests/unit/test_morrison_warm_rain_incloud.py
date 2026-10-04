@@ -316,6 +316,7 @@ def test_raises_without_cloud_fraction_or_with_two_sources():
 # --- the MPAS lane: which cloud fraction reaches the call --------------------
 
 def _mpas_physics(incloud, turb="clubb", n=2):
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection import ConvectionConfig
     from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
@@ -323,7 +324,8 @@ def _mpas_physics(incloud, turb="clubb", n=2):
     from legoesm.atmosphere.physics.radiation import RadiationConfig
     from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
     cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),
         turbulence=TurbulenceConfig(scheme=turb),
         microphysics=MicrophysicsConfig(
@@ -334,12 +336,46 @@ def _mpas_physics(incloud, turb="clubb", n=2):
                         cld_macmic_num_steps=n), cfg
 
 
+def _mpas_physics_hydrostatic():
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.radiation import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    return make_physics(PhysicsConfig(
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=CloudConfig(scheme="cam6_clubb")),
+        turbulence=TurbulenceConfig(scheme="clubb"),
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=_cfg(warm_rain_scheme="kk2000_cam6",
+                                             warm_rain_incloud=True))),
+        model_type="hydrostatic", dt=600.0, cld_macmic_num_steps=2)
+
+
 def test_lane_guard_needs_clubb_and_the_subcycle():
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         _mpas_physics(True, turb="tke", n=2)
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         _mpas_physics(True, turb="clubb", n=1)
     assert callable(_mpas_physics(False, turb="tke", n=1)[0])
+    # CAM6 ast needs the run's cam6_clubb cloud config for aist
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    mc = MicrophysicsConfig(scheme="morrison", morrison=_cfg(warm_rain_incloud=True))
+    for cc in (None, __import__("legoesm.atmosphere.physics.clouds.config",
+                                fromlist=["CloudConfig"]).CloudConfig(scheme="sundqvist")):
+        with pytest.raises(ValueError, match="cam6_clubb"):
+            make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc)
+    # the MPAS-only lane requirement fails at BUILD time, before any step
+    cc6 = __import__("legoesm.atmosphere.physics.clouds.config",
+                     fromlist=["CloudConfig"]).CloudConfig(scheme="cam6_clubb")
+    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6))
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6)
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        _mpas_physics_hydrostatic()
 
 
 def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypatch):
@@ -354,6 +390,13 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     written, read = [], []
     real_upd = ti._carry_update_with_cloud_fraction
     real_micro = mi.morrison_microphysics
+    real_aist = mi.cam6_ice_stratus_fraction
+    aists = []
+
+    def aist(*a, **k):
+        out = real_aist(*a, **k)
+        aists.append(np.asarray(out))
+        return out
 
     def upd(carry_field, carry_val, turb_out):
         written.append(np.asarray(turb_out.cloud_fraction))
@@ -364,14 +407,26 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
         return real_micro(*a, cloud_fraction=cloud_fraction, **k)
     monkeypatch.setattr(ti, "_carry_update_with_cloud_fraction", upd)
     monkeypatch.setattr(mi, "morrison_microphysics", micro)
+    monkeypatch.setattr(mi, "cam6_ice_stratus_fraction", aist)
     mesh, sigma, state = _moist_setup()
+    # ice-supersaturated cloud ice on the top half: aist > CLUBB's alst there
+    ncol, nlev = state.T.data.shape
+    top = (jnp.arange(nlev) < nlev // 2)[None, :] * jnp.ones((ncol, 1))
+    tr = dict(state.tracers)
+    tr["q_i"] = state.T.replace(data=1.0e-5 * top, name="q_i", units="kg/kg")
+    tr["q_v"] = tr["q_v"].replace(data=jnp.maximum(tr["q_v"].data, 2.0e-3 * top))
+    state = state._replace(tracers=tr)
     fn, cfg = _mpas_physics(True, n=2)
     ps = init_physics_state(*state.T.data.shape, cfg)
     ps = ps._replace(cloud_fraction=jnp.full(state.T.data.shape, 0.123))
     fn(state, mesh, sigma, phys_state=ps)
-    assert len(written) == len(read) == 2
-    for w, r in zip(written, read):
-        np.testing.assert_array_equal(w.reshape(r.shape), r)
+    assert len(written) == len(read) == len(aists) == 2
+    for w, r, ai in zip(written, read, aists):
+        np.testing.assert_array_equal(
+            np.maximum(np.clip(w.reshape(r.shape), 0.0, 1.0), ai), r)
+    # discriminating: the ice fraction wins somewhere, CLUBB's elsewhere
+    w0 = written[0].reshape(read[0].shape)
+    assert (aists[0] > w0).any() and (aists[0] <= w0).any()
     assert not np.all(read[0] == 0.123)
 
 
@@ -387,8 +442,11 @@ def test_experiment_config_cli_and_threading():
     )
     assert ExperimentConfig._field_defaults["morrison_warm_rain_incloud"] is False
     assert MorrisonConfig().warm_rain_incloud is False
+    from legoesm.driver.config import DycoreConfig
     good = dict(grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
-                microphysics="morrison", turbulence="clubb",
+                dycore=DycoreConfig(discretization="mpas"),
+                microphysics="morrison", turbulence="clubb", radiation="rrtmgp",
+                cloud_scheme="cam6_clubb", use_clubb_cloud_fraction=True,
                 cld_macmic_num_steps=3, morrison_warm_rain_incloud=True)
     cfg = ExperimentConfig(**good)
     cfg.validate_strict()
@@ -397,7 +455,7 @@ def test_experiment_config_cli_and_threading():
     assert thread_morrison_scalars(
         cfg._replace(morrison_warm_rain_incloud=False), "morrison", base) is base
     for bad in (dict(turbulence="tke"), dict(cld_macmic_num_steps=1),
-                dict(subgrid_autoconversion=True)):
+                dict(subgrid_autoconversion=True), dict(cloud_scheme="sundqvist")):
         with pytest.raises(ValueError, match="morrison_warm_rain_incloud"):
             ExperimentConfig(**{**good, **bad}).validate_strict()
     with pytest.raises((ValueError, TypeError)):
@@ -458,12 +516,14 @@ def test_production_deck_selects_incloud_and_threads_it():
             / "amip_production.yaml")
     keys = load_yaml_config(deck, build_arg_parser())
     assert keys["morrison_warm_rain_incloud"] is True
-    sub = {k: keys[k] for k in ("microphysics", "turbulence",
-                                "cld_macmic_num_steps",
+    from legoesm.driver.config import DycoreConfig
+    sub = {k: keys[k] for k in ("microphysics", "turbulence", "radiation",
+                                "cld_macmic_num_steps", "use_clubb_cloud_fraction",
                                 "morrison_warm_rain_incloud")}
     assert not keys.get("subgrid_autoconversion", False)
     cfg = ExperimentConfig(grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
-                           **sub)
+                           dycore=DycoreConfig(discretization=keys["discretization"]),
+                           cloud_scheme=keys["clouds"], **sub)
     cfg.validate_strict()
     assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
                                    ).warm_rain_incloud is True

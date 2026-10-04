@@ -59,7 +59,7 @@ _K_SNOW_REF = constants.k_snow          # W/m/K at the reference density
 _C_ICE = constants.c_pi                 # J/kg/K (snow grains ~ ice)
 _C_LIQ = constants.c_pw                 # J/kg/K liquid water
 _TF = constants.T_freeze                # freezing point [K]
-_LF = constants.L_f                     # latent heat of fusion [J/kg]
+_LF = constants.L_f  # latent-ok: enthalpy referenced to ice at T_freeze, where L_f(T_freeze) == L_f
 _EPS = 1e-12                            # generic small floor
 _DZ_HALF_MIN = 1e-4                     # [m] min interface distance (empty-pack conductance bound)
 _COEFF_MIN = 1e-6                       # [W/m^2/K] floor on every inter-layer conductance (no layer decouples)

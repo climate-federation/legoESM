@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-land"
-version = "0.1.0"
+version = "1.0.0"
 description = "legoESM land component: multilayer soil thermal/hydrology, snow budget, stomatal conductance, carbon cycle, slab + lake surfaces."
 readme = "README.md"
 license = { text = "MIT" }
@@ -23,7 +23,7 @@ classifiers = [
 # independent of each other" + "Components must not import the coupler, driver,
 # or training"), which is what lets `pip install legoesm-land` run standalone.
 dependencies = [
-    "legoesm-core~=0.1.0",
+    "legoesm-core~=1.0.0",
     "jax>=0.5.3",
     "jaxlib>=0.5.3",
     "numpy>=1.26",

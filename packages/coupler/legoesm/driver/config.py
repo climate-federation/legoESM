@@ -819,6 +819,14 @@ class ExperimentConfig(NamedTuple):
     # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
     # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
     cloud_cover_condensate_q_ref: float | None = None
+    # CAM6 ice-stratus fraction aist ramp (cldfrc2m.F90:846-856; namelist
+    # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis, CLUBB defaults 0.80/1.0/1.0/1.0)
+    # for cloud_scheme='cam6_clubb': radiation cloud cover and the in-cloud
+    # warm-rain ast.  None => CloudConfig default (the CAM6 CLUBB values).
+    cloud_cam6_rhmini: float | None = None
+    cloud_cam6_rhmaxi: float | None = None
+    cloud_cam6_rhminis: float | None = None
+    cloud_cam6_rhmaxis: float | None = None
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -1740,11 +1748,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
-    # HinesConfig.launch_p [Pa]; 0.0 = unset = legacy SURFACE launch.
-    # A non-orographic wave launched at the surface is born supersaturated
-    # in the weakly stratified BL and breaks at its own launch level
-    # (measured: 55% of its momentum deposited below 1 km).
-    hines_launch_p: float = 0.0
+    # HinesConfig.launch_p [Pa], legal range HINES_LAUNCH_P_RANGE_PA.  No
+    # surface launch: a non-orographic wave launched there is born
+    # supersaturated in the weakly stratified BL and breaks at its own
+    # launch level (measured: 55% of its momentum deposited below 1 km).
+    hines_launch_p: float = 7.0e4
     e3sm_cam_source: str = "orographic"         # E3SMCAMConfig.source
     e3sm_cam_pgwv: int = 0                      # phase-speed half-width (waves either side of c0)
     e3sm_cam_effgw: float = 0.125               # E3SMCAMConfig.effgw [dimensionless]
@@ -1885,7 +1893,7 @@ class ExperimentConfig(NamedTuple):
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
 
         Not the experiment flag alone: an authoritative ``turbulence_override``
-        can carry ``CLUBBConfig(liquid_partition=True)`` without it ever being
+        can carry ``TurbulenceConfig(liquid_partition=True)`` without it ever being
         set, and that route reached a validated, built model with both
         radiative condensate floors still active (codex).
 
@@ -1911,8 +1919,7 @@ class ExperimentConfig(NamedTuple):
             return True
         _ov = self.turbulence_override
         if _ov is not None and getattr(_ov, "scheme", None) == "clubb":
-            return bool(getattr(getattr(_ov, "clubb", None),
-                                "liquid_partition", False))
+            return bool(getattr(_ov, "liquid_partition", False))
         return False
 
     def validate_strict(self) -> None:
@@ -3704,16 +3711,27 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"{_nm}={_v} requires microphysics='morrison' "
                     f"(got {self.microphysics!r}); it would be silently inert")
+        _cam6_rh_set = [f for f in ("cloud_cam6_rhmini", "cloud_cam6_rhmaxi",
+                                    "cloud_cam6_rhminis", "cloud_cam6_rhmaxis")
+                         if getattr(self, f) is not None]
+        if _cam6_rh_set and self.cloud_scheme != "cam6_clubb":
+            errors.append(
+                f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
+                f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
+                "cloud_scheme='cam6_clubb' (otherwise silently inert).")
         if self.morrison_warm_rain_incloud is True and (
                 self.turbulence != "clubb" or self.cld_macmic_num_steps < 2
-                or self.subgrid_autoconversion):
+                or self.subgrid_autoconversion
+                or self.cloud_scheme != "cam6_clubb"):
             errors.append(
                 "morrison_warm_rain_incloud=True needs turbulence='clubb', "
+                "cloud_scheme='cam6_clubb' (CAM6 ast = max(alst, aist)), "
                 "cld_macmic_num_steps>=2 and subgrid_autoconversion=False "
                 "(it reads CLUBB's cloud fraction from the same macmic "
                 f"sub-step); got turbulence={self.turbulence!r}, "
                 f"cld_macmic_num_steps={self.cld_macmic_num_steps}, "
-                f"subgrid_autoconversion={self.subgrid_autoconversion}")
+                f"subgrid_autoconversion={self.subgrid_autoconversion}, "
+                f"cloud_scheme={self.cloud_scheme!r}")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(
@@ -3763,6 +3781,14 @@ class ExperimentConfig(NamedTuple):
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            # rhmini: CloudConfig __param_spec__ bounds (one range).  The
+            # other three have no spec (fixed, excluded); their range spans
+            # the CAM6 namelist values (namelist_defaults_cam.xml:1521-1533:
+            # rhminis 0.85/1.0, rhmaxi and rhmaxis 1.0/1.1).
+            ("cloud_cam6_rhmini", 0.5, 0.99),
+            ("cloud_cam6_rhmaxi", 1.0, 1.1),
+            ("cloud_cam6_rhminis", 0.85, 1.0),
+            ("cloud_cam6_rhmaxis", 1.0, 1.1),
             ("cloud_cap_floor_lat_deg", 40.0, 89.0),
             ("cloud_cap_floor_p_max_pa", 20000.0, 100000.0),
             ("cloud_cap_floor_cf", 0.1, 1.0),
@@ -3834,6 +3860,18 @@ class ExperimentConfig(NamedTuple):
                     "refines the same scheme's sub-config, it does not switch "
                     "schemes)"
                 )
+            else:
+                from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                    HINES_LAUNCH_P_RANGE_PA,
+                )
+                _ov_lp = self.gravity_wave_drag_override.hines.launch_p
+                _lo, _hi = HINES_LAUNCH_P_RANGE_PA
+                if not (isinstance(_ov_lp, (int, float))
+                        and math.isfinite(_ov_lp) and _lo <= _ov_lp <= _hi):
+                    errors.append(
+                        f"gravity_wave_drag_override.hines.launch_p must lie in "
+                        f"[{_lo:g}, {_hi:g}] Pa, got {_ov_lp!r}"
+                    )
         # GWD scalars that ``gwd_config_for`` overlays onto the kernel leaves.
         # Every one is a strictly-positive physical quantity (a wavenumber, a
         # spreading factor, a stress/flux cap, an rms launch wind), and none is
@@ -3855,6 +3893,17 @@ class ExperimentConfig(NamedTuple):
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+            HINES_LAUNCH_P_RANGE_PA,
+        )
+        _lo, _hi = HINES_LAUNCH_P_RANGE_PA
+        if not (isinstance(self.hines_launch_p, (int, float))
+                and math.isfinite(self.hines_launch_p)
+                and _lo <= self.hines_launch_p <= _hi):
+            errors.append(
+                f"hines_launch_p must lie in [{_lo:g}, {_hi:g}] Pa (there is "
+                f"no surface launch), got {self.hines_launch_p!r}"
+            )
         _e3sm_parts = str(self.e3sm_cam_source).split("+")
         _e3sm_valid = ("orographic", "frontal", "convective", "background")
         if self.e3sm_cam_source not in _e3sm_valid and (

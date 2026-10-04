@@ -229,57 +229,6 @@ class DiffusionB:
 
 
 # ---------------------------------------------------------------------------
-# Spectral B (for GaussianGrid)
-# ---------------------------------------------------------------------------
-
-class SpectralB:
-    """Spectral background error for GaussianGrid.
-
-    B is diagonal in spectral space with prescribed power spectrum:
-    sigma^2(n) = sigma_0^2 * (n(n+1) / n_0(n_0+1))^{-alpha}
-
-    Parameters
-    ----------
-    grid : GaussianGrid
-        Must have ls, ms, n_sh attributes.
-    sigma_0 : float
-        Base standard deviation.
-    n_0 : int
-        Decorrelation wavenumber.
-    alpha : float
-        Spectral slope.
-    spec : ControlVectorSpec, optional
-        Control vector specification.
-    """
-
-    def __init__(self, grid, sigma_0: float, n_0: int = 10,
-                 alpha: float = 2.0, spec=None):
-        self.grid = grid
-        self.sigma_0 = sigma_0
-        self.n_0 = n_0
-        self.alpha = alpha
-        self.spec = spec
-
-        # Build spectral variance profile
-        ls = grid.ls  # Total wavenumber for each spectral index
-        n0_factor = n_0 * (n_0 + 1.0)
-        n_factor = ls * (ls + 1.0)
-        # Avoid division by zero at n=0
-        ratio = jnp.where(ls > 0, n_factor / n0_factor, 1.0)
-        self.variance = sigma_0 ** 2 * jnp.power(ratio, -alpha)
-        self.variance = self.variance.at[0].set(sigma_0 ** 2)
-        self.std = jnp.sqrt(self.variance)
-
-    def sqrt_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply B^{1/2} to control vector x."""
-        return self.std * x
-
-    def inv_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply B^{-1} to control vector x."""
-        return x / self.variance
-
-
-# ---------------------------------------------------------------------------
 # Hybrid B (static + ensemble)
 # ---------------------------------------------------------------------------
 
@@ -316,7 +265,7 @@ class HybridB:
 
     Parameters
     ----------
-    static_B : DiagonalB, DiffusionB, or SpectralB
+    static_B : DiagonalB or DiffusionB
         Static background error covariance.
     ensemble_perts : jax.Array
         Ensemble perturbations, shape (n_members, control_size).

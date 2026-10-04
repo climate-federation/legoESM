@@ -982,8 +982,9 @@ def _step_multilayer_land_impl(
     # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
     # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
     # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
-    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt
-                   + blow_subl * constants.L_s)
+    from legoesm.thermo import latent_heat_sublimation as _lhs
+    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt   # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
+                   + blow_subl * _lhs(T_surface))
     G_surface = G_surface - melt_energy
 
     # --- Latent mass partition (component- and phase-correct, water-limited) ---
@@ -1044,7 +1045,11 @@ def _step_multilayer_land_impl(
     # after the remap a non-empty top layer always holds ice.
     max_sublim = jnp.maximum((pack.swe_ice[:, 0] if layered else snow_after_melt)
                              / dt, 0.0)
-    sublim_demand = snow_latent / constants.L_s
+    # Inverses of the L the surface solve charged (surface_latent_heat at T_surface).
+    from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+    _L_s_T = latent_heat_sublimation(T_surface)
+    _L_v_T = latent_heat_vaporization(T_surface)
+    sublim_demand = snow_latent / _L_s_T
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -1114,12 +1119,13 @@ def _step_multilayer_land_impl(
         rain_pack = f_snow * jnp.maximum(infil_rain, 0.0) * dt
         snow_advected_heat = snow_advected_heat + rain_pack * (
             constants.c_pw * (jnp.maximum(forcing.T_lowest, constants.T_freeze)
-                              - constants.T_freeze) + constants.L_f)
+                              - constants.T_freeze)
+            + constants.L_f)  # latent-ok: pack enthalpy is referenced to ice at T_freeze, where L_f(T_freeze) == L_f
         pack = snow_add_mass(pack, 0.0, forcing.T_lowest, rain=rain_pack,
                              T_rain=forcing.T_lowest, config=scc)
         infil_rain = infil_rain - rain_pack / dt
     # --- Soil / plant-water evaporation (L_v), water-limited ---
-    soil_evap_demand = soil_latent / constants.L_v
+    soil_evap_demand = soil_latent / _L_v_T
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
@@ -1200,7 +1206,7 @@ def _step_multilayer_land_impl(
     _wet_evap = jnp.zeros_like(evap_transp)
     if _do_intercept:
         _wet_evap_demand = jnp.maximum(
-            surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
+            surface_out.LE_wet_canopy, 0.0) / _L_v_T   # kg m-2 s-1
         # Cap by BOTH the store (can't evaporate water it doesn't hold) AND the
         # transpiration the caller is about to draw (the wet-leaf flux re-sources
         # transpiration; drawing more than that from the store would remove more
@@ -1224,8 +1230,8 @@ def _step_multilayer_land_impl(
         # minus what the start-of-step supply cap lets the soil give.  Sign: W/m^2,
         # positive = energy INTO the column (same convention as G_surface).  The
         # post-hydrology remainder is charged to the top soil layer below.
-        evap_excess_energy_pre = lhflx - (sublim_actual * constants.L_s
-                                          + soil_evap * constants.L_v)
+        evap_excess_energy_pre = lhflx - (sublim_actual * _L_s_T
+                                          + soil_evap * _L_v_T)
         C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
         T_pack_solved, T_soil_new = solve_snow_soil_thermal(
             pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
@@ -1301,7 +1307,7 @@ def _step_multilayer_land_impl(
     # returns to the ground heat flux as ``evap_excess_energy`` (below) so the
     # surface energy budget still closes (in - out - dStorage = 0); the skin
     # temperature is not re-solved this step.
-    lhflx_actual = sublim_actual * constants.L_s + soil_evap * constants.L_v
+    lhflx_actual = sublim_actual * _L_s_T + soil_evap * _L_v_T
     evap_excess_energy = lhflx - lhflx_actual
 
     if layered:
@@ -1601,7 +1607,7 @@ def _step_multilayer_land_impl(
         # Latent heat to the atmosphere = the evaporative/sublimation demand PLUS the
         # blowing-snow sublimation (gap 5): its L_s was charged to the surface energy
         # budget, so it must reach the atmosphere as latent heat (0 when bands off).
-        lhflx=lhflx_actual + blow_subl * constants.L_s,
+        lhflx=lhflx_actual + blow_subl * _L_s_T,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=response_lw_up,

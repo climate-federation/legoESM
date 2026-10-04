@@ -8,7 +8,7 @@ surface-flux suites were skipped.  This covers the new chain:
     sign conventions, None default byte-identical.
   - ``DiagnosticCollector.feed_cmip_accumulators_native`` new kwargs — shape
     validation (transactional PHASE 1), IDW-exact uniform-field regrid,
-    ``evspsbl = hfls / L_v`` derivation, backward-compat when absent.
+    fed evspsbl (the turbulence water flux, never hfls / L_v), absent when unfed.
 """
 
 import numpy as np
@@ -65,6 +65,9 @@ def _base_fields(mesh, sigma_full):
 
 
 FLUXES = dict(rlut=238.0, rsut=99.0, rsdt=340.0, hfss=17.0, hfls=88.0,
+              # The water flux is FED (turbulence evap_sfc, slot 13), never
+              # derived from hfls: a value hfls / L_v would not give.
+              evspsbl=3.2e-5,
               # Clear-sky pair (#843): physically rsutcs <= rsut (clear sky
               # reflects LESS) and rlutcs >= rlut (clear sky emits MORE).
               rsutcs=77.0, rlutcs=262.0)
@@ -83,10 +86,9 @@ class TestFeed:
         # Uniform fields -> IDW (partition of unity) regrid is EXACT.
         for k, v in FLUXES.items():
             np.testing.assert_allclose(out[f"field_2d_{k}"], v, rtol=1e-9)
-        # evspsbl derived as hfls / L_v [kg/m2/s].
-        np.testing.assert_allclose(
-            out["field_2d_evspsbl"], FLUXES["hfls"] / constants.L_v,
-            rtol=1e-9)
+        # ...and the water is the fed value, not a latent-heat inverse.
+        assert abs(out["field_2d_evspsbl"].mean()
+                   / (FLUXES["hfls"] / constants.L_v) - 1.0) > 0.05
 
     def test_wrong_shape_raises_and_commits_nothing(self, mesh):
         dc, sigma_full = _make_collector(mesh)
@@ -103,7 +105,7 @@ class TestFeed:
         f = _base_fields(mesh, sigma_full)
         dc.feed_cmip_accumulators_native(day=15.0, **f)
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
-        for k in (*FLUXES, "evspsbl"):
+        for k in FLUXES:
             assert f"field_2d_{k}" not in out
 
 
@@ -180,7 +182,9 @@ def _tend_with_extras():
         lw_up_toa_clr=_f("lw_up_toa_clr", 12.0),
         sed_substeps_required=Field(
             data=np.full(3, 13, dtype=np.int32), name="sed_substeps_required",
-            dims=("cell",), units="1"))
+            dims=("cell",), units="1"),
+        evap_sfc=Field(data=np.full(3, 14.0e-5), name="evap_sfc",
+                       dims=("cell",), units="kg/m^2/s"))
 
 
 # The ONE slot contract both producers build from (core.state).  Spelled out
@@ -194,11 +198,14 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 # slot 12 (2026-09-22): the microphysics' required CFL
                 # sedimentation sub-step count, so an overflow is visible in
                 # a real run on BOTH producers.
-                "sed_substeps_required")
+                "sed_substeps_required",
+                # slot 13: the water flux the column received (turbulence
+                # evap_sfc) -- CMOR evspsbl / moisture closure, never hfls/L_v.
+                "evap_sfc")
 
 
 class TestSfcDiagContract:
-    """Lock the 12-slot sfc_diag tuple contract of BOTH producers (serial
+    """Lock the 14-slot sfc_diag tuple contract of BOTH producers (serial
     primitive_eq_mpas._step_jit and MPI parallel.voronoi_mpi._step) and the
     driver consumer's slot mapping (3-7 all-sky fluxes, 8/9 land-forcing
     downwelling, 10/11 clear-sky)."""
@@ -253,7 +260,7 @@ class TestSfcDiagContract:
             else getattr(_pt, _k, None)
             for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
         sfc = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc) == 13
+        assert len(sfc) == 14
         assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
         assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
         # the MPI producer publishes the sub-step count at the same slot the
@@ -261,6 +268,11 @@ class TestSfcDiagContract:
         from legoesm.driver.model_driver import _sed_substeps_slot
         assert _sed_substeps_slot() == 12
         assert sfc[12].name == "sed_substeps_required"
+        # slot 13 is the water flux; the driver reads it through the same
+        # contract-derived helper the sub-step slot uses
+        from legoesm.driver.model_driver import _evap_sfc_slot
+        assert _evap_sfc_slot() == 13
+        assert sfc[13].name == "evap_sfc"
         # #1321: the land downwelling pair is now PUBLISHED at slots 8/9.
         # While it was withheld, ``_marshal_land_forcing``'s ``_sd[8] is None``
         # guard declined every step and the Richards soil never advanced.
@@ -271,7 +283,7 @@ class TestSfcDiagContract:
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 13
+        assert len(sfc_diag) == 14
         # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
         # 5->rsdt, 6->hfss, 7->hfls, 10->rsutcs, 11->rlutcs; slots 8/9 are
         # the _marshal_land_forcing downwelling pair.
@@ -284,6 +296,7 @@ class TestSfcDiagContract:
         assert sfc_diag[9].name == "lw_down_sfc"  # land forcing
         assert sfc_diag[10].name == "sw_up_toa_clr"  # rsutcs
         assert sfc_diag[11].name == "lw_up_toa_clr"  # rlutcs
+        assert sfc_diag[13].name == "evap_sfc"       # evspsbl
 
     def test_both_producers_build_extras_from_the_shared_contract(self):
         """Assert against the symbols that RUN — the serial
@@ -461,7 +474,7 @@ class TestFeedUsesIntervalMeans:
                 output=types.SimpleNamespace(diag_days=1.0)),
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None,
+                phis=_field(f["phis"]), tracers=None, v=None,
             ),
             # Instantaneous end-of-interval snapshot deliberately DIFFERENT
             # from the accumulated mean.
@@ -498,7 +511,7 @@ class TestFeedUsesIntervalMeans:
             grid=mesh,
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None,
+                phis=_field(f["phis"]), tracers=None, v=None,
             ),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
@@ -974,7 +987,7 @@ class TestPartialWindowGate:
                 dycore=types.SimpleNamespace(dt=21600.0)),   # 4 steps = 1 d
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None),
+                phis=_field(f["phis"]), tracers=None, v=None),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
@@ -1009,7 +1022,7 @@ class TestPartialWindowGate:
                 dycore=types.SimpleNamespace(dt=43200.0)),   # 2 steps = 1 d
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]), tracers=None),
+                phis=_field(f["phis"]), tracers=None, v=None),
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
@@ -1422,7 +1435,7 @@ class TestClearSkyDriverFeed:
                 output=types.SimpleNamespace(clear_sky_diag=clear_sky_on)),
             state=types.SimpleNamespace(
                 u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
-                phis=_field(f["phis"]),
+                phis=_field(f["phis"]), v=None,
                 tracers={"q_v": _field(q_v), "q_c": _field(q_c),
                          "q_i": _field(q_i)},
             ),
