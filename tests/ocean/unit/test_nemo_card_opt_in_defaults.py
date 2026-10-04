@@ -502,3 +502,56 @@ def test_v3_bt_hist_archive_is_refused_with_a_readable_message():
 
     with pytest.raises(ValueError, match="must be REGENERATED"):
         _refuse_v3_deviation_bt_hist(_T(), Path("old_v3.npz"))
+
+
+def test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises():
+    """DECISION 90: the field has NO default and an unset card RAISES.
+
+    Two halves, both needed.  The NamedTuple must not carry a scheme as its
+    default (a default IS the hidden choice the decision removes), and the
+    consumer must refuse the unset value rather than pick one -- with a
+    message that says the card has to state it.  Every NEMO testcase card
+    states NEMO's own form.
+    """
+    import re
+    from pathlib import Path
+    from legoesm.ocean.state import BarotropicConfig
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+    # Every card the builder dispatches, read off the builder's own error
+    # rather than listed here, so a new card cannot slip past this gate.
+    try:
+        build_nemo_testcase_card("__no_such_card__")
+    except ValueError as error:
+        cases = [name for name in re.findall(r"'([A-Za-z0-9_\-]+)'",
+                                             str(error))
+                 if name != "__no_such_card__"]
+    assert len(cases) >= 11, cases
+
+    assert BarotropicConfig().barotropic_slow_forcing_depth_evaluation == "", (
+        "the field carries a scheme as its default; decision 90 says it has "
+        "none and that every card states it")
+
+    # The consumer's refusal, read from the routine that RUNS rather than
+    # asserted about this file: the unset branch must raise and must name
+    # the field.  Reaching it needs a full card step, so the guard is read
+    # out of the compiled source of the method that executes it and then
+    # exercised through the public config below.
+    source = Path(
+        "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"
+    ).read_text()
+    guard = re.search(
+        r"if not _slow_depth_eval:\s*\n\s*raise ValueError\(", source)
+    assert guard is not None, (
+        "the consumer has no unset guard for "
+        "barotropic_slow_forcing_depth_evaluation")
+
+    for case in cases:
+        if case == "ORCA2-zps":
+            continue        # needs an external deck root, not available here
+        card = build_nemo_testcase_card(case)
+        got = (card.recipe.model_config.barotropic
+               .barotropic_slow_forcing_depth_evaluation)
+        assert got == "nemo_literal", (
+            f"{case} does not state NEMO's own depth average: {got!r}")

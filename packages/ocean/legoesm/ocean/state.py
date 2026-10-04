@@ -1196,7 +1196,10 @@ class BarotropicConfig(NamedTuple):
     barotropic_seed_evaluation: str = "generic"
     # How the SLOW FORCING is depth-averaged onto the barotropic faces --
     # NEMO's ``Ue_rhs``/``Ve_rhs`` (``stp2d.F90:177-186``).
-    # ``min_rule_live`` (DEFAULT, main's behaviour): the per-level minimum of
+    # DECISION 90 (user, 2026-10-04): this field has NO DEFAULT.  Every card
+    # states it explicitly and the unset value RAISES at the consumer, so a
+    # scientific choice can never be made by a default nobody wrote down.
+    # ``min_rule_live``: the per-level minimum of
     # the two neighbouring LIVE (ssh-stretched) T thicknesses, divided by
     # their own column sum.  On a full-step mesh the two columns share one
     # reference ladder, so that minimum is the reference face thickness times
@@ -1208,7 +1211,7 @@ class BarotropicConfig(NamedTuple):
     # (``domain.F90``), with ``hu_0 = SUM_k e3u_0*umask``.  The two disagree
     # only where the per-level minimum can follow a DIFFERENT column than the
     # reference minimum does, i.e. over PARTIAL CELLS.  Unknown value raises.
-    barotropic_slow_forcing_depth_evaluation: str = "min_rule_live"
+    barotropic_slow_forcing_depth_evaluation: str = ""
     # Does this card CARRY NEMO's prognostic external mode (``uu_b``/``vv_b``,
     # NEMO ``oce.F90:39,99``) as model state, so the barotropic window seeds
     # from it (``dynspg_ts.F90:484-500``) instead of re-reducing the 3-D

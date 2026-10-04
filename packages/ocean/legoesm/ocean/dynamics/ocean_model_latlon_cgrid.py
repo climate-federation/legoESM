@@ -5965,9 +5965,20 @@ class LatLonCGridOceanModel:
         # minimum of the two STRETCHED thicknesses can follow a different
         # column than the reference minimum does.  Static Python branch on a
         # config string, so the default path is bit-identical.
+        # DECISION 90 (user): no default.  An unset field is a card that
+        # never stated which depth average it runs, which is the hidden
+        # choice this field exists to remove -- so it raises here rather
+        # than silently selecting one.
         _slow_depth_eval = getattr(
-            _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation",
-            "min_rule_live")
+            _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation", "")
+        if not _slow_depth_eval:
+            raise ValueError(
+                "barotropic_slow_forcing_depth_evaluation is unset: this "
+                "card must STATE how the slow forcing is depth-averaged "
+                "onto the barotropic faces -- 'nemo_literal' for NEMO's own "
+                "statement (stp2d.F90:177-186) or 'min_rule_live' for the "
+                "per-level minimum of the two live thicknesses.  There is "
+                "no default (decision 90).")
         if _slow_depth_eval not in ("min_rule_live", "nemo_literal"):
             raise ValueError(
                 "unknown barotropic_slow_forcing_depth_evaluation scheme "
