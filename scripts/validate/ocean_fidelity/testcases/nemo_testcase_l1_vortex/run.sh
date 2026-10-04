@@ -252,7 +252,8 @@ case "$variant" in
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
   smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
-  smtflxtra | smtvectra | smt1vec | smt1vec100d)
+  smtflxtra | smtvectra | smt1vec | smt1vec100d | \
+  smt2vec | smt2vec100d)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -424,10 +425,32 @@ case "$variant" in
         ref_name=VORTEX_SMT1_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round220_smt1_vec_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/day100 ;;
+      # ---- ROUND 222 / VORTEX_SMT round 10 -- DECISION 93 (operator note CE),
+      # rung SMT-2 of the seamount mini-ladder: LINEAR BOTTOM DRAG, exactly as
+      # ORCA2 rung 0 resolves it.  ONE module's switches change against SMT-1
+      # and the diff is two lines in &namdrg: ln_drg_OFF .true. -> .false. and
+      # ln_lin -> .true. (ORCA2 rung-0 namelist_cfg:270).  &namdrg_bot is NOT
+      # written, because rung 0 does not write it either: rn_Cd0 = 1.e-3
+      # (namelist_ref:834), rn_Uc0 = 0.4 (:835), ln_boost = .false. (:839) and
+      # &namdrg ln_drgimp = .true. (:817) all come from the reference namelist
+      # on both decks.  cpp keys unchanged; new build directories; round 9's
+      # are untouched.
+      smt2vec)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        ref_name=VORTEX_SMT2_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round222_smt2_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smt2vec100d)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt2_vec_een_100d.patch
+        ref_name=VORTEX_SMT2_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round222_smt2_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/day100 ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec or smt1vec100d\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec, smt1vec100d, smt2vec or smt2vec100d\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -465,6 +488,7 @@ readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
    || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
    || "$variant" == "smt1vec" || "$variant" == "smt1vec100d" \
+   || "$variant" == "smt2vec" || "$variant" == "smt2vec100d" \
    || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
@@ -775,7 +799,7 @@ case "$variant" in
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
   | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
-  | smt1vec | smt1vec100d)
+  | smt1vec | smt1vec100d | smt2vec | smt2vec100d)
       want_vec='.true.'  ; want_up3='.false.' ;;
   *)  # Dispatch hardening: a variant added above but forgotten here used to
       # fall through to an unbound-variable abort.  Name it instead.
@@ -1036,6 +1060,7 @@ if [[ "$reuse_build" -eq 1 ]]; then
     smtflx100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtvec100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smt1vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smt2vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
