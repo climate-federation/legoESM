@@ -448,7 +448,9 @@ It is named in the table above and offered for revert in this same receipt.
 | citation re-anchor rule | does not apply: no model file was edited |
 | the two new card/record guards | both proved to FIRE (seamount card against the flat record, and the reverse), and both real invocations still run |
 | direct test for the new probe | `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round215_slow_forcing_split.py`, 4 tests, run with round 196's own module: `9 passed in 3.42s`. **NON-VACUITY PROVED**: with the guard block deleted the two refusal tests go red (`2 failed, 2 passed`), and the file was restored and `git status --porcelain` checked |
-| push battery | §13 (appended on landing) |
+| push battery, run 1 | `136 passed in 984.11s (0:16:24)`, then `PUSHED 25a5fb2f2059` — six commits onto `fidelity/nemo-testcases-l2-gyre-codex2` from `9cd35a16a` |
+| push battery, run 2 (the second review pass's fixes) | `136 passed in 1002.34s (0:16:42)`, then `PUSHED 579ae11115` — two commits. The first push attempt hit a GitHub SSH timeout and was RETRIED on the same tree the battery had just passed, not forced; the lane fast-forwarded, no rebase |
+| DINO from-rest month gate | auto-skipped on both runs, correctly: `git diff --name-only origin/BR..HEAD -- packages src` is empty |
 
 ## 10. OPEN
 
