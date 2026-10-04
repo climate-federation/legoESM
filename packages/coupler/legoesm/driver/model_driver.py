@@ -2086,6 +2086,14 @@ class ModelDriver:
                 _phis_g, _fl_g = load_real_topography(
                     self._grid_global, config=topo_config)
                 _ids = np.asarray(self._voronoi_layout.partition.local_cells)
+                # the local mesh IS global[local_cells] (voronoi_partition.
+                # build_local_mesh); a permuted order would land every cell's
+                # terrain on another cell with no shape error (GLM)
+                if not np.array_equal(np.asarray(self.grid.latCell),
+                                      np.asarray(self._grid_global.latCell)[_ids]):
+                    raise RuntimeError(
+                        "Voronoi local mesh cell order != global[local_cells]; "
+                        "the terrain product cannot be indexed onto it")
                 self._phis_data = jnp.asarray(np.asarray(_phis_g)[_ids])
                 self._f_land = jnp.asarray(np.asarray(_fl_g)[_ids])
             else:

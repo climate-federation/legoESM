@@ -4598,8 +4598,18 @@ def test_argv_distributed_mode_matches_the_parser_and_config_default():
     p = build_arg_parser()
     for argv in (["--distributed-mode", "spmd"], ["--distributed-mode=spmd"],
                  ["--days", "1", "--distributed-mode", "spmd", "--distributed"],
-                 ["--distributed"], []):
-        assert _argv_distributed_mode(argv) == p.parse_args(argv).distributed_mode
+                 ["--distributed"], [],
+                 # argparse: the LAST occurrence wins (codex)
+                 ["--distributed-mode", "spmd", "--distributed-mode", "mpi"],
+                 ["--distributed-mode=mpi", "--distributed-mode", "spmd"],
+                 # argparse: unambiguous abbreviations are accepted (GLM)
+                 ["--distributed-m", "spmd"], ["--distributed-mo=spmd"],
+                 ["--distributed-", "spmd"]):
+        assert _argv_distributed_mode(argv) == p.parse_args(argv).distributed_mode, argv
+    # `--distributed` is the exact OTHER flag, never this option
+    assert _argv_distributed_mode(["--distributed", "spmd"]) == "mpi"
+    # nothing after a bare `--` is an option (argparse treats it as positional)
+    assert _argv_distributed_mode(["--", "--distributed-mode", "spmd"]) == "mpi"
     # a trailing bare flag has no value: the default, same as argparse would
     # refuse -- we never federate on a half-typed flag
     assert _argv_distributed_mode(["--distributed-mode"]) == "mpi"

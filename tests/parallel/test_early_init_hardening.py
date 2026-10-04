@@ -597,10 +597,12 @@ def test_mpi_lane_never_federates_across_hosts(monkeypatch, capsys):
     fires (assert below) and the call returns True.
     """
     monkeypatch.setattr(ei, "_INITIALIZED", False)
-    monkeypatch.setenv("SLURM_NTASKS", "4")
+    # same launch shape as the multi-host test above (the stub's allgather
+    # echoes this rank's contribution, so two ranks on two hosts)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    _stub_mpi(monkeypatch, rank=0, hosts=["g194", "g194", "g283", "g283"])
-    jax = _stub_jax(monkeypatch, process_count=4)
+    _stub_mpi(monkeypatch, rank=0, hosts=["g194", "g283"])
+    jax = _stub_jax(monkeypatch, process_count=2)
     fired = []
     jax.distributed = types.SimpleNamespace(
         initialize=lambda **kw: fired.append(kw))

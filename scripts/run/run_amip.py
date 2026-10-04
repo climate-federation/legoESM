@@ -39,13 +39,27 @@ _ARGV_DISTRIBUTED_MODE_DEFAULT = "mpi"
 
 
 def _argv_distributed_mode(argv: list[str]) -> str:
-    """``--distributed-mode`` as typed on the command line, or the default."""
+    """``--distributed-mode`` as argparse will read it, or the default.
+
+    argparse semantics mirrored (pinned against the real parser by the CLI
+    test): the LAST occurrence wins, ``--opt=value`` and ``--opt value``
+    both count, an unambiguous abbreviation (``--distributed-m spmd``:
+    longer than the exact ``--distributed`` flag, so it can only be this
+    option) counts, and nothing after a bare ``--`` is an option.
+    """
+    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
     for i, a in enumerate(argv):
-        if a.startswith("--distributed-mode="):
-            return a.split("=", 1)[1]
-        if a == "--distributed-mode" and i + 1 < len(argv):
-            return argv[i + 1]
-    return _ARGV_DISTRIBUTED_MODE_DEFAULT
+        if a == "--":
+            break
+        flag, eq, value = a.partition("=")
+        if not (len(flag) > len("--distributed")
+                and "--distributed-mode".startswith(flag)):
+            continue
+        if eq:
+            mode = value
+        elif i + 1 < len(argv):
+            mode = argv[i + 1]
+    return mode
 
 
 if "--multicontroller" not in sys.argv:
