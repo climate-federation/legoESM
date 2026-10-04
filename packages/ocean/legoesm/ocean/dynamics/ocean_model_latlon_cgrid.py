@@ -5967,18 +5967,32 @@ class LatLonCGridOceanModel:
         # config string, so the default path is bit-identical.
         # DECISION 90 (user): no default.  An unset field is a card that
         # never stated which depth average it runs, which is the hidden
-        # choice this field exists to remove -- so it raises here rather
-        # than silently selecting one.
+        # choice this field exists to remove -- so it raises rather than
+        # silently selecting one.
+        #
+        # SCOPE OF THE RAISE, stated rather than left implicit.  The choice
+        # is between NEMO's stp2d.F90:177-186 statement and legoESM's own
+        # live min-rule, so it only EXISTS on a card running NEMO's RK3
+        # momentum program; a card on legoESM's own time stepping executes
+        # no NEMO statement here and has nothing to choose between.  This
+        # is the same shape as the nemo_first_wzv_after_ssh guard above,
+        # which refuses a NEMO value on a non-RK3 program instead of
+        # demanding one from every card.
         _slow_depth_eval = getattr(
             _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation", "")
+        _nemo_rk3_family = getattr(
+            _cfg_b, "momentum_time_integrator", "euler") in ("rk3", "rk3_ws")
         if not _slow_depth_eval:
-            raise ValueError(
-                "barotropic_slow_forcing_depth_evaluation is unset: this "
-                "card must STATE how the slow forcing is depth-averaged "
-                "onto the barotropic faces -- 'nemo_literal' for NEMO's own "
-                "statement (stp2d.F90:177-186) or 'min_rule_live' for the "
-                "per-level minimum of the two live thicknesses.  There is "
-                "no default (decision 90).")
+            if _nemo_rk3_family:
+                raise ValueError(
+                    "barotropic_slow_forcing_depth_evaluation is unset: this "
+                    "card runs NEMO's RK3 momentum program and must STATE "
+                    "how the slow forcing is depth-averaged onto the "
+                    "barotropic faces -- 'nemo_literal' for NEMO's own "
+                    "statement (stp2d.F90:177-186) or 'min_rule_live' for "
+                    "the per-level minimum of the two live thicknesses. "
+                    "There is no default (decision 90).")
+            _slow_depth_eval = "min_rule_live"
         if _slow_depth_eval not in ("min_rule_live", "nemo_literal"):
             raise ValueError(
                 "unknown barotropic_slow_forcing_depth_evaluation scheme "
