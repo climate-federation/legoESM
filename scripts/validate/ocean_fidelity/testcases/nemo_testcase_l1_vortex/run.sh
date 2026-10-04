@@ -251,7 +251,8 @@ case "$variant" in
     ;;
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
-  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6)
+  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
+  smtflxtra | smtvectra)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -381,10 +382,28 @@ case "$variant" in
         ref_name=VORTEX_SMT_R5R_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round215_smt_vec_rhs
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5R_VEC_R8_OMIP_L1_P3/rhs ;;
+      # ---- ROUND 218 / VORTEX_SMT round 7 (operator note CD, decision 92).
+      # The seamount cards' first TRACER row over the bar is T at kt=2, and
+      # no admitted record carries a single tracer array: rounds 192 and 200
+      # instrumented the MOMENTUM side of the same stage loop.  These two
+      # variants compile the round-218 per-stage TRACER writer into new
+      # VORTEX_SMT_R7_* configurations; rounds 1, 3, 5 and 6 build
+      # directories are never touched, and the additions-only proof is the
+      # step-10 restart against round 3's ADMITTED run of the same deck.
+      smtflxtra)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R7_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round218_smt_flux_tracer
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round7/VORTEX_SMT_R7_OMIP_L1_P3/tracer ;;
+      smtvectra)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R7_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round218_smt_vec_tracer
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round7/VORTEX_SMT_R7_VEC_R8_OMIP_L1_P3/tracer ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts or smtvecrhs\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra or smtvectra\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -431,6 +450,18 @@ if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec
   STAGE_MODULE_NAME=vortex_r8_stage_terms.F90
   STAGE_SYMBOL=vortex_r8_stage
   STAGE_FLAG_NAME=--stage-terms
+elif [[ "$variant" == "smtflxtra" || "$variant" == "smtvectra" ]]; then
+  # Round 218's TRACER writer.  One patched file; the momentum stage writers
+  # are NOT applied here, because the momentum terms of these two decks are
+  # already admitted (round 3's R3 records) and only one stprk3_stg patch
+  # slot exists.
+  STAGE_INSTRUMENT=$here/stprk3_tracer_terms_record.patch
+  DYNADV_INSTRUMENT=
+  STAGE_MODULE=$here/vortex_r18_tracer_terms.F90
+  STAGE_STUBS=$here/vortex_r18_tracer_terms_syntax_stubs.F90
+  STAGE_MODULE_NAME=vortex_r18_tracer_terms.F90
+  STAGE_SYMBOL=vortex_r18_tracer
+  STAGE_FLAG_NAME=--tracer-terms
 elif [[ "$variant" == "stage123flx" ]]; then
   # One patched file, not two: the flux-form advection trend is recorded at
   # its CALL SITE in stprk3_stg, so dynadv.F90 stays shipped.
@@ -715,10 +746,10 @@ fi
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
   flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d \
-  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6)
+  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6 | smtflxtra)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
-  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs)
+  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra)
       want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then

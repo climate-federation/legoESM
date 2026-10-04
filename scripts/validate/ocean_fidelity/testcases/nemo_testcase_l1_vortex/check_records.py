@@ -61,6 +61,10 @@ _FAMILIES = {
     # stream, but it opens at EVERY stage and carries the advective
     # transports the flux-form advection call consumes.
     "oracle_stage_flux_terms_kt": ("NEMO_L1_STGFLX1", 15, "groups", 0),
+    # Round 218's TRACER-term record (VORTEX_SMT round 7).  Same header
+    # shape and the same self-describing group stream; it opens at every
+    # stage and carries the tracer path's operands and outputs.
+    "oracle_tracer_terms_kt": ("NEMO_L1_TRATRM1", 15, "groups", 0),
 }
 # The groups every per-term record must carry, by name.  This list, the magic
 # and the format version are the ONLY hard-coded expectations.
@@ -92,6 +96,18 @@ _STAGE_FLUX_BY_STAGE = {
     3: _STAGE_FLUX_COMMON + ("hpg_u", "hpg_v", "vor_u", "vor_v",
                              "ldf_u", "ldf_v", "zdf_u", "zdf_v"),
 }
+
+# Round 218's tracer-term record.  The same fifteen groups at every stage:
+# the three advective transports as tra_adv receives them, the cross-level
+# velocity, the before/now tracer fields, the three surface-ratio time
+# levels, the tracer right-hand side after advection + the surface boundary
+# condition, and the after-tracer at the end of the stage.
+_TRACER_TERM_GROUPS = (
+    "zfu", "zfv", "zfw", "ww",
+    "tsb_t", "tsb_s", "tsm_t", "tsm_s",
+    "r3t_kbb", "r3t_kmm", "r3t_kaa",
+    "adv_t", "adv_s", "out_t", "out_s",
+)
 
 
 # Round 196's per-substep barotropic record.  Three frame kinds: the
@@ -237,6 +253,12 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
                  f"{path.name}: unsupported stage {stage}")
         required = _STAGE_FLUX_BY_STAGE[stage]
         declared_index = 10
+    elif family == "oracle_tracer_terms_kt":
+        stage = header[2]
+        _require(stage in (1, 2, 3),
+                 f"{path.name}: unsupported stage {stage}")
+        required = _TRACER_TERM_GROUPS
+        declared_index = 10
     else:
         stage = header[2]
         _require(stage in _STAGE_TERM_BY_STAGE,
@@ -326,6 +348,9 @@ def main(argv=None) -> int:
     parser.add_argument("--stage-flux-terms", action="store_true",
                         help="also require round 200's flux-card stage-1, "
                              "stage-2 and stage-3 momentum term records")
+    parser.add_argument("--tracer-terms", action="store_true",
+                        help="also admit round 218's per-stage tracer-term "
+                             "record")
     parser.add_argument("--spgts-terms", action="store_true",
                         help="also require round 196's per-substep "
                              "barotropic (dyn_spg_ts) records")
@@ -374,6 +399,10 @@ def main(argv=None) -> int:
             wanted += [args.run_dir /
                        f"oracle_stage_flux_terms_kt00000001_s{stage}.bin"
                        for stage in (1, 2, 3)]
+        if args.tracer_terms:
+            wanted += [args.run_dir /
+                       f"oracle_tracer_terms_kt00000001_s{stage}.bin"
+                       for stage in (1, 2, 3)]
         if args.spgts_terms:
             wanted += [args.run_dir / f"oracle_spgts_kt{kt:08d}.bin"
                        for kt in range(1, args.steps + 1)]
@@ -381,6 +410,9 @@ def main(argv=None) -> int:
             _require(path.is_file(), f"the run did not write {path.name}")
         if args.spgts_terms:
             corrupt_path = args.run_dir / "oracle_spgts_kt00000001.bin"
+        elif args.tracer_terms:
+            corrupt_path = (args.run_dir /
+                            "oracle_tracer_terms_kt00000001_s1.bin")
         elif args.stage_flux_terms:
             corrupt_path = (args.run_dir /
                             "oracle_stage_flux_terms_kt00000001_s1.bin")
@@ -459,6 +491,23 @@ def main(argv=None) -> int:
                              f"rank {want}")
             report["stage_flux_term_groups"] = {
                 str(r["stage"]): sorted(r["groups"]) for r in flux_records}
+        if args.tracer_terms:
+            tra_records = [r for r in report["records"]
+                           if r["magic"] == "NEMO_L1_TRATRM1"]
+            stages = {r["stage"] for r in tra_records}
+            _require(stages == {1, 2, 3},
+                     f"tracer-term records cover {sorted(stages)}, "
+                     "expected [1, 2, 3]")
+            _require(len(tra_records) == 3,
+                     f"{len(tra_records)} tracer-term records, expected 3")
+            for record in tra_records:
+                for name, meta in record["groups"].items():
+                    want = 2 if name.startswith("r3t_") else 3
+                    _require(meta["rank"] == want,
+                             f"stage {record['stage']} {name} is not "
+                             f"rank {want}")
+            report["tracer_term_groups"] = {
+                str(r["stage"]): sorted(r["groups"]) for r in tra_records}
         if args.spgts_terms:
             spgts = [r for r in report["records"]
                      if r["magic"] == "NEMO_L1_SPGTS1"]
