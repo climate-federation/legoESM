@@ -40,9 +40,13 @@ CASE = "VORTEX_VEC-zco"
 # legoESM has one barotropic solve -- so the card is a PARAMETER here rather
 # than a second copy of this file.  Each card names the evidence root its own
 # acquisition wrote; nothing is defaulted across cards.
+# Each card's acquisitions, by configuration-directory name.  Round 6 built
+# the flux card its own pair (round 5's run never started), so that card now
+# has two admissible roots and the guard must accept either rather than one.
 SMT_CASES = {
-    "VORTEX_SMT-zps": "VORTEX_SMT_R5_OMIP_L1_P3",
-    "VORTEX_SMT_VEC-zps": "VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3",
+    "VORTEX_SMT-zps": ("VORTEX_SMT_R5_OMIP_L1_P3",
+                       "VORTEX_SMT_R6B_OMIP_L1_P3"),
+    "VORTEX_SMT_VEC-zps": ("VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3",),
 }
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round196/"
@@ -128,13 +132,20 @@ def require_case_matches_root(case: str, root: Path) -> None:
     records are the same size and ``expect_interior`` passes on either.
     Both entry points (the walk and the conditioning probe) call it.
     """
-    expected_dir = SMT_CASES.get(case)
-    if expected_dir is not None:
-        require(expected_dir in root.parts,
-                f"{case} must be walked against its own acquisition: no "
-                f"'{expected_dir}' component in --oracle-root {root}")
+    expected_dirs = SMT_CASES.get(case)
+    every_smt_dir = {d for dirs in SMT_CASES.values() for d in dirs}
+    if expected_dirs is not None:
+        require(any(d in root.parts for d in expected_dirs),
+                f"{case} must be walked against one of its own acquisitions "
+                f"{sorted(expected_dirs)}: --oracle-root {root}")
+        # ...and not against the OTHER seamount card's, which the clause
+        # above cannot catch on its own once a card has several roots.
+        require(not any(d in root.parts
+                        for d in every_smt_dir - set(expected_dirs)),
+                f"{case} is walked against another card's seamount "
+                f"acquisition: --oracle-root {root}")
     else:
-        require(not any(d in root.parts for d in SMT_CASES.values()),
+        require(not any(d in root.parts for d in every_smt_dir),
                 f"{case} is the flat card and --oracle-root {root} is a "
                 "seamount acquisition")
 
