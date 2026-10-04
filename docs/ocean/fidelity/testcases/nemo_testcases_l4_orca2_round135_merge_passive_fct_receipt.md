@@ -21,8 +21,9 @@ The round cannot land because the merged VORTEX round-201 known-answer
 control is red: feeding the model its own exposed stage-1 momentum RHS changes
 32,422/40,320 elements in its first reported leaf, with maximum absolute
 difference `4.440892098500626e-16`. A diagnostic census also found a leaf at
-12 row-scale ULP, so the two-ULP ratchet cannot be invoked as a pass. The test
-remains exact; no tolerance was relaxed.
+16,777,216 row-scale ULP (53 unequal values, maximum absolute difference
+`3.7252902984619141e-09`), so the two-ULP ratchet cannot be invoked as a pass.
+The test remains exact; no tolerance was relaxed.
 
 No public config field, card, forcing, carried-state definition, stabilizer,
 threshold, deck, sea-ice selector, or `unmeasured_features` entry changed.
@@ -147,4 +148,3 @@ Verdict: **independent review unavailable in-sandbox**.
    with the headline cell.
 4. Rung 0 remains incomplete and the hierarchy-decks merge/rung-1 climb stays
    deferred. Round 129's salinity-exposing barotropic arm remains held.
-
