@@ -9056,8 +9056,6 @@ def main() -> int:
                                          False)),
         )
         app_grid_type = "tripole"
-        if args.trd_accumulate:
-            model._trd_callback = _ZdfTrendAccumulator()
     elif args.grid == "cubed_sphere":
         grid, z_coord, model, state, H_bathy = build_cubed_sphere(
             args.nlev, args.H_max, args.mesh, n=args.cube_n,
@@ -11054,6 +11052,10 @@ def main() -> int:
                  if (args.flux_accumulate or args.mld_accumulate
                      or args.state_accumulate)
                  else None)
+    # Attached HERE, after every setup-time rebuild of the model (a hook set at
+    # build time was silently dropped by those rebuilds).
+    if args.trd_accumulate:
+        model._trd_callback = _ZdfTrendAccumulator()
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
@@ -11081,11 +11083,13 @@ def main() -> int:
                     # viscosity the profile file named.
                     _lv_new = renormalise_ah_profile(
                         _lv_now, _ah)._replace(C_smag_lap=_cs)
+                    _trd_keep = getattr(model, "_trd_callback", None)
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
                         model.config._replace(lateral_viscosity=_lv_new),
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
+                    model._trd_callback = _trd_keep
                     # Free the previous segment's compiled step before the new
                     # one compiles: without this the old executable stays in
                     # JAX's compilation cache and the rebuild OOMs the GPU
