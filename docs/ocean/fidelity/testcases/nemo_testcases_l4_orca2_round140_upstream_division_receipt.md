@@ -100,7 +100,17 @@ DINO and tank integrations were not repeated for this default-off diagnostic.
 The default receipt has no `advection.py` citation. A SequenceMatcher
 old-to-new line map nevertheless re-anchored all eight affected citation-map
 entries and their round-138/139 receipt spans; no rigid shift was used. The
-round's citation gate and focused tests are recorded in the evidence directory.
+final default citation gate passes 274 citations and the round gate passes
+five, both with zero failures, unmapped citations, or map-audit failures. The
+planted two-line shift of the compiled vertical-flux span refuses as required.
+
+The focused observer/EVD/citation battery passes **28/28**. The required
+`tests/ocean/fidelity -n 12` battery reached 95% and then entered the known
+silent xdist tail with zero live pytest processes; it is **incomplete, not
+PASS**. Before the tail it emitted three established reds: SI3 scalar-math
+provenance, round-35 allow-dirty escape scope, and the worktree-stamp grow-only
+ratchet. Each failing ID was rerun alone and reproduced its documented failure;
+no round-140 test failed. Logs are preserved under the evidence root.
 
 The required `codex exec --sandbox read-only` review could not initialize:
 `failed to initialize in-process app-server client: Read-only file system`.
