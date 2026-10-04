@@ -262,20 +262,23 @@ def test_smt1_validator_refuses_a_card_that_drops_a_rung0_value():
         validate_nemo_testcase_card(bad3)
 
 
-def test_smt1_stated_evd_is_declared_but_not_executed_and_measured_inert():
+def test_smt1_stated_evd_is_executed_and_measured_inert_on_this_rung():
     """Two MEASURED facts, pinned so neither can rot silently.
 
-    1.  The card states ``ln_zdfevd`` (it is the deck's resolved value) and
-        the executed model DOES NOT RUN IT: multiplying ``rn_evd`` by ten
-        thousand changes nothing in a full step.  Round 220 found this with
-        exactly this plant; it is a DECISION_NEEDED in that receipt, not a
-        thing this test endorses.
-    2.  It is inert here anyway, because NEMO's own ``zdfevd`` never fires
-        on this rung: with the deck's S-EOS (decision 69) the minimum N^2
-        over the whole seamount run is +9.0e-06 s^-2, ten orders the wrong
-        side of ``zdfevd.F90:93``'s -1.e-12 threshold.  The trigger as the
-        MODEL would compute it fires on 61 cells, which is the defaulted
-        S-EOS coefficient set, not the fluid this deck runs.
+    1.  Multiplying ``rn_evd`` by ten thousand changes nothing in a full
+        step -- because NEMO's own ``zdfevd`` never fires on this rung:
+        with the deck's S-EOS (decision 69) the minimum N^2 over the whole
+        seamount run is +9.0e-06 s^-2, ten orders the wrong side of
+        ``zdfevd.f90:108``'s -1.e-12 threshold.  This is the card being
+        FAITHFULLY inert, not the selection being dropped.
+    2.  CORRECTION to round 220, which read this same 0.0 as "the stated
+        selection is not reaching the solve".  It reaches it: round 221
+        measured the same plant moving temperature by 3.268e-02 K once one
+        column is made unstable for the card's own fluid
+        (``tests/ocean/fidelity/test_nemo_round221_evd.py``).  The 61 cells
+        the trigger used to fire on came from the DEFAULTED S-EOS
+        coefficients and were all below the seafloor, where the
+        wet-interface mask removes them before the solve.
     """
     import numpy as _np
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
