@@ -400,9 +400,9 @@ def measure(deck_root: Path, record_root: Path, admission: Path,
         "worktree": stamp, "wall_seconds": time.time() - started,
         "compiled_citations": {
             "external_before_stage1":
-                "ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/stprk3.f90:210-222",
+                "ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/stprk3.f90:202-221",
             "stage1_transport":
-                "ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/traadv.f90:259-273",
+                "ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/traadv.f90:299-320",
         },
     }
     return report
