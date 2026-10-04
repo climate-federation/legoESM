@@ -5547,13 +5547,11 @@ CITATION_MAP = {
     # its paired U/V halo exchange, not the differently numbered MY_SRC file.
     'VORTEX_SMT_R3_OMIP_L1_P3/BLD/ppsrc/nemo/usrdef_zgr.f90:240-247': [
         'pe3u(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji+1,jj,jk) )',
-        'pe3v(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji,jj+1,jk) )',
-        'CALL lbc_lnk',
+        '&          kfillmode = jpfillcopy )',
         8],
     'vertical.py:673-735': [
         'def nemo_qco_resolved_mesh_operands(',
-        'e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)',
-        'e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)',
+        'e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]',
         63],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
