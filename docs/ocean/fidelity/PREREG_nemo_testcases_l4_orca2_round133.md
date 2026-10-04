@@ -42,3 +42,22 @@ stabilizer, or alter any selector. A valid result requires the committed probe,
 an earlier-boundary classification plant and a passivity plant that both fire,
 focused tests, the citation gate with a shifted-line plant, one prescribed
 ocean-fidelity battery, and a separate read-only Codex diff-review attempt.
+
+## Post-refutation continuation — frozen before measurement
+
+The committed first pass at `d698301ed` refuted R133-P2 and R133-P3: all four
+exposed stage-1 transport rows are finite. This result is retained. The walk
+therefore continues, without changing the trajectory or metric, through the
+existing stage-ordered tracer exposures used in round 131: after stage-1
+advection, after its surface source, the complete stage-1 tracer, complete
+stage-2 tracer, stage-3 advection content, complete pre-implicit content,
+pre-implicit concentration, and returned state.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R133-P6 | Stage-1 and stage-2 tracer boundaries remain finite; stage-3 advection content is the first non-finite downstream boundary. | Every earlier census is zero and the stage-3 advection census is nonzero. | Mark **REFUTED** and name the earliest observed boundary in source order. |
+| R133-P7 | Every boundary from the first non-finite one through the returned state remains non-finite. | All later censuses are nonzero. | Mark **REFUTED** at the first later finite boundary; do not infer ownership beyond the observed boundary. |
+
+The continuation must reproduce the first pass's four finite operand censuses
+from its committed JSON before its own result is classified. Its earlier-
+boundary plant changes that replay and must fire.
