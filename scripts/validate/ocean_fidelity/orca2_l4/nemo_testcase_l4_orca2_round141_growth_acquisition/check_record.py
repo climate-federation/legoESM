@@ -13,7 +13,7 @@ import numpy as np
 
 MAGIC = "NEMO_L4_R141G1"
 HEADER = struct.Struct("=14i")
-GROUP = struct.Struct("=4i")
+GROUP = struct.Struct("=5i")
 STEPS = tuple(range(30, 37))
 FIELDS_2D = (
     "ssh_entry", "r3t_entry", "uub_entry", "vvb_entry",
@@ -23,7 +23,7 @@ FIELDS_2D = (
 FIELDS_3D = ("zFu_stage1", "zFv_stage1", "zFw_stage1")
 FIELDS = FIELDS_2D + FIELDS_3D
 PLANTS = (
-    "none", "header", "field-name", "field-dims", "truncation",
+    "none", "header", "field-name", "field-rank", "field-dims", "truncation",
     "missing-step", "nonfinite", "swapped-rank", "restart-byte",
 )
 
@@ -69,14 +69,18 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
                 f"{path.name}: truncated field header {index}")
         name = raw[offset:offset + 16].decode("ascii", "replace").rstrip(" \x00")
         offset += 16
-        ndim, n1, n2, n3 = GROUP.unpack_from(raw, offset)
+        field_rank, ndim, n1, n2, n3 = GROUP.unpack_from(raw, offset)
         offset += GROUP.size
         if plant == "field-name" and index == 0:
             name = "wrong"
+        if plant == "field-rank" and index == 0:
+            field_rank = 1 - field_rank
         if plant == "field-dims" and index == 0:
             n1 += 1
         require(name and name not in groups,
                 f"{path.name}: duplicate/empty field {name!r}")
+        require(field_rank == rank,
+                f"{path.name}: field {name!r} rank {field_rank} != {rank}")
         expected = (2, *owned, 1) if name in FIELDS_2D else (3, *owned, jpk)
         require((ndim, n1, n2, n3) == expected,
                 f"{path.name}: bad field {name!r} dimensions {(ndim, n1, n2, n3)}")

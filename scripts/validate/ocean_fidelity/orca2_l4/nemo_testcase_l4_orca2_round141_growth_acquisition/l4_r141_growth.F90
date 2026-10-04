@@ -92,7 +92,7 @@ CONTAINS
       CHARACTER(LEN=16) :: field
       field = name
       WRITE(record_unit) field
-      WRITE(record_unit) 2, SIZE(value,1), SIZE(value,2), 1
+      WRITE(record_unit) mpprank, 2, SIZE(value,1), SIZE(value,2), 1
       WRITE(record_unit) value
    END SUBROUTINE write_2d
 
@@ -102,7 +102,7 @@ CONTAINS
       CHARACTER(LEN=16) :: field
       field = name
       WRITE(record_unit) field
-      WRITE(record_unit) 3, SIZE(value,1), SIZE(value,2), SIZE(value,3)
+      WRITE(record_unit) mpprank, 3, SIZE(value,1), SIZE(value,2), SIZE(value,3)
       WRITE(record_unit) value
    END SUBROUTINE write_3d
 END MODULE l4_r141_growth

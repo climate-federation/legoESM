@@ -193,7 +193,7 @@ admit() {
     printf 'REFUSE: calibration namelist moved\n' >&2; exit 70;
   }
   local plant
-  for plant in header field-name field-dims truncation missing-step nonfinite swapped-rank restart-byte; do
+  for plant in header field-name field-rank field-dims truncation missing-step nonfinite swapped-rank restart-byte; do
     if "$PY" "$GATE" --record-root "$TARGET_RUN" --calibration-root "$CALIBRATION_RUN" \
       --baseline "$SOURCE_RUN" --plant "$plant" >"$EVIDENCE/${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71

@@ -21,7 +21,8 @@ def _write_record(path: Path, step: int, rank: int) -> None:
     for index, name in enumerate(gate.FIELDS):
         ndim = 2 if name in gate.FIELDS_2D else 3
         n3 = 1 if ndim == 2 else 31
-        chunks.extend((name.encode().ljust(16), gate.GROUP.pack(ndim, owned_x, owned_y, n3)))
+        chunks.extend((name.encode().ljust(16), gate.GROUP.pack(
+            rank, ndim, owned_x, owned_y, n3)))
         values = np.full((owned_x, owned_y, n3), step + rank + index / 100, dtype="=f8")
         if ndim == 2:
             values = values[:, :, 0]
