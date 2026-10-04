@@ -187,7 +187,8 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         nemo_entry_velocity: bool = False,
         nemo_substep_coriolis: bool = False,
         nemo_substep_pgf: bool = False,
-        nemo_depth_average: Path | None = None) -> dict:
+        nemo_depth_average: Path | None = None,
+        dump_entry_coriolis: Path | None = None) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -277,6 +278,29 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         _npz = np.load(nemo_depth_average)
         depth_override = (jnp.asarray(_npz["ue_rhs"]),
                           jnp.asarray(_npz["ve_rhs"]))
+    # Round 216's ONE VARIABLE for the remainder round 215 left PLAUSIBLE:
+    # legoESM's OWN loop-entry barotropic Coriolis subtraction, read out at
+    # the boundary it is formed (dynspg_ts.f90:292's counterpart).  The model
+    # already offers this boundary as a CALLABLE observer on the same hook
+    # the forcing override uses, so nothing in the package changes; the probe
+    # that compares it to NEMO's own is
+    # nemo_testcase_l1_vortex_round216_entry_coriolis.
+    _entry_dump: dict[str, np.ndarray] = {}
+    if dump_entry_coriolis is not None:
+        require(override is None,
+                "the entry-Coriolis dump and the entry-forcing override share "
+                "one hook; they cannot both be requested")
+
+        def _observe(incoming_u, incoming_v, cor_u, cor_v,
+                     umask, vmask, final_u, final_v):
+            _entry_dump.update(
+                incoming_u=np.asarray(incoming_u),
+                incoming_v=np.asarray(incoming_v),
+                cor_u=np.asarray(cor_u), cor_v=np.asarray(cor_v),
+                umask=np.asarray(umask), vmask=np.asarray(vmask),
+                final_u=np.asarray(final_u), final_v=np.asarray(final_v))
+
+        override = _observe
     cor_override = _stack("cor_u", "cor_v") if nemo_substep_coriolis else None
     pgf_override = _stack("zu_spg", "zv_spg") if nemo_substep_pgf else None
     model = LatLonCGridOceanModel(
@@ -288,6 +312,16 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
             barotropic_substep_coriolis_override=cor_override,
             barotropic_substep_pgf_override=pgf_override))
     result = jax.device_get(model.step(seed, dt=card.dt_s))
+    if dump_entry_coriolis is not None:
+        # Self-checking: the observer must have FIRED and must have seen a
+        # subtraction that is not a zero, or the arm reports nothing.
+        require(bool(_entry_dump),
+                "the loop-entry observer never fired; this card does not take "
+                "the live barotropic-Coriolis-split path")
+        require(float(np.max(np.abs(_entry_dump["cor_u"]))) > 0.0,
+                "the loop-entry Coriolis subtraction is identically zero; a "
+                "comparison against it would perturb a zero")
+        np.savez(dump_entry_coriolis, **_entry_dump)
     trace = {key: np.asarray(value) for key, value in result.substeps.items()}
     traced_loops = int(next(iter(trace.values())).shape[0])
     require(traced_loops == meta["icycle"],
@@ -565,6 +599,11 @@ def main(argv=None) -> int:
                         help="one-variable arm: substitute NEMO's own depth "
                              "average of the slow forcing (stp2d.f90:178) "
                              "before the barotropic Coriolis subtraction")
+    parser.add_argument("--dump-entry-coriolis", type=Path,
+                        help="save legoESM's OWN loop-entry barotropic "
+                             "Coriolis subtraction (and the forcing either "
+                             "side of it) as an npz, for comparison against "
+                             "NEMO's dynspg_ts.f90:292 trend")
     parser.add_argument("--one-ulp-entry-probe", action="store_true",
                         help="legoESM-vs-legoESM conditioning arm: perturb the "
                              "barotropic entry velocity by one ULP and report "
@@ -589,7 +628,8 @@ def main(argv=None) -> int:
                      nemo_entry_velocity=args.nemo_entry_velocity,
                      nemo_substep_coriolis=args.nemo_substep_coriolis,
                      nemo_substep_pgf=args.nemo_substep_pgf,
-                     nemo_depth_average=args.nemo_depth_average)
+                     nemo_depth_average=args.nemo_depth_average,
+                     dump_entry_coriolis=args.dump_entry_coriolis)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2

@@ -81,7 +81,8 @@ def _interior(plane: np.ndarray, nlev: int) -> np.ndarray:
 
 
 def run(terms_root: Path, spgts_root: Path, *, case: str,
-        allow_dirty: bool = False, write_operand: Path | None = None) -> dict:
+        allow_dirty: bool = False, write_operand: Path | None = None,
+        lego_entry_coriolis: Path | None = None) -> dict:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
@@ -186,6 +187,40 @@ def run(terms_root: Path, spgts_root: Path, *, case: str,
         "residual_after_depth_average_cells_v": int(np.count_nonzero(dv)),
         "drag_and_wind_excluded_by_the_decks_own_namelist": True,
     }
+    if lego_entry_coriolis is not None:
+        # ROUND 216.  The residual above is NEMO's OWN loop-entry Coriolis
+        # trend, zu_trd*ssumask, because the three controls make every other
+        # writer of Ue_rhs identically zero on this deck.  legoESM forms the
+        # same quantity at the same boundary and the substep walk's
+        # --dump-entry-coriolis arm saves it; this is the per-statement
+        # comparison round 215 named as the discriminating measurement and
+        # did not have.  The two arrays are differenced, not their maxima:
+        # a max-vs-max agreement is not an agreement.
+        dump = np.load(lego_entry_coriolis)
+        lego_u = np.asarray(dump["cor_u"], dtype=np.float64)[:, 1:]
+        lego_v = np.asarray(dump["cor_v"], dtype=np.float64)[1:, :]
+        require(lego_u.shape == ue_rhs.shape,
+                f"legoESM's entry Coriolis is {lego_u.shape} on NEMO's "
+                f"interior {ue_rhs.shape}")
+        nemo_u = ue_rhs - zu_frc            # dynspg_ts.f90:292, u
+        nemo_v = ve_rhs - zv_frc            # dynspg_ts.f90:292, v
+        require(float(np.max(np.abs(nemo_u))) > 0.0
+                and float(np.max(np.abs(lego_u))) > 0.0,
+                "one side of the entry-Coriolis comparison is identically "
+                "zero; this would be a control that perturbs a zero")
+        cu = np.abs(lego_u - nemo_u)
+        cv = np.abs(lego_v - nemo_v)
+        report.update(
+            entry_coriolis_nemo_peak_u=float(np.max(np.abs(nemo_u))),
+            entry_coriolis_nemo_peak_v=float(np.max(np.abs(nemo_v))),
+            entry_coriolis_lego_peak_u=float(np.max(np.abs(lego_u))),
+            entry_coriolis_lego_peak_v=float(np.max(np.abs(lego_v))),
+            entry_coriolis_diff_max_u=float(np.max(cu)),
+            entry_coriolis_diff_max_v=float(np.max(cv)),
+            entry_coriolis_diff_cells_u=int(np.count_nonzero(cu)),
+            entry_coriolis_diff_cells_v=int(np.count_nonzero(cv)),
+            lego_entry_coriolis=str(lego_entry_coriolis),
+        )
     if write_operand is not None:
         # NEMO's OWN depth average, rebuilt from NEMO's own right-hand side
         # and NEMO's own mesh operands.  The substep walk substitutes it at
@@ -203,6 +238,11 @@ def main(argv=None) -> int:
     parser.add_argument("--case", default="VORTEX_SMT_VEC-zps")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--lego-entry-coriolis", type=Path,
+                        help="npz from the substep walk's "
+                             "--dump-entry-coriolis arm; adds the "
+                             "per-statement comparison against NEMO's "
+                             "dynspg_ts.f90:292 trend")
     parser.add_argument("--write-operand", type=Path,
                         help="save NEMO's own rebuilt depth average as an "
                              "npz the substep walk can substitute")
@@ -210,7 +250,8 @@ def main(argv=None) -> int:
     try:
         report = run(args.terms_dir, args.spgts_dir, case=args.case,
                      allow_dirty=args.allow_dirty,
-                     write_operand=args.write_operand)
+                     write_operand=args.write_operand,
+                     lego_entry_coriolis=args.lego_entry_coriolis)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2

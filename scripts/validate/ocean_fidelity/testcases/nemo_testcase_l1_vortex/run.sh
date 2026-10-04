@@ -359,9 +359,9 @@ case "$variant" in
       # ADMITTED flux run.
       smtflxspgts6)
         deck_basename=namelist_cfg_smt_omip_l1.patch
-        ref_name=VORTEX_SMT_R6_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        ref_name=VORTEX_SMT_R6B_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
         tag=round216_smt_flux_spgts
-        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round6/VORTEX_SMT_R6_OMIP_L1_P3/spgts ;;
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round6/VORTEX_SMT_R6B_OMIP_L1_P3/spgts ;;
       smtvecspgts)
         deck_basename=namelist_cfg_smt_vec_een.patch
         ref_name=VORTEX_SMT_R5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
@@ -421,7 +421,7 @@ readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
    || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
-   || "$variant" == "smtflxspgts6" || "$variant" == "smtvecspgts" ]]; then
+   || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
   STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
