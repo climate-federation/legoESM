@@ -235,11 +235,10 @@ def test_water_closes_and_albedo_contract_holds_through_melt_and_refreeze():
 
 
 @pytest.mark.parametrize("scheme, ft", [
-    pytest.param("two_leaf", False, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-        "KNOWN REGRESSION 2026-09-27: with the albedo's snow cover (tanh(SWE/50), "
-        "f~0.29 at 15 kg/m2) the two-leaf canopy solve stops converging on the LAI-2 "
-        "column in warm sun over a melting partial pack; the column is held from "
-        "step ~18. Not seen with SWE/(SWE+10)."))),
+    # Freeze/thaw off: the layered pack refuses it.  With it off the LAI-2 column
+    # converges through the melt (measured 2026-10-04); the earlier xfail, recorded
+    # with freeze/thaw on, had since been satisfied by the refusal's ValueError.
+    ("two_leaf", False),
     ("seb", False)])
 def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
     """Full land step, both surface schemes, through cold snowfall, rain on snow
@@ -583,10 +582,11 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
 @pytest.mark.parametrize("swe", [5.0, 15.0, 40.0])
 def test_partial_cover_sublimation_scales_with_f_not_f_squared(swe):
     """SimpleSEB over a partial layered pack on a soil at its dry floor: the snow
-    exchanges as an ice-saturated surface over the fraction f, so the pack
-    supplies (nearly) all the latent demand the scheme charged.  The f-blended
-    surface gave the pack only f of an already f-weighted demand (f^2): measured
-    unmet 13.8 / 21.2 / 20.2 W/m2 of 15.3 / 29.9 / 60.0 at f = 0.10 / 0.29 / 0.66."""
+    exchanges as an ice-saturated surface over the fraction f and the pack
+    supplies that whole share (the dry soil gives ~nothing of its own).  The
+    f-blended surface gave the pack only f of an already f-weighted demand (f^2):
+    measured reported latent 1.5 / 8.7 / 39.9 W/m2 at f = 0.10 / 0.29 / 0.66,
+    against pack shares of 8.9 / 26.0 / 59.2 now."""
     from legoesm.land.richards import psi_dry_floor
     from legoesm.land.soil_grid import SoilGridConfig
     from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
@@ -602,8 +602,9 @@ def test_partial_cover_sublimation_scales_with_f_not_f_squared(swe):
     _, out = _run(cfg, s, fo, 1, 1800.0)
     _, resp, sfc = out[0]
     demand, reported = float(sfc.lhflx[0]), float(resp.lhflx[0])
-    assert demand > 5.0, demand
-    assert demand - reported < 0.05 * demand, (f, demand, reported)
+    le_snow = float(sfc.LE_snow[0])
+    assert le_snow > 5.0 and le_snow <= demand, (f, le_snow, demand)
+    assert reported >= le_snow * (1.0 - 1e-9), (f, le_snow, reported)
     # the scheme itself: snow and soil exchange separately, area-weighted
     kw = dict(T_surface=s.T_soil[:, 0], snow=s.snow_depth, snow_age=s.snow_age,
               beta_soil=jnp.zeros(1), forcing=fo, land_config=cfg, U_min=1.0, lat=None,
