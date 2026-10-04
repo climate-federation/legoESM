@@ -1331,9 +1331,9 @@ CITATION_MAP = {
         ('! 2nd option', 1), ('END DO   ;   END DO', 52), 30],
     'advection.py:839-873': [
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
-        'return_limiter_activity: bool = False,', 28],
+        'return_limiter_activity: bool = False,', 35],
     'advection.py:1225-1242': [
-        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 29), 18],
+        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 30), 18],
     'advection.py:1310-1311': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],
@@ -1348,7 +1348,7 @@ CITATION_MAP = {
         'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
     'advection.py:975-990': [
         ('raise ValueError(', 2),
-        '"NEMO trace returns require the NEMO RK3 two-step predictor")', 15],
+        '"NEMO trace returns require the NEMO RK3 two-step predictor")', 16],
     'advection.py:1256-1271': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
@@ -2167,7 +2167,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109': [
         ('MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12', 1),
         ('p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
-        3,
+        2,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121-135': [
         ('IF( nn_evdm == 1 ) THEN', 1),
