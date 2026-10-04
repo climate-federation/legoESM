@@ -242,6 +242,25 @@ magnitude on 0.1 % of its support.**  The seam cannot produce
 `3.552714e-15` K on 7.  The arm's inexactness is registered as a measured
 1-ULP, 7-cell term; the headline stands.
 
+**THE CONTROL THAT MAKES THAT A FAIR COMPARISON, AND THE REVIEWER RAN IT,
+NOT ME.**  The identity arm only bounds Arm A if the seam is driven just as
+hard on both — and legoESM's own `zFu` is born as `mf_u * dy_u`, for which
+the round trip survives far more often than for an arbitrary `F`, so a
+weakly-driven identity arm would have made its 7 cells meaningless.  The
+reviewer counted the INPUT-side perturbation on both drives:
+
+| card | drive | u / v / w faces perturbed | amplitude |
+|---|---|---|---:|
+| vector | NEMO recorded (Arms A and B) | 2098 / 2090 / 0 = 4188 | `9.313e-10` |
+| vector | legoESM's own (identity arm) | 2100 / 2137 / 0 = 4237 | `9.313e-10` |
+| flux | NEMO recorded | 2086 / 2186 / 0 = 4272 | `9.313e-10` |
+| flux | legoESM's own | 2086 / 2169 / 0 = 4255 | `9.313e-10` |
+
+Same face count to within 1 %, same amplitude to the bit.  **The identity
+arm is driven at FULL amplitude**, so its seven cells are a controlled
+measurement of what the seam can make and not an artifact of a gentler
+input.
+
 The exact arm — the stage-3 FCT branch consuming the raw
 `zfu_stage/zfv_stage` slots plus a raw `zFw` slot, as the CEN2 branch
 already does — is a MODEL edit with the full gate set, and it is a later
@@ -425,7 +444,7 @@ identity, ladder, first-over-bar row.  It is the rung that makes
 | 2 | Add Arm B (NEMO's whole stage-3 entry) when Arm A did not reach bit equality | UNASKED; a measurement, and both arms are reported |
 | 3 | Decide R8-P1 from the record instead of adding a `ze3div` seam to the model | UNASKED; it keeps the round measurement-only, and the limit of that choice is stated in section 5 |
 | 4 | Report the 2-ULP residue as a registered last-bit item rather than walking it | UNASKED; it is 2.9x inside the bar and its structure refutes a partial-cell owner (section 4) |
-| 5 | Land over a BLOCK verdict after measuring its finding end to end, instead of withdrawing the headline or making the arm exact | UNASKED — it follows this lane's "a reviewer's finding is a hypothesis, not an instruction" rule, the discriminating measurement the reviewer itself named is in section 4b, and the exact arm is registered as a MODEL edit for a later round; offered for revert if the operator wants the headline withdrawn instead |
+| 5 | Answer a BLOCK by running the reviewer's own discriminating measurement rather than by withdrawing the headline or making the arm exact (the BLOCK was then CLEARED) | UNASKED — it follows this lane's "a reviewer's finding is a hypothesis, not an instruction" rule, the discriminating measurement the reviewer itself named is in section 4b, and the exact arm is registered as a MODEL edit for a later round; offered for revert if the operator wants the headline withdrawn instead |
 | 6 | No production model file is edited | not a choice: the round is a measurement unless a statement is named |
 
 No default value, scheme selection, bound, tier, cadence, window, data
@@ -444,6 +463,7 @@ them changes a number any card produces.**
 | the recorded `zFw` liveness refusal (round 7 reviewer finding 1) | a vacuous vertical half of the transport arm | passed |
 | Arm B against Arm A | a result that was really inherited input noise | Arm B does not move Arm A: the residue is made at stage 3 |
 | **the seam-identity arm** (section 4b): legoESM's own stage-3 transports fed back through the same override | an arm whose inexactness manufactures the result it reports | **1 ULP on 7 cells (vector) / 8 (flux)**, against 2 ULP on 7,066 / 7,116 |
+| the identity arm's own DRIVE, counted by the reviewer | an identity arm too gently driven for its 7 cells to bound anything | 4237 vs 4188 perturbed input faces, same amplitude to the bit: FULL drive |
 | the linear bound that preceded it | a gain-1 assumption through a limiter made of cancelling differences | REFUTED by the reviewer and then by the identity arm (4.7x amplification measured); kept, but nothing rests on it |
 | the residue's level/extent structure against the card's own partial-cell census (section 4) | a "partial-cell" finding that is really composition noise | 88 % of the residue sits on levels 1-8, which have NO partial cell |
 | `r3t(Kbb)` and `r3t(Kaa)` rebuilt from the card's own depth | an operand split asserted instead of measured | 0 of 3721 columns unequal at stage 3 |
@@ -491,14 +511,27 @@ including that ORCA2's `traadv_fct.f90` is BYTE-IDENTICAL to the
 seamount's, both 67105 bytes, so the line numbers transfer).  The reviewer
 did not re-run the walk.
 
-**THE REVIEWER WAS RUN TWICE AND WAS RIGHT BOTH TIMES ABOUT WHAT TO
+**FINAL VERDICT: BLOCK CLEARED, after three passes.**  Finding 1 is
+RETRACTED by the reviewer as the residue's owner and stands only as what
+is registered here: a measured 7-cell, 1-ULP term.  Before clearing it the
+reviewer ran its own control on my measurement — the identity arm's drive
+amplitude (above, section 4b) — and that control refuted its remaining
+hypothesis rather than confirming it.  It also withdrew its two recompute
+objections: the `w` term is not padding (it had tested the transport round
+trip, which is exact for a uniform `area_T`; the code executes the
+ASSOCIATION, with `T` between the divide and the restore), and
+`2.980232e-08` is not a quantum (`|zFu*T|` peaks in `[2^28, 2^29)`, whose
+half-ULP is exactly `2^-25`).
+
+**THE REVIEWER WAS RUN THREE TIMES AND WAS RIGHT EACH TIME ABOUT WHAT TO
 MEASURE.**  Its first pass BLOCKED on the arm's inexactness.  I answered
 with an analytic bound; it re-reviewed, reproduced the bound, and refused
 it on the correct ground — a gain-1 bound does not bound a flux limiter —
 and named the one four-minute run that settles it without a model edit.
 **That run is now section 4b's seam-identity arm**, it is committed, and
 it replaces the bound as the evidence.  The round lands on a measurement,
-not on an assumption.
+not on an assumption — and on the reviewer's own cleared verdict, not over
+a standing BLOCK.
 
 Two disagreements with the reviewer's own recompute, resolved here and
 worth stating because both of us were measuring something real: it tested
@@ -527,11 +560,13 @@ counts.
    consume the raw `zfu_stage/zfv_stage` slots the CEN2 branch already
    consumes, plus a raw `zFw` slot.  That is a MODEL edit with the full
    gate set and it is a later round's landing.
-4b. NOT RUN, and cheap: the reviewer's second control — count the faces
-   whose FCT limiter coefficient differs between the identity arm's two
-   runs (`_flux_pair` already sets `return_a_fct_activity` at
-   `stage_index == 2`).  The identity arm's 4.7x over the linear bound
-   says the count is nonzero; the number itself is unmeasured.
+4b. NOT RUN, and now DESCRIPTIVE rather than decisive (the reviewer's own
+   disposition): count the faces whose FCT limiter coefficient differs
+   between the identity arm's two runs (`_flux_pair` already sets
+   `return_a_fct_activity` at `stage_index == 2`).  The identity arm
+   measures the end-to-end effect with those flips included, and its 4.7x
+   over the linear bound says the count is nonzero; the number itself is
+   unmeasured and gates nothing.
 5. Round 7's reviewer 2 had not reported when that round landed; its
    findings, if they arrive, are still owed a disposition.
 6. The round-213/215 open items are unchanged.
