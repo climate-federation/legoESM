@@ -930,6 +930,7 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py",
     "ocean_model_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "advection.py": REPO / "packages/ocean/legoesm/ocean/advection.py",
     "barotropic_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
     "eos.py": REPO / "packages/ocean/legoesm/ocean/eos.py",
@@ -1320,12 +1321,12 @@ CITATION_MAP = {
     # --- ORCA2 round 138: passive FCT beta-operand walk ------------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:800-845': [
         '!        !==  set slices and compute zbup/zbdo  ==!',
-        ('END DO   ;   END DO', 14), 46],
+        ('END DO   ;   END DO', 52), 46],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-856': [
         'zup = MAX(  zbup(ji  ,jj  ,ik  ),',
         '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
-        'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 30), 21],
+        'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910-913': [
         'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji,jj+1,ik) ),',
         'pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 4],
