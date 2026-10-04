@@ -1317,6 +1317,36 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 138: passive FCT beta-operand walk ------------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:800-845': [
+        '!        !==  set slices and compute zbup/zbdo  ==!',
+        ('END DO   ;   END DO', 14), 46],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-856': [
+        'zup = MAX(  zbup(ji  ,jj  ,ik  ),',
+        '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
+        'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 30), 21],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910-913': [
+        'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji,jj+1,ik) ),',
+        'pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 4],
+    'advection.py:958-970': [
+        ('raise ValueError(', 2),
+        '"NEMO trace returns require the NEMO RK3 two-step predictor")', 13],
+    'advection.py:1206-1221': [
+        'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
+        'return_nemo_beta_trace=True,', 16],
+    'advection.py:1223-1228': [
+        'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
+        'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 6],
+    'advection.py:1741-1764': [
+        ('if return_nemo_beta_trace:', 5),
+        'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
+    'advection.py:1819-1820': [
+        ('if return_nemo_beta_trace:', 6),
+        'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
+    'ocean_model_latlon_cgrid.py:13190-13205': [
+        'if self._nemo_ws_test_hooks.expose_stage3_fct_inputs:',
+        'return state_after._replace(mass_flux_w=diagnostic)', 16],
     # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:180-195': [
         "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
