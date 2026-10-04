@@ -98,8 +98,20 @@ write-only passivity in each gate. The focused round-130/131/133 battery passes
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
-Citation and broad-battery results are recorded in the final validation
-commit after those controls run.
+The default citation gate passes 274 citations with zero failures, zero
+unmapped citations, and zero audit failures. This receipt passes four
+citations with the same zero counts. Shifting the three-part compiled FCT
+dispatch citation by two lines makes the gate fail with
+`SYMBOL-NOT-AT-LINE`, so the receipt check is non-vacuous.
+
+The single prescribed `tests/ocean/fidelity -n 12` battery reached 99% and
+then entered the established silent tail in
+`test_prediction_plant_is_fail_closed`; it was interrupted and is
+**incomplete, not PASS**. Before the tail it reproduced exactly the six known
+reds carried from rounds 97-98: the GYRE round-51 private-arm scope, round-35
+escape scope, GYRE round-129 record stamp, worktree-stamp ratchet, recipe
+case-board, and SI3 scalar-math provenance gates. No round-133 test failed.
+Per the one-battery rule, no second broad battery was launched.
 
 ## OPEN
 
