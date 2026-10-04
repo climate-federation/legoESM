@@ -1,6 +1,11 @@
 """MPI-distributed (y-slab) variable-coefficient pressure Poisson for the
 pseudo-incompressible plane LES — the nearest-neighbour, mesh-scalable elliptic solve.
 
+PARKED in ``_future/`` (ponytail item poisson_mpi, user-approved 2026-10-02):
+not wired — only the parked pseudo_incompressible_plane_mpi and tests import
+it, and its tests are skipped.  Wire it into production (moving it back) or
+delete it.
+
 This is the distributed counterpart of :mod:`pseudo_incompressible_poisson`. It proves the
 core GPU/TPU-scaling thesis: the matrix-free 7-point Laplacian communicates ONLY a 1-cell
 halo with its two y-neighbours per matvec (NOT the spectral core's global all-to-all FFT),

@@ -1,5 +1,9 @@
 """1.5-order TKE sub-grid-scale closure for the plane LES (gap #4).
 
+PARKED in ``_future/`` (ponytail #16, user-approved 2026-10-02): not wired —
+no production driver, factory or registry imports this module, and its tests
+are skipped.  Wire it into production (moving it back) or delete it.
+
 Deardorff (1980) / Lilly (1967) prognostic-TKE sub-grid closure, the alternative
 to the Smagorinsky-Lilly SGS in
 :func:`legoesm.atmosphere.dynamics.les.compressible_euler_plane._compute_smagorinsky_K_m_plane`

@@ -1,5 +1,9 @@
 """Score an ARM-forced SCM run against the ARM observation reference.
 
+PARKED in ``_future/`` (ponytail #7, user-approved 2026-10-02): not wired —
+no production driver, factory or registry imports this module, and its tests
+are skipped.  Wire it into production (moving it back) or delete it.
+
 The observational-campaign analogue of :mod:`les_suite.score` (which scores an SCM
 against LES truth).  Here the reference is REAL observations
 (:class:`legoesm.atmosphere.forcing.scm.sccm_arm.ARMObsReference`): the ARM SGP
