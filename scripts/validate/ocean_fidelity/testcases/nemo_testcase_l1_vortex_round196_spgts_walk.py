@@ -136,7 +136,7 @@ def require_case_matches_root(case: str, root: Path) -> None:
     every_smt_dir = {d for dirs in SMT_CASES.values() for d in dirs}
     if expected_dirs is not None:
         require(any(d in root.parts for d in expected_dirs),
-                f"{case} must be walked against one of its own acquisitions "
+                f"{case} must be walked against its own acquisition among "
                 f"{sorted(expected_dirs)}: --oracle-root {root}")
         # ...and not against the OTHER seamount card's, which the clause
         # above cannot catch on its own once a card has several roots.

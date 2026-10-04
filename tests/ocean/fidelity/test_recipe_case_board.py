@@ -40,6 +40,8 @@ _NON_CASE_COMPARE = frozenset({
                                     # the legoesm_cube_vs_latlon class
     "three_way_nemo",               # re-scores the SAME global_omip arms on
                                     # one common grid; adds no case
+    "hires_lane_surface",           # cross-grid FESOM/MPAS/tripole surface
+                                    # diagnostic on one common raster
 })
 
 
