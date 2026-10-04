@@ -290,8 +290,14 @@ does fire. Options, my pick first:
 | geometry identity, SMT-1 vs its own record | 18/18 rows, 0 ULP (incl. the new `e3w_0` row) |
 | initial state vs SMT-0 | bit-identical, 7 fields |
 | SMT-1 ladder / 50-row registry | first over bar kt=2 T/u/v/ssh; status DEBT |
-| nine of the ten existing cards, 50-row registries | **0/50 rows moved each** — SMT flux, SMT vector, VORTEX-zco, VORTEX_VEC-zco, both 15 km, both 10 km, LOCK_EXCHANGE |
-| OVERFLOW-zps | **STILL RUNNING at the time of landing, so UNMEASURED** (**[R-3 taken]** — an earlier draft counted it as scored; it was not). Its registry completes into `round9/inert/` and is reported in the ledger addendum |
+| all ten existing cards, 50-row registries | **0/50 rows moved each**, TOTAL_MOVED_ROWS 0 — SMT flux, SMT vector, VORTEX-zco, VORTEX_VEC-zco, both 15 km, both 10 km, LOCK_EXCHANGE, OVERFLOW-zps |
+
+**[R-3 taken, then CLOSED.]** The reviewer was right that an earlier draft
+counted OVERFLOW without having scored it; the run was still going. It
+completed at 15:51:18 UTC at **0/50 rows moved**, first-over-bar unchanged at
+kt=2 T/u, so the sweep is complete and nothing here is unmeasured. Two of my
+own status checks in between read a stale directory listing and I reported
+OVERFLOW as unmeasured on that basis — the count above supersedes it.
 | card unit tests | 13 passed |
 | NEMO admission | ADMITTED, restarts byte-identical, plant fired |
 
@@ -348,7 +354,6 @@ substitute for it.
   not walked.
 * §6b's momentum owner, with its ×2-viscosity falsifier — the next round's
   first item.
-* OVERFLOW's registry (§8).
 * §7's plant test pins a defect rather than a property: when the enhanced
   vertical diffusion is wired it will go RED by design. Whoever wires it
   inverts that test rather than deleting it.
