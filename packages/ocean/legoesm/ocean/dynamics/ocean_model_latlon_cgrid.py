@@ -8620,6 +8620,7 @@ class LatLonCGridOceanModel:
         dK_ddm_salt = None
         if do_tracers:
             K_v_cell = K_v_cell.astype(state.T.data.dtype)
+            _K_trd = K_v_cell   # pre-K33/ddm/mask: NEMO avt minus avt_evd
             if K33_iso is not None:
                 # Fold the vertical isoneutral diffusivity K_33 into the implicit
                 # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
@@ -9113,7 +9114,7 @@ class LatLonCGridOceanModel:
                 # diagonal); handed to a host accumulator, state untouched.
                 from jax.experimental import io_callback
                 io_callback(trd_callback, None, (T_new - T_solve_in) / dt,
-                            ordered=True)
+                            _K_trd, ordered=True)
         if do_momentum:
             if _zdf_baroclinic_only:
                 # Re-add the SAME depth mean that was subtracted before the

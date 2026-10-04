@@ -6513,15 +6513,18 @@ class _ZdfTrendAccumulator:
 
     The model hands each step's solve change ``(T_new - T_in)/dt`` [degC/s]
     through ``io_callback`` (NEMO's ``ttrd_zdf``); the snapshot writes the
-    window mean as ``ttrd_zdf_mean``.  Read-only: the state is never touched.
+    window mean as ``ttrd_zdf_mean``, plus the solve's diffusivity at interfaces
+    before the K33/ddm terms (``K_trd_mean``, NEMO avt - avt_evd).  Read-only.
     """
 
     def __init__(self):
-        self._sum, self._n, self._total = None, 0, 0
+        self._sum, self._ksum, self._n, self._total = None, None, 0, 0
 
-    def __call__(self, x):
+    def __call__(self, x, k):
         x = np.asarray(x, dtype=np.float64)
+        k = np.asarray(k, dtype=np.float64)
         self._sum = x.copy() if self._sum is None else self._sum + x
+        self._ksum = k.copy() if self._ksum is None else self._ksum + k
         self._n += 1
         self._total += 1
 
@@ -6535,8 +6538,9 @@ class _ZdfTrendAccumulator:
                 "accumulator this window; this lane does not emit it (only the "
                 "prognostic-TKE implicit solve of the lat-lon/tripole step does)")
         out = {"ttrd_zdf_mean": self._sum / self._n,
+               "K_trd_mean": self._ksum / self._n,
                "ttrd_zdf_n_steps": np.asarray(self._n)}
-        self._sum, self._n = None, 0
+        self._sum, self._ksum, self._n = None, None, 0
         return out
 
 

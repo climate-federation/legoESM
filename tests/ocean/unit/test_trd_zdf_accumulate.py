@@ -82,7 +82,7 @@ def test_emitted_tendency_is_the_solve_alone_and_conserves_column_heat():
     got = []
     out, _ = m._apply_implicit_vertical_mixing(
         st, _DT, None, tke_old=tke0, return_tke=True,
-        surface_tracer_forcing=src, trd_callback=lambda x: got.append(np.asarray(x)))
+        surface_tracer_forcing=src, trd_callback=lambda x, k: got.append(np.asarray(x)))
     assert len(got) == 1
     trd = got[0]
     T0, T1 = np.asarray(st.T.data), np.asarray(out.T.data)
@@ -103,19 +103,22 @@ def test_callback_is_read_only_and_fires_under_jit():
     got = []
     f = lambda s, cb: m._apply_implicit_vertical_mixing(
         s, _DT, None, tke_old=tke0, return_tke=True, trd_callback=cb)[0].T.data
-    with_cb = jax.jit(lambda s: f(s, lambda x: got.append(np.asarray(x))))(st)
+    with_cb = jax.jit(lambda s: f(s, lambda x, k: got.append((np.asarray(x), np.asarray(k)))))(st)
     without = jax.jit(lambda s: f(s, None))(st)
     np.testing.assert_array_equal(np.asarray(with_cb), np.asarray(without))
-    assert len(got) == 1 and got[0].shape == st.T.data.shape
+    assert len(got) == 1 and got[0][0].shape == st.T.data.shape
+    assert got[0][1].shape == st.T.data.shape[:-1] + (st.T.data.shape[-1] - 1,)
+    assert np.all(got[0][1] >= 0) and np.any(got[0][1] > 0)
 
 
 def test_accumulator_mean_empty_window_and_never_fed():
     acc = _core2()._ZdfTrendAccumulator()
     with pytest.raises(SystemExit, match="does not emit"):
         acc.drain(_DT)
-    acc(np.full((2, 3), 1.0)); acc(np.full((2, 3), 3.0))
+    acc(np.full((2, 3), 1.0), np.full((2, 2), 4.0)); acc(np.full((2, 3), 3.0), np.full((2, 2), 6.0))
     out = acc.drain(_DT)
     np.testing.assert_array_equal(out["ttrd_zdf_mean"], np.full((2, 3), 2.0))
+    np.testing.assert_array_equal(out["K_trd_mean"], np.full((2, 2), 5.0))
     assert int(out["ttrd_zdf_n_steps"]) == 2
     assert acc.drain(_DT) == {}
 
