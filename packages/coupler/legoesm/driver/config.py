@@ -1081,6 +1081,13 @@ class ExperimentConfig(NamedTuple):
     # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
     # use_multilayer_land runs.
     land_soil_moisture_init_frac: float = 0.5
+    # Iteration cap of the two-leaf canopy energy-balance solver
+    # (CanopyConfig.max_iters; its own default is 60).  The cap BINDS every
+    # step in production (columns at LAI->0 never converge; the vmapped
+    # while_loop runs to the slowest column), so it is the land step's cost:
+    # ~95 % of a CAM6 step on every lane (measured 2026-10-04).  Only read
+    # for land_surface_scheme='two_leaf'.
+    land_canopy_max_iters: int = 60
     # HOW the multilayer soil is seeded at a cold start.
     #
     #   "aridity" (default, unchanged) — from the initial atmosphere's
@@ -2770,6 +2777,7 @@ class ExperimentConfig(NamedTuple):
                 # conductance a second time.
                 "land_stomatal_beta": (self.land_stomatal_beta, False),
                 "land_surface_scheme": (self.land_surface_scheme, "two_leaf"),
+                "land_canopy_max_iters": (self.land_canopy_max_iters, 60),
                 "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
                 "multilayer_soil_depth": (self.multilayer_soil_depth,
                                           _grid.total_depth),
@@ -3487,6 +3495,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_soil_init must be one of {_soil_init_modes}, got "
                 f"{self.land_soil_init!r}.")
+        if not (isinstance(self.land_canopy_max_iters, int)
+                and self.land_canopy_max_iters >= 1):
+            raise ValueError(
+                "land_canopy_max_iters (two-leaf canopy solver iteration cap) "
+                f"must be an int >= 1; got {self.land_canopy_max_iters!r}.")
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
                 f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "

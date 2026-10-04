@@ -102,6 +102,8 @@ unset SLURM_CPUS_PER_TASK
 _PER_NODE=$((AMIP_N_GPUS / AMIP_NODES))
 _GPU_MAP=$(seq -s, 0 $((_PER_NODE - 1)))
 export MPI4JAX_USE_CUDA_MPI=0
+# AMIP_EXTRA_FLAGS: word-split extra run_amip flags for a one-variable arm
+# (e.g. "--land-canopy-max-iters 10"); empty on the production chain.
 JAX_ENABLE_X64=1 srun --nodes="${AMIP_NODES}" --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${_PER_NODE}" \
   --mpi=pmix --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task=8 --kill-on-bad-exit=1 \
   "$PY" -u scripts/run/run_amip.py \
@@ -112,6 +114,7 @@ JAX_ENABLE_X64=1 srun --nodes="${AMIP_NODES}" --ntasks="${AMIP_N_GPUS}" --ntasks
   --checkpoint-days "$CHECKPOINT_DAYS" \
   --max-wallclock-seconds "$MAX_WALL" \
   "${RESTART[@]}" \
+  ${AMIP_EXTRA_FLAGS:-} \
   --output "$OUTDIR"
 rc=$?
 new_day=$(_ckpt_day)

@@ -11,8 +11,8 @@ from legoesm import constants
 from scripts.run.run_amip import (
     _ARGV_DISTRIBUTED_MODE_DEFAULT,
     _apply_aimip_classical_overrides,
-    _argv_distributed_mode,
     _apply_spectral_scheme_fallback,
+    _argv_distributed_mode,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
@@ -594,6 +594,29 @@ def test_land_soil_moisture_init_frac_flag_flows_to_config():
     for bad in (0.0, -0.1, 1.5, float("nan")):
         with pytest.raises(ValueError, match="land_soil_moisture_init_frac"):
             cfg._replace(land_soil_moisture_init_frac=bad).validate_strict()
+
+
+def test_land_canopy_max_iters_flag_flows_to_config():
+    """--land-canopy-max-iters round-trips; default 60 equals the canopy
+    solver's own cap (byte-identical when unchanged); the driver hands it to
+    the two-leaf scheme config."""
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.land.canopy.config import CanopyConfig
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_canopy_max_iters == 60 == CanopyConfig().max_iters
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-canopy-max-iters", "10",
+    ]), parser))
+    assert cfg.land_canopy_max_iters == 10
+    for bad in (0, -1, 2.5):
+        with pytest.raises(ValueError, match="land_canopy_max_iters"):
+            cfg._replace(land_canopy_max_iters=bad).validate_strict()
+    src = inspect.getsource(ModelDriver._setup_multilayer_land)
+    assert "max_iters=int(self.config.land_canopy_max_iters)" in src
 
 
 def test_land_surface_scheme_flag_flows_to_config():

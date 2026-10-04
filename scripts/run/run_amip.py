@@ -1684,6 +1684,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "land into the slab-like dry attractor. Default "
                              f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
                              "(byte-identical when unchanged).")
+    parser.add_argument("--land-canopy-max-iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_max_iters,
+                        dest="land_canopy_max_iters",
+                        help="Iteration cap of the two-leaf canopy energy-balance "
+                             "solver (two_leaf scheme only). The cap binds every "
+                             "step in production (LAI->0 columns never converge) "
+                             "and the vmapped solve runs to the slowest column, so "
+                             "this IS the land step's cost. Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_canopy_max_iters} "
+                             "(byte-identical when unchanged).")
     parser.add_argument("--land-surface-scheme",
                         choices=["simple_seb", "two_leaf", "clm_ml"],
                         default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
@@ -2556,6 +2566,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_soil_init=args.land_soil_init,
         land_surface_scheme=args.land_surface_scheme,
+        land_canopy_max_iters=args.land_canopy_max_iters,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,

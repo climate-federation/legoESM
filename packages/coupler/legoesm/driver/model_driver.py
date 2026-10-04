@@ -3307,7 +3307,8 @@ class ModelDriver:
         if _scheme_name == "simple_seb":
             _surface_scheme = SimpleSEBConfig()
         elif _scheme_name == "two_leaf":
-            _surface_scheme = TwoLeafCanopyConfig()
+            _surface_scheme = TwoLeafCanopyConfig(
+                max_iters=int(self.config.land_canopy_max_iters))
         elif _scheme_name == "clm_ml":
             # CLM-ML-JAX multilayer canopy.  The ncol>1 traceable path (S2) makes
             # the coupled land tile steppable over all model columns inside the

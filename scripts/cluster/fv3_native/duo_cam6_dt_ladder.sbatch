@@ -27,12 +27,12 @@ export AMIP_DATA=/burg-archive/glab/users/ac5006/legoESM/data/amip
 export AMIP_SURFDATA=/burg-archive/glab/users/pg2328/legoESM/data/legoesm_surfdata_c260716.nc
 export CLM_SURFDATA=/burg-archive/glab/users/pg2328/legoESM/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc
 export JAX_ENABLE_X64=1 PYTHONUNBUFFERED=1 LEGOESM_JIT_CACHE_DIR=""
-OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/a_ladder/dt${DT}
+OUT=${OUT:-/burg-archive/glab/users/pg2328/fv3_duo_gaps/a_ladder/dt${DT}}
 mkdir -p "$OUT"
 cd "$WT"; echo "sha $(git rev-parse --short HEAD) dirty $(git status --porcelain | grep -v '^??' | wc -l) host $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) dt=$DT phys=$PHYS rad=$RAD"
 source "$WT/config/amip/amip_production.ginsburg.sh"
 "$PY" -u scripts/run/run_amip.py --config config/amip/amip_production_fv3duo_c24.yaml \
   "${AMIP_PATH_FLAGS[@]}" --dt "$DT" --physics-update-steps "$PHYS" --rad-update-steps "$RAD" \
-  --days "${DAYS:-5}" --checkpoint-days 5 --diag-days 1 --output "$OUT"
+  --days "${DAYS:-5}" --checkpoint-days "${DAYS:-5}" --diag-days 1 ${EXTRA_FLAGS:-} --output "$OUT"
 echo "rc=$?"
 grep -m1 "CFL: reducing dt" "$OUT"/*.log 2>/dev/null || true
