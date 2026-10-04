@@ -90,11 +90,21 @@ integrations were not repeated for this default-off diagnostic round.
 
 ## Tests, citations, and review
 
-The final focused observer/gate/citation battery and the required
-`tests/ocean/fidelity -n 12` battery are recorded in the evidence directory.
-The default citation gate and this receipt's citation gate are required to pass
-with zero failures and unmapped citations; the receipt's planted shift must
-fire.
+The final focused observer/gate/citation battery passes **34/34**. The default
+citation gate passes 274 citations and this receipt's gate passes 7 citations,
+both with zero failures, unmapped citations, or map-audit failures. The planted
+two-line shift of the compiled stencil span refuses with
+`SYMBOL-NOT-AT-LINE` as required.
+
+The required `tests/ocean/fidelity -n 12` battery reached 97% and then entered
+the campaign's known silent xdist tail, with no live pytest process and no
+terminal summary; it was interrupted and is therefore **incomplete, not
+PASS**. Before the tail it emitted exactly the same four established reds as
+round 138: SI3 scalar-math provenance, round-35 allow-dirty escape scope, the
+worktree-stamp grow-only ratchet, and the GYRE round-129 retained-record
+provenance stamp. Each failing ID was rerun alone and reproduced its known
+failure; no round-139 test failed. All logs are preserved in the evidence
+directory.
 
 The required `codex exec --sandbox read-only` review could not initialize:
 `failed to initialize in-process app-server client: Read-only file system`.
