@@ -63,8 +63,10 @@ def test_slicing_preserves_every_other_override_field():
                                      update_interval_steps=3)
     local = localize_turbulence_override(ov, _band(1, 2))
     assert local.clubb_lite.C_K.shape[0] == NCOL // 2   # it really sliced
-    assert local.liquid_partition is True
-    assert local.update_interval_steps == 3
+    # Every field but the sliced one, so a future selector is covered too.
+    for f in ov._fields:
+        if f != "clubb_lite":
+            assert getattr(local, f) == getattr(ov, f), f
     # ...so the build still refuses the lever on a non-CLUBB scheme.
     from legoesm.atmosphere.physics.turbulence.integration import (
         make_turbulence_physics,

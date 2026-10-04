@@ -396,8 +396,10 @@ def test_columns_gather_preserves_every_other_override_field():
                                        update_interval_steps=3)
     local = slice_override_columns(ov, jnp.array([0, 5]))
     assert local.clubb_lite.C_K.shape == (2,)
-    assert local.liquid_partition is True
-    assert local.update_interval_steps == 3
+    # Every field but the sliced one, so a future selector is covered too.
+    for f in ov._fields:
+        if f != "clubb_lite":
+            assert getattr(local, f) == getattr(ov, f), f
 
 
 def test_columns_gather_empty_rank_is_clean_zero_column_slice():
