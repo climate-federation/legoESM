@@ -73,10 +73,18 @@ file system`.
 
 ## Validation
 
-The focused round-131 tests, citation gate and its shifted-line plant, and the
-prescribed `tests/ocean/fidelity -n 12` battery are recorded in the round-131
-evidence directory. No model file changed, so the ORCA2/GYRE/DINO/tank
-trajectory gates are unchanged by construction rather than re-scored.
+The focused round-130/131 plus citation-gate battery passed `30/30`. Both the
+default and this receipt's citation checks passed with no unmapped citations;
+the shifted-line plant exited nonzero. The single prescribed
+`tests/ocean/fidelity -n 12` battery reached 99%. It reproduced the six known
+pre-existing reds (round-51 private-arm scope, round-35 escape scope,
+worktree-stamp ratchet, recipe case-board, GYRE round-129 spread-record stamp,
+and SI3 scalar-math provenance), with no round-131 failure. Its final
+phase-3 stage-sweep prediction plant produced no output for substantially
+longer than its paired control and was interrupted; the log therefore records
+an incomplete battery, not a pass. No second battery was started. No model file
+changed, so the ORCA2/GYRE/DINO/tank trajectory gates are unchanged by
+construction rather than re-scored.
 
 ## OPEN
 
