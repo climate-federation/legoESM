@@ -530,6 +530,29 @@ def make_mpas_ocean_physics(
             # trigger from T/S/p_cell via the EOS, so it needs cell-centre
             # pressure; compute it ONLY on that path (default 'insitu' path
             # stays byte-identical — no extra pressure solve).
+            # Decision 94.  This is the EXPLICIT tendency path: the
+            # convective coefficient enters as an added dT/dt, so NEMO's
+            # zdfevd REPLACEMENT (zdfevd.f90:107-110 overwrites the
+            # assembled avt) cannot be expressed here at all.  Fail closed
+            # rather than let a card state "nemo_replace" and silently get
+            # the sum -- and refuse the unstated case on a NEMO trigger the
+            # same way the implicit paths do.
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                resolve_evd_composition,
+            )
+            if resolve_evd_composition(cfg_c) == "nemo_replace":
+                raise ValueError(
+                    'EnhancedDiffusionConfig.evd_composition="nemo_replace" '
+                    "is not implemented on the MPAS explicit convection "
+                    "path: this path ADDS the convective tendency, and "
+                    "NEMO's zdfevd overwrites the vertical coefficient "
+                    "instead (zdfevd.f90:107-110).  Run the mesh card with "
+                    'evd_composition="additive" and state that it is '
+                    "legoESM's composition, not NEMO's.")
+            # The card's own NEMO &nameos coefficients for the nemo_bn2
+            # trigger; absent on a mesh config that states none, which
+            # resolves to NemoSEOSConfig() exactly as its density path does.
+            _seos = getattr(config, "eos_nemo_seos", None)
             if getattr(cfg_c, "n2_mode", "insitu") == "adiabatic":
                 from legoesm.ocean.eos import compute_ocean_rho_and_pressure
                 _, p_cell = compute_ocean_rho_and_pressure(
@@ -540,6 +563,7 @@ def make_mpas_ocean_physics(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     p_cell=p_cell, eos_fn=eos_fn,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    seos_cfg=_seos,
                     # The run's constants: the density above is now built with
                     # them, and a trigger evaluated on the library's would put
                     # the two halves of one decision on different physics.
@@ -549,6 +573,7 @@ def make_mpas_ocean_physics(
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    seos_cfg=_seos,
                     g=config.constants.g, rho_ref=config.constants.rho_0,
                 )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]

@@ -396,6 +396,23 @@ def enhanced_diffusion_convection(
 EVD_COMPOSITIONS = ("additive", "nemo_replace")
 
 
+def _static_float(value):
+    """``float(value)`` when it is a concrete number, else ``None``.
+
+    ``K_conv`` / ``K_bg`` are declared tunable (``__param_spec__`` tier 2) and
+    a trainer substitutes TRACED leaves for them inside the loss, so a bare
+    Python comparison on them raises ``TracerBoolConversionError`` under jit.
+    The structural guards below are about the card's SHAPE (which arm runs,
+    which branch is larger), which a trained value cannot change; they are
+    therefore checked whenever the value is concrete -- i.e. at every card
+    build and every production step -- and skipped under tracing.
+    """
+    try:
+        return float(value)
+    except TypeError:
+        return None
+
+
 def resolve_evd_composition(cfg: EnhancedDiffusionConfig) -> str:
     """The composition this enhanced-diffusion card states (no silent default).
 
@@ -421,12 +438,17 @@ def resolve_evd_composition(cfg: EnhancedDiffusionConfig) -> str:
             f"unknown EnhancedDiffusionConfig.evd_composition {mode!r}: "
             f"must be one of {EVD_COMPOSITIONS}.")
     if mode == "nemo_replace":
+        _K_conv = _static_float(cfg.K_conv)
+        _K_bg = _static_float(cfg.K_bg)
+        _nu_conv = _static_float(cfg.nu_conv)
+        _nu_bg = _static_float(cfg.nu_bg)
         if cfg.smooth_transition:
             raise ValueError(
                 'evd_composition="nemo_replace" transcribes a HARD switch '
                 "(zdfevd.f90:108 is an IF, not a blend) and requires "
                 "smooth_transition=False.")
-        if not (cfg.K_bg < cfg.K_conv):
+        if _K_bg is not None and _K_conv is not None and not (
+                _K_bg < _K_conv):
             raise ValueError(
                 'evd_composition="nemo_replace" requires K_bg < K_conv '
                 f"(got K_bg={cfg.K_bg!r}, K_conv={cfg.K_conv!r}): the fired "
@@ -436,11 +458,12 @@ def resolve_evd_composition(cfg: EnhancedDiffusionConfig) -> str:
         # nn_evdm, stated rather than implied: zdfevd.f90:121 applies the SAME
         # rn_evd to avm when nn_evdm=1 and leaves avm untouched when 0.  There
         # is no NEMO configuration in between.
-        if cfg.nu_bg != 0.0:
+        if _nu_bg is not None and _nu_bg != 0.0:
             raise ValueError(
                 'evd_composition="nemo_replace" requires nu_bg=0.0: NEMO\'s '
                 "zdfevd has no momentum background of its own.")
-        if cfg.nu_conv not in (0.0, cfg.K_conv):
+        if (_nu_conv is not None and _K_conv is not None
+                and _nu_conv not in (0.0, _K_conv)):
             raise ValueError(
                 'evd_composition="nemo_replace" requires nu_conv to state '
                 "nn_evdm: 0.0 for nn_evdm=0 (zdfevd.f90:121 leaves avm "
@@ -471,6 +494,9 @@ def compose_evd_coefficient(other, evd, mode: str, *, convective: float):
         raise ValueError(
             f"unknown evd composition {mode!r}; expected one of "
             f"{EVD_COMPOSITIONS}.")
-    if convective == 0.0:
+    # nn_evdm = 0 is a STRUCTURAL zero (the arm never runs), never a trained
+    # value, so it is read as a static float; a traced coefficient is a live
+    # positive diffusivity and takes the where() below.
+    if _static_float(convective) == 0.0:
         return other
     return jnp.where(evd >= convective, convective, other)

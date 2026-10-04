@@ -3248,7 +3248,7 @@ class LatLonCGridOceanModel:
                 # trigger's bn2 (decision 94): without this the trigger built
                 # alpha/beta from NemoSEOSConfig()'s DINO defaults whatever
                 # fluid the card actually runs.
-                seos_cfg=getattr(self.config, "eos_nemo_seos", None),
+                seos_cfg=self.config.eos_nemo_seos,
             )
         else:
             self._physics_fn = None
@@ -11890,7 +11890,7 @@ class LatLonCGridOceanModel:
                         self._nemo_ws_test_hooks.tke_rhs_materialization),
                     tke_rhs_intermediate=(
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
-                    seos_cfg=getattr(_cfg_b, "eos_nemo_seos", None),
+                    seos_cfg=_cfg_b.eos_nemo_seos,
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
@@ -11928,7 +11928,7 @@ class LatLonCGridOceanModel:
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,
                     eta_now=eta_now,
-                    seos_cfg=getattr(_cfg_b, "eos_nemo_seos", None),
+                    seos_cfg=_cfg_b.eos_nemo_seos,
                 )
 
         # Private causal seam: two arrays replace the post-closure heat and

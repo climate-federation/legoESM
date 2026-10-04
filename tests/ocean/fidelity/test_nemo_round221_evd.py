@@ -136,6 +136,73 @@ def _unstable(card):
     return state._replace(T=state.T.replace(data=jnp.asarray(T)))
 
 
+def test_the_replace_wiring_reaches_the_solve(smt1):
+    """The composition the card states must reach the tridiagonal solve.
+
+    Reverting either integration hunk (``k_profiles.py``'s composition or the
+    physics-provided-K path in ``ocean_model_latlon_cgrid.py``) to ``+``
+    makes this difference exactly zero.  What it measures is the background
+    ``rn_avt0`` that used to ride on top of ``rn_evd`` on the fired
+    interface: NEMO's avt there is 100 m2/s, legoESM's was 100.000012.
+    """
+    unstable = _unstable(smt1)
+    additive = _step(smt1, unstable, k_conv=100.0, composition="additive")
+    replace = _step(smt1, unstable, k_conv=100.0, composition="nemo_replace")
+    moved = float(np.max(np.abs(replace - additive)))
+    assert moved > 0.0, (
+        "the stated composition does not reach the solve: replacing and "
+        "adding the convective coefficient gave the same temperature")
+    assert moved == pytest.approx(2.735e-09, rel=0.05), moved
+    # And it is inert where the trigger selects nothing -- the pristine card.
+    assert np.array_equal(
+        _step(smt1, smt1.recipe.initial_state, k_conv=100.0,
+              composition="additive"),
+        _step(smt1, smt1.recipe.initial_state, k_conv=100.0,
+              composition="nemo_replace"))
+
+
+def test_the_explicit_branch_refuses_the_replacement():
+    """It adds a tendency; zdfevd overwrites a coefficient."""
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.convection.integration import (
+        make_convection_physics,
+    )
+    conv = OceanConvectionConfig(
+        scheme="enhanced_diffusion",
+        enhanced_diffusion=EnhancedDiffusionConfig(
+            n2_mode="nemo_bn2", smooth_transition=False, K_bg=0.0, nu_bg=0.0,
+            nu_conv=0.0, K_conv=100.0, evd_composition="nemo_replace"))
+    with pytest.raises(ValueError, match="cannot express it"):
+        make_convection_physics(conv, apply_diffusion=True)
+    # The implicit branch surfaces the coefficient and is fine.
+    make_convection_physics(conv, apply_diffusion=False)
+    # And an unstated NEMO-trigger card raises on this path too.
+    unstated = conv._replace(
+        enhanced_diffusion=conv.enhanced_diffusion._replace(
+            evd_composition=""))
+    with pytest.raises(ValueError, match="evd_composition is unset"):
+        make_convection_physics(unstated, apply_diffusion=False)
+
+
+def test_the_guards_survive_tracing_of_the_tunable_coefficient():
+    """K_conv is a declared tunable; the guards must not break jit+grad."""
+    import jax
+
+    cfg = EnhancedDiffusionConfig(
+        n2_mode="nemo_bn2", smooth_transition=False, K_bg=0.0, nu_bg=0.0,
+        nu_conv=0.0, K_conv=100.0, evd_composition="nemo_replace")
+    other = jnp.asarray([1.0e-5, 1.0e-5, 7.0])
+    fired = jnp.asarray([0.0, 1.0, 1.0])
+
+    def loss(k_conv):
+        mode = resolve_evd_composition(cfg._replace(K_conv=k_conv))
+        evd = jnp.where(fired > 0, k_conv, 0.0)
+        return jnp.sum(compose_evd_coefficient(
+            other, evd, mode, convective=k_conv))
+
+    assert float(jax.jit(jax.grad(loss))(100.0)) == 2.0
+
+
 @pytest.mark.slow
 def test_the_rn_evd_plant_moves_temperature_where_the_trigger_fires(smt1):
     """rn_evd x 1e4 must MOVE T on a column the trigger selects."""

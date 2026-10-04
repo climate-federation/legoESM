@@ -4328,7 +4328,12 @@ def dino_mpas_model_config(
                 n2_mode=cfg.convection_n2_mode,
                 n2_threshold=cfg.convection_n2_threshold,
                 two_level_trigger=cfg.convection_two_level_trigger,
-                evd_composition=cfg.convection_evd_composition,
+                # STATED, not inherited: the MPAS path applies convection as
+                # an added tendency, so NEMO's zdfevd REPLACEMENT cannot be
+                # expressed on it at all (mpas_physics raises on it).  This
+                # mesh card runs legoESM's additive composition and says so,
+                # rather than copying a lat-lon statement it cannot execute.
+                evd_composition="additive",
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(

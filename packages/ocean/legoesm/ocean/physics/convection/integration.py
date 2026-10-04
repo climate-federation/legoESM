@@ -81,6 +81,24 @@ def _make_enhanced_diffusion(
         seos_cfg=None) -> Callable:
     cfg = config.enhanced_diffusion
 
+    # Decision 94, at CONSTRUCTION on the static config: a card whose
+    # convective trigger is NEMO's own must state how the coefficient
+    # composes, and the EXPLICIT branch cannot express NEMO's replacement --
+    # it adds a tendency, where zdfevd.f90:107-110 overwrites the assembled
+    # coefficient.  Refuse rather than silently sum.
+    from legoesm.ocean.physics.convection.enhanced_diffusion import (
+        resolve_evd_composition,
+    )
+    if resolve_evd_composition(cfg) == "nemo_replace" and apply_diffusion:
+        raise ValueError(
+            'EnhancedDiffusionConfig.evd_composition="nemo_replace" '
+            "transcribes NEMO's zdfevd, which OVERWRITES the vertical "
+            "diffusivity (zdfevd.f90:107-110); the explicit convection "
+            "branch only adds a tendency and cannot express it. Select "
+            "implicit_vertical_mixing=True (the coefficient is then "
+            "composed in the implicit solve) or state "
+            'evd_composition="additive".')
+
     # Fail closed at construction: suppression (emit_momentum_viscosity=False)
     # with a nonzero convective momentum viscosity is contradictory — the
     # configured nu_conv/nu_bg would be silently dropped.  The only internal
