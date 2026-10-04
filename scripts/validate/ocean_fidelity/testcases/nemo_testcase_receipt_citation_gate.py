@@ -126,6 +126,8 @@ FILES = {
     # arm that this deck runs and the card does not.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90": (
         _ORCA2_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90": (
+        _ORCA2_COMPILED / "zdfevd.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90": (
         _ORCA2_COMPILED / "zdfiwm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
@@ -2162,6 +2164,16 @@ CITATION_MAP = {
         '* rnfmsk(ji,jj) * wmask(ji,jj,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359':
         'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:107-109': [
+        ('MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12', 1),
+        ('p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
+        3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121-135': [
+        ('IF( nn_evdm == 1 ) THEN', 1),
+        ('p_avm(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
+        15,
+    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363':
         'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372':
