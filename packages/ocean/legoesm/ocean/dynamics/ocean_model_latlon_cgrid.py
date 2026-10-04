@@ -5953,6 +5953,81 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        # NEMO's own depth average of the slow forcing (stp2d.F90:177-186 of
+        # the VORTEX_SMT builds): the REFERENCE face thickness and the STORED
+        # reciprocal, with no ssh stretching anywhere in the statement --
+        #   Ue_rhs = SUM( e3u_0(1:jpkm1)*uu(Krhs)*umask ) * r1_hu_0
+        # where e3u_0 is the min of the two neighbouring REFERENCE
+        # thicknesses and r1_hu_0 = ssumask/(hu_0 + 1 - ssumask) with
+        # hu_0 = SUM_k e3u_0*umask (domain.F90).  The min-rule-live form
+        # above equals this on a FULL-STEP mesh (one per-face scalar that
+        # cancels) and does NOT over partial cells, where the per-level
+        # minimum of the two STRETCHED thicknesses can follow a different
+        # column than the reference minimum does.  Static Python branch on a
+        # config string, so the default path is bit-identical.
+        # DECISION 90 (user): no default.  An unset field is a card that
+        # never stated which depth average it runs, which is the hidden
+        # choice this field exists to remove -- so it raises rather than
+        # silently selecting one.
+        #
+        # SCOPE OF THE RAISE, stated rather than left implicit.  The choice
+        # is between NEMO's stp2d.F90:177-186 statement and legoESM's own
+        # live min-rule, so it only EXISTS on a card running NEMO's RK3
+        # momentum program; a card on legoESM's own time stepping executes
+        # no NEMO statement here and has nothing to choose between.  This
+        # is the same shape as the nemo_first_wzv_after_ssh guard above,
+        # which refuses a NEMO value on a non-RK3 program instead of
+        # demanding one from every card.
+        _slow_depth_eval = getattr(
+            _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation", "")
+        _nemo_rk3_family = getattr(
+            _cfg_b, "momentum_time_integrator", "euler") in ("rk3", "rk3_ws")
+        if not _slow_depth_eval:
+            if _nemo_rk3_family:
+                raise ValueError(
+                    "barotropic_slow_forcing_depth_evaluation is unset: this "
+                    "card runs NEMO's RK3 momentum program and must STATE "
+                    "how the slow forcing is depth-averaged onto the "
+                    "barotropic faces -- 'nemo_literal' for NEMO's own "
+                    "statement (stp2d.F90:177-186) or 'min_rule_live' for "
+                    "the per-level minimum of the two live thicknesses. "
+                    "There is no default (decision 90).")
+            _slow_depth_eval = "min_rule_live"
+        if _slow_depth_eval not in ("min_rule_live", "nemo_literal"):
+            raise ValueError(
+                "unknown barotropic_slow_forcing_depth_evaluation scheme "
+                f"{_slow_depth_eval!r}: must be one of "
+                "('min_rule_live', 'nemo_literal').")
+        if _slow_depth_eval == "nemo_literal":
+            from legoesm.ocean.vertical import nemo_qco_card_mesh_operands
+            _h_ref0 = compute_layer_thickness(
+                jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            ).astype(du_dt.dtype)
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
+                _um3 = _um3.astype(du_dt.dtype)
+                _vm3 = _vm3.astype(du_dt.dtype)
+            else:
+                _um3 = jnp.asarray(u_mask_3d, dtype=du_dt.dtype)
+                _vm3 = jnp.asarray(v_mask_3d, dtype=du_dt.dtype)
+            _ops0 = nemo_qco_card_mesh_operands(
+                _h_ref0, _um3, _vm3, _grid, du_dt.dtype)
+            _one = jnp.asarray(1.0, dtype=du_dt.dtype)
+            _wet_u0 = (_ops0.hu_0 > 0.0).astype(du_dt.dtype)
+            _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
+            _r1_hu_0 = _wet_u0 / (_ops0.hu_0 + _one - _wet_u0)
+            _r1_hv_0 = _wet_v0 / (_ops0.hv_0 + _one - _wet_v0)
+            _slow_u_native = jnp.sum(
+                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3,
+                axis=-1) * _r1_hu_0
+            _slow_v_native = jnp.sum(
+                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
+                axis=-1) * _r1_hv_0
+            F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
+                        * state.u_mask.data)
+            F_slow_v = (F_slow_v.at[1:, :].set(_slow_v_native)
+                        * state.v_mask.data)
         _slow_depth_override = (
             self._nemo_ws_test_hooks.slow_forcing_depth_override)
         if _slow_depth_override is not None:
@@ -6766,6 +6841,16 @@ class LatLonCGridOceanModel:
                     _bt_pv_scheme = (
                         "ene" if _bt_cor_split in ("ene", "ene_metric")
                         else "een")
+                    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                        nemo_carried_barotropic_depth_mean,
+                    )
+                    # The SAME selector the window seed uses: a card that
+                    # selects NEMO's carried external mode and carries no
+                    # pair (or half a pair) RAISES rather than falling back
+                    # to a reduction, which is the silent fallback this
+                    # round is removing in the first place.
+                    _nemo_carried_baro = nemo_carried_barotropic_depth_mean(
+                        state, F_slow_u.dtype, _cfg_b)
                     _slow_incoming_override = (
                         self._nemo_ws_test_hooks
                         .slow_forcing_incoming_override)
@@ -6794,7 +6879,16 @@ class LatLonCGridOceanModel:
                         eta=state.eta.data,
                         z_coord=_zc,
                         return_pre=True,
-                        scheme=_bt_pv_scheme)
+                        scheme=_bt_pv_scheme,
+                        # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
+                        # subtracted at :292, is handed puu_b(:,:,Kmm) --
+                        # the carried external mode, the SAME array the
+                        # substep loop seeds from (dynspg_ts.F90:484-500).
+                        # stprk3.f90:189 calls stp_2D(kstp, Nbb, Nbb, ...),
+                        # so Kmm IS Nbb here.  Not a fresh reduction of the
+                        # 3-D velocity.  Cards that do not run the carried
+                        # external mode keep the reduction.
+                        entry_barotropic_velocity=_nemo_carried_baro)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data

@@ -65,6 +65,30 @@ CERTIFIED_LADDER = {
     "vec": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round207/"
                 "card_VORTEX_VEC-zco.json"),
 }
+# ROUND 216 / VORTEX_SMT round 6.  The seamount pair, scored by the SAME
+# definitions: the same field extraction, the same wet masks (taken from the
+# SMT card's own geometry through expected_masks, so the mask is the
+# seamount's), the same NEMO restart reader and the same table days.  NEMO's
+# 100-day seamount runs are round 3's admitted ones.  Their kt=1..10 sanity
+# reference is this round's OWN registry, because this round moves those rows:
+# a pre-move reference would have to fail.
+SMT_CARDS = {
+    "smtflux": ("VORTEX_SMT-zps",
+                Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                     "vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/day100")),
+    "smtvec": ("VORTEX_SMT_VEC-zps",
+               Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                    "vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/"
+                    "day100")),
+}
+SMT_LADDER = {
+    "smtflux": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                    "vortex_smt/round6/after2/after_VORTEX_SMT-zps.json"),
+    "smtvec": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                   "vortex_smt/round6/after2/after_VORTEX_SMT_VEC-zps.json"),
+}
+CARDS.update(SMT_CARDS)
+CERTIFIED_LADDER.update(SMT_LADDER)
 
 
 class ComparisonError(RuntimeError):
@@ -191,6 +215,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, default=Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
+    ap.add_argument("--cards", default="flux,vec",
+                     help="comma-separated tags: flux, vec, smtflux, smtvec")
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     args = ap.parse_args()
@@ -199,7 +225,13 @@ def main() -> int:
               "steps_per_day": STEPS_PER_DAY, "n_days": N_DAYS,
               "table_days": list(TABLE_DAYS), "cards": {}}
 
-    for tag, (case, nemo_dir) in CARDS.items():
+    selected = [tag.strip() for tag in args.cards.split(",") if tag.strip()]
+    unknown = [tag for tag in selected if tag not in CARDS]
+    if unknown:
+        raise ComparisonError(f"unknown card tag(s) {unknown}; "
+                              f"expected from {sorted(CARDS)}")
+    for tag in selected:
+        case, nemo_dir = CARDS[tag]
         print(f"\n################ {tag} ({case})")
         sanity = sanity_check_kt1_10(tag, case, nemo_dir)
         print(f"  kt1-10 sanity vs certified ladder: {sanity['status']}")
@@ -267,12 +299,12 @@ def main() -> int:
     # ---- table ----
     print("\n==== TABLE (days {}) ====".format(TABLE_DAYS))
     header = f"{'day':>4}"
-    for tag in CARDS:
+    for tag in selected:
         header += f"  {tag+'_T_rms':>14}{tag+'_u_rms':>14}{tag+'_ssh_rms':>14}"
     print(header)
     for day in TABLE_DAYS:
         line = f"{day:>4}"
-        for tag in CARDS:
+        for tag in selected:
             r = report["cards"][tag]["rows"][str(day)]
             line += (f"  {r['T_rms']:>14.6e}{r['u_rms']:>14.6e}"
                       f"{r['ssh_rms']:>14.6e}")
@@ -286,7 +318,7 @@ def main() -> int:
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     for field, ax, title in zip(("T_rms", "u_rms", "ssh_rms"), axes,
                                   ("T rms [K]", "u rms [m/s]", "ssh rms [m]")):
-        for tag in CARDS:
+        for tag in selected:
             days = report["cards"][tag]["days"]
             values = [report["cards"][tag]["rows"][str(d)][field]
                       for d in days]

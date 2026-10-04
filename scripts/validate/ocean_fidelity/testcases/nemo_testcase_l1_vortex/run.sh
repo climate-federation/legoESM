@@ -250,7 +250,8 @@ case "$variant" in
     default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/$ladder_res/$ladder_card
     ;;
   smtflx | smtvec | smtflx100d | smtvec100d | \
-  smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3)
+  smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
+  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -333,10 +334,57 @@ case "$variant" in
         ref_name=VORTEX_SMT_R3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round213_smt_vec_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/day100 ;;
+      # ---- ROUND 215 / VORTEX_SMT round 5 (operator note CC addendum 5).
+      # The kt=2 sea-surface-height error is the SAME size under both
+      # momentum programs (3.73e-07 flux, 3.66e-07 vector) while the flat
+      # VORTEX pair is at the bar, so its owner is a statement the two
+      # programs SHARE: the free-surface / split-explicit barotropic path
+      # over partial cells.  No seamount record carries that solve's
+      # SUBSTEP operands -- the R3 records hold its OUTPUT only -- so these
+      # two variants compile the round-196 per-substep writer into the R3
+      # seamount configurations.  NEW build directories (VORTEX_SMT_R5_*):
+      # rounds 1 and 3 builds are never moved or rebuilt, and the admitted
+      # R3 restart is what the additions-only proof compares to.
+      smtflxspgts)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R5_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round215_smt_flux_spgts
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5_OMIP_L1_P3/spgts ;;
+      # ---- ROUND 216 / VORTEX_SMT round 6 (operator note CC addendum 6).
+      # Round 5's flux substep acquisition never ran (its launcher was edited
+      # while it was executing), so its VORTEX_SMT_R5_OMIP_L1{,_P3} pair is
+      # left exactly where it is and this round builds its OWN pair.  Same
+      # deck, same instrument, new directories and a new evidence root: the
+      # additions-only proof is the step-10 restart against round 3's
+      # ADMITTED flux run.
+      smtflxspgts6)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R6B_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round216_smt_flux_spgts
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round6/VORTEX_SMT_R6B_OMIP_L1_P3/spgts ;;
+      smtvecspgts)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round215_smt_vec_spgts
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3/spgts ;;
+      # The barotropic substep walk (round 215) names the loop-entry
+      # depth-averaged slow forcing as the first non-bit operand, and NEMO's
+      # own depth-average statement (stp2d.f90:178-179, the np_VEC_c2 arm
+      # selected at :176) accounts for only part of it -- the rest is in the
+      # two statements that build that operand, applied to the 3-D right-hand
+      # side assembled at stp2d.f90:138,141,144,153,161,163 (hpg, ldf, vor,
+      # wzv, keg, zad).
+      # No seamount record carries those per-term boundaries; this variant is
+      # round 4's stp2d per-term writer on the seamount vector deck.
+      smtvecrhs)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R5R_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round215_smt_vec_rhs
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5R_VEC_R8_OMIP_L1_P3/rhs ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3 or smtvec100dr3\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts or smtvecrhs\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -352,14 +400,15 @@ readonly RESTART=$(printf '%s_%s_%08d_restart.nc' "$exp_name" "$COORD_TAG" "$STE
 readonly TAG=$tag
 readonly INSTRUMENT=$here/stprk3_step_record.patch
 # The second, round-4 instrument.  Empty for every variant but vecrhs.
-if [[ "$variant" == "vecrhs" ]]; then
+if [[ "$variant" == "vecrhs" || "$variant" == "smtvecrhs" ]]; then
   RHS_INSTRUMENT=$here/stp2d_rhs_terms_record.patch
 else
   RHS_INSTRUMENT=
 fi
 readonly RHS_INSTRUMENT
 readonly SHIPPED_STP2D=$NEMO_ROOT/src/OCE/stp2d.F90
-if [[ "$variant" == "spgts" ]]; then
+if [[ "$variant" == "spgts" || "$variant" == "smtflxspgts" \
+   || "$variant" == "smtflxspgts6" || "$variant" == "smtvecspgts" ]]; then
   SPGTS_INSTRUMENT=$here/dynspg_ts_substep_record.patch
   SPGTS_MODULE=$here/vortex_r12_spgts_terms.F90
   SPGTS_STUBS=$here/vortex_r12_spgts_terms_syntax_stubs.F90
@@ -371,7 +420,8 @@ fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
-   || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" ]]; then
+   || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
+   || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
   STAGE_INSTRUMENT=$here/stprk3_stage_terms_record.patch
@@ -665,10 +715,10 @@ fi
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
   flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d \
-  | smtflxr3 | smtflx100dr3)
+  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
-  | smtvecr3 | smtvec100dr3)
+  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs)
       want_vec='.true.'  ; want_up3='.false.' ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then

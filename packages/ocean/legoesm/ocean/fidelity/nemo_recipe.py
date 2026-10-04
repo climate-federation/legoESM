@@ -463,6 +463,16 @@ def nemo_lat_lon_model_config(
         # from that carried pair.  The CONFIG says so, so the choice is not
         # read off whether the state happens to hold the arrays.
         nemo_prognostic_barotropic_state=True,
+        # DECISION 90 (user, 2026-10-04): the slow-forcing depth average has
+        # NO default and every card running NEMO's RK3 momentum program
+        # states it.  These are NEMO recipes, so they state NEMO's own
+        # statement, stp2d.F90:177-186: the REFERENCE face thickness times
+        # the stored reciprocal r1_hu_0, with no sea-surface stretching.
+        # These recipes resolve FULL-STEP z-star meshes, where that form and
+        # the per-level minimum of the two live thicknesses are algebraically
+        # the same -- one per-face scalar cancels -- so the STATEMENT is
+        # NEMO's and the arithmetic is unchanged.
+        barotropic_slow_forcing_depth_evaluation="nemo_literal",
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
         momentum_time_integrator=cfg.momentum_time_integrator,
@@ -1141,6 +1151,16 @@ def build_nemo_gyre_recipe(
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
             barotropic_diffusion_alpha=0.0,
+            # DECISION 90 (user, 2026-10-04): the slow-forcing depth average
+            # has NO default and every card states it.  This is the generic
+            # NEMO-GYRE recipe, so it states NEMO's own statement,
+            # stp2d.F90:177-186 -- the REFERENCE face thickness times the
+            # stored reciprocal r1_hu_0, with no sea-surface stretching.
+            # This recipe resolves a z-star FULL-STEP mesh, where that form
+            # and the per-level minimum of the two live thicknesses are
+            # algebraically the same (one per-face scalar cancels), so the
+            # statement is NEMO's and the arithmetic is unchanged.
+            barotropic_slow_forcing_depth_evaluation="nemo_literal",
             # Required by surface_stress_implicit (init-validated): the
             # implicit stress deposition shifts the depth mean after the
             # barotropic solve; NEMO re-imposes it every stage

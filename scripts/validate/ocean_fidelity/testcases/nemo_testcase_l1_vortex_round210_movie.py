@@ -34,9 +34,15 @@ from nemo_testcase_l1_vortex_round210_100day_comparison import (  # noqa: E402
 )
 from nemo_testcase_phase3_trajectory_gate import expected_masks  # noqa: E402
 
+# ROUND 216: the same three panels for any card the round-210 scorer knows,
+# selected by --card, with the seamount's bathymetry drawn over every panel.
+# The vector flat card stays the default, so the round-210 invocation is
+# unchanged.
 OUT_DIR = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210")
+TAG = "vec"
 LEGO_DIR = OUT_DIR / "lego_vec"
 CASE, NEMO_DIR = CARDS["vec"]
+BATHY_KM = None          # (X, Y, depth_m) when the card has real topography
 QUIVER_STRIDE = 3
 DPI = 100
 FIGSIZE = (14.0, 4.6)
@@ -105,16 +111,37 @@ def _render_panels(fig, axes, day, lego_d, nemo_d, masks, X, Y, u_mask,
     im2 = axes[2].pcolormesh(X, Y, diff_plot, cmap="RdBu_r",
                               vmin=-fixed_dssh, vmax=fixed_dssh,
                               shading="nearest")
+    if BATHY_KM is not None:
+        # The card's OWN resolved bathymetry, drawn identically on all three
+        # panels so the seamount's position is readable in the difference.
+        bx, by, depth = BATHY_KM
+        for ax in axes:
+            ax.contour(bx, by, depth, levels=8, colors="k",
+                        linewidths=0.5, alpha=0.55)
     for ax, title in zip(axes, titles):
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("x [km]")
         ax.set_aspect("equal")
     axes[0].set_ylabel("y [km]")
-    fig.suptitle(f"VORTEX_VEC-zco round 210: legoESM vs NEMO, day {day}/100")
+    fig.suptitle(f"{CASE}: legoESM vs NEMO, day {day}/100")
     return im0, im1, im2
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    global TAG, CASE, NEMO_DIR, LEGO_DIR, OUT_DIR, BATHY_KM
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--card", default="vec",
+                     help="card tag known to the round-210 scorer")
+    ap.add_argument("--out", type=Path, default=OUT_DIR)
+    args = ap.parse_args(argv)
+    if args.card not in CARDS:
+        raise SystemExit(f"REFUSE: unknown card tag {args.card!r}; "
+                         f"expected from {sorted(CARDS)}")
+    TAG = args.card
+    CASE, NEMO_DIR = CARDS[TAG]
+    OUT_DIR = args.out
+    LEGO_DIR = OUT_DIR / f"lego_{TAG}"
     card = _build_card()
     nlev = card.recipe.z_coord.n_levels
     masks = expected_masks(card)
@@ -127,6 +154,14 @@ def main() -> int:
     X, Y = np.meshgrid((np.arange(nx) + 0.5) * dx_km,
                         (np.arange(ny) + 0.5) * dy_km)
     u_mask, v_mask = masks["u"][:, :, 0], masks["v"][:, :, 0]
+    depth = np.asarray(card.recipe.initial_state.H_bathy.data,
+                        dtype=np.float64)
+    if float(depth.max() - depth.min()) > 1.0:
+        BATHY_KM = (X, Y, np.where(masks["ssh"], depth, np.nan))
+        print(f"bathymetry contours ON: depth {depth.min():.1f}-"
+              f"{depth.max():.1f} m")
+    else:
+        print("bathymetry contours OFF: this card is flat-bottomed")
 
     lego1, nemo1 = _load_day(1, nlev)
     print(f"day001: lego ssh {lego1['ssh'].shape} u {lego1['u'].shape}  "
@@ -139,7 +174,7 @@ def main() -> int:
     lego100, nemo100 = _load_day(N_DAYS, nlev)
     print(f"day100: lego ssh {lego100['ssh'].shape}  nemo ssh {nemo100['ssh'].shape}")
     fixed_dssh = _max(lego100["ssh"] - nemo100["ssh"], masks["ssh"])
-    print(f"FIXED day-100 max|d(ssh)| (VORTEX_VEC-zco) = {fixed_dssh:.6e} m")
+    print(f"FIXED day-100 max|d(ssh)| ({CASE}) = {fixed_dssh:.6e} m")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -170,12 +205,12 @@ def main() -> int:
             print(f"rendered day {day}/{N_DAYS}")
     plt.close(fig)
 
-    mp4_path = OUT_DIR / "vortex_vec_100d.mp4"
+    mp4_path = OUT_DIR / f"vortex_{TAG}_100d.mp4"
     imageio.mimsave(mp4_path, frames, fps=FPS, codec="libx264", quality=8)
     print(f"WROTE {mp4_path} ({mp4_path.stat().st_size / 1e6:.2f} MB, "
           f"{len(frames)} frames)")
 
-    gif_path = OUT_DIR / "vortex_vec_100d.gif"
+    gif_path = OUT_DIR / f"vortex_{TAG}_100d.gif"
     from PIL import Image
     pil_frames = [Image.fromarray(f).convert(
         "P", palette=Image.ADAPTIVE, colors=128) for f in frames]
@@ -196,10 +231,9 @@ def main() -> int:
         for row in range(3):
             fig2.colorbar(axes2[row, col].collections[0], ax=axes2[row, col],
                            shrink=0.8)
-    fig2.suptitle("VORTEX_VEC-zco round 210: legoESM vs NEMO at "
-                  f"days {MONTAGE_DAYS}")
+    fig2.suptitle(f"{CASE}: legoESM vs NEMO at days {MONTAGE_DAYS}")
     fig2.tight_layout()
-    png_path = OUT_DIR / "vortex_vec_frames.png"
+    png_path = OUT_DIR / f"vortex_{TAG}_frames.png"
     fig2.savefig(png_path)
     plt.close(fig2)
     print(f"WROTE {png_path} ({png_path.stat().st_size / 1e6:.2f} MB)")

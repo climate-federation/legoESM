@@ -572,6 +572,9 @@ def _model_config(
                 barotropic_transport_accumulation_evaluation="nemo_literal",
                 barotropic_seed_face_depth="nemo_ssh_avg",
                 barotropic_seed_evaluation="nemo_literal",
+                # DECISION 90 (user): no default, every card states it, and
+                # a NEMO card states NEMO's form (stp2d.f90:178-186).
+                barotropic_slow_forcing_depth_evaluation="nemo_literal",
                 # dynspg_ts.F90:484-500 seeds the window from the CARRIED
                 # uu_b/vv_b (oce.F90:39,99), not from a 3-D reduction.
                 nemo_prognostic_barotropic_state=True,
@@ -622,6 +625,15 @@ def _model_config(
         barotropic_transport_accumulation_evaluation="nemo_literal",
         barotropic_seed_face_depth="nemo_ssh_avg",
         barotropic_seed_evaluation="nemo_literal",
+        # DECISION 90 (user, 2026-10-04): the field has no default and every
+        # card states it; a NEMO card states NEMO's form.  stp2d.f90:178-179
+        # (vector) / :183-184 (flux) weight the slow forcing with the
+        # REFERENCE face thickness and divide by the stored reciprocal
+        # r1_hu_0 -- no sea-surface stretching anywhere in it.  On a
+        # full-step mesh this equals the per-level minimum of the two live
+        # thicknesses (one per-face scalar cancels); over partial cells it
+        # does not, which is what the seamount cards measured.
+        barotropic_slow_forcing_depth_evaluation="nemo_literal",
         # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
         # (oce.F90:39,99), not from a 3-D reduction.
         nemo_prognostic_barotropic_state=True,
@@ -2584,6 +2596,15 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
                              else "vortex_vector_een_c2"),
         tke_langmuir_evaluation=None,
     )
+    # stp2d.F90:177-186 depth-averages the slow forcing with the REFERENCE
+    # face thickness and the stored reciprocal, not with the live min-rule
+    # thickness; the two differ only over partial cells (round 213).  Stated
+    # on the card, explicitly, because it is a statement choice.
+    model_config = model_config._replace(
+        barotropic=model_config.barotropic._replace(
+            # Stated on the seamount card too, where it was first measured,
+            # rather than inherited silently from the shared block above.
+            barotropic_slow_forcing_depth_evaluation="nemo_literal"))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,

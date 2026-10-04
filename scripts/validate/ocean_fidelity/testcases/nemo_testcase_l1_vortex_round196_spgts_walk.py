@@ -35,6 +35,19 @@ from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
 )
 
 CASE = "VORTEX_VEC-zco"
+# Round 215 / VORTEX_SMT round 5: the SAME walk on the seamount pair.  The
+# routine under test is shared -- dyn_spg_ts is one compiled subroutine and
+# legoESM has one barotropic solve -- so the card is a PARAMETER here rather
+# than a second copy of this file.  Each card names the evidence root its own
+# acquisition wrote; nothing is defaulted across cards.
+# Each card's acquisitions, by configuration-directory name.  Round 6 built
+# the flux card its own pair (round 5's run never started), so that card now
+# has two admissible roots and the guard must accept either rather than one.
+SMT_CASES = {
+    "VORTEX_SMT-zps": ("VORTEX_SMT_R5_OMIP_L1_P3",
+                       "VORTEX_SMT_R6B_OMIP_L1_P3"),
+    "VORTEX_SMT_VEC-zps": ("VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3",),
+}
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round196/"
     "oracle_spgts_substeps")
@@ -111,6 +124,32 @@ def _checker():
     return _CHECKER
 
 
+def require_case_matches_root(case: str, root: Path) -> None:
+    """Refuse a card walked against the OTHER card's acquisition.
+
+    This cannot be caught downstream: the step-entry record carries no case
+    stamp, and the flat and seamount decks are the same 30 km grid, so their
+    records are the same size and ``expect_interior`` passes on either.
+    Both entry points (the walk and the conditioning probe) call it.
+    """
+    expected_dirs = SMT_CASES.get(case)
+    every_smt_dir = {d for dirs in SMT_CASES.values() for d in dirs}
+    if expected_dirs is not None:
+        require(any(d in root.parts for d in expected_dirs),
+                f"{case} must be walked against one of its own acquisitions "
+                f"{sorted(expected_dirs)}: --oracle-root {root}")
+        # ...and not against the OTHER seamount card's, which the clause
+        # above cannot catch on its own once a card has several roots.
+        require(not any(d in root.parts
+                        for d in every_smt_dir - set(expected_dirs)),
+                f"{case} is walked against another card's seamount "
+                f"acquisition: --oracle-root {root}")
+    else:
+        require(not any(d in root.parts for d in every_smt_dir),
+                f"{case} is the flat card and --oracle-root {root} is a "
+                "seamount acquisition")
+
+
 def read_spgts(root: Path, kt: int) -> tuple[dict, dict]:
     """Read one per-substep barotropic record through the acquisition's own
     self-describing parser.  Returns (header fields, {group name: array})."""
@@ -153,12 +192,14 @@ def _lego_plane(values, stagger):
     return values
 
 
-def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
+def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         plant: str | None = None, substeps: int | None = None,
         nemo_entry_forcing: bool = False,
         nemo_entry_velocity: bool = False,
         nemo_substep_coriolis: bool = False,
-        nemo_substep_pgf: bool = False) -> dict:
+        nemo_substep_pgf: bool = False,
+        nemo_depth_average: Path | None = None,
+        dump_entry_coriolis: Path | None = None) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -187,14 +228,16 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
     require(plant is None or plant in valid,
             f"unknown plant {plant!r}; expected one of {valid}")
 
-    card = build_nemo_testcase_card(CASE)
+    require_case_matches_root(case, root)
+
+    card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     masks3 = expected_masks(card)
     masks = {"u": np.asarray(masks3["u"])[..., 0],
              "v": np.asarray(masks3["v"])[..., 0],
              "t": np.asarray(masks3["ssh"], dtype=bool)}
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", CASE,
+    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", case,
                        expect_interior=interior)
     seed = _seed_from_record(card.recipe.initial_state, entry, nlev)
 
@@ -235,6 +278,40 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
                        for jn in range(1, meta["icycle"] + 1)])
         return jnp.asarray(us), jnp.asarray(vs)
 
+    # Round 215's split arm: substitute NEMO's OWN depth average of the slow
+    # forcing -- rebuilt by nemo_testcase_l1_vortex_round215_slow_forcing_split
+    # from NEMO's recorded 3-D right-hand side and NEMO's own mesh operands --
+    # at the boundary legoESM forms the same quantity, BEFORE the barotropic
+    # Coriolis subtraction.  What survives is the subtraction's own share.
+    depth_override = None
+    if nemo_depth_average is not None:
+        import jax.numpy as jnp
+        _npz = np.load(nemo_depth_average)
+        depth_override = (jnp.asarray(_npz["ue_rhs"]),
+                          jnp.asarray(_npz["ve_rhs"]))
+    # Round 216's ONE VARIABLE for the remainder round 215 left PLAUSIBLE:
+    # legoESM's OWN loop-entry barotropic Coriolis subtraction, read out at
+    # the boundary it is formed (dynspg_ts.f90:292's counterpart).  The model
+    # already offers this boundary as a CALLABLE observer on the same hook
+    # the forcing override uses, so nothing in the package changes; the probe
+    # that compares it to NEMO's own is
+    # nemo_testcase_l1_vortex_round216_entry_coriolis.
+    _entry_dump: dict[str, np.ndarray] = {}
+    if dump_entry_coriolis is not None:
+        require(override is None,
+                "the entry-Coriolis dump and the entry-forcing override share "
+                "one hook; they cannot both be requested")
+
+        def _observe(incoming_u, incoming_v, cor_u, cor_v,
+                     umask, vmask, final_u, final_v):
+            _entry_dump.update(
+                incoming_u=np.asarray(incoming_u),
+                incoming_v=np.asarray(incoming_v),
+                cor_u=np.asarray(cor_u), cor_v=np.asarray(cor_v),
+                umask=np.asarray(umask), vmask=np.asarray(vmask),
+                final_u=np.asarray(final_u), final_v=np.asarray(final_v))
+
+        override = _observe
     cor_override = _stack("cor_u", "cor_v") if nemo_substep_coriolis else None
     pgf_override = _stack("zu_spg", "zv_spg") if nemo_substep_pgf else None
     model = LatLonCGridOceanModel(
@@ -242,9 +319,20 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
             barotropic_slow_forcing_override=override,
+            slow_forcing_depth_override=depth_override,
             barotropic_substep_coriolis_override=cor_override,
             barotropic_substep_pgf_override=pgf_override))
     result = jax.device_get(model.step(seed, dt=card.dt_s))
+    if dump_entry_coriolis is not None:
+        # Self-checking: the observer must have FIRED and must have seen a
+        # subtraction that is not a zero, or the arm reports nothing.
+        require(bool(_entry_dump),
+                "the loop-entry observer never fired; this card does not take "
+                "the live barotropic-Coriolis-split path")
+        require(float(np.max(np.abs(_entry_dump["cor_u"]))) > 0.0,
+                "the loop-entry Coriolis subtraction is identically zero; a "
+                "comparison against it would perturb a zero")
+        np.savez(dump_entry_coriolis, **_entry_dump)
     trace = {key: np.asarray(value) for key, value in result.substeps.items()}
     traced_loops = int(next(iter(trace.values())).shape[0])
     require(traced_loops == meta["icycle"],
@@ -271,7 +359,7 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
         nonlocal first
         planted = plant == name
         use = masks[stagger]
-        row = score(f"{CASE}.spgts.j{substep:03d}.{name}", reference,
+        row = score(f"{case}.spgts.j{substep:03d}.{name}", reference,
                     candidate, use, plant=planted)
         active = np.asarray(use, dtype=bool)
         row["cells_unequal"] = int(np.count_nonzero(
@@ -348,7 +436,15 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
 
     bad_scalars = [s for s in scalars if not s["bit_exact"]]
     report = {
-        "case": CASE, "kt": kt, "git_sha": sha, "worktree": tree,
+        "case": case, "kt": kt, "git_sha": sha, "worktree": tree,
+        # Which arm produced this artifact.  Without these an arm that
+        # injected an operand is indistinguishable from one that did not.
+        "arm_nemo_entry_forcing": bool(nemo_entry_forcing),
+        "arm_nemo_entry_velocity": bool(nemo_entry_velocity),
+        "arm_nemo_substep_coriolis": bool(nemo_substep_coriolis),
+        "arm_nemo_substep_pgf": bool(nemo_substep_pgf),
+        "arm_nemo_depth_average": (None if nemo_depth_average is None
+                                   else str(nemo_depth_average)),
         "oracle_root": str(root),
         "record": meta, "bar": BAR,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),
@@ -389,7 +485,8 @@ def run(root: Path, *, kt: int = 1, allow_dirty: bool = False,
     return report
 
 
-def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
+def conditioning(root: Path, *, case: str = CASE, kt: int = 1,
+                 allow_dirty: bool = False) -> dict:
     """How much does the solve amplify ONE last-bit change at its entry?
 
     A walk that finds every boundary inside the loop at the rounding floor
@@ -412,10 +509,11 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_nemo_testcase_card(CASE)
+    require_case_matches_root(case, root)
+    card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", CASE,
+    entry = read_entry(root / f"oracle_step_entry_kt{kt:08d}.bin", case,
                        expect_interior=interior)
     seed = _seed_from_record(card.recipe.initial_state, entry, nlev)
     masks3 = expected_masks(card)
@@ -466,7 +564,7 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
     first = next((r["max_abs"] for r in rows if r["max_abs"] > 0.0), 0.0)
     final = rows[-1]["max_abs"]
     return {
-        "case": CASE, "kt": kt, "git_sha": sha, "arm": "one_ulp_entry_probe",
+        "case": case, "kt": kt, "git_sha": sha, "arm": "one_ulp_entry_probe",
         "perturbed_faces": int(np.count_nonzero(use)),
         "largest_cell": [int(where[0]), int(where[1]) + 1],
         "perturbation_at_largest_cell": float(
@@ -483,6 +581,10 @@ def conditioning(root: Path, *, kt: int = 1, allow_dirty: bool = False) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--oracle-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--case", default=CASE,
+                        choices=(CASE, *sorted(SMT_CASES)),
+                        help="which card the walk runs; the seamount "
+                             "cards need their own --oracle-root")
     parser.add_argument("--kt", type=int, default=1)
     parser.add_argument("--substeps", type=int, default=None,
                         help="walk only the first N substeps (the whole loop "
@@ -504,13 +606,22 @@ def main(argv=None) -> int:
                         help="one-variable arm: substitute NEMO's recorded "
                              "per-substep surface pressure gradient "
                              "(dynspg_ts.f90:498)")
+    parser.add_argument("--nemo-depth-average", type=Path,
+                        help="one-variable arm: substitute NEMO's own depth "
+                             "average of the slow forcing (stp2d.f90:178) "
+                             "before the barotropic Coriolis subtraction")
+    parser.add_argument("--dump-entry-coriolis", type=Path,
+                        help="save legoESM's OWN loop-entry barotropic "
+                             "Coriolis subtraction (and the forcing either "
+                             "side of it) as an npz, for comparison against "
+                             "NEMO's dynspg_ts.f90:292 trend")
     parser.add_argument("--one-ulp-entry-probe", action="store_true",
                         help="legoESM-vs-legoESM conditioning arm: perturb the "
                              "barotropic entry velocity by one ULP and report "
                              "the per-substep response")
     args = parser.parse_args(argv)
     if args.one_ulp_entry_probe:
-        report = conditioning(args.oracle_root, kt=args.kt,
+        report = conditioning(args.oracle_root, case=args.case, kt=args.kt,
                               allow_dirty=args.allow_dirty)
         if args.output:
             args.output.write_text(
@@ -521,12 +632,15 @@ def main(argv=None) -> int:
         print("amplification:", report["amplification"])
         return 0
     try:
-        report = run(args.oracle_root, kt=args.kt, allow_dirty=args.allow_dirty,
+        report = run(args.oracle_root, case=args.case, kt=args.kt,
+                     allow_dirty=args.allow_dirty,
                      plant=args.plant, substeps=args.substeps,
                      nemo_entry_forcing=args.nemo_entry_forcing,
                      nemo_entry_velocity=args.nemo_entry_velocity,
                      nemo_substep_coriolis=args.nemo_substep_coriolis,
-                     nemo_substep_pgf=args.nemo_substep_pgf)
+                     nemo_substep_pgf=args.nemo_substep_pgf,
+                     nemo_depth_average=args.nemo_depth_average,
+                     dump_entry_coriolis=args.dump_entry_coriolis)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
