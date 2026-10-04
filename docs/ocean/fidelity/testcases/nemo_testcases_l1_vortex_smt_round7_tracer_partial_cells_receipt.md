@@ -235,6 +235,8 @@ section 10.  Calling it now would be a guess.
 
 **STATUS: HELD, as a measurement round.**  No model file is edited, so no
 card moves, no registry row moves, and the two-ULP ratchet cannot go red.
+The operand split of `sshwzv.f90:297-298` is the round's OPEN item and its
+preregistered arm is R8-P1 in section 10.
 ## 9. THE FLUX SEAMOUNT CARD
 
 Its record (`VORTEX_SMT_R7_OMIP_L1_P3/tracer`, variant `smtflxtra`) was
@@ -244,14 +246,30 @@ kt=2 T row is NOT a partial-cell row — the FLAT flux card already carries
 subject: it says whether the continuity statement named in section 7 is
 shared by both momentum programs or belongs to the vector one.
 
-**ITS ACQUISITION WAS STILL BUILDING WHEN THIS ROUND HIT ITS TOOL BUDGET,
-and this receipt says so rather than quoting a number it does not have.**
-The variant is committed and runs unattended
-(`run.sh --variant smtflxtra --run`); the walk reads it with
-`--card flux`.  The round's finding does not depend on it: the vector card
-is the one whose flat twin is at the bar, so it is the clean partial-cell
-signal, and the one-variable arm there is bit-exact.  Carried as OPEN item
-2.
+Its record is ADMITTED, restart BYTE-IDENTICAL, header plant fired
+(`walk_flux.json`).  **IT REPRODUCES THE VECTOR CARD'S RESULT, AND THAT
+MAKES THE STATEMENT A SHARED ONE.**
+
+| row | flux card | vector card |
+|---|---:|---:|
+| `zfu` / `zfv` | `1.42e-16` rel, 78 / 86 cells | `1.42e-16` rel, 85 / 93 cells |
+| **`ww`** | **`3.368e-13` rel, 36713 cells** | **`1.993e-13` rel, 24648 cells** |
+| **`zfw`** | **`3.368e-13` rel, 36709 cells** | **`1.993e-13` rel, 24617 cells** |
+| `adv.T` | `1.83e-12` rel, 34793 cells | `1.37e-12` rel, 18219 cells |
+| `out.T` / `out.S` | 1 ULP, 1710 / 1912 cells | 1 ULP, 1775 / 1621 cells |
+
+One-variable arm, NEMO's recorded `zFu/zFv/zFw` substituted, flux card:
+
+| row | before | after |
+|---|---:|---:|
+| `adv.T` | `1.048203e-18` on 34793 cells | **`0.0` on 0 cells — BIT-IDENTICAL** |
+| `adv.S` | `1.961728e-18` on 34113 cells | **`0.0` on 0 cells — BIT-IDENTICAL** |
+
+So the FCT tracer path is bit-faithful over partial cells under BOTH
+momentum programs, and the `ww` statement is carried by both — which is
+what `sshwzv.f90:297-298` being reached from `stprk3_stg.f90:298` on the
+flux card and from `traadv.f90:268` on the vector card predicts.  The
+preregistered falsifier (the flux card's `ww` at the bar) did NOT fire.
 ## 8. CHOICES MADE THIS ROUND
 
 | # | choice | ASKED? |
@@ -365,16 +383,14 @@ three arrays at the step-36 cell say which statement.
 ## 11. OPEN
 
 1. The `ww` row is named but NOT attributed to one operand (section 7).
-2. **The flux seamount card's record was still compiling at the budget
-   stop.**  Run `run.sh --variant smtflxtra --run` then the walk with
-   `--card flux`; the expected answer, preregistered here, is that its
-   `ww` row carries the SAME `~2e-13` relative error as the vector card's,
-   because `wzv(..., np_transport)` is called on both programs (from
-   `stprk3_stg.f90:298` on the flux card, from `traadv.f90:268` on the
-   vector one) and the statement at `sshwzv.f90:297-298` is shared.
-   FALSIFIER: the flux card's `ww` is at the bar.
+2. RESOLVED in section 9: the flux card's record was admitted and its
+   `ww` row carries `3.368e-13` relative, the same statement, so the
+   preregistered falsifier did not fire.
 3. The SMT deck cannot exercise `tra_zdf`'s partial-cell statement at all
-   (`avt` identically zero, section 3).  Only ORCA2 can.
+   (`avt` identically zero, section 3).  **The mini-ladder's SMT-1 rung
+   (Decision 93: rung-0 background mixing plus enhanced vertical diffusion)
+   is what makes it measurable here** — until that rung exists, the only
+   configuration on the lane that exercises `trazdf.f90:231-233` is ORCA2.
 4. The round-213/215 open items are unchanged.
 
 ## 12. GATES
@@ -409,3 +425,29 @@ directories were not moved, rebuilt or deleted.
 | `require_live` on every exposed row | a hook that silently went inert and handed back the plain step output | all rows live |
 | the `adv.T` plant against the clean report | scoring that cannot react | VISIBLE |
 | the flat `VORTEX_VEC-zco` card at the bar on the same kt=2 T row | a "partial-cell" finding that is really a scheme defect | AT BAR (`3.466e-16`) |
+
+## 15. THE ADVERSARIAL REVIEW
+
+Two fresh reviewers, both on the committed diff, neither of them the
+author.
+
+**Reviewer 1 — SHIP WITH FIXES.**  Confirmed by tracing the shipped NEMO
+sources that the writer is read-only with a sound open/close state
+machine, that the three call sites sit where `tra_adv_trp` has already
+populated `zFu/zFv/zFw` on BOTH momentum programs, that the `out` site
+covers the stage-1/2 explicit update AND stage-3's `tra_zdf`, and that the
+record checker hard-codes nothing beyond the magic and the group names.
+Four findings, all closed in commit `276839c14`:
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | the arm's vertical member round-trips `zfw/area_T` then `*area_T`, so a recorded `zFw` of zero would make the w half VACUOUS | **MEASURED, REFUTED**: recorded `zFw` peak `8.742244e+04`, nonzero on 34,391 of 43,659 cells; the walk now REFUSES unless it is live over the scored support, so the control lives in the probe |
+| 2 | the transport-substitution arm — the row that carries the round — was the one exposure without `require_live` | FIXED; the arm is now seam-controlled like every other row |
+| 3 | the rank-2 reader reinvented the shared halo stripper with a hard-coded width | FIXED; it calls `_strip2` |
+| 4 | the plant perturbed the geometric centre without checking it is scored | FIXED; it perturbs a cell from the row's own active support |
+
+Every number in sections 7 and 9 was RE-MEASURED after those fixes and is
+unchanged; the new `zFw` control passes, `require_live` passes on the arm,
+and the `adv.T` plant is still VISIBLE.
+
+**Reviewer 2 — verdict in section 16.**
