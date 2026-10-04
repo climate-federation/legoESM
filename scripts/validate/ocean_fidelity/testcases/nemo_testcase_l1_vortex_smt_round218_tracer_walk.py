@@ -468,6 +468,67 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                 "structure": _structure(reference, candidate, active),
             })
 
+    # ---- 7. STAGE 3 ONLY: THE SEAM-IDENTITY ARM -------------------------
+    # The reviewer's blocking finding, measured end to end instead of
+    # bounded.  The stage-3 FCT branch reads the geometry slots this hook
+    # fills with zFu/dy_u, zFv/dx_v, zFw/area_T, and advection.py forms
+    # ``mass_flux * tracer`` before the metric is multiplied back, so the
+    # substitution arm hands FCT ``((F/d)*T)*d`` where NEMO forms ``F*T``.
+    # That is an inexactness of the INSTRUMENT.
+    #
+    # This arm isolates it with no model edit and no linearity assumption:
+    # harvest legoESM's OWN stage-3 transports through the same exposure the
+    # rows above score, hand them straight back through the same override,
+    # and diff the stage-3 output against the ordinary step.  Both runs then
+    # execute identical code on identical PHYSICAL transports; the only
+    # difference is the division-and-restore, measured through the FCT
+    # limiter, branch flips and all.
+    if stage == 3 and plant is None:
+        harvest = lego_fields(model_step(_NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            expose_tracer_transport_stage=3)))
+        own_u = np.asarray(harvest["u"])[..., :nlev]
+        own_v = np.asarray(harvest["v"])[..., :nlev]
+        # The T slot carries pFw = area_T*ww for the first nlev interfaces;
+        # the recurrence's last interface is the rigid bottom and is zero
+        # (nemo_qco_wzv_recurrence stacks levels + a zero row).  Check that
+        # against the record rather than asserting it.
+        own_w = np.asarray(harvest["T"])[..., :nlev]
+        require(float(np.max(np.abs(groups["zfw"][..., nlev]))) == 0.0,
+                "the record's deepest zFw interface is not zero, so the "
+                "exposure's nlev-deep w slot cannot be completed by a zero")
+        own_w = np.concatenate([own_w, np.zeros_like(own_w[..., :1])], axis=-1)
+        require(int(np.count_nonzero(own_u)) > 0
+                and int(np.count_nonzero(own_w)) > 0,
+                "the harvested own-transport triplet is identically zero; "
+                "the identity arm would be vacuous")
+        identity = lego_fields(model_step(_NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            stage3_transport_override=(jnp.asarray(own_u),
+                                       jnp.asarray(own_v),
+                                       jnp.asarray(own_w)))))
+        active = np.asarray(masks["T"], dtype=bool)
+        for tracer in ("T", "S"):
+            reference = np.asarray(plain[tracer])[..., :nlev]
+            candidate = np.asarray(identity[tracer])[..., :nlev]
+            carrier_rows.append({
+                "name": f"{case}.stage3.seam_identity.{tracer}",
+                "cells_unequal": int(np.count_nonzero(
+                    (candidate != reference)[active])),
+                "max_abs": float(np.max(np.abs(
+                    (candidate - reference)[active]))),
+                "max_abs_before": float(np.max(np.abs(reference[active]))),
+                "relative_max_abs": float(np.max(np.abs(
+                    (candidate - reference)[active]))) / max(
+                        float(np.max(np.abs(reference[active]))), 1.0e-300),
+                "execution_regime": "production_step_jit",
+                "nemo_boundary": (
+                    "legoESM's OWN stage-3 transports fed back through the "
+                    "same override: the instrument's division-and-restore "
+                    "alone, measured end to end through FCT"),
+                "structure": _structure(reference, candidate, active),
+            })
+
     first = next((r for r in rows if not r["bit_exact"]), None)
     report = {
         "case": case, "oracle_root": str(root), "legoesm_git_sha": sha,
