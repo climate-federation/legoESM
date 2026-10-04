@@ -836,6 +836,11 @@ NEMO_FCT_BETA_TRACE_FIELDS = (
     "zbetup_literal", "zbetdo_literal", "r_in", "r_out",
     "coef_u", "coef_v", "coef_w",
 )
+NEMO_FCT_STENCIL_TRACE_FIELDS = (
+    "zbup_center", "zbup_west", "zbup_east", "zbup_south",
+    "zbup_north", "zbup_above", "zbup_below",
+    "pbef", "paft", "wet", "zup",
+)
 
 
 def fct_tracer_advection(
@@ -857,6 +862,7 @@ def fct_tracer_advection(
     return_nemo_split: bool = False,
     return_nemo_trace: bool = False,
     return_nemo_beta_trace: bool = False,
+    return_nemo_stencil_trace: bool = False,
     return_limiter_activity: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
@@ -939,6 +945,10 @@ def fct_tracer_advection(
         and the live face coefficients.  Its duplicated arithmetic is kept
         behind an XLA optimization barrier; the ordinary limiter graph remains
         the one that supplies the two production outputs.
+    return_nemo_stencil_trace : bool
+        Private write-only readout of the seven source-ordered ``zbup`` inputs,
+        their ``pbef``/``paft`` sources, wet mask, and resulting ``zup``.  False
+        preserves the ordinary return.
 
     Returns
     -------
@@ -958,16 +968,20 @@ def fct_tracer_advection(
         raise ValueError(
             f"Unknown FCT low_order_predictor {low_order_predictor!r}; "
             "expected 'one_step' or 'nemo_rk3_two_step'")
-    if return_nemo_trace or return_nemo_beta_trace:
+    trace_returns = (
+        return_nemo_trace, return_nemo_beta_trace, return_nemo_stencil_trace)
+    if any(trace_returns):
         if return_nemo_split or return_limiter_activity:
             raise ValueError(
                 "NEMO trace returns cannot be combined with another "
                 "diagnostic return")
-        if return_nemo_trace and return_nemo_beta_trace:
+        if sum(trace_returns) > 1:
             raise ValueError("NEMO trace returns are mutually exclusive")
         if low_order_predictor != "nemo_rk3_two_step":
             raise ValueError(
                 "NEMO trace returns require the NEMO RK3 two-step predictor")
+    if return_nemo_stencil_trace and active_mask is None:
+        raise ValueError("NEMO stencil trace requires the compiled wet mask")
 
     eps = 1e-30
 
@@ -1168,7 +1182,8 @@ def fct_tracer_advection(
     # legoESM limiter deviates from a faithful nonosc transcription.
     bnd_up = jnp.maximum(base, q_td)
     bnd_do = jnp.minimum(base, q_td)
-    if active_mask is not None:
+    wet = None if active_mask is None else active_mask > 0.5
+    if wet is not None:
         # #1226 item 8: faithful dry-cell mask (traadv_fct.F90:911-915
         # ``MERGE(..., -zbig/+zbig, tmask==1)``) BEFORE the neighbourhood
         # max/min — a dry cell's ``q_td`` is an unconstrained ``h_k→0``
@@ -1176,7 +1191,6 @@ def fct_tracer_advection(
         # tracer update masks the cell out anyway) and must not widen a
         # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
         # max (not ``inf``) so float32 callers stay finite under AD.
-        wet = active_mask > 0.5
         zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
         bnd_up = jnp.where(wet, bnd_up, -zbig)
         bnd_do = jnp.where(wet, bnd_do, zbig)
@@ -1190,6 +1204,14 @@ def fct_tracer_advection(
         jnp.maximum(jnp.maximum(bnd_up, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
+    if return_nemo_stencil_trace:
+        # Materialise the observer after an optimization barrier.  Returning
+        # the raw intermediates lets XLA fuse their consumers back into the
+        # ordinary divergence graph and changes the bits being observed.
+        stencil_trace = jax.lax.optimization_barrier((
+            bnd_up, tr_west, tr_east, tr_south, tr_north, tr_above, tr_below,
+            base, q_td, wet, q_max,
+        ))
     tr_west_do = jnp.roll(bnd_do, 1, axis=1)
     tr_east_do = jnp.roll(bnd_do, -1, axis=1)
     tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
@@ -1257,6 +1279,8 @@ def fct_tracer_advection(
             jnp.pad(alpha_vert_face, (*pad_axes_v, (1, 1)),
                     constant_values=1.0),
         )
+    if return_nemo_stencil_trace:
+        return div_h_fct, vert_div_fct, stencil_trace
     if return_limiter_activity:
         # WRITE-only branch census for the developed-state fidelity walk.
         # A cell is active when a non-zero antidiffusive flux on any incident
