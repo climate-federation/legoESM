@@ -4175,11 +4175,14 @@ class LatLonCGridOceanModel:
                     "matrix; there is no matrix without the implicit solve).")
             _bd_scheme = getattr(config.bottom_drag, "bottom_drag_scheme",
                                   "legacy")
-            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer"):
+            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer",
+                                  "nemo_linear"):
                 raise ValueError(
                     "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
-                    '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
-                    f"rCdU_bot rate); got {_bd_scheme!r}.")
+                    '{"nemo_quadratic", "nemo_loglayer", "nemo_linear"} '
+                    "(NEMO's zdfdrg rCdU_bot rate, whichever of ln_non_lin / "
+                    "ln_loglayer / ln_lin the run selects); got "
+                    f"{_bd_scheme!r}.")
             # zdf_drag_in_matrix skips the explicit _bc_bottom_drag RHS kick
             # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
             # counting drag in the 3-D momentum tendency. But under
