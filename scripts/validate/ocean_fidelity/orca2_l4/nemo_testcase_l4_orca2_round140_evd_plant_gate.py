@@ -57,6 +57,10 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "EVD profiles are not fp64")
     require(set(report.get("profiles_equal", ())) == {"avt", "avm"},
             "EVD profile registry changed")
+    require(all(bool(report["profiles_equal"][name])
+                == (int(report["profile_delta"][name]["moved"]) == 0)
+                for name in ("avt", "avm")),
+            "EVD equality and moved-cell census disagree")
     active = not all(report["profiles_equal"].values())
     report["prediction_ledger"] = {
         "R140-P4": {
