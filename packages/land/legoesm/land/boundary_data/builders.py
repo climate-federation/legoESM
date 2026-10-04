@@ -206,7 +206,7 @@ def build_soil_hydraulics(
     texture profile, which the loader already remapped to the model's
     :class:`SoilGrid` via :func:`_remap_soil_layers`.  Hydraulic params come
     back as ``(ncol, n_layer)`` arrays that align cell-for-cell with the
-    Richards solver's soil state — ``slice_layer`` picks the right layer for
+    Richards solver's soil state; the solver takes the top / bottom layer for
     single-layer call sites (``K_top`` / ``K_bot``).  Any (col, layer) where
     HWSD has no soil (NaN) falls back to ``fallback_*`` (a sandy default) in
     just that cell, so a column with partial coverage keeps its real layers.
