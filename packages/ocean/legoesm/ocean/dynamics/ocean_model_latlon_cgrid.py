@@ -13187,6 +13187,22 @@ class LatLonCGridOceanModel:
                     _nemo_stage1_zad_eta_after_override=(
                         _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
+            if self._nemo_ws_test_hooks.expose_stage3_fct_inputs:
+                # The diagnostic payload can alter XLA fusion in the traced
+                # step even though it is attached only after the computation.
+                # Pair that payload with an independently compiled ordinary
+                # state so every prognostic/carried leaf remains production
+                # exact; only the otherwise-unused mass_flux_w slot differs.
+                diagnostic = result.mass_flux_w
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
+                return state_after._replace(mass_flux_w=diagnostic)
             return result
 
     @partial(jax.jit, static_argnums=(0,))

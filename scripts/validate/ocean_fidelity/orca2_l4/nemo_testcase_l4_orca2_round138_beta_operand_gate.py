@@ -90,9 +90,10 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(report.get("ordinary_repeat_state_equal") == {
         name: True for name in state_gate.FIELDS},
         "ordinary step-36 repeat changed bits")
-    require(report.get("observer_state_equal") == {
-        name: True for name in state_gate.FIELDS},
-        "stage-3 FCT input side output moved an ordinary state leaf")
+    expected_state = {name: True for name in state_gate.FIELDS}
+    require(report.get("observer_state_equal") == expected_state,
+            "stage-3 FCT input side output moved ordinary leaves: "
+            f"{report.get('observer_state_equal')}")
     require(report.get("coefficient_nonfinite_masks_equal") == {
         name: True for name in ("coef_u", "coef_v", "coef_w")},
         "beta observer changed a coefficient's finite/non-finite support")
