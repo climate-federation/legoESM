@@ -90,6 +90,9 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(report.get("side_output_type") == "_NEMOWSFCTInputTrace"
             and report.get("side_output_field") == "mass_flux_w",
             "FCT side-output scope changed")
+    require(report.get("stage3_advection_content", {}).get("target_jik")
+            == list(TARGET),
+            "caller-content target association changed")
 
     for group, fields in TRACE_GROUPS:
         row = report["groups"][group]
@@ -154,6 +157,11 @@ def measure(deck_root: Path, expect_commit: str,
 
     previous = json.loads(round136_json.read_text())
     content_row = previous["rows"]["pre_zdf_content"]
+    # ``boundary_summary`` retains round 131's historical reporting target;
+    # its non-finite census is valid, but those two display-only fields are
+    # not.  Replace the index with this gate's target and omit the stale value.
+    report["stage3_advection_content"]["target_jik"] = list(TARGET)
+    report["stage3_advection_content"].pop("target_values", None)
     report.update({
         "format": "nemo-testcase-l4-orca2-round137-step36-fct-content-v1",
         "target": list(TARGET),

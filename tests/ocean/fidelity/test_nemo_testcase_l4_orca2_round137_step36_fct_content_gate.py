@@ -57,6 +57,7 @@ def _report():
             "field": "T", "index": list(gate.RETURNED_TARGET), "value": "nan"},
         "side_output_type": "_NEMOWSFCTInputTrace",
         "side_output_field": "mass_flux_w",
+        "stage3_advection_content": {"target_jik": list(gate.TARGET)},
         "round136_pre_zdf": {"first_nonfinite": list(gate.TARGET)},
     }
 
