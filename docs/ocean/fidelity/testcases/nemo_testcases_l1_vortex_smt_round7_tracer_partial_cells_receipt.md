@@ -450,4 +450,11 @@ Every number in sections 7 and 9 was RE-MEASURED after those fixes and is
 unchanged; the new `zFw` control passes, `require_live` passes on the arm,
 and the `adv.T` plant is still VISIBLE.
 
-**Reviewer 2 — verdict in section 16.**
+**Reviewer 2 — a SECOND fresh reviewer was launched on all four commits
+(it was asked to attack the headline's self-referentiality, the writer's
+read-only property, three of this receipt's own numeric/citation claims,
+and the checker's hard-coded expectations).  It had not reported when the
+battery slot came free, and this round landed on reviewer 1's verdict
+with every one of its findings closed and re-measured.**  That is stated
+here rather than implied: the landing rests on ONE recorded verdict, not
+two.  Reviewer 2's findings, when they arrive, are round 8's first item.
