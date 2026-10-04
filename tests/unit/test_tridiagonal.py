@@ -107,3 +107,29 @@ def test_thomas_solve_grad_safe():
         for i in range(n)
     ])
     np.testing.assert_allclose(g, fd, rtol=1e-4, atol=1e-6)
+
+
+def test_thomas_sweeps_emit_levels_instead_of_writing_into_a_buffer():
+    """Each sweep scans over the level axis and stacks its outputs; a per-level
+    ``x.at[..., k].set`` inside a loop lowers to a scatter that XLA's CPU
+    backend turns into a whole-buffer rewrite every iteration (~30% of an
+    MPAS dycore step before it was removed)."""
+    import jax
+    import jax.numpy as jnp
+
+    a = b = c = d = jnp.ones((7, 32))
+    jaxpr = str(jax.make_jaxpr(thomas_solve)(a, b + 3.0, c, d))
+    assert "scan" in jaxpr  # the solve body is printed, so the check bites
+    assert "scatter" not in jaxpr and "dynamic_update_slice" not in jaxpr
+
+
+def test_thomas_single_level_without_jit():
+    """n == 1 is just d/b; it must also work eagerly (zero-length scans are
+    rejected outside jit)."""
+    import jax
+    import jax.numpy as jnp
+    b = jnp.array([[2.0], [4.0]]); d = jnp.array([[1.0], [3.0]])
+    z = jnp.zeros_like(b)
+    with jax.disable_jit():
+        x = thomas_solve(z, b, z, d)
+    np.testing.assert_allclose(np.asarray(x), np.asarray(d / b), rtol=1e-6)

@@ -121,55 +121,39 @@ def _thomas_solve_impl(
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
     d0_star = d[..., 0] / (b[..., 0] + _TINY)
 
-    # We'll do the sweep manually with lax.scan over k=1..n-1
-    # But lax.scan needs fixed-size arrays. Instead, build vectorized.
-    # Use the stable sequential approach with fori_loop.
+    # Both sweeps are lax.scans over the LEVEL axis (moved to the front) that
+    # emit one level per step.  Writing level k into a (..., n) buffer inside a
+    # loop instead (``x.at[..., k].set``) makes XLA rewrite the whole buffer
+    # every iteration on CPU -- measured as ~30% of an MPAS dycore step.
+    if n == 1:
+        # no sweep to run (and lax.scan refuses zero-length scans without jit)
+        return jax.lax.convert_element_type(d0_star[..., None], out_dtype)
+    am, bm, cm, dm = (jnp.moveaxis(v, -1, 0) for v in (a, b, c, d))
 
-    # Allocate modified arrays
-    c_star = jnp.zeros_like(c)
-    d_star = jnp.zeros_like(d)
-    c_star = c_star.at[..., 0].set(c0_star)
-    d_star = d_star.at[..., 0].set(d0_star)
-
-    def forward_body(k, carry):
-        c_star_c, d_star_c = carry
-        ak = a[..., k]
-        bk = b[..., k]
-        ck = c[..., k]
-        dk = d[..., k]
-
-        c_prev = c_star_c[..., k - 1]
-        d_prev = d_star_c[..., k - 1]
-
+    def forward_body(carry, abcd_k):
+        c_prev, d_prev = carry
+        ak, bk, ck, dk = abcd_k
         denom = bk - ak * c_prev
         denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-
         c_star_k = ck / denom
         d_star_k = (dk - ak * d_prev) / denom
+        return (c_star_k, d_star_k), (c_star_k, d_star_k)
 
-        c_star_c = c_star_c.at[..., k].set(c_star_k)
-        d_star_c = d_star_c.at[..., k].set(d_star_k)
+    _, (c_rest, d_rest) = jax.lax.scan(
+        forward_body, (c0_star, d0_star), (am[1:], bm[1:], cm[1:], dm[1:]))
+    c_star = jnp.concatenate([c0_star[None], c_rest], axis=0)
+    d_star = jnp.concatenate([d0_star[None], d_rest], axis=0)
 
-        return (c_star_c, d_star_c)
+    # Backward substitution: x[n-1] = d_star[n-1], x[k] = d*[k] - c*[k] x[k+1]
+    def backward_body(x_next, cd_k):
+        c_star_k, d_star_k = cd_k
+        x_k = d_star_k - c_star_k * x_next
+        return x_k, x_k
 
-    c_star, d_star = jax.lax.fori_loop(
-        1, n, forward_body, (c_star, d_star),
-    )
-
-    # Backward substitution: x[n-1] = d_star[n-1]
-    x = jnp.zeros_like(d)
-    x = x.at[..., -1].set(d_star[..., -1])
-
-    def backward_body(k_rev, x_c):
-        # k_rev counts 0, 1, ..., n-2; actual index k = n-2-k_rev
-        k = n - 2 - k_rev
-        x_c = x_c.at[..., k].set(
-            d_star[..., k] - c_star[..., k] * x_c[..., k + 1]
-        )
-        return x_c
-
-    x = jax.lax.fori_loop(0, n - 1, backward_body, x)
-
+    x_last = d_star[-1]
+    _, x_rest = jax.lax.scan(
+        backward_body, x_last, (c_star[:-1], d_star[:-1]), reverse=True)
+    x = jnp.moveaxis(jnp.concatenate([x_rest, x_last[None]], axis=0), 0, -1)
     return jax.lax.convert_element_type(x, out_dtype)
 
 
