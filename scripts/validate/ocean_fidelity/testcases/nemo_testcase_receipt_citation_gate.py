@@ -5637,7 +5637,6 @@ CITATION_MAP = {
         17,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:265-284': [
-        ('ALLOCATE( zub(', 1),
         ('zFu(ji,jj,jk) = e2u(ji,jj)', 1),
         ('zFv(ji,jj,jk) = e1v(ji,jj)', 1),
         20,
