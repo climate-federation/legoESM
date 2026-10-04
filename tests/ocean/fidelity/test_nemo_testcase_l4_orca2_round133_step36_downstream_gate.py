@@ -17,6 +17,9 @@ def _summary(nonfinite: bool = False) -> dict[str, object]:
         "first_nonfinite": (
             {"field": "T", "index": [0, 0, 0], "value": "nan"}
             if nonfinite else None),
+        "support": "active_t_cells",
+        "active_count": 1,
+        "nonfinite_unscored": {"T": 0, "S": 0},
     }
 
 

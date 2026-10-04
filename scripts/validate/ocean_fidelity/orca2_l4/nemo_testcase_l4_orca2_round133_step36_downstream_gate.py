@@ -95,6 +95,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         require((row["first_nonfinite"] is None)
                 == (row["nonfinite_total"] == 0),
                 f"{name}: first-nonfinite/census disagreement")
+        if name != "returned_state":
+            require(row.get("support") == "active_t_cells"
+                    and int(row.get("active_count", 0)) > 0,
+                    f"{name}: tracer support is not the active T-cell mask")
+            require(set(row.get("nonfinite_unscored", ())) == {"T", "S"},
+                    f"{name}: dry-cell census is incomplete")
     first = _first_boundary(report)
     require(first == report.get("first_nonfinite_boundary"),
             "first downstream non-finite boundary is not source ordered")
@@ -206,9 +212,23 @@ def measure(deck_root: Path, operand_report: Path,
     pre_concentration = exposed(_NEMOWSRK3TestHooks(
         expose_pre_implicit_state=True))
 
+    active_t = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+
     def tracer_summary(state_value):
-        return prior.boundary_summary({
-            "T": state_value.T.data, "S": state_value.S.data})
+        raw = {
+            "T": np.asarray(state_value.T.data),
+            "S": np.asarray(state_value.S.data),
+        }
+        row = prior.boundary_summary({
+            name: np.where(active_t, values, 0.0)
+            for name, values in raw.items()})
+        row["support"] = "active_t_cells"
+        row["active_count"] = int(np.count_nonzero(active_t))
+        row["nonfinite_unscored"] = {
+            name: int(np.count_nonzero(~np.isfinite(values[~active_t])))
+            for name, values in raw.items()
+        }
+        return row
 
     boundaries = {
         "stage1_after_advection": tracer_summary(after_advection1),
