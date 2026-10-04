@@ -71,6 +71,8 @@ _ORCA2_R96SPG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
 _ORCA2_R141GROWTH_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo")
+_ORCA2_R143EARLY_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -202,6 +204,10 @@ FILES = {
         _ORCA2_R141GROWTH_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R141GROWTH_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R143EARLY_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R143EARLY_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -5831,6 +5837,17 @@ CITATION_MAP = {
         20,
     ],
     'ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo/traadv.f90:299-320': [
+        ('CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )', 1),
+        ('& pFw(ntsi:ntei,ntsj:ntej,:) )', 1),
+        22,
+    ],
+    # --- ORCA2 card round 144: independent early-growth bracket
+    'ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo/stprk3.f90:202-221': [
+        ('CALL r143_growth_entry(', 1),
+        ('CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 1),
+        20,
+    ],
+    'ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo/traadv.f90:299-320': [
         ('CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )', 1),
         ('& pFw(ntsi:ntei,ntsj:ntej,:) )', 1),
         22,
