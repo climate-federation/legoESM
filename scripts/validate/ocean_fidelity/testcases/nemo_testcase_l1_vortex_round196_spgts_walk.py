@@ -392,6 +392,14 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
     bad_scalars = [s for s in scalars if not s["bit_exact"]]
     report = {
         "case": case, "kt": kt, "git_sha": sha, "worktree": tree,
+        # Which arm produced this artifact.  Without these an arm that
+        # injected an operand is indistinguishable from one that did not.
+        "arm_nemo_entry_forcing": bool(nemo_entry_forcing),
+        "arm_nemo_entry_velocity": bool(nemo_entry_velocity),
+        "arm_nemo_substep_coriolis": bool(nemo_substep_coriolis),
+        "arm_nemo_substep_pgf": bool(nemo_substep_pgf),
+        "arm_nemo_depth_average": (None if nemo_depth_average is None
+                                   else str(nemo_depth_average)),
         "oracle_root": str(root),
         "record": meta, "bar": BAR,
         "precision_policy": "fp64/libm", "jax_backend": jax.default_backend(),

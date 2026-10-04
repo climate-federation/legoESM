@@ -21,19 +21,37 @@ already admitted:
   so ``Ue_rhs`` can be rebuilt from NEMO's own operands;
 * the substep record's ``i000_zu_frc`` is the finished operand.
 
-``max |Ue_rhs(rebuilt) - zu_frc(recorded)|`` is therefore the SIZE of the
-Coriolis subtraction at this step, and ``max |Ue_rhs(rebuilt) -
-Ue_rhs(NEMO's own, unavailable)|`` is not claimed: the rebuild uses NEMO's
-operands and NEMO's right-hand side, so a residual against the recorded
-``zu_frc`` is the subtraction, not a transcription error.
+``max |Ue_rhs(rebuilt) - zu_frc(recorded)|`` is therefore the residual
+after the depth average, and it is NOT named "the Coriolis subtraction":
+TWO MORE STATEMENTS write ``Ue_rhs`` between the two above, both UNGUARDED
+in the source --
 
-The probe REFUSES rather than reports if the right-hand side it was handed
-is not the completed one (the control: the per-term record's own ordering).
+    stp2d.f90:194       CALL dyn_drg_init( ..., Ue_rhs, Ve_rhs, ... )
+                        (Ue_rhs is INTENT(inout), dynspg_ts.f90:1284, and
+                        the bottom drag is added at dynspg_ts.f90:1339)
+    stp2d.f90:197-199   the surface-stress add
+
+-- so the residual is Coriolis ONLY on a deck where both vanish.  On this
+deck they do, and the probe REFUSES unless the run's own namelist says so
+rather than leaving the exclusion unstated: ``ln_drg_OFF = .true.`` makes
+the drag term identically zero, and ``ln_usr = .true.`` with VORTEX's
+``usrdef_sbc`` gives ``utau = vtau = 0``.  Those are the reference
+implementation's exclusions, carried rather than dropped.
+
+CONTROLS.  The probe refuses unless the per-term record on disk carries
+EXACTLY the six boundaries it expects (so a seventh dump cannot be
+ignored) and unless the last dump's accumulator actually differs from the
+one before it (so a repeated or mis-ordered file cannot pass as the
+completed right-hand side).  An earlier version asserted
+``BOUNDARIES[-1] == "zad"`` and called that a control; it is a check on
+this file's own Python list that no record can falsify, and the
+independent reviewer was right to refuse it.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -76,9 +94,39 @@ def run(terms_root: Path, spgts_root: Path, *, case: str,
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64")
 
+    # CONTROL 1: the record on disk carries exactly the boundaries this
+    # probe expects.  A seventh dump would otherwise be silently skipped.
+    on_disk = {path.name.rsplit("_", 1)[-1][:-4]
+               for path in terms_root.glob("oracle_rhsterm_kt*_*.bin")}
+    require(on_disk == set(BOUNDARIES),
+            f"the per-term record carries {sorted(on_disk)}, this probe "
+            f"expects {sorted(BOUNDARIES)}")
     terms = read_terms(terms_root)
-    last = BOUNDARIES[-1]
-    require(last == "zad", "the last pre-stage boundary is no longer zad")
+    last, prev = BOUNDARIES[-1], BOUNDARIES[-2]
+    # CONTROL 2: the last dump is a LATER dump, read from the records
+    # themselves rather than asserted about this file's own list.
+    require(not np.array_equal(terms[last]["fields"]["uu_rhs"],
+                               terms[prev]["fields"]["uu_rhs"]),
+            f"the {last!r} and {prev!r} dumps are identical, so the record "
+            "is not the ordered accumulator this probe reads")
+    # CONTROL 3: the two statements that would otherwise write Ue_rhs
+    # between stp2d.f90:178 and dynspg_ts.f90:275 must be off in the run's
+    # OWN namelist, not assumed off.
+    namelist = terms_root / "namelist_cfg"
+    require(namelist.is_file(),
+            f"the evidence directory has no namelist_cfg at {namelist}")
+    deck = namelist.read_text()
+    require(re.search(r"^\s*ln_drg_OFF\s*=\s*\.true\.", deck, re.M)
+            is not None,
+            "this probe's residual is only the Coriolis subtraction when "
+            "the bottom drag dyn_drg_init adds to Ue_rhs (stp2d.f90:194, "
+            "dynspg_ts.f90:1339) is off; the deck does not set "
+            "ln_drg_OFF = .true.")
+    require(re.search(r"^\s*ln_usr\s*=\s*\.true\.", deck, re.M) is not None
+            and re.search(r"^\s*ln_blk\s*=\s*\.true\.", deck, re.M) is None,
+            "this probe's residual is only the Coriolis subtraction when "
+            "the surface stress added at stp2d.f90:197-199 is zero; the "
+            "deck does not select VORTEX's zero-stress usrdef_sbc")
     _meta, groups = read_spgts(spgts_root, 1)
     zu_frc = groups["i000_zu_frc"]
     zv_frc = groups["i000_zv_frc"]
@@ -101,9 +149,17 @@ def run(terms_root: Path, spgts_root: Path, *, case: str,
     hv_0 = np.asarray(raw.hv_0, dtype=np.float64)
     require(uu.shape == e3u_0.shape,
             f"the record's RHS is {uu.shape}, the card's faces {e3u_0.shape}")
+    # CONTROL 4: the two components are not the same buffer read twice.
+    # Their PEAKS are equal on this symmetric vortex, so a peak comparison
+    # would not catch it; the arrays must differ.
+    require(not np.array_equal(uu, vv),
+            "the record's u and v right-hand sides are identical arrays; "
+            "_interior is reading one buffer twice")
 
-    ssu = (hu_0 > 0.0).astype(np.float64)
-    ssv = (hv_0 > 0.0).astype(np.float64)
+    # ssumask is NEMO's own MAXVAL( umask, DIM=3 ) (dommsk.f90:248), and
+    # the probe already holds umask -- do not re-derive it from hu_0.
+    ssu = np.max(umask, axis=-1)
+    ssv = np.max(vmask, axis=-1)
     r1_hu_0 = ssu / (hu_0 + 1.0 - ssu)          # domain.F90
     r1_hv_0 = ssv / (hv_0 + 1.0 - ssv)
     ue_rhs = np.sum(e3u_0 * uu * umask, axis=-1) * r1_hu_0   # stp2d.f90:178
@@ -120,10 +176,15 @@ def run(terms_root: Path, spgts_root: Path, *, case: str,
         "zu_frc_peak": float(np.max(np.abs(zu_frc))),
         "entry_barotropic_velocity_peak_u": float(np.max(np.abs(un_e))),
         "entry_barotropic_velocity_peak_v": float(np.max(np.abs(vn_e))),
-        "coriolis_subtraction_max_u": float(np.max(du)),
-        "coriolis_subtraction_max_v": float(np.max(dv)),
-        "coriolis_subtraction_cells_u": int(np.count_nonzero(du)),
-        "coriolis_subtraction_cells_v": int(np.count_nonzero(dv)),
+        # NOT named for the statement it is attributed to: the attribution
+        # holds only under the three controls above, and a reader reusing
+        # this probe on a deck with drag or wind would otherwise read
+        # "coriolis" off a number that is drag plus wind plus Coriolis.
+        "residual_after_depth_average_max_u": float(np.max(du)),
+        "residual_after_depth_average_max_v": float(np.max(dv)),
+        "residual_after_depth_average_cells_u": int(np.count_nonzero(du)),
+        "residual_after_depth_average_cells_v": int(np.count_nonzero(dv)),
+        "drag_and_wind_excluded_by_the_decks_own_namelist": True,
     }
     if write_operand is not None:
         # NEMO's OWN depth average, rebuilt from NEMO's own right-hand side

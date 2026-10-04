@@ -285,17 +285,42 @@ boundary legoESM forms the same quantity, BEFORE the Coriolis subtraction.
 | **round 213's held S2 patch** | **`4.3969046116e-11`** | **`2.8616009e-07`** |
 | NEMO's own finished `zu_frc` injected | `0` (bit) | `2.109e-15` |
 
-The middle two rows agree to every digit the diagnostic prints, and they
-were produced by two independent routes — one injects NEMO's array, the
-other runs legoESM's own transcription of NEMO's statement. **That is the
-proof that round 213's S2 transcribes `stp2d.f90:178-179` EXACTLY**, and
-equally the proof that the depth average is not where the rest is.
+The middle two rows were produced by two independent routes — one injects
+NEMO's array, the other runs legoESM's own transcription of NEMO's
+statement — and they leave the same residual. **How close "the same" is,
+exactly, because a draft of this receipt wrote "agree to every digit" and
+called it a proof of exactness, and the reviewer refuted that from these
+two JSON files:** the `u` maxima are identical to all 18 printed digits
+(`4.39690461164344952e-11`), the `v` maxima are NOT
+(`4.38530688948472400e-11` injected against `4.38530689016235035e-11`
+transcribed, a difference of `6.776e-19`, i.e. `1.5e-08` of the residual
+itself), and the two arms disagree about WHICH cells are unequal (2 104
+against 2 520). They are therefore different fields.
 
-**By elimination over a closed set, and the set IS closed: the remaining
-`4.3969e-11` is the loop-entry barotropic Coriolis subtraction,
-`dynspg_ts.f90:292`.** The forcing is exactly these two statements applied
-to an array that matches at `1.4e-20`; one of them is now shown exact, and
-substituting the pair's output gives `0`.
+**What that licenses, and what it does not.** It licenses: the two routes
+bound the same statement to within `1.5e-08` of the residual they both
+leave, so the depth average is not where the remaining `4.4e-11` is — a
+transcription wrong enough to hold `4.4e-11` could not land within
+`6.8e-19` of NEMO's own array. It does NOT license calling round 213's S2
+EXACT; `max |S2 - NEMO's own depth average|` per cell is not measured here
+and the one-line arm that would measure it (dump both and difference them)
+is round 6's. Until then S2 is a transcription whose residual is bounded,
+not a transcription shown exact.
+
+**By elimination, over a set that is closed ONLY under two stated
+exclusions: the remaining `4.3969e-11` is the loop-entry barotropic
+Coriolis subtraction, `dynspg_ts.f90:292`.** FOUR statements write
+`Ue_rhs` between `stp2d.f90:178` and `dynspg_ts.f90:275`, not two — the
+reviewer found the other two and they are carried here rather than
+dropped: `stp2d.f90:194` passes `Ue_rhs` to `dyn_drg_init` as
+`INTENT(inout)` (`dynspg_ts.f90:1284`) which adds the bottom drag
+UNGUARDED at `dynspg_ts.f90:1339`, and `stp2d.f90:197-199` adds the
+surface stress, also unguarded. Both are identically zero on THIS deck,
+and only on a deck like it: `ln_drg_OFF = .true.` (`namelist_cfg:114`) and
+`ln_usr = .true.` with VORTEX's zero-stress `usrdef_sbc`. The probe now
+REFUSES unless the run's own namelist says both, and its output field is
+named `residual_after_depth_average_*` rather than `coriolis_*`, so the
+attribution cannot travel to GYRE or ORCA2 inside the instrument.
 
 **A SECOND, INDEPENDENT READING THAT THIS RECEIPT DOES NOT RESOLVE, AND
 SAYS SO.** NEMO builds `zu_trd` at `:292` with the SAME `dyn_cor_2D` the
@@ -467,6 +492,20 @@ MAJOR. Every one is taken; two of them changed what this receipt claims.
 | minor | the lost flux record obscures that R5-P4's two-card bar was unevaluable | **TAKEN**: §7.1 says so |
 | PASS | all three sha256 verified independently; every NEMO line citation verbatim-correct; every number reproduces from the JSON; `rDt_e = 60` and the `3.331e-09` identity holds to 1 part in 4e9; variant wiring complete across all four switches; `--case` threads through every former constant; nothing in the diff can change a certified number; HOLDING is correct | — |
 
+**A SECOND PASS FOLLOWED, against the current text and the one instrument
+the first pass had not seen, and it returned DO NOT SHIP again with four
+more MAJOR. All four are taken and the first two changed what this receipt
+claims:**
+
+| # | finding | taken |
+|---|---|---|
+| MAJOR 1 | §6's "the two routes agree to every digit, that is the proof S2 is EXACT" is refuted by the two JSON files it cites: the `v` maxima differ at the 10th digit and the two arms disagree about which cells are unequal (2 104 against 2 520), so they are different fields | **ACCEPTED, decisive.** §6 now gives the `6.776e-19` difference and the two cell counts, claims only that the two routes bound the same statement to `1.5e-08` of the residual, and says plainly that S2 is NOT shown exact and which one-line arm would show it |
+| MAJOR 2 | the set is not closed: `stp2d.f90:194` (`dyn_drg_init`, `Ue_rhs` INTENT(inout), drag added unguarded at `dynspg_ts.f90:1339`) and `:197-199` (surface stress) also write it; the probe's field name `coriolis_subtraction_*` baked the attribution into the instrument | **ACCEPTED.** §6 carries both exclusions with the namelist lines that make them zero, the probe REFUSES unless the run's own `namelist_cfg` sets them, and the field is renamed `residual_after_depth_average_*` so the attribution cannot travel to another card inside the tool |
+| MAJOR 3 | the probe's documented control, `require(BOUNDARIES[-1] == "zad")`, is a check on its own Python list that no record can falsify | **ACCEPTED.** Replaced by three controls read from the records: the boundary set on disk must be exactly the six, the last dump must DIFFER from the one before it, and the two components must not be the same buffer (their peaks are equal on this symmetric vortex, so a peak check would not catch it) |
+| MAJOR 4 | three arms, three trees, and no artifact says whether an operand was injected | **ACCEPTED.** The walk's report now stamps every arm flag, including the injected operand's path |
+| minor | `ssu = (hu_0 > 0)` re-derives `ssumask`, which NEMO defines as `MAXVAL(umask, DIM=3)` and the probe already loads | **TAKEN** |
+| PASS, second pass | `r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)` verified against `domain.f90:213`; the guard hoist confirmed at `:123`, called from both entry points; MAJOR 1, 2 and 4 of the first pass genuinely discharged, not papered over; the PLAUSIBLE labelling of the Coriolis attribution accepted, and the §5/§6 tension judged correctly resolved rather than averaged | — |
+
 **THE REVIEWER'S OWN CORRECTION, recorded because it changes who was
 right.** After the fixes above it re-read the lane and RETRACTED MAJOR 3 —
 "the guard exists" — which is true, and it exists BECAUSE of MAJOR 3: the
@@ -497,18 +536,25 @@ record. Frozen here, before any of it runs:
   there. **FALSIFIER:** the flux card's first non-bit operand is a
   different boundary, which would mean the two cards' equal-sized `ssh`
   errors have different owners and §4's reading does not transfer.
-* **R6-P2** — over 100 days both seamount cards stay bounded and the
-  seamount's imprint (the vortex's deflection over the bank) is the same
-  SIGN in legoESM and NEMO. **FALSIFIER:** either card blows up, or the
-  deflection has opposite sign.
+* **R6-P2** — over 100 days both seamount cards stay bounded, with a
+  threshold rather than a word: peak `|u|` stays under `2.0` m/s (the
+  deck's `rn_ppumax` is `1.0`; NEMO's own 100-day run is the comparison)
+  and peak `|ssh|` under `1.0` m on every scored day, and the seamount's
+  imprint — the vortex's deflection over the bank — has the same SIGN in
+  legoESM and NEMO. **FALSIFIER:** either threshold is crossed on any
+  scored day, or the deflection has opposite sign.
 * **R6-P3** — the 100-day daily score is WORSE on the seamount pair than on
   the flat pair at the same day, because the kt=2 owner named here is still
   in the model. **FALSIFIER:** the seamount pair scores at or better than
   the flat pair, which would mean the kt=2 owner does not survive into the
   developed flow and the round-6 ranking must be redone before any fix is
   prioritised.
-* **R6-P4** — nothing lands in round 6 either: it is a measurement round,
-  exactly as round 208's ladder was.
+* **R6-P4 is NOT a prediction and is restated as a COMMITMENT**, because
+  as written ("nothing lands in round 6 either") it described my own
+  choice and no measurement could refute it — the reviewer's point, taken.
+  The commitment: round 6 is a measurement round, exactly as round 208's
+  ladder was, and if a landable statement appears it is reported and
+  deferred rather than landed inside it.
 
 ## 13. EVIDENCE
 
