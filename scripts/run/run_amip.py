@@ -75,15 +75,17 @@ def _argv_distributed_mode(argv: list[str]) -> str:
     YAML's key (a YAML-selected spmd deck must federate too -- codex), then
     an explicit ``--distributed-mode`` flag on top, else the default."""
     mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+    opts = argv[:argv.index("--")] if "--" in argv else argv
     # `--conf` is the shortest prefix unique to --config in this parser
     cfg = _argv_option(argv, "--config", len("--conf"))
-    if cfg:
+    if cfg and not ({"-h", "--help"} & set(opts)):
         try:
             mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
-        except SystemExit:
-            # a missing / cyclic / non-mapping deck: main() reports it with
-            # the reader's own message (or prints --help first); the hook
-            # must not pre-empt that (codex)
+        except (SystemExit, Exception):  # noqa: BLE001 - re-raised by main()
+            # a missing / cyclic / malformed deck: main() reports it with
+            # the reader's own message; the hook must not pre-empt that
+            # (codex). A rank-local failure cannot split the decision:
+            # maybe_init_jax_distributed votes on `federate` collectively.
             pass
     # longer than the exact `--distributed` flag: unique to --distributed-mode
     v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)

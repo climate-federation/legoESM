@@ -948,6 +948,17 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None, *,
     size = comm.Get_size()
 
     hosts = comm.allgather(socket.gethostname())
+    # The federation decision is collective: a rank whose deck read failed
+    # (a missing included file on one host) would fall back to the mpi lane
+    # and skip initialize() while its peers enter it -- a stall until the
+    # walltime instead of an error (codex + GLM). Vote before anything
+    # rank-local happens.
+    votes = comm.allgather(bool(federate))
+    if len(set(votes)) > 1:
+        raise RuntimeError(
+            "ranks disagree on whether to federate jax.distributed "
+            f"(federate per rank: {votes}); a rank-local --config read "
+            "probably failed -- the deck must be readable on every host.")
     # Per-rank GPU binding, BEFORE the single-node early return: nothing
     # downstream assigns rank -> device on that path, so every rank grabbed
     # the default and the job silently ran entirely on GPU 0 (#1516).  A

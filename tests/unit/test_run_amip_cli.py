@@ -4642,3 +4642,8 @@ def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
     # a missing deck is main()'s error (after --help had its chance), not
     # the hook's: the default, no raise
     assert _argv_distributed_mode(["--help", "--config", str(tmp_path / "nope.yaml")]) == "mpi"
+    assert _argv_distributed_mode(["--config", str(tmp_path / "nope.yaml")]) == "mpi"
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("distributed_mode: [unclosed\n")
+    assert _argv_distributed_mode(["-h", "--config", str(bad)]) == "mpi"
+    assert _argv_distributed_mode(["--config", str(bad)]) == "mpi"
