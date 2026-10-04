@@ -20,7 +20,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.timestepping.tridiagonal import thomas_solve
+from legoesm.timestepping.tridiagonal import thomas_solve, thomas_solve_shared
 
 
 def _dense_solve(a, b, c, d):
@@ -121,6 +121,11 @@ def test_thomas_sweeps_emit_levels_instead_of_writing_into_a_buffer():
     jaxpr = str(jax.make_jaxpr(thomas_solve)(a, b + 3.0, c, d))
     assert "scan" in jaxpr  # the solve body is printed, so the check bites
     assert "scatter" not in jaxpr and "dynamic_update_slice" not in jaxpr
+    # the one-matrix, several-RHS variant used by ocean vertical mixing
+    jaxpr = str(jax.make_jaxpr(
+        lambda a, b, c, d: thomas_solve_shared(a, b, c, (d, 2.0 * d)))(a, b + 3.0, c, d))
+    assert "scan" in jaxpr
+    assert "scatter" not in jaxpr and "dynamic_update_slice" not in jaxpr
 
 
 def test_thomas_single_level_without_jit():
@@ -133,3 +138,24 @@ def test_thomas_single_level_without_jit():
     with jax.disable_jit():
         x = thomas_solve(z, b, z, d)
     np.testing.assert_allclose(np.asarray(x), np.asarray(d / b), rtol=1e-6)
+    with jax.disable_jit():
+        x1, x2 = thomas_solve_shared(z, b, z, (d, 2.0 * d))
+    np.testing.assert_allclose(np.asarray(x1), np.asarray(d / b), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(x2), np.asarray(2.0 * d / b), rtol=1e-6)
+
+
+def test_thomas_shared_matches_single_rhs_bitwise():
+    rng = np.random.default_rng(0)
+    for dtype in (np.float32, np.float64):
+        a = jnp.asarray(rng.uniform(-1, 0, (5, 16)), dtype)
+        c = jnp.asarray(rng.uniform(-1, 0, (5, 16)), dtype)
+        b = jnp.asarray(3.0 + rng.uniform(0, 1, (5, 16)), dtype)
+        d1 = jnp.asarray(rng.normal(size=(5, 16)), dtype)
+        d2 = jnp.asarray(rng.normal(size=(5, 16)), dtype)
+        for wrap in (lambda f: f, jax.jit):
+            x1, x2 = wrap(lambda a, b, c, d1, d2: thomas_solve_shared(a, b, c, (d1, d2)))(a, b, c, d1, d2)
+            single = wrap(thomas_solve)
+            np.testing.assert_array_equal(np.asarray(x1), np.asarray(single(a, b, c, d1)))
+            np.testing.assert_array_equal(np.asarray(x2), np.asarray(single(a, b, c, d2)))
+            y1, y2 = wrap(lambda b, d1, d2: thomas_solve_shared(0 * b, b, 0 * b, (d1, d2)))(b[:, :1], d1[:, :1], d2[:, :1])
+            np.testing.assert_array_equal(np.asarray(y1), np.asarray(single(0 * b[:, :1], b[:, :1], 0 * b[:, :1], d1[:, :1])))
