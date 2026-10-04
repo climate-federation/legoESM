@@ -19,7 +19,6 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.gaussian import GaussianGrid
 
 
 class RegridWeights(NamedTuple):
@@ -99,77 +98,6 @@ def compute_latlon_to_cs_weights(
         weights=jnp.array(weights, dtype=jnp.float32),
         target_shape=tuple(int(s) for s in cs_grid.lat.shape),
         src_flat_size=int(src_lat.shape[0] * src_lon.shape[0]),
-    )
-
-
-def compute_cs_to_gauss_weights(
-    cs_grid: CubedSphereGrid,
-    gauss_grid: GaussianGrid,
-    k_neighbors: int = 4,
-) -> RegridWeights:
-    """Compute regridding weights from CubedSphere to Gaussian grid.
-
-    Uses KD-tree in Cartesian coordinates for nearest-neighbor lookup,
-    then inverse-distance weighting for interpolation.
-
-    Parameters
-    ----------
-    cs_grid : CubedSphereGrid
-        Source cubed-sphere grid.
-    gauss_grid : GaussianGrid
-        Target Gaussian grid.
-    k_neighbors : int
-        Number of nearest neighbors for interpolation.
-
-    Returns
-    -------
-    RegridWeights
-        Precomputed weights for regridding.
-    """
-    # Source points: flatten cubed-sphere (6, n, n); target: Gaussian grid.
-    src_xyz = _latlon_to_xyz(
-        np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
-    tgt_xyz = _latlon_to_xyz(
-        np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
-    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
-    return RegridWeights(
-        src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float64),
-        target_shape=(gauss_grid.n_lat, gauss_grid.n_lon),
-        src_flat_size=int(np.prod(np.array(cs_grid.lat.shape))),
-    )
-
-
-def compute_gauss_to_cs_weights(
-    gauss_grid: GaussianGrid,
-    cs_grid: CubedSphereGrid,
-    k_neighbors: int = 4,
-) -> RegridWeights:
-    """Compute regridding weights from Gaussian to CubedSphere grid.
-
-    Parameters
-    ----------
-    gauss_grid : GaussianGrid
-        Source Gaussian grid.
-    cs_grid : CubedSphereGrid
-        Target cubed-sphere grid.
-    k_neighbors : int
-        Number of nearest neighbors for interpolation.
-
-    Returns
-    -------
-    RegridWeights
-    """
-    src_xyz = _latlon_to_xyz(
-        np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
-    tgt_xyz = _latlon_to_xyz(
-        np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
-    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
-    return RegridWeights(
-        src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float64),
-        target_shape=tuple(int(s) for s in cs_grid.lat.shape),
-        src_flat_size=gauss_grid.n_lat * gauss_grid.n_lon,
     )
 
 
@@ -318,59 +246,6 @@ def regrid_scalar(
         return result.reshape(regrid_weights.target_shape + extra_dims)
 
 
-def regrid_vector(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    regrid_weights: RegridWeights,
-    src_angle: jnp.ndarray | None = None,
-    tgt_angle: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Regrid vector components with optional rotation correction.
-
-    If grid rotation angles are provided, vector components are rotated
-    from the source grid orientation to true east-north before regridding,
-    then rotated to the target grid orientation.
-
-    Parameters
-    ----------
-    u, v : arrays
-        Zonal and meridional components on source grid.
-    regrid_weights : RegridWeights
-        Precomputed weights.
-    src_angle : array, optional
-        Rotation angle of source grid relative to east [rad].
-    tgt_angle : array, optional
-        Rotation angle of target grid relative to east [rad].
-
-    Returns
-    -------
-    u_tgt, v_tgt : arrays
-        Vector components on target grid.
-    """
-    # Rotate to true east-north if source has grid rotation
-    if src_angle is not None:
-        cos_a = jnp.cos(src_angle)
-        sin_a = jnp.sin(src_angle)
-        u_en = u * cos_a - v * sin_a
-        v_en = u * sin_a + v * cos_a
-    else:
-        u_en, v_en = u, v
-
-    # Regrid each component
-    u_tgt = regrid_scalar(u_en, regrid_weights)
-    v_tgt = regrid_scalar(v_en, regrid_weights)
-
-    # Rotate to target grid orientation
-    if tgt_angle is not None:
-        cos_a = jnp.cos(tgt_angle)
-        sin_a = jnp.sin(tgt_angle)
-        u_out = u_tgt * cos_a + v_tgt * sin_a
-        v_out = -u_tgt * sin_a + v_tgt * cos_a
-        return u_out, v_out
-
-    return u_tgt, v_tgt
-
-
 # ==============================================================================
 # Face-aware cubed-sphere to lat-lon regridding
 # ==============================================================================
@@ -489,10 +364,26 @@ class CubedSphereToLatLonWeights(NamedTuple):
     lat_cent: np.ndarray
 
 
+def _target_lat(n_lat: int, lat_cent) -> np.ndarray:
+    """Target latitudes [deg]: pole-to-pole ``linspace(-90, 90, n_lat)`` by
+    default, or the caller's own row centres (e.g. the CMIP writer's
+    cell-centred labels) so samples and labels come from ONE definition."""
+    if lat_cent is None:
+        return np.linspace(-90.0, 90.0, n_lat)
+    lat = np.asarray(lat_cent, dtype=np.float64)
+    if (lat.shape != (n_lat,) or n_lat == 0 or not np.all(np.isfinite(lat))
+            or np.any(np.diff(lat) <= 0.0) or lat[0] < -90.0 or lat[-1] > 90.0):
+        raise ValueError(
+            f"lat_cent must be {n_lat} finite, strictly increasing latitudes "
+            f"in [-90, 90]; got shape {lat.shape}")
+    return lat
+
+
 def compute_cubedsphere_to_latlon_weights(
     n: int,
     n_lon: int = 360,
     n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Precompute face-aware bilinear weights for CS → lat-lon.
 
@@ -511,6 +402,8 @@ def compute_cubedsphere_to_latlon_weights(
         Cubed-sphere tile size (cells per face edge).
     n_lon, n_lat : int
         Output regular lat-lon grid dimensions.
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
 
     Returns
     -------
@@ -518,7 +411,7 @@ def compute_cubedsphere_to_latlon_weights(
     """
     # Target grid
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     lon_r = np.deg2rad(lon2d.ravel())
@@ -590,17 +483,19 @@ def compute_cubedsphere_to_latlon_weights(
     )
 
 
-_cs_weights_cache: dict[tuple[int, int, int], CubedSphereToLatLonWeights] = {}
+_cs_weights_cache: dict[tuple, CubedSphereToLatLonWeights] = {}
 
 
 def get_cubedsphere_to_latlon_weights(
     n: int, n_lon: int = 360, n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Cached version of :func:`compute_cubedsphere_to_latlon_weights`."""
-    key = (n, n_lat, n_lon)
+    key = (n, n_lat, n_lon, None if lat_cent is None
+           else tuple(np.asarray(lat_cent, dtype=np.float64).tolist()))
     if key not in _cs_weights_cache:
         _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
+            n, n_lon=n_lon, n_lat=n_lat, lat_cent=lat_cent)
     return _cs_weights_cache[key]
 
 
@@ -650,55 +545,6 @@ def apply_cubedsphere_to_latlon(
 # ---------------------------------------------------------------------------
 
 
-def _pad_corner_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
-    """Pad (6, n+1, n+1) D-grid corner data → (6, n+3, n+3).
-
-    Corner indices 0 and n sit ON the face boundary (shared with the
-    neighbouring face), so the halo copies the *second-from-boundary*
-    corner on the neighbour (``strip_inset=1``); see
-    :func:`_pad_faces_for_regrid`.
-    """
-    return _pad_faces_for_regrid(field, strip_inset=1)
-
-
-def apply_cubedsphere_corners_to_latlon(
-    corner_field: np.ndarray,
-    weights: CubedSphereToLatLonWeights,
-) -> np.ndarray:
-    """Regrid D-grid corner data (6, n+1, n+1) → (n_lat, n_lon).
-
-    1. Pad corners with cross-face halo  → (6, n+3, n+3)
-    2. Average 4 corners → padded cell centres (6, n+2, n+2)
-    3. Apply cell-centre bilinear weights
-
-    Boundary corners are synchronized across faces, so the resulting
-    cell-centre field is seamless at face boundaries — no edge artifacts.
-    """
-    n = weights.n
-    corner = np.asarray(corner_field, dtype=np.float64).reshape(6, n + 1, n + 1)
-    padded_corners = _pad_corner_field_for_regrid(corner, n)
-
-    padded = 0.25 * (
-        padded_corners[:, :-1, :-1] + padded_corners[:, 1:, :-1]
-        + padded_corners[:, :-1, 1:] + padded_corners[:, 1:, 1:]
-    )  # (6, n+2, n+2) — same layout as _pad_field_for_regrid output
-
-    i1 = weights.i0 + 1
-    j1 = weights.j0 + 1
-
-    v00 = padded[weights.face, weights.i0, weights.j0]
-    v10 = padded[weights.face, i1, weights.j0]
-    v01 = padded[weights.face, weights.i0, j1]
-    v11 = padded[weights.face, i1, j1]
-
-    result = (v00 * (1.0 - weights.wi) * (1.0 - weights.wj)
-              + v10 * weights.wi * (1.0 - weights.wj)
-              + v01 * (1.0 - weights.wi) * weights.wj
-              + v11 * weights.wi * weights.wj)
-
-    return result.reshape(weights.n_lat, weights.n_lon)
-
-
 def apply_cubedsphere_to_latlon_3d(
     field_faces: np.ndarray,
     weights: CubedSphereToLatLonWeights,
@@ -745,8 +591,8 @@ class VoronoiToLatLonWeights(NamedTuple):
     (rows sum to 1).  k-nearest IDW (not conservative) — adequate for CMIP
     diagnostic output on an unstructured mesh, where the alternatives
     (nearest = blocky; conservative = needs cell polygons) trade simplicity
-    for marginal accuracy.  Mirror of :func:`compute_cs_to_gauss_weights`'s
-    KD-tree + IDW pattern, specialised to a regular lat-lon target.
+    for marginal accuracy.  KD-tree + IDW (as in
+    :func:`compute_latlon_to_cs_weights`), specialised to a regular lat-lon target.
 
     Fields
     ------
@@ -770,6 +616,7 @@ def compute_voronoi_to_latlon_weights(
     n_lon: int = 360,
     n_lat: int = 181,
     k: int = 3,
+    lat_cent: np.ndarray | None = None,
 ) -> VoronoiToLatLonWeights:
     """Precompute IDW k-nearest weights from Voronoi cell centres to lat-lon.
 
@@ -782,11 +629,13 @@ def compute_voronoi_to_latlon_weights(
         Output regular lat-lon grid dimensions.
     k : int
         Number of nearest source cells per target point (clamped to nCells).
+    lat_cent : 1-D array, optional
+        Row latitudes [deg] to sample at (default pole-to-pole linspace).
     """
     from scipy.spatial import cKDTree
 
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _target_lat(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
@@ -836,93 +685,6 @@ def apply_voronoi_to_latlon_3d(
 # ==============================================================================
 # Legacy KD-tree cubed-sphere to lat-lon regridding (kept for compatibility)
 # ==============================================================================
-
-
-def regrid_faces_to_latlon(
-    field_faces: np.ndarray,
-    src_lon_rad: np.ndarray,
-    src_lat_rad: np.ndarray,
-    n_lon: int | None = None,
-    n_lat: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Interpolate cubed-sphere face data to a regular lat-lon grid.
-
-    Uses Gaussian (RBF) weighting of K nearest neighbors in 3-D Cartesian
-    coordinates on the unit sphere.
-
-    Parameters
-    ----------
-    field_faces : array
-        Data on cubed-sphere faces (e.g. shape ``(6, n, n)``).
-    src_lon_rad, src_lat_rad : array
-        Source grid longitude/latitude in **radians**, same shape as the
-        spatial dimensions of *field_faces*.
-    n_lon, n_lat : int, optional
-        Output grid size.  Defaults to ``max(360, 8*N)`` and ``n_lon // 2``
-        where *N* is inferred from the face tile dimension.
-
-    Returns
-    -------
-    lon_cent : 1-D array, shape (n_lon,)
-        Longitude centres [degrees].
-    lat_cent : 1-D array, shape (n_lat,)
-        Latitude centres [degrees].
-    field_ll : 2-D array, shape (n_lat, n_lon)
-        Regridded field.
-    """
-    from scipy.spatial import cKDTree
-
-    # Infer default output resolution from face tile size
-    face_shape = np.asarray(field_faces).shape
-    n_tile = face_shape[1] if len(face_shape) >= 3 else int(np.sqrt(face_shape[0] / 6))
-    if n_lon is None:
-        n_lon = max(360, 8 * n_tile)
-    if n_lat is None:
-        n_lat = n_lon // 2
-
-    cube_lon_deg = np.asarray(src_lon_rad, dtype=np.float64) * 180.0 / np.pi
-    cube_lat_deg = np.asarray(src_lat_rad, dtype=np.float64) * 180.0 / np.pi
-
-    lon = cube_lon_deg.reshape(-1)
-    lat = cube_lat_deg.reshape(-1)
-    val = np.asarray(field_faces, dtype=np.float64).reshape(-1)
-
-    valid = np.isfinite(lon) & np.isfinite(lat) & np.isfinite(val)
-    lon = ((lon[valid] + 180.0) % 360.0) - 180.0
-    lat = np.clip(lat[valid], -90.0, 90.0)
-    val = val[valid]
-
-    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
-    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
-
-    lon_rad = np.deg2rad(lon)
-    lat_rad = np.deg2rad(lat)
-    cos_lat = np.cos(lat_rad)
-    src_xyz = np.column_stack(
-        [cos_lat * np.cos(lon_rad), cos_lat * np.sin(lon_rad), np.sin(lat_rad)],
-    )
-
-    lon_t = np.deg2rad(lon2d.reshape(-1))
-    lat_t = np.deg2rad(lat2d.reshape(-1))
-    cos_lat_t = np.cos(lat_t)
-    tgt_xyz = np.column_stack(
-        [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
-    )
-
-    k = min(16, src_xyz.shape[0])
-    tree = cKDTree(src_xyz)
-    dist, idx = tree.query(tgt_xyz, k=k)
-    if k == 1:
-        field_ll = val[idx].reshape(lon2d.shape)
-    else:
-        dist = np.maximum(dist, 1.0e-12)
-        sigma = np.median(dist[:, 0]) * 2.0
-        w = np.exp(-0.5 * (dist / sigma) ** 2)
-        w /= np.sum(w, axis=1, keepdims=True)
-        field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
-
-    return lon_cent, lat_cent, field_ll
 
 
 def regrid_scalar_nan_aware(

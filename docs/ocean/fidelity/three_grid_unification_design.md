@@ -20,7 +20,7 @@ A2. --iwm (remap + plumbing; no new numerics). Kernel
    (k_profiles.iwm_K_profile) already shape-generic. Edits: (a) iwm_forcing.py
    :101-118 paired-cell branch + target_area=areaCell for the TW renorm;
    (b) MPASOceanModel gains iwm_forcing= ctor kwarg mirroring
-   ocean_model_latlon_cgrid.py:1496-1513 (both-or-neither check);
+   ocean_model_latlon_cgrid.py:1522-1539 (both-or-neither check);
    (c) additive splice K_v_cells += K_iwm, A_v_cells += K_iwm at
    mpas_integration.py:909-917 BEFORE m_half/bottom_level masks (NEMO zdfphy
    order: closure first, zdf_iwm added on top — same as latlon :6982-7001);

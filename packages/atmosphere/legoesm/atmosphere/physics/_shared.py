@@ -144,6 +144,16 @@ def compute_layer_dz(T, p_half, q_v=None):
     )
 
 
+def half_to_full(x_half):
+    """Interior-interface field ``(ncol, nlev-1)`` to full levels ``(ncol, nlev)``.
+
+    Interior full levels take the mean of the two adjacent interfaces; the top
+    and bottom full levels copy the nearest interface (one-sided).
+    """
+    mid = 0.5 * (x_half[:, :-1] + x_half[:, 1:])
+    return jnp.concatenate([x_half[:, :1], mid, x_half[:, -1:]], axis=1)
+
+
 def brunt_vaisala_n_full(T, p_full, z_full):
     """Brunt-Väisälä frequency ``N`` on full levels for column GWD schemes.
 

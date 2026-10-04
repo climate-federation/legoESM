@@ -82,6 +82,18 @@ from legoesm.io.cmor_table_loader import (
 
 logger = logging.getLogger(__name__)
 
+
+# Global attribute value on CMOR files whose lat-lon rows are sampled at their
+# labelled cell centres (MPAS/cube lanes since the registration fix).
+LAT_SAMPLING_CENTRES = "labelled_cell_centres"
+
+
+class LatSamplingMismatchError(RuntimeError):
+    """Resuming would mix pole-to-pole and centre-sampled lat-lon rows.
+
+    A RuntimeError, not ValueError: the collector's write loop skips
+    ValueError/KeyError per variable, which would silently drop months."""
+
 # CMIP6 fill / missing sentinel.  Every official table Header declares
 # ``"missing_value": "1e20"``; the writer used to leave xarray's NaN
 # default in place, which PrePARE rejects.
@@ -948,6 +960,10 @@ class CFWriter:
         self.experiment_id = experiment_id
         self.model_id = model_id
         self.freq = freq
+        # Set by the MPAS/cube collectors, whose rows are sampled at their
+        # labelled centres only since the regrid registration fix: stamps new
+        # files and refuses to extend an unstamped (pole-to-pole) series.
+        self.require_centre_sampling_on_append = False
         self.calendar = calendar
         self.ref_date = ref_date
         self.variant_label = variant_label
@@ -1028,6 +1044,8 @@ class CFWriter:
             grid=self.grid,
         )
         attrs["realm"] = table_realm(table_id)
+        if self.require_centre_sampling_on_append:
+            attrs["legoesm_lat_sampling"] = LAT_SAMPLING_CENTRES
         # ``frequency`` comes from the TABLE ENTRY, not from the writer's
         # own ``freq``.  One CFWriter serves several tables (the AMIP
         # driver constructs it with freq="mon" and then writes the ``day``
@@ -1461,7 +1479,16 @@ class CFWriter:
             if _xr_guard is not None:
                 _chk = _xr_guard.open_dataset(out_path, decode_times=False)
                 _existing_t = np.asarray(_chk["time"].values, dtype=np.float64)
+                _sampling = _chk.attrs.get("legoesm_lat_sampling")
                 _chk.close()
+                if (self.require_centre_sampling_on_append
+                        and _sampling != LAT_SAMPLING_CENTRES):
+                    raise LatSamplingMismatchError(
+                        f"{out_path}: written before lat-lon output was "
+                        "sampled at its labelled cell centres (rows were "
+                        "pole-to-pole); appending would mix both grids in one "
+                        "series. Continue with the code that wrote it, or "
+                        "write to a new output directory.")
             if _existing_t is not None and _existing_t.size:
                 _t = float(time)
                 # Tolerance: far below any real output spacing (1 day for
@@ -1674,13 +1701,14 @@ class CFWriter:
             if key.startswith("zonal_"):
                 # arr shape: (n_months, n_lat_bins)
                 # Broadcast to (n_months, nlat, nlon)
-                if arr.shape[1] != nlat:
+                acc_lat = _to_numpy(monthly_data.get(
+                    "lat",
+                    np.linspace(-90, 90, arr.shape[1]),
+                ))
+                if (arr.shape[1] != nlat or ("lat" in monthly_data
+                        and not np.allclose(acc_lat, lat_np))):
                     # Interpolate from accumulator latitude bins to
                     # output latitude
-                    acc_lat = _to_numpy(monthly_data.get(
-                        "lat",
-                        np.linspace(-90, 90, arr.shape[1]),
-                    ))
                     from numpy import interp as np_interp
                     new_arr = np.empty((n_months, nlat), dtype=output_dtype)
                     for t in range(n_months):
@@ -1703,11 +1731,12 @@ class CFWriter:
                     continue
 
                 # Interpolate latitude if needed
-                if arr.shape[1] != nlat:
-                    acc_lat = _to_numpy(monthly_data.get(
-                        "lat",
-                        np.linspace(-90, 90, arr.shape[1]),
-                    ))
+                acc_lat = _to_numpy(monthly_data.get(
+                    "lat",
+                    np.linspace(-90, 90, arr.shape[1]),
+                ))
+                if (arr.shape[1] != nlat or ("lat" in monthly_data
+                        and not np.allclose(acc_lat, lat_np))):
                     from numpy import interp as np_interp
                     new_arr = np.empty(
                         (n_months, nlat, nplev), dtype=output_dtype,

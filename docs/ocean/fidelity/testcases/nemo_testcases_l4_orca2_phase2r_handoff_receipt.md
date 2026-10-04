@@ -78,7 +78,7 @@ guard, not physics: `eos_depth="geometric"` admitted TEOS-10 and S-EOS but
 omitted the already-certified EOS-80 arm.  NEMO `eosbn2.F90:260` uses live
 `gdept` for the joint `np_teos10/np_eos80` branch.  The allow-list now includes
 `nemo_eos80` at
-`ocean_model_latlon_cgrid.py:3767-3777`; the guard remains active for an
+`ocean_model_latlon_cgrid.py:3829-3839`; the guard remains active for an
 uncertified EOS.  The focused constructibility tests pass for both admitted
 EOS-80 and rejected `wright` cases.  This is a selector guard correction; it
 does not change EOS arithmetic.

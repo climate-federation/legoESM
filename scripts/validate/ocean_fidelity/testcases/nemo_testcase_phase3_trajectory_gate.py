@@ -46,6 +46,28 @@ DEFAULT_ORACLE_ROOTS = {
     # (decision 73); its own NEMO run, beside the flux card's.
     "VORTEX_VEC-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3"),
+    # Decision 74's resolution ladder (round 208, operator note BZ).  Each rung
+    # is the SAME certified executable reading a deck refined by NEMO's own
+    # rule (AGRIF_FixedGrids.in:2 ratio 3; 1_namelist_cfg:21-22,43), so a row
+    # that moves between rungs is a grid-size dependence in the transcription
+    # and nothing else.
+    "VORTEX-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/flx"),
+    "VORTEX_VEC-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/vec"),
+    "VORTEX-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/flx"),
+    "VORTEX_VEC-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/vec"),
+    # Decision 88's seamount pair (round 211 acquired, round 212 scores): the
+    # same 30 km deck with a Gaussian seamount and z partial bottom cells,
+    # built through NEMO's own usrdef_zgr hook on key_vco_1d3d.
+    "VORTEX_SMT-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10"),
+    "VORTEX_SMT_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate

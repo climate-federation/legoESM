@@ -68,7 +68,7 @@ divergent statement is the model CONSTRUCTION, and it is the only one.**
 
 **THE TWO ROWS ARE ONE SELECTION, NOT TWO FREE FIELDS.** The model REFUSES
 `real_freshwater` with `fix_eta_drift=False`
-(`ocean_model_latlon_cgrid.py:3112-3124`), so only three of the four
+(`ocean_model_latlon_cgrid.py:3174-3186`), so only three of the four
 combinations are constructible at all. The pair is one choice with a
 mechanically enforced companion.
 
@@ -347,7 +347,7 @@ step, and a real freshwater source would move `ssh` by `5.1750e-04` m.
 Turning the channel OFF is a first-order change; choosing between the two ways
 of carrying it is bit-for-bit identical. The freshwater reaches the state
 through the barotropic continuity source (`F_slow_eta`, built for any closure
-other than `"none"`, `ocean_model_latlon_cgrid.py:5631-5634`) and **the virtual
+other than `"none"`, `ocean_model_latlon_cgrid.py:5693-5696`) and **the virtual
 salt term never reaches salinity at all** — a `1.8e-03` g/kg per-step source
 that produces `0` unequal cells.
 
@@ -391,7 +391,7 @@ AFTER THE CONTENT IS CAPTURED.** `implicit_solver.py:625-648` hands
 `implicit_vertical_diffusion_nemo_tracer_pair` only the `content_rhs_*`
 arrays; `field_1`/`field_2` are dropped. Measured: perturbing `field_2` by
 `+1e3` moves `max|dS|` by **`0.0`** on that arm, against `1000.0` on the shared
-Thomas arm. The content is captured at `ocean_model_latlon_cgrid.py:7838`,
+Thomas arm. The content is captured at `ocean_model_latlon_cgrid.py:7909`,
 BEFORE the virtual-salt block at `:7898-7963` — which is the mechanism behind
 section 7, now CONFIRMED rather than plausible. Everything that mutates T/S
 between those two points is discarded: the virtual salt flux, the
@@ -463,7 +463,7 @@ and certified phase-3 gate files. The new gate's own file:
      `pssh(Kaa) = (pssh(Kbb) - rDt*(r1_rho0*emp + zhdiv))*ssmask`) and has NO
      global sum anywhere in the free-surface path. legoESM's fixer adds a
      GLOBAL uniform eta shift sized by an area-weighted volume residual
-     (`ocean_model_latlon_cgrid.py:6621-6684`). Rule 9: never add a stabilizer
+     (`ocean_model_latlon_cgrid.py:6685-6748`). Rule 9: never add a stabilizer
      the oracle lacks.
    - The `raise` that makes `real_freshwater` require it
      (`:3006-3018`) justifies itself by a volume defect of

@@ -1,0 +1,85 @@
+#!/bin/bash -l
+#PBS -N cpu_regression
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=128:mpiprocs=16:mem=200GB
+#PBS -l walltime=01:30:00
+#PBS -j oe
+# ===========================================================================
+# One-node CPU performance regression check on NCAR Derecho.
+#
+# Runs the three CPU lanes the scaling campaign tunes -- MPAS atmosphere s7
+# L26 f32, MPAS ocean s6 L40 f64, lat-lon 1024x2048 L26 f32 -- at the ladder's
+# CPU layout (16 ranks x 8 cores, nature_ladder.pbs), twice each, writing
+# receipts to OUTDIR. With BASELINE set, it then compares them to that
+# receipt directory through scripts/validate/check_scaling_regression.py
+# (the scaling figure's own loader and filters, best-of replicates) and exits
+# with the gate's code: 0 pass, 1 slower than 1 + TOL_PCT/100, 2 no common
+# rows, 3 a baseline row missing or a problem-size mismatch. Other codes:
+# 4 an arm failed or timed out (10 min each; the six take ~5 min in total
+# at the 2026-09-25 code), 5 the gate itself crashed, 64 bad arguments. A
+# PBS walltime kill is an infrastructure failure, never a pass.
+#
+# TOL_PCT has no default: it must be at least the lane's run-to-run spread,
+# which is the submitter's call (measured 2026-09-25 on one node: MPAS atm
+# ~1%, MPAS ocean ~1.5%, lat-lon up to ~9% at 4 x 32).
+#
+#   qsub -A <acct> scripts/cluster/scaling_derecho/cpu_regression_smoke.pbs
+#        (first run: no BASELINE -> just writes receipts; keep that OUTDIR)
+#   qsub -A <acct> -v BASELINE=<dir>,TOL_PCT=<pct> \
+#        scripts/cluster/scaling_derecho/cpu_regression_smoke.pbs
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
+if [[ -n "${BASELINE:-}" && -z "${TOL_PCT:-}" ]]; then
+  echo "BASELINE given without TOL_PCT: the tolerance has no default" >&2; exit 64
+fi
+export JAX_PLATFORMS=cpu
+PPN=16
+NODE_CORES="$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)"
+DEPTH=$(( NODE_CORES / PPN ))
+(( DEPTH >= 1 )) || { echo "cannot size --depth: $NODE_CORES cores, PPN=$PPN" >&2; exit 64; }
+source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"   # $REPO, $PY, PYTHONPATH
+cd "$REPO"
+JOBID="${PBS_JOBID:-manual$$}"; JOBID="${JOBID%%.*}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/cpu_regression_j${JOBID}}"
+# A candidate written over the baseline, or over stale receipts, would be
+# compared with itself and pass forever.
+if compgen -G "$OUTDIR/*.jsonl" >/dev/null; then
+  echo "OUTDIR $OUTDIR already holds receipts; use a fresh directory" >&2; exit 64
+fi
+if [[ -n "${BASELINE:-}" && "$(realpath -m -- "$BASELINE")" == "$(realpath -m -- "$OUTDIR")" ]]; then
+  echo "BASELINE and OUTDIR are the same directory" >&2; exit 64
+fi
+mkdir -p "$OUTDIR"
+export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
+echo "cpu regression: sha=$(git rev-parse --short HEAD) ppn=$PPN depth=$DEPTH outdir=$OUTDIR"
+
+rc=0
+arm() {  # arm <tag> <x64> <bench args...>
+  local tag="$1" x64="$2"; shift 2
+  echo "=== $tag $(date '+%F %T')"
+  JAX_ENABLE_X64="$x64" timeout --kill-after=30 600 \
+    mpiexec -n "$PPN" --ppn "$PPN" --cpu-bind depth --depth "$DEPTH" \
+    "$PY" "$@" --multicontroller --n-devices "$PPN" --out "$OUTDIR/${tag}.jsonl" < /dev/null \
+    || { echo "!!! FAILED $tag"; rc=1; }
+}
+for rep in 1 2; do
+  arm "mpas_atm_s7_r$rep" 0 scripts/bench/bench_mpas_spmd_scaling.py \
+      --subdivision 7 --nlev 26 --lloyd 0 --wide-halo --partition-method sfc --steps 40 --warmup 10
+  arm "mpas_ocean_s6_r$rep" 1 scripts/bench/bench_ocean_mpas_spmd_scaling.py \
+      --subdivision 6 --nlev 40 --lloyd 0 --block-steps 20 --blocks 3
+  LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
+  arm "latlon_1024_r$rep" 0 scripts/bench/bench_atm_latlon_spmd_scaling.py \
+      --mode strong --n-lat 1024 --n-lon 2048 --nlev 26 --steps 30 --warmup 5
+done
+(( rc == 0 )) || { echo "an arm failed; not gating" >&2; exit 4; }
+if [[ -n "${BASELINE:-}" ]]; then
+  "$PY" scripts/validate/check_scaling_regression.py --tol-pct "$TOL_PCT" --atm-nlev 26 \
+      --baseline "$BASELINE" --candidate "$OUTDIR"
+  grc=$?
+  case "$grc" in 0|1|2|3) exit "$grc" ;; *) echo "gate crashed rc=$grc" >&2; exit 5 ;; esac
+fi
+echo "receipts written to $OUTDIR (no BASELINE given, nothing gated)"

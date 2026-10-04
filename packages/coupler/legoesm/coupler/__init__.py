@@ -12,7 +12,7 @@ from legoesm.coupler.accumulator import (
     accumulator_from_flux,
 )
 from legoesm.coupler.surface_exchange import (
-    extract_atm_to_surface, extract_atm_to_surface_nh,
+    extract_atm_to_surface,
 )
 from legoesm.core.bulk_flux import compute_most_fluxes, simple_bulk_fluxes, psi_m, psi_h
 from legoesm.core.surface_energy import surface_radiation_fluxes
@@ -53,7 +53,7 @@ __all__ = [
     "TileFractions", "compute_tile_fractions", "blend_tiles",
     "FluxAccumulator", "accumulate", "mean_accumulator", "reset_accumulator",
     "accumulator_from_flux",
-    "extract_atm_to_surface", "extract_atm_to_surface_nh",
+    "extract_atm_to_surface",
     "compute_most_fluxes", "simple_bulk_fluxes", "psi_m", "psi_h",
     "surface_radiation_fluxes",
     "SurfaceState", "init_surface_state", "make_coupler", "ocean_tile_response",

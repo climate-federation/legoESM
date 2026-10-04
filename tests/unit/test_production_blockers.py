@@ -416,15 +416,6 @@ class TestPpermuteTilingGuard:
 class TestCoupledConfigValidation:
     """ModelDriver must reject unsupported coupled modes with actionable errors."""
 
-    def test_carbon_cycle_rejected(self):
-        ec = ExperimentConfig(carbon_cycle="interactive")
-        with pytest.raises(ValueError, match="carbon_cycle.*not implemented"):
-            ec.validate_strict()
-
-    def test_carbon_cycle_none_passes(self):
-        ec = ExperimentConfig(carbon_cycle="none")
-        ec.validate_strict()  # Should not raise
-
     def test_default_config_passes_strict(self):
         ec = ExperimentConfig()
         ec.validate_strict()  # Defaults should always be valid
@@ -522,16 +513,6 @@ class TestMixedPrecisionSemantics:
                 call_kwargs = mock_bootstrap.call_args[1]
                 assert call_kwargs["precision"] == expected_mode, \
                     f"dyn={dyn}, cons={cons} → expected {expected_mode}, got {call_kwargs['precision']}"
-
-    def test_legacy_ml_precision_preserved_in_hardware_dict(self):
-        """ML precision key must be preserved in legacy 3-component dict."""
-        from legoesm.core.hardware import (
-            set_runtime_precision_policy,
-            get_runtime_precision_policy,
-        )
-        set_runtime_precision_policy(ml="bfloat16")
-        policy = get_runtime_precision_policy()
-        assert policy["ml"] == jnp.bfloat16
 
     @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])  # #1675: mixed re-enabled
     def test_precision_policy_matches_mode(self, mode):

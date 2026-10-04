@@ -68,6 +68,7 @@ from legoesm.parallel.sharded_dynamics import (
     ppermute_halo_fill,
 )
 from legoesm.parallel.voronoi_mpi import MPASOceanHaloRefresh
+from legoesm.parallel.voronoi_partition import complete_cell_rings
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ class MPASOceanSPMDLayout(NamedTuple):
     vertex_owner: np.ndarray    # (nVertices,) owning device (smallest incident cell)
     upup: tuple | None      # stacked (upup_pos, upup_neg) per device, or None
     mesh_statics: dict      # Python ints/floats re-applied to the local mesh in-body
+    halo_depth: int = _DEFAULT_HALO_DEPTH   # cell rings every refresh fills
+    complete_cell_rings: int = 0  # voronoi_partition.complete_cell_rings
 
     @property
     def cell_sharding(self) -> NamedSharding:
@@ -281,7 +284,25 @@ def build_mpas_ocean_spmd_layout(
         vertex_owner=np.asarray(vertex_owner),
         upup=upup,
         mesh_statics=_mesh_statics(mesh, max_lc, max_le, max_lv),
+        halo_depth=int(halo_depth),
+        complete_cell_rings=complete_cell_rings(mesh, partitions),
     )
+
+
+def halo_depth_for_config(config) -> int:
+    """Cell-halo depth the MPAS ocean SPMD layout needs for ``config``.
+
+    The global-polynomial barotropic preconditioner ("gpoly", K terms)
+    evaluates K-1 sweeps of the one-ring Helmholtz redundantly on the halo.
+    The partition closes the nominal ``halo_depth`` rings under cellsOnEdge
+    twice (``_close_halo_under_cellsOnEdge(n_passes=2)``), so the local block
+    holds depth+2 rings and the sweeps need depth >= K-2 (measured exact at
+    K=4/6/8 with depth 2/4/6, wrong one ring shallower). K=4 fits the
+    historical 2."""
+    if str(getattr(config, "barotropic_implicit_pcg_precond", "")) == "gpoly":
+        return max(_DEFAULT_HALO_DEPTH,
+                   int(config.barotropic_implicit_pcg_poly_sweeps) - 2)
+    return _DEFAULT_HALO_DEPTH
 
 
 def _mesh_statics(mesh: VoronoiMesh, max_lc: int, max_le: int, max_lv: int) -> dict:
@@ -579,6 +600,8 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
             edges=_edges, cells=_cells, both=_both, vertices=_vertices,
             owned_mask_cells=owned_c, owned_mask_edges=owned_e,
             global_sum=lambda vals: batch_psum_spmd(list(vals), SPMD_AXIS),
+            halo_depth=int(layout.halo_depth),
+            complete_cell_rings=layout.complete_cell_rings,
         )
 
     def _classify(leaves):

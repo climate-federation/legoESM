@@ -1087,6 +1087,7 @@ def jra55_to_freshwater(
     slice: JRA55Slice,
     lhflx,
     *,
+    evap=None,
     L_v: float | None = None,
 ) -> FreshwaterForcing:
     """Bridge a JRA55Slice + computed latent heat flux into
@@ -1124,8 +1125,11 @@ def jra55_to_freshwater(
     -------
     FreshwaterForcing
     """
-    L = constants.L_v if L_v is None else L_v
-    evap = lhflx / L
+    if evap is None:
+        # Legacy heat-only entry: the caller has no water flux.  The tile
+        # path (run_omip) passes ``evap=tile.surface_mass_flux`` instead.
+        L = constants.L_v if L_v is None else L_v   # latent-ok: heat-only legacy entry, no surface temperature in scope
+        evap = lhflx / L
     return FreshwaterForcing(
         precip=slice.prra + slice.prsn,
         evap=evap,

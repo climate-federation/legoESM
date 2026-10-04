@@ -172,75 +172,63 @@ def _thomas_solve_impl(
     if operation_order != "normalised":
         raise ValueError(f"unknown Thomas operation order {operation_order!r}")
 
-    # Initialize: for k=0, c_star = c[0]/b[0], d_star = d[0]/b[0]
-    c0_star = c[..., 0] / (b[..., 0] + _TINY)
-    d0_star = d[..., 0] / (b[..., 0] + _TINY)
+    # Sweep over the system axis moved to the FRONT, so every level is one
+    # contiguous (batch,) slice.  Updating ``[..., k]`` of a (batch, n) array
+    # in a fori_loop touched a strided column per level and was 4-7x slower
+    # on CPU (2026-09-25, 32 Milan cores, (35972, 40) f64: 63 -> 16 ms); the
+    # per-element arithmetic is unchanged (bit-identical to the loop on the
+    # CPU XLA build measured; a compiler that contracts to FMA differently
+    # may move the last bit).  Operands are broadcast first so the output is
+    # the full broadcast shape by construction.
+    a, b, c, d = (jnp.moveaxis(v, -1, 0)
+                  for v in jnp.broadcast_arrays(a, b, c, d))
+    c0_star = c[0] / (b[0] + _TINY)
+    d0_star = d[0] / (b[0] + _TINY)
 
-    # We'll do the sweep manually with lax.scan over k=1..n-1
-    # But lax.scan needs fixed-size arrays. Instead, build vectorized.
-    # Use the stable sequential approach with fori_loop.
-
-    # Allocate modified arrays
-    c_star = jnp.zeros_like(c)
-    d_star = jnp.zeros_like(d)
-    c_star = c_star.at[..., 0].set(c0_star)
-    d_star = d_star.at[..., 0].set(d0_star)
-
-    def forward_body(k, carry):
-        c_star_c, d_star_c = carry
-        ak = a[..., k]
-        bk = b[..., k]
-        ck = c[..., k]
-        dk = d[..., k]
-
-        c_prev = c_star_c[..., k - 1]
-        d_prev = d_star_c[..., k - 1]
-
+    def forward_body(carry, xs):
+        c_prev, d_prev = carry
+        ak, bk, ck, dk = xs
         denom = bk - ak * c_prev
         denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-
         c_star_k = ck / denom
         d_star_k = (dk - ak * d_prev) / denom
+        return (c_star_k, d_star_k), (c_star_k, d_star_k)
 
-        c_star_c = c_star_c.at[..., k].set(c_star_k)
-        d_star_c = d_star_c.at[..., k].set(d_star_k)
+    _, (c_star, d_star) = jax.lax.scan(
+        forward_body, (c0_star, d0_star), (a[1:], b[1:], c[1:], d[1:]))
+    c_star = jnp.concatenate([c0_star[None], c_star])
+    d_star = jnp.concatenate([d0_star[None], d_star])
 
-        return (c_star_c, d_star_c)
+    # Backward substitution: x[n-1] = d_star[n-1], x[k] = d*[k] - c*[k] x[k+1]
+    def backward_body(x_next, xs):
+        c_k, d_k = xs
+        x_k = d_k - c_k * x_next
+        return x_k, x_k
 
-    c_star, d_star = jax.lax.fori_loop(
-        1, n, forward_body, (c_star, d_star),
-    )
-
-    # Backward substitution: x[n-1] = d_star[n-1]
-    x = jnp.zeros_like(d)
-    x = x.at[..., -1].set(d_star[..., -1])
-
-    def backward_body(k_rev, x_c):
-        # k_rev counts 0, 1, ..., n-2; actual index k = n-2-k_rev
-        k = n - 2 - k_rev
-        x_c = x_c.at[..., k].set(
-            d_star[..., k] - c_star[..., k] * x_c[..., k + 1]
-        )
-        return x_c
-
-    x = jax.lax.fori_loop(0, n - 1, backward_body, x)
+    _, x = jax.lax.scan(backward_body, d_star[-1], (c_star[:-1], d_star[:-1]),
+                        reverse=True)
+    x = jnp.moveaxis(jnp.concatenate([x, d_star[-1:]]), 0, -1)
 
     return jax.lax.convert_element_type(x, out_dtype)
 
 
 def _thomas_solve_fwd(a, b, c, d, operation_order):
     x = _thomas_solve_impl(a, b, c, d, operation_order)
-    return x, (a, b, c, x)
+    return x, (a, b, c, x, d.shape)
 
 
 def _thomas_solve_bwd(operation_order, res, x_bar):
     """Adjoint of ``A x = d`` (A tridiagonal): d̄ = A⁻ᵀ x̄ =: λ, and the band
     cotangents from ``x = A⁻¹ d`` ⇒ Ā = -λ xᵀ restricted to the three bands:
     ā[k] = -λ[k] x[k-1], b̄[k] = -λ[k] x[k], c̄[k] = -λ[k] x[k+1]."""
-    a, b, c, x = res
+    a, b, c, x, res_d_shape = res
     work = jnp.result_type(a, b, c, x, x_bar)
     aw = jnp.asarray(a, work); bw = jnp.asarray(b, work); cw = jnp.asarray(c, work)
     xw = jnp.asarray(x, work); xbar = jnp.asarray(x_bar, work)
+    # The primal broadcasts its operands before sweeping; the band shifts below
+    # must act on the FULL system axis, so a singleton band (a constant sub- or
+    # super-diagonal) is expanded first and its cotangent reduced back at the end.
+    aw, bw, cw, xw, xbar = jnp.broadcast_arrays(aw, bw, cw, xw, xbar)
 
     # Transposed system Aᵀ λ = x̄.  Aᵀ has sub-diag aT[k]=c[k-1], super-diag
     # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep,
@@ -276,8 +264,23 @@ def _thomas_solve_bwd(operation_order, res, x_bar):
     c_bar = c_bar.at[..., -1].set(0.0)   # c[..., -1] is unused (structurally 0)
     d_bar = lam
 
-    return (jnp.asarray(a_bar, a.dtype), jnp.asarray(b_bar, b.dtype),
-            jnp.asarray(c_bar, c.dtype), jnp.asarray(d_bar, x.dtype))
+    # The primal broadcasts a/b/c/d to a common shape; a cotangent must come
+    # back in each PRIMAL's shape, summed over the axes broadcasting added.
+    return (jnp.asarray(_sum_to_shape(a_bar, a.shape), a.dtype),
+            jnp.asarray(_sum_to_shape(b_bar, b.shape), b.dtype),
+            jnp.asarray(_sum_to_shape(c_bar, c.shape), c.dtype),
+            jnp.asarray(_sum_to_shape(d_bar, res_d_shape), x.dtype))
+
+
+def _sum_to_shape(g: jax.Array, shape: tuple[int, ...]) -> jax.Array:
+    """Reduce a full-broadcast cotangent to the primal's ``shape`` (the
+    transpose of ``jnp.broadcast_to``)."""
+    if g.shape == tuple(shape):
+        return g
+    lead = g.ndim - len(shape)
+    g = jnp.sum(g, axis=tuple(range(lead)))
+    keep = tuple(i for i, (n, m) in enumerate(zip(g.shape, shape)) if n != m)
+    return jnp.sum(g, axis=keep, keepdims=True) if keep else g
 
 
 thomas_solve.defvjp(_thomas_solve_fwd, _thomas_solve_bwd)

@@ -84,7 +84,7 @@ cancelling-pair design: their separate U errors are about `4.8x` the faithful
 residual and neither carries it.  Lateral friction follows in source order;
 its strong unresolved score is additionally mechanism-backed by a production
 level mismatch.  legoESM's live first barotropic pass evaluates lateral
-friction at NOW (`ocean_model_latlon_cgrid.py:8984-9064`), while NEMO
+friction at NOW (`ocean_model_latlon_cgrid.py:9055-9135`), while NEMO
 `dyn_ldf` evaluates BEFORE (`stpmlf.F90:319-322`; `dynldf.F90:69-119`).  The
 later legoESM BEFORE pass retains only the three-dimensional dissipative
 increment and discards its barotropic result.

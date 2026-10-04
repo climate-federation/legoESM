@@ -760,7 +760,13 @@ def test_the_vector_deck_differs_from_the_flux_deck_only_in_the_momentum_set(
 # place because main flipped one, and the fix is for the card to state the
 # field -- never to re-pin the digest alone.  This is the gate for that.
 _ALL_NEMO_TESTCASE_CARDS = ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps",
-                            "VORTEX-zco", "VORTEX_VEC-zco")
+                            "VORTEX-zco", "VORTEX_VEC-zco",
+                            # Decision 74's resolution rungs are cards like any
+                            # other and are held to the same no-library-default
+                            # rule; a rung that escaped this list would be the
+                            # one card allowed to inherit a default silently.
+                            "VORTEX-15km-zco", "VORTEX_VEC-15km-zco",
+                            "VORTEX-10km-zco", "VORTEX_VEC-10km-zco")
 # Every DINO recipe, not only the two NEMO-literal ones: decision 75 is
 # about a library default moving under ANY card, and the two remaining
 # recipes build their lateral mixing through the same two builders.
@@ -922,3 +928,112 @@ def test_the_after_ssh_form_does_not_follow_the_time_integrator():
     # on -- which is exactly how a hidden coupling gets a card wrong without
     # anyone seeing it.
     assert getattr(dino, "momentum_time_integrator", None) != "rk3_ws"
+
+
+# --------------------------------------------------------------------------
+# Decision 74's resolution ladder (round 208, operator note BZ).
+#
+# The rungs exist so a grid-size dependence in the transcription cannot hide.
+# What is checked here is that each card states the deck NEMO was actually run
+# with, and that the certified 30 km pair is untouched by the parameterisation
+# that made the rungs possible.  The bit-level comparison against each rung's
+# NEMO record is the trajectory gate's, not this file's.
+# --------------------------------------------------------------------------
+
+# tests/VORTEX/EXPREF/1_namelist_cfg (NEMO's own child deck for the 1:3 AGRIF
+# zoom pinned at AGRIF_FixedGrids.in:2) against its parent: rn_dx and rn_dy
+# 30000 -> 10000 (:21-22), rn_Dt 2880 -> 960 (:43).  Everything else that
+# matters here -- rn_dz (:23), rn_ppumax, nn_rot, nn_e (:222) -- is unchanged,
+# so the 15 km rung is the same rule at ratio 2.
+_LADDER = {
+    # case suffix     resolution  dx [m]    dt [s]   ni   nj
+    ("flux", "30km"): ("VORTEX-zco", 30000.0, 2880.0, 63, 63),
+    ("vector", "30km"): ("VORTEX_VEC-zco", 30000.0, 2880.0, 63, 63),
+    ("flux", "15km"): ("VORTEX-15km-zco", 15000.0, 1440.0, 123, 123),
+    ("vector", "15km"): ("VORTEX_VEC-15km-zco", 15000.0, 1440.0, 123, 123),
+    ("flux", "10km"): ("VORTEX-10km-zco", 10000.0, 960.0, 183, 183),
+    ("vector", "10km"): ("VORTEX_VEC-10km-zco", 10000.0, 960.0, 183, 183),
+}
+
+
+@pytest.mark.parametrize("momentum,resolution", sorted(_LADDER))
+def test_ladder_rung_states_the_deck_nemo_ran(momentum, resolution):
+    name, dx_m, dt_s, ni, nj = _LADDER[(momentum, resolution)]
+    rung = build_vortex_zco_card(momentum, resolution)
+    assert rung.case == name
+    assert rung.dt_s == dt_s
+    assert np.shape(rung.recipe.land_mask) == (nj, ni)
+    # usrdef_nam.F90:138-143 -- the cell count IS this arithmetic.
+    assert (ni, nj) == (round(1800.0e3 / dx_m) + 3, round(1800.0e3 / dx_m) + 3)
+    # The box is closed at every rung: two land rows and columns, no more.
+    wet = np.asarray(rung.recipe.land_mask)
+    assert np.count_nonzero(np.any(wet, axis=1)) == nj - 2
+    assert np.count_nonzero(np.any(wet, axis=0)) == ni - 2
+    # rn_dz is NOT refined by NEMO's child deck, so every rung has the same
+    # ten wet levels on the same 5000 m flat bottom.
+    assert np.shape(rung.recipe.initial_state.T.data)[-1] == 10
+    # The grid spacing the card resolved, read back from the mesh itself.
+    assert np.array_equal(np.asarray(rung.recipe.grid.dx_T),
+                          np.full((nj, ni), dx_m))
+
+
+def test_refining_the_grid_leaves_the_certified_30km_cards_alone():
+    """Non-vacuity for the parameterisation: the shipped rung is unchanged.
+
+    The helpers now take a rung; this proves the default one reproduces the
+    certified card field for field, including the analytic initial state,
+    rather than merely building without raising.
+    """
+    for momentum in ("flux", "vector"):
+        base = build_vortex_zco_card(momentum)
+        explicit = build_vortex_zco_card(momentum, "30km")
+        assert base.case == explicit.case
+        assert (base.dt_s, base.n_steps) == (explicit.dt_s, explicit.n_steps)
+        for field in ("T", "S", "u", "v", "eta"):
+            a = np.asarray(getattr(base.recipe.initial_state, field).data)
+            b = np.asarray(getattr(explicit.recipe.initial_state, field).data)
+            assert np.array_equal(a, b)
+        assert np.array_equal(np.asarray(base.recipe.grid.ff_f),
+                              np.asarray(explicit.recipe.grid.ff_f))
+
+
+def test_unknown_resolution_is_refused_not_defaulted():
+    with pytest.raises(ValueError, match="unknown VORTEX resolution"):
+        build_vortex_zco_card("flux", "20km")
+    for name in ("VORTEX-15km-zco", "VORTEX_VEC-15km-zco",
+                 "VORTEX-10km-zco", "VORTEX_VEC-10km-zco"):
+        assert build_nemo_testcase_card(name).case == name
+
+
+def test_a_rung_whose_cell_count_contradicts_usr_def_nam_is_refused():
+    """Non-vacuity: the derivation guard must REFUSE, not merely exist.
+
+    The guard runs over every rung at import, which a test cannot observe
+    without reloading the module, so the loop body is a named function and
+    this calls it with a poisoned rung.  Delete the ``raise`` and this test
+    fails -- which the first version of it did not.
+    """
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as mod
+
+    bad = mod._VortexResolution("-20km", 20000.0, 20000.0, 63, 63, 1920.0,
+                                3000, "none")
+    with pytest.raises(ValueError, match=r"not usr_def_nam's.*93x93"):
+        mod.validate_vortex_resolution(bad)
+    # The guard must also PASS every rung that ships, or it would be refusing
+    # for the wrong reason.
+    for rung in mod._VORTEX_RESOLUTIONS.values():
+        mod.validate_vortex_resolution(rung)
+
+
+def test_the_transcribed_nint_rounds_half_away_from_zero_like_fortran():
+    """Python's ``round`` is half-to-even; Fortran's ``NINT`` is not.
+
+    No shipped rung lands on a .5 case, so this guards the helper rather than
+    a current value -- but a future rung at rn_dx = 1800e3/2.5 would resolve
+    to a different box under the wrong rule.
+    """
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as mod
+
+    assert [mod._vortex_nint(v) for v in (0.5, 1.5, 2.5, -0.5, -1.5)] == [
+        1, 2, 3, -1, -2]
+    assert round(0.5) == 0 and round(2.5) == 2   # the rule NOT transcribed

@@ -92,7 +92,7 @@ instructive:
    whether to reproduce NEMO's associated heat correction.
 4. Normalization: eta only. **Cross-grid inconsistency found:** MPAS normalizes
    eta (`ocean_model_mpas.py:741-766`) while lat-lon sends RAW freshwater to eta
-   (`ocean_model_latlon_cgrid.py:3157-3162`). Pick ONE policy explicitly:
+   (`ocean_model_latlon_cgrid.py:3219-3224`). Pick ONE policy explicitly:
    normalize full `P-E+R+ice+restoring` (fixed liquid-ocean volume) OR exclude
    `ice_fw` (NEMO-like ice+ocean volume, `sbcfwb.F90:233-238`).
 5. Conservation invariant = salt MASS, not mean salinity:

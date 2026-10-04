@@ -73,7 +73,7 @@ def test_same_key_different_mesh_is_flagged(tmp_path):
 def test_atmosphere_rows_follow_atm_nlev(tmp_path):
     atm = {"component": "mpas_atm", "grid_type": "icosahedral", "platform": "gpu",
            "precision": "float32", "subdivision": 9, "nlev": 40, "n_devices": 1,
-           "valid": True, "metadata": {}}
+           "valid": True, "finite_ok": True, "metadata": {}}
     _write(tmp_path / "b", "atm_d1", {**atm, "steady_median_ms": 100.0})
     _write(tmp_path / "c", "atm_d1", {**atm, "steady_median_ms": 200.0})
     assert _main(tmp_path, nlev="40") == 1     # compared, and slower
@@ -117,3 +117,76 @@ def test_refused_row_without_device_count_does_not_crash(tmp_path):
         json.dumps(_tri(8, 100.0, n_devices=None)) + "\n"
         + json.dumps(_tri(8, 100.0)) + "\n")
     assert _main(tmp_path) == 0
+
+
+def test_pbs_float64_rows_are_dated_not_crashed(tmp_path):
+    """A PBS/PALS receipt stamps slurm_job_id="" -- the float64 filter keys a
+    job-less row on its timestamp instead of crashing on int(""): rows after
+    the fp64-state fix pair up, older (or undated) ones are refused (here: no common row, exit 2)."""
+    new = {"slurm_job_id": "", "timestamp_utc": "2026-09-25T08:00:00+00:00"}
+    old = {"slurm_job_id": "", "timestamp_utc": "2026-08-20T08:00:00+00:00"}
+    _write(tmp_path / "b", "tri_d8", _tri(8, 100.0, precision="float64", metadata=new))
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata=new))
+    assert _main(tmp_path, nlev="26") == 0
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata=old))
+    assert _main(tmp_path, nlev="26") == 2
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, precision="float64", metadata={}))
+    assert _main(tmp_path, nlev="26") == 2
+
+
+def test_cpu_rows_refuse_one_core_ranks_keep_eight_core_ranks(tmp_path):
+    """16 ranks x 8 cores per node stamps cpu_affinity 8 and must pair; a
+    one-core rank (affinity 1 or 2) is refused as before."""
+    meta = {"slurm_job_id": "", "timestamp_utc": "2026-09-25T08:00:00+00:00"}
+    _write(tmp_path / "b", "tri_d8", _tri(8, 100.0, platform="cpu", metadata={**meta, "cpu_affinity": 8}))
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, platform="cpu", metadata={**meta, "cpu_affinity": 8}))
+    assert _main(tmp_path) == 0
+    _write(tmp_path / "c", "tri_d8", _tri(8, 101.0, platform="cpu", metadata={**meta, "cpu_affinity": 2}))
+    assert _main(tmp_path) == 2
+
+
+def test_state_all_finite_flags_nan_inf_and_ignores_integer_leaves():
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts" / "bench"))
+    import jax.numpy as jnp
+    from metadata import state_all_finite
+    ok = {"T": jnp.ones((4, 3)), "n": jnp.arange(3), "none": None}
+    assert state_all_finite(ok) is True
+    assert state_all_finite({**ok, "u": jnp.array([1.0, jnp.nan])}) is False
+    assert state_all_finite({**ok, "u": jnp.array([jnp.inf])}) is False
+    assert state_all_finite({"n": jnp.arange(3)}) is True
+    assert state_all_finite({"dt": float("nan"), "u": jnp.ones(2)}) is False
+
+
+def test_latlon_atmosphere_rows_must_prove_a_finite_state(tmp_path):
+    ll = {"component": "atmosphere", "grid_type": "latlon", "platform": "gpu",
+          "precision": "float32", "mode": "strong", "n_lat": 2048, "n_lon": 4096,
+          "nlev": 40, "n_devices": 1, "valid": True, "metadata": {}}
+    _write(tmp_path / "b", "ll_d1", {**ll, "steady_median_ms": 100.0, "finite_ok": True})
+    _write(tmp_path / "c", "ll_d1", {**ll, "steady_median_ms": 200.0, "finite_ok": True})
+    assert _main(tmp_path) == 1                # checked rows compare
+    _write(tmp_path / "b", "ll_d1", {**ll, "steady_median_ms": 100.0})   # legacy: unchecked
+    _write(tmp_path / "c", "ll_d1", {**ll, "steady_median_ms": 200.0})
+    assert _main(tmp_path) == 2                # refused on both sides
+
+
+def test_mpas_atmosphere_rows_must_prove_finite_and_match_the_coefficient(tmp_path):
+    atm = {"component": "mpas_atm", "grid_type": "icosahedral", "platform": "gpu",
+           "precision": "float32", "subdivision": 8, "nlev": 40, "n_devices": 1,
+           "valid": True, "metadata": {}}
+    _write(tmp_path / "b", "a_d1", {**atm, "steady_median_ms": 100.0})       # legacy: unchecked
+    _write(tmp_path / "c", "a_d1", {**atm, "steady_median_ms": 200.0})
+    assert _main(tmp_path) == 2
+    _write(tmp_path / "b", "a_d1", {**atm, "steady_median_ms": 100.0, "finite_ok": True, "nu_del4": 1e16})
+    _write(tmp_path / "c", "a_d1", {**atm, "steady_median_ms": 100.0, "finite_ok": True, "nu_del4": 1.2e13})
+    assert _main(tmp_path) == 3                # different physics is a mismatch, not a comparison
+
+
+def test_icosahedral_hyperdiff_rule_scales_with_dx4():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "bench"))
+    from hyperdiff import hyperdiff_coeff       # the one shared law
+    assert hyperdiff_coeff(4, "icosahedral") == pytest.approx(1e16, rel=1e-12)
+    for lev in (5, 6, 7, 8):   # nCells ~ 4^L, so dx^4 ~ 16^-L
+        assert hyperdiff_coeff(lev, "icosahedral") == pytest.approx(
+            hyperdiff_coeff(lev - 1, "icosahedral") / 16, rel=1e-3)

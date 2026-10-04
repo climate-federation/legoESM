@@ -68,7 +68,10 @@ def test_dino_card_constructs(recipe_name):
 
 @pytest.mark.parametrize(
     "case",
-    ("LOCK_EXCHANGE-zco", "OVERFLOW-zps", "VORTEX-zco", "VORTEX_VEC-zco"))
+    ("LOCK_EXCHANGE-zco", "OVERFLOW-zps", "VORTEX-zco", "VORTEX_VEC-zco",
+     # Decision 74's resolution rungs construct and validate like any card.
+     "VORTEX-15km-zco", "VORTEX_VEC-15km-zco",
+     "VORTEX-10km-zco", "VORTEX_VEC-10km-zco"))
 def test_nemo_testcase_card_constructs(case):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -97,7 +100,11 @@ def test_nemo_testcase_card_constructs(case):
         # the Matsuno rotation off so f enters exactly once.
         assert model.config.coriolis_scheme == "explicit_ab2"
         assert not model.config.adaptive_implicit_vertadv
-        if case == "VORTEX-zco":
+        # The branch is the MOMENTUM DECK, not the card name: decision 74's
+        # resolution rungs carry the same two decks at 15 km and 10 km, and an
+        # equality against one name would have silently sent a flux rung down
+        # the vector arm.
+        if not case.startswith("VORTEX_VEC"):
             assert model.config.vorticity_scheme == "een_planetary"
             assert model.config.momentum_advection == "flux_form"
         else:

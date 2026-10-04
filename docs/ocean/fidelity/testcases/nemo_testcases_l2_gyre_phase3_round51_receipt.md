@@ -11,7 +11,7 @@ already enters kt=2 with legoESM's unequal kt=1 result.  The observer control is
 bit-exact for returned T/S/u/v/SSH (zero unequal fields).
 
 This is the executed selection: legoESM binds `u0/v0` directly from the live
-state (`ocean_model_latlon_cgrid.py:5434-5435`) and hands those values to the
+state (`ocean_model_latlon_cgrid.py:5496-5497`) and hands those values to the
 stage-1 tendency (`:6317-6322`).  NEMO calls `stp_2D` before its three RK stages
 (`GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:190-215`), and compiled
 stage 1 calls EOS/HPG/LDF/VOR/WZV/KEG/ZAD on Kbb

@@ -3,6 +3,35 @@
 Atmosphere-only integration with prescribed sea surface temperature (SST) and
 sea-ice concentration (SIC) from observational datasets.
 
+## Production configuration (legoESM 1.0)
+
+The authoritative production AMIP configuration is the **CAM6 physics suite on
+the MPAS/Voronoi grid**, single-sourced in `config/amip/amip_production.yaml`
+(machine paths and a ready launcher in `config/amip/amip_production.sh`):
+
+```bash
+PY=.venv/bin/python DAYS=60 OUTDIR=results/amip_prod   # your choices
+source config/amip/amip_production.sh                  # sets AMIP_PATH_FLAGS
+"${PY}" -u scripts/run/run_amip.py \
+    --config config/amip/amip_production.yaml \
+    "${AMIP_PATH_FLAGS[@]}" --days "${DAYS}" --output "${OUTDIR}"
+```
+
+What the YAML selects (read the file for every value; it is the record):
+
+- **Grid / dycore**: MPAS Voronoi level 6 (40,962 cells, ~1.1°), CAM 32-level
+  hybrid table (`vertical_coord: cam_l32`), dt 112.5 s, fp64.
+- **Physics step**: every 1800 s, with three macro/micro sub-steps; radiation hourly.
+- **Radiation**: RRTMG with McICA cloud overlap, no in-cloud inhomogeneity thinning.
+- **Convection**: Zhang–McFarlane (CAM6 port).
+- **Turbulence + cloud fraction**: prognostic CLUBB; `clouds: cam6_clubb`.
+- **Microphysics**: Morrison double-moment with CAM6 MG2 in-cloud warm rain.
+- **Gravity-wave drag**: McFarlane (orographic).
+- **Surface**: CESM Large–Yeager bulk fluxes; interactive multilayer land.
+
+Production arms run on 4+ GPUs. The previous production deck (Sundqvist
+clouds, L36) is preserved runnable as `config/amip/amip_sundqvist_l36.yaml`.
+
 ## How to run an AMIP CMIP simulation
 
 `scripts/run/run_amip_cmip6_deck.py` is the one entry point for a full
@@ -84,13 +113,14 @@ The deck defaults the real-SST var/unit flags to the input4MIPs convention
 (`tosbcs` in K, `siconcbcs` in %); the loader's units-attribute guard
 rejects a wrong file/flag combination loudly.
 
-### Production physics defaults
+### Deck physics defaults
 
-The deck pins a faithful, validated stack (override any with the matching
-flag): **RRTMG correlated-k** radiation, **Morrison double-moment** microphysics
-(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **Bechthold (mass flux)**
-convection, **Louis (first order)** PBL, **McFarlane (orographic)** GWD, **Hines (non-orographic)** GWD, with **aerosol→CCN** coupling (Andreae 2009) and
-**zenith-dependent ocean albedo** (Briegleb 1992) on the pipeline grids.
+The deck's defaults (override any with the matching flag; this is NOT the
+CAM6 production configuration above): **RRTMG correlated-k** radiation,
+**Morrison double-moment** microphysics, **Sundqvist** cloud fraction,
+**SBM** convection, **Louis** PBL, **McFarlane (orographic)** GWD, with
+**aerosol→CCN** coupling (Andreae 2009) and **zenith-dependent ocean albedo**
+(Briegleb 1992) on the pipeline grids.
 `--dt-auto` picks each grid's stability-ladder timestep (C36→150 s,
 latlon72→75 s, T47→150 s, voronoi→300 s) so long runs cannot blow up.
 
@@ -136,20 +166,26 @@ the build trace.
 
 ## Overview
 
-The AMIP driver (`scripts/run/run_amip.py`) couples:
+The AMIP driver (`scripts/run/run_amip.py`) couples the components below.
+Defaults shown are the bare-CLI defaults; production runs set every scheme
+explicitly through `--config` (see above).
 
-- **Dynamics**: Hydrostatic primitive equations on cubed-sphere (centered)
-- **Radiation**: Selectable via `--radiation {gray,rrtmg}`
+- **Dynamics**: `--grid-type {cubed_sphere,gaussian,latlon,mpas}` (default
+  `cubed_sphere`) with `--discretization`; `--vertical-coord {sigma,hybrid,cam_l32}`
+- **Radiation**: `--radiation {none,gray,rrtmgp,rrtmg}` (default `gray`)
   - **Gray**: Two-stream (Frierson 2006) with moisture-dependent LW optical depth
-  - **RRTMG**: RRTMGP correlated-k (Pincus et al. 2019) via bundled jax-rrtmgp
+  - **RRTMGP** (`rrtmgp`; `rrtmg` is an alias for the same scheme): correlated-k
+    (Pincus et al. 2019) via bundled jax-rrtmgp
   - Optional diurnal cycle (`--diurnal-cycle`) with instantaneous solar zenith angle
-- **Convection**: Simplified Betts-Miller (SBM)
-- **Boundary layer**: Bulk aerodynamic heat and moisture exchange (constant coefficients default; MOST/COARE3/LY04 available via coupler `bulk_scheme`)
-- **Large-scale condensation**: Saturation adjustment with latent heating
-- **Clouds**: Diagnostic cloud fraction (`--clouds {none,sundqvist,xu_randall}`) coupled to RRTMG radiation
-- **Microphysics**: Selectable via `--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson}` (deck default: `morrison`)
-- **Ozone**: Selectable via `--ozone-source {standard,analytical,mls,none}`
-- **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
+- **Convection**: `--convection` (default `tiedtke`; production `zhang_mcfarlane`)
+- **Turbulence**: `--turbulence` (default `louis`; production `clubb`)
+- **Surface fluxes**: `--surface-bulk-scheme {constant,coare3,large_yeager,large_yeager_cesm}` (default `constant`)
+- **Clouds**: `--clouds {none,sundqvist,xu_randall,cam6_clubb}` (default `xu_randall`)
+- **Microphysics**: `--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson,p3,sdm,fast_sbm}` (default `sundqvist`)
+- **Gravity-wave drag**: `--gravity-wave-drag` (default `mcfarlane`; `+`-joined compositions such as `hines+mcfarlane` accepted)
+- **Ozone**: `--ozone-source {standard,analytical,mls,none}` or `--ozone-forcing external --ozone-file …`
+- **GHG / aerosol**: `--ghg-forcing {constant,external}`, `--aerosol-forcing {off,external}`, `--aerosol-ccn`
+- **Land**: `--use-multilayer-land` (interactive Richards land; production on)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
   albedo, and emissivity
 - **Diagnostics**: Energy budget tracking, optional monthly-mean accumulation (`--monthly-means`)
@@ -199,29 +235,21 @@ JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
 | N2O | **Active, prescribed** | CLI `--n2o-ppbv` | Default 332 ppbv; uniform |
 | O3 | **Active, prescribed** | `--ozone-source` | `standard` (US Std Atm), `analytical` (lat-dependent Gaussian), `mls` (SAM RCEMIP MLS climatology), or `none` |
 | CFCs | Not included | — | Not in current gas optics files |
-| Clouds | **Active (optional)** | `--clouds` | `none` (clear-sky), `sundqvist`, or `xu_randall`; coupled to RRTMG cloud optics |
-| Aerosols | **Not included** | — | Clear-sky; no aerosol optical depth |
+| Clouds | **Active (optional)** | `--clouds` | `none` (clear-sky), `sundqvist`, `xu_randall`, or `cam6_clubb`; coupled to RRTMG cloud optics |
+| Aerosols | **Active (optional)** | `--aerosol-forcing external` | Kinne-style AOD with per-shortwave-band SSA/asymmetry; volcanic via `--volcanic-aerosol-file` |
 
 #### RRTMG scientific limitations
 
-1. **Scalar surface albedo**: The bundled jax-rrtmgp uses a single scalar
-   `sfc_alb` for all columns. The AMIP driver passes the column-mean of the
-   ice/ocean blended albedo. At coarse resolution (C16-C48) this is a good
-   approximation; at fine resolution with large ice fraction gradients it may
-   introduce small errors.
+1. **Inline ozone by default**: without `--ozone-forcing external` the O3
+   profile is a fixed analytical/standard profile with no seasonal cycle or
+   chemistry. Pass a CMIP6 `vmro3` file for a real climatology.
 
-2. **Prescribed ozone**: The O3 profile is analytical (Gaussian in
-   log-pressure with latitude dependence). It does not vary with season or
-   chemistry. A proper ozone climatology (e.g., from CMIP6 forcing files)
-   would improve stratospheric heating further.
+2. **Aerosols off by default**: aerosol direct and CCN effects need
+   `--aerosol-forcing external` (and `--aerosol-ccn`).
 
-3. **No aerosols**: Aerosol direct and indirect effects are absent.
-
-4. **Uniform well-mixed gases**: CO2, CH4, N2O are spatially and temporally
-   uniform by default. Time-varying concentrations from CMIP forcing files are
-   supported via `GHGConfig(source="file", path="...")` with NetCDF time
-   interpolation (`ExternalForcingConfig`), but the AMIP driver currently uses
-   constant values from CLI flags.
+3. **Uniform well-mixed gases**: CO2, CH4, N2O are spatially uniform. They
+   are constant (CLI flags) unless `--ghg-forcing external --ghg-file …`
+   supplies a time series.
 
 #### Radiation update interval
 
@@ -310,7 +338,7 @@ JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --output results/amip_full_physics
 ```
 
-### Production 10-year AMIP
+### Long C48 AMIP (not the production configuration)
 
 ```bash
 JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
@@ -388,16 +416,16 @@ path given by `--output`) containing:
 |-----------|--------|-------|
 | SST/SIC forcing | **Active** | COBE-SST2, HadISST presets; custom supported |
 | Gray radiation | **Active** | Frierson 2006, moist LW OD, seasonal solar |
-| RRTMG radiation | **Active** | Correlated-k, H2O+CO2+CH4+N2O+O3, clear-sky |
-| SBM convection | **Active** | Frierson 2007 |
-| BL exchange | **Active** | Bulk aerodynamic (constant default); MOST/COARE3/LY04 available |
+| RRTMG radiation | **Active** | Correlated-k, H2O+CO2+CH4+N2O+O3, all-sky with cloud optics |
+| Convection | **Active** | `--convection` (Tiedtke default; ZM, Bechtold, SBM, KF, Emanuel, …) |
+| BL exchange | **Active** | Bulk aerodynamic (constant default); COARE3/LY04/CESM-LY via `--surface-bulk-scheme` |
 | Large-scale condensation | **Active** | Saturation adjustment |
 | Rayleigh friction | **Active** | BL + free-atmosphere drag |
 | Checkpoint/restart | **Active** | NPZ-based, reproducible |
 | Experiment config | **Active** | JSON-serializable `AMIPExperimentConfig` |
 | Diurnal cycle | **Active** | Instantaneous cos(SZA) per column; `--diurnal-cycle` |
 | Cloud-radiation coupling | **Active** | Sundqvist or Xu-Randall cloud fraction → RRTMG optics |
-| Microphysics | **Active** | Kessler warm-rain or Sundqvist; `--microphysics` |
+| Microphysics | **Active** | Sundqvist default; Kessler, Morrison (MG2/SAM), Thompson, P3, … via `--microphysics` |
 | Ozone | **Active** | Standard (US Std Atm), analytical (lat-dependent), or MLS climatology; `--ozone-source` |
 | Dynamic albedo | **Active** | Temperature/zenith-dependent ice+snow albedo; `--dynamic-albedo` |
 | Energy budget | **Active** | Online column energy, TOA balance, residual tracking |
@@ -407,8 +435,8 @@ path given by `--output`) containing:
 | CMOR output | **Active** | CF-1.8/CMIP6 DRS NetCDF via `CFWriter`; 27 CMOR variables |
 | Restart/reproducibility | **Active** | SHA-256 state digests, config hashes; `verify_reproducibility()` |
 | Tuning validation | **Active** | `validate_tuning()` checks CFL, ranges, conflicts |
-| Ozone from file | **Active** | `OzoneConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
-| Aerosol from file | **Active** | `AerosolConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
+| Ozone from file | **Active** | `--ozone-forcing external --ozone-file …` (CMIP6 `vmro3`, climatology or interannual) |
+| Aerosol from file | **Active** | `--aerosol-forcing external --aerosol-file …`; CCN coupling via `--aerosol-ccn` |
 | Solar TSI variation | **Active** | `SolarConfig(source="file")` with NetCDF time interpolation |
 
 ## Recommended stable settings
@@ -431,34 +459,39 @@ are available but not yet validated for AMIP-length runs.
 
 ```
 # Grid and integration
---resolution INT                  Cubed-sphere N (default: 16)
+--config PATH                     YAML run config (e.g. config/amip/amip_production.yaml)
+--grid-type {cubed_sphere,gaussian,latlon,mpas}  Grid (default: cubed_sphere)
+--resolution INT                  Grid resolution (default: 16)
 --nlev INT                        Number of vertical levels (default: 40)
 --dt FLOAT                        Time step [seconds] (default: 600)
 --days INT                        Integration length [days] (default: 200)
 --start-day FLOAT                 Start day within forcing record
---diag-days INT                   Diagnostic output interval [days] (default: 5)
+--diag-days FLOAT                 Diagnostic output interval [days] (default: 5)
 
 # Forcing
---dataset {cobe,hadisst,custom}   Forcing dataset preset
---forcing-path PATH               Path to NetCDF forcing file (required unless restarting)
+--dataset {cobe,hadisst,custom,analytical}  Forcing dataset preset (default: analytical)
+--forcing-path PATH               Path to NetCDF forcing file (required for cobe/hadisst/custom)
 --sst-var NAME                    SST variable name (custom only)
 --sic-var NAME                    SIC variable name (custom only)
 --sst-offset FLOAT                Additive offset for SST (e.g., 273.15)
 --sic-scale FLOAT                 Multiplicative scale for SIC (e.g., 0.01)
 
 # Radiation
---radiation {gray,rrtmg}          Radiation scheme (default: gray)
+--radiation {none,gray,rrtmgp,rrtmg}  Radiation scheme (default: gray)
 --rad-update-steps INT            Radiation call frequency [steps] (default: 1)
 --diurnal-cycle                   Use instantaneous solar zenith angle (default: off)
 --co2-ppmv FLOAT                  CO2 concentration [ppmv] for RRTMG (default: 415)
 --ch4-ppbv FLOAT                  CH4 concentration [ppbv] for RRTMG (default: 1900)
 --n2o-ppbv FLOAT                  N2O concentration [ppbv] for RRTMG (default: 332)
 --ozone-source {standard,analytical,mls,none}  Ozone profile (default: standard)
---clouds {none,sundqvist,xu_randall}       Cloud fraction scheme (default: none)
+--clouds {none,sundqvist,xu_randall,cam6_clubb}  Cloud fraction scheme (default: xu_randall)
 
 # Physics
---microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson}
-                                           Microphysics (run_amip default: none; deck default: morrison)
+--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson,p3,sdm,fast_sbm}
+                                           Microphysics (run_amip default: sundqvist; deck default: morrison)
+--convection NAME                 Convection scheme (default: tiedtke)
+--turbulence NAME                 Turbulence scheme (default: louis)
+--gravity-wave-drag SPEC          GWD scheme or "+"-joined composition (default: mcfarlane)
 --dynamic-albedo                  Temperature/zenith-dependent surface albedo (default: off)
 
 # Diagnostics

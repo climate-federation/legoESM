@@ -676,8 +676,10 @@ def nemo_qco_resolved_mesh_operands(
     """One qco operand set, from NEMO's own mesh when the card carries it.
 
     The NEMO arm of ``wzv``/``div_hor`` needs exactly these fields.  Cards
-    built from NEMO's ``mesh_mask.nc`` (DINO, GYRE) hand over the raw arrays
-    unchanged, so their executed arithmetic is untouched; cards that are not
+    built from NEMO's ``mesh_mask.nc`` (DINO, GYRE, ORCA2, VORTEX) hand over
+    the raw arrays unchanged -- including the reference FACE thicknesses
+    ``e3u_0``/``e3v_0``, which NEMO carries separately from ``e3t_0`` and
+    which this routine must not invent; cards that are not
     (LOCK_EXCHANGE, OVERFLOW, ORCA1) get the identical quantities rebuilt
     from their own grid and reference ladder by
     :func:`nemo_qco_card_mesh_operands`.  This is what makes the NEMO arm a
@@ -694,11 +696,54 @@ def nemo_qco_resolved_mesh_operands(
         e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
             jnp.asarray(value, dtype=dtype) for value in raw)
         e3t0 = e3t0[..., :nlev]
-        # NEMO's own mesh: e3u_0/e3v_0 are e3t_0 on the full-step meshes this
-        # branch serves; keeping the raw statement preserves the certified
-        # DINO arithmetic bit for bit.
+        # THE REFERENCE FACE THICKNESS IS THE SHALLOWER NEIGHBOUR'S, NOT THE
+        # T THICKNESS.  NEMO builds it once, in the domain builder, as
+        #     pe3u(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji+1,jj,jk) )
+        #     pe3v(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji,jj+1,jk) )
+        #     CALL lbc_lnk( ..., pe3u,'U', pe3v,'V', kfillmode=jpfillcopy )
+        # (the executing statements on these builds are
+        # tests/VORTEX_SMT_R3{,_VEC_R8}_OMIP_L1_P3/MY_SRC/usrdef_zgr.F90:225
+        # and :228, with their :231 lbc_lnk, transcribed from
+        # tools/DOMAINcfg/src/domzgr.F90::zgr_zps:1166-1167 and its :1177-1178
+        # exchange; `E3u_0 -> e3u_3d` under key_vco_1d3d by
+        # src/OCE/DOM/domzgr_substitute.h90:94-95).  Aliasing
+        # it to e3t_0 is exact ONLY on a full-step mesh; over partial cells it
+        # is wrong on every stepped face: 686 wet U faces of VORTEX_SMT in
+        # the nlev=10 operand this routine actually returns (1 164 cells of
+        # the jpk=11 mesh array it is sliced from), by up to 170.38 m, and
+        # 18 803 U / 18 300 V cells of ORCA2 by up to 917 / 949 m.
+        #
+        # It is NOT re-derived here.  Re-deriving needs NEMO's mask, halo and
+        # north-fold conventions, and a round-213 attempt to do that zeroed a
+        # whole northern row.  The card already carries the arrays NEMO
+        # itself built, verified against its `mesh_mask.nc` at zero ULP, on
+        # the EEN barotropic operand bundle; read them, the way
+        # `nemo_ldf_reference_e3f` above reads `e3f_0` from the same bundle,
+        # and fail closed rather than silently fall back to the alias.
+        raw_een = getattr(z_coord, "nemo_een_barotropic", None)
+        e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)
+        e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)
+        if e3u0 is None or e3v0 is None:
+            raise ValueError(
+                "a card carrying NEMO's raw qco mesh operands must also carry "
+                "NEMO's own reference face thicknesses e3u_0/e3v_0 on "
+                "z_coord.nemo_een_barotropic: they are the shallower "
+                "neighbour's thickness (usrdef_zgr.F90:225,228; DOMAINcfg "
+                "zgr_zps:1166-1167), not e3t_0, and re-deriving them here "
+                "would need NEMO's mask/halo conventions")
+        e3u0 = jnp.asarray(e3u0, dtype=dtype)[..., :nlev]
+        e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]
+        # The bundle is NEMO-native (U/V hold the EAST/NORTH face of each T
+        # cell), the same extent as e3t0 and the sliced masks.  A card that
+        # attached a redundant west/south layout would BROADCAST silently
+        # here rather than fail, so say the shape out loud.
+        if e3u0.shape != e3t0.shape or e3v0.shape != e3t0.shape:
+            raise ValueError(
+                "z_coord.nemo_een_barotropic.e3u_0/.e3v_0 must be on NEMO's "
+                f"native extent {e3t0.shape} (U/V on the east/north face of "
+                f"each T cell); got {e3u0.shape} and {e3v0.shape}")
         return NemoQCOMeshOperands(
-            e3t_0=e3t0, e3u_0=e3t0, e3v_0=e3t0, umask3=umask3, vmask3=vmask3,
+            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
             e2u=e2u, e1v=e1v)
     if any(value is not None for value in raw):
@@ -1440,6 +1485,7 @@ def create_partial_cell_coordinate(
     H_bathy: jnp.ndarray,
     *,
     bottom_index_rule: str = "interface",
+    min_partial_thickness: float | None = None,
 ) -> OceanPartialCellCoordinate:
     """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
 
@@ -1462,6 +1508,30 @@ def create_partial_cell_coordinate(
         legacy near-full snap.  It requires an explicit ``z_coord.t_depth_ref``;
         no arithmetic-midpoint fallback is allowed because that changes
         ``k_bot`` on stretched external grids.
+        ``"nemo_zps_e3min"`` is the OTHER rule NEMO's shipped zps user domains
+        run, and it is NOT equivalent to ``"nemo_tpoint"``:
+        ``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:204,209-212`` sets
+        ``ze3min = 0.1*rn_dz`` and then
+
+            k_bot = jpkm1
+            DO jk = jpkm1,1,-1 ; WHERE( zht < pdepw_1d(jk)+ze3min ) k_bot = jk-1
+
+        i.e. ``k_bot`` counts the W interfaces that clear the floor, so the
+        thinnest bottom cell is a TENTH of the reference thickness where the
+        T-point rule's is a HALF.  On a uniform ladder the two disagree for
+        every column whose bathymetry lands in
+        ``[pdepw+ze3min, pdepw+0.5*dz)``.  The bottom thickness is then
+        ``MIN(H, pdepw_1d(k+1)) - pdepw_1d(k)``, in NEMO's own association
+        (``OVERFLOW:221-225``).  It is written the source's way because the
+        source writes it that way; no ladder has yet been found on which it
+        differs in the bits from the other rules' clipped
+        ``MIN(H - pdepw(k), dz_ref[k])``, and the unit test says so rather
+        than implying a difference it does not demonstrate.  It requires
+        ``min_partial_thickness``.
+    min_partial_thickness : float, optional
+        ``ze3min`` for ``bottom_index_rule="nemo_zps_e3min"``; refused (and
+        required) for exactly that rule, so neither rule can silently run with
+        the other's floor.
 
     Returns
     -------
@@ -1480,10 +1550,17 @@ def create_partial_cell_coordinate(
     nlev = z_coord.n_levels
     abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
 
-    if bottom_index_rule not in {"interface", "nemo_tpoint"}:
+    if bottom_index_rule not in {"interface", "nemo_tpoint", "nemo_zps_e3min"}:
         raise ValueError(
-            "bottom_index_rule must be 'interface' or 'nemo_tpoint', got "
-            f"{bottom_index_rule!r}"
+            "bottom_index_rule must be 'interface', 'nemo_tpoint' or "
+            f"'nemo_zps_e3min', got {bottom_index_rule!r}"
+        )
+    if (bottom_index_rule == "nemo_zps_e3min") != (min_partial_thickness
+                                                   is not None):
+        raise ValueError(
+            "min_partial_thickness is required by, and only by, "
+            'bottom_index_rule="nemo_zps_e3min" (NEMO\'s ze3min); got rule '
+            f"{bottom_index_rule!r} with {min_partial_thickness!r}"
         )
 
     # Number of reference points strictly shallower than H_bathy.  The legacy
@@ -1500,10 +1577,18 @@ def create_partial_cell_coordinate(
                 "the wrong NEMO bottom level on a stretched grid"
             )
         index_depths = jnp.abs(z_coord.t_depth_ref)
+    elif bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:209-212.  The loop runs jk = jpkm1..1 and the LAST write
+        # wins, so k_bot is the count of jk in 1..jpkm1 whose
+        # pdepw_1d(jk)+ze3min does NOT exceed zht -- the complement of the
+        # loop's strict ``<``, hence ``<=`` here.
+        index_depths = abs_z_half[:nlev] + min_partial_thickness
     else:
         index_depths = abs_z_half
+    view = index_depths[(jnp.newaxis,) * n_lead + (slice(None),)]
     interfaces_above = jnp.sum(
-        index_depths[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        (view <= H_exp) if bottom_index_rule == "nemo_zps_e3min"
+        else (view < H_exp),
         axis=-1,
     )                                                # (...) integer
     bottom_level = interfaces_above.astype(jnp.int32) - 1
@@ -1544,11 +1629,17 @@ def create_partial_cell_coordinate(
     safe_bottom = jnp.maximum(bottom_level, 0)
     abs_z_at_bottom = abs_z_half[safe_bottom]       # (...)
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
-    raw_partial = H - abs_z_at_bottom
-    capped = jnp.minimum(raw_partial, dz_at_bottom)
-    if bottom_index_rule == "nemo_tpoint":
-        partial_thickness = capped
+    if bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:222 -- MIN(zht, pdepw_1d(ik+1)) - pdepw_1d(ik), with the
+        # MIN inside the subtraction as the source writes it.  safe_bottom is
+        # at most nlev-1, so safe_bottom+1 indexes abs_z_half (nlev+1 long)
+        # in range without a clamp.
+        partial_thickness = (jnp.minimum(H, abs_z_half[safe_bottom + 1])
+                             - abs_z_at_bottom)
+    elif bottom_index_rule == "nemo_tpoint":
+        partial_thickness = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
     else:
+        capped = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
         near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
         partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
 

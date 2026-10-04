@@ -44,9 +44,9 @@ additions are exactly
 `GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/stp2d.f90:249-250`.
 
 The shared implementation already constructs NEMO QCO face geometry for the
-same step-entry state at `ocean_model_latlon_cgrid.py:5309-5364`, but the wind
+same step-entry state at `ocean_model_latlon_cgrid.py:5371-5426`, but the wind
 path instead derives its inverse depth from `H_u_pre/H_v_pre` at
-`ocean_model_latlon_cgrid.py:5555-5596`. Round 145 must route the existing
+`ocean_model_latlon_cgrid.py:5617-5658`. Round 145 must route the existing
 shared QCO reciprocals to the wind statement; it must not add a second formula
 or a card-specific selector.
 

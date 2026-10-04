@@ -5333,6 +5333,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _diag_zero_v = jnp.zeros_like(dv_dt)
     diag_vortcor_u = _diag_zero_u
     diag_vortcor_v = _diag_zero_v
+    # The flux-form horizontal advection shares ``diag_vortcor`` with the
+    # rotation terms (stage 7b writes it, the een_planetary / face-f branches
+    # then add Coriolis into the same slot), so the published decomposition
+    # cannot otherwise separate NEMO's ``dyn_vor`` from its ``dyn_adv`` on a
+    # flux-form card.  Kept here as its own array for the operator-component
+    # bundle only; nothing reads it in the tendency.
+    _flux_hadv_u = _diag_zero_u
+    _flux_hadv_v = _diag_zero_v
     diag_Dterm_u = _diag_zero_u    # WENO momentum-advection D-term;
     diag_Dterm_v = _diag_zero_v    # zero unless WENO + weno_d_term active.
     diag_vertadv_u = _diag_zero_u
@@ -5382,6 +5390,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 up3_upwind_selector=up3_upwind_selector,
             )
         )
+        # Captured BEFORE the rotation branches below add Coriolis into the
+        # same diagnostic slot.
+        _flux_hadv_u = diag_vortcor_u
+        _flux_hadv_v = diag_vortcor_v
         if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
             # NEMO runs dyn_vor and dyn_adv as two separate subroutines even in
             # flux form: the energy-and-enstrophy triad supplies the ROTATION
@@ -6148,6 +6160,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # In vector-invariant form NEMO dyn_adv owns KEG + ZAD.
             "advection_u": _mu(-dKE_dx + diag_Dterm_u + diag_vertadv_u),
             "advection_v": _mv(-dKE_dy + diag_Dterm_v + diag_vertadv_v),
+            # Flux form only: the -div(transport (x) velocity) horizontal
+            # trend NEMO's dyn_adv owns.  ``advection_u`` above cannot carry
+            # it because stage 7b writes it into the rotation slot, and the
+            # KE gradient it would otherwise hold is zeroed in flux form.
+            # Zero on every vector-invariant / WENO card.
+            "flux_form_hadv_u": _mu(_flux_hadv_u),
+            "flux_form_hadv_v": _mv(_flux_hadv_v),
             # Actual accumulator values at the production routine barriers.
             # The GYRE gate uses these directly for stages 2/3, whose compiled
             # order is HPG -> VOR -> ADV -> (stage-3 LDF).

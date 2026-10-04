@@ -10,7 +10,7 @@ committed BEFORE this measurement ran). Follows M-01
 `stpmlf.F90:196-199/250/368`: ONE traversal of `stp_MLF` per step;
 `dyn_ldf`/`tra_ldf` (and the slope precompute feeding `tra_ldf`) read `Nbb` as
 their OWN call argument, every other term in the SAME traversal reads `Nnn`.
-`_nemo_mlf_step` (`ocean_model_latlon_cgrid.py:10636`, `_ldf_state=` at
+`_nemo_mlf_step` (`ocean_model_latlon_cgrid.py:10719`, `_ldf_state=` at
 `ocean_pe_latlon_cgrid.py:4624-4631`/`4612-4626`) reproduces this per-term
 substitution inside ONE `_step_impl` call. `_leapfrog_step` (`:9885`) instead
 runs the WHOLE pipeline twice (full Nnn pass + full Nbb pass) and combines
