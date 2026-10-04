@@ -5662,7 +5662,7 @@ CITATION_MAP = {
         ('CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )', 1),
         9,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:529-532': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:529,531-532': [
         ('CASE ( np_FCT )', 1),
         ('CALL tra_adv_fct ( kt, nit000,', 1),
         ('nn_fct_imp )', 1),
