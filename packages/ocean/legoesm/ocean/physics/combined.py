@@ -147,6 +147,7 @@ def _make_mle(cfg: MLEConfig) -> Callable:
 def make_ocean_physics(
     config: OceanPhysicsConfig,
     apply_vertical_diffusion: bool = True,
+    seos_cfg=None,
 ) -> Callable:
     """Create a combined ocean physics function.
 
@@ -273,6 +274,7 @@ def make_ocean_physics(
                 emit_momentum_viscosity=(
                     config.vertical_mixing.scheme != "kpp"),
                 constants_config=config.constants,
+                seos_cfg=seos_cfg,
             ))
         # else: TKE/CATKE K profiles are computed INSIDE the implicit
         # solve's compute_vertical_K_profiles fallback (their pipeline

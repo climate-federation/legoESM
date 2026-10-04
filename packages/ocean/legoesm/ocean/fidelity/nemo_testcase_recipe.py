@@ -461,6 +461,13 @@ def _model_config(
                     n2_eos_form="teos10",
                     n2_threshold=-1.0e-12,
                     two_level_trigger=True,
+                    # zdfevd.f90:107-110 REPLACES the assembled avt by
+                    # rn_evd where the trigger fires (zdfphy.f90:359 runs it
+                    # AFTER the closure copy at :348-351), and :121/:133-135
+                    # does the same to avm because this deck sets
+                    # nn_evdm = 1 (gyre_omip_l2_namelist_cfg namzdf) --
+                    # which is what nu_conv = K_conv = rn_evd = 100 states.
+                    evd_composition="nemo_replace",
                     # RK3 stprk3.F90:154-181 computes rn2b on Nbb, copies
                     # rn2=rn2b, and calls zdf_phy(Nbb,Nbb) before any stage.
                     # The canonical NEMO time-level option therefore samples
@@ -2697,6 +2704,14 @@ def build_vortex_smt_zps_card(
                         # fluid the rest of the card runs.
                         n2_mode="nemo_bn2",
                         n2_eos_form="seos",
+                        # zdfevd.f90:107-110 REPLACES the assembled avt by
+                        # rn_evd where the trigger fires; zdfphy.f90:359
+                        # runs it AFTER the background copy at :348-351, so
+                        # the fired interfaces carry rn_evd ALONE and not
+                        # rn_evd + rn_avt0.  nn_evdm = 0 (rung-0
+                        # namelist_cfg:410) is the nu_conv = 0 above:
+                        # zdfevd.f90:121 leaves avm untouched.
+                        evd_composition="nemo_replace",
                     ),
                 ),
             ),

@@ -576,6 +576,14 @@ class DINOConfig:
     # carries a genuine Nbb level) sets it. Default keeps every other recipe
     # BIT-IDENTICAL.
     convection_evd_n2_time_level: str = "solver_state"
+    # How zdfevd COMPOSES with the background and the closure.  NEMO
+    # REPLACES the assembled avt by rn_evd where the trigger fires
+    # (zdfevd.f90:107-110, run at zdfphy.f90:359 AFTER the closure copy at
+    # :348-351) and, with nn_evdm = 1 as DINO's deck sets, the assembled avm
+    # too (:121, :133-135).  legoESM's historical composition ADDS.  A card
+    # whose trigger is NEMO's own (convection_n2_mode="nemo_bn2") must state
+    # this -- unset raises (decision 94); every other recipe keeps "additive".
+    convection_evd_composition: str = ""
     # ----- Phase-2 #1317 Tier C: small faithful items -----
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
@@ -1341,6 +1349,11 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_smooth_transition": False,
         "convection_n2_mode": "nemo_bn2",
         "convection_n2_threshold": -1e-12,
+        # zdfevd.f90:107-110 REPLACES the assembled avt by rn_evd where the
+        # trigger fires (zdfphy.f90:359 runs it AFTER the closure copy at
+        # :348-351), and :121/:133-135 does the same to avm because DINO's
+        # deck sets nn_evdm = 1.  Decision 94; there is no default.
+        "convection_evd_composition": "nemo_replace",
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
         # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
@@ -3925,6 +3938,9 @@ def dino_lat_lon_model_config(
                     # NEMO's rn2/rn2b time levels (stpmlf.F90:186-187) —
                     # both arms on the Nnn geometry.
                     evd_n2_time_level=cfg.convection_evd_n2_time_level,
+                    # zdfevd REPLACES avt/avm where it fires; see the config
+                    # field's note (decision 94).
+                    evd_composition=cfg.convection_evd_composition,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -4312,6 +4328,7 @@ def dino_mpas_model_config(
                 n2_mode=cfg.convection_n2_mode,
                 n2_threshold=cfg.convection_n2_threshold,
                 two_level_trigger=cfg.convection_two_level_trigger,
+                evd_composition=cfg.convection_evd_composition,
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(

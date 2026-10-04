@@ -3244,6 +3244,11 @@ class LatLonCGridOceanModel:
             self._physics_fn = make_ocean_physics(
                 physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
+                # The CARD's NEMO &nameos coefficients reach the zdfevd
+                # trigger's bn2 (decision 94): without this the trigger built
+                # alpha/beta from NemoSEOSConfig()'s DINO defaults whatever
+                # fluid the card actually runs.
+                seos_cfg=getattr(self.config, "eos_nemo_seos", None),
             )
         else:
             self._physics_fn = None
@@ -11692,8 +11697,53 @@ class LatLonCGridOceanModel:
                     "compute_vertical_K_profiles.")
             state.T.data.shape[-1]
             dtype = state.T.data.dtype
-            K_v_cell = K_v_phys + jnp.asarray(_cfg_b.K_v, dtype=dtype)
-            A_v_cell = A_v_phys + jnp.asarray(_cfg_b.A_v, dtype=dtype)
+            # NEMO zdfevd REPLACES the assembled coefficient where its trigger
+            # fires (zdfevd.f90:107-110, run at zdfphy.f90:359 AFTER the
+            # background copy at :348-351), so on a card that states
+            # ``evd_composition="nemo_replace"`` the fired interfaces carry
+            # rn_evd ALONE -- not rn_evd plus the namelist background.  Every
+            # other card keeps the historical sum.  The fallback path does the
+            # same composition in k_profiles.compute_vertical_K_profiles.
+            _conv_fast = getattr(
+                getattr(_cfg_b, "physics", None), "convection", None)
+            _evd_fast = None
+            if getattr(_conv_fast, "scheme", "none") == "enhanced_diffusion":
+                from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                    compose_evd_coefficient, resolve_evd_composition,
+                )
+                _ed_fast = _conv_fast.enhanced_diffusion
+                if resolve_evd_composition(_ed_fast) == "nemo_replace":
+                    _evd_fast = _ed_fast
+            if _evd_fast is None:
+                K_v_cell = K_v_phys + jnp.asarray(_cfg_b.K_v, dtype=dtype)
+                A_v_cell = A_v_phys + jnp.asarray(_cfg_b.A_v, dtype=dtype)
+            else:
+                # Fail closed: on THIS path the surfaced K/A are the
+                # enhanced-diffusion scheme's own, which is only true when no
+                # closure also surfaces one.  tke/catke take the fallback
+                # path (combined.make_ocean_physics withholds EVD for them);
+                # anything else would have the replace overwrite a closure's
+                # coefficient it never saw.
+                _vmix_fast = getattr(
+                    getattr(_cfg_b, "physics", None), "vertical_mixing", None)
+                if getattr(_vmix_fast, "scheme", "none") != "none":
+                    raise ValueError(
+                        'EnhancedDiffusionConfig.evd_composition='
+                        '"nemo_replace" on the physics-provided-K path is '
+                        "only defined when the card selects no vertical-"
+                        "mixing closure (vertical_mixing.scheme='none'); got "
+                        f"{getattr(_vmix_fast, 'scheme', None)!r}. tke/catke "
+                        "compose EVD inside compute_vertical_K_profiles.")
+                _K_bg_field = jnp.full_like(
+                    K_v_phys, jnp.asarray(_cfg_b.K_v, dtype=dtype))
+                _A_bg_field = jnp.full_like(
+                    A_v_phys, jnp.asarray(_cfg_b.A_v, dtype=dtype))
+                K_v_cell = compose_evd_coefficient(
+                    _K_bg_field, K_v_phys, "nemo_replace",
+                    convective=_evd_fast.K_conv)
+                A_v_cell = compose_evd_coefficient(
+                    _A_bg_field, A_v_phys, "nemo_replace",
+                    convective=_evd_fast.nu_conv)
             _phys_cfg = _cfg_b.physics
             if (_phys_cfg is not None
                     and getattr(_phys_cfg.vertical_mixing, "iwm", None)
@@ -11840,6 +11890,7 @@ class LatLonCGridOceanModel:
                         self._nemo_ws_test_hooks.tke_rhs_materialization),
                     tke_rhs_intermediate=(
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
+                    seos_cfg=getattr(_cfg_b, "eos_nemo_seos", None),
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
@@ -11877,6 +11928,7 @@ class LatLonCGridOceanModel:
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,
                     eta_now=eta_now,
+                    seos_cfg=getattr(_cfg_b, "eos_nemo_seos", None),
                 )
 
         # Private causal seam: two arrays replace the post-closure heat and

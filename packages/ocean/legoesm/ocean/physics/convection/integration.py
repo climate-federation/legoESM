@@ -26,6 +26,7 @@ def make_convection_physics(
     emit_momentum_viscosity: bool = True,
     eos_fn: Callable | None = None,
     constants_config: ConstantsConfig = ConstantsConfig(),
+    seos_cfg=None,
 ) -> Callable:
     """Create an ocean convection physics function.
 
@@ -62,6 +63,7 @@ def make_convection_physics(
             config, apply_diffusion=apply_diffusion,
             emit_momentum_viscosity=emit_momentum_viscosity,
             eos_fn=eos_fn, constants_config=constants_config,
+            seos_cfg=seos_cfg,
         )
     elif scheme == "plume":
         return _make_plume(config, eos_fn=eos_fn,
@@ -75,7 +77,8 @@ def _make_enhanced_diffusion(
         apply_diffusion: bool = True,
         emit_momentum_viscosity: bool = True,
         eos_fn: Callable | None = None,
-        constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+        constants_config: ConstantsConfig = ConstantsConfig(),
+        seos_cfg=None) -> Callable:
     cfg = config.enhanced_diffusion
 
     # Fail closed at construction: suppression (emit_momentum_viscosity=False)
@@ -154,6 +157,10 @@ def _make_enhanced_diffusion(
             u=u_in, v=v_in,
             p_cell=p_cell, eos_fn=eos_fn,
             eta=state.eta.data, H_bathy=state.H_bathy.data,
+            # The CARD's NEMO &nameos coefficients for the nemo_bn2 trigger
+            # (decision 94); None keeps NemoSEOSConfig()'s defaults, which is
+            # what the card's own density EOS resolves to when it states none.
+            seos_cfg=seos_cfg,
             # Recipe-pinned constants (the N^2 trigger's g / reference
             # density); defaults reproduce legoesm.constants exactly.
             g=constants_config.g, rho_ref=constants_config.rho_0,
