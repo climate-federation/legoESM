@@ -3719,7 +3719,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      no_gm_redi=False, K_zeta_bih=None,
                      gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                      gm_kappa_min=0.0, nemo_ldf_file=None,
-                     lateral_side_bc=None):
+                     lateral_side_bc=None, vertical_momentum_scheme=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3812,7 +3812,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                                barotropic_pcg_variant),
                               ("freeze_floor", freeze_floor),
                               ("freezing", freezing),
-                              ("runoff_depth_spread_m", runoff_depth_spread_m))
+                              ("runoff_depth_spread_m", runoff_depth_spread_m),
+                              ("vertical_momentum_scheme", vertical_momentum_scheme))
             if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
@@ -7035,7 +7036,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--woa-s", type=str, default="data/woa18/woa18_decav_s00_01.nc")
     p.add_argument("--vertical-momentum-scheme", type=str, default=None,
                    choices=["nemo_advective"],
-                   help="Tripole only: vertical momentum advection. 'nemo_advective' "
+                   help="Tripole and MPAS: vertical momentum advection. 'nemo_advective' "
                         "= NEMO dynzad (centered advective form on the full velocity; "
                         "with --adaptive-implicit-vertadv it is the explicit part of "
                         "the Courant split, as ln_zad_Aimp). Default (None) keeps the "
@@ -8298,8 +8299,8 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
-    if args.vertical_momentum_scheme is not None and args.grid != "tripole":
-        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole only "
+    if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas"):
+        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas only "
                          f"(got {args.grid!r}); it would be silently ignored.")
     if args.nemo_een_coriolis and args.momentum_rk3:
         raise SystemExit("--nemo-een-coriolis with --momentum-rk3 is refused: the "
@@ -9060,6 +9061,7 @@ def main() -> int:
             C_smag_lap=args.C_smag_lap, K_zeta_bih=args.K_zeta_bih,
             nemo_ldf_file=args.nemo_ldf_file,
             lateral_side_bc=args.lateral_side_bc,
+            vertical_momentum_scheme=args.vertical_momentum_scheme,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,

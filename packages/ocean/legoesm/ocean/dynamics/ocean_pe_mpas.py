@@ -75,6 +75,7 @@ from legoesm.ocean.vertical import (
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection,
+    nemo_advective_vertical_momentum_advection,
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
@@ -673,10 +674,25 @@ def mpas_ocean_baroclinic_tendencies(
                          else halo_refresh.vertices))
 
     # Vertical advection of perturbation momentum (#171 Level-1).
-    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
-    vert_adv_u = flux_form_vertical_momentum_advection(
-        u_prime_3d, w_e, h_e_3d,
-    )
+    _vms = getattr(config, "vertical_momentum_scheme", "upwind_perturbation")
+    if _vms == "upwind_perturbation":
+        w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
+        vert_adv_u = flux_form_vertical_momentum_advection(
+            u_prime_3d, w_e, h_e_3d,
+        )
+    elif _vms == "nemo_advective":
+        # NEMO dynzad: 2-cell mean of areaCell*w at the edge, normalised by the
+        # 2-cell mean area (the edge's e1e2u analogue), full velocity.
+        _aw = mesh.areaCell[:, jnp.newaxis] * w
+        vert_adv_u = nemo_advective_vertical_momentum_advection(
+            u_3d, 0.5 * (_aw[c1] + _aw[c2]), h_e_3d,
+            (0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2]))[:, jnp.newaxis],
+            face_active=edge_mask_3d,
+        )
+    else:
+        raise ValueError(
+            f"MPASOceanConfig.vertical_momentum_scheme={_vms!r}: expected "
+            "'upwind_perturbation' or 'nemo_advective'")
 
     # Full nonlinear momentum tendency.  Use the per-level edge mask
     # (zero below the shallower neighbor's seafloor on partial cells)

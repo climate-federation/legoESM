@@ -55,7 +55,7 @@ def test_vertical_momentum_flag_defaults_off_and_is_forwarded():
 def test_vertical_momentum_flag_refused_off_tripole(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "fesom",
                                       "--vertical-momentum-scheme", "nemo_advective"])
-    with pytest.raises(SystemExit, match="tripole only"):
+    with pytest.raises(SystemExit, match="tripole and mpas only"):
         _core2().main()
 
 
@@ -64,3 +64,10 @@ def test_een_refused_with_rk3(monkeypatch):
                                       "--nemo-een-coriolis", "--momentum-rk3"])
     with pytest.raises(SystemExit, match="forward-Euler"):
         _core2().main()
+
+
+def test_vertical_momentum_flag_reaches_the_mpas_builder():
+    import inspect
+    assert "vertical_momentum_scheme" in inspect.signature(_core2().build_mpas_ocean).parameters
+    assert inspect.getsource(_core2().main).count(
+        "vertical_momentum_scheme=args.vertical_momentum_scheme") == 2

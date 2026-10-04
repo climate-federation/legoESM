@@ -464,6 +464,14 @@ class MPASOceanConfig(NamedTuple):
     # replay on another mesh is visible rather than a silent re-pin.
     K_zeta_bih_dx_m: float = 0.0
 
+    # Vertical momentum advection (appended at the END: positional callers stay
+    # valid). "upwind_perturbation" (default, bit-identical) = 1st-order upwind
+    # flux form of u' = u - u_bar; "nemo_advective" = NEMO dynzad, centered
+    # advective form w*du/dz on the FULL velocity with the cell-area-weighted w
+    # at the edge (NEMO ln_dynadv_vec; explicit, as NEMO is below Aimp's Courant
+    # threshold).
+    vertical_momentum_scheme: str = "upwind_perturbation"
+
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.
 
