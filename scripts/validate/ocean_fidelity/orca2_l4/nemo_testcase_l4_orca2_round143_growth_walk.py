@@ -380,6 +380,9 @@ def measure(deck_root: Path, record_root: Path, admission: Path,
             next_state = jax.device_get(ordinary.step(
                 state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
             passivity = transport_passivity(exposed_transport, next_state)
+            changed = [name for name, equal in passivity.items() if not equal]
+            require(not changed,
+                    f"kt={step}: passive transport exposure moved {changed}")
             record, census = assemble_record(record_root, step)
             measured[str(step)] = {
                 "rows": target_rows(
