@@ -362,16 +362,19 @@ def test_surface_diagnostics_merge_slot_wise(dry):
     assert float(col._sfc_diag[2][0]) == 2.0
 
 
-def test_refuses_the_window_layout_and_nh(grid, dry):
+def test_refuses_kt1_windows_and_nh(grid, dry):
+    """M7: the window layout is accepted (test_fv3_duo_column_spmd.py);
+    kt=1 windows (shaped like six faces) and NH are refused."""
+    from types import SimpleNamespace
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
         FV3DuoColumnModel)
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig, FV3DuoDynamicsModel)
     dyn = dry[0]
     saved = dyn.window_layout
-    dyn.window_layout = object()          # stand-in for a window layout
+    dyn.window_layout = SimpleNamespace(nb=6)     # kt=1 stand-in
     try:
-        with pytest.raises(NotImplementedError, match="rung 7"):
+        with pytest.raises(NotImplementedError, match="kt=1"):
             FV3DuoColumnModel(dyn)
     finally:
         dyn.window_layout = saved
@@ -1245,3 +1248,22 @@ def test_column_lane_carries_the_subgrid_orography_through_the_grid_rebuild(tmp_
     assert np.array_equal(np.asarray(sso_grid), np.asarray(sso_phys))
     assert 700.0 < float(np.asarray(sso_phys).max()) <= 800.0
     assert float(np.asarray(sso_phys).min()) == 0.0
+
+
+def test_column_lane_cmor_feed_survives_without_wap(tmp_path, caplog):
+    """The CMOR feed derived wap from the edge-wind divergence, which the
+    column mesh has no edges for; the AttributeError dropped EVERY CMOR
+    interval of the dt ladder.  The lane now publishes no wap (one
+    warning) and the feed's other fields reach the collector."""
+    import logging
+    from legoesm.driver.config import OutputConfig
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=0.25, output=OutputConfig(
+        diag_days=0, checkpoint_days=0, output_dir=str(tmp_path), cmip_output=True))
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    with caplog.at_level(logging.WARNING):
+        assert drv.run() == "COMPLETED"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("CMOR accumulator feed FAILED" in m for m in msgs), msgs
+    assert sum("publishing no wap" in m for m in msgs) == 1

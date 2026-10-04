@@ -94,9 +94,16 @@ fi
 # different environment variables".  Measured, job 27647178 died in 12 s on it.
 # Clear the inherited one and state the value on the srun line instead.
 unset SLURM_CPUS_PER_TASK
-_GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
-JAX_ENABLE_X64=1 srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
-  --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task=8 --kill-on-bad-exit=1 \
+# Ginsburg GPU nodes carry 2 GPUs: AMIP_NODES spreads the ranks (submit with
+# --nodes=$AMIP_NODES --gres=gpu:$((AMIP_N_GPUS/AMIP_NODES))); the conda
+# Open MPI is not CUDA-aware, so mpi4jax stages through the host (CUDA-aware
+# MPI segfaulted on Levante too, see the Levante chain).
+: "${AMIP_NODES:=1}"
+_PER_NODE=$((AMIP_N_GPUS / AMIP_NODES))
+_GPU_MAP=$(seq -s, 0 $((_PER_NODE - 1)))
+export MPI4JAX_USE_CUDA_MPI=0
+JAX_ENABLE_X64=1 srun --nodes="${AMIP_NODES}" --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${_PER_NODE}" \
+  --mpi=pmix --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task=8 --kill-on-bad-exit=1 \
   "$PY" -u scripts/run/run_amip.py \
   --config config/amip/amip_production.yaml \
   --distributed \
@@ -121,4 +128,5 @@ if [ "${new_day:-0}" -le "${cur_day:-0}" ]; then
 fi
 
 echo "[chain] $new_day/$TARGET_DAYS days done; submitting the next link."
-sbatch --export="ALL,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL" "$0"
+sbatch --nodes="$AMIP_NODES" --gres="gpu:${_PER_NODE}" --output="$OUTDIR/slurm_%j.out" \
+  --export="ALL,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,AMIP_NODES=$AMIP_NODES,AMIP_N_GPUS=$AMIP_N_GPUS" "$0"

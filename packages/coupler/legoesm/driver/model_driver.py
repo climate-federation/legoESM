@@ -8217,6 +8217,18 @@ class ModelDriver:
             logger.warning(
                 "no vertical coordinate on the driver: publishing no wap, so "
                 "subsidence cannot be scored for this run")
+        elif self._fv3_duo_column_model() is not None:
+            # The duo column mesh has no edge topology for the divergence
+            # route, and the duo bundle's own ``omga`` is flagged
+            # ``omga_is_meaningless`` (fv3_native_dynamics): no wap, said
+            # once, rather than the whole CMOR interval lost to the
+            # AttributeError the edge route raised (dt ladder 2026-10-03).
+            if not getattr(self, "_fv3_duo_wap_warned", False):
+                self._fv3_duo_wap_warned = True
+                logger.warning(
+                    "fv3_duo column lane: publishing no wap (no edge "
+                    "divergence on the column mesh; the duo omga is not a "
+                    "hydrostatic omega) -- subsidence is not scored")
         else:
             from legoesm.atmosphere.forcing.column_large_scale_extract import (
                 omega_from_divergence)
