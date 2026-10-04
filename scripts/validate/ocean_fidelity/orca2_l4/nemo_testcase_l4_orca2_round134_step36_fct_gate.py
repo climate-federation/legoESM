@@ -145,8 +145,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "observed": [name for name in GROUP_ORDER[first_index:]
                          if report["groups"][name]["nonfinite_total"]],
         },
-        "R134-P5": {"status": "CONFIRMED", "observed": "bit-identical"},
+        "R134-P5": {
+            "status": "REFUTED",
+            "observed": "same-JIT return_nemo_trace moved the ordinary step",
+        },
         "R134-P6": {"status": "CONFIRMED", "observed": "measurement-only"},
+        "R134-P7": {"status": "CONFIRMED", "observed": "bit-identical"},
     }
     return {**report, "status": "PASS_ROUND134_STEP36_FCT_WALK",
             "prediction_ledger": predictions}
@@ -336,10 +340,19 @@ def measure(deck_root: Path, downstream_report: Path,
     def capture(*values, **kwargs):
         require(kwargs.get("low_order_predictor") == "nemo_rk3_two_step",
                 "observed FCT call is not the compiled two-step program")
-        div_h, div_w, trace = real_fct(
-            *values, **kwargs, return_nemo_trace=True)
-        jax.debug.callback(sink, *trace, ordered=True)
-        return div_h, div_w
+        base = kwargs.get("tracer_before")
+        active = kwargs.get("active_mask")
+        h_base = kwargs.get("base_thickness")
+        h_after = kwargs.get("after_thickness")
+        implicit_w = kwargs.get("implicit_w")
+        require(base is not None and active is not None and h_base is not None
+                and h_after is not None and implicit_w is not None,
+                "observed FCT call lacks a required two-step operand")
+        result = real_fct(*values, **kwargs)
+        jax.debug.callback(
+            sink, values[0], values[1], values[2], values[3], values[4],
+            base, active, h_base, h_after, implicit_w, ordered=True)
+        return result
 
     observed_model = model()
     advection_module.fct_tracer_advection = capture
@@ -361,8 +374,8 @@ def measure(deck_root: Path, downstream_report: Path,
 
     require(len(calls) >= 2 and len(calls) % 2 == 0,
             f"production step observed {len(calls)} FCT calls")
-    require(all(len(call) == len(TRACE_FIELD_ORDER) for call in calls),
-            "production FCT trace arity changed")
+    require(all(len(call) == 10 for call in calls),
+            "production FCT input-observer arity changed")
     duplicate_equal = True
     for index, duplicate in enumerate(calls[2:], 2):
         original = calls[index % 2]
@@ -370,10 +383,21 @@ def measure(deck_root: Path, downstream_report: Path,
             np.ascontiguousarray(left).view(np.uint64),
             np.ascontiguousarray(right).view(np.uint64))
             for left, right in zip(duplicate, original, strict=True))
-    traces = {
-        tracer: dict(zip(TRACE_FIELD_ORDER, calls[index], strict=True))
-        for index, tracer in enumerate(("T", "S"))
-    }
+    @jax.jit
+    def isolated_trace(now, u, v, w, h_now, base, active, h_base,
+                       h_after, implicit_w):
+        _div_h, _div_w, trace = real_fct(
+            now, u, v, w, h_now, card.recipe.grid, card.dt_s,
+            high_order="centred2", tracer_before=base, active_mask=active,
+            low_order_predictor="nemo_rk3_two_step",
+            base_thickness=h_base, after_thickness=h_after,
+            implicit_w=implicit_w, return_nemo_trace=True)
+        return trace
+
+    traces = {}
+    for index, tracer in enumerate(("T", "S")):
+        trace = jax.device_get(isolated_trace(*calls[index]))
+        traces[tracer] = dict(zip(TRACE_FIELD_ORDER, trace, strict=True))
     supports = _support_masks(
         np.asarray(card.recipe.z_coord.is_active, dtype=bool))
     active = supports["cell"]
@@ -415,6 +439,12 @@ def measure(deck_root: Path, downstream_report: Path,
         "observer_state_equal": prior.state_bit_rows(observed, returned),
         "observed_fct_call_count": len(calls),
         "duplicate_calls_equal": bool(duplicate_equal),
+        "instrument_attempt1": {
+            "status": "REFUTED",
+            "reason": "same-JIT return_nemo_trace moved the ordinary step",
+            "producer_commit": "db301a4ff87b4eb48ce3712b655aa440a43979ed",
+        },
+        "instrument_attempt2": "passive input callback plus isolated JIT trace",
         "downstream_report": str(downstream_report),
         "downstream_replay": {
             "T": int(caller["nonfinite"]["T"]),

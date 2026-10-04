@@ -55,6 +55,8 @@ def test_classify_accepts_antidiffusive_first_boundary() -> None:
     result = gate.classify(_report())
     assert result["status"] == "PASS_ROUND134_STEP36_FCT_WALK"
     assert result["prediction_ledger"]["R134-P2"]["status"] == "CONFIRMED"
+    assert result["prediction_ledger"]["R134-P5"]["status"] == "REFUTED"
+    assert result["prediction_ledger"]["R134-P7"]["status"] == "CONFIRMED"
 
 
 def test_earlier_boundary_is_retained_as_refutation() -> None:

@@ -51,3 +51,23 @@ result requires the committed probe, a source-order plant and a passivity
 plant that both fire, focused tests, the citation gate with a shifted-line
 plant, the one prescribed ocean-fidelity battery, and a separate read-only
 Codex diff-review attempt.
+
+## Instrument refutation and frozen continuation
+
+The first committed measurement at `db301a4ff` rejected itself with
+`write-only FCT observer moved the ordinary step`. R134-P5 is therefore
+**REFUTED** and retained: requesting `return_nemo_trace=True` inside the full
+production step changes the compiled graph at this catastrophically amplified
+state, even though the wrapper returns the same two divergence arrays.
+
+The continuation changes only the observer, before taking another scientific
+measurement. The production step now calls ordinary FCT exactly once and a
+`jax.debug.callback` copies its ten already-present array inputs. After the
+ordinary step and its bitwise passivity check complete, the existing FCT trace
+is evaluated in a separate JIT call on those exact captured operands. This is
+the established developed-state FCT instrument pattern; no operand is
+reconstructed.
+
+| ID | Frozen prediction | Confirmation | Falsification / action |
+|---|---|---|---|
+| R134-P7 | Copying the ten exact FCT input arrays is passive, and the separate JIT trace is deterministic across duplicate T/S calls. | Observed and ordinary returned states are bit-identical in all five fields; duplicate captured operands agree array-for-array. | Reject the continuation instrument and stop without a scientific boundary. |
