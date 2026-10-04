@@ -90,6 +90,10 @@ set with 27 passes: round-35 allow-dirty escape scope, the grow-only worktree
 stamp ratchet, the GYRE round-129 retained-record provenance stamp, and SI3
 scalar-math provenance. No round-137 test fails.
 
+The receipt citation gate passes 2/2 citations and the default audit passes
+274/274, both with zero unmapped or failing-map entries. Shifting the
+V-coefficient citation by two lines makes the plant fail.
+
 The required `codex exec --sandbox read-only` review could not initialize:
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
