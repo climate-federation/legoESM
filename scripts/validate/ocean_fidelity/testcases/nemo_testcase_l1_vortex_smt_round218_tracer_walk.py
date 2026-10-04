@@ -51,7 +51,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "nemo_testcase_l1_vortex"))
 
 from nemo_testcase_l1_vortex_kt2_walk import (  # noqa: E402
-    _seed_from_record, _strip3, _u_full, _v_full, read_bt_frame, read_stage,
+    _seed_from_record, _strip2, _strip3, _u_full, _v_full, read_bt_frame,
+    read_stage,
 )
 from nemo_testcase_l1_vortex_round200_flux_stage1 import (  # noqa: E402
     require_live,
@@ -97,8 +98,9 @@ def read_tracer_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
         if meta["rank"] == 3:
             out[name] = _strip3(values, *shape)
         else:
-            nx, ny = shape
-            out[name] = values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
+            # Reviewer finding 3: the shared stripper, not a local copy with
+            # a hard-coded halo width.
+            out[name] = _strip2(values, *shape)
     require(offset == len(raw), f"{path}: parser did not consume the record")
     return out
 
@@ -183,8 +185,13 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         reference = np.asarray(reference)
         candidate = np.asarray(candidate)
         if planted:
+            # Reviewer finding 4: perturb a cell that is actually SCORED.
+            # The geometric centre can be masked, and a plant that lands on
+            # a masked cell reports NOT VISIBLE for a live seam.
+            active_idx = np.argwhere(np.asarray(mask, dtype=bool))
+            require(active_idx.size > 0, f"{label}: empty scored support")
             candidate = candidate.copy()
-            candidate[tuple(d // 2 for d in candidate.shape)] += 1.0
+            candidate[tuple(active_idx[len(active_idx) // 2])] += 1.0
         row = score(f"{case}.stage1.{label}", reference, candidate, mask)
         active = np.asarray(mask, dtype=bool)
         delta = candidate - reference
@@ -279,6 +286,19 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         require(groups["zfw"].shape[-1] == nlev + 1,
                 f"the record's zFw is {groups['zfw'].shape[-1]} deep, the "
                 f"card needs {nlev + 1}")
+        # REVIEWER FINDING 1, MEASURED RATHER THAN ARGUED.  The hook sends
+        # the vertical member through ``zfw / area_T`` and the tracer helper
+        # multiplies by ``area_T`` again, so a recorded zFw that happened to
+        # be identically zero would make the w half of this arm VACUOUS --
+        # bit equality for free, proving nothing about the vertical path.
+        # It is not zero: this refuses unless the recorded field is live
+        # over the scored support.
+        _zfw_nonzero = int(np.count_nonzero(
+            groups["zfw"][..., :nlev][np.asarray(masks["T"], dtype=bool)]))
+        require(_zfw_nonzero > 0,
+                "the recorded zFw is identically zero over the scored "
+                "support; the vertical half of the transport arm would be "
+                "vacuous")
         override = (
             jnp.asarray(groups["zfu"][..., :nlev]),
             jnp.asarray(groups["zfv"][..., :nlev]),
@@ -294,6 +314,13 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                 kwargs["expose_tracer_stage"] = 1
             carried = lego_fields(model_step(_NEMOWSRK3TestHooks(**kwargs)))
             for tracer, slot in zip(("T", "S"), slots):
+                # REVIEWER FINDING 2: the arm that carries this round is the
+                # one exposure that was not seam-controlled.  An override
+                # that silently went inert would hand back the plain step
+                # output and still score.
+                require_live(f"nemo_transport.{slot}", tracer,
+                             np.asarray(carried[tracer])[..., :nlev],
+                             plain[tracer])
                 reference = groups[slot][..., :nlev]
                 candidate = np.asarray(carried[tracer])[..., :nlev]
                 active = np.asarray(masks["T"], dtype=bool)
