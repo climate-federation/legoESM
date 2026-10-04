@@ -2076,9 +2076,22 @@ class ModelDriver:
                 smoothing_passes=self.config.topo_smoothing,
                 land_mask_path=getattr(self.config, "land_mask_path", "") or "",
             )
-            self._phis_data, self._f_land = load_real_topography(
-                self.grid, config=topo_config
-            )
+            if self._voronoi_layout is not None:
+                # the product is a GLOBAL construction (exact binning + the
+                # masked diffusion across cell neighbours): build it on the
+                # global mesh every rank holds, then take this rank's local
+                # cells (owned + halo, the partition's own order) -- a rank-
+                # local build mis-assigns every source cell near a partition
+                # edge (measured 4 ranks: area ratio 0.21..876)
+                _phis_g, _fl_g = load_real_topography(
+                    self._grid_global, config=topo_config)
+                _ids = np.asarray(self._voronoi_layout.partition.local_cells)
+                self._phis_data = jnp.asarray(np.asarray(_phis_g)[_ids])
+                self._f_land = jnp.asarray(np.asarray(_fl_g)[_ids])
+            else:
+                self._phis_data, self._f_land = load_real_topography(
+                    self.grid, config=topo_config
+                )
             if self.config.dycore.discretization == "spectral":
                 # the spectral dynamics feel the TRUNCATED field; the product
                 # (dynamics, CMOR orog, restart check) is that field, once
