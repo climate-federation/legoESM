@@ -58,6 +58,10 @@ LAND_CONDENSATION_FLOOR_W = -150.0
 # fluxes when building the semi-implicit surface conductance (Robin BC).  Small enough
 # for an accurate slope, large enough to stay above bulk-flux round-off.
 _SURFACE_LIN_DT_K = 0.1
+# Humidity step [kg/kg] for the finite-difference vapour conductance the layered
+# path exports (bulk fluxes are linear in the surface humidity up to the weak
+# virtual-temperature stability feedback).
+_VAPOUR_COND_DQ = 1.0e-5
 
 
 class SimpleSEBConfig(NamedTuple):
@@ -222,9 +226,10 @@ def compute_simple_seb_fluxes(
         # evaporation (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
         # On the layered path it bounds each component (snow, soil) per unit of its
         # own area before the f / (1-f) weighting, so the cell total stays >= floor.
+        lh_raw = lh
         if LAND_CONDENSATION_FLOOR_W is not None:
             lh = jnp.maximum(lh, LAND_CONDENSATION_FLOOR_W)
-        return tx, ty, sh, lh
+        return tx, ty, sh, lh, lh_raw
 
     def _layered_q(T_s):
         # Layered pack (fractional cover f): the snow is an ice-saturated, freely
@@ -236,8 +241,9 @@ def compute_simple_seb_fluxes(
             q_liq, forcing.q_lowest, jnp.ones_like(q_liq), b)
 
     LE_snow = None
+    vapour_conductance = None
     if snow_cover is None:
-        tau_x, tau_y, shflx, lhflx = _bulk(T_surface, q_sfc, L_eff)
+        tau_x, tau_y, shflx, lhflx, _ = _bulk(T_surface, q_sfc, L_eff)
     else:
         # Snow and soil exchange computed SEPARATELY, then area-weighted by f and
         # 1-f.  One blended surface (f-weighted q_sat, beta and L) put about f of
@@ -247,11 +253,24 @@ def compute_simple_seb_fluxes(
         # pack's share, which the multilayer partition charges to the pack.
         f = snow_cover
         q_sfc_snow, q_sfc_soil = _layered_q(T_surface)
-        _snow = _bulk(T_surface, q_sfc_snow, latent_heat_sublimation(T_surface))
-        _soil = _bulk(T_surface, q_sfc_soil, latent_heat_vaporization(T_surface))
-        tau_x, tau_y, shflx, lhflx = (f * a + (1.0 - f) * b for a, b in zip(_snow, _soil))
+        _L_s, _L_v = latent_heat_sublimation(T_surface), latent_heat_vaporization(T_surface)
+        _snow = _bulk(T_surface, q_sfc_snow, _L_s)
+        _soil = _bulk(T_surface, q_sfc_soil, _L_v)
+        tau_x, tau_y, shflx, lhflx = (
+            f * a + (1.0 - f) * b for a, b in zip(_snow[:4], _soil[:4]))
         LE_snow = f * _snow[3]
         q_sfc = f * q_sfc_snow + (1.0 - f) * q_sfc_soil
+        # Cell vapour conductance [kg m-2 s-1 per kg/kg], > 0: the change of the
+        # area-weighted UNFLOORED vapour flux when both surface humidities rise by
+        # _VAPOUR_COND_DQ.  The caller rebuilds the exported humidity from the
+        # REALISED vapour flux with it (q_air + E / g), so the exported humidity
+        # implies that flux in sign and magnitude, whatever the L weighting, the
+        # condensation floor or the supply limits did to it.
+        _dq = _VAPOUR_COND_DQ
+        vapour_conductance = (
+            f * (_bulk(T_surface, q_sfc_snow + _dq, _L_s)[4] - _snow[4]) / _L_s
+            + (1.0 - f) * (_bulk(T_surface, q_sfc_soil + _dq, _L_v)[4] - _soil[4]) / _L_v
+        ) / _dq
 
     # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
     # Use the SAME effective snow mass as the iter-68 bulk-flux phase
@@ -307,7 +326,7 @@ def compute_simple_seb_fluxes(
         _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
         q_sfc_lin = beta_limited_surface_humidity(
             _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
-        _, _, shflx_lin, lhflx_lin = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
+        _, _, shflx_lin, lhflx_lin, _ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
     else:
         # Same per-component exchange as the flux above (latent heats held at
         # T_surface, as L_eff is on the binary path).
@@ -337,5 +356,6 @@ def compute_simple_seb_fluxes(
         stomatal_ratio=stomatal_ratio,
         surface_conductance=surface_conductance,
         LE_snow=LE_snow,
+        vapour_conductance=vapour_conductance,
         # Canopy-specific diagnostics left as None
     )

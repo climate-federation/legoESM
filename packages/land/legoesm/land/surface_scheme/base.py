@@ -115,6 +115,10 @@ class SurfaceFluxOutput(NamedTuple):
     # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
     # flux.  ``None`` on the binary snow path and for the canopy schemes.
     LE_snow: jax.Array | None = None
+    # SimpleSEB over a layered pack: cell vapour conductance [kg m-2 s-1 per
+    # kg/kg] (> 0), so the caller can export the humidity q_air + E / g that
+    # implies the REALISED vapour flux E.  ``None`` elsewhere.
+    vapour_conductance: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None
     Rn_canopy: jax.Array | None = None

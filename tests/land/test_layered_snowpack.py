@@ -643,8 +643,12 @@ def test_exported_humidity_implies_realised_vapour_flux_mixed_sign(frac, dry):
     q_liq = float(saturation_mixing_ratio(T_skin, p)[0])
     q_air = q_ice + frac * (q_liq - q_ice)
     _, out = _run(cfg, s, _forcing(1, T_air=268.0, sw=0.0, lw=280.0, q=q_air), 1, 1800.0)
-    _, resp, _ = out[0]
+    _, resp, sfc = out[0]
     E = float(resp.surface_mass_flux[0])
     dq = float(resp.q_surface[0]) - q_air
     assert abs(E) > 1e-9, E
     assert np.sign(dq) == np.sign(E), (frac, dry, E, dq)
+    # and the magnitude, through the scheme's own (positive) vapour conductance
+    g = float(sfc.vapour_conductance[0])
+    assert g > 0.0
+    np.testing.assert_allclose(g * dq, E, rtol=1e-9)

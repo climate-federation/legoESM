@@ -1556,21 +1556,16 @@ def _step_multilayer_land_impl(
         # (SimpleSEB's is already f-blended), never the binary ice override,
         # so the exported humidity and the realised flux agree in sign.
         q_sfc_new = surface_out.q_surface
-        if surface_out.LE_snow is not None:
+        if surface_out.vapour_conductance is not None:
             # SimpleSEB with separate snow / soil exchange: its area-mean humidity
-            # carries the DEMAND vapour flux (one transfer coefficient), which is
-            # neither the latent energy (L_s / L_v weighted) nor the REALISED flux
-            # after the pack and soil supply limits (a dry soil can turn a net
-            # demand of evaporation into net frost).  Rescale the humidity
-            # gradient by realised / demand vapour flux so the exported humidity
-            # implies the vapour flux actually handed to the atmosphere.
-            E_demand = (surface_out.LE_snow / _L_s_T
-                        + (lhflx - surface_out.LE_snow) / _L_v_T)
+            # carries the DEMAND vapour flux, which is neither the latent energy
+            # (L_s / L_v weighted) nor the REALISED flux after the pack and soil
+            # supply limits (a dry soil can turn a net evaporation demand into
+            # net frost).  Export the humidity that implies the realised vapour
+            # flux through the scheme's own positive conductance: q_air + E / g.
             E_realised = sublim_actual + soil_evap
-            _has_demand = jnp.abs(E_demand) > 1e-12
-            _ratio = jnp.where(
-                _has_demand, E_realised / jnp.where(_has_demand, E_demand, 1.0), 1.0)
-            q_sfc_new = forcing.q_lowest + _ratio * (q_sfc_new - forcing.q_lowest)
+            q_sfc_new = forcing.q_lowest + E_realised / jnp.maximum(
+                surface_out.vapour_conductance, 1e-12)
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
