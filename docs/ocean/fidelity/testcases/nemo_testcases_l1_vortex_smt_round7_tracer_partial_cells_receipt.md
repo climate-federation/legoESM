@@ -1,3 +1,50 @@
+# RETRACTION, AT THE TOP, BEFORE ANYTHING ELSE (reviewer 2, BLOCK)
+
+**THIS RECEIPT'S HEADLINE WAS MISATTRIBUTED AND IS WITHDRAWN.**  Under
+`key_RK3` NEMO runs FCT at the LAST STAGE ONLY: `traadv.f90:307-311`
+
+```
+      ll_dofct = .TRUE.
+      ! FCT at last stage only with RK3
+      IF (PRESENT(kstg)) THEN
+         IF (kstg/=3) ll_dofct = .FALSE.
+      ENDIF
+```
+
+and at `traadv.f90:347-352` the `np_FCT` case dispatches to
+`tra_adv_cen(..., nn_fct_h, nn_fct_v)` whenever `ll_dofct` is false.
+`stprk3_stg.f90` passes `kstg` on every call.  **Every arm in this receipt
+was run at STAGE 1, so NONE of the `traadv_fct.f90` statements cited in
+section 2 rows 6a-6h executed.  What the bit-exact one-variable arm
+actually shows is that legoESM's 2nd-order CENTRED tracer path matches
+NEMO's, given NEMO's transports, over partial cells.**
+
+WHAT SURVIVES, unchanged and still measured: given NEMO's recorded
+`zFu/zFv/zFw`, legoESM's stage-1 tracer tendency is bit-identical to
+NEMO's for T and S on every wet cell, on BOTH cards; and the first
+substantive non-bit statement in the stage order is the continuity solve
+`sshwzv.f90:297-298` at `~2-3e-13` relative on 66-99 % of wet cells.
+Those two findings do not depend on which advection scheme ran.
+
+WHAT IS WITHDRAWN: every sentence claiming FCT fidelity, including "EVERY
+statement of the tracer path ... is bit-faithful" and "No tracer-path
+statement is landed this round because none is wrong".  Read them as
+scoped to the CENTRED path at stages 1-2.
+
+WHAT ROUND 8 MUST DO FIRST: re-run the same arm at **STAGE 3**, where
+`ll_dofct` is true, before any claim about FCT is made.  The record
+already carries stage 3 (`oracle_tracer_terms_kt00000001_s3.bin`, admitted
+on both cards), so this costs no NEMO time -- only the walk's stage
+selector needs to move.
+
+**AND THE ORCA2 POINTER IN SECTION 6 IS AFFECTED**: its recommended arm
+must be taken at ORCA2's stage 3, not stage 1, or it will exercise CEN2
+instead of the FCT lines ORCA2's overflow names.  The two CODE-READING
+items in section 6 -- that `traadv_fct.f90:569-570` averages a `pt_up1`
+built at `:538`, and that `trazdf.f90:231-233` divides its off-diagonals
+by the 1-D `e3w_1d` while its diagonal uses the 3-D `e3t_3d` -- were
+verified by reviewer 2 against ORCA2's own compiled tree and STAND.
+
 # Round 218 / VORTEX_SMT round 7 — the seamount cards' TRACER path over partial cells
 
 Decision 92 (operator note CD).  Lane tip `a3be519e0`, branch
