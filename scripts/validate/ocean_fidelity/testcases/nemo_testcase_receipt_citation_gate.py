@@ -1247,6 +1247,10 @@ FILES = {
         NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90"),
     "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90"),
+    # Round 214 / ORCA2 round 132: the exact compiled seamount domain-builder
+    # branch whose face-thickness statement the shared qco repair transcribes.
+    "VORTEX_SMT_R3_OMIP_L1_P3/BLD/ppsrc/nemo/usrdef_zgr.f90": (
+        NEMO / "tests/VORTEX_SMT_R3_OMIP_L1_P3/BLD/ppsrc/nemo/usrdef_zgr.f90"),
     # --- round 6: the after-SSH slot the RK3 program leaves behind, in the
     # vector card's own build and in GYRE's (the statement is shared). ---
     "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
@@ -5539,6 +5543,18 @@ CITATION_MAP = {
     'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-273': [
         'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
         ('END DO   ;   END DO   ;   END DO', 3), 6],
+    # Round 214 / ORCA2 round 132: compiled face-thickness construction and
+    # its paired U/V halo exchange, not the differently numbered MY_SRC file.
+    'VORTEX_SMT_R3_OMIP_L1_P3/BLD/ppsrc/nemo/usrdef_zgr.f90:240-247': [
+        'pe3u(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji+1,jj,jk) )',
+        'pe3v(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji,jj+1,jk) )',
+        'CALL lbc_lnk',
+        8],
+    'vertical.py:673-735': [
+        'def nemo_qco_resolved_mesh_operands(',
+        'e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)',
+        'e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)',
+        63],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],
