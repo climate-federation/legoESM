@@ -47,3 +47,12 @@ def test_nemo_advective_runs_and_differs_from_upwind(pieces):
 def test_unknown_scheme_raises(pieces):
     with pytest.raises(ValueError, match="vertical_momentum_scheme"):
         _run(pieces, "centred", n=1)
+
+
+def test_term_diagnostics_work_with_nemo_advective(pieces):
+    from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
+    mesh, z, st = pieces
+    m = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=0.0,
+                                                vertical_momentum_scheme="nemo_advective"))
+    _, terms = mpas_ocean_baroclinic_tendencies(st, mesh, z, m.config, term_diagnostics=True)
+    assert "w_e" in terms and bool(jnp.all(jnp.isfinite(terms["vert_adv_u"])))

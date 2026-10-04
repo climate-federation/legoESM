@@ -675,8 +675,8 @@ def mpas_ocean_baroclinic_tendencies(
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     _vms = getattr(config, "vertical_momentum_scheme", "upwind_perturbation")
+    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1); also a term diagnostic
     if _vms == "upwind_perturbation":
-        w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
         vert_adv_u = flux_form_vertical_momentum_advection(
             u_prime_3d, w_e, h_e_3d,
         )
