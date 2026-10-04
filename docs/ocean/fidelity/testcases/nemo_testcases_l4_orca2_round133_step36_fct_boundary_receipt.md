@@ -20,9 +20,9 @@ content: 132 temperature and 134 salinity cells.
 NEMO runs stages 1, 2, and 3 in that order at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:211-227`. At the named boundary the
 compiled stage program calls `tra_adv` before the surface source at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:633-645`; the resolved ORCA2
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:637-645`; the resolved ORCA2
 dispatch takes `tra_adv_fct` at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:525-535`. This names the first
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:529-532`. This names the first
 measured executed call, not yet the first arithmetic statement inside FCT.
 That internal source-ordered split is the next walk.
 

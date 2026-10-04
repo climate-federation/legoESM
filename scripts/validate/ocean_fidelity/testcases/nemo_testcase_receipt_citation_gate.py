@@ -5657,15 +5657,16 @@ CITATION_MAP = {
         ('zFv(ji,jj,jk) = e1v(ji,jj)', 1),
         2,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:633-645': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:637-645': [
         ('CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )', 1),
         ('CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )', 1),
-        13,
+        9,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:525-535': [
-        ('SELECT CASE ( nadv )', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:529-532': [
+        ('CASE ( np_FCT )', 1),
         ('CALL tra_adv_fct ( kt, nit000,', 1),
-        11,
+        ('nn_fct_imp )', 1),
+        4,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
