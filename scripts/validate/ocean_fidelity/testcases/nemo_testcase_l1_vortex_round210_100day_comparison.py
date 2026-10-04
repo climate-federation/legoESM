@@ -299,12 +299,12 @@ def main() -> int:
     # ---- table ----
     print("\n==== TABLE (days {}) ====".format(TABLE_DAYS))
     header = f"{'day':>4}"
-    for tag in CARDS:
+    for tag in selected:
         header += f"  {tag+'_T_rms':>14}{tag+'_u_rms':>14}{tag+'_ssh_rms':>14}"
     print(header)
     for day in TABLE_DAYS:
         line = f"{day:>4}"
-        for tag in CARDS:
+        for tag in selected:
             r = report["cards"][tag]["rows"][str(day)]
             line += (f"  {r['T_rms']:>14.6e}{r['u_rms']:>14.6e}"
                       f"{r['ssh_rms']:>14.6e}")
@@ -318,7 +318,7 @@ def main() -> int:
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     for field, ax, title in zip(("T_rms", "u_rms", "ssh_rms"), axes,
                                   ("T rms [K]", "u rms [m/s]", "ssh rms [m]")):
-        for tag in CARDS:
+        for tag in selected:
             days = report["cards"][tag]["days"]
             values = [report["cards"][tag]["rows"][str(d)][field]
                       for d in days]
