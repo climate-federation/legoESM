@@ -68,7 +68,7 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "adjacency":
         report["adjacent_cells"][1] = [0, 0, 0]
     elif plant == "source-order":
-        report["first_nonfinite_beta_operand"] = "zup"
+        report["first_nonfinite_beta_operand"] = "wrong"
     elif plant == "live-selection":
         report["face_selection"]["live_selected_nonfinite"] = False
 
