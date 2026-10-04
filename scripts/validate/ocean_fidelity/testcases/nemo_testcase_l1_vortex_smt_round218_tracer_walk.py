@@ -229,15 +229,7 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         row["nemo_boundary"] = nemo_boundary
         row["execution_regime"] = "production_step_jit"
         row["planted"] = bool(planted)
-        bad = (candidate != reference) & active
-        idx = np.argwhere(bad)
-        structure = {"n_unequal": int(bad.sum()), "n_active": int(active.sum())}
-        if idx.size and reference.ndim == 3:
-            structure["levels"] = np.bincount(
-                idx[:, -1], minlength=reference.shape[-1]).tolist()
-            structure["j_range"] = [int(idx[:, 0].min()), int(idx[:, 0].max())]
-            structure["i_range"] = [int(idx[:, 1].min()), int(idx[:, 1].max())]
-        row["structure"] = structure
+        row["structure"] = _structure(reference, candidate, active)
         rows.append(row)
         return row
 
@@ -328,8 +320,11 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         for tracer, slot in (("T", "out_t"), ("S", "out_s")):
             _row(f"out.{tracer}", groups[slot][..., :nlev],
                  np.asarray(plain[tracer])[..., :nlev], masks["T"],
-                 "ts(Kaa) after the stage-3 tra_zdf, i.e. the ordinary step "
-                 "output (stprk3_stg.f90:519-544, recorded at :558)",
+                 "ts(Kaa) after the stage-3 tra_zdf, i.e. the ordinary "
+                 "step output (stprk3_stg.f90:519-544, recorded at :558). "
+                 "legoESM reaches the same array by its own "
+                 "physics-Euler-then-stages order, which is inert on this "
+                 "deck (rn_avt0=0, ln_traldf_OFF, usrdef_sbc all zero)",
                  plant == f"out.{tracer}")
 
     # ---- 5. THE ONE-VARIABLE ARM: NEMO's transports, everything else ours

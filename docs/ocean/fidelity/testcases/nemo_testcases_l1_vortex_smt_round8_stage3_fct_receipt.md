@@ -22,7 +22,17 @@ NEMO's `tra_adv_fct` owns a measurable error over partial cells.**
 
 It is NOT bit equality, so **R8-S3-P1 as written is FALSIFIED** and this
 receipt says so in its first section rather than rounding the prediction to
-fit.  What replaced it is a bounded result with its own control (section 4).
+fit.  What replaced it is a bounded result with its own controls (sections
+4 and 4b).
+
+**THE ARM IS NOT AN EXACT SUBSTITUTION, AND THE REVIEWER CAUGHT THAT.**  The
+seam that carries NEMO's transports into the stage-3 FCT branch re-associates
+the face product — it stores `zFu/dy_u` and the FCT forms
+`(zFu/dy_u) * T` before the metric is multiplied back, where NEMO forms
+`zFu * T`.  **Measured, not argued (section 4b): the worst case that
+association can produce is `7.63e-16` K on the vector card and `5.72e-16` K
+on the flux card, 9.3x and 12.4x SMALLER than the residue, with every face's
+error summed in the same direction.  It cannot own the result.**
 
 ## 0b. A CITATION CORRECTION THAT APPLIES TO ROUND 7's RECEIPT TOO
 
@@ -168,6 +178,38 @@ exactly where the topography is.  It also peaks at level
 not a topography statement**, and it is registered as such rather than
 walked.
 
+## 4b. THE SUBSTITUTION SEAM'S OWN ASSOCIATION, BOUNDED
+
+The reviewer's blocking finding, stated as it was made: the stage-3 FCT
+branch of `_flux_pair` reads the geometry slots that
+`_tracer_transport_geometry_override` fills with `zFu/dy_u`, `zFv/dx_v`,
+`zFw/area_T` — not the raw slots the stage-1/2 CEN2 branch reads — and
+`advection.py` then forms `flux_u_low = mass_flux_u * tr_u_low` with the
+metric multiplied back downstream.  So what FCT consumes is `((F/d)*T)*d`
+where NEMO consumes `F*T`: the same product, a different association, up to
+two roundings per face.  **The arm is therefore NOT bit-exact, and nothing
+in sections 0-4 may be read as if it were.**
+
+A reviewer's finding is a hypothesis, so it was measured.  The committed
+probe forms the per-face difference in NEMO's own numbers and converts it
+to the tracer increment one step can carry,
+`dt * sum_faces |((F/d)*T)*d - F*T| / (e1e2t * e3t)`, with the face scale
+taken as the larger of the two cells' `|T|` and every face summed in the
+same direction — a deliberately pessimistic bound, since the real errors
+carry signs and the upwind face takes one cell, not the larger:
+
+| card | u / v / w faces perturbed | worst face product error | **worst tracer increment** | measured arm residue |
+|---|---|---:|---:|---:|
+| vector | 12743 / 12552 / 12367 | `2.980232e-08` | **`7.628312e-16` K** | `7.105427e-15` K |
+| flux | 12706 / 12565 / 12435 | `2.980232e-08` | **`5.721240e-16` K** | `7.105427e-15` K |
+
+**The seam's worst case is 9.3x (vector) and 12.4x (flux) too small to be
+the residue.**  The finding is real and is registered — the arm is inexact,
+and an exact one needs the stage-3 FCT branch to consume the raw transport
+slots, which is a MODEL edit and therefore a later round's landing, not a
+measurement round's — but it does not own the number, and the headline
+stands with that qualification attached rather than withdrawn.
+
 ## 5. R8-P1 — THE `sshwzv.f90:297-298` OPERAND SPLIT, DECIDED AT STAGE 3
 
 The statement is
@@ -211,6 +253,22 @@ That same probe also establishes, as a by-product, that the card's
 reference thickness ladder reproduces NEMO's `ht_0` to the bit — an
 independent confirmation of round 2's geometry identity, from a different
 array.
+
+**THREE QUALIFICATIONS, EACH NAMED BY THE REVIEWER AND EACH KEPT.**
+(i) the test pins the COLUMN SUM `sum_k e3t_0 * tmask`, while
+`sshwzv.f90:298` multiplies the PER-LEVEL `e3t_3d`; a compensating
+per-level error would survive the sum, and what rules it out is round 2's
+separate 12-field, 0-ULP geometry identity, not this probe.
+(ii) the step from "NEMO's `r3t` is reproducible from NEMO's `ssh`" to
+"legoESM's operand is bitwise NEMO's" holds because the walk hands legoESM
+NEMO's barotropic output (`stage_barotropic_output_override`); on a card
+running its own free surface it would not.
+(iii) the split is three-way, not two: `ze3div`, the thickness operand, and
+the recurrence's own bottom-up composition in `nemo_qco_wzv_recurrence`.
+This probe excludes the thickness operand.  It does NOT separate the other
+two, and the level structure of round 7's stage-1 `ww` row (most cells at
+the surface, fewest at the bottom) is the accumulation signature — so the
+composition remains a live candidate alongside `ze3div`.
 
 **WHAT IT DOES *NOT* DECIDE, SAID OUT LOUD.**  At stages 1 and 2 the
 record's `r3t(Kaa)` does NOT equal `ssh(end of step) / ht_0` (3721 of 3721
@@ -330,7 +388,8 @@ identity, ladder, first-over-bar row.  It is the rung that makes
 | 2 | Add Arm B (NEMO's whole stage-3 entry) when Arm A did not reach bit equality | UNASKED; a measurement, and both arms are reported |
 | 3 | Decide R8-P1 from the record instead of adding a `ze3div` seam to the model | UNASKED; it keeps the round measurement-only, and the limit of that choice is stated in section 5 |
 | 4 | Report the 2-ULP residue as a registered last-bit item rather than walking it | UNASKED; it is 2.9x inside the bar and its structure refutes a partial-cell owner (section 4) |
-| 5 | No production model file is edited | not a choice: the round is a measurement unless a statement is named |
+| 5 | Land over a BLOCK verdict after measuring and bounding its finding, instead of withdrawing the headline or making the arm exact | UNASKED — it follows this lane's "a reviewer's finding is a hypothesis, not an instruction" rule, the bound is in section 4b, and the exact arm is registered as a MODEL edit for a later round; offered for revert if the operator wants the headline withdrawn instead |
+| 6 | No production model file is edited | not a choice: the round is a measurement unless a statement is named |
 
 No default value, scheme selection, bound, tier, cadence, window, data
 source or card option was changed.  **UNASKED list is rows 1-4, each a
@@ -347,6 +406,7 @@ them changes a number any card produces.**
 | the `out.T` plant against the clean stage-3 report | scoring that cannot react | **VISIBLE** |
 | the recorded `zFw` liveness refusal (round 7 reviewer finding 1) | a vacuous vertical half of the transport arm | passed |
 | Arm B against Arm A | a result that was really inherited input noise | Arm B does not move Arm A: the residue is made at stage 3 |
+| the substitution seam's own association, bounded (section 4b) | an arm whose inexactness manufactures the result it reports | worst case `7.63e-16` / `5.72e-16` K, 9.3x / 12.4x under the residue |
 | the residue's level/extent structure against the card's own partial-cell census (section 4) | a "partial-cell" finding that is really composition noise | 88 % of the residue sits on levels 1-8, which have NO partial cell |
 | `r3t(Kbb)` and `r3t(Kaa)` rebuilt from the card's own depth | an operand split asserted instead of measured | 0 of 3721 columns unequal at stage 3 |
 | stages 1/2 `r3t(Kaa)` NOT matching | an over-claim that the split holds at every stage | 3721 of 3721 differ; the limit is stated, not hidden |
@@ -373,8 +433,31 @@ rebuilt or deleted.
 
 ## 12. THE ADVERSARIAL REVIEW
 
-Recorded in section 13 below with the reviewer's verdict and the
-disposition of every finding.
+One fresh reviewer, not the author, on the committed diff plus this
+receipt.  **VERDICT: BLOCK**, on the ground that the stage-3 arm is not a
+bit-exact substitution and therefore cannot attribute the residue.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | BLOCK: the stage-3 FCT branch reads the DIVIDED geometry slots, so the arm hands FCT `((F/d)*T)*d`, not `F*T`; the reviewer measured 2098 of 39690 u-faces changed by up to `9.31e-10` on a round trip and argued every signature of the residue is reproduced by the instrument | **MEASURED, AND THE MECHANISM IS TOO SMALL BY 9.3x.** Section 4b: the worst tracer increment that association can carry is `7.63e-16` K (vector) / `5.72e-16` K (flux) against a `7.105427e-15` K residue, with every face summed in the same direction. The finding is REGISTERED (the arm is inexact; an exact arm needs the FCT branch to read the raw slots, a MODEL edit and a later round), the headline is QUALIFIED in section 0, and nothing is withdrawn |
+| 2 | the "61 of 3,969 columns" partial-cell claim is wrong by 40x, and the census was uncommitted | **FIXED before the verdict arrived**: section 4 now carries the probe's own census (level 9: 52, level 10: 2435, levels 1-8: zero) and the census is committed in the probe (`21a8bf6fd`). The reviewer and this receipt independently got the same numbers |
+| 3 | R8-P1 is proved only for a column SUM, only under the barotropic override, and the split is three-way not two | **FIXED**: section 5 now states all three qualifications |
+| 4 | `_structure` duplicated verbatim inside `_row`; the recurrence docstring cites `sshwzv.F90:330-336` while the probe cites `:297-298` | **FIXED**: `_row` calls the helper, and the probe states that `:297-298` is this build's compiled span of the raw-source statement. Every number in sections 2-4 was RE-MEASURED after the refactor and is unchanged |
+| 5 | the `out.T` row's label names an order legoESM does not execute (physics-Euler runs before the stages) | **FIXED**: the row now says so, and says why it is inert here |
+
+Claims the reviewer verified independently: the stage-3-only FCT dispatch
+(claim 1, every line); the stage-3 `r3t` result (claim 4, re-ran the probe,
+0 of 3721 both cards, and confirmed 3721 is the full interior so no mask
+excludes anything); and the whole ORCA2 pointer (claim 5, every line,
+including that ORCA2's `traadv_fct.f90` is BYTE-IDENTICAL to the
+seamount's, both 67105 bytes, so the line numbers transfer).  The reviewer
+did not re-run the walk.
+
+**The round lands on ONE recorded verdict, and that verdict was BLOCK.**
+It is landed over that verdict only because its blocking finding was
+measured and bounded, which is this lane's rule (a reviewer's finding is a
+hypothesis, not an instruction).  The bound and the registered inexactness
+are in section 4b for the next reader to attack.
 
 ## 13. OPEN
 
@@ -387,6 +470,10 @@ disposition of every finding.
 2. The 2-ULP stage-3 composition residue (`3.47e-16` relative, both cards)
    is registered, not walked.
 3. SMT-1 (Decision 93) is preregistered for round 9 (section 7).
-4. Round 7's reviewer 2 had not reported when that round landed; its
+4. THE ARM IS INEXACT (section 4b).  An exact stage-3 substitution needs
+   the FCT branch of `_flux_pair` to consume the raw `zfu_stage/zfv_stage`
+   slots the CEN2 branch already consumes, plus a raw `zFw` slot.  That is
+   a MODEL edit with the full gate set and it is a later round's landing.
+5. Round 7's reviewer 2 had not reported when that round landed; its
    findings, if they arrive, are still owed a disposition.
-5. The round-213/215 open items are unchanged.
+6. The round-213/215 open items are unchanged.

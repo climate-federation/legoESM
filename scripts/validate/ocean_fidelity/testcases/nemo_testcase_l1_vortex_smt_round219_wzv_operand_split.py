@@ -11,9 +11,11 @@ solve
 
 at ``1.99e-13`` (vector) / ``3.37e-13`` (flux) relative, and left it
 UNATTRIBUTED between the horizontal divergence ``ze3div`` and the
-thickness-tendency term.  legoESM forms the same statement in
-``nemo_qco_wzv_recurrence`` (``ocean_pe_latlon_cgrid.py``), whose second
-operand is built from exactly three numbers: the reference thickness
+thickness-tendency term.  (``sshwzv.f90:297-298`` is the COMPILED ``BLD/ppsrc/nemo`` line span of this
+build; the raw-source statement ``nemo_qco_wzv_recurrence``'s docstring
+cites as ``sshwzv.F90:330-336`` preprocesses to it.)  legoESM forms the
+same statement in ``nemo_qco_wzv_recurrence`` (``ocean_pe_latlon_cgrid.py``),
+whose second operand is built from exactly three numbers: the reference thickness
 ``e3t_0``, the step clock, and ``r3_after - r3_before``.
 
 This probe decides the split WITHOUT a model seam, because every input of
@@ -164,8 +166,70 @@ def run(root: Path, card_key: str, *, allow_dirty: bool = False) -> dict:
                 float(e3t0[..., jk][wet].min()) if wet.any() else 0.0),
         })
 
+    # ---- THE SUBSTITUTION SEAM'S OWN ASSOCIATION BOUND --------------------
+    # Reviewer finding, measured rather than argued.  The stage-3 arm hands
+    # NEMO's recorded zFu/zFv/zFw to _tracer_transport_geometry_override,
+    # which stores them DIVIDED by dy_u/dx_v/area_T in the geometry slots the
+    # FCT branch reads (ocean_model_latlon_cgrid.py: the fct2 branch of
+    # _flux_pair takes mf_u/mf_v/w_stage, not the raw zfu_stage/zfv_stage the
+    # stage-1/2 CEN2 branch takes).  advection.py then forms
+    # ``flux_u_low = mass_flux_u * tr_u_low`` and multiplies the metric back
+    # downstream, so what FCT consumes is ``((F/d)*T)*d`` where NEMO consumes
+    # ``F*T``.  That is a different ASSOCIATION of the same product: up to two
+    # roundings per face.  This bounds the tracer increment it can produce,
+    # so the arm's residue can be compared against it instead of guessed at.
+    dt_s = float(card.dt_s)
+    groups3 = read_tracer_terms(root, 3)
+    r3mm = np.asarray(groups3["r3t_kmm"], dtype=np.float64)
+    live_t = e3t0 * (1.0 + r3mm[..., None]) * active
+    area_t = np.asarray(ops.area_t, dtype=np.float64)
+    tpeak = np.abs(np.asarray(groups3["tsm_t"],
+                             dtype=np.float64))[..., :nlev]
+
+    def _assoc(raw, metric, tracer_scale):
+        """|((F/d)*T)*d - F*T| face by face, in NEMO's own numbers."""
+        f = np.asarray(raw, dtype=np.float64)
+        d = np.asarray(metric, dtype=np.float64)
+        if d.ndim == 2:
+            d = d[..., None]
+        return np.abs(((f / d) * tracer_scale) * d - f * tracer_scale)
+
+    # The scale each face can carry: the larger of the two cells' |T|.
+    t_u = np.maximum(tpeak, np.roll(tpeak, -1, axis=1))
+    t_v = np.maximum(tpeak, np.roll(tpeak, -1, axis=0))
+    du = np.asarray(card.recipe.grid.dy_u, dtype=np.float64)
+    dv = np.asarray(card.recipe.grid.dx_v, dtype=np.float64)
+    zfu = np.asarray(groups3["zfu"], dtype=np.float64)[..., :nlev]
+    zfv = np.asarray(groups3["zfv"], dtype=np.float64)[..., :nlev]
+    zfw = np.asarray(groups3["zfw"], dtype=np.float64)[..., :nlev]
+    # The hook restores one ghost before dividing; the metric must agree on
+    # the ghost column or no single owned value can satisfy both.
+    require(du.shape[1] in (zfu.shape[1], zfu.shape[1] + 1),
+            f"dy_u is {du.shape}, the record's zfu is {zfu.shape}")
+    du_own = du[:, 1:] if du.shape[1] == zfu.shape[1] + 1 else du
+    dv_own = dv[1:, :] if dv.shape[0] == zfv.shape[0] + 1 else dv
+    eu = _assoc(zfu, du_own, t_u)
+    ev = _assoc(zfv, dv_own, t_v)
+    ew = _assoc(zfw, area_t, tpeak)
+    # Per cell: every face it owns, over one time step, per unit volume.
+    flux_err = (eu + np.roll(eu, 1, axis=1)
+                + ev + np.roll(ev, 1, axis=0) + 2.0 * ew)
+    volume = area_t[..., None] * np.maximum(live_t, 1.0e-300)
+    bound = np.where(active, dt_s * flux_err / volume, 0.0)
+    assoc_bound = {
+        "dt_s": dt_s,
+        "u_faces_perturbed": int(np.count_nonzero(eu)),
+        "v_faces_perturbed": int(np.count_nonzero(ev)),
+        "w_faces_perturbed": int(np.count_nonzero(ew)),
+        "max_face_product_error_K_m3_per_s": float(
+            max(eu.max(), ev.max(), ew.max())),
+        "max_tracer_increment_K": float(bound.max()),
+        "measured_arm_residue_K": 7.105427e-15,
+    }
+
     bt = read_bt_frame(root / "oracle_bt_frames_kt00000001.bin", expect_step=1)
     return {
+        "association_bound": assoc_bound,
         "partial_cell_census": census,
         "case": case, "oracle_root": str(root), "legoesm_git_sha": sha,
         "nlev": nlev, "bt_frame_fields": sorted(bt),
@@ -202,6 +266,14 @@ def main(argv=None) -> int:
     for row in report["partial_cell_census"]:
         print("k={level:2d} wet={wet_cells:5d} partial={partial_cells:5d} "
               "thinnest_e3t_0={thinnest_e3t_0_m:.3f}".format(**row))
+    a = report["association_bound"]
+    print("assoc bound: faces u/v/w perturbed {u}/{v}/{w}, max face product "
+          "error {p:.6e}, max tracer increment {t:.6e} K (arm residue "
+          "{r:.6e} K)".format(u=a["u_faces_perturbed"], v=a["v_faces_perturbed"],
+                              w=a["w_faces_perturbed"],
+                              p=a["max_face_product_error_K_m3_per_s"],
+                              t=a["max_tracer_increment_K"],
+                              r=a["measured_arm_residue_K"]))
     print("all r3 bit-identical:", report["all_r3_bit_identical"])
     return 0
 
