@@ -965,6 +965,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
     parser.add_argument("--land-soil-ice-impedance-exponent",
                         dest="land_soil_ice_impedance_exponent", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
@@ -2534,6 +2546,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,

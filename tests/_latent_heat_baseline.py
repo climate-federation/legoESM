@@ -61,7 +61,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/coupler/legoesm/driver/physics_pipeline.py': 3,
     'packages/ice/legoesm/ice/config.py': 1,
     'packages/ice/legoesm/ice/constants_config.py': 2,
-    'packages/land/legoesm/land/_future/snow_column.py': 1,
     'packages/land/legoesm/land/boundary_data/ec_site.py': 1,
     'packages/land/legoesm/land/slab_land.py': 1,
     'packages/land/legoesm/land/snow_bands.py': 3,
