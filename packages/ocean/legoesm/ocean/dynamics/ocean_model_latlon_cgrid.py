@@ -10389,8 +10389,10 @@ class LatLonCGridOceanModel:
                     or _nemo_ws_live_stage_qco is None
                     or _nemo_ws_live_stage1_full_rhs is None
                     or _nemo_ws_live_stage1_rhs_walk is None
-                    or _nemo_ws_live_tke_entry is None
-                    or _nemo_ws_live_tke_statement_trace is None
+                    or (
+                        self._tke_prognostic_active()
+                        and (_nemo_ws_live_tke_entry is None
+                             or _nemo_ws_live_tke_statement_trace is None))
                     or _nemo_ws_live_slow_forcing_producer is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(

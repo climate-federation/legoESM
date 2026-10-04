@@ -154,17 +154,14 @@ def _bits_equal(left, right) -> bool:
         np.array_equal(a.view(np.uint64), b.view(np.uint64)))
 
 
-def transport_passivity(exposed, ordinary) -> dict[str, bool]:
-    """Check every prognostic slot not used to publish zFu/zFv/zFw."""
-
-    left = rung0.candidate_fields(exposed)
-    right = rung0.candidate_fields(ordinary)
-    return {
-        "S": _bits_equal(left["S"], right["S"]),
-        "ssh": _bits_equal(left["ssh"], right["ssh"]),
-        "uu_b": _bits_equal(exposed.uu_b.data, ordinary.uu_b.data),
-        "vv_b": _bits_equal(exposed.vv_b.data, ordinary.vv_b.data),
-    }
+def state_bit_rows(left, right) -> dict[str, bool]:
+    fields_left = rung0.candidate_fields(left)
+    fields_right = rung0.candidate_fields(right)
+    rows = {name: _bits_equal(fields_left[name], fields_right[name])
+            for name in rung0.FIELDS}
+    rows["uu_b"] = _bits_equal(left.uu_b.data, right.uu_b.data)
+    rows["vv_b"] = _bits_equal(left.vv_b.data, right.vv_b.data)
+    return rows
 
 
 def score_values(lego, nemo) -> dict[str, object]:
@@ -193,13 +190,13 @@ def score_values(lego, nemo) -> dict[str, object]:
     }
 
 
-def target_rows(record: dict[str, np.ndarray], state, baro, transport, card) -> dict[str, dict]:
+def target_rows(record: dict[str, np.ndarray], state, trace, card) -> dict[str, dict]:
     import jax.numpy as jnp
     from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch, nemo_r3t_stretch
 
     j, i = TARGET
     entry_eta = np.asarray(state.eta.data)
-    after_eta = np.asarray(baro.state_after_barotropic.eta.data)
+    after_eta = np.asarray(trace.barotropic_targets[4])
     depth = np.asarray(state.H_bathy.data)
     entry_r3t = np.asarray(nemo_r3t_stretch(
         card.recipe.z_coord, jnp.asarray(entry_eta), jnp.asarray(depth),
@@ -213,13 +210,14 @@ def target_rows(record: dict[str, np.ndarray], state, baro, transport, card) -> 
 
     entry_u = np.asarray(state.uu_b.data)[:, 1:]
     entry_v = np.asarray(state.vv_b.data)[1:, :]
-    after_u = np.asarray(baro.state_after_barotropic.uu_b.data)[:, 1:]
-    after_v = np.asarray(baro.state_after_barotropic.vv_b.data)[1:, :]
-    un_adv = np.asarray(baro.transport_average[0])[:, 1:]
-    vn_adv = np.asarray(baro.transport_average[1])[1:, :]
-    zfu = np.asarray(transport.u.data)[:, 1:, :]
-    zfv = np.asarray(transport.v.data)[1:, :, :]
-    zfw = np.asarray(transport.T.data)
+    after_u = np.asarray(trace.barotropic_targets[0])[:, 1:]
+    after_v = np.asarray(trace.barotropic_targets[1])[1:, :]
+    un_adv = np.asarray(trace.barotropic_targets[2])[:, 1:]
+    vn_adv = np.asarray(trace.barotropic_targets[3])[1:, :]
+    geometry = trace.stage_geometry[0]
+    zfu = np.asarray(geometry[7])[:, 1:, :]
+    zfv = np.asarray(geometry[8])[1:, :, :]
+    zfw = np.asarray(geometry[2]) * np.asarray(card.recipe.grid.area)[..., None]
 
     pairs = {
         "ssh_entry": (entry_eta[j, i], record["ssh_entry"][j, i]),
@@ -357,12 +355,9 @@ def measure(deck_root: Path, record_root: Path, admission: Path,
         tuple(np.asarray(card.recipe.initial_state.eta.data).shape))
     ordinary = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    barotropic = LatLonCGridOceanModel(
+    traced = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True))
-    transport = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_transport_stage=1))
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True))
 
     state = card.recipe.initial_state
     measured: dict[str, object] = {}
@@ -373,20 +368,17 @@ def measure(deck_root: Path, record_root: Path, admission: Path,
             state = jax.device_get(ordinary.step(
                 state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         else:
-            baro = jax.device_get(barotropic.step(
-                state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-            exposed_transport = jax.device_get(transport.step(
+            trace = jax.device_get(traced.step(
                 state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
             next_state = jax.device_get(ordinary.step(
                 state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-            passivity = transport_passivity(exposed_transport, next_state)
+            passivity = state_bit_rows(trace.state_after, next_state)
             changed = [name for name, equal in passivity.items() if not equal]
             require(not changed,
-                    f"kt={step}: passive transport exposure moved {changed}")
+                    f"kt={step}: passive live trace moved {changed}")
             record, census = assemble_record(record_root, step)
             measured[str(step)] = {
-                "rows": target_rows(
-                    record, state, baro, exposed_transport, card),
+                "rows": target_rows(record, state, trace, card),
                 "passivity": passivity,
             }
             record_census.extend(census)

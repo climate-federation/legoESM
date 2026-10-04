@@ -1,4 +1,5 @@
 import copy
+import inspect
 
 import numpy as np
 import pytest
@@ -82,3 +83,18 @@ def test_first_over_floor_uses_step_then_source_order():
     altered = copy.deepcopy(report["steps"])
     altered["30"]["rows"]["r3t_entry"] = _row(delta=1.0)
     assert gate.first_over_floor(altered)["row"] == "ssh_entry"
+
+
+def test_live_trace_requires_tke_payload_only_when_tke_is_prognostic():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    guard = source.index("self._tke_prognostic_active()")
+    tke_entry = source.index("_nemo_ws_live_tke_entry is None", guard)
+    incomplete = source.index(
+        'raise ValueError("live WS-RK3 operand trace is incomplete")',
+        tke_entry,
+    )
+    assert guard < tke_entry < incomplete
