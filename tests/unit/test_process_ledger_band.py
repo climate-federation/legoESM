@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.diagnostics.process_ledger import (
     apply_level_weight, column_store_snapshot_column, ledger_entry_column,
-    sigma_band_weight,
+    pressure_band_weight, sigma_band_weight,
 )
 
 NLEV = 10
@@ -217,3 +217,34 @@ def test_every_physics_build_site_receives_the_band():
             assert "budget_ledger_level_weight=" in call, (
                 "a make_physics call passes the ledger flag but not the band:\n"
                 + call)
+
+
+# ---- pressure_band_weight (moved from the deleted test_qc_band_budget.py) ----
+P_LO, P_HI = 5.0e4, 8.0e4      # const-ok: analysis band edges [Pa], not a constant
+
+
+def _pressure_half_levels(p_s, nlev=12):
+    """Hybrid-like half levels: a fixed pressure part plus a p_s-following part."""
+    a = jnp.linspace(1.0e3, 5.0e4, nlev + 1)
+    b = jnp.linspace(0.0, 1.0, nlev + 1)
+    return a[None, :] + b[None, :] * (p_s[:, None] - a[-1])
+
+
+def test_pressure_band_weight_is_fractional_and_partitions_unity():
+    ph = _pressure_half_levels(jnp.array([1.0e5, 9.5e4]))
+    w = pressure_band_weight(ph, P_LO, P_HI)
+    assert jnp.all(w >= 0.0) and jnp.all(w <= 1.0)
+    # Adjacent bands partition each layer exactly.
+    lo = pressure_band_weight(ph, 0.0, P_HI)
+    hi = pressure_band_weight(ph, P_HI, 2.0e5)
+    assert float(jnp.max(jnp.abs(lo + hi - 1.0))) < 1e-12
+    # A fractional edge really is fractional, not a 0/1 mask.
+    assert float(jnp.max(jnp.minimum(w, 1.0 - w))) > 0.0
+
+
+def test_inverted_interfaces_poison_the_pressure_weight():
+    """Interfaces that do not increase downward must yield NaN, not zero weights."""
+    good = jnp.array([[2e4, 4e4, 6e4, 8e4, 1e5]])
+    bad = jnp.array([[2e4, 6e4, 4e4, 8e4, 1e5]])   # layer 2 inverted
+    assert bool(jnp.all(jnp.isfinite(pressure_band_weight(good, 5e4, 8e4))))
+    assert bool(jnp.any(jnp.isnan(pressure_band_weight(bad, 5e4, 8e4))))
