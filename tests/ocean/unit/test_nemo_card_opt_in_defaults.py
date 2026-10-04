@@ -541,11 +541,21 @@ def test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises():
     source = Path(
         "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"
     ).read_text()
+    # The guard is SCOPED: the choice between NEMO's statement and
+    # legoESM's live min-rule only exists on a card running NEMO's RK3
+    # momentum program, so that is where the unset value raises.  Both
+    # halves are required -- the scope test and the raise under it.
     guard = re.search(
-        r"if not _slow_depth_eval:\s*\n\s*raise ValueError\(", source)
+        r"if not _slow_depth_eval:\s*\n\s*if _nemo_rk3_family:"
+        r"\s*\n\s*raise ValueError\(", source)
     assert guard is not None, (
-        "the consumer has no unset guard for "
+        "the consumer has no scoped unset guard for "
         "barotropic_slow_forcing_depth_evaluation")
+    assert re.search(
+        r'_nemo_rk3_family = getattr\(\s*\n?\s*_cfg_b, '
+        r'"momentum_time_integrator", "euler"\) in \("rk3", "rk3_ws"\)',
+        source) is not None, (
+        "the guard's scope is not NEMO's RK3 momentum family")
 
     for case in cases:
         if case == "ORCA2-zps":
