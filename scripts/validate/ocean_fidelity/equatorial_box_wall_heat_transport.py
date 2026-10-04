@@ -62,9 +62,9 @@ def band_budget(name, layers, vol_in, heat_in, band_vol, t_band, extra=None):
 
 def ours(a):
     files = sorted(glob.glob(f"{a.snapshot_dir}/snapshot_day*.npz"),
-                   key=lambda f: float(re.search(r"day([0-9]+\.[0-9]+)", f).group(1)))
+                   key=lambda f: float(re.search(r"day([0-9]+(?:\.[0-9]+)?)", f).group(1)))
     h_lo, h_hi = (float(x) for x in a.hours.split("-"))
-    sel = [f for f in files if h_lo < float(re.search(r"day([0-9]+\.[0-9]+)", f).group(1)) * 24.0 <= h_hi + 0.05]
+    sel = [f for f in files if h_lo < float(re.search(r"day([0-9]+(?:\.[0-9]+)?)", f).group(1)) * 24.0 <= h_hi + 0.05]
     if not sel:
         raise SystemExit(f"no snapshot in hours ({h_lo}, {h_hi}]")
     z0 = np.load(sel[0])
@@ -125,7 +125,12 @@ def ours(a):
 
 
 def nemo(a):
-    t = nc.Dataset(a.nemo_t); u = nc.Dataset(a.nemo_u); v = nc.Dataset(a.nemo_v); d = nc.Dataset(a.nemo_trd)
+    t = nc.Dataset(a.nemo_t); u = nc.Dataset(a.nemo_u); v = nc.Dataset(a.nemo_v)
+    # 5-day files carry no trend output: vertical transport then comes from wo x cell area (grid_W)
+    if (a.nemo_trd is None) == (a.nemo_w is None):
+        raise SystemExit("give exactly one of --nemo-trd (hourly trend file) or --nemo-w (grid_W with wo)")
+    d = nc.Dataset(a.nemo_trd) if a.nemo_trd else None
+    wfile = nc.Dataset(a.nemo_w) if a.nemo_w else None
     m = nc.Dataset(a.mesh_mask)
     lat = np.asarray(t.variables["nav_lat"][:]); lon = np.asarray(t.variables["nav_lon"][:])
     gphit = np.asarray(m.variables["gphit"][0])[0:lat.shape[0], 1:1 + lat.shape[1]]
@@ -142,10 +147,10 @@ def nemo(a):
     zc = np.asarray(t.variables["deptht"][:]).ravel()
     ks = [k for k in range(zc.size) if a.z_lo <= zc[k] < a.z_hi]
     r_lo, r_hi = (int(x) for x in a.recs.split("-"))
-    # control: the trend file and the state files must be the same run
-    _tv = "votemper" if "votemper" in d.variables else "to"
-    dchk = float(np.nanmax(np.abs(np.asarray(d.variables[_tv][r_hi, 5]) - np.asarray(t.variables["to"][r_hi, 5]))))
-    print(f"[control] trend-file T vs state-file T at rec {r_hi}, level 5: max|diff| = {dchk:.2e} (must be ~0)")
+    if d is not None:  # control: the trend file and the state files must be the same run
+        _tv = "votemper" if "votemper" in d.variables else "to"
+        dchk = float(np.nanmax(np.abs(np.asarray(d.variables[_tv][r_hi, 5]) - np.asarray(t.variables["to"][r_hi, 5]))))
+        print(f"[control] trend-file T vs state-file T at rec {r_hi}, level 5: max|diff| = {dchk:.2e} (must be ~0)")
     acc_v = {w: 0.0 for w in ("W", "E", "S", "N", "BOT", "TOP")}; acc_h = dict(acc_v); vol = 0.0; tb = 0.0; trd = 0.0
     def g(var, r, k):
         x = np.asarray(var[r, k], dtype=np.float64)
@@ -172,12 +177,14 @@ def nemo(a):
                 rowu[gg] += (uo[gg, i0 - 1:i1] * e3[gg, i0:i1 + 1]).sum(); rowh[gg] += e3[gg, i0:i1 + 1].sum()  # U point i-1 = west face of cell i
             vol += (e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
             tb += (T[j0:j1 + 1, i0:i1 + 1] * e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
-            trd += (g(d.variables["ttrd_totad"], r, k)[j0:j1 + 1, i0:i1 + 1] * e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
+            if d is not None:
+                trd += (g(d.variables["ttrd_totad"], r, k)[j0:j1 + 1, i0:i1 + 1] * e3[j0:j1 + 1, i0:i1 + 1] * A[j0:j1 + 1, i0:i1 + 1]).sum()
         kt, kb = ks[0], ks[-1]
         Tt = g(t.variables["to"], r, kt); Ta = g(t.variables["to"], r, max(kt - 1, 0)); Tb = g(t.variables["to"], r, kb); Tbb = g(t.variables["to"], r, min(kb + 1, zc.size - 1))
-        wt = g(d.variables["wocetr_eff"], r, kt)[j0:j1 + 1, i0:i1 + 1]
+        wtr = (lambda kk: g(d.variables["wocetr_eff"], r, kk)) if d is not None else (lambda kk: g(wfile.variables["wo"], r, kk) * A)
+        wt = wtr(kt)[j0:j1 + 1, i0:i1 + 1]
         acc_v["TOP"] -= wt.sum(); acc_h["TOP"] -= (wt * _upwind(wt, Tt[j0:j1 + 1, i0:i1 + 1], Ta[j0:j1 + 1, i0:i1 + 1])).sum()
-        wb = g(d.variables["wocetr_eff"], r, kb + 1)[j0:j1 + 1, i0:i1 + 1]
+        wb = wtr(kb + 1)[j0:j1 + 1, i0:i1 + 1]
         acc_v["BOT"] += wb.sum(); acc_h["BOT"] += (wb * _upwind(wb, Tbb[j0:j1 + 1, i0:i1 + 1], Tb[j0:j1 + 1, i0:i1 + 1])).sum()
     n = r_hi - r_lo + 1
     for w in acc_v:
@@ -188,13 +195,14 @@ def nemo(a):
         print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}   | T-row lat {lat[gg, i0]:+6.2f} zonal-mean u (thickness-weighted, m/s) {rowu[gg] / rowh[gg]:+8.4f}")
     band_budget(f"NEMO {a.nemo_t.split('/')[-2]} recs {a.recs} ({n} hourly means)", [f"{zc[k]:.1f}" for k in ks],
                 acc_v, acc_h, vol, tb / vol,
-                extra=f"CONTROL NEMO's own ttrd_totad band mean: {trd / vol * 86400:+8.4f} K/day")
+                extra=(f"CONTROL NEMO's own ttrd_totad band mean: {trd / vol * 86400:+8.4f} K/day" if d is not None else None))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--snapshot-dir"); ap.add_argument("--hours", default="24-36")
     ap.add_argument("--nemo-t"); ap.add_argument("--nemo-u"); ap.add_argument("--nemo-v"); ap.add_argument("--nemo-trd")
+    ap.add_argument("--nemo-w", help="grid_W file with wo [m/s, +up]; alternative to --nemo-trd for 5-day means")
     ap.add_argument("--mesh-mask", default="/burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc")
     ap.add_argument("--recs", default="24-35")
     ap.add_argument("--z-lo", type=float, default=20.0); ap.add_argument("--z-hi", type=float, default=40.0)
