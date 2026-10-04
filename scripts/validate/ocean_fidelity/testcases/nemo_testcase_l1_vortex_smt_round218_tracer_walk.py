@@ -69,7 +69,13 @@ DEFAULT_ROOTS = {
                  "round7/VORTEX_SMT_R7_OMIP_L1_P3/tracer"),
 }
 ORDER = ("zfu", "zfv", "zfw", "ww", "adv.T", "adv.S", "out.T", "out.S")
-PLANTS = ORDER
+# Stage 3 is the ONLY stage at which NEMO runs tra_adv_fct under key_RK3
+# (traadv.f90:307-311 forces ll_dofct=.FALSE. for kstg/=3, and :347-352
+# dispatches np_FCT to tra_adv_cen when it is false).  At stage 3 the
+# record's own ``tsm_t/tsm_s`` IS the tracer FCT advects, so it is scored
+# as its own row, and the stage output is the ordinary step output.
+ORDER_S3 = ("zfu", "zfv", "zfw", "ww", "tsm.T", "tsm.S", "out.T", "out.S")
+PLANTS = tuple(dict.fromkeys(ORDER + ORDER_S3))
 
 
 def read_tracer_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
@@ -105,8 +111,21 @@ def read_tracer_terms(root: Path, stage: int) -> dict[str, np.ndarray]:
     return out
 
 
+def _structure(reference, candidate, active) -> dict:
+    """Where an arm's residue sits -- levels and index ranges, no narrative."""
+    bad = (candidate != reference) & active
+    idx = np.argwhere(bad)
+    out = {"n_unequal": int(bad.sum()), "n_active": int(active.sum())}
+    if idx.size and reference.ndim == 3:
+        out["levels"] = np.bincount(
+            idx[:, -1], minlength=reference.shape[-1]).tolist()
+        out["j_range"] = [int(idx[:, 0].min()), int(idx[:, 0].max())]
+        out["i_range"] = [int(idx[:, 1].min()), int(idx[:, 1].max())]
+    return out
+
+
 def run(root: Path, card_key: str, *, plant: str | None = None,
-        allow_dirty: bool = False) -> dict:
+        allow_dirty: bool = False, stage: int = 1) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -125,8 +144,10 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             "precision policy is not fp64/libm")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "this walk must run on CPU")
-    require(plant is None or plant in PLANTS,
-            f"unknown plant {plant!r}; expected one of {PLANTS}")
+    require(stage in (1, 3), f"stage must be 1 or 3; got {stage}")
+    order = ORDER if stage == 1 else ORDER_S3
+    require(plant is None or plant in order,
+            f"unknown plant {plant!r}; expected one of {order}")
     require(card_key in CARDS, f"unknown card key {card_key!r}")
 
     case = CARDS[card_key]
@@ -144,9 +165,11 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                         expect_interior=interior)
     entry2 = read_entry(root / "oracle_step_entry_kt00000002.bin", case,
                         expect_interior=interior)
-    stage1 = read_stage(root / "oracle_stage_kt00000001_s1.bin",
-                        expect_step=1, expect_stage=1)
-    groups = read_tracer_terms(root, 1)
+    stage_state = read_stage(root / f"oracle_stage_kt00000001_s{stage}.bin",
+                             expect_step=1, expect_stage=stage)
+    groups = read_tracer_terms(root, stage)
+    groups_s1 = groups if stage == 1 else read_tracer_terms(root, 1)
+    groups_s2 = None if stage == 1 else read_tracer_terms(root, 2)
     frame = read_bt_frame(root / "oracle_bt_frames_kt00000001.bin",
                           expect_step=1)
     external = (
@@ -164,9 +187,10 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
     # is not at the boundary it claims.
     for tracer, slot in (("T", "out_t"), ("S", "out_s")):
         mismatch = int(np.count_nonzero(
-            groups[slot][..., :nlev] != np.asarray(stage1[tracer])[..., :nlev]))
+            groups[slot][..., :nlev]
+            != np.asarray(stage_state[tracer])[..., :nlev]))
         require(mismatch == 0,
-                f"the tracer record's {slot} differs from the stage-1 state "
+                f"the tracer record's {slot} differs from the stage-{stage} state "
                 f"record in {mismatch} cells: the writer is not at the "
                 "boundary it claims")
 
@@ -192,7 +216,8 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             require(active_idx.size > 0, f"{label}: empty scored support")
             candidate = candidate.copy()
             candidate[tuple(active_idx[len(active_idx) // 2])] += 1.0
-        row = score(f"{case}.stage1.{label}", reference, candidate, mask)
+        row = score(f"{case}.stage{stage}.{label}", reference, candidate,
+                    mask)
         active = np.asarray(mask, dtype=bool)
         delta = candidate - reference
         row["cells_unequal"] = int(np.count_nonzero(
@@ -216,10 +241,10 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         rows.append(row)
         return row
 
-    # ---- 1. the stage-1 tracer transports, AS tra_adv receives them ------
+    # ---- 1. the stage tracer transports, AS tra_adv receives them --------
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
-        expose_tracer_transport_stage=1)
+        expose_tracer_transport_stage=stage)
     fields = lego_fields(model_step(hooks))
     for face in ("u", "v"):
         require_live("zf" + face, face, np.asarray(fields[face])[..., :nlev],
@@ -227,50 +252,85 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         _row(f"zf{face}", groups[f"zf{face}"][..., :nlev],
              np.asarray(fields[face])[..., :nlev], masks[face],
              "zFu/zFv as tra_adv receives them, with the partial-cell "
-             "reference face thickness (stprk3_stg.f90:276-277, :463)",
+             "reference face thickness (stprk3_stg.f90:276-277, :463) "
+             f"[stage {stage}]",
              plant == f"zf{face}")
     require_live("zfw", "T", np.asarray(fields["T"])[..., :nlev], plain["T"])
     _row("zfw", groups["zfw"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
-         "zFw as tra_adv receives it (stprk3_stg.f90:301, :463)",
+         "zFw as tra_adv receives it (stprk3_stg.f90:301, :463)"
+         f" [stage {stage}]",
          plant == "zfw")
 
-    # ---- 2. the stage-1 continuity solve without the metric --------------
+    # ---- 2. the stage continuity solve without the metric ----------------
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
-        expose_tracer_transport_stage=1, expose_tracer_transport_as_ww=True)
+        expose_tracer_transport_stage=stage, expose_tracer_transport_as_ww=True)
     fields = lego_fields(model_step(hooks))
     require_live("ww", "T", np.asarray(fields["T"])[..., :nlev], plain["T"])
     _row("ww", groups["ww"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
-         "ww after the stage continuity solve (stprk3_stg.f90:298)",
+         "ww after the stage continuity solve (stprk3_stg.f90:298)"
+         f" [stage {stage}]",
          plant == "ww")
 
-    # ---- 3. the tracer right-hand side after FCT + the surface flux ------
-    hooks = _NEMOWSRK3TestHooks(
-        stage_barotropic_output_override=external,
-        expose_tracer_stage1_boundary="after_sbc")
-    fields = lego_fields(model_step(hooks))
-    for tracer, slot in (("T", "adv_t"), ("S", "adv_s")):
-        require_live(f"adv.{tracer}", tracer,
-                     np.asarray(fields[tracer])[..., :nlev], plain[tracer])
-        _row(f"adv.{tracer}", groups[slot][..., :nlev],
-             np.asarray(fields[tracer])[..., :nlev], masks["T"],
-             "ts(Krhs) after tra_adv + tra_sbc_RK3 "
-             "(stprk3_stg.f90:519,521; traadv_fct.f90:327)",
-             plant == f"adv.{tracer}")
+    if stage == 1:
+        # ---- 3. the tracer right-hand side after CEN2 + the surface flux --
+        # At stage 1 ``ll_dofct`` is FALSE (traadv.f90:307-311), so this row
+        # scores the CENTRED path, not FCT.
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            expose_tracer_stage1_boundary="after_sbc")
+        fields = lego_fields(model_step(hooks))
+        for tracer, slot in (("T", "adv_t"), ("S", "adv_s")):
+            require_live(f"adv.{tracer}", tracer,
+                         np.asarray(fields[tracer])[..., :nlev], plain[tracer])
+            _row(f"adv.{tracer}", groups[slot][..., :nlev],
+                 np.asarray(fields[tracer])[..., :nlev], masks["T"],
+                 "ts(Krhs) after tra_adv + tra_sbc_RK3 "
+                 "(stprk3_stg.f90:519,521; traadv_cen.f90 via "
+                 "traadv.f90:347-352)",
+                 plant == f"adv.{tracer}")
 
-    # ---- 4. the stage-1 after-tracer -------------------------------------
-    hooks = _NEMOWSRK3TestHooks(
-        stage_barotropic_output_override=external, expose_tracer_stage=1)
-    fields = lego_fields(model_step(hooks))
-    for tracer, slot in (("T", "out_t"), ("S", "out_s")):
-        require_live(f"out.{tracer}", tracer,
-                     np.asarray(fields[tracer])[..., :nlev], plain[tracer])
-        _row(f"out.{tracer}", groups[slot][..., :nlev],
-             np.asarray(fields[tracer])[..., :nlev], masks["T"],
-             "ts(Kaa) after the qco thickness-weighted stage step "
-             "(stprk3_stg.f90:552-554)", plant == f"out.{tracer}")
+        # ---- 4. the stage-1 after-tracer ----------------------------------
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external, expose_tracer_stage=1)
+        fields = lego_fields(model_step(hooks))
+        for tracer, slot in (("T", "out_t"), ("S", "out_s")):
+            require_live(f"out.{tracer}", tracer,
+                         np.asarray(fields[tracer])[..., :nlev], plain[tracer])
+            _row(f"out.{tracer}", groups[slot][..., :nlev],
+                 np.asarray(fields[tracer])[..., :nlev], masks["T"],
+                 "ts(Kaa) after the qco thickness-weighted stage step "
+                 "(stprk3_stg.f90:552-554)", plant == f"out.{tracer}")
+    else:
+        # ---- 3. the tracer tra_adv_fct RECEIVES, ts(Kmm) at stage 3 -------
+        # stprk3_stg.f90:519 hands tra_adv the stage-2 Kaa tracer; the record
+        # writes it as tsm_t/tsm_s at the same boundary.
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external, expose_tracer_stage=2)
+        fields = lego_fields(model_step(hooks))
+        for tracer, slot in (("T", "tsm_t"), ("S", "tsm_s")):
+            require_live(f"tsm.{tracer}", tracer,
+                         np.asarray(fields[tracer])[..., :nlev], plain[tracer])
+            _row(f"tsm.{tracer}", groups[slot][..., :nlev],
+                 np.asarray(fields[tracer])[..., :nlev], masks["T"],
+                 "ts(Kmm) as tra_adv_fct receives it at stage 3 "
+                 "(stprk3_stg.f90:519; the stage-2 Kaa tracer)",
+                 plant == f"tsm.{tracer}")
+
+        # ---- 4. the stage-3 after-tracer: the ORDINARY step output --------
+        # NEMO writes ``out`` after the stage-3 SELECT CASE, i.e. after
+        # tra_zdf (stprk3_stg.F90:618).  legoESM has no seam there and needs
+        # none: stage 3 ENDS the tracer program, so the production step
+        # output IS that array.  There is no seam to control, and this row
+        # says so rather than pretending one ran.
+        for tracer, slot in (("T", "out_t"), ("S", "out_s")):
+            _row(f"out.{tracer}", groups[slot][..., :nlev],
+                 np.asarray(plain[tracer])[..., :nlev], masks["T"],
+                 "ts(Kaa) after the stage-3 tra_zdf, i.e. the ordinary step "
+                 "output (stprk3_stg.f90:556-618)",
+                 plant == f"out.{tracer}")
 
     # ---- 5. THE ONE-VARIABLE ARM: NEMO's transports, everything else ours
     carrier_rows: list[dict] = []
@@ -299,18 +359,36 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                 "the recorded zFw is identically zero over the scored "
                 "support; the vertical half of the transport arm would be "
                 "vacuous")
-        override = (
-            jnp.asarray(groups["zfu"][..., :nlev]),
-            jnp.asarray(groups["zfv"][..., :nlev]),
-            jnp.asarray(groups["zfw"]),
-        )
-        for exposure, slots in (("after_sbc", ("adv_t", "adv_s")),
-                                ("stage", ("out_t", "out_s"))):
-            kwargs = {"stage_barotropic_output_override": external,
-                      "stage1_tracer_transport_override": override}
+        def _triplet(src):
+            return (
+                jnp.asarray(src["zfu"][..., :nlev]),
+                jnp.asarray(src["zfv"][..., :nlev]),
+                jnp.asarray(src["zfw"]),
+            )
+        override = _triplet(groups)
+        if stage == 1:
+            exposures = (("after_sbc", ("adv_t", "adv_s")),
+                         ("stage", ("out_t", "out_s")))
+        else:
+            # Stage 3 is the END of the tracer program, so the ordinary step
+            # output is the row; one exposure, no seam.
+            exposures = (("plain", ("out_t", "out_s")),)
+        for exposure, slots in exposures:
+            kwargs = {"stage_barotropic_output_override": external}
+            if stage == 1:
+                kwargs["stage1_tracer_transport_override"] = override
+            else:
+                # EVERY stage's transports come from NEMO's own record, so
+                # the FCT call at stage 3 sees NEMO's zFu/zFv/zFw AND a Kmm
+                # tracer built on NEMO's stage-1/2 transports.  Nothing else
+                # is substituted: the partial-cell divisors inside
+                # traadv_fct.f90 stay legoESM's.
+                kwargs["stage1_tracer_transport_override"] = _triplet(groups_s1)
+                kwargs["stage2_tracer_transport_override"] = _triplet(groups_s2)
+                kwargs["stage3_transport_override"] = override
             if exposure == "after_sbc":
                 kwargs["expose_tracer_stage1_boundary"] = "after_sbc"
-            else:
+            elif exposure == "stage":
                 kwargs["expose_tracer_stage"] = 1
             carried = lego_fields(model_step(_NEMOWSRK3TestHooks(**kwargs)))
             for tracer, slot in zip(("T", "S"), slots):
@@ -324,12 +402,11 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                 reference = groups[slot][..., :nlev]
                 candidate = np.asarray(carried[tracer])[..., :nlev]
                 active = np.asarray(masks["T"], dtype=bool)
+                _label = "adv" if exposure == "after_sbc" else "out"
                 before = next(r for r in rows
-                              if r["name"].endswith(
-                                  f".{'adv' if exposure == 'after_sbc' else 'out'}"
-                                  f".{tracer}"))
+                              if r["name"].endswith(f".{_label}.{tracer}"))
                 carrier_rows.append({
-                    "name": f"{case}.stage1.nemo_transport.{slot}",
+                    "name": f"{case}.stage{stage}.nemo_transport.{slot}",
                     "cells_unequal": int(np.count_nonzero(
                         (candidate != reference)[active])),
                     "max_abs": float(np.max(np.abs(
@@ -343,11 +420,63 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                     "nemo_boundary": (
                         "the same boundary, with NEMO's recorded zFu/zFv/zFw "
                         "as the ONLY substituted operand"),
+                    "structure": _structure(reference, candidate, active),
                 })
+
+    # ---- 6. STAGE 3 ONLY: NEMO's whole stage-3 ENTRY as well -------------
+    # The arm above leaves legoESM's own Kmm tracer in place, and that tracer
+    # already carries the one-ULP residue of the qco stage step
+    # (stprk3_stg.f90:552-554), so a non-zero result there cannot separate an
+    # FCT statement from inherited last-bit noise.  This arm hands stage 3
+    # NEMO's recorded stage-2 state (u, v, T, S, ssh -- the ``Kmm`` operands
+    # of stprk3_stg.f90:519) together with NEMO's recorded stage-3
+    # transports, so every operand tra_adv_fct reads is NEMO's and the only
+    # things left of legoESM's are the FCT statements themselves and their
+    # partial-cell divisors.
+    if stage == 3 and plant is None:
+        s2 = read_stage(root / "oracle_stage_kt00000001_s2.bin",
+                        expect_step=1, expect_stage=2)
+        entry = (3,
+                 jnp.asarray(_u_full(s2["u"][..., :nlev])),
+                 jnp.asarray(_v_full(s2["v"][..., :nlev])),
+                 jnp.asarray(s2["T"][..., :nlev]),
+                 jnp.asarray(s2["S"][..., :nlev]),
+                 jnp.asarray(s2["ssh"]))
+        carried = lego_fields(model_step(_NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            stage_entry_override=entry,
+            stage3_transport_override=_triplet(groups))))
+        for tracer, slot in (("T", "out_t"), ("S", "out_s")):
+            require_live(f"nemo_stage3_entry.{slot}", tracer,
+                         np.asarray(carried[tracer])[..., :nlev],
+                         plain[tracer])
+            reference = groups[slot][..., :nlev]
+            candidate = np.asarray(carried[tracer])[..., :nlev]
+            active = np.asarray(masks["T"], dtype=bool)
+            before = next(r for r in rows
+                          if r["name"].endswith(f".out.{tracer}"))
+            carrier_rows.append({
+                "name": f"{case}.stage3.nemo_stage3_entry.{slot}",
+                "cells_unequal": int(np.count_nonzero(
+                    (candidate != reference)[active])),
+                "max_abs": float(np.max(np.abs(
+                    (candidate - reference)[active]))),
+                "max_abs_before": before["max_abs"],
+                "relative_max_abs": float(np.max(np.abs(
+                    (candidate - reference)[active]))) / max(
+                        float(np.max(np.abs(reference[active]))), 1.0e-300),
+                "execution_regime": "production_step_jit",
+                "nemo_boundary": (
+                    "NEMO's recorded stage-2 state AND stage-3 transports; "
+                    "only the FCT statements and their partial-cell divisors "
+                    "are legoESM's"),
+                "structure": _structure(reference, candidate, active),
+            })
 
     first = next((r for r in rows if not r["bit_exact"]), None)
     report = {
         "case": case, "oracle_root": str(root), "legoesm_git_sha": sha,
+        "stage": stage,
         "plant": plant, "rows": rows, "carrier_rows": carrier_rows,
         "first_non_bit": first["name"] if first else None,
         "first_non_bit_max_abs": first["max_abs"] if first else 0.0,
@@ -364,12 +493,15 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=PLANTS)
     parser.add_argument("--clean-report", type=Path)
+    parser.add_argument("--stage", type=int, choices=(1, 3),
+                        default=1)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     root = args.oracle_dir or DEFAULT_ROOTS[args.card]
     try:
         report = run(root, args.card, plant=args.plant,
-                     allow_dirty=args.allow_dirty)
+                     allow_dirty=args.allow_dirty,
+                     stage=args.stage)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
@@ -398,8 +530,11 @@ def main(argv=None) -> int:
         clean = (json.loads(args.clean_report.read_text())
                  if args.clean_report
                  else run(root, args.card, plant=None,
-                          allow_dirty=args.allow_dirty))
-        if clean.get("case") != report["case"] or clean.get("plant"):
+                          allow_dirty=args.allow_dirty,
+                          stage=args.stage))
+        if (clean.get("case") != report["case"]
+                or clean.get("plant")
+                or clean.get("stage") != report["stage"]):
             print("REFUSE: --clean-report is not an unplanted report for "
                   f"{report['case']}", file=sys.stderr)
             return 2
