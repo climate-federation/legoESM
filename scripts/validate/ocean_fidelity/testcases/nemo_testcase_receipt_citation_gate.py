@@ -1327,9 +1327,6 @@ CITATION_MAP = {
         '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
         'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910-913': [
-        'zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji,jj+1,ik) ),',
-        'pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 4],
     'advection.py:958-970': [
         ('raise ValueError(', 2),
         '"NEMO trace returns require the NEMO RK3 two-step predictor")', 13],
