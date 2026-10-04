@@ -144,8 +144,29 @@ def run(root: Path, card_key: str, *, allow_dirty: bool = False) -> dict:
                 "r3_peak": float(np.max(np.abs(r3[live]))),
             })
 
+    # The card's own PARTIAL-CELL CENSUS, from the same resolved operand set.
+    # The stage-3 arms' residue is read against this: a level with no partial
+    # cell cannot carry a partial-cell statement.  Counted, not recalled.
+    dz_ref = np.asarray(zc.dz_ref, dtype=np.float64)
+    require(dz_ref.shape == (nlev,),
+            f"the card's reference ladder is {dz_ref.shape}, expected ({nlev},)")
+    active = np.asarray(zc.is_active, dtype=bool)
+    census = []
+    for jk in range(nlev):
+        wet = active[..., jk]
+        partial = wet & (e3t0[..., jk] != dz_ref[jk])
+        census.append({
+            "level": jk + 1,
+            "wet_cells": int(wet.sum()),
+            "partial_cells": int(partial.sum()),
+            "reference_dz_m": float(dz_ref[jk]),
+            "thinnest_e3t_0_m": (
+                float(e3t0[..., jk][wet].min()) if wet.any() else 0.0),
+        })
+
     bt = read_bt_frame(root / "oracle_bt_frames_kt00000001.bin", expect_step=1)
     return {
+        "partial_cell_census": census,
         "case": case, "oracle_root": str(root), "legoesm_git_sha": sha,
         "nlev": nlev, "bt_frame_fields": sorted(bt),
         "column_depth_min": float(h0[h0 > 0].min()),
@@ -178,6 +199,9 @@ def main(argv=None) -> int:
                   c=row["columns_tested"], u=row["r3_cells_unequal"],
                   m=row["r3_max_abs_diff"],
                   h=row["implied_ht0_max_rel_diff"]))
+    for row in report["partial_cell_census"]:
+        print("k={level:2d} wet={wet_cells:5d} partial={partial_cells:5d} "
+              "thinnest_e3t_0={thinnest_e3t_0_m:.3f}".format(**row))
     print("all r3 bit-identical:", report["all_r3_bit_identical"])
     return 0
 
