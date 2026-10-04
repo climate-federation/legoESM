@@ -220,6 +220,8 @@ def compute_simple_seb_fluxes(
         # Cold-start condensation floor (issue #730): bound the spurious (negative)
         # condensation shock BEFORE it enters G_soil / the returned demand;
         # evaporation (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
+        # On the layered path it bounds each component (snow, soil) per unit of its
+        # own area before the f / (1-f) weighting, so the cell total stays >= floor.
         if LAND_CONDENSATION_FLOOR_W is not None:
             lh = jnp.maximum(lh, LAND_CONDENSATION_FLOOR_W)
         return tx, ty, sh, lh

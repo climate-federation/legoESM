@@ -1033,6 +1033,11 @@ def _step_multilayer_land_impl(
         # SimpleSEB already computes the snow and soil exchange separately and
         # returns the pack's share (``LE_snow``, f-weighted); taking f of its
         # f-blended total again put only ~f^2 of the snow's potential on the pack.
+        if scheme_is_seb and surface_out.LE_snow is None:
+            raise ValueError(
+                "layered snow with SimpleSEB needs the scheme's pack share "
+                "(SurfaceFluxOutput.LE_snow): call compute_simple_seb_fluxes with "
+                "snow_cover=f.")
         snow_latent = (surface_out.LE_snow if scheme_is_seb else
                        f_snow * (lhflx_ground
                                  + jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0)))
@@ -1551,6 +1556,21 @@ def _step_multilayer_land_impl(
         # (SimpleSEB's is already f-blended), never the binary ice override,
         # so the exported humidity and the realised flux agree in sign.
         q_sfc_new = surface_out.q_surface
+        if surface_out.LE_snow is not None:
+            # SimpleSEB with separate snow / soil exchange: its area-mean humidity
+            # carries the DEMAND vapour flux (one transfer coefficient), which is
+            # neither the latent energy (L_s / L_v weighted) nor the REALISED flux
+            # after the pack and soil supply limits (a dry soil can turn a net
+            # demand of evaporation into net frost).  Rescale the humidity
+            # gradient by realised / demand vapour flux so the exported humidity
+            # implies the vapour flux actually handed to the atmosphere.
+            E_demand = (surface_out.LE_snow / _L_s_T
+                        + (lhflx - surface_out.LE_snow) / _L_v_T)
+            E_realised = sublim_actual + soil_evap
+            _has_demand = jnp.abs(E_demand) > 1e-12
+            _ratio = jnp.where(
+                _has_demand, E_realised / jnp.where(_has_demand, E_demand, 1.0), 1.0)
+            q_sfc_new = forcing.q_lowest + _ratio * (q_sfc_new - forcing.q_lowest)
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":

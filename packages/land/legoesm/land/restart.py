@@ -66,6 +66,9 @@ _MULTILAYER_FIELDS = (
 # holds real mass, so it must round-trip or the warm start leaks it.  Serialised
 # like ``TgC``: written only when not None, grafted on merge only when both the
 # restart and the template carry it.
+# The layered pack's four fields: all present or none (_require_whole_snow_layer_set).
+_SNOW_LAYER_FIELDS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers",
+                      "snow_rho_layers")
 _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     "surface_water", "snow_bands", "snow_age_bands", "ice_bands",
     # Intercepted canopy-water store (present iff interception is enabled); real
@@ -73,10 +76,8 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     "W_canopy",
     # Layered snowpack (present iff snow_scheme == "layered"): the pack's water,
     # enthalpy and density, which snow_depth alone cannot rebuild.
-    "snow_ice_layers", "snow_liq_layers", "snow_T_layers", "snow_rho_layers",
+    *_SNOW_LAYER_FIELDS,
 )
-_SNOW_LAYER_FIELDS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers",
-                      "snow_rho_layers")
 
 
 def _require_whole_snow_layer_set(present, where):

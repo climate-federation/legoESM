@@ -527,11 +527,13 @@ def test_exported_humidity_agrees_with_latent_flux_sign(scheme, q_air):
     f = _forcing(n, T_air=272.0, sw=600.0, lw=260.0, q=q_air)
     _, out = _run(cfg, st, f, 2, 300.0, lp=lp)
     for _, resp, sfc in out:
-        # the exported humidity IS the one the scheme solved its flux with
-        np.testing.assert_allclose(resp.q_surface, sfc.q_surface, rtol=0, atol=0)
-        lh = np.asarray(resp.lhflx)
+        if two:   # the exported humidity IS the one the canopy solved its flux with
+            np.testing.assert_allclose(resp.q_surface, sfc.q_surface, rtol=0, atol=0)
+        # SimpleSEB exports the humidity of the REALISED vapour flux (its sign is
+        # the vapour flux's; see the mixed-sign test below)
+        lh = np.asarray(resp.lhflx if two else resp.surface_mass_flux)
         dq = np.asarray(resp.q_surface) - q_air
-        big = np.abs(lh) > 0.1
+        big = np.abs(lh) > (0.1 if two else 0.1 / constants.L_s)   # 0.1 W/m2
         assert big.any()
         assert np.all(np.sign(lh[big]) == np.sign(dq[big])), (lh, dq)
 
@@ -614,3 +616,35 @@ def test_partial_cover_sublimation_scales_with_f_not_f_squared(swe):
     np.testing.assert_allclose(lh[f].lhflx, f * lh[1.0].lhflx + (1 - f) * lh[0.0].lhflx,
                                rtol=1e-12)
     np.testing.assert_allclose(lh[f].LE_snow, f * lh[1.0].lhflx, rtol=1e-12)
+
+
+@pytest.mark.parametrize("frac", [0.2, 0.5, 0.8])
+@pytest.mark.parametrize("dry", [False, True])
+def test_exported_humidity_implies_realised_vapour_flux_mixed_sign(frac, dry):
+    """SimpleSEB, partial pack, air humidity BETWEEN ice and liquid saturation at
+    the skin: the snow frosts while the soil evaporates, so the vapour and the
+    latent-energy fluxes can differ in sign, and a dry soil can turn a net
+    evaporation demand into net frost.  The exported humidity must sit on the
+    side of the air humidity given by the REALISED vapour flux (the area-mean
+    demand humidity did not, once the dry soil failed to supply its share)."""
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
+    from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+    cfg = _cfg(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
+    hc = cfg.hydraulics
+    tfl = float(jnp.max(theta_from_psi(psi_dry_floor(hc), hc)))
+    s = init_multilayer_land_state(1, cfg, T_init=268.0,
+                                   theta_init=(tfl + 1.0e-3) if dry else 0.3)
+    s = seed_snow_layers(s._replace(psi_soil=psi_from_theta(s.theta_soil, hc),
+                                    snow_depth=jnp.full(1, 15.0)), cfg)
+    T_skin, p = s.T_soil[:, 0], jnp.full(1, 1.0e5)
+    q_ice = float(saturation_mixing_ratio_ice(T_skin, p)[0])
+    q_liq = float(saturation_mixing_ratio(T_skin, p)[0])
+    q_air = q_ice + frac * (q_liq - q_ice)
+    _, out = _run(cfg, s, _forcing(1, T_air=268.0, sw=0.0, lw=280.0, q=q_air), 1, 1800.0)
+    _, resp, _ = out[0]
+    E = float(resp.surface_mass_flux[0])
+    dq = float(resp.q_surface[0]) - q_air
+    assert abs(E) > 1e-9, E
+    assert np.sign(dq) == np.sign(E), (frac, dry, E, dq)
