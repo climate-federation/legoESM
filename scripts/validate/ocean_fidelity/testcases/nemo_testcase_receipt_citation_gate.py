@@ -5668,6 +5668,30 @@ CITATION_MAP = {
         ('nn_fct_imp )', 1),
         3,
     ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610': [
+        ('! *** 1st step', 1),
+        ('pt_up1(ji,jj,jk) =', 2),
+        ('! *** 2nd step', 1),
+        116,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-200,260-280': [
+        ('!* horizontal anti-diffusive fluxes', 1),
+        ('!* vertical anti-diffusive fluxes', 1),
+        ('ztFw(ji,jj,jk) =', 2),
+        29,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:314-316,743-938': [
+        ('CALL nonosc(', 1),
+        ('SUBROUTINE nonosc(', 1),
+        ('END SUBROUTINE nonosc', 1),
+        199,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:318-330': [
+        ('! -- Final trend with corrected fluxes', 1),
+        ('pt(ji,jj,jk,jn,Krhs) =', 1),
+        ('zta_up1(ji,jj,jk) =', 1),
+        13,
+    ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
         ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
