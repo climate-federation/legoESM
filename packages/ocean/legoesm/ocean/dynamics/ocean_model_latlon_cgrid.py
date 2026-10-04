@@ -5666,6 +5666,8 @@ class LatLonCGridOceanModel:
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
+        _fct_input_exposure = (
+            self._nemo_ws_test_hooks.expose_stage3_fct_inputs)
         if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
             _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
         state = cast_pytree(state, None, "compute")
