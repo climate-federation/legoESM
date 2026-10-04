@@ -15,11 +15,11 @@ routine then executes, in order:
 1. the two-step upstream predictor and averaged low-order fluxes
    (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610`);
 2. centred high-order minus low-order antidiffusive fluxes
-   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-200,260-280`);
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266`);
 3. the nonoscillatory limiter
-   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:314-316,743-938`);
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:316,743-938`);
 4. the final corrected-flux divergence and RHS accumulation
-   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:318-330`).
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329`).
 
 The committed probe advances the ordinary production-JIT CPU/fp64/x64/libm
 trajectory through step 35 and repeats round 133's ordinary step-36 result.

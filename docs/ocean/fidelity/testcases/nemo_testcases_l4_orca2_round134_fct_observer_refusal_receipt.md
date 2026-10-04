@@ -27,11 +27,11 @@ routine the required source order is:
 1. the two-step upstream predictor and low-order fluxes at
    `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610`;
 2. the horizontal and vertical antidiffusive fluxes at
-   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-200,260-280`;
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266`;
 3. the limiter call and implementation at
-   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:314-316,743-938`;
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:316,743-938`;
 4. the corrected divergence and final RHS at
-   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:318-330`.
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329`.
 
 The first attempt enabled the existing same-JIT FCT trace. The second called
 ordinary FCT and copied its ten exact inputs through an ordered callback,
@@ -91,4 +91,3 @@ system`. Verdict: **independent review unavailable in-sandbox**.
    the parked hierarchy decks or climb to rung 1 until rung 0 is finite.
 4. Round 129's barotropic association arm remains held; its salinity exposure
    is not part of this tree.
-

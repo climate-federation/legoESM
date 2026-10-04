@@ -5672,27 +5672,26 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-610': [
         ('! *** 1st step', 1),
-        ('pt_up1(ji,jj,jk) =', 2),
-        ('! *** 2nd step', 1),
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt_b(ji,jj,jk) + zDt * ztra ) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem', 1),
         116,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-200,260-280': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:193-197,260-266': [
         ('!* horizontal anti-diffusive fluxes', 1),
+        ('ztFu(ji,jj,jk) =', 1),
         ('!* vertical anti-diffusive fluxes', 1),
-        ('ztFw(ji,jj,jk) =', 2),
-        29,
+        ('- ztFw(ji,jj,jk)  ) * wmask(ji,jj,jk)', 1),
+        12,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:314-316,743-938': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:316,743-938': [
         ('CALL nonosc(', 1),
         ('SUBROUTINE nonosc(', 1),
         ('END SUBROUTINE nonosc', 1),
-        199,
+        197,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:318-330': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329': [
         ('! -- Final trend with corrected fluxes', 1),
-        ('pt(ji,jj,jk,jn,Krhs) =', 1),
         ('zta_up1(ji,jj,jk) =', 1),
-        13,
+        10,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
