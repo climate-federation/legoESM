@@ -32,8 +32,27 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 # hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
 
+# Read before argparse: this hook runs before the driver config can be
+# imported.  Mirrors ExperimentConfig.distributed_mode's default ("mpi";
+# pinned by tests/unit/test_run_amip_cli.py).
+_ARGV_DISTRIBUTED_MODE_DEFAULT = "mpi"
+
+
+def _argv_distributed_mode(argv: list[str]) -> str:
+    """``--distributed-mode`` as typed on the command line, or the default."""
+    for i, a in enumerate(argv):
+        if a.startswith("--distributed-mode="):
+            return a.split("=", 1)[1]
+        if a == "--distributed-mode" and i + 1 < len(argv):
+            return argv[i + 1]
+    return _ARGV_DISTRIBUTED_MODE_DEFAULT
+
+
 if "--multicontroller" not in sys.argv:
-    maybe_init_jax_distributed()
+    # Only the multi-controller SPMD lane federates jax.distributed across
+    # hosts; the mpi4jax lane must not (the mixed stack deadlocks).
+    maybe_init_jax_distributed(
+        federate=_argv_distributed_mode(sys.argv) == "spmd")
 
 from legoesm.driver.config import (
     VALID_RADIATION,

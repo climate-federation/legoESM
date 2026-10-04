@@ -587,6 +587,30 @@ def test_hostname_undergrouping_falls_back_to_the_shm_split(monkeypatch):
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
 
+def test_mpi_lane_never_federates_across_hosts(monkeypatch, capsys):
+    """``federate=False`` (run_amip's mpi4jax lane) on a two-host launch:
+    the GPU pin still happens, ``jax.distributed.initialize`` is never
+    called.  A jax.distributed federation on top of mpi4jax deadlocks
+    (measured, job 10201641).
+
+    Non-vacuous: drop the ``federate`` branch and the stub's initialize
+    fires (assert below) and the call returns True.
+    """
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    _stub_mpi(monkeypatch, rank=0, hosts=["g194", "g194", "g283", "g283"])
+    jax = _stub_jax(monkeypatch, process_count=4)
+    fired = []
+    jax.distributed = types.SimpleNamespace(
+        initialize=lambda **kw: fired.append(kw))
+    assert ei.maybe_init_jax_distributed(federate=False) is False
+    assert fired == []
+    assert ei._INITIALIZED is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "jax.distributed NOT initialised" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     "jax_platforms, jax_platform_name, expect_non_gpu",
     [

@@ -9,7 +9,9 @@ import pytest
 
 from legoesm import constants
 from scripts.run.run_amip import (
+    _ARGV_DISTRIBUTED_MODE_DEFAULT,
     _apply_aimip_classical_overrides,
+    _argv_distributed_mode,
     _apply_spectral_scheme_fallback,
     _postprocess_args,
     _print_forcing_activity,
@@ -4584,3 +4586,20 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
                    "land_update_seconds", "land_calibrated_physics",
                    "mpas_land_beta", "mpas_land_beta_soil", "mpas_ice_skin_prognostic"):
         assert needle in msg, needle
+
+
+def test_argv_distributed_mode_matches_the_parser_and_config_default():
+    """The import-time federation decision reads argv by hand (before the
+    driver config can be imported); it must agree with argparse on every
+    spelling and with ExperimentConfig's default when the flag is absent.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    assert _ARGV_DISTRIBUTED_MODE_DEFAULT == ExperimentConfig().distributed_mode
+    p = build_arg_parser()
+    for argv in (["--distributed-mode", "spmd"], ["--distributed-mode=spmd"],
+                 ["--days", "1", "--distributed-mode", "spmd", "--distributed"],
+                 ["--distributed"], []):
+        assert _argv_distributed_mode(argv) == p.parse_args(argv).distributed_mode
+    # a trailing bare flag has no value: the default, same as argparse would
+    # refuse -- we never federate on a half-typed flag
+    assert _argv_distributed_mode(["--distributed-mode"]) == "mpi"

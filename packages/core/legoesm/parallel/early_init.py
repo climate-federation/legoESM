@@ -871,7 +871,8 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     _warn_missing_nccl_plugin(rank=proc_id)
 
 
-def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
+def maybe_init_jax_distributed(coordinator_port: int | None = None, *,
+                               federate: bool = True) -> bool:
     """Initialize ``jax.distributed`` if running under multi-node MPI.
 
     Detects the MPI world size from the environment (SLURM_NTASKS /
@@ -894,6 +895,15 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     ``coordinator_port=None`` (default) resolves the port via
     :func:`resolve_coordinator_port` (env override / job-id-derived /
     legacy 1234).
+
+    ``federate=False`` keeps the per-rank GPU pin and the duplicate-binding
+    tripwire but NEVER calls ``jax.distributed.initialize()``, whatever the
+    host span.  That is the mpi4jax lane (``distributed_mode='mpi'``): its
+    ranks talk over MPI only, and a jax.distributed federation on top of
+    mpi4jax deadlocks (``reductions.is_distributed`` documents the mixed
+    stack; measured 2026-10-04 on a 2x2 Ginsburg MPAS run, job 10201641:
+    three GPUs spinning in an XLA collective, rank 0 polling MPI, silent
+    for an hour).  Only the multi-controller SPMD lane federates.
     """
     global _INITIALIZED
     if _INITIALIZED:
@@ -1074,6 +1084,13 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
         # GPU binding was already applied above (#1516); unpinned, every
         # local rank boots on default GPU 0 and the job completes with
         # most of the hardware idle.
+        return False
+    if not federate:
+        if rank == 0:
+            print(f"[early_init] {size} ranks on {len(set(hosts))} hosts, "
+                  "mpi4jax lane: jax.distributed NOT initialised (each rank "
+                  "is its own JAX process; MPI carries the exchange)",
+                  flush=True)
         return False
 
     import jax
