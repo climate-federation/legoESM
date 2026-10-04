@@ -5749,11 +5749,11 @@ CITATION_MAP = {
     # --- ORCA2 card round 137: level-3 FCT limiter-coefficient walk
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910-913': [
         ('zcoef = MERGE( MIN( 1._wp, zbetdo(ji,jj,ik), zbetup(ji,jj+1,ik) )', 1),
-        ('pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 1),
+        ('pbb(ji,jj,jk) = pbb(ji,jj,jk) * zcoef', 2),
         4,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:853-878': [
-        ('zup = MAX(', 1),
+        ('zup = MAX(', 2),
         ('zbetdo(ji,jj,ik) = ( paft(ji,jj,jk) - zdo ) / zneg * zbt', 1),
         26,
     ],
