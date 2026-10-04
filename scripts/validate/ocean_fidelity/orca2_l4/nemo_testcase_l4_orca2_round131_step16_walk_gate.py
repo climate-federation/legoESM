@@ -27,6 +27,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 BOUNDARIES = (
     "step15_entry",
+    "stage1_transport",
+    "stage1_after_advection",
+    "stage1_after_sbc",
     "stage1_tracer",
     "stage2_tracer",
     "stage3_advection_content",
@@ -157,8 +160,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         "R131-P3": {
             "status": ("CONFIRMED" if first == "stage3_advection_content"
                        and all(report["boundaries"][name]["nonfinite_total"]
-                               for name in BOUNDARIES[3:]) else "REFUTED"),
-            "observed": [name for name in BOUNDARIES[3:]
+                               for name in BOUNDARIES[
+                                   BOUNDARIES.index(
+                                       "stage3_advection_content"):])
+                       else "REFUTED"),
+            "observed": [name for name in BOUNDARIES[
+                              BOUNDARIES.index("stage3_advection_content"):]
                          if report["boundaries"][name]["nonfinite_total"]],
         },
         "R131-P4": {
@@ -230,6 +237,12 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
             state15, card.dt_s, freshwater=freshwater,
             surface_forcing=surface))
 
+    transport1 = exposed(_NEMOWSRK3TestHooks(
+        expose_tracer_transport_stage=1))
+    after_advection1 = exposed(_NEMOWSRK3TestHooks(
+        expose_tracer_stage1_boundary="after_advection"))
+    after_sbc1 = exposed(_NEMOWSRK3TestHooks(
+        expose_tracer_stage1_boundary="after_sbc"))
     stage1 = exposed(_NEMOWSRK3TestHooks(expose_tracer_stage=1))
     stage2 = exposed(_NEMOWSRK3TestHooks(expose_tracer_stage=2))
     adv_content = exposed(_NEMOWSRK3TestHooks(
@@ -241,6 +254,16 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
 
     boundaries = {
         "step15_entry": boundary_summary(_state_arrays(state15)),
+        "stage1_transport": boundary_summary({
+            "zFu": transport1.u.data,
+            "zFv": transport1.v.data,
+            "zFw": transport1.T.data,
+        }),
+        "stage1_after_advection": boundary_summary(
+            _tracer_arrays(after_advection1.T.data,
+                           after_advection1.S.data)),
+        "stage1_after_sbc": boundary_summary(
+            _tracer_arrays(after_sbc1.T.data, after_sbc1.S.data)),
         "stage1_tracer": boundary_summary(
             _tracer_arrays(stage1.T.data, stage1.S.data)),
         "stage2_tracer": boundary_summary(
@@ -279,6 +302,8 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
         "compiled_citations": {
             "stage_order": "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:211-227",
             "tracer_accumulator": "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:548-604",
+            "stage1_transport": "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:265-284",
+            "stage1_advection": "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:633-645",
             "vertical_solve": "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:97-107",
         },
     }
