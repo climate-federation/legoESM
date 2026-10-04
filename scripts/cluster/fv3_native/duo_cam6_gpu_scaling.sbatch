@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --account=glab
+#SBATCH --partition=short
 #SBATCH --job-name=duo_gpu_scal
 #SBATCH --constraint=a100
 #SBATCH --cpus-per-task=8
