@@ -774,8 +774,13 @@ case "$variant" in
   | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6 | smtflxtra)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
-  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra)
+  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
+  | smt1vec | smt1vec100d)
       want_vec='.true.'  ; want_up3='.false.' ;;
+  *)  # Dispatch hardening: a variant added above but forgotten here used to
+      # fall through to an unbound-variable abort.  Name it instead.
+      printf 'REFUSE: variant %s has no momentum-form expectation\n' "$variant" >&2
+      rm -rf "$dry"; exit 64 ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
   printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
