@@ -8,10 +8,10 @@ within the parent (no offset drift, no overlap, no gaps).
 
 This module owns only the GRID GEOMETRY and the parent->child interpolation
 OPERATOR — both substrate-level (``legoesm.grids`` / ``legoesm.core``) concerns
-with no dependency on any dynamical core.  The 1-way nested *time stepping*
-(parent step, child step, boundary forcing) lives with the dynamics that uses it
-(``legoesm.atmosphere.dynamics.gcm.shallow_water_nesting``), because the substrate
-must not import a component (import-linter contract #4).
+with no dependency on any dynamical core.  No nested *time stepping* is
+implemented (the former shallow-water nest driver was test-only and was
+deleted); one would live with the dynamics that uses it, because the
+substrate must not import a component (import-linter contract #4).
 
 Design
 ------

@@ -15,7 +15,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as ser  # noqa: E402
-from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane_mpi as dmpi  # noqa: E402
+from legoesm.atmosphere._future import pseudo_incompressible_plane_mpi as dmpi  # noqa: E402
 
 NY, NX, NZ = 16, 8, 32
 LX, LY, LZ = 400.0, 400.0, 400.0
@@ -89,3 +89,8 @@ if __name__ == "__main__":
         ok = all(v < 1e-5 for v in errs.values())
         print("full-step max-err:", {k: f"{v:.2e}" for k, v in errs.items()},
               "PASS" if ok else "FAIL")
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail #23)")

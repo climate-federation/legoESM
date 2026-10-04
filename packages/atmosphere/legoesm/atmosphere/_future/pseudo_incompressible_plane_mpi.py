@@ -1,5 +1,9 @@
 """MPI-distributed (y-slab) full time step for the pseudo-incompressible plane LES.
 
+PARKED in ``_future/`` (ponytail #23, user-approved 2026-10-02): not wired —
+no production driver, factory or registry imports this module, and its tests
+are skipped.  Wire it into production (moving it back) or delete it.
+
 Domain decomposition: y-slab (axis 0). Each rank owns ``(ny_local, nx, nz)``;
 ``ny_global = ny_local · n_ranks``. The serial dycore (:mod:`pseudo_incompressible_plane`)
 is REUSED verbatim on halo-padded slabs — every horizontal stencil has reach ≤3, so a
@@ -24,7 +28,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.atmosphere.dynamics.les import pseudo_incompressible_plane as _ser
-from legoesm.atmosphere.dynamics.les import pseudo_incompressible_poisson_mpi as _pmpi
+from legoesm.atmosphere._future import pseudo_incompressible_poisson_mpi as _pmpi
 
 _AY, _AX, _AZ = 0, 1, 2
 # y-halo width per advection scheme = its horizontal stencil reach.

@@ -1,5 +1,9 @@
 """Liquid-only saturation adjustment over a prescribed uniform total-water PDF.
 
+PARKED in ``_future/`` (ponytail item pdf_condensation, user-approved
+2026-10-02): not wired — no production driver, factory or registry imports
+this module, and its tests are skipped.  Wire it into production (moving it back) or delete it.
+
 A uniform total-water PDF on [q_t - D, q_t + D] with D = (1 - rh_crit) * q_sat is
 algebraically identical to the Sundqvist (1978) cloud scheme: cloud fraction and
 condensate follow from closed-form integrals of the PDF above saturation (ECMWF
