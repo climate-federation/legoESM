@@ -215,7 +215,7 @@ round's tool budget and a partial gate set is not a gate set.
 | flux seamount substep record | **ADMITTED** (§2); additions-only proven across builds and rounds |
 | the two statements close the kt=1 window, BOTH cards | **MET** (§6, §7) |
 | direct unit test, non-vacuous | **GREEN.** `tests/ocean/unit/test_barotropic_coriolis_null_mode.py` gains one case that pins the supplied pair as what the operator sees AND asserts it differs from the reduction, so a dropped keyword turns it red. The keyword is `entry_barotropic_velocity`, renamed from `barotropic_velocity` after the existing RK3 stage-operand AST guard correctly refused the collision — that refusal is itself a non-vacuity proof of that guard |
-| the ten-card registries (two seamount, six flat, two tanks) | **RUNNING** at hand-off; nine of ten written, `OVERFLOW-zps` still in its first pass. Round 4's certified set is the before arm (`round4/` and `round4/inert/`) and the diff script is committed as `round6/registry_diff.txt`'s producer |
+| the ten-card registries (two seamount, six flat, two tanks) | **COMPLETE — see §9.3. Both seamount cards' kt=2 sea surface height reaches the bar; the two tanks move 0 rows; THE SIX FLAT CARDS MOVE 24-34 ROWS EACH, at the last bit, which REFUTES the round's own "0/50 expected"** |
 | GYRE ladder + certified year (note BZ, 8 days + digests) | **QUEUED**, chained behind the registries; the script is `round6/gyre_gates.sh` |
 | DINO from-rest month gate (`2.053801168e-03` K) | NOT RUN — it runs inside `land.sh`, which was not invoked |
 | the 100-day comparison, both seamount cards + movie | **QUEUED**, chained behind the registries; scorer and movie already extended and committed |
@@ -225,6 +225,58 @@ This is a HOLD with everything in place, not a failure: no gate came back
 red. Round 7's first act is to read the four outputs already being written
 into this round's evidence directory and, if they are green, run `land.sh`
 on this same tree.
+
+## 9.3 THE REGISTRIES — AND THE FLAT CARDS ARE **NOT** 0/50
+
+Round 4's certified set is the before arm (`round4/`, `round4/inert/`);
+`round6/after2/` is the after arm; `round6/registry_diff.txt` is the full
+row-by-row diff.
+
+| card | rows | over bar | moved | toward | away |
+|---|---:|---:|---:|---:|---:|
+| `VORTEX_SMT-zps` | 50 | 41 | 41 | 31 | 10 |
+| `VORTEX_SMT_VEC-zps` | 50 | 41 | 39 | 34 | 5 |
+| `VORTEX-zco` | 50 | 39 | 27 | 18 | 9 |
+| `VORTEX_VEC-zco` | 50 | 35 | 28 | 13 | 15 |
+| `VORTEX-15km-zco` | 50 | 41 | 34 | 13 | 21 |
+| `VORTEX_VEC-15km-zco` | 50 | 37 | 28 | 15 | 13 |
+| `VORTEX-10km-zco` | 50 | 42 | 27 | 17 | 10 |
+| `VORTEX_VEC-10km-zco` | 50 | 38 | 24 | 11 | 13 |
+| `LOCK_EXCHANGE-zco` | 50 | 16 | **0** | — | — |
+| `OVERFLOW-zps` | 50 | 37 | **0** | — | — |
+
+The seamount kt=2 rows, which are what this round set out to move:
+
+| card | field | before | after |
+|---|---|---:|---:|
+| `VORTEX_SMT-zps` | ssh | `3.726197e-07` | **`2.275957e-15`** |
+| | u | `6.308422e-08` | `2.160534e-08` |
+| | v | `4.742908e-08` | `1.545394e-08` |
+| | T | `4.259549e-10` | `3.803022e-10` |
+| `VORTEX_SMT_VEC-zps` | ssh | `3.664757e-07` | **`2.664535e-15`** |
+| | u | `6.004125e-08` | `1.267541e-09` |
+| | v | `4.037530e-08` | `2.548881e-10` |
+| | T | `4.539846e-11` | `3.618737e-12` |
+
+**THE FINDING THAT BLOCKS THE LANDING, reported the moment it was seen
+(RULE: a default or a result that disagrees with expectation is a FINDING,
+not a footnote).** The round's own bar, and the operator's order, expected
+the six flat VORTEX cards at **0 of 50 moved**. They are not: each moves
+24-34 rows, in BOTH directions, and every moved flat row agrees with its
+predecessor to 7-16 significant digits — i.e. these are last-bit changes,
+with the kt=2 `ssh`/`u`/`v` rows still inside the `1e-15` bar before and
+after (`VORTEX_VEC-zco` kt=2 ssh `2.831069e-15 -> 2.220446e-15`). The two
+tanks, which do NOT take the changed branch, move exactly 0 rows, which is
+the control saying the movement is this change and not noise.
+
+That is consistent with the reviewer's time-level reading: on full cells
+the two THICKNESS rules agree exactly, so what remains is a different
+floating-point composition of the same quantity at a different time level,
+and it shows up at the last bit. It is NOT consistent with "inert by
+construction", which is what an earlier draft of this receipt would have
+claimed. Whether a last-bit movement on eight certified cards is
+acceptable is the operator's call, not mine, and it is why this round does
+not land on its own judgement.
 
 ## 9.1 SCOPE — WHICH CARDS EXECUTE THE CHANGED STATEMENTS
 
@@ -322,11 +374,11 @@ above and the work is HELD rather than shipped on my own answer.
 
 ## 12. ROUND 7 — PREREGISTERED
 
-* **R7-P1** — the ten registries show the two seamount cards' kt=2 `ssh`,
-  `u` and `v` rows AT BAR and the six flat cards and two tanks 0 moved
-  rows. **FALSIFIER:** any flat or tank row moves; that would mean the
-  time-level half of the change is not a no-op on full cells and the round
-  must measure it before landing.
+* **R7-P1 is ALREADY ADJUDICATED, in §9.3, and it is REFUTED.** The
+  seamount half held — both cards' kt=2 `ssh` reaches the bar — and the
+  flat half did not: the six flat cards move 24-34 last-bit rows each
+  while the two tanks move 0. The decision this hands the operator is in
+  §9.3 and it is the first thing round 7 must settle.
 * **R7-P2** — GYRE reproduces its certified ladder (954 rows, 0 moved) and
   its certified year to the pinned eight days and digests (day 30
   `2.3432465132112266e-06` K, day 360 `5.4077419367442036e-05` K).
