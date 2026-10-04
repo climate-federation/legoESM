@@ -388,6 +388,7 @@ def _compute_minor_optical_depth(
     idx_scaling_gas = lookup.idx_scaling_gases_lower
     scale_by_complement = lookup.lower_scale_by_complement
     minor_gpt_shift = lookup.minor_lower_gpt_shift
+    max_per_bnd = lookup.max_minor_per_bnd_lower
     kminor = jax.lax.optimization_barrier(lookup.kminor_lower)
   else:
     minor_absorber_intervals = lookup.n_minor_absrb_upper
@@ -398,6 +399,7 @@ def _compute_minor_optical_depth(
     idx_scaling_gas = lookup.idx_scaling_gases_upper
     scale_by_complement = lookup.upper_scale_by_complement
     minor_gpt_shift = lookup.minor_upper_gpt_shift
+    max_per_bnd = lookup.max_minor_per_bnd_upper
     kminor = jax.lax.optimization_barrier(lookup.kminor_upper)
 
   ibnd = lookup.g_point_to_bnd[igpt]
@@ -455,7 +457,7 @@ def _compute_minor_optical_depth(
     return lambda: scaling
 
   # Optical depth will be aggregated over all the minor absorbers contributing
-  # to the frequency band.  We use fori_loop over the full static range and
+  # to the frequency band.  We use fori_loop over a static trip count and
   # mask inactive iterations so that reverse-mode AD works (while_loop with
   # dynamic stopping is not reverse-mode differentiable).
   minor_start_idx = minor_bnd_start[ibnd]
@@ -467,8 +469,16 @@ def _compute_minor_optical_depth(
   )
   bnd_end = minor_bnd_end[ibnd]
 
-  def body_fn(i, tau_minor):
-    active = jnp.logical_and(i >= i0, i <= bnd_end)
+  # Minor absorbers are grouped by band, so this g-point's band owns the
+  # contiguous intervals [i0, bnd_end]; loop over at most ``max_per_bnd`` of
+  # them instead of every interval in the table (the skipped ones only ever
+  # added exact zeros).  Bands with no minor absorber carry the sentinel
+  # ``minor_absorber_intervals`` in i0/bnd_end and so stay inactive.
+  def body_fn(j, tau_minor):
+    i_raw = i0 + j
+    active = jnp.logical_and(i_raw <= bnd_end,
+                             i_raw < minor_absorber_intervals)
+    i = jnp.minimum(i_raw, minor_absorber_intervals - 1)
     # Map the minor contributor to the RRTMGP gas index.
     gas_idx = idx_gases_minor[i] * jnp.ones_like(tropo_idx)
     vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields).astype(_wdtype)
@@ -495,7 +505,7 @@ def _compute_minor_optical_depth(
 
   tau_minor_0 = jnp.zeros_like(temperature)
 
-  return jax.lax.fori_loop(0, minor_absorber_intervals, body_fn, tau_minor_0)
+  return jax.lax.fori_loop(0, max_per_bnd, body_fn, tau_minor_0)
 
 
 def compute_minor_optical_depth(

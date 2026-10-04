@@ -58,6 +58,10 @@ class AbstractLookupGasOptics:
   n_minor_absrb_lower: int
   # Number of minor absorbers in upper atmosphere.
   n_minor_absrb_upper: int
+  # Most minor-absorber intervals any one band has, lower/upper atmosphere:
+  # the trip count of the per-g-point minor-gas loop.
+  max_minor_per_bnd_lower: int
+  max_minor_per_bnd_upper: int
   # Number of minor contributors in the lower atmosphere.
   n_contrib_lower: int
   # Number of minor contributors in the upper atmosphere.
@@ -180,6 +184,17 @@ def _create_rrtm_consistent_minor_gas_index(
   idx_minor = idx_tensor(gases_minor)
   idx_scale = idx_tensor(scaling_gases)
   return idx_minor, idx_scale
+
+
+def _max_minor_per_bnd(bnd_start, bnd_end, n_minor_absrb: int) -> int:
+  """Largest number of minor-absorber intervals in any band.
+
+  Bands without minor absorbers carry the sentinel ``n_minor_absrb`` in both
+  ``bnd_start`` and ``bnd_end`` (see ``_minor_gas_mappings``).
+  """
+  start, end = np.asarray(bnd_start), np.asarray(bnd_end)
+  has = start < n_minor_absrb
+  return int(np.max(end[has] - start[has] + 1)) if np.any(has) else 0
 
 
 def _minor_gas_mappings(
@@ -324,6 +339,12 @@ def load_data(
       n_minor_absrb=dims['minor_absorber'],
       n_minor_absrb_lower=dims['minor_absorber_intervals_lower'],
       n_minor_absrb_upper=dims['minor_absorber_intervals_upper'],
+      max_minor_per_bnd_lower=_max_minor_per_bnd(
+          minor_lower_bnd_start, minor_lower_bnd_end,
+          dims['minor_absorber_intervals_lower']),
+      max_minor_per_bnd_upper=_max_minor_per_bnd(
+          minor_upper_bnd_start, minor_upper_bnd_end,
+          dims['minor_absorber_intervals_upper']),
       n_contrib_lower=dims['contributors_lower'],
       n_contrib_upper=dims['contributors_upper'],
       n_mixing_fraction=dims['mixing_fraction'],

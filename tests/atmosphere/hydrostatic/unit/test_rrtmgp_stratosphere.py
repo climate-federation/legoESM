@@ -3342,3 +3342,52 @@ class TestRayleighScattering:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# Minor-gas loop over the g-point's own band only
+# ---------------------------------------------------------------------------
+
+
+class TestMinorGasBandLoop:
+    """The minor-gas loop runs only over the intervals of the g-point's band
+    (``max_minor_per_bnd_*`` trips); it must equal the loop over every
+    interval in the table, bit for bit, for every g-point of both tables."""
+
+    @pytest.mark.parametrize("spectrum", ["lw", "sw"])
+    def test_band_loop_equals_full_table_loop(self, lookup_vmr, spectrum):
+        import dataclasses
+        from tests.legoesm_paths import legoesm_source_path
+        from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+            lookup_gas_optics_shortwave,
+        )
+        lookup, vmr_lib = lookup_vmr
+        if spectrum == "sw":
+            lookup = lookup_gas_optics_shortwave.from_data_file(str(
+                legoesm_source_path(
+                    "atmosphere/physics/radiation/rrtmgp/optics"
+                    "/rrtmgp_data/rrtmgp-gas-sw-g112.nc")))
+        full = dataclasses.replace(
+            lookup,
+            max_minor_per_bnd_lower=lookup.n_minor_absrb_lower,
+            max_minor_per_bnd_upper=lookup.n_minor_absrb_upper)
+        assert lookup.max_minor_per_bnd_lower < lookup.n_minor_absrb_lower
+        assert lookup.max_minor_per_bnd_upper < lookup.n_minor_absrb_upper
+        # troposphere to stratosphere, warm and cold, moist and dry
+        p = jnp.asarray(np.geomspace(50.0, 1.0e5, 24))
+        T = jnp.asarray(np.linspace(190.0, 300.0, 24))
+        molecules = jnp.asarray(np.geomspace(1.0e21, 2.0e25, 24))
+        # every gas present, so each minor interval contributes (a gas left at
+        # zero would hide a dropped interval)
+        vmr_fields = {i: jnp.asarray(np.geomspace(1e-9, 1e-6, 24))
+                      for i in set(lookup.idx_gases.values())}
+        vmr_fields[lookup.idx_h2o] = jnp.asarray(np.geomspace(3e-6, 3e-2, 24))
+
+        def tau(lk):
+            return jax.jit(jax.vmap(lambda g: gas_optics.compute_minor_optical_depth(
+                lk, vmr_lib, molecules, T, p, g, vmr_fields)))(
+                    jnp.arange(lk.n_gpt))
+
+        got, want = tau(lookup), tau(full)
+        assert np.any(np.asarray(want) > 0.0)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
