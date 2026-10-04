@@ -9562,8 +9562,8 @@ packages/ocean/legoesm/ocean/state.py:2156       tracer_combine: str = "concentr
 packages/ocean/legoesm/ocean/experiments/dino.py:1004    tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1751    "tracer_combine": "thickness_weighted",
 packages/ocean/legoesm/ocean/experiments/dino.py:3967        tracer_combine=cfg.tracer_combine,
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12675  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13063  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12677  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13065  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
