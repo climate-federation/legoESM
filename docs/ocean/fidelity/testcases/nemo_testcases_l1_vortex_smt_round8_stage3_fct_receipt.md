@@ -24,6 +24,33 @@ It is NOT bit equality, so **R8-S3-P1 as written is FALSIFIED** and this
 receipt says so in its first section rather than rounding the prediction to
 fit.  What replaced it is a bounded result with its own control (section 4).
 
+## 0b. A CITATION CORRECTION THAT APPLIES TO ROUND 7's RECEIPT TOO
+
+Round 7's `stprk3_stg` line numbers do not match the compiled build they
+are attributed to, and its own receipt and its own walk disagree with each
+other (`:474` vs `:519` for the same `CALL tra_adv`).  Every number below
+was re-read this round directly from
+`VORTEX_SMT_R7_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90` with
+`grep -n`, and these are the numbers used in this receipt and in the walk:
+
+| statement | compiled `stprk3_stg.f90` |
+|---|---|
+| `zFu = e2u*(e3u_3d*(1+r3u(Kmm)*umask))*(uu+zub)` | `:278` |
+| `CALL wzv(..., np_velocity)` (momentum solve) | `:293` |
+| `CALL wzv(..., np_transport)` (tracer solve) | `:300` |
+| `zFw = e1e2t*ww` | `:304` |
+| `CALL tra_adv_trp` | `:433` (vector branch) / `:456` (flux branch) |
+| `CALL tra_adv` | `:479` |
+| `CALL tra_sbc_RK3` | `:481` |
+| the qco stage step, stages 1-2 | `:509-511` |
+| `CASE ( 3 )`, the stage-3 branch | `:519` |
+| `CALL tra_zdf` | `:544` |
+| the record writer's `begin` / `out` calls | `:472` / `:558` |
+
+The `traadv_fct.f90` and `traadv.f90` numbers round 7 cited ARE this
+build's and are unchanged — except `:715`, which section 6 corrects for a
+different reason (it is in a routine that never runs).
+
 ## 1. THE RETRACTION ROUND 7 ORDERED IS DISCHARGED
 
 Round 7 ran every arm at stage 1.  Under `key_RK3` NEMO runs FCT at the
@@ -56,13 +83,13 @@ absolute difference over the row's own peak; bit equality
 
 | row | NEMO boundary | vector `rel` | vector cells | flux `rel` | flux cells |
 |---|---|---:|---:|---:|---:|
-| `zfu` | `stprk3_stg.f90:276-277`, `:463` | `5.584e-10` | 13736 | `1.256e-08` | 18712 |
+| `zfu` | `stprk3_stg.f90:278`, `:433`/`:456` | `5.584e-10` | 13736 | `1.256e-08` | 18712 |
 | `zfv` | same | `1.486e-10` | 14091 | `1.093e-08` | 18792 |
-| `zfw` | `pFw = e1e2t*ww`, `stprk3_stg.f90:301` | `8.200e-09` | 34295 | `4.939e-07` | 37098 |
-| `ww` | the stage continuity solve, `sshwzv.f90:297-298` | `8.200e-09` | 34299 | `4.939e-07` | 37102 |
-| `tsm.T` | `ts(Kmm)` as `tra_adv_fct` receives it (`stprk3_stg.f90:519`) | `1.733e-16` | 1795 | `1.376e-10` | 3070 |
+| `zfw` | `zFw = e1e2t*ww`, `stprk3_stg.f90:304` | `8.200e-09` | 34295 | `4.939e-07` | 37098 |
+| `ww` | the stage continuity solve, `sshwzv.f90:297-298`, entered at `stprk3_stg.f90:300` | `8.200e-09` | 34299 | `4.939e-07` | 37102 |
+| `tsm.T` | `ts(Kmm)` as `tra_adv_fct` receives it (`stprk3_stg.f90:479`) | `1.733e-16` | 1795 | `1.376e-10` | 3070 |
 | `tsm.S` | same | `4.060e-16` | 1838 | `4.060e-16` | 1654 |
-| `out.T` | `ts(Kaa)` after stage-3 `tra_zdf` (`stprk3_stg.f90:556-618`) | `3.619e-12` | 7508 | `3.803e-10` | 9097 |
+| `out.T` | `ts(Kaa)` after stage-3 `tra_zdf` (`stprk3_stg.f90:519-544`) | `3.619e-12` | 7508 | `3.803e-10` | 9097 |
 | `out.S` | same | `4.060e-16` | 2147 | `4.060e-16` | 2237 |
 
 Two things to read off that table before any arm:
@@ -88,7 +115,7 @@ stage's `zFu/zFv/zFw` triplet is taken from that stage's own record
 the qco stage step, so a non-zero Arm A cannot separate an FCT statement
 from inherited last-bit noise.  Arm B additionally hands stage 3 NEMO's
 recorded stage-2 state — `u`, `v`, `T`, `S`, `ssh`, the `Kmm` operands of
-`stprk3_stg.f90:519` — through `stage_entry_override`.  After that the only
+`stprk3_stg.f90:479` — through `stage_entry_override`.  After that the only
 things left of legoESM's in the stage-3 tracer are the FCT statements
 themselves and their partial-cell divisors.
 
@@ -188,8 +215,9 @@ array.
 **WHAT IT DOES *NOT* DECIDE, SAID OUT LOUD.**  At stages 1 and 2 the
 record's `r3t(Kaa)` does NOT equal `ssh(end of step) / ht_0` (3721 of 3721
 columns differ, up to `3.93e-06`), because NEMO's writer runs at
-`stprk3_stg.F90:517`, *after* the stage has already advanced that slot,
-while `wzv` consumed it earlier at `:297`.  So the round-7 stage-1 `ww` row
+`stprk3_stg.f90:472` (MY_SRC `stprk3_stg.F90:517`), *after* the stage has
+already advanced that slot, while the transport `wzv` consumed it earlier
+at `stprk3_stg.f90:300` (and, on the vector card, at `traadv.f90:268`).  So the round-7 stage-1 `ww` row
 (`1.99e-13` relative) is **still unattributed**, and the reason is an
 instrument limit, not a measurement: the record would have to capture
 `r3t(:,:,Kaa)` at the `wzv` call site.  That is one extra `write2` in the
@@ -352,7 +380,8 @@ disposition of every finding.
 
 1. The stage-1 `ww` row (`1.99e-13` relative, round 7) is still
    unattributed between its two operands; the record cannot decide it
-   because NEMO's writer runs after the stage advanced `r3t(Kaa)`
+   because NEMO's writer runs at `stprk3_stg.f90:472`, after the stage
+   advanced `r3t(Kaa)`, while `wzv` consumed it at `stprk3_stg.f90:300`
    (section 5).  Round 9: one extra `write2` of `r3t(:,:,Kaa)` at the
    `wzv` call site.
 2. The 2-ULP stage-3 composition residue (`3.47e-16` relative, both cards)

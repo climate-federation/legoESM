@@ -8,10 +8,10 @@ operands and outputs at every RK3 stage of kt=1, which no earlier seamount
 record carried, and this walk scores legoESM's value of each one against
 NEMO's in the compiled stage order:
 
-    stprk3_stg.F90:276-277   zFu/zFv = e2u*(e3u_3d*(1+r3u(Kmm)*umask))*(uu+zub)
-    stprk3_stg.F90:298-301   wzv -> ww, zFw = e1e2t*ww   (flux form)
-    stprk3_stg.F90:463       tra_adv_trp updates/computes zFu,zFv,zFw
-    stprk3_stg.F90:519       tra_adv -> tra_adv_fct      (ln_traadv_fct)
+    stprk3_stg.f90:278       zFu/zFv = e2u*(e3u_3d*(1+r3u(Kmm)*umask))*(uu+zub)
+    stprk3_stg.f90:300,:304  wzv -> ww, zFw = e1e2t*ww   (flux form)
+    stprk3_stg.f90:433,:456  tra_adv_trp updates/computes zFu,zFv,zFw
+    stprk3_stg.f90:479       tra_adv -> tra_adv_fct at STAGE 3 only
       traadv_fct.f90:170       fct_up1_2stp (upstream, two steps)
       traadv_fct.f90:502-508     1st-step upstream fluxes
       traadv_fct.f90:538         mid-step guess / (e3t_3d*(1+r3t(Kmm)))
@@ -20,8 +20,8 @@ NEMO's in the compiled stage order:
       traadv_fct.f90:265-266     2nd-order centred vertical       (nn_fct_v=2)
       traadv_fct.f90:316         nonosc flux limiter
       traadv_fct.f90:327         Krhs += ztra / (e3t_3d*(1+r3t(Kmm)))
-    stprk3_stg.F90:521       tra_sbc_RK3 (this deck forces all fluxes to 0)
-    stprk3_stg.F90:552-554   ts(Kaa) = ((1+r3t(Kbb))ts(Kbb)
+    stprk3_stg.f90:481       tra_sbc_RK3 (this deck forces all fluxes to 0)
+    stprk3_stg.f90:509-511   ts(Kaa) = ((1+r3t(Kbb))ts(Kbb)   (stages 1-2)
                                         + rDt(1+r3t(Kmm))ts(Krhs)tmask)
                                        / (1+r3t(Kaa))
 
@@ -252,13 +252,13 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
         _row(f"zf{face}", groups[f"zf{face}"][..., :nlev],
              np.asarray(fields[face])[..., :nlev], masks[face],
              "zFu/zFv as tra_adv receives them, with the partial-cell "
-             "reference face thickness (stprk3_stg.f90:276-277, :463) "
+             "reference face thickness (stprk3_stg.f90:278, :433/:456) "
              f"[stage {stage}]",
              plant == f"zf{face}")
     require_live("zfw", "T", np.asarray(fields["T"])[..., :nlev], plain["T"])
     _row("zfw", groups["zfw"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
-         "zFw as tra_adv receives it (stprk3_stg.f90:301, :463)"
+         "zFw as tra_adv receives it (stprk3_stg.f90:304, :433/:456)"
          f" [stage {stage}]",
          plant == "zfw")
 
@@ -270,7 +270,7 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
     require_live("ww", "T", np.asarray(fields["T"])[..., :nlev], plain["T"])
     _row("ww", groups["ww"][..., :nlev],
          np.asarray(fields["T"])[..., :nlev], masks["T"],
-         "ww after the stage continuity solve (stprk3_stg.f90:298)"
+         "ww after the stage continuity solve (stprk3_stg.f90:300)"
          f" [stage {stage}]",
          plant == "ww")
 
@@ -288,7 +288,7 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             _row(f"adv.{tracer}", groups[slot][..., :nlev],
                  np.asarray(fields[tracer])[..., :nlev], masks["T"],
                  "ts(Krhs) after tra_adv + tra_sbc_RK3 "
-                 "(stprk3_stg.f90:519,521; traadv_cen.f90 via "
+                 "(stprk3_stg.f90:479,:481; traadv_cen.f90 via "
                  "traadv.f90:347-352)",
                  plant == f"adv.{tracer}")
 
@@ -302,10 +302,10 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             _row(f"out.{tracer}", groups[slot][..., :nlev],
                  np.asarray(fields[tracer])[..., :nlev], masks["T"],
                  "ts(Kaa) after the qco thickness-weighted stage step "
-                 "(stprk3_stg.f90:552-554)", plant == f"out.{tracer}")
+                 "(stprk3_stg.f90:509-511)", plant == f"out.{tracer}")
     else:
         # ---- 3. the tracer tra_adv_fct RECEIVES, ts(Kmm) at stage 3 -------
-        # stprk3_stg.f90:519 hands tra_adv the stage-2 Kaa tracer; the record
+        # stprk3_stg.f90:479 hands tra_adv the stage-2 Kaa tracer; the record
         # writes it as tsm_t/tsm_s at the same boundary.
         hooks = _NEMOWSRK3TestHooks(
             stage_barotropic_output_override=external, expose_tracer_stage=2)
@@ -316,7 +316,7 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             _row(f"tsm.{tracer}", groups[slot][..., :nlev],
                  np.asarray(fields[tracer])[..., :nlev], masks["T"],
                  "ts(Kmm) as tra_adv_fct receives it at stage 3 "
-                 "(stprk3_stg.f90:519; the stage-2 Kaa tracer)",
+                 "(stprk3_stg.f90:479; the stage-2 Kaa tracer)",
                  plant == f"tsm.{tracer}")
 
         # ---- 4. the stage-3 after-tracer: the ORDINARY step output --------
@@ -329,7 +329,7 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
             _row(f"out.{tracer}", groups[slot][..., :nlev],
                  np.asarray(plain[tracer])[..., :nlev], masks["T"],
                  "ts(Kaa) after the stage-3 tra_zdf, i.e. the ordinary step "
-                 "output (stprk3_stg.f90:556-618)",
+                 "output (stprk3_stg.f90:519-544, recorded at :558)",
                  plant == f"out.{tracer}")
 
     # ---- 5. THE ONE-VARIABLE ARM: NEMO's transports, everything else ours
@@ -426,10 +426,10 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
     # ---- 6. STAGE 3 ONLY: NEMO's whole stage-3 ENTRY as well -------------
     # The arm above leaves legoESM's own Kmm tracer in place, and that tracer
     # already carries the one-ULP residue of the qco stage step
-    # (stprk3_stg.f90:552-554), so a non-zero result there cannot separate an
+    # (stprk3_stg.f90:509-511), so a non-zero result there cannot separate an
     # FCT statement from inherited last-bit noise.  This arm hands stage 3
     # NEMO's recorded stage-2 state (u, v, T, S, ssh -- the ``Kmm`` operands
-    # of stprk3_stg.f90:519) together with NEMO's recorded stage-3
+    # of stprk3_stg.f90:479) together with NEMO's recorded stage-3
     # transports, so every operand tra_adv_fct reads is NEMO's and the only
     # things left of legoESM's are the FCT statements themselves and their
     # partial-cell divisors.
