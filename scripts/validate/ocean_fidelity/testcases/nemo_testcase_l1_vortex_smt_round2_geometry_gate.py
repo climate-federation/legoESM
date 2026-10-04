@@ -41,6 +41,7 @@ from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
 CASES = {
     "VORTEX_SMT-zps": "VORTEX_SMT_OMIP_L1_P3",
     "VORTEX_SMT_VEC-zps": "VORTEX_SMT_VEC_R8_OMIP_L1_P3",
+    "VORTEX_SMT1_VEC-zps": "VORTEX_SMT1_VEC_R8_OMIP_L1_P3",
 }
 
 

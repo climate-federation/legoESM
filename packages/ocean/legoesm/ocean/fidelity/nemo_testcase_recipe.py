@@ -2381,6 +2381,13 @@ _VORTEX_SMT_Y0_M = 0.0           # centre, j-direction          [m]
 # tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:204 -- ze3min = 0.1 * rn_dz.
 _VORTEX_SMT_ZE3MIN_M = 0.1 * _VORTEX_DZ_M
 
+# --- seamount mini-ladder rung SMT-1 (decision 93): ORCA2 rung 0's namzdf ---
+# orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/
+# namelist_cfg:417 / :418 / :411.
+_SMT1_RN_AVM0 = 1.2e-4           # background vertical viscosity   [m2/s]
+_SMT1_RN_AVT0 = 1.2e-5           # background vertical diffusivity [m2/s]
+_SMT1_RN_EVD = 100.0             # enhanced vertical diffusion     [m2/s]
+
 
 def vortex_smt_bathymetry(glamt_km, gphit_km) -> np.ndarray:
     """The seamount, in the hook's own association (usrdef_zgr:167-170)."""
@@ -2457,7 +2464,9 @@ def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray]):
     return zht, k_bot, e3t, e3u, e3v, e3f
 
 
-def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
+def build_vortex_smt_zps_card(
+    momentum: str = "flux", rung: str = "smt0"
+) -> NEMOTestcaseCard:
     """VORTEX with a Gaussian seamount and z partial bottom cells.
 
     Identical to :func:`build_vortex_zco_card` at 30 km in every namelist
@@ -2465,11 +2474,26 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
     bottom reaches: the column depth, the bottom level, the partial T-, U-,
     V- and F-cell thicknesses, and -- through ``ht_0`` -- the depth the
     initial state is evaluated on.
+
+    ``rung`` selects the seamount mini-ladder step (decision 93, operator
+    note CE).  ``"smt0"`` is the shipped VORTEX vertical-physics block;
+    ``"smt1"`` moves ONE module -- namzdf -- to ORCA2 rung 0's values and
+    nothing else.  Only the vector deck is carried up the ladder, because
+    ORCA2 is vector-invariant.
     """
     if momentum not in ("flux", "vector"):
         raise ValueError(
             f"unknown VORTEX_SMT momentum deck {momentum!r}; expected 'flux' "
             "(ln_dynadv_up3) or 'vector' (ln_dynadv_vec)")
+    if rung not in ("smt0", "smt1"):
+        raise ValueError(
+            f"unknown VORTEX_SMT mini-ladder rung {rung!r}; expected 'smt0' "
+            "(the shipped namzdf block) or 'smt1' (ORCA2 rung 0's background "
+            "mixing and enhanced vertical diffusion)")
+    if rung == "smt1" and momentum != "vector":
+        raise ValueError(
+            "the seamount mini-ladder (decision 93) is carried on the VECTOR "
+            "deck only; there is no flux-form SMT-1 card")
     res = _VORTEX_RESOLUTIONS["30km"]
     source = vortex_horizontal_coordinates(res)
     grid = _vortex_grid(source, res)
@@ -2605,6 +2629,78 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
             # Stated on the seamount card too, where it was first measured,
             # rather than inherited silently from the shared block above.
             barotropic_slow_forcing_depth_evaluation="nemo_literal"))
+    if rung == "smt1":
+        # DECISION 93 (user), rung SMT-1.  ONE namelist module moves to ORCA2
+        # rung 0's values; every line is cited to that deck
+        # (phase3/orca2_rounds/round83/acquisition/
+        #  orca2_rung0_restart_list_10step_a_np2/namelist_cfg):
+        #
+        #   :417  rn_avm0  = 1.2e-4   background vertical eddy VISCOSITY
+        #   :418  rn_avt0  = 1.2e-5   background vertical eddy DIFFUSIVITY
+        #   :409  ln_zdfevd = .true.  enhanced vertical diffusion ON
+        #   :410  nn_evdm   = 0       evd on the TRACER only, never on avm
+        #   :411  rn_evd    = 100.    the coefficient it writes [m2/s]
+        #
+        # Rung 0 keeps ln_zdfcst with the UNIFORM background (:419 nn_avb=0,
+        # :420 nn_havtb=0, :421 ln_zdfcst=.true.), which is what the two
+        # scalars below express -- there is no latitude shape and no profile.
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig, OceanConvectionConfig,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig,
+        )
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        model_config = model_config._replace(
+            A_v=_SMT1_RN_AVM0, K_v=_SMT1_RN_AVT0,
+            physics=OceanPhysicsConfig(
+                # ln_zdfcst with a uniform background is NOT a closure: it is
+                # the two scalars above, which the implicit solve already
+                # carries as A_v / K_v.  Selecting a closure here would run a
+                # second one.
+                vertical_mixing=VerticalMixingConfig(scheme="none"),
+                # Every other namzdf / namtra_ldf / namdyn_ldf / namdrg /
+                # namsbc switch on this deck is OFF, and each is stated
+                # rather than inherited (ln_traldf_OFF, ln_dynldf_OFF,
+                # ln_drg_OFF, ln_usr writing zeros, ln_traqsr=.false.).
+                lateral_mixing=LateralMixingConfig(scheme="none"),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                bottom_drag=BottomDragConfig(scheme="none"),
+                shortwave_penetration=None,
+                mle=None,
+                constants=NEMO_CONSTANTS_CONFIG,
+                convection=OceanConvectionConfig(
+                    scheme="enhanced_diffusion",
+                    enhanced_diffusion=EnhancedDiffusionConfig(
+                        # zdfevd.F90:94  p_avt = rn_evd * wmask
+                        K_conv=_SMT1_RN_EVD,
+                        # zdfevd.F90:106  nn_evdm == 1 guards the MOMENTUM
+                        # arm; rung 0 sets nn_evdm = 0, so the viscosity is
+                        # never touched and the convective one is zero.
+                        nu_conv=0.0,
+                        # The stable branch contributes nothing of its own:
+                        # the background is the namelist pair above.
+                        K_bg=0.0, nu_bg=0.0,
+                        smooth_transition=False,
+                        # zdfevd.F90:93  MIN( rn2, rn2b ) <= -1.e-12
+                        n2_threshold=-1.0e-12,
+                        two_level_trigger=True,
+                        # The S-EOS of this deck (decision 69), not the
+                        # campaign TEOS-10: the trigger must see the same
+                        # fluid the rest of the card runs.
+                        n2_mode="nemo_bn2",
+                        n2_eos_form="seos",
+                    ),
+                ),
+            ),
+        )
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -2613,8 +2709,14 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
         land_mask=wet,
         initial_state=state,
     )
+    if rung == "smt1":
+        case_name = "VORTEX_SMT1_VEC-zps"
+    elif momentum == "flux":
+        case_name = "VORTEX_SMT-zps"
+    else:
+        case_name = "VORTEX_SMT_VEC-zps"
     card = NEMOTestcaseCard(
-        "VORTEX_SMT-zps" if momentum == "flux" else "VORTEX_SMT_VEC-zps",
+        case_name,
         recipe, res.dt_s, res.n_steps, 1, 0, 0, 0.0, 0.0,
         unmeasured_features=VORTEX_UNMEASURED,
     )
@@ -2647,6 +2749,9 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         # Decision 88's seamount pair: the SAME 30 km deck, so the SAME row.
         "VORTEX_SMT-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         "VORTEX_SMT_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # Decision 93's mini-ladder rung 1: the SAME deck with namzdf moved
+        # to ORCA2 rung 0, so every row this table checks is the same row.
+        "VORTEX_SMT1_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         "VORTEX_VEC-10km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
     }
     if card.case not in expected:
@@ -2793,11 +2898,13 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 )
         return
     if card.case.startswith(
-            ("VORTEX-", "VORTEX_VEC-", "VORTEX_SMT-", "VORTEX_SMT_VEC-")):
+            ("VORTEX-", "VORTEX_VEC-", "VORTEX_SMT-", "VORTEX_SMT_VEC-",
+             "VORTEX_SMT1_VEC-")):
         # Decision 88's seamount cards run the SAME two momentum decks; every
         # switch this branch checks is the same switch, so they are checked
         # by it rather than by a second copy of it.
-        vector = card.case.startswith(("VORTEX_VEC-", "VORTEX_SMT_VEC-"))
+        vector = card.case.startswith(
+            ("VORTEX_VEC-", "VORTEX_SMT_VEC-", "VORTEX_SMT1_VEC-"))
         # VORTEX is the first card on this identity with a LIVE rotation
         # operator, so the structural-elimination escape below must not be
         # reachable for it.  Round 1 declared the operator as a gap; round 2
@@ -2904,7 +3011,34 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             raise ValueError(
                 "VORTEX-zco requires ln_traldf_OFF, ln_dynldf_OFF and "
                 "ln_drg_OFF (no lateral diffusion, no bottom drag)")
-        if (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
+        # Decision 93 rung SMT-1 moves exactly this pair, and the enhanced
+        # vertical diffusion that rung 0 runs beside it; every other card on
+        # this identity keeps the shipped VORTEX namzdf block.
+        if card.case == "VORTEX_SMT1_VEC-zps":
+            if (cfg.A_v, cfg.K_v) != (_SMT1_RN_AVM0, _SMT1_RN_AVT0):
+                raise ValueError(
+                    "VORTEX_SMT1_VEC-zps requires ORCA2 rung 0's rn_avm0="
+                    f"{_SMT1_RN_AVM0} and rn_avt0={_SMT1_RN_AVT0}")
+            _ph = cfg.physics
+            if _ph is None or _ph.convection.scheme != "enhanced_diffusion":
+                raise ValueError(
+                    "VORTEX_SMT1_VEC-zps requires ln_zdfevd=.true. as an "
+                    "explicit enhanced-vertical-diffusion selection")
+            _ed = _ph.convection.enhanced_diffusion
+            if (_ed.K_conv, _ed.nu_conv, _ed.K_bg, _ed.nu_bg) != (
+                    _SMT1_RN_EVD, 0.0, 0.0, 0.0):
+                raise ValueError(
+                    "VORTEX_SMT1_VEC-zps requires rn_evd=100 on the tracer "
+                    "arm and nn_evdm=0 (no convective viscosity)")
+            if (_ed.n2_threshold, _ed.two_level_trigger) != (-1.0e-12, True):
+                raise ValueError(
+                    "VORTEX_SMT1_VEC-zps requires zdfevd's own trigger, "
+                    "MIN(rn2, rn2b) <= -1.e-12 (zdfevd.F90:93)")
+            if _ph.vertical_mixing.scheme != "none":
+                raise ValueError(
+                    "VORTEX_SMT1_VEC-zps resolves ln_zdfcst with a uniform "
+                    "background; a closure here would be a second one")
+        elif (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
             raise ValueError(
                 "VORTEX-zco requires rn_avm0=1.0e-4 and rn_avt0=0.0")
         if cfg.adaptive_implicit_vertadv:
@@ -2966,6 +3100,9 @@ def build_nemo_testcase_card(
         # with z partial bottom cells.
         "VORTEX_SMT-zps": build_vortex_smt_zps_card,
         "VORTEX_SMT_VEC-zps": lambda: build_vortex_smt_zps_card("vector"),
+        # Decision 93's seamount mini-ladder, rung 1 (vector deck only).
+        "VORTEX_SMT1_VEC-zps": lambda: build_vortex_smt_zps_card(
+            "vector", "smt1"),
     }
     if case == "ORCA2-zps":
         if deck_root is None:

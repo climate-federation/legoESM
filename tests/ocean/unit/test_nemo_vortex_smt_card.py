@@ -177,3 +177,86 @@ def test_card_column_depth_is_the_summed_partial_thickness():
     assert ht[wet].max() == pytest.approx(5000.0, rel=1e-12)
     ops = z.nemo_een_barotropic
     assert np.asarray(ops.hu_0).max() <= 5000.0 + 1e-9
+
+
+# --------------------------------------------------------------------------
+# Decision 93, rung SMT-1: ORCA2 rung 0's background vertical mixing and its
+# enhanced vertical diffusion, on the seamount vector deck and nothing else.
+# Every number below is the rung-0 namelist's, cited in the card.
+# --------------------------------------------------------------------------
+
+def test_smt1_card_carries_orca2_rung0_namzdf_and_nothing_else():
+    base = build_nemo_testcase_card("VORTEX_SMT_VEC-zps")
+    card = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    cfg, base_cfg = card.recipe.model_config, base.recipe.model_config
+
+    # rung-0 namelist_cfg:417 / :418
+    assert (cfg.A_v, cfg.K_v) == (1.2e-4, 1.2e-5)
+    assert (base_cfg.A_v, base_cfg.K_v) == (1.0e-4, 0.0)
+
+    # rung-0 namelist_cfg:409 ln_zdfevd, :411 rn_evd, :410 nn_evdm = 0
+    ed = cfg.physics.convection.enhanced_diffusion
+    assert cfg.physics.convection.scheme == "enhanced_diffusion"
+    assert (ed.K_conv, ed.nu_conv, ed.K_bg, ed.nu_bg) == (100.0, 0.0, 0.0, 0.0)
+    # zdfevd.F90:93  MIN( rn2, rn2b ) <= -1.e-12
+    assert (ed.n2_threshold, ed.two_level_trigger) == (-1.0e-12, True)
+    assert ed.n2_eos_form == "seos"          # decision 69, this deck's fluid
+    # ln_zdfcst with a uniform background is the two scalars above, not a
+    # closure; and base carries no physics block at all.
+    assert cfg.physics.vertical_mixing.scheme == "none"
+    assert base_cfg.physics is None
+
+    # ONE module moved: everything the ladder scores is otherwise the same
+    # card.  Compare the two configs field by field and require that the
+    # only differences are the three namzdf rows.
+    moved = {name for name in cfg._fields
+             if getattr(cfg, name) != getattr(base_cfg, name)}
+    assert moved == {"A_v", "K_v", "physics"}, moved
+
+
+def test_smt1_geometry_and_initial_state_are_the_smt0_ones():
+    base = build_nemo_testcase_card("VORTEX_SMT_VEC-zps")
+    card = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    z0, z1 = base.recipe.z_coord, card.recipe.z_coord
+    for name in ("h_partial", "bottom_level", "is_active"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(z0, name)), np.asarray(getattr(z1, name)))
+    for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(base.recipe.initial_state, name).data),
+            np.asarray(getattr(card.recipe.initial_state, name).data))
+
+
+def test_smt1_is_vector_only_and_the_rung_dispatch_is_fail_closed():
+    with pytest.raises(ValueError, match="mini-ladder rung"):
+        build_vortex_smt_zps_card("vector", "smt2")
+    with pytest.raises(ValueError, match="VECTOR deck only"):
+        build_vortex_smt_zps_card("flux", "smt1")
+
+
+def test_smt1_validator_refuses_a_card_that_drops_a_rung0_value():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        validate_nemo_testcase_card,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+    cfg = card.recipe.model_config
+    # the background diffusivity back to the shipped 0.0
+    bad = card._replace(recipe=card.recipe._replace(
+        model_config=cfg._replace(K_v=0.0)))
+    with pytest.raises(ValueError, match="rung 0's rn_avm0"):
+        validate_nemo_testcase_card(bad)
+    # enhanced vertical diffusion dropped
+    ed = cfg.physics.convection.enhanced_diffusion
+    bad2 = card._replace(recipe=card.recipe._replace(
+        model_config=cfg._replace(physics=cfg.physics._replace(
+            convection=cfg.physics.convection._replace(
+                enhanced_diffusion=ed._replace(K_conv=0.0))))))
+    with pytest.raises(ValueError, match="rn_evd=100"):
+        validate_nemo_testcase_card(bad2)
+    # nn_evdm silently promoted to 1
+    bad3 = card._replace(recipe=card.recipe._replace(
+        model_config=cfg._replace(physics=cfg.physics._replace(
+            convection=cfg.physics.convection._replace(
+                enhanced_diffusion=ed._replace(nu_conv=100.0))))))
+    with pytest.raises(ValueError, match="nn_evdm=0"):
+        validate_nemo_testcase_card(bad3)
