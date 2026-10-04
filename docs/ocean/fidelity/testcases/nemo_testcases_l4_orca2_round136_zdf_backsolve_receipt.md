@@ -88,9 +88,9 @@ The private diagnostics default off in
 `ocean_model_latlon_cgrid.py:1429,1646`; the same-graph transform is applied
 only behind its private hook at `ocean_model_latlon_cgrid.py:8143-8147`.
 The ZDF trace return is likewise private at
-`ocean_model_latlon_cgrid.py:10371-10379` and pairs its diagnostic arrays with
+`ocean_model_latlon_cgrid.py:10371-10378` and pairs its diagnostic arrays with
 the independently compiled ordinary state at
-`ocean_model_latlon_cgrid.py:13177-13191`.
+`ocean_model_latlon_cgrid.py:13177-13189`.
 
 | Gate | Base to tip result |
 |---|---|

@@ -156,6 +156,8 @@ FILES = {
         _ORCA2_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90": (
         _ORCA2_COMPILED / "traadv_fct.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2_COMPILED / "trazdf.f90"),
     "ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R85FRAMEDEBUG_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
@@ -1315,6 +1317,36 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:180-195': [
+        "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
+        ('END DO   ;   END DO', 4), 16],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:218-235': [
+        '! Diagonal, lower (i), upper (s)', ('ENDIF', 11), 18],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:268-273': [
+        '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
+        ('END DO   ;   END DO', 11), 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:283-291': [
+        '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
+        ('END DO   ;   END DO', 13), 9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:293-299': [
+        '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
+        ('END DO   ;   END DO', 14), 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16],
+    'ocean_model_latlon_cgrid.py:1429,1646': [
+        'stage1_momentum_rhs_transform: object = None',
+        ('tracer_zdf_trace: bool = False', 1), 2],
+    'ocean_model_latlon_cgrid.py:8143-8147': [
+        'if (self._nemo_ws_test_hooks.stage1_momentum_rhs_transform',
+        '_u1_rhs, _v1_rhs))', 5],
+    'ocean_model_latlon_cgrid.py:10371-10378': [
+        'if _return_tracer_zdf_trace:',
+        'solve=_nemo_ws_vertical_solve_trace,', 8],
+    'ocean_model_latlon_cgrid.py:13177-13189': [
+        ('if self._nemo_ws_test_hooks.tracer_zdf_trace:', 1),
+        'return result._replace(state_after=state_after)', 13],
     # --- ORCA2 round 129: split-explicit boundary association walk -------
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
         'IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)',
