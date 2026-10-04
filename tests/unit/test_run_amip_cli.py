@@ -4613,3 +4613,29 @@ def test_argv_distributed_mode_matches_the_parser_and_config_default():
     # a trailing bare flag has no value: the default, same as argparse would
     # refuse -- we never federate on a half-typed flag
     assert _argv_distributed_mode(["--distributed-mode"]) == "mpi"
+    # a value argparse will reject never federates (GLM)
+    assert _argv_distributed_mode(["--distributed-mode", "--verbose"]) == "mpi"
+    assert _argv_distributed_mode(["--distributed-mode=SPMD"]) == "mpi"
+
+
+def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
+    """A YAML-selected spmd deck (no flag on the command line) must federate
+    too (codex): the hook reads --config through the driver's include-aware
+    reader, and an explicit flag still overrides the YAML, as argparse's
+    set_defaults does.
+    """
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    base = tmp_path / "base.yaml"
+    base.write_text("distributed_mode: spmd\ndays: 3\n")
+    deck = tmp_path / "deck.yaml"
+    deck.write_text(f"include: {base.name}\ndistributed: true\n")
+    p = build_arg_parser()
+    assert load_yaml_config(str(deck), p)["distributed_mode"] == "spmd"
+    for argv in (["--config", str(deck)], [f"--config={deck}"],
+                 ["--conf", str(deck), "--days", "1"]):
+        assert _argv_distributed_mode(argv) == "spmd", argv
+    assert _argv_distributed_mode(["--config", str(deck),
+                                   "--distributed-mode", "mpi"]) == "mpi"
+    # a missing file is the reader's own loud exit (same message as later)
+    with pytest.raises(SystemExit, match="file not found"):
+        _argv_distributed_mode(["--config", str(tmp_path / "nope.yaml")])

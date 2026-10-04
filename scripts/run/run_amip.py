@@ -38,27 +38,53 @@ from legoesm.parallel.early_init import maybe_init_jax_distributed
 _ARGV_DISTRIBUTED_MODE_DEFAULT = "mpi"
 
 
-def _argv_distributed_mode(argv: list[str]) -> str:
-    """``--distributed-mode`` as argparse will read it, or the default.
+def _argv_option(argv: list[str], name: str, min_len: int) -> str | None:
+    """Value of option ``name`` as argparse will read it, or None.
 
     argparse semantics mirrored (pinned against the real parser by the CLI
     test): the LAST occurrence wins, ``--opt=value`` and ``--opt value``
-    both count, an unambiguous abbreviation (``--distributed-m spmd``:
-    longer than the exact ``--distributed`` flag, so it can only be this
-    option) counts, and nothing after a bare ``--`` is an option.
+    both count, an unambiguous abbreviation of at least ``min_len``
+    characters counts, and nothing after a bare ``--`` is an option.
     """
-    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+    value = None
     for i, a in enumerate(argv):
         if a == "--":
             break
-        flag, eq, value = a.partition("=")
-        if not (len(flag) > len("--distributed")
-                and "--distributed-mode".startswith(flag)):
+        flag, eq, v = a.partition("=")
+        if len(flag) < min_len or not name.startswith(flag):
             continue
-        if eq:
-            mode = value
-        elif i + 1 < len(argv):
-            mode = argv[i + 1]
+        value = v if eq else (argv[i + 1] if i + 1 < len(argv) else None)
+    return value
+
+
+def _read_run_yaml_prejax(path: str) -> dict:
+    """The ``--config`` YAML (include-aware) through the driver's own reader,
+    loaded by file path: importing ``legoesm.driver`` here would pull in JAX
+    before the federation decision below is made."""
+    import importlib.util
+    loc = importlib.util.find_spec("legoesm.driver").submodule_search_locations[0]
+    spec = importlib.util.spec_from_file_location(
+        "_run_config_yaml_prejax", Path(loc) / "run_config_yaml.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.read_yaml_with_includes(path)
+
+
+def _argv_distributed_mode(argv: list[str]) -> str:
+    """``distributed_mode`` as the run will resolve it: the ``--config``
+    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
+    an explicit ``--distributed-mode`` flag on top, else the default."""
+    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+    # `--conf` is the shortest prefix unique to --config in this parser
+    cfg = _argv_option(argv, "--config", len("--conf"))
+    if cfg:
+        # a missing / cyclic / non-mapping file is the reader's own
+        # SystemExit, the same message load_yaml_config would give later
+        mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+    # longer than the exact `--distributed` flag: unique to --distributed-mode
+    v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)
+    if v in ("mpi", "spmd"):   # anything else argparse rejects anyway
+        mode = v
     return mode
 
 

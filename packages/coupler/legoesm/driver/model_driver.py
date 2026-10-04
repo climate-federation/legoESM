@@ -2089,8 +2089,11 @@ class ModelDriver:
                 # the local mesh IS global[local_cells] (voronoi_partition.
                 # build_local_mesh); a permuted order would land every cell's
                 # terrain on another cell with no shape error (GLM)
-                if not np.array_equal(np.asarray(self.grid.latCell),
-                                      np.asarray(self._grid_global.latCell)[_ids]):
+                _gg = self._grid_global
+                if not (np.array_equal(np.asarray(self.grid.latCell),
+                                       np.asarray(_gg.latCell)[_ids])
+                        and np.array_equal(np.asarray(self.grid.lonCell),
+                                           np.asarray(_gg.lonCell)[_ids])):
                     raise RuntimeError(
                         "Voronoi local mesh cell order != global[local_cells]; "
                         "the terrain product cannot be indexed onto it")
