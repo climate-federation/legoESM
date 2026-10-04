@@ -71,3 +71,12 @@ reconstructed.
 | ID | Frozen prediction | Confirmation | Falsification / action |
 |---|---|---|---|
 | R134-P7 | Copying the ten exact FCT input arrays is passive, and the separate JIT trace is deterministic across duplicate T/S calls. | Observed and ordinary returned states are bit-identical in all five fields; duplicate captured operands agree array-for-array. | Reject the continuation instrument and stop without a scientific boundary. |
+
+The continuation measurement at `4f9b6335c` also rejected itself with the
+same passivity refusal. R134-P7 is therefore **REFUTED** and retained. No
+scientific boundary from either observer is admissible. The existing narrow
+stage-transport exposure cannot replace the rejected observers: on this card
+it exposes the post-partition explicit vertical transport, while the compiled
+two-step upstream predictor also consumes the complementary implicit
+transport. Reconstructing that missing operand would change the exact
+association being measured.
