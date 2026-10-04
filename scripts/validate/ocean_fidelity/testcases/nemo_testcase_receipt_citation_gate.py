@@ -5701,7 +5701,7 @@ CITATION_MAP = {
     # --- ORCA2 card round 135: incoming slow forcing and passive FCT walk
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:194-200': [
         ('!*  vertical averaging  *!', 1),
-        ('Ve_rhs(ji,jj) = SUM( e3v_3d', 1),
+        ('END DO   ;   END DO', 2),
         7,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:569-572': [
