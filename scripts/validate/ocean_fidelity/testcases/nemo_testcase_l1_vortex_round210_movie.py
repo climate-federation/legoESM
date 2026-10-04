@@ -174,7 +174,7 @@ def main(argv=None) -> int:
     lego100, nemo100 = _load_day(N_DAYS, nlev)
     print(f"day100: lego ssh {lego100['ssh'].shape}  nemo ssh {nemo100['ssh'].shape}")
     fixed_dssh = _max(lego100["ssh"] - nemo100["ssh"], masks["ssh"])
-    print(f"FIXED day-100 max|d(ssh)| (VORTEX_VEC-zco) = {fixed_dssh:.6e} m")
+    print(f"FIXED day-100 max|d(ssh)| ({CASE}) = {fixed_dssh:.6e} m")
 
     import matplotlib
     matplotlib.use("Agg")

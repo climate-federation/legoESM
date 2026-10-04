@@ -1,4 +1,12 @@
-# Round 216 / VORTEX_SMT round 6 — the entry forcing's TWO statements, and the 100-day comparison
+# Rounds 216-217 / VORTEX_SMT round 6 — the entry forcing's TWO statements, LANDED, and the 100-day comparison
+
+**DECISIONS 90 and 91 (user, 2026-10-04), both taken as the picks this
+receipt asked for.** (90) The slow-forcing depth-average field gets NO
+default: every card states it explicitly and the unset value raises; the
+NEMO cards state NEMO's own form. (91) The entry-Coriolis statement lands
+on the SHARED path for every card, and the six flat VORTEX cards' last-bit
+moves are REGISTERED rather than scoped away. Round 216 measured and held;
+round 217 carries the two decisions, completes the gate set and lands.
 
 **VERDICT: the seamount cards' step-2 sea-surface-height error is two
 compiled statements, both now transcribed, and the kt=1 window closes to
@@ -390,6 +398,57 @@ above and the work is HELD rather than shipped on my own answer.
   same day. **FALSIFIER:** a threshold crossed on any scored day, an
   opposite-sign deflection, or the seamount pair scoring at or better than
   the flat pair.
+
+## 14. THE 100-DAY COMPARISON, BOTH SEAMOUNT CARDS
+
+NEMO's 100-day seamount runs are round 3's admitted ones (100 daily
+restarts each); legoESM ran each card 3000 steps from rest on the landed
+tree with daily snapshots, scored by the round-210 scorer extended with a
+`--cards` selector — the same field extraction, the same `_rms`/`_max`,
+the same table days, and the wet mask taken from each card's OWN seamount
+geometry. **The scorer's own kt=1..10 sanity check REPRODUCED this round's
+registry row for row on both cards before any day was scored.**
+
+rms of (legoESM - NEMO) over the wet mask:
+
+| day | SMT flux T | SMT flux u | SMT flux ssh | SMT vec T | SMT vec u | SMT vec ssh |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 5.249983e-08 | 7.387520e-08 | 7.019992e-09 | 3.204073e-08 | 3.396484e-08 | 1.235604e-08 |
+| 2 | 1.207119e-07 | 2.858069e-07 | 1.144139e-08 | 5.147746e-08 | 5.156699e-08 | 1.588041e-08 |
+| 5 | 8.623671e-07 | 1.566380e-06 | 8.023421e-08 | 1.041797e-07 | 1.130934e-07 | 1.932992e-08 |
+| 10 | 3.710177e-06 | 9.779855e-06 | 3.984371e-07 | 2.585982e-07 | 2.647966e-07 | 4.275864e-08 |
+| 20 | 1.670425e-05 | 3.366900e-05 | 6.155395e-06 | 5.336740e-07 | 5.769240e-07 | 1.102496e-07 |
+| 30 | 2.507509e-05 | 3.425672e-05 | 1.193501e-05 | 1.175615e-06 | 1.336023e-06 | 3.169288e-07 |
+| 60 | 1.206284e-04 | 1.522355e-04 | 7.291672e-05 | 5.865115e-06 | 5.222433e-06 | 1.850190e-06 |
+| 100 | 5.073628e-04 | 5.405034e-04 | 2.141955e-04 | 4.352693e-05 | 2.746327e-05 | 6.910337e-06 |
+
+Day-100 maxima (not rms): flux T 2.981e-02 K, u 4.352e-02 m/s, v
+4.184e-02 m/s, ssh 1.104e-03 m; vector T 2.069e-03 K, u 1.118e-03 m/s, v
+8.692e-04 m/s, ssh 1.156e-04 m. The vector card is an order of magnitude
+closer to NEMO than the flux card at every scored day, which is the same
+ordering the flat pair shows.
+
+**R6-P2 CONFIRMED.** Over all 100 days the runs stay bounded well inside
+the preregistered thresholds: peak `|u|` is `0.9145` m/s (flux) and
+`1.1279` m/s (vector) against the `2.0` m/s falsifier, and peak `|ssh|`
+is `0.7955` m and `0.8230` m against `1.0` m. The deflection-sign half of
+the prediction is NOT separately instrumented — it is visible in the movie
+and is reported as read off the frames, not measured.
+
+**R6-P3 CONFIRMED, and by a wide margin.** At day 100 the seamount pair's
+sea-surface-height rms is `2.142e-04` m (flux) and `6.910e-06` m (vector)
+against the flat pair's `2.826e-05` m and `7.430e-13` m — 7.6x worse on
+the flux card and seven orders of magnitude worse on the vector card. The
+kt=2 owner this round removed is therefore NOT the whole of the seamount
+pair's developed-flow debt; partial-cell statements downstream of it are.
+That re-ranks the next round: the seamount cards' remaining debt is now
+the largest VORTEX-family term and it is not the barotropic entry forcing.
+
+Artifacts: `round210_scores.json`, `round210_curves.png`, and per card
+`vortex_smtvec_100d.mp4` / `.gif` / `vortex_smtvec_frames.png` and the
+flux equivalents — three panels (NEMO | legoESM | difference), sea surface
+height with surface-velocity quivers, the card's own resolved bathymetry
+contoured on all three panels.
 
 ## 13. EVIDENCE
 
