@@ -488,6 +488,7 @@ def _compute_advection_flux_div(
     fct_after_thickness=None,
     fct_implicit_w=None,
     return_fct_activity: bool = False,
+    return_fct_inputs: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -528,6 +529,9 @@ def _compute_advection_flux_div(
     AB2 linear combination is NOT guaranteed monotone.  This is a
     known limitation shared with MITgcm.
     """
+    if return_fct_activity and return_fct_inputs:
+        raise ValueError(
+            "return_fct_activity and return_fct_inputs are mutually exclusive")
     # Wall tracer BC (#480): zero-gradient (Neumann) fill the RECONSTRUCTION
     # tracer over the dead cells so the flux-form face reconstructions (esp. the
     # wide WENO stencil) see a flat extension across solid walls / topographic
@@ -716,6 +720,15 @@ def _compute_advection_flux_div(
             raise ValueError(
                 "return_fct_activity requires an FCT tracer scheme")
         return div_hut, vert_flux_div, fct_activity
+    if return_fct_inputs:
+        if tracer_advection not in ("ppm_fct", "fct2"):
+            raise ValueError(
+                "return_fct_inputs requires an FCT tracer scheme")
+        return div_hut, vert_flux_div, (
+            tr, mass_flux_u, mass_flux_v, w_baro, h_k_old,
+            tr_before, recon_fill_mask, fct_base_thickness,
+            fct_after_thickness, fct_implicit_w,
+        )
     if return_h_fluxes:
         return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
     return div_hut, vert_flux_div
@@ -751,6 +764,7 @@ def compute_advection_flux_div_pair(
     fct_after_thickness=None,
     fct_implicit_w=None,
     return_a_fct_activity: bool = False,
+    return_fct_inputs: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -785,6 +799,9 @@ def compute_advection_flux_div_pair(
     bit-identical to ``_compute_advection_flux_div`` on that tracer
     (identical elementwise ops applied to the same per-level values).
     """
+    if return_a_fct_activity and return_fct_inputs:
+        raise ValueError(
+            "return_a_fct_activity and return_fct_inputs are mutually exclusive")
     # Trace-time opt-in gate (LEGOESM_TRACER_PAIR=1 → level-stacked
     # pair; baked into the compiled graph — flip BEFORE first compile).
     # DEFAULT OFF: the stack halves pad count + reconstruction calls
@@ -810,10 +827,14 @@ def compute_advection_flux_div_pair(
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
             return_fct_activity=return_a_fct_activity,
+            return_fct_inputs=return_fct_inputs,
         )
         if return_a_fct_activity:
             pair_a = pair_a_result[:2]
             activity_a = pair_a_result[2]
+        elif return_fct_inputs:
+            pair_a = pair_a_result[:2]
+            inputs_a = pair_a_result[2]
         else:
             pair_a = pair_a_result
         out_b = _compute_advection_flux_div(
@@ -827,12 +848,15 @@ def compute_advection_flux_div_pair(
             fct_base_thickness=fct_base_thickness,
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
+            return_fct_inputs=return_fct_inputs,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
             return pair_a, (div_b, vert_b), (sf_u, sf_v)
         if return_a_fct_activity:
             return pair_a, out_b, activity_a
+        if return_fct_inputs:
+            return pair_a, out_b[:2], (inputs_a, out_b[2])
         return pair_a, out_b
 
     nlev = tr_a.shape[-1]
@@ -1063,6 +1087,23 @@ _STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
 # landed NEMO's depth, so the depth arm is now the LEGACY one.
 _STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean",
                                   "legacy_min_rule_depth")
+
+
+class _NEMOWSFCTInputTrace(NamedTuple):
+    """Private post-step side output of the exact stage-3 FCT inputs."""
+
+    tracer_a: object
+    tracer_b: object
+    mass_flux_u: object
+    mass_flux_v: object
+    w_explicit: object
+    thickness: object
+    tracer_a_before: object
+    tracer_b_before: object
+    active_mask: object
+    base_thickness: object
+    after_thickness: object
+    w_implicit: object
 
 
 class _NEMOWSRK3TestHooks(NamedTuple):
@@ -1543,6 +1584,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # WRITE-only stage-3 tracer boundary before SBC/QSR/LDF content is added.
     # The ordinary step completes before this diagnostic substitutes T/S.
     expose_stage3_advection_content: bool = False
+    # Private passive side output for the already-materialized inputs of the
+    # stage-3 FCT call.  The arrays are attached only after the whole
+    # ordinary step has completed, in the otherwise-unused ``mass_flux_w``
+    # diagnostic slot.  No callback, recomputation, or public card selector
+    # is involved; the round-135 gate compares every ordinary state leaf with
+    # the unobserved step before admitting the array.
+    expose_stage3_fct_inputs: bool = False
     # One-variable causal arm paired with the seam above.  Replace only the
     # T/S arrays entering the ordinary implicit ZDF solve; production leaves
     # this None.  The gate supplies a source-reconstructed NEMO pre-ZDF seed.
@@ -2110,6 +2158,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     return_final_content: bool = False,
     return_stage1_trace: bool = False,
     return_fct_activity: bool = False,
+    return_fct_inputs: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -2154,6 +2203,7 @@ def _nemo_ws_rk3_tracer_pair_step(
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         fct_activity = None
+        fct_inputs = None
         stage_geom = stage_transport_geometry[stage_index]
         if len(stage_geom) == 6:
             mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = stage_geom
@@ -2229,9 +2279,20 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_implicit_w=wi_stage,
                 return_a_fct_activity=(
                     return_fct_activity and stage_index == 2),
+                return_fct_inputs=(
+                    return_fct_inputs and stage_index == 2),
             )
             if return_fct_activity and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
+            elif return_fct_inputs and stage_index == 2:
+                (dh_a, dv_a), (dh_b, dv_b), _raw_fct_inputs = pair_result
+                _inputs_a, _inputs_b = _raw_fct_inputs
+                fct_inputs = (
+                    _inputs_a[0], _inputs_b[0],
+                    *_inputs_a[1:5],
+                    _inputs_a[5], _inputs_b[5],
+                    *_inputs_a[6:],
+                )
             else:
                 (dh_a, dv_a), (dh_b, dv_b) = pair_result
                 fct_activity = None
@@ -2293,7 +2354,7 @@ def _nemo_ws_rk3_tracer_pair_step(
             # flux divergence before the final dt update.
             fd_a = fd_a - h_stage * bbl_a
             fd_b = fd_b - h_stage * bbl_b
-        return fd_a, fd_b, rhs_a, rhs_b, fct_activity
+        return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs
 
     def _source_order_sum(base, fallback, terms):
         if terms is None:
@@ -2327,7 +2388,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     if resume_stage >= 1:
         a1, b1 = a_resume, b_resume
     else:
-        fd0_a, fd0_b, rhs0_a, rhs0_b, _ = _flux_pair(
+        fd0_a, fd0_b, rhs0_a, rhs0_b, _, _ = _flux_pair(
             tr_a, tr_b, dt / 3.0, 0, h_one_third)
         # WRITE-only source-order values.  The CEN2 RK stage already returns
         # its concentration RHS directly; for another private diagnostic
@@ -2363,7 +2424,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     if resume_stage >= 2:
         a2, b2 = a_resume, b_resume
     else:
-        fd1_a, fd1_b, rhs1_a, rhs1_b, _ = _flux_pair(
+        fd1_a, fd1_b, rhs1_a, rhs1_b, _, _ = _flux_pair(
             a1, b1, dt / 2.0, 1, h_one_half)
         _terms1 = None if stage_source_terms is None else stage_source_terms[1]
         a2 = _stage(
@@ -2376,7 +2437,8 @@ def _nemo_ws_rk3_tracer_pair_step(
             None if _terms1 is None else _terms1[1])
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _, fct_activity = _flux_pair(a2, b2, dt, 2, h_k_new)
+    fd2_a, fd2_b, _, _, fct_activity, fct_inputs = _flux_pair(
+        a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
     if stage3_advection_content_override is not None:
@@ -2392,10 +2454,21 @@ def _nemo_ws_rk3_tracer_pair_step(
     out_b = jnp.where(
         active_3d > 0.5,
         content_b / jnp.maximum(h_k_new, 1.0e-10), tr_b)
+    if return_final_content and return_fct_activity and return_fct_inputs:
+        return (
+            out_a, out_b, content_a, content_b,
+            advection_content_a, advection_content_b, fct_activity,
+            fct_inputs,
+        )
     if return_final_content and return_fct_activity:
         return (
             out_a, out_b, content_a, content_b,
             advection_content_a, advection_content_b, fct_activity,
+        )
+    if return_final_content and return_fct_inputs:
+        return (
+            out_a, out_b, content_a, content_b,
+            advection_content_a, advection_content_b, fct_inputs,
         )
     if return_final_content:
         return (
@@ -2981,6 +3054,10 @@ class LatLonCGridOceanModel:
         if (_zdf_momentum_observer is not None
                 and not callable(_zdf_momentum_observer)):
             raise ValueError("zdf_momentum_observer must be callable or None")
+        _fct_input_exposure = (
+            self._nemo_ws_test_hooks.expose_stage3_fct_inputs)
+        if not isinstance(_fct_input_exposure, bool):
+            raise ValueError("expose_stage3_fct_inputs must be bool")
         _config_input = config or LatLonCGridOceanConfig.from_flat()
         _oracle_endpoint_diagnostic_eos_bypass = bool(
             (self._nemo_ws_test_hooks.expose_stage1_wzv
@@ -6309,6 +6386,7 @@ class LatLonCGridOceanModel:
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
         _nemo_ws_advection_content_rhs = None
+        _nemo_ws_fct_input_trace = None
         _nemo_ws_zdf_eta_kmm = None
         _nemo_ws_process_qco = None
         _nemo_ws_process_surface_rate = None
@@ -9407,15 +9485,32 @@ class LatLonCGridOceanModel:
                         _return_tracer_process_trace
                         and self._nemo_ws_test_hooks
                         .tracer_process_branch_activity),
+                    return_fct_inputs=bool(_fct_input_exposure),
                 )
                 if (_return_tracer_process_trace
                         and self._nemo_ws_test_hooks
-                        .tracer_process_branch_activity):
+                        .tracer_process_branch_activity
+                        and _fct_input_exposure):
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S,
+                     _nemo_ws_fct_activity,
+                     _nemo_ws_fct_input_trace) = _ws_tracer_result
+                elif (_return_tracer_process_trace
+                      and self._nemo_ws_test_hooks
+                      .tracer_process_branch_activity):
                     (T_corrected, S_corrected,
                      _nemo_ws_content_T, _nemo_ws_content_S,
                      _nemo_ws_advection_content_T,
                      _nemo_ws_advection_content_S,
                      _nemo_ws_fct_activity) = _ws_tracer_result
+                elif _fct_input_exposure:
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S,
+                     _nemo_ws_fct_input_trace) = _ws_tracer_result
                 else:
                     (T_corrected, S_corrected,
                      _nemo_ws_content_T, _nemo_ws_content_S,
@@ -10171,6 +10266,22 @@ class LatLonCGridOceanModel:
             # Substitute only after the production step and its conservation
             # checks have completed, preserving a WRITE-only diagnostic.
             state_new = _nemo_ws_pre_implicit_state
+        if _fct_input_exposure:
+            if _nemo_ws_fct_input_trace is None:
+                raise ValueError(
+                    "stage-3 FCT input exposure did not reach the FCT call")
+            if state_new.mass_flux_w is not None:
+                raise ValueError(
+                    "stage-3 FCT input exposure requires the unused "
+                    "mass_flux_w diagnostic slot")
+            if any(value is None for value in _nemo_ws_fct_input_trace):
+                raise ValueError("stage-3 FCT input trace contains an absent input")
+            # Post-step side output only.  No subsequent model step consumes
+            # this diagnostic state; every ordinary state leaf remains in its
+            # original slot for the passivity comparison.
+            state_new = state_new._replace(
+                mass_flux_w=_NEMOWSFCTInputTrace(
+                    *_nemo_ws_fct_input_trace))
 
         # NEMO's after-SSH slot is written HERE, not in the compiled step
         # wrapper, because the wrapper is not the only way in: the OMIP scan
