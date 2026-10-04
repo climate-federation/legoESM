@@ -103,9 +103,23 @@ tank integrations were not repeated for this default-off diagnostic round.
 
 ## Tests, citations, and review
 
-The focused beta observer/gate battery passes `8/8`. The full fidelity battery,
-receipt citation results, and any known-red isolation are recorded in the final
-round evidence under
+The final focused beta observer/gate/citation battery passes `25/25`. The
+default citation gate passes 274 citations and the round receipt passes 10,
+both with zero failures, unmapped citations, or map-audit failures. The planted
+two-line shift fails on the first `zup` endpoint as required. A SequenceMatcher
+old-to-new line map was applied once to every default-receipt citation of both
+edited model files; all 18 cited `ocean_model_latlon_cgrid.py` spans precede
+the insertion and therefore map to themselves, while that receipt contains no
+`advection.py` citation. The audit is preserved as
+`default_receipt_reanchor.log`.
+
+The required `tests/ocean/fidelity -n 12` battery reached 95% and then entered
+the campaign's known silent xdist tail, so it was interrupted and is
+**incomplete, not PASS**. It emitted exactly the same four established reds as
+round 136: SI3 scalar-math provenance, round-35 allow-dirty escape scope, the
+worktree-stamp grow-only ratchet, and the GYRE round-129 retained-record
+provenance stamp. Each failing ID was rerun alone and reproduced its known
+failure; no round-138 test failed. All logs are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round138/`.
 
 The required `codex exec --sandbox read-only` review could not initialize:
