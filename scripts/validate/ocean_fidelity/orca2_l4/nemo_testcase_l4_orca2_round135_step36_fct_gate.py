@@ -215,8 +215,6 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "first active-support non-finite group is not source ordered")
     require(first_target == report.get("first_target_nonfinite_group"),
             "first target non-finite group is not source ordered")
-    require(first is not None and first_target is not None,
-            "FCT walk did not reach a non-finite boundary")
     report["prediction_ledger"] = {
         "R135-P3": {"status": "CONFIRMED",
                      "observed": report["returned_first_nonfinite"]},
@@ -227,7 +225,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "predicted": "antidiffusive_flux", "observed": first,
         },
         "R135-P6": {
-            "status": "CONFIRMED" if first_target == first else "REFUTED",
+            "status": ("CONFIRMED" if first is not None and first_target == first
+                       else "REFUTED"),
             "global": first, "target": first_target,
         },
         "R135-P7": {"status": "UNMEASURED", "observed": "shared gates pending"},

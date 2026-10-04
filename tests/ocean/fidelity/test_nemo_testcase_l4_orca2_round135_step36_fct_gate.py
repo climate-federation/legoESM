@@ -83,6 +83,20 @@ def test_target_disagreement_is_retained_as_refutation() -> None:
     assert result["prediction_ledger"]["R135-P6"]["status"] == "REFUTED"
 
 
+def test_no_fct_boundary_is_retained_as_refutation() -> None:
+    report = _report()
+    report["first_nonfinite_group"] = None
+    report["first_target_nonfinite_group"] = None
+    for row in report["groups"].values():
+        row["nonfinite"] = {"T": 0, "S": 0}
+        row["nonfinite_total"] = 0
+        row["target_nonfinite"] = {"T": 0, "S": 0}
+        row["target_nonfinite_total"] = 0
+    result = gate.classify(report)
+    assert result["prediction_ledger"]["R135-P5"]["status"] == "REFUTED"
+    assert result["prediction_ledger"]["R135-P6"]["status"] == "REFUTED"
+
+
 def test_private_hook_defaults_off() -> None:
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _NEMOWSRK3TestHooks,
