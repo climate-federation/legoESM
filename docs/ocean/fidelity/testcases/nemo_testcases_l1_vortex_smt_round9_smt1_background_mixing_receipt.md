@@ -4,6 +4,13 @@
 module of the seamount vector deck moves to ORCA2 rung 0's values; nothing else
 changes, and the round measures what that module does on both sides.
 
+**REVIEW.** One fresh adversarial reviewer: **SHIP WITH FIXES** — "code is sound;
+the receipt overclaims". Three MAJOR and three MINOR findings, all taken; two of
+them changed a conclusion, and the first changed it twice (the reviewer
+corrected me, then the measurement it asked for corrected the reviewer). Each is
+marked **[R-n taken]** where it lands. Codex is paused on this account, so DUAL
+review is a stated GAP, not an exemption.
+
 **Headline.** The background vertical mixing is **faithful**: with the tracer
 diffusivity switched on for the first time on this deck (`rn_avt0` 0 → 1.2e-5,
 so the implicit tracer vertical solve stops being identically inert), the whole
@@ -115,11 +122,16 @@ ORCA2 is vector-invariant), and the validator refuses a card that drops any of
 the three rung-0 values.
 
 A field-by-field test proves the only configuration rows that moved are `A_v`,
-`K_v` and the physics block.
+`K_v` and the physics block. **[R-5 taken]** "one module moved" is true of the
+DECK and not of the config: SMT-1 is the first VORTEX card to carry a non-`None`
+physics block at all, so the third row is a structural change, not a value
+change. Every module inside it is stated OFF except the enhanced vertical
+diffusion, and section 7 is what that block measurably does (nothing).
 
-**Geometry identity: 0 ULP on all twelve fields** against the new record's own
+**Geometry identity: 0 ULP on all eighteen gate rows** against the new record's own
 `mesh_mask.nc` (`k_bot`, `e3t_0`, `e3u_0`, `e3v_0`, `e3f_0`, the four card
-operands, the two resolved qco-arm faces, the three masks), with the gate's own
+operands, the two resolved qco-arm faces, the two boundary-row controls, the
+new `e3w_0`-vs-`e3w_1d` row, and the three masks), with the gate's own
 non-vacuity row live (1164 cells where the resolved `e3u_0` differs from
 `e3t_0`). **R9-P7 CONFIRMED.**
 
@@ -183,17 +195,59 @@ coordinate carries one (`nemo_e3w_mesh_reference`, which
 `create_z_star_from_thicknesses` sets by default), and the SMT card supplies the
 uniform 500 m ladder; only a card with no mesh `e3w_0` falls to the
 midpoint-of-the-live-thickness arm. The result is the registry above: with the
-solve switched from identically inert to active, **T at kt=2 does not move at
-all** (3.618737e-12 both sides) and kt=3 moves by 0.011 %.
+solve switched from identically inert to active, the kt=2 temperature row moves
+by **11 parts in a billion** — 3.6187367529741716e-12 against SMT-0's
+3.6187367118426722e-12, which is a last-bit change and **not** the "does not
+move at all" an earlier draft claimed from the rounded printout
+(**[R-2 taken]**; diff the arrays, never the printout) — and kt=3 moves by
+0.011 %.
 
 That it could have moved is arithmetic, not assertion. The per-step diffusive
 increment is `K dt / dz² = 1.2e-5 × 2880 / 500² = 1.4e-7` relative, and NEMO's
 own two runs differ by 2.294e-06 K at kt=2. The midpoint arm's divisor at the
 seamount's thinnest bottom cell is `(500 + 50.67)/2 = 275.3` m against NEMO's
 500 m — a **45 % wrong divisor** on those interfaces, which would have put an
-O(1e-6 K) error into exactly the cells the seamount creates, six orders above
-the 3.6e-12 the row actually carries. **First non-bit statement from this
-module: none.** The rung is faithful.
+O(1e-6 K) error into exactly the cells the seamount creates — the reviewer
+reproduced ~2.3e-6 K at the 50.67 m bottom cell independently — six orders above
+the 3.6e-12 the row actually carries. The field the whole argument rests on is
+now a gate row of its own: **card `e3w_0` vs NEMO's `e3w_1d`, 0 ULP**
+(**[R-4 taken]**; under `key_vco_1d3d` the mesh file carries `e3w_1d` alone, so
+the comparison is against the exact object `trazdf.F90:219-220` divides by).
+
+**First non-bit statement from the TRACER half of this module: none.** The
+scope word matters and an earlier draft did not have it (**[R-1 taken]**): this
+section covers `tra_zdf`, and the momentum solve is section 6b.
+
+## 6b. The momentum half — an owner this rung EXPOSED, not yet walked
+
+**Retraction, in one sentence: an earlier draft read the kt=2 meridional
+velocity's ×1.200 as "a pre-existing error the new viscosity merely rescales",
+and that is wrong** — a pre-existing error would have given ×1.000. The
+reviewer caught it and proposed the whole row is proportional to `rn_avm0`,
+which makes the owner the implicit vertical MOMENTUM solve. The discriminating
+check it named is cheap and was run, and it **qualifies the reviewer too**:
+
+| quantity, kt=2 v residual field | value |
+|---|---|
+| peak, SMT-0 → SMT-1 | 2.548881e-10 → 3.058414e-10 (**×1.19990**) |
+| median cell-by-cell ratio over 32,693 cells | **1.00000** |
+| 5th / 95th percentile of that ratio | 0.400 / 1.500 |
+| max abs(SMT-1 − 1.2 × SMT-0) | 4.947e-11, i.e. **16 % of the peak** |
+
+So the row is **not** a uniform rescale of the old field: most cells are
+unchanged and the **peak** is the thing proportional to the viscosity. The
+honest reading is that this rung added a NEW over-bar contribution carried by a
+term that scales with `rn_avm0`, and the place it must live is the implicit
+vertical momentum solve — `dynzdf.F90:200-203`, whose divisor pair is
+`e3u(...,Kaa) * e3uw(ji,jj,jk,Kmm)` with `e3uw_0 = e3w_1d(k)`
+(`domzgr_substitute.h90:81`) and `e3u_0 = e3u_3d` (`:98`), the momentum analogue
+of section 6 and **not verified by this round**.
+
+**Next round's first item, with its falsifier preregistered here:** a rung at
+twice the viscosity on BOTH sides (NEMO and the card). If the owner is the
+momentum solve's thickness association, the peak moves ×2 and extrapolates to
+zero as `rn_avm0 → 0` while the median stays at 1.000; a peak that does not
+scale refutes it.
 
 ## 7. FINDING — the card's stated enhanced vertical diffusion is not executed
 
@@ -233,11 +287,11 @@ does fire. Options, my pick first:
 
 | gate | result |
 |---|---|
-| geometry identity, SMT-1 vs its own record | 12/12 fields, 0 ULP |
+| geometry identity, SMT-1 vs its own record | 18/18 rows, 0 ULP (incl. the new `e3w_0` row) |
 | initial state vs SMT-0 | bit-identical, 7 fields |
 | SMT-1 ladder / 50-row registry | first over bar kt=2 T/u/v/ssh; status DEBT |
-| SMT vector, SMT flux, VORTEX-zco registries | 0/50 rows moved |
-| the other five flat VORTEX cards + two tanks | see §9 |
+| nine of the ten existing cards, 50-row registries | **0/50 rows moved each** — SMT flux, SMT vector, VORTEX-zco, VORTEX_VEC-zco, both 15 km, both 10 km, LOCK_EXCHANGE |
+| OVERFLOW-zps | **STILL RUNNING at the time of landing, so UNMEASURED** (**[R-3 taken]** — an earlier draft counted it as scored; it was not). Its registry completes into `round9/inert/` and is reported in the ledger addendum |
 | card unit tests | 13 passed |
 | NEMO admission | ADMITTED, restarts byte-identical, plant fired |
 
@@ -255,8 +309,8 @@ substitute for it.
 | R9-P3 | **CONFIRMED** — 0 trigger cells with the deck's S-EOS (min N² +9.0e-06) |
 | R9-P4 | **CONFIRMED** — avt 0 → 1.2e-5, avm 1.0e-4 → 1.2e-4, read back from NEMO |
 | R9-P5 | **REFUTED** — the first-over-bar row is unchanged; the tracer solve added nothing measurable |
-| R9-P6 | **not reached** — there is no first-over-bar row for this module to own; the association was measured faithful instead, with the 45 %-divisor bound as the non-vacuity argument |
-| R9-P7 | **CONFIRMED** — 0 ULP, twelve fields |
+| R9-P6 | **half CONFIRMED, half OPEN** — the TRACER association (`trazdf.F90:219-221`) is measured faithful, with the 45 %-divisor bound and the new 0-ULP `e3w_0` gate row behind it; the MOMENTUM association (`dynzdf.F90:200-203`) is NOT verified and section 6b hands it the next round with a falsifier |
+| R9-P7 | **CONFIRMED** — 0 ULP, eighteen rows |
 | R9-P8 | **CONFIRMED** — initial state bit-identical to SMT-0 |
 
 ## 10. ORCA2 pointer
@@ -292,3 +346,9 @@ substitute for it.
 * §7's DECISION_NEEDED.
 * The S rows crossing the bar at kt≥5 (6-8 quanta of 2.030e-16) are registered,
   not walked.
+* §6b's momentum owner, with its ×2-viscosity falsifier — the next round's
+  first item.
+* OVERFLOW's registry (§8).
+* §7's plant test pins a defect rather than a property: when the enhanced
+  vertical diffusion is wired it will go RED by design. Whoever wires it
+  inverts that test rather than deleting it.
