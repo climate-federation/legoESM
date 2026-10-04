@@ -6863,7 +6863,7 @@ class LatLonCGridOceanModel:
                         # so Kmm IS Nbb here.  Not a fresh reduction of the
                         # 3-D velocity.  Cards that do not run the carried
                         # external mode keep the reduction.
-                        barotropic_velocity=_nemo_carried_baro)
+                        entry_barotropic_velocity=_nemo_carried_baro)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data

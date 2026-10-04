@@ -308,7 +308,7 @@ def test_een_pre_step_matches_substep_zero_live_term():
 
 
 def test_een_pre_step_takes_the_carried_barotropic_velocity():
-    """``barotropic_velocity=`` must REPLACE the reduction, not be ignored.
+    """``entry_barotropic_velocity=`` must REPLACE the reduction, not be ignored.
 
     NEMO hands ``dyn_cor_2D`` the carried external mode ``puu_b(:,:,Kmm)``
     at ``dynspg_ts.f90:292`` -- the same array the substep loop is seeded
@@ -345,7 +345,7 @@ def test_een_pre_step_takes_the_carried_barotropic_velocity():
     mwc = jnp.asarray(setup.model_config.min_water_column_m, dtype=jnp.float64)
     cu, cv = barotropic_coriolis_een_pre_step(
         u3, v3, h_k, grid, mask, um, vm, mwc, jnp.float64,
-        barotropic_velocity=(carried_u, carried_v))
+        entry_barotropic_velocity=(carried_u, carried_v))
     pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
     cu_ref, cv_ref = een_barotropic_coriolis(carried_u, carried_v, pre)
     np.testing.assert_allclose(np.asarray(cu), np.asarray(cu_ref),
