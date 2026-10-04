@@ -189,6 +189,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Latent heat a surface scheme charged (thermo.charged_latent_heat):
+        # an unknown scheme must raise, never fall back to one family.
+        ("packages/core/legoesm/thermo.py", "charged_latent_heat"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the shared stable-branch dispatch twins (grow-only
         # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:

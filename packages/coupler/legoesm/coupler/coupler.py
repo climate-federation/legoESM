@@ -407,13 +407,11 @@ def ocean_tile_response(
     # with the SAME latent heat the flux used (ocean is liquid, never
     # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
     # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
-    # which charges its oracle's constant.  Positive = freshwater INTO ocean.
-    if config.bulk_scheme == "large_yeager_cesm":
-        _L_evap = constants.L_v   # latent-ok: CESM shr_flux_atmOcn oracle constant (compute_sam_oceflx_fluxes charges it)
-    else:
-        from legoesm.thermo import latent_heat_vaporization
-        _L_evap = latent_heat_vaporization(ocean_sst)
-    evap_rate = lhflx / _L_evap   # kg/m²/s, positive = up (ocean → atm)
+    # which charges its oracle's constant (thermo.charged_latent_heat).
+    # Positive = freshwater INTO ocean.
+    from legoesm.thermo import charged_latent_heat
+    # kg/m²/s, positive = up (ocean → atm)
+    evap_rate = lhflx / charged_latent_heat(config.bulk_scheme, ocean_sst)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,
