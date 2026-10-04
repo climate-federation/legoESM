@@ -5636,6 +5636,12 @@ CITATION_MAP = {
         ('IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )', 1),
         17,
     ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:265-284': [
+        ('ALLOCATE( zub(', 1),
+        ('zFu(ji,jj,jk) = e2u(ji,jj)', 1),
+        ('zFv(ji,jj,jk) = e1v(ji,jj)', 1),
+        20,
+    ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
         ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
