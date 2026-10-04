@@ -150,6 +150,8 @@ FILES = {
         _ORCA2_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90": (
