@@ -77,6 +77,11 @@ The required separate `codex exec --sandbox read-only` review did not reach
 the diff: `failed to initialize in-process app-server client: Read-only file
 system`. Verdict: **independent review unavailable in-sandbox**.
 
+The default citation gate passes 274 citations and this receipt passes five,
+both with zero failures, zero unmapped citations, and zero audit failures.
+Shifting the compiled two-step-predictor citation by two lines makes the
+receipt gate fail with `SYMBOL-NOT-AT-LINE` and exit 1.
+
 ## OPEN
 
 1. Add one private post-step exposure for the exact stage-3 implicit tracer
