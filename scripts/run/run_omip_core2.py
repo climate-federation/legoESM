@@ -6526,6 +6526,7 @@ class _ZdfTrendAccumulator:
         self._total += 1
 
     def drain(self, dt=None):
+        jax.effects_barrier()   # ordered callbacks are async: land them first
         if self._n == 0 and self._total > 0:
             return {}   # final snapshot right after a drained window
         if self._n == 0:
@@ -10697,6 +10698,9 @@ def main() -> int:
                 and not args.sss_restore
                 and not _tide_enabled
                 and _tti != "ab2")
+    if args.trd_accumulate and use_scan:
+        raise SystemExit("--trd-accumulate is refused with --scan-block: the "
+                         "scan lane's snapshot writer does not drain it.")
     if args.kprofile_snapshots and use_scan:
         # The scan-block lane does not thread the per-snapshot K dump, so
         # honouring --kprofile-snapshots there would silently write no
@@ -11949,8 +11953,10 @@ def main() -> int:
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
                            z_coord=z_coord, grid=grid, io_proc=_is_io_proc(),
                            ice_state=ice_state,
-                           extra=(_flux_acc.drain(dt)
-                                  if _flux_acc is not None else None))
+                           extra=({**(_flux_acc.drain(dt) if _flux_acc is not None else {}),
+                                   **(model._trd_callback.drain(dt)
+                                      if getattr(model, "_trd_callback", None) is not None else {})}
+                                  or None))
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
