@@ -1420,10 +1420,18 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
             scheme=scheme)
     if barotropic_velocity is not None:
         # NEMO hands dyn_cor_2D the CARRIED external mode, puu_b(:,:,Kmm)
-        # (dynspg_ts.f90:292) -- the very array the substep loop is seeded
-        # from (dynspg_ts.F90:484-500) -- and forms it ONCE, by the
-        # reference-thickness depth mean at istate.f90:149-152 (kt = nit000)
-        # and dynatf_qco.f90:220-231 thereafter.  Re-reducing the 3-D
+        # (called at dynspg_ts.f90:289, subtracted at :292) -- the very
+        # array the substep loop is seeded from (dynspg_ts.F90:484-500).
+        # At kt = nit000 istate.f90:149-152 builds it for Kbb (and Kmm is
+        # istate.f90:161), and thereafter THIS RK3 deck -- cpp keys
+        # key_qco key_RK3 key_vco_1d3d, no dyn_atf anywhere in stprk3.f90 /
+        # stprk3_stg.f90 / step.f90 -- gets it out of dyn_spg_ts itself and
+        # combines it at stprk3_stg.f90:134-232; the leap-frog filter path
+        # dynatf_qco.f90:220-231 does NOT run here.  Either way the weights
+        # are e3u_0*umask exactly: the e3u_3d*(1+r3u*umask) numerator and
+        # the r1_hu_0/(1+r3u) divisor share a k-independent (1+r3u) that
+        # cancels, and umask zeroes the levels below the bottom.
+        # Re-reducing the 3-D
         # velocity here with a different face-thickness rule than the seed
         # gives a DIFFERENT barotropic velocity to the two halves of one
         # cancellation; on a full-cell mesh the two rules agree and on
@@ -2487,7 +2495,7 @@ def nemo_carried_barotropic_state_active(config) -> bool:
                         "nemo_prognostic_barotropic_state", False))
 
 
-def _carried_nemo_depth_mean(state, dtype, config):
+def nemo_carried_barotropic_depth_mean(state, dtype, config):
     """Return the paired NEMO Kbb external-mode state, or ``None``.
 
     NEMO declares this independently of 3-D velocity at ``oce.F90:39,99``;
@@ -2695,7 +2703,7 @@ def barotropic_substeps_latlon_cgrid(
     # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
-    _carried_baro = _carried_nemo_depth_mean(state, _dt, config)
+    _carried_baro = nemo_carried_barotropic_depth_mean(state, _dt, config)
     if _carried_baro is None:
         U_bar, V_bar = _depth_average_to_faces(
             u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
@@ -3303,7 +3311,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
     _area_seed = grid.area.astype(_dt)
-    _carried_baro = _carried_nemo_depth_mean(state, _dt, config)
+    _carried_baro = nemo_carried_barotropic_depth_mean(state, _dt, config)
     if _carried_baro is None:
         U_bar, V_bar = _depth_average_to_faces(
             u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,

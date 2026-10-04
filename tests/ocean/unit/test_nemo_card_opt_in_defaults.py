@@ -387,7 +387,7 @@ def test_literal_een_coriolis_refuses_a_curvilinear_grid_without_ff_f():
 def test_carried_seed_is_selected_by_config_not_by_state_presence():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        _carried_nemo_depth_mean,
+        nemo_carried_barotropic_depth_mean as _carried_nemo_depth_mean,
     )
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.state import LatLonCGridOceanConfig

@@ -6817,15 +6817,15 @@ class LatLonCGridOceanModel:
                         "ene" if _bt_cor_split in ("ene", "ene_metric")
                         else "een")
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                        nemo_carried_barotropic_state_active,
+                        nemo_carried_barotropic_depth_mean,
                     )
-                    _nemo_carried_baro = None
-                    if (nemo_carried_barotropic_state_active(_cfg_b)
-                            and state.uu_b is not None
-                            and state.vv_b is not None):
-                        _nemo_carried_baro = (
-                            state.uu_b.data.astype(F_slow_u.dtype),
-                            state.vv_b.data.astype(F_slow_v.dtype))
+                    # The SAME selector the window seed uses: a card that
+                    # selects NEMO's carried external mode and carries no
+                    # pair (or half a pair) RAISES rather than falling back
+                    # to a reduction, which is the silent fallback this
+                    # round is removing in the first place.
+                    _nemo_carried_baro = nemo_carried_barotropic_depth_mean(
+                        state, F_slow_u.dtype, _cfg_b)
                     _slow_incoming_override = (
                         self._nemo_ws_test_hooks
                         .slow_forcing_incoming_override)
@@ -6855,12 +6855,14 @@ class LatLonCGridOceanModel:
                         z_coord=_zc,
                         return_pre=True,
                         scheme=_bt_pv_scheme,
-                        # dyn_cor_2D at dynspg_ts.f90:292 is handed
-                        # puu_b(:,:,Kmm), the carried external mode -- the
-                        # SAME array the substep loop seeds from -- not a
-                        # fresh reduction of the 3-D velocity.  Cards that
-                        # run NEMO's carried external mode hand it over;
-                        # the others keep the reduction.
+                        # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
+                        # subtracted at :292, is handed puu_b(:,:,Kmm) --
+                        # the carried external mode, the SAME array the
+                        # substep loop seeds from (dynspg_ts.F90:484-500).
+                        # stprk3.f90:189 calls stp_2D(kstp, Nbb, Nbb, ...),
+                        # so Kmm IS Nbb here.  Not a fresh reduction of the
+                        # 3-D velocity.  Cards that do not run the carried
+                        # external mode keep the reduction.
                         barotropic_velocity=_nemo_carried_baro)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
