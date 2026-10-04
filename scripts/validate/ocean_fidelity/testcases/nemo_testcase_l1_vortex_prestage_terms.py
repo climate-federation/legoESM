@@ -184,6 +184,22 @@ def run(terms_root: Path, walk_root: Path, *, stage1_error: float,
             "momentum accumulator, so the dumps are not in the order this "
             "probe assumes and no increment below is a term")
 
+    # Same refusal as the substep walk: the records carry no case stamp and
+    # the flat and seamount decks share a grid size, so a card walked against
+    # the other card's acquisition would pass every downstream guard.
+    if case != CASE:
+        for name, given in (("--terms-dir", terms_root),
+                            ("--walk-dir", walk_root)):
+            require("VORTEX_SMT" in str(given),
+                    f"{case} must be walked against its own acquisition; "
+                    f"{name} is {given}")
+    else:
+        for name, given in (("--terms-dir", terms_root),
+                            ("--walk-dir", walk_root)):
+            require("VORTEX_SMT" not in str(given),
+                    f"{CASE} is the flat card; {name} is a seamount "
+                    f"acquisition ({given})")
+
     card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     masks = expected_masks(card)

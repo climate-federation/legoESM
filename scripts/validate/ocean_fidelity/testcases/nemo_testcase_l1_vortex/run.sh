@@ -357,9 +357,11 @@ case "$variant" in
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5_VEC_R8_OMIP_L1_P3/spgts ;;
       # The barotropic substep walk (round 215) names the loop-entry
       # depth-averaged slow forcing as the first non-bit operand, and NEMO's
-      # own depth-average statement (stp2d.f90:176-178) accounts for only
-      # part of it -- the rest is inside the 3-D right-hand side that
-      # statement averages (hpg, ldf, vor, wzv, keg, zad; stp2d.f90:134-170).
+      # own depth-average statement (stp2d.f90:178-179, the np_VEC_c2 arm
+      # selected at :176) accounts for only part of it -- the rest is in the
+      # two statements that build that operand, applied to the 3-D right-hand
+      # side assembled at stp2d.f90:138,141,144,153,161,163 (hpg, ldf, vor,
+      # wzv, keg, zad).
       # No seamount record carries those per-term boundaries; this variant is
       # round 4's stp2d per-term writer on the seamount vector deck.
       smtvecrhs)

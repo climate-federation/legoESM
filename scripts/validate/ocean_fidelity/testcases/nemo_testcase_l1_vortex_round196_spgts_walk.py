@@ -167,7 +167,8 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         nemo_entry_forcing: bool = False,
         nemo_entry_velocity: bool = False,
         nemo_substep_coriolis: bool = False,
-        nemo_substep_pgf: bool = False) -> dict:
+        nemo_substep_pgf: bool = False,
+        nemo_depth_average: Path | None = None) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -195,6 +196,20 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         + tuple(name for name, *_ in ENTRY_ORDER)
     require(plant is None or plant in valid,
             f"unknown plant {plant!r}; expected one of {valid}")
+
+    # A card and an evidence root that do not belong together CANNOT be
+    # caught downstream: the step-entry record carries no case stamp and the
+    # flat and seamount decks are the same 30 km grid, so their records are
+    # the same size and `expect_interior` passes on either.  Refuse here.
+    expected_dir = SMT_CASES.get(case)
+    if expected_dir is not None:
+        require(expected_dir in root.parts,
+                f"{case} must be walked against its own acquisition: no "
+                f"'{expected_dir}' component in --oracle-root {root}")
+    else:
+        require(not any(d in root.parts for d in SMT_CASES.values()),
+                f"{case} is the flat card and --oracle-root {root} is a "
+                "seamount acquisition")
 
     card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
@@ -244,6 +259,17 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
                        for jn in range(1, meta["icycle"] + 1)])
         return jnp.asarray(us), jnp.asarray(vs)
 
+    # Round 215's split arm: substitute NEMO's OWN depth average of the slow
+    # forcing -- rebuilt by nemo_testcase_l1_vortex_round215_slow_forcing_split
+    # from NEMO's recorded 3-D right-hand side and NEMO's own mesh operands --
+    # at the boundary legoESM forms the same quantity, BEFORE the barotropic
+    # Coriolis subtraction.  What survives is the subtraction's own share.
+    depth_override = None
+    if nemo_depth_average is not None:
+        import jax.numpy as jnp
+        _npz = np.load(nemo_depth_average)
+        depth_override = (jnp.asarray(_npz["ue_rhs"]),
+                          jnp.asarray(_npz["ve_rhs"]))
     cor_override = _stack("cor_u", "cor_v") if nemo_substep_coriolis else None
     pgf_override = _stack("zu_spg", "zv_spg") if nemo_substep_pgf else None
     model = LatLonCGridOceanModel(
@@ -251,6 +277,7 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=True,
             barotropic_slow_forcing_override=override,
+            slow_forcing_depth_override=depth_override,
             barotropic_substep_coriolis_override=cor_override,
             barotropic_substep_pgf_override=pgf_override))
     result = jax.device_get(model.step(seed, dt=card.dt_s))
@@ -518,6 +545,10 @@ def main(argv=None) -> int:
                         help="one-variable arm: substitute NEMO's recorded "
                              "per-substep surface pressure gradient "
                              "(dynspg_ts.f90:498)")
+    parser.add_argument("--nemo-depth-average", type=Path,
+                        help="one-variable arm: substitute NEMO's own depth "
+                             "average of the slow forcing (stp2d.f90:178) "
+                             "before the barotropic Coriolis subtraction")
     parser.add_argument("--one-ulp-entry-probe", action="store_true",
                         help="legoESM-vs-legoESM conditioning arm: perturb the "
                              "barotropic entry velocity by one ULP and report "
@@ -541,7 +572,8 @@ def main(argv=None) -> int:
                      nemo_entry_forcing=args.nemo_entry_forcing,
                      nemo_entry_velocity=args.nemo_entry_velocity,
                      nemo_substep_coriolis=args.nemo_substep_coriolis,
-                     nemo_substep_pgf=args.nemo_substep_pgf)
+                     nemo_substep_pgf=args.nemo_substep_pgf,
+                     nemo_depth_average=args.nemo_depth_average)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
