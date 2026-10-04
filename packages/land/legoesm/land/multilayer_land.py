@@ -1065,16 +1065,24 @@ def _step_multilayer_land_impl(
         raise ValueError(
             f"no latent-heat charge known for surface_scheme "
             f"{type(config.surface_scheme)!r}")
-    # Snow stream: the driver re-charges snow-routed latent energy as sublimation
-    # at L_s(T_surface) for every scheme (phase split, audit F13; the remainder
-    # returns to the ground heat flux via evap_excess_energy below).
+    # Both streams convert latent energy to water with exactly the latent heat
+    # the surface solve CHARGED, so the vapour mass equals the scheme's own E.
+    # CLM-ML evaluates its latent heat at its reference air temperature (the
+    # forcing T_lowest: hsub at or below freezing, hvap above), every other
+    # scheme at T_surface.  Over snow SimpleSEB charges sublimation (its L_eff /
+    # layered LE_snow use L_s(T_surface)); the two-leaf canopy charges
+    # vaporization to its ground and canopy-dew fluxes.
+    _T_charge = forcing.T_lowest if _lsch == "clm_ml" else T_surface
+    _L_v_T = charged_latent_heat(_lsch, _T_charge)
+    _L_snow_charged = charged_latent_heat(
+        _lsch, _T_charge, ice=(_lsch == "simple_seb"))
+    # Snow mass really leaves the pack as ICE: sublimating it costs L_s(T_surface)
+    # per kg (lhflx_actual below).  Where the scheme charged less (L_v), the
+    # difference (L_s - L_charged) * E enters evap_excess_energy = lhflx -
+    # lhflx_actual as a NEGATIVE term and cools the ground; frost deposition
+    # (E < 0) warms it by the same rule.  No other correction is applied.
     _L_s_T = latent_heat_sublimation(T_surface)
-    # Soil / plant-water stream: exactly what the surface solve charged.  CLM-ML
-    # evaluates its latent heat at its reference air temperature (the forcing
-    # T_lowest), every other scheme at T_surface.
-    _L_v_T = charged_latent_heat(
-        _lsch, forcing.T_lowest if _lsch == "clm_ml" else T_surface)
-    sublim_demand = snow_latent / _L_s_T
+    sublim_demand = snow_latent / _L_snow_charged
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -1253,8 +1261,11 @@ def _step_multilayer_land_impl(
         # The unmet-evaporation energy is only final after hydrology (the Richards
         # refill), so the solve takes a PRE-hydrology estimate: the latent demand
         # minus what the start-of-step supply cap lets the soil give.  Sign: W/m^2,
-        # positive = energy INTO the column (same convention as G_surface).  The
-        # post-hydrology remainder is charged to the top soil layer below.
+        # positive = energy INTO the column (same convention as G_surface).  Where
+        # the scheme charged snow at L_v it carries the pack's extra sublimation
+        # cost -(L_s - L_charged) * E (negative while subliming, positive for
+        # frost), on top of any positive unmet-demand term.
+        # The post-hydrology remainder is charged to the top soil layer below.
         evap_excess_energy_pre = lhflx - (sublim_actual * _L_s_T
                                           + soil_evap * _L_v_T)
         C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
@@ -1341,6 +1352,9 @@ def _step_multilayer_land_impl(
         # sink), already charged at the surface as L_v.  Sign: W/m^2, positive =
         # energy INTO the column (downward), the same convention as G_surface and
         # evap_excess_energy; it is >= 0 whenever hydrology only reduces the draw.
+        # The snow terms (sublim_actual at L_s) are identical in the pre and final
+        # excess and cancel here, so a negative snow sublimation cost is booked
+        # exactly once, by the combined solve above.
         # Charged as a sensible increment of the top soil layer at the heat
         # capacity the combined solve used (start-of-step theta; freeze/thaw is
         # refused on this branch), so pack + soil energy closes against the
