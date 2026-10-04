@@ -40,7 +40,7 @@ dependencies = [
     "legoesm-land~=1.0.0",
     "legoesm-ice~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
-    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
     # (a uv-workspace cycle), unlike the four independent components above.
     "legoesm-coupler~=1.0.0",
@@ -415,8 +415,6 @@ ignore_imports = [
     # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
     # component (the root inversion above); baseline the core->grids hop.
@@ -574,8 +572,6 @@ ignore_imports = [
     # baselined in contract #1 (runtime/__init__ <-> core init cycle).
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
     # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).

@@ -77,7 +77,34 @@ def step_land(
     Dispatches between ``SimpleSEBConfig`` (default — bulk flux on the
     slab T) and ``TwoLeafCanopyConfig`` (two-leaf canopy with explicit
     single-layer thermal Picard callback) via
-    ``isinstance(config.surface_scheme, TwoLeafCanopyConfig)``.
+    ``isinstance(config.surface_scheme, TwoLeafCanopyConfig)``.  Use
+    :func:`step_land_with_diagnostics` to also receive the surface scheme's
+    ``SurfaceFluxOutput``.
+    """
+    new_state, response, carbon_new, _surface_out = step_land_with_diagnostics(
+        state, forcing, config, U_min, dt, lat=lat, carbon_state=carbon_state,
+        doy=doy, land_params=land_params)
+    return new_state, response, carbon_new
+
+
+def step_land_with_diagnostics(
+    state: LandState,
+    forcing: AtmToSurface,
+    config: LandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None = None,
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+    land_params=None,
+):
+    """Like :func:`step_land` but also returns the ``SurfaceFluxOutput``.
+
+    Mirrors ``multilayer_land.step_multilayer_land_with_diagnostics``.  For the
+    two-leaf canopy its ``converged`` field is ``False`` on columns whose canopy
+    root solve failed.  The slab lane does NOT hold those columns (the
+    multilayer lane does): their fluxes are the solver's fallback iterate and
+    are used as-is, so callers that care must count them from ``converged``.
     """
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         return _step_land_canopy(
@@ -369,7 +396,7 @@ def step_land(
             _pin_to_input_dtype, carbon_state_new, carbon_state,
             is_leaf=lambda x: x is None)
 
-    return new_state, response, carbon_state_new
+    return new_state, response, carbon_state_new, surface_out
 
 
 # ---------------------------------------------------------------------------
@@ -658,4 +685,4 @@ def _step_land_canopy(
         salt_flux=jnp.zeros_like(T_soil_new),
     )
 
-    return new_state, response, carbon_state_new
+    return new_state, response, carbon_state_new, surface_out

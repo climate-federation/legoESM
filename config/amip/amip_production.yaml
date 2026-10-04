@@ -121,6 +121,10 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
                             # scheme's updraft mass flux + in-cloud condensate
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
+cloud_cam6_rhmini: 0.80     # CAM6 aist ramp (cldfrc2m.F90:846-856), namelist
+cloud_cam6_rhmaxi: 1.0      # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis under
+cloud_cam6_rhminis: 1.0     # clubb_sgs (namelist_defaults_cam.xml:1521-1533);
+cloud_cam6_rhmaxis: 1.0     # = the code defaults, now recorded (user 2026-09-30)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
 morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # measured behaviour.  CAM6's MG2 has NO graupel
@@ -139,12 +143,11 @@ morrison_autocon_fact: 1.0         # kk2000 autoconversion multiplier (1 = unsca
 morrison_accre_enhan_fact: 1.0     # kk2000 accretion multiplier (MG2 accre_enhan)
 morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
                                    # 2026-09-30): rates on qc/lcldm, qr/lcldm,
-                                   # lcldm = max(CLUBB liquid cloud fraction,
-                                   # 1e-4), times lcldm (micro_mg2_0.F90:878,
-                                   # :1224-1322).  DEPARTURE: CAM6 passes
-                                   # ast = max(liquid, ice) fraction
-                                   # (clubb_intr.F90:2575); here liquid only.
-                                   # Grid-mean arm:
+                                   # lcldm = max(ast, 1e-4), ast = max(CLUBB
+                                   # liquid, aist ice-stratus) as CAM6
+                                   # (clubb_intr.F90:2575, micro_mg_cam.F90:
+                                   # 1810), times lcldm (micro_mg2_0.F90:878,
+                                   # :1224-1322).  Grid-mean arm:
                                    # --no-morrison-warm-rain-incloud.
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,

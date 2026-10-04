@@ -692,19 +692,6 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
             "nsplt": nsplt_i, "nsplt_exceeded": nsplt_exceeded}
 
 
-def make_alloc_flux_capacitors_jit(n: int, ng: int, km: int):
-    """jit twin of alloc_flux_capacitors (every input is static)."""
-    return jax.jit(functools.partial(alloc_flux_capacitors,
-                                     n=n, ng=ng, km=km))
-
-
-def make_require_tracer_2d_1l_lane_jit():
-    """The guard reads only static config and never a tracer, so its
-    jit twin is the guard itself; provided for the per-public-routine
-    convention."""
-    return require_tracer_2d_1l_lane
-
-
 def make_tracer_2d_1l_sixface_jit(ctx: dict, *, km: int, nq: int,
                                   hord_tr: int, q_split: int = 0,
                                   nord_tr: int = 0, trdm: float = 0.0,

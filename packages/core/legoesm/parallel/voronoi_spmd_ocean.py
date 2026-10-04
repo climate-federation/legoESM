@@ -68,6 +68,7 @@ from legoesm.parallel.sharded_dynamics import (
     ppermute_halo_fill,
 )
 from legoesm.parallel.voronoi_mpi import MPASOceanHaloRefresh
+from legoesm.parallel.voronoi_partition import complete_cell_rings
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class MPASOceanSPMDLayout(NamedTuple):
     upup: tuple | None      # stacked (upup_pos, upup_neg) per device, or None
     mesh_statics: dict      # Python ints/floats re-applied to the local mesh in-body
     halo_depth: int = _DEFAULT_HALO_DEPTH   # cell rings every refresh fills
+    complete_cell_rings: int = 0  # voronoi_partition.complete_cell_rings
 
     @property
     def cell_sharding(self) -> NamedSharding:
@@ -283,6 +285,7 @@ def build_mpas_ocean_spmd_layout(
         upup=upup,
         mesh_statics=_mesh_statics(mesh, max_lc, max_le, max_lv),
         halo_depth=int(halo_depth),
+        complete_cell_rings=complete_cell_rings(mesh, partitions),
     )
 
 
@@ -598,6 +601,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
             owned_mask_cells=owned_c, owned_mask_edges=owned_e,
             global_sum=lambda vals: batch_psum_spmd(list(vals), SPMD_AXIS),
             halo_depth=int(layout.halo_depth),
+            complete_cell_rings=layout.complete_cell_rings,
         )
 
     def _classify(leaves):

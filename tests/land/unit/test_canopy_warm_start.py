@@ -198,7 +198,8 @@ def test_degenerate_regimes_stay_inside_the_feasible_set(name, kw):
 # entry point instead.
 # ---------------------------------------------------------------------------
 
-def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
+def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None,
+                 lw_scale=1.0, soil_offset=0.0):
     """One two-leaf canopy call over a small realistic column batch."""
     import numpy as np
     from legoesm.core.coupling_fields import AtmToSurface
@@ -212,7 +213,7 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
     Ta = 290.0 + 8.0 * r.random(ncol)
     forcing = AtmToSurface(
         sw_down=f(200.0 + 400.0 * r.random(ncol)),
-        lw_down=f(300.0 + 60.0 * r.random(ncol)),
+        lw_down=f(300.0 + 60.0 * r.random(ncol)) * lw_scale,
         precip_total=f(np.zeros(ncol)), precip_snow=f(np.zeros(ncol)),
         T_lowest=f(Ta), q_lowest=f(0.006 + 0.006 * r.random(ncol)),
         u_lowest=f(1.0 + 3.0 * r.random(ncol)), v_lowest=f(np.zeros(ncol)),
@@ -228,7 +229,9 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
         land_config=MultiLayerLandConfig(), canopy_params=None,
         w_frac_rz=w_frac, wind_speed=jnp.abs(forcing.u_lowest),
         wind_dir_x=jnp.ones_like(w_frac), wind_dir_y=jnp.zeros_like(w_frac),
-        soil_thermal_fn=lambda G, dt_: T_soil, dt=1800.0,
+        soil_thermal_fn=(lambda G, dt_: T_soil + soil_offset) if soil_record is None
+        else (lambda G, dt_: (soil_record.append(G), T_soil + soil_offset)[1]),
+        dt=1800.0,
         canopy_seed=seed_arr)
 
 

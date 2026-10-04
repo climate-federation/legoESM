@@ -18,6 +18,8 @@ def make_implicit_newton_solver(
     atol: float = 1.0e-12,
     lambda_initial: float = 1.0e-2,
     lambda_max: float = 1.0e10,
+    n_sq_max: float | None = None,
+    admissible: Callable | None = None,
 ):
     """Build a scaled Levenberg--Marquardt root solver with an IFT VJP.
 
@@ -26,13 +28,27 @@ def make_implicit_newton_solver(
     the forward solve works in ``z = x / x_scale`` and ``f / f_scale``.
 
     The result is ``(x, n_iters, converged, n_sq, n_sq_rel, damping, hit_cap)``.
-    Convergence is based only on the scaled squared residual.  The forward
+    Convergence is based on the scaled squared residual: a reduction by
+    ``rtol`` relative to the SEED's residual.  That alone cannot certify a root
+    when the seed is far off (a huge seed residual makes the relative gate
+    vacuous), so a caller can also require an absolute ceiling ``n_sq_max`` and
+    a physical ``admissible(x) -> bool``; both default to off, which leaves the
+    contract unchanged.  The combined flag drives the stop test, the returned
+    ``converged`` and the adjoint mask alike.  The forward
     linear least-squares step uses augmented QR and Nielsen gain-ratio damping
     with rejected steps.  The backward pass uses an exact, column-equilibrated
     solve and returns zero cotangents for every non-converged root.
     """
     x_scale = jnp.asarray(x_scale)
     f_scale = jnp.asarray(f_scale)
+
+    def accepted(x, n_sq):
+        ok = jnp.asarray(True)
+        if n_sq_max is not None:
+            ok = ok & (n_sq <= n_sq_max)
+        if admissible is not None:
+            ok = ok & admissible(x)
+        return ok
 
     def scaled_residual(x, parameters):
         return residual_fn(x, parameters) / f_scale
@@ -103,7 +119,7 @@ def make_implicit_newton_solver(
                 lambda_max,
             )
             iteration_new = iteration + 1
-            converged = n_sq_new <= atol + rtol * n_sq_0
+            converged = (n_sq_new <= atol + rtol * n_sq_0) & accepted(x_new, n_sq_new)
             done = (
                 converged
                 | (damping_new >= lambda_max)
@@ -119,7 +135,7 @@ def make_implicit_newton_solver(
                 done,
             )
 
-        initial_converged = n_sq_0 <= atol
+        initial_converged = (n_sq_0 <= atol) & accepted(x0, n_sq_0)
         x_final, _, _, _, damping, n_iters, _ = jax.lax.while_loop(
             cond,
             body,
@@ -135,7 +151,8 @@ def make_implicit_newton_solver(
         )
         residual_final = fun(x_final)
         n_sq_final = jnp.sum(residual_final * residual_final)
-        converged = n_sq_final <= atol + rtol * n_sq_0
+        converged = ((n_sq_final <= atol + rtol * n_sq_0)
+                     & accepted(x_final, n_sq_final))
         tiny = jnp.finfo(n_sq_final.dtype).tiny
         return (
             x_final,
