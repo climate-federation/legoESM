@@ -120,6 +120,25 @@ def _checker():
     return _CHECKER
 
 
+def require_case_matches_root(case: str, root: Path) -> None:
+    """Refuse a card walked against the OTHER card's acquisition.
+
+    This cannot be caught downstream: the step-entry record carries no case
+    stamp, and the flat and seamount decks are the same 30 km grid, so their
+    records are the same size and ``expect_interior`` passes on either.
+    Both entry points (the walk and the conditioning probe) call it.
+    """
+    expected_dir = SMT_CASES.get(case)
+    if expected_dir is not None:
+        require(expected_dir in root.parts,
+                f"{case} must be walked against its own acquisition: no "
+                f"'{expected_dir}' component in --oracle-root {root}")
+    else:
+        require(not any(d in root.parts for d in SMT_CASES.values()),
+                f"{case} is the flat card and --oracle-root {root} is a "
+                "seamount acquisition")
+
+
 def read_spgts(root: Path, kt: int) -> tuple[dict, dict]:
     """Read one per-substep barotropic record through the acquisition's own
     self-describing parser.  Returns (header fields, {group name: array})."""
@@ -197,19 +216,7 @@ def run(root: Path, *, case: str = CASE, kt: int = 1, allow_dirty: bool = False,
     require(plant is None or plant in valid,
             f"unknown plant {plant!r}; expected one of {valid}")
 
-    # A card and an evidence root that do not belong together CANNOT be
-    # caught downstream: the step-entry record carries no case stamp and the
-    # flat and seamount decks are the same 30 km grid, so their records are
-    # the same size and `expect_interior` passes on either.  Refuse here.
-    expected_dir = SMT_CASES.get(case)
-    if expected_dir is not None:
-        require(expected_dir in root.parts,
-                f"{case} must be walked against its own acquisition: no "
-                f"'{expected_dir}' component in --oracle-root {root}")
-    else:
-        require(not any(d in root.parts for d in SMT_CASES.values()),
-                f"{case} is the flat card and --oracle-root {root} is a "
-                "seamount acquisition")
+    require_case_matches_root(case, root)
 
     card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
@@ -449,6 +456,7 @@ def conditioning(root: Path, *, case: str = CASE, kt: int = 1,
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require_case_matches_root(case, root)
     card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]

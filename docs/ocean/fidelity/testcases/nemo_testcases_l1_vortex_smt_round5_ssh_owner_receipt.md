@@ -467,6 +467,17 @@ MAJOR. Every one is taken; two of them changed what this receipt claims.
 | minor | the lost flux record obscures that R5-P4's two-card bar was unevaluable | **TAKEN**: §7.1 says so |
 | PASS | all three sha256 verified independently; every NEMO line citation verbatim-correct; every number reproduces from the JSON; `rDt_e = 60` and the `3.331e-09` identity holds to 1 part in 4e9; variant wiring complete across all four switches; `--case` threads through every former constant; nothing in the diff can change a certified number; HOLDING is correct | — |
 
+**THE REVIEWER'S OWN CORRECTION, recorded because it changes who was
+right.** After the fixes above it re-read the lane and RETRACTED MAJOR 3 —
+"the guard exists" — which is true, and it exists BECAUSE of MAJOR 3: the
+snapshot it was handed was four of the lane's six commits and I moved the
+tree under it. The finding stands, the retraction is of its own reading of
+the diff, and the record says both. With it came one residual minor,
+**taken**: the conditioning entry point (`--one-ulp-entry-probe`) took a
+card and a root without the guard. It is hoisted into one
+`require_case_matches_root` helper that both entry points call, with a
+fifth test that goes red if `conditioning` stops calling it.
+
 **COMPLIANCE (RULE 2): ONE review, not two.** The second reviewer is codex,
 paused on this account. That is a gap, not an exemption.
 

@@ -87,3 +87,16 @@ def test_the_guard_is_not_vacuous_on_a_matching_pair():
     assert "must be walked against its own acquisition" not in str(
         excinfo.value)
     assert "is a seamount acquisition" not in str(excinfo.value)
+
+
+def test_the_conditioning_probe_shares_the_guard():
+    """The --one-ulp-entry-probe entry point must refuse the same mismatch.
+
+    It took the card and the root and read the entry record without the
+    guard, which is the reviewer's residual finding; the guard is hoisted
+    into one helper both entry points call.
+    """
+    with pytest.raises(walk.GateError) as excinfo:
+        walk.conditioning(Path("/nonexistent/round196/oracle_spgts_substeps"),
+                          case="VORTEX_SMT_VEC-zps", allow_dirty=True)
+    assert "must be walked against its own acquisition" in str(excinfo.value)
