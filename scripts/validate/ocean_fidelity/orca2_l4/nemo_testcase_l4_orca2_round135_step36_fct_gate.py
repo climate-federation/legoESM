@@ -33,7 +33,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 TRACE_FIELD_ORDER = rejected.TRACE_FIELD_ORDER
 GROUP_ORDER = rejected.GROUP_ORDER
-TARGET = rejected.TARGET
+TARGET = (86, 159, 0)
 FIELDS = prior.FIELDS
 PLANTS = ("none", "source-order", "passivity", "support")
 
@@ -76,6 +76,91 @@ def _ordinary_state_equal(observed, ordinary) -> dict[str, bool]:
 
 def _first_nonfinite(groups: dict[str, object], key: str) -> str | None:
     return next((name for name in GROUP_ORDER if groups[name][key]), None)
+
+
+def _target_values(values: np.ndarray, kind: str) -> tuple[np.ndarray, list[list[int]]]:
+    j, i, k = TARGET
+    if kind == "u":
+        indices = ((j, i, k), (j, i + 1, k))
+    elif kind == "v":
+        indices = ((j, i, k), (j + 1, i, k))
+    elif kind == "w":
+        indices = ((j, i, k), (j, i, k + 1))
+    else:
+        indices = ((j, i, k),)
+    return (np.asarray([values[index] for index in indices]),
+            [list(index) for index in indices])
+
+
+def _field_summary(name: str, values: np.ndarray,
+                   supports: dict[str, np.ndarray]) -> dict[str, object]:
+    values = np.asarray(values)
+    require(values.dtype == np.dtype(np.float64), f"{name}: trace is not fp64")
+    kind = rejected._kind(name)
+    support = supports[kind]
+    require(values.shape == support.shape,
+            f"{name}: shape {values.shape} != {kind} support {support.shape}")
+    selected = values[support]
+    bad = np.argwhere((~np.isfinite(values)) & support)
+    target_values, target_indices = _target_values(values, kind)
+    return {
+        "kind": kind,
+        "shape": list(values.shape),
+        "support_count": int(np.count_nonzero(support)),
+        "nonfinite": int(np.count_nonzero(~np.isfinite(selected))),
+        "first_nonfinite": (list(map(int, bad[0])) if bad.size else None),
+        "finite_max_abs": (float(np.max(np.abs(selected[np.isfinite(selected)])))
+                           if bool(np.isfinite(selected).any()) else None),
+        "target_indices": target_indices,
+        "target_values": [str(value) for value in target_values],
+        "target_nonfinite": int(np.count_nonzero(~np.isfinite(target_values))),
+    }
+
+
+def _group_summaries(traces: dict[str, dict[str, np.ndarray]],
+                     supports: dict[str, np.ndarray],
+                     caller: dict[str, object]) -> dict[str, object]:
+    groups = {}
+    for group, fields in rejected.TRACE_GROUPS[:-1]:
+        summaries = {
+            tracer: {name: _field_summary(name, traces[tracer][name], supports)
+                     for name in fields}
+            for tracer in ("T", "S")
+        }
+        nonfinite = {
+            tracer: sum(row["nonfinite"] for row in summaries[tracer].values())
+            for tracer in ("T", "S")
+        }
+        target_nonfinite = {
+            tracer: sum(row["target_nonfinite"]
+                        for row in summaries[tracer].values())
+            for tracer in ("T", "S")
+        }
+        support_count = {
+            name: summaries["T"][name]["support_count"] * 2 for name in fields}
+        groups[group] = {
+            "fields": list(fields), "details": summaries,
+            "support_count": support_count,
+            "active_count": sum(support_count.values()),
+            "nonfinite": nonfinite, "nonfinite_total": sum(nonfinite.values()),
+            "target_nonfinite": target_nonfinite,
+            "target_nonfinite_total": sum(target_nonfinite.values()),
+        }
+    caller_nonfinite = {name: int(caller["nonfinite"][name])
+                        for name in ("T", "S")}
+    caller_target = {name: int(caller["target_nonfinite"][name])
+                     for name in ("T", "S")}
+    groups["caller_advection_content"] = {
+        "fields": ["caller_content"],
+        "support_count": {"caller_content": int(caller["active_count"]) * 2},
+        "active_count": int(caller["active_count"]) * 2,
+        "nonfinite": caller_nonfinite,
+        "nonfinite_total": sum(caller_nonfinite.values()),
+        "target_nonfinite": caller_target,
+        "target_nonfinite_total": sum(caller_target.values()),
+        "details": {"passive_post_step_exposure": True},
+    }
+    return groups
 
 
 def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, object]:
@@ -259,7 +344,7 @@ def measure(deck_root: Path, expect_commit: str) -> dict[str, object]:
         name: int(not np.isfinite(values[j, i, k]))
         for name, values in content_arrays.items()
     }
-    groups = rejected._group_summaries(traces, supports, content_summary)
+    groups = _group_summaries(traces, supports, content_summary)
     first = _first_nonfinite(groups, "nonfinite_total")
     first_target = _first_nonfinite(groups, "target_nonfinite_total")
     returned_summary = prior.boundary_summary(prior._state_arrays(returned))
