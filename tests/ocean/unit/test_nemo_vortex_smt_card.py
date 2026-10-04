@@ -260,3 +260,58 @@ def test_smt1_validator_refuses_a_card_that_drops_a_rung0_value():
                 enhanced_diffusion=ed._replace(nu_conv=100.0))))))
     with pytest.raises(ValueError, match="nn_evdm=0"):
         validate_nemo_testcase_card(bad3)
+
+
+def test_smt1_stated_evd_is_declared_but_not_executed_and_measured_inert():
+    """Two MEASURED facts, pinned so neither can rot silently.
+
+    1.  The card states ``ln_zdfevd`` (it is the deck's resolved value) and
+        the executed model DOES NOT RUN IT: multiplying ``rn_evd`` by ten
+        thousand changes nothing in a full step.  Round 220 found this with
+        exactly this plant; it is a DECISION_NEEDED in that receipt, not a
+        thing this test endorses.
+    2.  It is inert here anyway, because NEMO's own ``zdfevd`` never fires
+        on this rung: with the deck's S-EOS (decision 69) the minimum N^2
+        over the whole seamount run is +9.0e-06 s^-2, ten orders the wrong
+        side of ``zdfevd.F90:93``'s -1.e-12 threshold.  The trigger as the
+        MODEL would compute it fires on 61 cells, which is the defaulted
+        S-EOS coefficient set, not the fluid this deck runs.
+    """
+    import numpy as _np
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT1_VEC-zps")
+
+    def one_step(k_conv):
+        cfg = card.recipe.model_config
+        ed = cfg.physics.convection.enhanced_diffusion._replace(K_conv=k_conv)
+        cfg = cfg._replace(physics=cfg.physics._replace(
+            convection=cfg.physics.convection._replace(
+                enhanced_diffusion=ed)))
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg)
+        return model.step(card.recipe.initial_state, dt=card.dt_s)
+
+    a, b = one_step(100.0), one_step(1.0e6)
+    assert float(_np.max(_np.abs(
+        _np.asarray(a.T.data) - _np.asarray(b.T.data)))) == 0.0
+    assert float(_np.max(_np.abs(
+        _np.asarray(a.u.data) - _np.asarray(b.u.data)))) == 0.0
+
+    # And the fluid itself: NEMO's bn2 with the DECK's coefficients.
+    from legoesm.ocean.eos import (
+        compute_buoyancy_frequency_nemo_bn2, nemo_bn2_live_geometry,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import _VORTEX_SEOS
+    st = card.recipe.initial_state
+    z = card.recipe.z_coord
+    t_depth, w_depth, e3w = nemo_bn2_live_geometry(
+        z, st.eta.data, st.H_bathy.data)
+    n2 = _np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        st.T.data, st.S.data, t_depth, w_depth, _VORTEX_SEOS,
+        g=card.recipe.model_config.physics.constants.g,
+        eos_form="seos", e3w_int=e3w))
+    act = _np.asarray(z.is_active)
+    wet = act[..., 1:] & act[..., :-1]
+    assert float(_np.min(n2[..., :wet.shape[-1]][wet])) > 1.0e-6
