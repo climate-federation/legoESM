@@ -74,6 +74,49 @@ def test_partial_cloud_lies_between_clear_and_overcast(solver):
     assert np.all(mc <= overcast + 1e-9)
 
 
+@pytest.mark.parametrize("aerosol", [False, True])
+def test_fused_clear_sky_equals_the_separate_cloud_free_solve(solver, aerosol):
+    """``clear_sky=True`` returns the clouds-off TOA fluxes from the all-sky
+    solve (shared gas optics): equal to a separate cloud-free solve, and the
+    all-sky outputs are unchanged.  Night columns included."""
+    kw, cf, lwp, iwp = _columns()
+    kw["cos_zenith"] = jnp.asarray(np.linspace(-0.3, 0.9, NCOL))
+    if aerosol:
+        kw["aerosol_optical_depth"] = jnp.full((NCOL, NLEV), 0.01)
+        kw["aerosol_absorption_optical_depth_lw"] = jnp.full((NCOL, NLEV), 0.002)
+    liq, ice = in_cloud_paths(cf, lwp, iwp)
+    cloudy = dict(cloud_path_liq=liq, cloud_path_ice=ice, mcica_cloud_fraction=cf)
+    fused = solver.solve_columns(**kw, **cloudy, clear_sky=True)
+    allsky = solver.solve_columns(**kw, **cloudy)
+    clear = solver.solve_columns(**kw)
+    assert allsky.sw_flux_up_toa_clr is None and allsky.lw_flux_up_toa_clr is None
+    _same(fused[:7], allsky[:7], atol=1e-9)
+    for got, want in ((fused.sw_flux_up_toa_clr, clear.sw_flux_up[:, 0]),
+                      (fused.lw_flux_up_toa_clr, clear.lw_flux_up[:, 0])):
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want),
+                                   rtol=1e-12, atol=1e-9)
+    # the clouds matter in this state, so clear != all-sky is a real check
+    assert not np.allclose(np.asarray(clear.sw_flux_up[:, 0]),
+                           np.asarray(allsky.sw_flux_up[:, 0]), atol=1.0)
+    assert not np.allclose(np.asarray(clear.lw_flux_up[:, 0]),
+                           np.asarray(allsky.lw_flux_up[:, 0]), atol=1.0)
+
+
+def test_fused_clear_sky_all_night(solver):
+    """Whole domain dark: the SW solve is skipped, so the clear-sky keys must
+    come back from the night branch too (zero SW, LW still the clear solve)."""
+    kw, cf, lwp, iwp = _columns()
+    kw["cos_zenith"] = jnp.full(NCOL, -0.2)
+    liq, ice = in_cloud_paths(cf, lwp, iwp)
+    fused = solver.solve_columns(**kw, cloud_path_liq=liq, cloud_path_ice=ice,
+                                 mcica_cloud_fraction=cf, clear_sky=True)
+    clear = solver.solve_columns(**kw)
+    np.testing.assert_array_equal(np.asarray(fused.sw_flux_up_toa_clr), 0.0)
+    np.testing.assert_allclose(np.asarray(fused.lw_flux_up_toa_clr),
+                               np.asarray(clear.lw_flux_up[:, 0]),
+                               rtol=1e-12, atol=1e-9)
+
+
 def test_column_chunking_is_exact(solver):
     kw, cf, lwp, iwp = _columns()
     liq, ice = in_cloud_paths(cf, lwp, iwp)

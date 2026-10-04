@@ -354,6 +354,36 @@ class RRTMOptics(optics_base.OpticsScheme):
         'asymmetry_factor': cloud_asy,
     }
 
+  def add_cloud_optical_properties(
+      self,
+      igpt: Array,
+      gas_optical_props: Mapping[str, Array],
+      is_lw: bool,
+      cloud_r_eff_liq: Array | None = None,
+      cloud_path_liq: Array | None = None,
+      cloud_r_eff_ice: Array | None = None,
+      cloud_path_ice: Array | None = None,
+      cloud_fraction: Array | None = None,
+  ) -> Mapping[str, Array]:
+    """Add cloud optics to already-computed gas optics for g-point ``igpt``.
+
+    The combination ``compute_lw/sw_optical_properties`` apply; with no cloud
+    path the gas properties are returned unchanged.  Lets a caller that needs
+    both the clear and the cloudy optics compute the gas optics once.
+    """
+    if cloud_path_liq is None and cloud_path_ice is None:
+      return gas_optical_props
+    return self._combine_gas_and_cloud_properties(
+        igpt,
+        gas_optical_props,
+        is_lw=is_lw,
+        radius_eff_liq=cloud_r_eff_liq,
+        cloud_path_liq=cloud_path_liq,
+        radius_eff_ice=cloud_r_eff_ice,
+        cloud_path_ice=cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
+
   def _combine_gas_and_cloud_properties(
       self,
       igpt: Array,
@@ -474,19 +504,9 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': jnp.zeros_like(optical_depth_lw),
         'asymmetry_factor': jnp.zeros_like(optical_depth_lw),
     }
-
-    if cloud_path_liq is not None or cloud_path_ice is not None:
-      return self._combine_gas_and_cloud_properties(
-          igpt,
-          optical_props,
-          is_lw=True,
-          radius_eff_liq=cloud_r_eff_liq,
-          cloud_path_liq=cloud_path_liq,
-          radius_eff_ice=cloud_r_eff_ice,
-          cloud_path_ice=cloud_path_ice,
-          cloud_fraction=cloud_fraction,
-      )
-    return optical_props
+    return self.add_cloud_optical_properties(
+        igpt, optical_props, True, cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
 
   @override
   def compute_sw_optical_properties(
@@ -553,18 +573,9 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': ssa,
         'asymmetry_factor': jnp.zeros_like(ssa),
     }
-    if cloud_path_liq is not None or cloud_path_ice is not None:
-      return self._combine_gas_and_cloud_properties(
-          igpt,
-          gas_optical_props,
-          is_lw=False,
-          radius_eff_liq=cloud_r_eff_liq,
-          cloud_path_liq=cloud_path_liq,
-          radius_eff_ice=cloud_r_eff_ice,
-          cloud_path_ice=cloud_path_ice,
-          cloud_fraction=cloud_fraction,
-      )
-    return gas_optical_props
+    return self.add_cloud_optical_properties(
+        igpt, gas_optical_props, False, cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
 
   @override
   def compute_planck_sources(

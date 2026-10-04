@@ -782,6 +782,7 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    clear_sky_toa: bool = False,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -823,7 +824,14 @@ def _call_radiation_backend(
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
+    clear_sky_toa : bool
+        RRTMGP only: also return the clear-sky TOA upward fluxes from the
+        same solve (``RadiationOutput.*_flux_up_toa_clr``).
     """
+    if clear_sky_toa and radiation_config.scheme in ("simple_lw", "gray"):
+        raise ValueError(
+            f"clear_sky_toa is an RRTMGP option; scheme "
+            f"{radiation_config.scheme!r} has no clear-sky solve")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -959,6 +967,8 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if clear_sky_toa:
+        _rad_kwargs["clear_sky"] = True
     # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
     # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
     # spread thinly over many partly cloudy layers is solved as one deep
@@ -1030,6 +1040,9 @@ def _call_radiation_backend(
             heating_rate=result.lw_heating_rate + result.sw_heating_rate * s,
             lw_heating_rate=result.lw_heating_rate,
             sw_heating_rate=result.sw_heating_rate * s,
+            lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
+            sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
+                                else result.sw_flux_up_toa_clr * _sw_scale),
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -1335,6 +1348,10 @@ def _make_hydrostatic_radiation(
     _clr_sky_cfg = (
         radiation_config._replace(cloud_scheme="none", cloud_config=None)
         if radiation_config.clear_sky_diag else None)
+    # RRTMGP computes the clear-sky fluxes inside the all-sky solve instead of
+    # a second solve; gray/simple_lw keep the second pass.
+    _clr_sky_fused = (_clr_sky_cfg is not None
+                      and radiation_config.scheme not in ("gray", "simple_lw"))
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
@@ -1642,6 +1659,7 @@ def _make_hydrostatic_radiation(
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
+            clear_sky_toa=_clr_sky_fused,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -1654,7 +1672,12 @@ def _make_hydrostatic_radiation(
         # (the held/no-rad sub-cycle variant contains no radiation at all).
         sw_up_toa_clr = None
         lw_up_toa_clr = None
-        if _clr_sky_cfg is not None:
+        if _clr_sky_fused:
+            # RRTMGP: the clear-sky fluxes came out of the all-sky solve
+            # above, sharing its gas optics (~90% of the radiation cost).
+            sw_up_toa_clr = rad_out.sw_flux_up_toa_clr
+            lw_up_toa_clr = rad_out.lw_flux_up_toa_clr
+        elif _clr_sky_cfg is not None:
             rad_out_clr = _call_radiation_backend(
                 radiation_config=_clr_sky_cfg,
                 eccf=eccf,
