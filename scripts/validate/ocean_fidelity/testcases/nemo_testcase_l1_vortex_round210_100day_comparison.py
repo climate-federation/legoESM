@@ -83,9 +83,9 @@ SMT_CARDS = {
 }
 SMT_LADDER = {
     "smtflux": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
-                    "vortex_smt/round6/after/after_VORTEX_SMT-zps.json"),
+                    "vortex_smt/round6/after2/after_VORTEX_SMT-zps.json"),
     "smtvec": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
-                   "vortex_smt/round6/after/after_VORTEX_SMT_VEC-zps.json"),
+                   "vortex_smt/round6/after2/after_VORTEX_SMT_VEC-zps.json"),
 }
 CARDS.update(SMT_CARDS)
 CERTIFIED_LADDER.update(SMT_LADDER)
