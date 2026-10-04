@@ -5696,6 +5696,22 @@ CITATION_MAP = {
         ('zta_up1(ji,jj,jk) =', 1),
         10,
     ],
+    # --- ORCA2 card round 135: incoming slow forcing and passive FCT walk
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:194-200': [
+        ('!*  vertical averaging  *!', 1),
+        ('Ve_rhs(ji,jj) = SUM( e3v_3d', 1),
+        7,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:569-572': [
+        ('ptFu(ji,jj,jk) = 0.5_wp', 1),
+        ('MIN( pV(ji,jj,jk) , 0._wp ) * pt_up1(ji,jj+1,jk)', 1),
+        4,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:577-578': [
+        ('ptFw(ji,jj,jk) = 0.5_wp', 1),
+        ('MIN( pW(ji,jj,jk) , 0._wp ) * pt_up1(ji,jj,jk-1)', 1),
+        2,
+    ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
         ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
