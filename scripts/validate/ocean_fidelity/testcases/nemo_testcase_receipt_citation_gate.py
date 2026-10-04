@@ -5819,30 +5819,30 @@ CITATION_MAP = {
         24,
     ],
     # --- ORCA2 card round 141: independent finite-growth acquisition
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/stprk3.f90:201-215': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         ('CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )', 1),
-        ('! Stage 1 :', 1),
-        15,
+        ('CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 1),
+        12,
     ],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:357-375': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:359-375': [
         ('sshn_e(:,:) =    pssh (:,:,Kmm)', 1),
         ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kbb)))', 1),
-        19,
+        17,
     ],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:888-960': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-960': [
         ('un_adv(:,:) = un_adv(:,:) / r1_wgt2s', 1),
         ("CALL r95_spg_w2('ssh_aa', pssh(:,:,Kaa))", 1),
-        73,
+        71,
     ],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:170-235': [
         ('SUBROUTINE tra_adv_trp_t(', 1),
         ('DEALLOCATE( zFu_cor, zFv_cor )', 1),
         66,
     ],
-    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:267-316': [
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:267-315': [
         ('IF( ll_Fw ) THEN', 1),
         ('pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 1),
-        50,
+        49,
     ],
     'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
         ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),

@@ -33,16 +33,16 @@ The exact missing NEMO streams are, on both MPI ranks and at each of steps
 
 This is the source order the rung-0 build executes. The compiled step program
 calls the split-explicit solve before stage 1 at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/stprk3.f90:201-215`. The solver starts
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/stprk3.f90:204-215`. The solver starts
 from the selected sea surface, barotropic velocities, and `r3u/r3v` depth
 ratios at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:357-375`, then finalizes
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:359-375`, then finalizes
 the depth-mean transports, external velocities, and sea surface at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:888-960`. The stage-1
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-960`. The stage-1
 transport program constructs the horizontal transports at
 `ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:170-235`, then evaluates
 `wzv` and forms `zFw` at
-`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:267-316`.
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90:267-315`.
 
 Round 83's month record cannot answer this question: it contains only the
 step-240 terminal restart. The round-91/96 frame and split-explicit records end
