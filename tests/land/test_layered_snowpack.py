@@ -652,3 +652,28 @@ def test_exported_humidity_implies_realised_vapour_flux_mixed_sign(frac, dry):
     g = float(sfc.vapour_conductance[0])
     assert g > 0.0
     np.testing.assert_allclose(g * dq, E, rtol=1e-9)
+
+
+@pytest.mark.parametrize("cover, q_air", [(0.0, 0.001), (1.0, 0.0005), (0.0, 0.009)])
+def test_vapour_conductance_reproduces_the_scheme_flux_under_most(cover, q_air):
+    """The layered SimpleSEB's exported conductance is the exchange coefficient AT
+    the solved humidity: g * (q_surface - q_air) recomputes the scheme's own vapour
+    flux (MOST, default).  A local slope dE/dq does not, because the MOST
+    coefficient depends on humidity through stability (codex round 3)."""
+    from legoesm.land.surface_scheme.simple_seb import compute_simple_seb_fluxes
+    from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+    cfg = _cfg()
+    assert cfg.bulk_scheme == "most"
+    s = _state(cfg, 1, T_soil=285.0 if cover == 0.0 else 268.0, swe=15.0)
+    fo = _forcing(1, T_air=280.0 if cover == 0.0 else 265.0, sw=300.0, q=q_air, wind=3.0)
+    out = compute_simple_seb_fluxes(
+        T_surface=s.T_soil[:, 0], snow=s.snow_depth, snow_age=s.snow_age,
+        beta_soil=jnp.ones(1), forcing=fo, land_config=cfg, U_min=1.0, lat=None,
+        carbon_state=None, dt=1800.0, land_params=None, albedo_land=0.2,
+        emissivity=0.97, z0=0.01, snow_cover=jnp.full(1, cover))
+    L = (latent_heat_sublimation if cover == 1.0 else latent_heat_vaporization)(
+        s.T_soil[:, 0])
+    E = float((out.lhflx / L)[0])
+    assert abs(E) > 1e-7, E
+    np.testing.assert_allclose(
+        float(out.vapour_conductance[0]) * (float(out.q_surface[0]) - q_air), E, rtol=1e-9)

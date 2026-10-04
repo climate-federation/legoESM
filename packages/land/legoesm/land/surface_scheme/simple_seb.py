@@ -58,9 +58,8 @@ LAND_CONDENSATION_FLOOR_W = -150.0
 # fluxes when building the semi-implicit surface conductance (Robin BC).  Small enough
 # for an accurate slope, large enough to stay above bulk-flux round-off.
 _SURFACE_LIN_DT_K = 0.1
-# Humidity step [kg/kg] for the finite-difference vapour conductance the layered
-# path exports (bulk fluxes are linear in the surface humidity up to the weak
-# virtual-temperature stability feedback).
+# Humidity [kg/kg] below which the layered path's exchange coefficient falls back
+# from the secant E / (q_c - q_air) (0/0 there) to a finite-difference slope.
 _VAPOUR_COND_DQ = 1.0e-5
 
 
@@ -260,17 +259,24 @@ def compute_simple_seb_fluxes(
             f * a + (1.0 - f) * b for a, b in zip(_snow[:4], _soil[:4]))
         LE_snow = f * _snow[3]
         q_sfc = f * q_sfc_snow + (1.0 - f) * q_sfc_soil
-        # Cell vapour conductance [kg m-2 s-1 per kg/kg], > 0: the change of the
-        # area-weighted UNFLOORED vapour flux when both surface humidities rise by
-        # _VAPOUR_COND_DQ.  The caller rebuilds the exported humidity from the
-        # REALISED vapour flux with it (q_air + E / g), so the exported humidity
-        # implies that flux in sign and magnitude, whatever the L weighting, the
-        # condensation floor or the supply limits did to it.
-        _dq = _VAPOUR_COND_DQ
-        vapour_conductance = (
-            f * (_bulk(T_surface, q_sfc_snow + _dq, _L_s)[4] - _snow[4]) / _L_s
-            + (1.0 - f) * (_bulk(T_surface, q_sfc_soil + _dq, _L_v)[4] - _soil[4]) / _L_v
-        ) / _dq
+        # Cell vapour conductance [kg m-2 s-1 per kg/kg], > 0: the exchange
+        # coefficient AT THE SOLVED HUMIDITY (and stability) of each component,
+        # E_raw / (q_c - q_air) from the UNFLOORED flux, area-weighted.  Under MOST
+        # the coefficient depends on q through stability, so a local slope dE/dq
+        # is not it.  Where q_c ~ q_air the secant is 0/0 and the slope (the same
+        # coefficient in that limit) is used.  The caller exports q_air + E / g
+        # from the REALISED vapour flux E, so the exported humidity implies that
+        # flux in sign and magnitude through this coefficient.
+        def _coeff(q_c, L, raw):
+            dq_c = q_c - forcing.q_lowest
+            slope = (_bulk(T_surface, q_c + _VAPOUR_COND_DQ, L)[4] - raw) / (
+                L * _VAPOUR_COND_DQ)
+            ok = jnp.abs(dq_c) > _VAPOUR_COND_DQ
+            secant = (raw / L) / jnp.where(ok, dq_c, 1.0)
+            return jnp.where(ok, secant, slope)
+
+        vapour_conductance = (f * _coeff(q_sfc_snow, _L_s, _snow[4])
+                              + (1.0 - f) * _coeff(q_sfc_soil, _L_v, _soil[4]))
 
     # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
     # Use the SAME effective snow mass as the iter-68 bulk-flux phase
