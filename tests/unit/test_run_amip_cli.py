@@ -4596,6 +4596,9 @@ def test_argv_distributed_mode_matches_the_parser_and_config_default():
     from legoesm.driver.config import ExperimentConfig
     assert _ARGV_DISTRIBUTED_MODE_DEFAULT == ExperimentConfig().distributed_mode
     p = build_arg_parser()
+    # the hook's accepted set IS the parser's choices (GLM)
+    _mode_action = next(a for a in p._actions if a.dest == "distributed_mode")
+    assert set(_mode_action.choices) == {"mpi", "spmd"}
     for argv in (["--distributed-mode", "spmd"], ["--distributed-mode=spmd"],
                  ["--days", "1", "--distributed-mode", "spmd", "--distributed"],
                  ["--distributed"], [],
@@ -4636,6 +4639,6 @@ def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
         assert _argv_distributed_mode(argv) == "spmd", argv
     assert _argv_distributed_mode(["--config", str(deck),
                                    "--distributed-mode", "mpi"]) == "mpi"
-    # a missing file is the reader's own loud exit (same message as later)
-    with pytest.raises(SystemExit, match="file not found"):
-        _argv_distributed_mode(["--config", str(tmp_path / "nope.yaml")])
+    # a missing deck is main()'s error (after --help had its chance), not
+    # the hook's: the default, no raise
+    assert _argv_distributed_mode(["--help", "--config", str(tmp_path / "nope.yaml")]) == "mpi"

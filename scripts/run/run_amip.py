@@ -78,9 +78,13 @@ def _argv_distributed_mode(argv: list[str]) -> str:
     # `--conf` is the shortest prefix unique to --config in this parser
     cfg = _argv_option(argv, "--config", len("--conf"))
     if cfg:
-        # a missing / cyclic / non-mapping file is the reader's own
-        # SystemExit, the same message load_yaml_config would give later
-        mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+        try:
+            mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+        except SystemExit:
+            # a missing / cyclic / non-mapping deck: main() reports it with
+            # the reader's own message (or prints --help first); the hook
+            # must not pre-empt that (codex)
+            pass
     # longer than the exact `--distributed` flag: unique to --distributed-mode
     v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)
     if v in ("mpi", "spmd"):   # anything else argparse rejects anyway
