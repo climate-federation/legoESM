@@ -235,7 +235,7 @@ def test_water_closes_and_albedo_contract_holds_through_melt_and_refreeze():
 
 
 @pytest.mark.parametrize("scheme, ft", [
-    pytest.param("two_leaf", True, marks=pytest.mark.xfail(strict=True, reason=(
+    pytest.param("two_leaf", False, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
         "KNOWN REGRESSION 2026-09-27: with the albedo's snow cover (tanh(SWE/50), "
         "f~0.29 at 15 kg/m2) the two-leaf canopy solve stops converging on the LAI-2 "
         "column in warm sun over a melting partial pack; the column is held from "
@@ -457,6 +457,29 @@ def test_land_restart_round_trips_snow_layers(tmp_path):
         np.testing.assert_allclose(getattr(merged, k), getattr(st, k))
 
 
+@pytest.mark.parametrize("drop", ["snow_ice_layers", "snow_rho_layers"])
+def test_partial_snow_layer_restart_is_refused(tmp_path, drop):
+    """A restart (file or in-memory state) carrying only some of the four pack
+    fields is refused: the template would fill the rest with its cold-start pack
+    and the next step would rebuild SWE from that mix, losing the loaded water."""
+    from legoesm.land.restart import (
+        load_land_restart, merge_land_restart_into_template, save_land_restart)
+    cfg = _cfg()
+    st = seed_snow_layers(init_multilayer_land_state(2, cfg, T_init=265.0)._replace(
+        snow_depth=jnp.array([4.0, 30.0])), cfg)
+    path = save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                             t_end_s=0.0, n_steps_completed=0)
+    d = dict(np.load(path))
+    d.pop(drop)
+    np.savez(tmp_path / "part.npz", **d)
+    with pytest.raises(ValueError, match="partial layered snowpack"):
+        load_land_restart(tmp_path / "part.npz", expected_land_mode="multilayer",
+                          expected_ncol=2)
+    with pytest.raises(ValueError, match="partial layered snowpack"):
+        merge_land_restart_into_template(
+            st._replace(**{drop: None}), init_multilayer_land_state(2, cfg, T_init=280.0))
+
+
 def test_rain_on_snow_enters_the_pack_in_the_land_step():
     """Rain on a cold pack: the snow-covered fraction of it is held by the pack
     (refrozen), only the rest reaches the soil."""
@@ -555,3 +578,38 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
     # the post-hydrology remainder breaks the first identity (by 0.58 W/m2 already
     # on step 1), and the merge as first resolved raised UnboundLocalError.
     assert unmet > 5.0, unmet
+
+
+@pytest.mark.parametrize("swe", [5.0, 15.0, 40.0])
+def test_partial_cover_sublimation_scales_with_f_not_f_squared(swe):
+    """SimpleSEB over a partial layered pack on a soil at its dry floor: the snow
+    exchanges as an ice-saturated surface over the fraction f, so the pack
+    supplies (nearly) all the latent demand the scheme charged.  The f-blended
+    surface gave the pack only f of an already f-weighted demand (f^2): measured
+    unmet 13.8 / 21.2 / 20.2 W/m2 of 15.3 / 29.9 / 60.0 at f = 0.10 / 0.29 / 0.66."""
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
+    from legoesm.land.surface_scheme.simple_seb import compute_simple_seb_fluxes
+    cfg = _cfg(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
+    hc = cfg.hydraulics
+    tfl = float(jnp.max(theta_from_psi(psi_dry_floor(hc), hc)))
+    s = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=tfl + 1.0e-3)
+    s = seed_snow_layers(s._replace(psi_soil=psi_from_theta(s.theta_soil, hc),
+                                    snow_depth=jnp.full(1, swe)), cfg)
+    f = float(land_snow_cover(jnp.full(1, swe), cfg.land_albedo)[0])
+    fo = _forcing(1, T_air=270.0, sw=200.0, lw=250.0, q=0.0005)
+    _, out = _run(cfg, s, fo, 1, 1800.0)
+    _, resp, sfc = out[0]
+    demand, reported = float(sfc.lhflx[0]), float(resp.lhflx[0])
+    assert demand > 5.0, demand
+    assert demand - reported < 0.05 * demand, (f, demand, reported)
+    # the scheme itself: snow and soil exchange separately, area-weighted
+    kw = dict(T_surface=s.T_soil[:, 0], snow=s.snow_depth, snow_age=s.snow_age,
+              beta_soil=jnp.zeros(1), forcing=fo, land_config=cfg, U_min=1.0, lat=None,
+              carbon_state=None, dt=1800.0, land_params=None, albedo_land=0.2,
+              emissivity=0.97, z0=0.01)
+    lh = {c: compute_simple_seb_fluxes(**kw, snow_cover=jnp.full(1, c)) for c in (f, 1.0, 0.0)}
+    np.testing.assert_allclose(lh[f].lhflx, f * lh[1.0].lhflx + (1 - f) * lh[0.0].lhflx,
+                               rtol=1e-12)
+    np.testing.assert_allclose(lh[f].LE_snow, f * lh[1.0].lhflx, rtol=1e-12)

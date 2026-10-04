@@ -111,6 +111,10 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # SimpleSEB over a layered pack (fractional cover f): the pack's share of
+    # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
+    # flux.  ``None`` on the binary snow path and for the canopy schemes.
+    LE_snow: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None
     Rn_canopy: jax.Array | None = None

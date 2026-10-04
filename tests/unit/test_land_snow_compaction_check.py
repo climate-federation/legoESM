@@ -35,3 +35,12 @@ def test_clm5_rates_match_hand_values():
     _, a = m.clm5_rates(200.0 * one, TF * one, 10.0 * one, 10.0 * one, 0.0 * one, one)
     _, b = m.clm5_rates(200.0 * one, TF * one, 25.0 * one, 10.0 * one, 0.0 * one, one)
     assert a[0] < 0.0 and np.isclose(b[0] / a[0], 30.0 / 15.0)
+
+
+def test_run_layered_runs_a_short_trajectory():
+    """The diagnostic's land run must be a configuration the layered pack accepts
+    (it used to switch soil freeze/thaw on, which the land step refuses)."""
+    m = _load()
+    cfg, rec = m.run_layered(days=2.0 * m.demo.DT / 86400.0)
+    assert not cfg.thermal.enable_freeze_thaw
+    assert rec.shape[:2] == (2, 4) and np.all(np.isfinite(rec))

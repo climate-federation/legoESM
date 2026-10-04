@@ -1030,8 +1030,12 @@ def _step_multilayer_land_impl(
         # A binary split here routed ALL ground latent to a trace pack, whose
         # top-layer clamp then returned it to G (measured: ~0 latent flux over
         # 290 K soil for ~20 h while a 3 kg/m2 pack melted out).
-        snow_latent = f_snow * (lhflx_ground
-                                + jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0))
+        # SimpleSEB already computes the snow and soil exchange separately and
+        # returns the pack's share (``LE_snow``, f-weighted); taking f of its
+        # f-blended total again put only ~f^2 of the snow's potential on the pack.
+        snow_latent = (surface_out.LE_snow if scheme_is_seb else
+                       f_snow * (lhflx_ground
+                                 + jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0)))
     else:
         snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
                        + jnp.where(transp_to_snow, lhflx_transp, 0.0))

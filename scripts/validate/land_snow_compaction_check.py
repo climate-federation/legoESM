@@ -72,7 +72,8 @@ def clm5_rates(rho, T, burden, w, liq, dz):
 def run_layered(days=demo.DAYS):
     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(), snow_scheme="layered",
                                snow_albedo_feedback=True)
-    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=True))
+    # Freeze/thaw off: the layered pack refuses it (the demo runs it off too).
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=False))
     st = init_multilayer_land_state(1, cfg, T_init=278.0, theta_init=0.25)
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([1.0]))
     step = jax.jit(lambda s, f: step_multilayer_land_with_diagnostics(
