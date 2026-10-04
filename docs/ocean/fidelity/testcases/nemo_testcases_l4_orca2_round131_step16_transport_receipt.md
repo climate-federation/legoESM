@@ -21,7 +21,7 @@ propagate the failure.
 The first named executed statements are NEMO's stage-1 horizontal transport
 products, which multiply the live face thickness by the barotropically
 corrected stage velocity in
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:265-284`. NEMO runs stage 1 before
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:282-283`. NEMO runs stage 1 before
 stages 2 and 3 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:211-227`). The next
 walk must split the transport operands already exposed by the production code:
 stage thickness, corrected velocity, and transport average. No stabilizer or
