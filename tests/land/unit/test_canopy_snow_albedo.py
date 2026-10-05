@@ -537,6 +537,20 @@ def test_burial_uses_physical_snow_cover_not_the_albedo_scale():
     np.testing.assert_array_equal(out, np.full(NCOL, 0.7))
 
 
+def test_masking_uses_clm5_optics_of_the_band():
+    """The masked column uses CLM5 pftcon optics of the requested band: NET
+    boreal (PFT 2), deep snow, nothing buried -> delta form evaluated with the
+    explicit CLM5 visible / near-infrared leaf and stem values."""
+    lai, sai = 1.51, 0.44
+    for band, (rl, tl, rs, ts) in ((0, (0.07, 0.05, 0.16, 0.001)),
+                                   (1, (0.35, 0.10, 0.39, 0.001))):
+        got = _masked(0.06, 0.74, band=band, cosz=np.array([0.3]),
+                      f_diffuse=np.array([1.0]))
+        ts_ = lambda g: float(clm5_two_stream_albedo(
+            np.array([lai + sai]), np.array([lai / (lai + sai)]), rl, tl, rs, ts,
+            0.01, np.array([0.3]), np.array([g]))[1][0])
+        np.testing.assert_allclose(got, 0.06 + (ts_(0.74) - ts_(0.06)), rtol=1e-12)
+
 
 def test_switch_with_layered_snow_raises():
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
