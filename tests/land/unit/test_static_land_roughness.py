@@ -118,6 +118,8 @@ def test_layered_pack_stress_magnitude_is_area_weighted():
         vec = np.hypot(np.asarray(o.tau_x), np.asarray(o.tau_y))
         np.testing.assert_allclose(vec / mag, 5.0 / np.sqrt(25.0 + 1e-4),
                                    rtol=1e-6)
+    # snow and soil differ in stability, so the weighting is not vacuous
+    assert abs(float(out[1.0].tau_mag[0] - out[0.0].tau_mag[0])) > 1e-6
     np.testing.assert_allclose(
         out[0.4].tau_mag, 0.4 * out[1.0].tau_mag + 0.6 * out[0.0].tau_mag,
         rtol=1e-12)
