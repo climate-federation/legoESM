@@ -68,7 +68,7 @@ The focused suite's decisive line is:
 ```
 
 The final combined focused suite, including all receipt-citation-gate tests,
-reported **26 passed in 3.50s**.
+reported **26 passed**.
 
 The committed-tree preflight ends:
 
