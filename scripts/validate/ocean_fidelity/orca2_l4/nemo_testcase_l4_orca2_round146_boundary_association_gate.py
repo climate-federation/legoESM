@@ -336,6 +336,23 @@ def _state_arrays(state) -> dict[str, np.ndarray]:
     return arrays
 
 
+def build_reference_depth_override(card, *, plant: str):
+    """Map native ``hu_0/hv_0`` into the certified compact face storage."""
+
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "rung-0 card has no raw NEMO reference depths")
+    raw_u = np.array(r97._to_model_u(np.asarray(raw.hu_0)), copy=True)
+    # Compact U column zero is the redundant periodic closure.  The generic
+    # native-to-model adapter deliberately pads it; reference geometry needs
+    # the same endpoint association as the existing seven-field helper.
+    raw_u[:, 0] = raw_u[:, -1]
+    raw_v = r97._to_model_v(np.asarray(raw.hv_0))
+    override = (raw_u, raw_v)
+    if plant == "reference-depth-shape":
+        override = (override[0][:-1], override[1])
+    return override
+
+
 def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
          t_pivot_north_neighbor=False, inverse_v_override=None,
          reference_depth_override=None):
@@ -420,15 +437,8 @@ def measure(
     )
     inverse_v_override = build_entry_inverse_v_override(
         oracle, plant=plant)
-    raw = card.recipe.z_coord.nemo_een_barotropic
-    require(raw is not None, "rung-0 card has no raw NEMO reference depths")
-    reference_depth_override = (
-        r97._to_model_u(np.asarray(raw.hu_0)),
-        r97._to_model_v(np.asarray(raw.hv_0)),
-    )
-    if plant == "reference-depth-shape":
-        reference_depth_override = (
-            reference_depth_override[0][:-1], reference_depth_override[1])
+    reference_depth_override = build_reference_depth_override(
+        card, plant=plant)
 
     ordinary = _run(
         card, state, freshwater, surface, slow, raw_history,

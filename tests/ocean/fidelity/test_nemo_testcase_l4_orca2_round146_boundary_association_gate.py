@@ -123,6 +123,27 @@ def test_reference_depth_override_rejects_malformed_shape():
             prep, (np.zeros((1, 3)), np.zeros((2, 3))), np.float64)
 
 
+def test_reference_depth_adapter_associates_periodic_u_closure():
+    class Raw:
+        hu_0 = np.arange(12, dtype=np.float64).reshape(3, 4)
+        hv_0 = np.arange(12, dtype=np.float64).reshape(3, 4)
+
+    class Z:
+        nemo_een_barotropic = Raw()
+
+    class Recipe:
+        z_coord = Z()
+
+    class Card:
+        recipe = Recipe()
+
+    raw_u, raw_v = gate.build_reference_depth_override(Card(), plant="none")
+
+    assert np.array_equal(raw_u[:, 0], raw_u[:, -1])
+    assert np.array_equal(raw_u[:, 1:], Raw.hu_0)
+    assert np.array_equal(raw_v[1:], Raw.hv_0)
+
+
 @pytest.mark.parametrize("face,changed", [("u", (1, 0)), ("v", (0, 2))])
 def test_boundary_scope_accepts_only_registered_storage(face, changed):
     pre = np.zeros((4, 5), dtype=np.float64)
