@@ -1684,6 +1684,17 @@ class TestNemoIsoLapOperator:
         assert len(source_round_calls) == 10
         assert literal.shape == pinned.shape
         assert literal_diag["zfu"].shape == pinned_diag["zfu"].shape
+        source_round_calls.clear()
+        divergence, divergence_diag = (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_diagnostics=True,
+                horizontal_flux_evaluation="nemo_literal_divergence"))
+        # Ten horizontal-flux boundaries plus three differences, two sums,
+        # the area multiply, and the live-thickness division.
+        assert len(source_round_calls) == 17
+        assert divergence.shape == pinned.shape
+        assert divergence_diag["zfu"].shape == pinned_diag["zfu"].shape
         with pytest.raises(ValueError, match="horizontal_flux_evaluation"):
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,

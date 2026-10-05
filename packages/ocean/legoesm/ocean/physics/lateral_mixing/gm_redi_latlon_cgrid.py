@@ -2458,11 +2458,15 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
             "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
             f"got {a33_evaluation!r}")
     if horizontal_flux_evaluation not in (
-            "vectorized", "nemo_pairwise", "nemo_literal"):
+            "vectorized", "nemo_pairwise", "nemo_literal",
+            "nemo_literal_differences", "nemo_literal_horizontal_sum",
+            "nemo_literal_flux_sum", "nemo_literal_divergence"):
         raise ValueError(
             "horizontal_flux_evaluation must be 'vectorized', "
-            "'nemo_pairwise' or "
-            f"'nemo_literal', got {horizontal_flux_evaluation!r}")
+            "'nemo_pairwise', 'nemo_literal', "
+            "'nemo_literal_differences', 'nemo_literal_horizontal_sum', "
+            "'nemo_literal_flux_sum' or 'nemo_literal_divergence', got "
+            f"{horizontal_flux_evaluation!r}")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2589,7 +2593,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     # 4-pt vertical-gradient average around the u-face / v-face
     zdkt_kp1 = jnp.roll(zdkt, -1, ax_z)
-    if horizontal_flux_evaluation in ("nemo_pairwise", "nemo_literal"):
+    literal_flux = horizontal_flux_evaluation.startswith("nemo_literal")
+    if horizontal_flux_evaluation == "nemo_pairwise" or literal_flux:
         # traldf_iso.f90:254-259: NEMO requires the two explicit pairs for
         # halo/fold compatibility.  Keep this private selector until the
         # production-step discriminator closes the complete statement.
@@ -2603,7 +2608,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
                   + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
 
-    if horizontal_flux_evaluation == "nemo_literal":
+    if literal_flux:
         # Materialize every source operation in traldf_iso.f90:254-259.  Bare
         # parentheses are reassociated by the production XLA closure; the
         # shared identity helper retains each gfortran rounding boundary.
@@ -2808,11 +2813,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "'centred' or 'through_fct'.")
 
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
-    hdiv = (zfu - jnp.roll(zfu, +1, ax_x)) + (zfv - jnp.roll(zfv, +1, ax_y))
     zfw_top = jnp.roll(zfw_kp1, +1, ax_z)            # flux at interface ABOVE cell k
     zfw_top = zfw_top.at[:, :, 0].set(0.0)           # surface flux = 0
-    vdiv = zfw_top - zfw_kp1
-
     r1_e1e2t = 1.0 / (e1t * e2t)
     e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(
         divisor_thickness, dtype=dtype)
@@ -2820,7 +2822,36 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "divisor_thickness must have the full tracer shape "
             f"{q.shape}, got {e3t_divisor.shape}")
-    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t_divisor
+    divergence_mode = horizontal_flux_evaluation.removeprefix(
+        "nemo_literal_")
+    if divergence_mode in (
+            "differences", "horizontal_sum", "flux_sum", "divergence"):
+        # traldf_iso.f90:306-310/:327-331.  These cumulative private modes
+        # retain one more compiled boundary at a time after the horizontal
+        # fluxes have become exact.  The deepest level uses zfw alone rather
+        # than subtracting the identically-zero flux below the model floor.
+        du = nemo_source_round(zfu - jnp.roll(zfu, +1, ax_x))
+        dv = nemo_source_round(zfv - jnp.roll(zfv, +1, ax_y))
+        dw = nemo_source_round(zfw_top - zfw_kp1)
+        dw = dw.at[:, :, -1].set(zfw_top[:, :, -1])
+        hdiv = du + dv
+        if divergence_mode in ("horizontal_sum", "flux_sum", "divergence"):
+            hdiv = nemo_source_round(hdiv)
+        total_div = hdiv + dw
+        if divergence_mode in ("flux_sum", "divergence"):
+            total_div = nemo_source_round(total_div)
+        scaled_div = total_div * r1_e1e2t[:, :, jnp.newaxis]
+        if divergence_mode == "divergence":
+            scaled_div = nemo_source_round(scaled_div)
+            tend = nemo_source_round(scaled_div / e3t_divisor)
+        else:
+            tend = scaled_div / e3t_divisor
+    else:
+        hdiv = ((zfu - jnp.roll(zfu, +1, ax_x))
+                + (zfv - jnp.roll(zfv, +1, ax_y)))
+        vdiv = zfw_top - zfw_kp1
+        tend = ((hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis]
+                / e3t_divisor)
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).

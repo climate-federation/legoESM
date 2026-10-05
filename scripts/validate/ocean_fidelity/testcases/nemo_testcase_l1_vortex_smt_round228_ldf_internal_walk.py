@@ -111,6 +111,7 @@ def run(root: Path, *, plant: str | None = None,
         include_live_faces: bool = False,
         pairwise_horizontal_flux: bool = False,
         literal_horizontal_flux: bool = False,
+        literal_divergence_walk: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -547,12 +548,23 @@ def run(root: Path, *, plant: str | None = None,
             literal = run_same_stage_arm(
                 "arm.literal_flux", use_divisor=True, use_faces=True,
                 flux_evaluation="nemo_literal")
+        divergence_arms = {}
+        if literal_divergence_walk:
+            for suffix in (
+                    "differences", "horizontal_sum", "flux_sum",
+                    "divergence"):
+                name = f"arm.literal_{suffix}"
+                divergence_arms[suffix] = run_same_stage_arm(
+                    name, use_divisor=True, use_faces=True,
+                    flux_evaluation=f"nemo_literal_{suffix}")
         same_stage_arms = {
             "closed_bottom_wmask_control": mask_only,
             "pair": pair,
             "triple": triple,
             "pairwise_flux": pairwise,
             "literal_flux": literal,
+            **{f"literal_{name}": arm
+               for name, arm in divergence_arms.items()},
         }
     oracle_fu = np.asarray(iso["fu"])[..., :nlev]
     oracle_fv = np.asarray(iso["fv"])[..., :nlev]
@@ -657,6 +669,7 @@ def main(argv=None) -> int:
     parser.add_argument("--include-live-faces", action="store_true")
     parser.add_argument("--pairwise-horizontal-flux", action="store_true")
     parser.add_argument("--literal-horizontal-flux", action="store_true")
+    parser.add_argument("--literal-divergence-walk", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
@@ -667,6 +680,8 @@ def main(argv=None) -> int:
                 "--pairwise-horizontal-flux requires --same-stage-set")
         require(not args.literal_horizontal_flux or args.same_stage_set,
                 "--literal-horizontal-flux requires --same-stage-set")
+        require(not args.literal_divergence_walk or args.same_stage_set,
+                "--literal-divergence-walk requires --same-stage-set")
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
                      divisor_arm=args.divisor_arm,
@@ -674,6 +689,7 @@ def main(argv=None) -> int:
                      include_live_faces=args.include_live_faces,
                      pairwise_horizontal_flux=args.pairwise_horizontal_flux,
                      literal_horizontal_flux=args.literal_horizontal_flux,
+                     literal_divergence_walk=args.literal_divergence_walk,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
@@ -714,8 +730,10 @@ def main(argv=None) -> int:
               f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
     if report["same_stage_arms"] is not None:
         for arm_name in ("closed_bottom_wmask_control", "pair", "triple",
-                         "pairwise_flux", "literal_flux"):
-            arm = report["same_stage_arms"][arm_name]
+                         "pairwise_flux", "literal_flux",
+                         "literal_differences", "literal_horizontal_sum",
+                         "literal_flux_sum", "literal_divergence"):
+            arm = report["same_stage_arms"].get(arm_name)
             if arm is None:
                 continue
             for row in [*arm["source_rows"], *arm["unchanged_rows"],
@@ -745,7 +763,9 @@ def main(argv=None) -> int:
             print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
             return 1 if fired else 0
         planted_arm = next((name for name in (
-            "pair", "triple", "pairwise_flux", "literal_flux")
+            "pair", "triple", "pairwise_flux", "literal_flux",
+            "literal_differences", "literal_horizontal_sum",
+            "literal_flux_sum", "literal_divergence")
             if args.plant.startswith(f"arm.{name}.")), None)
         if planted_arm is not None:
             require(report["same_stage_arms"] is not None,
