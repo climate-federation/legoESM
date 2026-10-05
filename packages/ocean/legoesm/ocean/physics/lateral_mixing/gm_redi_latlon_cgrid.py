@@ -5830,7 +5830,7 @@ def _nemo_native_slope_diagnostics(scope):
         "zww": scope["_vslp_raw"], "zuslp_pre": pre_u,
         "zvslp_pre": pre_v, "zuslp_post": post_u,
         "zvslp_post": post_v, "uslp": scope["uslp"],
-        "vslp": scope["vslp"], "r3t_Kmm": r3t,
+        "vslp": scope["vslp"], "wslpi": scope["wslpi"], "wslpj": scope["wslpj"], "r3t_Kmm": r3t,
         "r3u_Kmm": r3u, "r3v_Kmm": r3v,
         "zhmlpt": scope["zhmlpt"], "r1_hmlu": scope["r1_hmlu"],
         "r1_hmlv": scope["r1_hmlv"],
