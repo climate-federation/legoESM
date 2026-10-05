@@ -1260,6 +1260,18 @@ FILES = {
     "geo2ocean.F90": _OCE / "SBC/geo2ocean.F90",
     "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg": (
         NEMO / "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg"),
+    # Round 224 freezes SMT-3 from ORCA2 rung 0 and reads the executable
+    # branch from the already-compiled SMT-2 base.  The new SMT-3 build is
+    # intentionally absent until the operator runs the acquisition.
+    "orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/"
+        "acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg"),
+    "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref": (
+        NEMO / "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref"),
+    "VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90": (
+        NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90"),
+    "VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -5551,6 +5563,25 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:177':
         'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
     'domhgr.F90:222-223': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ("& iom_varid( inum, 'ff_t', ldstop = .FALSE. ) > 0    ) THEN", 1), 2],
+    # --- round 224: SMT-3 deck provenance and compiled branch ---
+    'orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:319-326': [
+        'ln_traldf_lap   = .true.', 'rn_Ld        = 200.e+3', 8],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:918-933': [
+        'ln_traldf_OFF   = .false.', 'ln_botmix_triad = .false.', 16],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:214-218': [
+        'NAMELIST/namtra_ldf/ ln_traldf_OFF',
+        '&                 nn_aht_ijk_t , rn_Ud          , rn_Ld', 5],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:231-233': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
+        'IF(lwm) WRITE( numond, namtra_ldf )', 3],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:261-283': [
+        'nldf_tra = np_ERROR',
+        'IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 23],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:354-390': [
+        'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
+        "CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 37],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
+        'SELECT CASE ( nldf_tra )', 'END SELECT', 18],
 }
 
 
