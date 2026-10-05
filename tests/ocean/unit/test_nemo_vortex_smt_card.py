@@ -489,7 +489,7 @@ def test_smt2_implicit_drag_divides_by_nemos_bottom_face_thickness():
         st = card.recipe.initial_state
         real = _mod._nemo_dynzdf_drag_face_thickness
 
-        def _old_average_rule(eta, hb, z, c, g, um3, vm3, dtype):
+        def _old_average_rule(eta, hb, z, c, g, dtype):
             dz = compute_layer_thickness(
                 eta, hb, z, min_water_column_m=c.min_water_column_m)
             return (interp_cell_to_uface(dz).astype(dtype),
