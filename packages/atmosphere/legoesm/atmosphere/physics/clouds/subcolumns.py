@@ -89,9 +89,17 @@ __physics_contract__ = {
 N_SUBCOLUMNS_DEFAULT = 8
 _PERM_SEED = 20260731          # fixed at import: a table, never per-call noise
 _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
-# Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
-_SHIFT_LAYER_SLOPE = 2.0 ** 0.5
-_SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
+# Per-layer McICA offset, in exact integer arithmetic on a 24-bit grid: the
+# column seed is quantised to s in [0, 2**24) and layer k is offset by
+# (s * M_k + C_k) mod 2**24 with M_k ODD -- a bijection of the grid, so a
+# uniform seed gives EVERY layer an exactly uniform offset, and each g-point's
+# expected cloud fraction is the layer's (no per-g-point bias).  The earlier
+# irrational slope (shift * (1 + k*sqrt2)) was not uniform mod 1: a g-point
+# saw cf 0.41-0.59 for a 0.5 layer under a clear one.  M_k and C_k are fixed
+# pseudo-random integers: an arithmetic progression of multipliers ties
+# layers through m_a - 2 m_b + m_c = 0 and left a multi-layer bias.
+_SHIFT_BITS = 24
+_SHIFT_SEED = 20261005         # fixed at import, like _PERM_SEED
 
 
 @functools.lru_cache(maxsize=32)
@@ -108,6 +116,19 @@ def _stratified_table_cached(n_sub: int, nlev: int) -> np.ndarray:
     # a caller mutating it would silently corrupt every later radiation call.
     tab.flags.writeable = False
     return tab
+
+
+@functools.lru_cache(maxsize=32)
+def _layer_offset_constants(nlev: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-layer odd multipliers ``M_k`` and additive constants ``C_k``
+    (uint32, below ``2**_SHIFT_BITS``), cached on the static ``nlev``."""
+    rng = np.random.default_rng(_SHIFT_SEED)
+    half = 2 ** (_SHIFT_BITS - 1)
+    mult = (2 * rng.integers(0, half, nlev) + 1).astype(np.uint32)
+    add = rng.integers(0, 2 * half, nlev).astype(np.uint32)
+    mult.flags.writeable = False
+    add.flags.writeable = False
+    return mult, add
 
 
 def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
@@ -137,10 +158,12 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
     n_sub : int
         Number of subcolumns (STATIC -- it sets the traced batch size).
     shift : jnp.ndarray, optional
-        ``(ncol,)`` per-column seed in [0, 1).  Layer ``k`` is offset by
-        ``frac(shift*(1 + k*sqrt2) + k*golden)`` (added modulo 1 to the table),
-        so each layer keeps its stratified marginal AND the offsets of different
-        layers vary independently across columns.  A single offset shared by all
+        ``(ncol,)`` per-column seed in [0, 1).  It is quantised to
+        ``s = floor(shift * 2**24)`` and layer ``k`` is offset by
+        ``((s*M_k + C_k) mod 2**24 + 0.5) / 2**24`` (added modulo 1 to the
+        table), ``M_k`` odd: a uniform seed gives every layer an exactly
+        uniform offset, and the offsets of different layers vary
+        (pseudo-)independently across columns.  A single offset shared by all
         layers kept every subcolumn's between-layer pairing fixed, so a given
         g-point saw the wrong overlap in every column (layers [0.5, 0, 0.5]:
         per-g-point cover 0.50-1.00 instead of 0.75; worst error 0.25 -> 0.03).
@@ -151,9 +174,14 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
-        k = jnp.arange(nlev, dtype=cf.dtype)
-        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        mult, add = _layer_offset_constants(int(nlev))
+        grid = 2 ** _SHIFT_BITS
+        s = jnp.clip(jnp.floor(jnp.asarray(shift) * float(grid)), 0, grid - 1)
+        s = s.astype(jnp.uint32)
+        # uint32 products wrap mod 2**32, and 2**24 divides it, so the mask
+        # gives the exact residue mod 2**24.
+        h = (s[:, None] * jnp.asarray(mult) + jnp.asarray(add)) & jnp.uint32(grid - 1)
+        off = (h.astype(cf.dtype) + 0.5) / grid               # (ncol, nlev)
         u = jnp.mod(u + off[None, :, :], 1.0)
     clear = 1.0 - cf                                    # (ncol, nlev)
 

@@ -342,6 +342,38 @@ def test_each_g_point_sees_random_overlap_across_columns():
     assert np.abs(cover - 0.75).max() < 0.06, np.abs(cover - 0.75).max()
 
 
+def _g_point_bias_z(cf_profile, n_sub, n_col, seed):
+    """Monte-Carlo estimate, over ``n_col`` uniform column seeds, of every
+    g-point's expected cloud fraction per layer; returns max |z| of its
+    departure from the layer's cf (binomial standard error)."""
+    cf_profile = np.asarray(cf_profile, dtype=np.float64)
+    cf = jnp.broadcast_to(jnp.asarray(cf_profile), (n_col, cf_profile.size))
+    shift = jnp.asarray(np.random.default_rng(seed).uniform(0.0, 1.0, n_col))
+    p = np.asarray(generate_subcolumns(cf, n_sub, shift=shift)).mean(axis=1)
+    var = cf_profile * (1.0 - cf_profile)
+    live = var > 0.0
+    return float(np.max(np.abs(p[:, live] - cf_profile[live])
+                        / np.sqrt(var[live] / n_col)))
+
+
+def test_each_g_point_expects_the_layer_cloud_fraction():
+    """McICA: averaged over uniform column seeds, EVERY g-point (subcolumn)
+    must see each layer's cloud fraction, not only the mean over g-points.
+    The irrational per-layer slope was not uniform mod 1, so a g-point saw a
+    0.5 layer under a clear one as 0.41-0.59 (z ~ 40 at 50000 seeds)."""
+    # 112 g-points, two live cells each at most: max |z| of pure noise ~3
+    assert _g_point_bias_z([0.0, 0.5], 112, 20000, 0) < 4.5
+    assert _g_point_bias_z([0.5, 0.0, 0.5], 112, 20000, 1) < 4.5
+
+
+def test_each_g_point_expects_cf_in_a_deep_profile():
+    """Same on a 32-layer profile with clear, broken and overcast layers:
+    multi-layer pairing of the offsets must not bias the recursion."""
+    prof = np.clip(np.random.default_rng(7).uniform(-0.3, 1.0, 32), 0.0, 1.0)
+    prof[:4] = 0.0
+    assert _g_point_bias_z(prof, 112, 20000, 2) < 4.8
+
+
 def test_shift_changes_which_subcolumn_is_cloudy():
     """Identical columns with different shifts get different subcolumn masks,
     so a g-point is not paired with the same cloud sample in every column."""
