@@ -254,3 +254,56 @@ def test_dino_kamm_cards_default_e3_weighting_off():
     cfg = dino_config_for_recipe("nemo_dino_kamm")
     mc, _ = dino_lat_lon_model_config(geo, cfg)
     assert mc.lateral_viscosity_e3_weighting == "off"
+
+
+# --- nn_ahm_ijk_t = -30: a full 3-D coefficient through THIS operator --------
+#
+# The ORCA2 card selects lateral_viscosity_e3_weighting="nemo_e3", so the
+# e3-weighted operator is the one that consumes NEMO's READ coefficient.
+
+def test_e3_operator_takes_a_full_3d_coefficient():
+    """A 3-D coefficient equal to the latitude profile is bit-identical to it,
+    and the operator really reads it: perturbing one cell moves the tendency."""
+    geo = _geo()
+    rng = np.random.default_rng(17)
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    nlev = 3
+    u, v = _uv(geo, rng, nlev=nlev)
+    mask = jnp.ones((n_lat, n_lon))
+    u_mask = jnp.ones((n_lat, n_lon + 1))
+    v_mask = jnp.ones((n_lat + 1, n_lon))
+    h_k = jnp.full((n_lat, n_lon, nlev), 250.0)
+    ahmt, ahmf = nemo_lateral_viscosity_coefficients(geo, 0.135)
+    ahmt3 = jnp.broadcast_to(ahmt[:, None, None], (n_lat, n_lon, nlev))
+    ahmf3 = jnp.broadcast_to(ahmf[:, None, None], (n_lat + 1, n_lon + 1, nlev))
+
+    ref = nemo_ldf_lap_viscosity_e3_cgrid(
+        u, v, geo, ahmt, ahmf, h_k, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    got = nemo_ldf_lap_viscosity_e3_cgrid(
+        u, v, geo, ahmt3, ahmf3, h_k, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    assert float(np.max(np.abs(np.asarray(ref[0])))) > 0.0
+    np.testing.assert_array_equal(np.asarray(got[0]), np.asarray(ref[0]))
+    np.testing.assert_array_equal(np.asarray(got[1]), np.asarray(ref[1]))
+
+    bumped = np.asarray(ahmt3).copy()
+    bumped[n_lat // 2, n_lon // 2, 0] *= 1.5
+    moved = nemo_ldf_lap_viscosity_e3_cgrid(
+        u, v, geo, jnp.asarray(bumped), ahmf3, h_k,
+        mask=mask, u_mask=u_mask, v_mask=v_mask)
+    assert not np.array_equal(np.asarray(moved[0]), np.asarray(ref[0]))
+
+
+def test_a_3d_coefficient_with_2d_velocities_raises():
+    """It must not silently broadcast a (lat, lon, lev) coefficient onto a
+    two-dimensional velocity field."""
+    geo = _geo()
+    rng = np.random.default_rng(18)
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    u = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1)))
+    v = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon)))
+    ahmt, ahmf = nemo_lateral_viscosity_coefficients(geo, 0.135)
+    ahmt3 = jnp.broadcast_to(ahmt[:, None, None], (n_lat, n_lon, 1))
+    ahmf3 = jnp.broadcast_to(ahmf[:, None, None], (n_lat + 1, n_lon + 1, 1))
+    with pytest.raises(ValueError, match="3-D velocities"):
+        nemo_ldf_lap_viscosity_cgrid(
+            u, v, geo, ahmt3, ahmf3)

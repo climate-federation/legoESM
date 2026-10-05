@@ -827,7 +827,7 @@ class TestSingleReducePCG:
         assert (cpu.barotropic_implicit_pcg_variant, cpu.barotropic_implicit_pcg_precond,
                 cpu.barotropic_implicit_pcg_fixed_iters) == ("single_reduce_deep", "jacobi", 30)
         assert (gpu.barotropic_implicit_pcg_variant, gpu.barotropic_implicit_pcg_precond,
-                gpu.barotropic_implicit_pcg_fixed_iters) == ("standard", "gpoly", 15)
+                gpu.barotropic_implicit_pcg_fixed_iters) == ("standard", "gpoly", 20)
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10

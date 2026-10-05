@@ -1,0 +1,66 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,6 +154,7 @@
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios, l4_halo_unit, l4_halo_ios
++      INTEGER  ::   l4_uhist_unit, l4_uhist_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -198,6 +199,7 @@
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
+       CHARACTER(LEN=96) :: l4_halo_filename
++      CHARACTER(LEN=96) :: l4_uhist_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -613,6 +615,17 @@
+          l2_magic = 'NEMO_L4_BTHALO1'
+          WRITE(l4_halo_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)
+       ENDIF
++      ! Round-18 WRITE-only per-rank stream: direct U midpoint inputs and the
++      ! source-ordered vector update that becomes the next substep's current
++      ! history.  No value from this stream is assigned back to the model.
++      IF( kt == nit000 ) THEN
++         WRITE(l4_uhist_filename,'("oracle_bt_u_history_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
++         OPEN( NEWUNIT=l4_uhist_unit, FILE=TRIM(l4_uhist_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_uhist_ios )
++         IF( l4_uhist_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 U-history trace' )
++         l2_magic = 'NEMO_L4_UHIST_1'
++         WRITE(l4_uhist_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)
++      ENDIF
+ 
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+@@ -656,6 +669,10 @@
+          DO_2D( 1, 1, 2, 1 )
+             va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)
+          END_2D
++         IF( kt == nit000 .AND. jn <= 2 ) THEN
++            WRITE(l4_uhist_unit) jn, za1, za2, za3
++            WRITE(l4_uhist_unit) un_e, ub_e, ubb_e, ua_e
++         ENDIF
+ 
+          IF( .NOT.lk_linssh ) THEN                        !* Update ocean depth (variable volume case only)
+             !                                             !  ------------------
+@@ -989,6 +1006,10 @@
+                & l4_canon_2d(ffv_sw,'V'), l4_canon_2d(ffv_se,'V'), &
+                & l4_canon_2d(ffv_nw,'V'), l4_canon_2d(ffv_ne,'V')
+          ENDIF
++         IF( kt == nit000 .AND. jn <= 2 ) THEN
++            WRITE(l4_uhist_unit) rDt_e
++            WRITE(l4_uhist_unit) zu_spg, zu_trd, zu_frc, ssumask, ua_e
++         ENDIF
+          !                                             !* Swap
+          !                                             !  ----
+          ubb_e  (:,:) = ub_e  (:,:)
+@@ -1041,6 +1062,8 @@
+          CLOSE(l4_halo_unit)
+          WRITE(numout,*) 'LANE4_BT_HALO_DUMP ', kt, 2, narea - 1, TRIM(l4_halo_filename)
++         CLOSE(l4_uhist_unit)
++         WRITE(numout,*) 'LANE4_BT_UHIST_DUMP ', kt, 2, narea - 1, TRIM(l4_uhist_filename)
+       ENDIF
+       ! Finalize sums:
+       ! (Divide by weights sums here to prevent from truncation errors)

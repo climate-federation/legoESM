@@ -166,7 +166,18 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
+            # DECISION 85 (operator note BT), measured in rounds 194/198
+            # and landed here.  In NEMO's vector-invariant RK3 stage the
+            # continuity solve is called TWICE and the two calls are not the
+            # same statement: stprk3_stg.f90:289-300 hands wzv the RAW stage
+            # velocity for the momentum program, while the tracer program
+            # re-solves it on the transports (traadv.f90:268); sshwzv.f90:
+            # 271-299 is the solve itself.  Both fields are STATED here, per
+            # decision 75 -- the split is NOT inferred from the time
+            # integrator, the momentum form or wzv_call2_evaluation.
+            wzv_call2_evaluation="nemo_literal",
+            nemo_stage_momentum_wzv_split=True,
             # nn_dynkeg = 0 (namelist_cfg:183); dynkeg.f90 takes its
             # mean-of-squares arm, not the Hollingsworth correction.
             ke_gradient_scheme="c2",
@@ -190,7 +201,7 @@ def _model_config(
         # FLUX-FORM arm, which calls vor_een on the PLANETARY vorticity alone
         # -- so on this case EEN *is* the Coriolis discretisation, a triad-
         # weighted f x u.  legoESM binds its own EEN arm to VECTOR-INVARIANT
-        # momentum (ocean_model_latlon_cgrid.py:4392-4400 refuses the pair
+        # momentum (ocean_model_latlon_cgrid.py:4454-4462 refuses the pair
         # outright, because its flux-form branch never receives f_vtx) and
         # gives the flux-form branch the 4-point C-grid average instead.
         # Selecting een_total here would not build; selecting nothing and
@@ -310,14 +321,33 @@ def _model_config(
         return base._replace(
             eos="nemo_eos80",
             physics=physics,
-            # Round 163 (Decision 55, note AT): ORCA2-zps resolves the SAME
-            # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does (via
-            # this shared base), but has never been measured under the
-            # second continuity solve -- explicit False, not an inference
-            # from `eos` (round-163 review BLOCKER, closed by making this an
-            # explicit per-card config choice instead).
-            nemo_stage_momentum_wzv_split=False,
+            # Round 77 (Decision 76): STATED on this card, never inherited
+            # from the shared GYRE identity above and never inferred from the
+            # time integrator.  ORCA2's OWN build runs the RK3 vector-invariant
+            # program -- stp2d.f90:145-147 takes the "Vector Inv. Form"
+            # Coriolis arm and :149 the "only KEG + ZAD in Vector Inv. Form"
+            # advection -- and that program leaves the PREVIOUS step's linear
+            # extrapolation ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
+            # in the after slot (stprk3.f90:239-241).  stp2d.f90:152 turns
+            # that slot into ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0``
+            # immediately before ``CALL wzv( ..., np_velocity )`` at
+            # stp2d.f90:156, so the first wzv call's scale-factor term is
+            # built from the extrapolation, not from a continuity prediction.
+            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            # Round 23 (Decision 58): ORCA2-zps resolves the SAME
+            # rk3_ws+vector_invariant+nemo_literal program GYRE-zco does and
+            # now takes NEMO's separately evaluated momentum continuity solve
+            # under its own explicit card choice.  This is not inferred from
+            # EOS or any other selector; the fail-closed field remains stated
+            # on each card that resolves the program.
+            nemo_stage_momentum_wzv_split=True,
             vorticity_scheme="een_total",
+            # ORCA2 resolves nn_ahm_ijk_t = -30 (run ocean.output:1184), so the
+            # lateral momentum viscosity coefficient is READ whole from
+            # eddy_viscosity_3D.nc rather than built from the grid metrics
+            # (ldfdyn.f90:348-353).  GYRE resolves the metric formula and keeps
+            # the shared default.
+            lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
             # nn_e3f_typ=0 and ln_dynvor_msk=F, identical source meanings to
             # the already-shared literal EEN operands used by GYRE's ENE arm.
             een_e3f_scheme="nemo_avg4",
@@ -431,6 +461,13 @@ def _model_config(
                     n2_eos_form="teos10",
                     n2_threshold=-1.0e-12,
                     two_level_trigger=True,
+                    # zdfevd.f90:107-110 REPLACES the assembled avt by
+                    # rn_evd where the trigger fires (zdfphy.f90:359 runs it
+                    # AFTER the closure copy at :348-351), and :121/:133-135
+                    # does the same to avm because this deck sets
+                    # nn_evdm = 1 (gyre_omip_l2_namelist_cfg namzdf) --
+                    # which is what nu_conv = K_conv = rn_evd = 100 states.
+                    evd_composition="nemo_replace",
                     # RK3 stprk3.F90:154-181 computes rn2b on Nbb, copies
                     # rn2=rn2b, and calls zdf_phy(Nbb,Nbb) before any stage.
                     # The canonical NEMO time-level option therefore samples
@@ -455,7 +492,7 @@ def _model_config(
             # after slot, and that is what the first wzv call's scale-factor
             # term is built from.  STATED here, never inferred from the time
             # integrator or any other field (decision 75).
-            nemo_first_wzv_after_ssh="rk3_extrapolated",
+            nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             wzv_call2_evaluation="nemo_literal",
             # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
             # landed choice -- explicit here, not inferred from EOS or any
@@ -542,6 +579,9 @@ def _model_config(
                 barotropic_transport_accumulation_evaluation="nemo_literal",
                 barotropic_seed_face_depth="nemo_ssh_avg",
                 barotropic_seed_evaluation="nemo_literal",
+                # DECISION 90 (user): no default, every card states it, and
+                # a NEMO card states NEMO's form (stp2d.f90:178-186).
+                barotropic_slow_forcing_depth_evaluation="nemo_literal",
                 # dynspg_ts.F90:484-500 seeds the window from the CARRIED
                 # uu_b/vv_b (oce.F90:39,99), not from a 3-D reduction.
                 nemo_prognostic_barotropic_state=True,
@@ -592,6 +632,15 @@ def _model_config(
         barotropic_transport_accumulation_evaluation="nemo_literal",
         barotropic_seed_face_depth="nemo_ssh_avg",
         barotropic_seed_evaluation="nemo_literal",
+        # DECISION 90 (user, 2026-10-04): the field has no default and every
+        # card states it; a NEMO card states NEMO's form.  stp2d.f90:178-179
+        # (vector) / :183-184 (flux) weight the slow forcing with the
+        # REFERENCE face thickness and divide by the stored reciprocal
+        # r1_hu_0 -- no sea-surface stretching anywhere in it.  On a
+        # full-step mesh this equals the per-level minimum of the two live
+        # thicknesses (one per-face scalar cancels); over partial cells it
+        # does not, which is what the seamount cards measured.
+        barotropic_slow_forcing_depth_evaluation="nemo_literal",
         # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
         # (oce.F90:39,99), not from a 3-D reduction.
         nemo_prognostic_barotropic_state=True,
@@ -1271,6 +1320,198 @@ def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):
     return tmask, umask, vmask, fmask
 
 
+# ORCA_R2 initial-condition hand alterations, transcribed from the compiled
+# ``dtatsd.f90:218-253`` branch that this deck executes (``cn_cfg="ORCA"`` and
+# ``nn_cfg=2`` come from the domain file's ``CfgName``/``CfgIndex``, and
+# ``namelist_cfg`` sets ``ln_tsd_dmp = .true.``, so the branch is live).  NEMO
+# applies them to the TIME-INTERPOLATED field before the land mask, and with
+# ``ln_tint = .true.`` they are re-applied from the interpolated field at every
+# call rather than accumulating.
+#
+# Index arithmetic, read off ``mppini.f90:1586-1594`` rather than inferred: the
+# source writes global halo-frame indices ``ij0 = 101 + nn_hls`` and
+# ``ii0 = 141 + nn_hls - 1``, and ``mi0``/``mj0`` map a global halo-frame index
+# to ``index - nn_hls`` in the inner domain, so every ``nn_hls`` cancels and the
+# boxes are the halo-independent inner one-based ranges below.  Level ranges are
+# Fortran one-based inclusive.
+_ORCA2_ALBORAN_BOX = (101, 109, 140, 154)      # (j0, j1, i0, i1), inner 1-based
+_ORCA2_RED_SEA_BOX = (87, 96, 147, 159)
+_ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C = ((13, 13, -0.20), (14, 15, -0.35),
+                                        (16, 25, -0.40))
+_ORCA2_ALBORAN_SALINITY_OFFSETS_PSU = ((13, 13, -0.15), (14, 15, -0.25),
+                                       (16, 17, -0.30), (18, 25, -0.35))
+_ORCA2_RED_SEA_TEMPERATURES_C = ((4, 10, 7.0), (11, 13, 6.5), (14, 20, 6.0))
+
+
+def build_orca2_ldf_dyn_coefficients(
+    viscosity_path, tmask: np.ndarray, fmask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """NEMO ``ldf_dyn_init`` with ``nn_ahm_ijk_t = -30``: the coefficient is READ.
+
+    The resolved ORCA2 run prints ``nn_ahm_ijk_t = -30``, so the compiled
+    routine computes no coefficient at all.  It opens ``eddy_viscosity_3D.nc``
+    and reads the whole three-dimensional field at T points and at F points
+    (``ldfdyn.f90:348-353``), each read carrying its own grid-point nature and
+    north-fold sign (``'T'`` and ``'F'``, both ``+1``); the read path completes
+    the field with the ordinary lateral boundary exchange for that nature
+    (``iom.f90:958-975``).  Because the resolved operator is the laplacian
+    (``ln_dynldf_lap = T``), levels one to ``jpkm1`` are then multiplied by
+    ``tmask``/``fmask`` and the last level is left alone -- no square root,
+    which is the bilaplacian arm (``ldfdyn.f90:388-393``).
+
+    ``rn_Uv`` and ``rn_Lv`` are read and printed and this arm never consults
+    them: ``zah0`` (``ldfdyn.f90:314``) is not referenced inside the
+    ``CASE( -30 )`` block.
+
+    The north-fold exchange is NOT applied here.  On the shipped input file it
+    is the identity over the owned domain for both natures, and that is a
+    MEASURED, gated statement rather than an assumption: the round-9 gate
+    refuses unless the file's last owned T row is its own mirrored left half
+    (``lbcnfd.f90:584-638``) and its last owned F row is the row below at the
+    reversed longitude (``lbcnfd.f90:722-746``).
+
+    Parameters
+    ----------
+    viscosity_path : path to ``eddy_viscosity_3D.nc``.
+    tmask, fmask : the card's own ``(n_lat, n_lon, nlev)`` masks.
+
+    Returns
+    -------
+    ahmt : (n_lat, n_lon, nlev)      T-point coefficient [m2/s].
+    ahmf : (n_lat+1, n_lon+1, nlev)  F-point coefficient on legoESM's VERTEX
+        layout, where ``vertex[j, i]`` is NEMO's F point ``(j-1, (i-1) mod
+        n_lon)``; the south row has no NEMO source and is zero (a wall).
+    """
+
+    import netCDF4  # noqa: N813
+
+    path = Path(viscosity_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 eddy viscosity file: {path}")
+    nlev = tmask.shape[-1]
+    with netCDF4.Dataset(path, "r") as ds:
+        ds.set_auto_maskandscale(False)
+        raw_t = np.asarray(ds.variables["ahmt_3d"][0], dtype=np.float64)
+        raw_f = np.asarray(ds.variables["ahmf_3d"][0], dtype=np.float64)
+    # File axes are (z, y, x); the card's are (y, x, z).
+    ahmt = np.moveaxis(raw_t, 0, -1)[..., :nlev] * tmask
+    ahmf_native = np.moveaxis(raw_f, 0, -1)[..., :nlev] * fmask
+    n_lat, n_lon = ahmf_native.shape[0], ahmf_native.shape[1]
+    ahmf = np.zeros((n_lat + 1, n_lon + 1, nlev), dtype=np.float64)
+    columns = (np.arange(n_lon + 1) - 1) % n_lon
+    ahmf[1:] = ahmf_native[:, columns]
+    return ahmt, ahmf
+
+
+def _orca2_box(field, box):
+    """Inner one-based ``(j0, j1, i0, i1)`` box as a mutable view."""
+
+    j0, j1, i0, i1 = box
+    return field[j0 - 1:j1, i0 - 1:i1]
+
+
+def apply_orca2_hand_alterations(temperature, salinity):
+    """Apply the ORCA_R2 initial hand alterations IN PLACE, in source order.
+
+    ``temperature`` and ``salinity`` are the time-interpolated, UNMASKED input
+    fields shaped ``(nlat, nlon, nlev)``.  NEMO subtracts the Alboran Sea
+    temperature then salinity increments and finally assigns the Red Sea deep
+    temperatures, all before the land mask (``dtatsd.f90:218-253``, masked at
+    ``:307-310``).
+    """
+
+    alboran_t = _orca2_box(temperature, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_TEMPERATURE_OFFSETS_C:
+        alboran_t[..., k0 - 1:k1] += np.float64(offset)
+    alboran_s = _orca2_box(salinity, _ORCA2_ALBORAN_BOX)
+    for k0, k1, offset in _ORCA2_ALBORAN_SALINITY_OFFSETS_PSU:
+        alboran_s[..., k0 - 1:k1] += np.float64(offset)
+    red_sea_t = _orca2_box(temperature, _ORCA2_RED_SEA_BOX)
+    for k0, k1, value in _ORCA2_RED_SEA_TEMPERATURES_C:
+        red_sea_t[..., k0 - 1:k1] = np.float64(value)
+
+
+def build_orca2_initial_ts(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    apply_hand_alterations: bool = True,
+):
+    """ORCA2's independent initial temperature and salinity, as NEMO builds it.
+
+    The executed order is the compiled one: read the monthly input files, do
+    ``fldread``'s two-record time interpolation, apply the ORCA_R2 hand
+    alterations (``dtatsd.f90:218-253``), then mask.  The z/zps branch
+    (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
+    are applied to the unmasked field.
+
+    ``apply_hand_alterations=False`` is an ABLATION CONTROL for the fidelity
+    gate -- it reproduces the pre-transcription state so the gate can show the
+    alterations own the whole residual.  It is not a configuration knob and no
+    card, recipe or driver exposes it; the card always takes the default, which
+    is what NEMO executes.
+    """
+
+    import netCDF4  # noqa: N813
+
+    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
+    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
+    after_weight = np.float64(249.0 / 496.0)
+    before_weight = np.float64(1.0) - after_weight
+    with netCDF4.Dataset(temperature_path, "r") as ds:
+        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
+        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
+    with netCDF4.Dataset(salinity_path, "r") as ds:
+        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
+        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
+    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
+    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
+
+    if apply_hand_alterations:
+        apply_orca2_hand_alterations(temperature, salinity)
+
+    return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
+# --- ORCA2 internal-wave mixing (NEMO zdfiwm; de Lavergne et al. 2020) ---
+# zdf_iwm_init replaces the namelist backgrounds once the wave arm is on:
+# the momentum background becomes the molecular viscosity and the tracer
+# background a very small diffusive minimum, because the wave field is now
+# what sets the interior background.
+_ORCA2_IWM_AVMB = 1.4e-6   # NEMO rnu [m2/s]
+_ORCA2_IWM_AVTB = 1.0e-10  # [m2/s]
+
+
+def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
+    """The six wave-power / decay-scale maps, as zdf_iwm_init reads them.
+
+    Delegates to the shared loader, which masks the four power maps with the
+    surface tracer mask (NEMO's ``smask0``), leaves the decay scales unmasked,
+    guards a non-positive critical-slope scale before inverting it, and stores
+    that inverse, which is what the scheme consumes.  The ORCA2 product is on
+    this card's own grid, so the loader's coordinate check takes its
+    pass-through branch and nothing is regridded; the assertion below is what
+    makes that a checked fact rather than an assumption.
+    """
+    from legoesm.ocean.forcing.curvilinear_regrid import coords_match
+    from legoesm.ocean.iwm_forcing import load_iwm_forcing, read_iwm_file
+
+    raw = read_iwm_file(str(path))
+    if not coords_match(raw["nav_lat"], raw["nav_lon"],
+                        np.asarray(lat_t, dtype=np.float64),
+                        np.asarray(lon_t, dtype=np.float64),
+                        tol_deg=1.0e-3):
+        raise ValueError(
+            "the ORCA2 internal-wave product is not on this card's grid; "
+            "this card reads it directly and never regrids it")
+    return load_iwm_forcing(
+        str(path), lat_t, lon_t,
+        land_mask=np.asarray(surface_tmask, dtype=np.float64),
+        coord_match_tol_deg=1.0e-3,
+    )
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -1290,7 +1531,15 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     domain_path = root / "ORCA_R2_zps_domcfg.nc"
     temperature_path = root / "data_1m_potential_temperature_nomask.nc"
     salinity_path = root / "data_1m_salinity_nomask.nc"
-    required = (domain_path, temperature_path, salinity_path)
+    # ldfdyn.f90:348-353 opens this exact file name in the run directory; the
+    # record's directory symlinks it to the deck, so the deck root is where it
+    # is read from here.
+    viscosity_path = root / "eddy_viscosity_3D.nc"
+    # namelist_cfg's namzdf_iwm names this root for all six wave-power and
+    # decay-scale fields, and the run log shows it opened six times.
+    iwm_path = root / "zdfiwm_forcing_orca2.nc"
+    required = (domain_path, temperature_path, salinity_path, viscosity_path,
+                iwm_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing ORCA2 deck files: {missing}")
@@ -1310,7 +1559,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             name: np.asarray(ds.variables[name][:], dtype=np.float64)
             for name in (
                 "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
-                "ff_f", "gphit",
+                "ff_f", "gphit", "glamt",
             )
         }
 
@@ -1383,9 +1632,13 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e1v_m=metric["e1v"],
         nemo_een_barotropic_m=operands,
     )
+    ahmt, ahmf = build_orca2_ldf_dyn_coefficients(
+        viscosity_path, tmask.astype(np.float64), fmask)
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
     )._replace(
+        nemo_ldf_ahmt=jnp.asarray(ahmt, dtype=jnp.float64),
+        nemo_ldf_ahmf=jnp.asarray(ahmf, dtype=jnp.float64),
         h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
         bottom_level=jnp.asarray(bottom - 1, dtype=jnp.int32),
         is_active=jnp.asarray(tmask),
@@ -1394,20 +1647,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
     )
 
-    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
-    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
-    after_weight = np.float64(249.0 / 496.0)
-    before_weight = np.float64(1.0) - after_weight
-    with netCDF4.Dataset(temperature_path, "r") as ds:
-        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
-        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
-    with netCDF4.Dataset(salinity_path, "r") as ds:
-        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
-        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
-    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
-    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
-    temperature = np.where(tmask, temperature, 0.0)
-    salinity = np.where(tmask, salinity, 0.0)
+    temperature, salinity = build_orca2_initial_ts(
+        temperature_path, salinity_path, tmask)
 
     # iceistate.F90:262-291 creates one-category ice from the surface T/S and
     # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
@@ -1516,11 +1757,36 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # (zdftke.F90:279-288).  nn_bc_bot is read for wave coupling but does
         # not guard this executed branch (declared/read only at :85/:762).
         bottom_tke_bc=True,
+        # zdfiwm.F90's initialisation runs AFTER zdf_tke_init and REPLACES the
+        # namelist backgrounds, because the wave field now supplies the
+        # interior background: avmb becomes the molecular viscosity, avtb a
+        # very small diffusive minimum, and the equatorial 2-D shape becomes
+        # uniform.  The carried avt_k/avm_k seeds above are set BEFORE that
+        # reset (zdfphy.f90:227-228) and keep the namelist values; these two
+        # floors are read AFTER it, every step, inside tke_avn's
+        # MAX(zav, avmb) / MAX(zav, avtb_2d*avtb) (zdftke.f90:709-710).
+        kappaM_min=_ORCA2_IWM_AVMB,
+        kappaH_min=_ORCA2_IWM_AVTB,
+    )
+    # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
+    # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
+    # The efficiency option is taken; the salt/heat differential is NOT, and it
+    # is not silently dropped either: legoESM's implicit tracer solve carries
+    # ONE diffusivity for both tracers, so a separate salt coefficient has
+    # nowhere to go, and the gap is declared in the card's unmeasured features
+    # below rather than hidden behind a False.  The heat and momentum halves of
+    # the arm, which are what the retired mixing-length floor was standing in
+    # for, are unaffected by that gap.
+    iwm_config = model_config.physics.vertical_mixing.iwm._replace(
+        enabled=True,
+        mevar=False,
+        tsdiff=False,
+        require_forcing_maps=True,
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config)))
+                tke=tke_config, iwm=iwm_config)))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -1528,6 +1794,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         z_coord=z_coord,
         land_mask=jnp.asarray(tmask[..., 0], dtype=jnp.float64),
         initial_state=state,
+        iwm_forcing=_orca2_iwm_forcing(
+            iwm_path, tmask[..., 0], metric["gphit"], metric["glamt"]),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",
@@ -1544,7 +1812,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         unmeasured_features=(
             "staged_gm_eiv",
             "linear_implicit_bottom_drag",
-            "internal_wave_mixing",
+            # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
+            # diffusivity from heat, and the shared-K implicit tracer solve
+            # cannot carry two.  The deck's second salt/heat differential,
+            # ln_zdfddm, is unbuilt for the same reason.
+            "internal_wave_salt_heat_differential",
+            "double_diffusive_salt_heat_split",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",
@@ -1578,6 +1851,88 @@ _VORTEX_NJ = 63
 _VORTEX_NK = 11
 _VORTEX_NLEV = _VORTEX_NK - 1        # jpkm1 wet levels; record 11 is the dummy
 _VORTEX_H_M = 5000.0                 # usrdef_zgr.F90:126,187 flat bottom
+
+
+class _VortexResolution(NamedTuple):
+    """One rung of decision 74's VORTEX resolution ladder, fully resolved.
+
+    No field here is derived at use time: the card states the grid it runs on
+    and the receipt prints it.  ``ni``/``nj`` ARE what ``usr_def_nam`` computes
+    from ``rn_dx`` (usrdef_nam.F90:138-139, kpi = NINT(1800e3/rn_dx)+3), but
+    they are written out so a card can never silently disagree with the deck
+    NEMO was run with.
+    """
+
+    suffix: str          # card-name segment; empty for the shipped 30 km deck
+    dx_m: float          # namusr_def rn_dx
+    dy_m: float          # namusr_def rn_dy
+    ni: int              # usr_def_nam kpi
+    nj: int              # usr_def_nam kpj
+    dt_s: float          # namdom  rn_Dt
+    n_steps: int         # namrun  nn_itend (run length; inert for a kt<=10 ladder)
+    oracle_tag: str      # the acquisition variant that produced its record
+
+
+# THE RULE IS NEMO'S OWN, NOT A CHOICE.  tests/VORTEX ships an AGRIF zoom whose
+# space and time refinement ratios are pinned at 3 3 3
+# (tests/VORTEX/EXPREF/AGRIF_FixedGrids.in:2, "22 41 22 41 3 3 3"), and the
+# child namelist NEMO ships for that zoom (tests/VORTEX/EXPREF/1_namelist_cfg)
+# differs from the parent in exactly three values: rn_dx and rn_dy
+# 30000 -> 10000 (:21-22), rn_Dt 2880 -> 960 (:43) and nn_itend 3000 -> 6000
+# (:34), plus a &namagrif sponge block (:103-108) that is meaningless without a
+# nest.  rn_dz = 500 (:23), rn_ppgphi0, rn_ppumax, nn_rot, nn_e = 48 (:222) and
+# every physics switch are UNCHANGED, and ln_dynldf_OFF / ln_traldf_OFF hold in
+# parent and child alike, so there is no viscosity or diffusivity to rescale.
+# So: dx -> dx/r, dt -> dt/r, everything else held.  The 10 km rung IS NEMO's
+# own child deck; the 15 km rung is the same rule at r = 2.
+#
+# nn_itend has no ratio rule (6000 is not 3*3000), so the 15 km rung keeps the
+# parent's 3000 and the discrepancy is registered as DECISION_NEEDED in round
+# 208's receipt.  It is inert for every gate: the ladders run ten steps and the
+# oracle decks pin nn_itend = 10 at every resolution.
+_VORTEX_RESOLUTIONS: dict[str, _VortexResolution] = {
+    "30km": _VortexResolution(
+        "", _VORTEX_DX_M, _VORTEX_DY_M, _VORTEX_NI, _VORTEX_NJ,
+        2880.0, 3000, "round2/round3"),
+    "15km": _VortexResolution(
+        "-15km", 15000.0, 15000.0, 123, 123, 1440.0, 3000,
+        "round208_res15"),
+    "10km": _VortexResolution(
+        "-10km", 10000.0, 10000.0, 183, 183, 960.0, 6000,
+        "round208_res10"),
+}
+def _vortex_nint(value: float) -> int:
+    """Fortran ``NINT``: round half AWAY FROM ZERO, not Python's half-to-even.
+
+    No rung here lands on a .5 case, but ``round()`` would silently disagree
+    with ``usr_def_nam`` on one that did, and the statement being transcribed
+    is Fortran's, so it is transcribed with Fortran's rounding rule.
+    """
+    if value < 0.0:
+        return -_vortex_nint(-value)
+    return int(math.floor(value + 0.5))
+
+
+def validate_vortex_resolution(rung: "_VortexResolution") -> None:
+    """Refuse a rung whose written-out cell count is not NEMO's own.
+
+    ``usrdef_nam.F90:138-139`` computes ``kpi = NINT(1800e3/rn_dx)+3`` and
+    ``kpj`` likewise; this runs that arithmetic as a CHECK on the value the
+    rung writes out, never as its source.  A rung that disagreed with it would
+    run a different box than the deck it cites.
+    """
+    want = (_vortex_nint(1800.e3 / rung.dx_m) + 3,
+            _vortex_nint(1800.e3 / rung.dy_m) + 3)
+    if (rung.ni, rung.nj) != want:
+        raise ValueError(
+            f"VORTEX rung {rung.suffix or '30km'} states {rung.ni}x"
+            f"{rung.nj} cells, which is not usr_def_nam's "
+            f"NINT(1800e3/rn_dx)+3 = {want[0]}x{want[1]}")
+
+
+for _rung in _VORTEX_RESOLUTIONS.values():
+    validate_vortex_resolution(_rung)
+del _rung
 # nameos rn_a0 (namelist_cfg:132).  eosbn2.F90:1890-1895 reads nameos
 # unconditionally, so usrdef_istate.F90:19,88 consumes 0.28 whichever equation
 # of state is selected.
@@ -1610,7 +1965,9 @@ _VORTEX_SEOS = NemoSEOSConfig(
 )
 
 
-def vortex_horizontal_coordinates() -> dict[str, np.ndarray]:
+def vortex_horizontal_coordinates(
+    res: _VortexResolution | None = None,
+) -> dict[str, np.ndarray]:
     """Transcribe ``usrdef_hgr.F90`` for ``nn_rot = 0`` (root grid).
 
     Positions are the source's own KILOMETRE coordinates: VORTEX uses
@@ -1619,22 +1976,23 @@ def vortex_horizontal_coordinates() -> dict[str, np.ndarray]:
     the initial state reproduces the Fortran bit for bit.
     """
 
+    res = res or _VORTEX_RESOLUTIONS["30km"]
     rad = math.pi / 180.0                            # phycst.F90:26
     omega = float(NEMO_CONSTANTS_CONFIG.Omega)       # phycst.F90:91
     radius = float(NEMO_CONSTANTS_CONFIG.R_earth)    # phycst.F90:37
     # usrdef_hgr.F90:83-84
-    offset_x = (-float(_VORTEX_NI - 1) + 1.0) * 0.5 * 1.e-3 * _VORTEX_DX_M
-    offset_y = (-float(_VORTEX_NJ - 1) + 1.0) * 0.5 * 1.e-3 * _VORTEX_DY_M
+    offset_x = (-float(res.ni - 1) + 1.0) * 0.5 * 1.e-3 * res.dx_m
+    offset_y = (-float(res.nj - 1) + 1.0) * 0.5 * 1.e-3 * res.dy_m
     # usrdef_hgr.F90:103-104 -- mig/mjg minus one, the 0-based global index
-    zti = np.arange(_VORTEX_NI, dtype=np.float64)
-    ztj = np.arange(_VORTEX_NJ, dtype=np.float64)
+    zti = np.arange(res.ni, dtype=np.float64)
+    ztj = np.arange(res.nj, dtype=np.float64)
     # usrdef_hgr.F90:108-111 and :130-133 (the nn_rot==0 arm).  glamv = glamt,
     # glamf = glamu, gphiu = gphit, gphif = gphiv.
-    lam_t = offset_x + _VORTEX_DX_M * 1.e-3 * (zti - 0.5)
-    lam_u = lam_t + _VORTEX_DX_M * 1.e-3 * 0.5
-    phi_t = offset_y + _VORTEX_DY_M * 1.e-3 * (ztj - 0.5)
-    phi_v = phi_t + _VORTEX_DY_M * 1.e-3 * 0.5
-    shape = (_VORTEX_NJ, _VORTEX_NI)
+    lam_t = offset_x + res.dx_m * 1.e-3 * (zti - 0.5)
+    lam_u = lam_t + res.dx_m * 1.e-3 * 0.5
+    phi_t = offset_y + res.dy_m * 1.e-3 * (ztj - 0.5)
+    phi_v = phi_t + res.dy_m * 1.e-3 * 0.5
+    shape = (res.nj, res.ni)
     glamt = np.broadcast_to(lam_t[None, :], shape).copy()
     glamu = np.broadcast_to(lam_u[None, :], shape).copy()
     gphit = np.broadcast_to(phi_t[:, None], shape).copy()
@@ -1654,7 +2012,7 @@ def vortex_horizontal_coordinates() -> dict[str, np.ndarray]:
     }
 
 
-def _vortex_grid(source: dict[str, np.ndarray]):
+def _vortex_grid(source: dict[str, np.ndarray], res: _VortexResolution | None = None):
     """Uniform 30 km Cartesian beta-plane with NEMO's own Coriolis operands.
 
     ``create_beta_plane_cgrid_geometry`` already evaluates ``f0 + beta*y`` at
@@ -1664,13 +2022,14 @@ def _vortex_grid(source: dict[str, np.ndarray]):
     operand order rather than a re-derivation in metres.
     """
 
+    res = res or _VORTEX_RESOLUTIONS["30km"]
     grid = create_beta_plane_cgrid_geometry(
-        _VORTEX_NJ, _VORTEX_NI,
-        dx_m=_VORTEX_DX_M, dy_m=_VORTEX_DY_M,
+        res.nj, res.ni,
+        dx_m=res.dx_m, dy_m=res.dy_m,
         f0=source["f0"], beta=source["beta"],
         # y_c[j] = origin + (j+1/2)dy must equal gphit[j]*1e3.
-        x_origin_m=float(source["glamt"][0, 0]) * 1.e3 - 0.5 * _VORTEX_DX_M,
-        y_origin_m=float(source["gphit"][0, 0]) * 1.e3 - 0.5 * _VORTEX_DY_M,
+        x_origin_m=float(source["glamt"][0, 0]) * 1.e3 - 0.5 * res.dx_m,
+        y_origin_m=float(source["gphit"][0, 0]) * 1.e3 - 0.5 * res.dy_m,
         radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
         cartesian_pseudo_lat=True,
         dtype=jnp.float64,
@@ -1681,7 +2040,7 @@ def _vortex_grid(source: dict[str, np.ndarray]):
     # depends on j alone, so the U array is a pure broadcast and the extra V
     # row is the affine continuation one cell south of gphiv[0].
     f_u = np.ascontiguousarray(
-        np.broadcast_to(ff_t[:, :1], (_VORTEX_NJ, _VORTEX_NI + 1)))
+        np.broadcast_to(ff_t[:, :1], (res.nj, res.ni + 1)))
     f_v = np.concatenate(
         [ff_f[:1] - (ff_f[1:2] - ff_f[:1]), ff_f], axis=0)
     return grid._replace(
@@ -1708,7 +2067,9 @@ def _vortex_analytic_scalars() -> dict[str, float]:
     return {"f0": f0, "lam": lam, "n2": n2, "H": height, "P0": p0}
 
 
-def vortex_initial_state_fields(source: dict[str, np.ndarray], tmask):
+def vortex_initial_state_fields(
+    source: dict[str, np.ndarray], tmask, *, ht_0=None,
+):
     """Transcribe ``usrdef_istate.F90`` in NEMO's own execution order.
 
     THE ORDER IS THE SOURCE'S: ``rst_read_ssh`` (restart.F90:461) calls
@@ -1741,7 +2102,17 @@ def vortex_initial_state_fields(source: dict[str, np.ndarray], tmask):
     ssh = p0 * bell_t / (rho_ssh * grav) * surface
 
     # --- domqco.F90:160 with domain.F90:158's reciprocal ------------------
-    r1_ht_0 = surface / (_VORTEX_H_M + 1.0 - surface)
+    # ``ht_0`` is domain.F90:139-144's SUM_k e3t_0*tmask.  On the flat cards
+    # every wet column is 5000 m, which is why the shipped decks could state
+    # it as a scalar; a card with topography MUST pass its own, because the
+    # depth handed to usr_def_istate is gdept_1d(k)*(1+ssh/ht_0) and nothing
+    # else about the initial state sees the bottom.  Round 212 measured this:
+    # it is the whole of the 2.787e-05 K difference between NEMO's seamount
+    # and flat runs at kt=1, reproduced to the bit.
+    if ht_0 is None:
+        ht_0 = _VORTEX_H_M * surface
+    ht_0 = np.asarray(ht_0, dtype=np.float64)
+    r1_ht_0 = surface / (ht_0 + 1.0 - surface)
     r3t = ssh * r1_ht_0
     # domzgr_substitute.h90:139 -- gdept(Kbb) = gdept_0 * (1 + r3t(Kbb))
     gdept_1d = (np.arange(_VORTEX_NLEV, dtype=np.float64) + 0.5) * _VORTEX_DZ_M
@@ -1787,7 +2158,10 @@ def vortex_initial_state_fields(source: dict[str, np.ndarray], tmask):
     return ssh, temperature, salinity, u, v
 
 
-def _vortex_barotropic_velocity(ssh, u, v, tmask):
+def _vortex_barotropic_velocity(
+    ssh, u, v, tmask, res: _VortexResolution | None = None, *,
+    e3u_0=None, e3v_0=None, hu_0=None, hv_0=None,
+):
     """Transcribe ``istate.F90:149-154`` (the RK3 ``Kbb`` arm).
 
     ``e3u(Kbb)`` and ``r1_hu(Kbb)`` are the key_qco macros
@@ -1796,6 +2170,7 @@ def _vortex_barotropic_velocity(ssh, u, v, tmask):
     it does not cancel in the bits.
     """
 
+    res = res or _VORTEX_RESOLUTIONS["30km"]
     tmask = np.asarray(tmask, dtype=np.float64)
     umask = tmask * np.concatenate(
         [tmask[:, 1:], np.zeros_like(tmask[:, :1])], axis=1)
@@ -1803,20 +2178,35 @@ def _vortex_barotropic_velocity(ssh, u, v, tmask):
         [tmask[1:], np.zeros_like(tmask[:1])], axis=0)
     su = umask[:, :, 0]
     sv = vmask[:, :, 0]
-    # domain.F90:159 -- r1_h*_0 = mask / (h*_0 + 1 - mask), h*_0 = 5000*mask.
-    r1_hu_0 = su / (_VORTEX_H_M * su + 1.0 - su)
-    r1_hv_0 = sv / (_VORTEX_H_M * sv + 1.0 - sv)
+    # domain.F90:143-144,:159 -- h*_0 = SUM_k e3*_0*mask and
+    # r1_h*_0 = mask / (h*_0 + 1 - mask).  The flat cards' uniform 5000 m
+    # column is the special case; a partial-cell card passes its own.
+    if hu_0 is None:
+        hu_0 = _VORTEX_H_M * su
+    if hv_0 is None:
+        hv_0 = _VORTEX_H_M * sv
+    r1_hu_0 = su / (np.asarray(hu_0, dtype=np.float64) + 1.0 - su)
+    r1_hv_0 = sv / (np.asarray(hv_0, dtype=np.float64) + 1.0 - sv)
     # domqco.F90:166-169 with this mesh's uniform e1e2t (r1_e1e2u = 1/e1e2u).
-    area = _VORTEX_DX_M * _VORTEX_DY_M
+    area = res.dx_m * res.dy_m
     ssh_east = np.concatenate([ssh[:, 1:], np.zeros_like(ssh[:, :1])], axis=1)
     ssh_north = np.concatenate([ssh[1:], np.zeros_like(ssh[:1])], axis=0)
     r3u = 0.5 * (area * ssh + area * ssh_east) * r1_hu_0 * (1.0 / area)
     r3v = 0.5 * (area * ssh + area * ssh_north) * r1_hv_0 * (1.0 / area)
-    e3u = _VORTEX_DZ_M * (1.0 + r3u)
-    e3v = _VORTEX_DZ_M * (1.0 + r3v)
+    # domzgr_substitute.h90:127 -- e3u(Kbb) = e3u_0(i,j,k)*(1+r3u*umask).
+    # E3u_0 is e3t_1d(k) under key_vco_1d (a scalar here, the ladder being
+    # uniform) and e3u_3d(i,j,k) under key_vco_1d3d.
+    e3u_ref = (np.full((_VORTEX_NLEV,), _VORTEX_DZ_M) if e3u_0 is None
+               else np.asarray(e3u_0, dtype=np.float64))
+    e3v_ref = (np.full((_VORTEX_NLEV,), _VORTEX_DZ_M) if e3v_0 is None
+               else np.asarray(e3v_0, dtype=np.float64))
     uu_b = np.zeros_like(su)
     vv_b = np.zeros_like(sv)
     for k in range(_VORTEX_NLEV):                  # DO_3D ... 1, jpkm1
+        e3u = (e3u_ref[k] if e3u_ref.ndim == 1 else e3u_ref[:, :, k]) * (
+            1.0 + r3u)
+        e3v = (e3v_ref[k] if e3v_ref.ndim == 1 else e3v_ref[:, :, k]) * (
+            1.0 + r3v)
         uu_b = uu_b + e3u * u[:, :, k] * umask[:, :, k]
         vv_b = vv_b + e3v * v[:, :, k] * vmask[:, :, k]
     return uu_b * (r1_hu_0 / (1.0 + r3u)), vv_b * (r1_hv_0 / (1.0 + r3v))
@@ -1831,8 +2221,16 @@ def _vortex_barotropic_velocity(ssh, u, v, tmask):
 VORTEX_UNMEASURED: tuple[str, ...] = ()
 
 
-def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
-    """VORTEX root grid: 63x63x10 beta-plane box, flat 5000 m zco bottom.
+def build_vortex_zco_card(
+    momentum: str = "flux", resolution: str = "30km",
+) -> NEMOTestcaseCard:
+    """VORTEX root grid: a beta-plane box with a flat 5000 m zco bottom.
+
+    ``resolution`` picks one rung of decision 74's ladder: ``"30km"`` is the
+    shipped deck (63x63x10), ``"15km"`` and ``"10km"`` are NEMO's own
+    refinement rule applied to it (123x123x10 and 183x183x10).  Every
+    resolved value is stated in ``_VORTEX_RESOLUTIONS``; nothing about the
+    grid is defaulted here.
 
     ``momentum`` picks which of the two VORTEX decks this card is (decision
     73).  ``"flux"`` is the shipped deck -- flux-form third-order upstream
@@ -1848,13 +2246,18 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
         raise ValueError(
             f"unknown VORTEX momentum deck {momentum!r}; expected 'flux' "
             "(ln_dynadv_up3) or 'vector' (ln_dynadv_vec)")
+    if resolution not in _VORTEX_RESOLUTIONS:
+        raise ValueError(
+            f"unknown VORTEX resolution {resolution!r}; expected one of "
+            f"{sorted(_VORTEX_RESOLUTIONS)}")
+    res = _VORTEX_RESOLUTIONS[resolution]
 
-    source = vortex_horizontal_coordinates()
-    grid = _vortex_grid(source)
-    wet = _closed_box_mask(_VORTEX_NJ, _VORTEX_NI)
+    source = vortex_horizontal_coordinates(res)
+    grid = _vortex_grid(source, res)
+    wet = _closed_box_mask(res.nj, res.ni)
     wet_np = np.asarray(wet)
     bathymetry = wet * _VORTEX_H_M
-    native_3d = (_VORTEX_NJ, _VORTEX_NI, _VORTEX_NLEV)
+    native_3d = (res.nj, res.ni, _VORTEX_NLEV)
     tmask = np.broadcast_to(wet_np[..., None], native_3d)
     thickness = np.full(native_3d, _VORTEX_DZ_M)
     gdept_1d = (np.arange(_VORTEX_NLEV, dtype=np.float64) + 0.5) * _VORTEX_DZ_M
@@ -1869,8 +2272,8 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
     fmask = fe3mask
     umask_3d = np.broadcast_to(u_wet[..., None], native_3d)
     vmask_3d = np.broadcast_to(v_wet[..., None], native_3d)
-    area = np.full((_VORTEX_NJ, _VORTEX_NI), _VORTEX_DX_M * _VORTEX_DY_M)
-    metric = np.full((_VORTEX_NJ, _VORTEX_NI), _VORTEX_DX_M)
+    area = np.full((res.nj, res.ni), res.dx_m * res.dy_m)
+    metric = np.full((res.nj, res.ni), res.dx_m)
     operands = NemoEENBarotropicOperands(
         ff_f=np.asarray(grid.ff_f),
         e3u_0=thickness, e3v_0=thickness, e3f_0=thickness,
@@ -1904,7 +2307,7 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
     z_coord = create_full_step_coordinate(z_ref, bottom)
     ssh, temperature, salinity, u, v = vortex_initial_state_fields(
         source, tmask)
-    uu_b, vv_b = _vortex_barotropic_velocity(ssh, u, v, tmask)
+    uu_b, vv_b = _vortex_barotropic_velocity(ssh, u, v, tmask, res)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
         T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
@@ -1915,8 +2318,8 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
     )
     # The model's face arrays carry one redundant west/south record; the
     # phase-2 geometry mapping is model[:, 1:] == NEMO's own U column.
-    zeros_u = np.zeros((_VORTEX_NJ, 1, _VORTEX_NLEV))
-    zeros_v = np.zeros((1, _VORTEX_NI, _VORTEX_NLEV))
+    zeros_u = np.zeros((res.nj, 1, _VORTEX_NLEV))
+    zeros_v = np.zeros((1, res.ni, _VORTEX_NLEV))
     state = state._replace(
         T=state.T.replace(data=jnp.asarray(temperature, dtype=jnp.float64)),
         S=state.S.replace(data=jnp.asarray(salinity, dtype=jnp.float64)),
@@ -1926,10 +2329,10 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
             np.concatenate([zeros_v, v], axis=0), dtype=jnp.float64)),
         eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
         uu_b=state.uu_b.replace(data=jnp.asarray(
-            np.concatenate([np.zeros((_VORTEX_NJ, 1)), uu_b], axis=1),
+            np.concatenate([np.zeros((res.nj, 1)), uu_b], axis=1),
             dtype=jnp.float64)),
         vv_b=state.vv_b.replace(data=jnp.asarray(
-            np.concatenate([np.zeros((1, _VORTEX_NI)), vv_b], axis=0),
+            np.concatenate([np.zeros((1, res.ni)), vv_b], axis=0),
             dtype=jnp.float64)),
     )
     # namelist_cfg:204-216: ln_bt_fw=T, nn_bt_flt=3, rn_bt_alpha=.07 and
@@ -1952,10 +2355,499 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
         land_mask=wet,
         initial_state=state,
     )
-    # namelist_cfg:32,41: nn_itend = 3000 at rn_Dt = 2880 s.
+    # namelist_cfg:32,41 at 30 km (nn_itend = 3000 at rn_Dt = 2880 s); the
+    # refined rungs carry their own rn_Dt and run length, both resolved in
+    # _VORTEX_RESOLUTIONS from NEMO's shipped child deck.
+    stem = "VORTEX-zco" if momentum == "flux" else "VORTEX_VEC-zco"
     card = NEMOTestcaseCard(
-        "VORTEX-zco" if momentum == "flux" else "VORTEX_VEC-zco",
-        recipe, 2880.0, 3000, 1, 0, 0, 0.0, 0.0,
+        stem.replace("-zco", f"{res.suffix}-zco"),
+        recipe, res.dt_s, res.n_steps, 1, 0, 0, 0.0, 0.0,
+        unmeasured_features=VORTEX_UNMEASURED,
+    )
+    validate_nemo_testcase_card(card)
+    return card
+
+
+# --- Decision 88 (user, 2026-10-03): VORTEX WITH TOPOGRAPHY ---------------
+# The bathymetry is an EXPLICIT field recipe, stated here with every
+# constant printed, exactly as the NEMO hook states it
+# (scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex/
+#  vortex_smt_usrdef_zgr.F90):
+#
+#     h(x,y) = H0 - A * exp( -((x-x0)^2 + (y-y0)^2) / L^2 )
+#
+# H0, A, L and the 300 km westward offset are the user's (decision 88).
+# glamt/gphit are in KILOMETRES in this configuration
+# (tests/VORTEX/MY_SRC/usrdef_hgr.F90:78) and glamt increases with i at
+# nn_rot = 0 (:108), so WEST is -glamt and x0 is negative.
+_VORTEX_SMT_H0_M = 5000.0        # far-field depth              [m]
+_VORTEX_SMT_A_M = 1000.0         # seamount height              [m]
+_VORTEX_SMT_L_M = 150.0e3        # Gaussian radius              [m]
+_VORTEX_SMT_X0_M = -300.0e3      # centre, i-direction          [m]
+_VORTEX_SMT_Y0_M = 0.0           # centre, j-direction          [m]
+# tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:204 -- ze3min = 0.1 * rn_dz.
+_VORTEX_SMT_ZE3MIN_M = 0.1 * _VORTEX_DZ_M
+
+# --- seamount mini-ladder rung SMT-1 (decision 93): ORCA2 rung 0's namzdf ---
+# orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/
+# namelist_cfg:417 / :418 / :411.
+_SMT1_RN_AVM0 = 1.2e-4           # background vertical viscosity   [m2/s]
+_SMT1_RN_AVT0 = 1.2e-5           # background vertical diffusivity [m2/s]
+_SMT1_RN_EVD = 100.0             # enhanced vertical diffusion     [m2/s]
+
+# --- rung SMT-2 (decision 93): ORCA2 rung 0's LINEAR bottom drag ---
+# The rung-0 namelist writes ONE line, `&namdrg ln_lin = .true.`
+# (namelist_cfg:270), and takes every companion from the reference namelist:
+# &namdrg_bot rn_Cd0 = 1.e-3 (namelist_ref:834), rn_Uc0 = 0.4 (:835),
+# ln_boost = .false. (:839), and &namdrg ln_drgimp = .true. (:817).
+# zdfdrg.f90 np_lin then stores, once for the whole run,
+#     rCd0_bot = rn_Cd0 * ssmask ;  rCdU_bot = - rCd0_bot * rn_Uc0
+# i.e. a CONSTANT -4.0e-4 m/s on every wet column, never updated
+# (l_zdfdrg = .FALSE.).
+_SMT2_RN_CD0 = 1.0e-3            # linear drag coefficient         [-]
+_SMT2_RN_UC0 = 0.4               # linear-law reference velocity   [m/s]
+
+# --- rung SMT-3 (decision 93): ORCA2 rung 0's namtra_ldf ------------
+_SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
+_SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
+
+
+def vortex_smt_bathymetry(glamt_km, gphit_km) -> np.ndarray:
+    """The seamount, in the hook's own association (usrdef_zgr:167-170)."""
+    zx = np.asarray(glamt_km, dtype=np.float64) * 1.0e3 - _VORTEX_SMT_X0_M
+    zy = np.asarray(gphit_km, dtype=np.float64) * 1.0e3 - _VORTEX_SMT_Y0_M
+    return _VORTEX_SMT_H0_M - _VORTEX_SMT_A_M * np.exp(
+        -(zx * zx + zy * zy) / (_VORTEX_SMT_L_M * _VORTEX_SMT_L_M))
+
+
+def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray]):
+    """NEMO's resolved zps geometry for the seamount deck, statement by statement.
+
+    Returns ``(zht, k_bot, e3t, e3u, e3v, e3f)`` with ``k_bot`` ONE-BASED and
+    the scale factors carrying NEMO's ``jpk`` records (``_VORTEX_NLEV + 1``);
+    record ``jpk`` is the below-bottom copy NEMO writes at ``ik+1``.
+
+    THE LAND RING IS NOT MASKED HERE, and that is NEMO's own order, not an
+    oversight: ``dom_zgr`` turns the first and last inner global row and
+    column into land only AFTER ``usr_def_zgr`` returns
+    (src/OCE/DOM/domzgr.F90:303-315), so those columns leave the hook with
+    ``k_top = 1`` and a partial bottom cell.  ``mesh_mask.nc`` of the NEMO
+    run shows exactly that (``mbathy = 10`` and ``e3t = 499.99997817 m`` on
+    the ring), and a card that masked them would not reproduce it.
+    """
+    zht = vortex_smt_bathymetry(source["glamt"], source["gphit"])
+    nlev = _VORTEX_NLEV
+    gdepw_1d = np.arange(nlev + 1, dtype=np.float64) * _VORTEX_DZ_M
+    ze3min = _VORTEX_SMT_ZE3MIN_M
+    # usrdef_zgr:186-189 (OVERFLOW:209-212).  The downward loop's last write
+    # wins, so k_bot is the number of W interfaces that clear the floor.
+    k_bot = np.sum(
+        gdepw_1d[None, None, :nlev] + ze3min <= zht[..., None], axis=-1)
+    shape = zht.shape + (nlev + 1,)
+    e3t = np.full(shape, _VORTEX_DZ_M, dtype=np.float64)   # :194-199
+    jj, ii = np.nonzero(k_bot > 0)                         # :200-206, IF(ik>0)
+    ik = k_bot[jj, ii] - 1
+    e3t[jj, ii, ik] = np.minimum(zht[jj, ii], gdepw_1d[ik + 1]) - gdepw_1d[ik]
+    e3t[jj, ii, ik + 1] = e3t[jj, ii, ik]
+
+    def min_of_neighbours(a, axis):
+        """usrdef_zgr:211-217 / :222-226 -- MIN with the next point.
+
+        THE LAST COLUMN/ROW, and the reason, which differs between the
+        faces (round 2's review corrected an earlier, wrong one):
+
+        * ``e3f`` is formed from ``pe3v`` AFTER the hook's
+          ``lbc_lnk(..., kfillmode = jpfillcopy)`` on ``pe3u``/``pe3v``
+          (vortex_smt_usrdef_zgr.F90:218-219), so its outside neighbour IS a
+          copy of the last point and the MIN there is that point.
+        * ``e3u``/``e3v`` are formed from ``pe3t``, whose halo is NOT
+          jpfillcopy-filled inside the hook (``dom_zgr`` fills it only after
+          the hook returns, src/OCE/DOM/domzgr.F90:272-274).  NEMO really
+          does MIN against the next T-cell there.  Copying agrees with that
+          ONLY because this bathymetry deepens monotonically away from the
+          seamount, so the cell just outside the east/north edge is never
+          shallower.  It would NOT agree for a bathymetry that shoals at the
+          edge, nor on a periodic domain, where NEMO wraps and this copies.
+          All five fields are measured bit-for-bit against the run's own
+          ``mesh_mask.nc`` by the round-2 geometry gate, which is what the
+          claim rests on.
+        """
+        out = np.empty_like(a)
+        if axis == 1:
+            out[:, :-1] = np.minimum(a[:, :-1], a[:, 1:])
+            out[:, -1] = a[:, -1]
+        else:
+            out[:-1] = np.minimum(a[:-1], a[1:])
+            out[-1] = a[-1]
+        return out
+
+    e3u = min_of_neighbours(e3t, 1)
+    e3v = min_of_neighbours(e3t, 0)
+    e3f = min_of_neighbours(e3v, 1)       # from e3v, not e3u (zgr_zps:1194)
+    return zht, k_bot, e3t, e3u, e3v, e3f
+
+
+def build_vortex_smt_zps_card(
+    momentum: str = "flux", rung: str = "smt0"
+) -> NEMOTestcaseCard:
+    """VORTEX with a Gaussian seamount and z partial bottom cells.
+
+    Identical to :func:`build_vortex_zco_card` at 30 km in every namelist
+    value; the ONE thing that differs is the bottom, and everything the
+    bottom reaches: the column depth, the bottom level, the partial T-, U-,
+    V- and F-cell thicknesses, and -- through ``ht_0`` -- the depth the
+    initial state is evaluated on.
+
+    ``rung`` selects the seamount mini-ladder step (decision 93, operator
+    note CE).  ``"smt0"`` is the shipped VORTEX vertical-physics block;
+    ``"smt1"`` moves ONE module -- namzdf -- to ORCA2 rung 0's values and
+    nothing else; ``"smt2"`` is SMT-1 with ONE further module, namdrg, at
+    rung 0's linear bottom drag; ``"smt3"`` adds ORCA2 rung 0's namtra_ldf
+    block.  Only the vector deck is carried up the ladder, because ORCA2 is
+    vector-invariant.
+    """
+    if momentum not in ("flux", "vector"):
+        raise ValueError(
+            f"unknown VORTEX_SMT momentum deck {momentum!r}; expected 'flux' "
+            "(ln_dynadv_up3) or 'vector' (ln_dynadv_vec)")
+    if rung not in ("smt0", "smt1", "smt2", "smt3"):
+        raise ValueError(
+            f"unknown VORTEX_SMT mini-ladder rung {rung!r}; expected 'smt0' "
+            "(the shipped namzdf block), 'smt1' (ORCA2 rung 0's background "
+            "mixing and enhanced vertical diffusion), 'smt2' (SMT-1 plus "
+            "rung 0's linear bottom drag), or 'smt3' (SMT-2 plus rung 0's "
+            "lateral tracer diffusion)")
+    if rung in ("smt1", "smt2", "smt3") and momentum != "vector":
+        raise ValueError(
+            "the seamount mini-ladder (decision 93) is carried on the VECTOR "
+            "deck only; there is no flux-form SMT-1 card")
+    res = _VORTEX_RESOLUTIONS["30km"]
+    source = vortex_horizontal_coordinates(res)
+    grid = _vortex_grid(source, res)
+    wet = _closed_box_mask(res.nj, res.ni)
+    wet_np = np.asarray(wet)
+    nlev = _VORTEX_NLEV
+    native_3d = (res.nj, res.ni, nlev)
+
+    zht, k_bot, e3t_jpk, e3u_jpk, e3v_jpk, e3f_jpk = (
+        vortex_smt_partial_cell_geometry(source))
+    e3t = e3t_jpk[:, :, :nlev]
+    e3u_0 = e3u_jpk[:, :, :nlev]
+    e3v_0 = e3v_jpk[:, :, :nlev]
+    e3f_0 = e3f_jpk[:, :, :nlev]
+
+    # dom_msk: a cell is wet when it is inside the closed box AND above the
+    # bottom level the zps rule chose.
+    k_idx = np.arange(nlev)[None, None, :]
+    tmask = (wet_np[..., None] > 0.0) & (k_idx < k_bot[..., None])
+    tmask = tmask.astype(np.float64)
+    umask_3d = tmask * np.concatenate(
+        [tmask[:, 1:], np.zeros_like(tmask[:, :1])], axis=1)
+    vmask_3d = tmask * np.concatenate(
+        [tmask[1:], np.zeros_like(tmask[:1])], axis=0)
+    fe3mask = np.asarray(nemo_fe3mask_from_tmask(jnp.asarray(tmask)))
+    fmask = fe3mask            # rn_shlat = 0, namelist_cfg:99
+
+    # domain.F90:139-152.
+    ht_0 = np.sum(e3t * tmask, axis=-1)
+    hu_0 = np.sum(e3u_0 * umask_3d, axis=-1)
+    hv_0 = np.sum(e3v_0 * vmask_3d, axis=-1)
+    hf_0 = np.sum(
+        e3f_0 * vmask_3d * np.roll(vmask_3d, -1, axis=1), axis=-1)
+
+    gdept_1d = (np.arange(nlev, dtype=np.float64) + 0.5) * _VORTEX_DZ_M
+    gdepw_1d = np.arange(nlev, dtype=np.float64) * _VORTEX_DZ_M
+    area = np.full((res.nj, res.ni), res.dx_m * res.dy_m)
+    metric = np.full((res.nj, res.ni), res.dx_m)
+    operands = NemoEENBarotropicOperands(
+        ff_f=np.asarray(grid.ff_f),
+        e3u_0=e3u_0, e3v_0=e3v_0, e3f_0=e3f_0,
+        umask=umask_3d, vmask=vmask_3d,
+        fmask=fmask, fe3mask=fe3mask,
+        hu_0=hu_0, hv_0=hv_0, hf_0=hf_0,
+        e1t=metric, e2t=metric, e1u=metric, e2u=metric,
+        e1v=metric, e2v=metric, e1f=metric, e2f=metric,
+    )
+    z_ref = create_z_star_from_thicknesses(
+        jnp.full((nlev,), _VORTEX_DZ_M),
+        t_depth_ref_m=gdept_1d,
+        # domzgr_substitute.h90:71-78: under key_vco_1d3d gdept_0, gdepw_0 and
+        # e3w_0 are STILL the 1-D ladder -- the key makes e3t/e3u/e3v/e3f 3-D
+        # and nothing else.  This is NEMO's own zps shape, not a shortcut.
+        nemo_gdept_0_m=np.broadcast_to(gdept_1d, native_3d),
+        nemo_gdepw_0_m=np.broadcast_to(gdepw_1d, native_3d),
+        nemo_e3t_0_m=e3t,
+        nemo_e3w_0_m=np.broadcast_to(
+            np.full((nlev,), _VORTEX_DZ_M), native_3d),
+        nemo_hu_0_m=hu_0, nemo_hv_0_m=hv_0,
+        nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
+        nemo_e2u_m=metric, nemo_e1v_m=metric,
+        nemo_een_barotropic_m=operands,
+    )
+    z_coord = create_partial_cell_coordinate(
+        z_ref, jnp.asarray(np.where(wet_np > 0.0, zht, 0.0)),
+        bottom_index_rule="nemo_zps_e3min",
+        min_partial_thickness=_VORTEX_SMT_ZE3MIN_M,
+    )
+    # fix 5 of round 2's review: the card derives the geometry in numpy (the
+    # statement-by-statement transcription above) and the shared factory
+    # derives bottom_level / h_partial again in JAX from the same bathymetry.
+    # Nothing used to pin the two together, so they are pinned here: outside
+    # the closed box NEMO's k_bot survives unmasked (see the docstring) while
+    # the model's column is dry, which is the only place they may differ.
+    _bl = np.asarray(z_coord.bottom_level)
+    _wetcol = wet_np > 0.0
+    if not np.array_equal(_bl[_wetcol] + 1, k_bot[_wetcol]):
+        raise ValueError(
+            "VORTEX_SMT: the card's transcribed k_bot and the shared "
+            "partial-cell factory's bottom_level disagree")
+    if not np.array_equal(np.asarray(z_coord.h_partial)[
+            np.asarray(z_coord.is_active)], e3t[np.asarray(
+                z_coord.is_active)]):
+        raise ValueError(
+            "VORTEX_SMT: the card's transcribed e3t and the shared "
+            "partial-cell factory's h_partial disagree on a wet cell")
+
+    ssh, temperature, salinity, u, v = vortex_initial_state_fields(
+        source, tmask, ht_0=ht_0)
+    uu_b, vv_b = _vortex_barotropic_velocity(
+        ssh, u, v, tmask, res, e3u_0=e3u_0, e3v_0=e3v_0,
+        hu_0=hu_0, hv_0=hv_0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
+        H_max=_VORTEX_H_M,
+        land_mask_override=wet,
+        H_bathy_override=jnp.asarray(ht_0),
+        nemo_prognostic_barotropic_velocity=True,
+    )
+    zeros_u = np.zeros((res.nj, 1, nlev))
+    zeros_v = np.zeros((1, res.ni, nlev))
+    state = state._replace(
+        T=state.T.replace(data=jnp.asarray(temperature, dtype=jnp.float64)),
+        S=state.S.replace(data=jnp.asarray(salinity, dtype=jnp.float64)),
+        u=state.u.replace(data=jnp.asarray(
+            np.concatenate([zeros_u, u], axis=1), dtype=jnp.float64)),
+        v=state.v.replace(data=jnp.asarray(
+            np.concatenate([zeros_v, v], axis=0), dtype=jnp.float64)),
+        eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
+        uu_b=state.uu_b.replace(data=jnp.asarray(
+            np.concatenate([np.zeros((res.nj, 1)), uu_b], axis=1),
+            dtype=jnp.float64)),
+        vv_b=state.vv_b.replace(data=jnp.asarray(
+            np.concatenate([np.zeros((1, res.ni)), vv_b], axis=0),
+            dtype=jnp.float64)),
+    )
+    model_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4",
+        n_barotropic_substeps=48,
+        bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
+        whole_step_identity=("vortex_flux_up3_een" if momentum == "flux"
+                             else "vortex_vector_een_c2"),
+        tke_langmuir_evaluation=None,
+    )
+    # stp2d.F90:177-186 depth-averages the slow forcing with the REFERENCE
+    # face thickness and the stored reciprocal, not with the live min-rule
+    # thickness; the two differ only over partial cells (round 213).  Stated
+    # on the card, explicitly, because it is a statement choice.
+    model_config = model_config._replace(
+        barotropic=model_config.barotropic._replace(
+            # Stated on the seamount card too, where it was first measured,
+            # rather than inherited silently from the shared block above.
+            barotropic_slow_forcing_depth_evaluation="nemo_literal"))
+    if rung in ("smt1", "smt2", "smt3"):
+        # DECISION 93 (user), rung SMT-1.  ONE namelist module moves to ORCA2
+        # rung 0's values; every line is cited to that deck
+        # (phase3/orca2_rounds/round83/acquisition/
+        #  orca2_rung0_restart_list_10step_a_np2/namelist_cfg):
+        #
+        #   :417  rn_avm0  = 1.2e-4   background vertical eddy VISCOSITY
+        #   :418  rn_avt0  = 1.2e-5   background vertical eddy DIFFUSIVITY
+        #   :409  ln_zdfevd = .true.  enhanced vertical diffusion ON
+        #   :410  nn_evdm   = 0       evd on the TRACER only, never on avm
+        #   :411  rn_evd    = 100.    the coefficient it writes [m2/s]
+        #
+        # Rung 0 keeps ln_zdfcst with the UNIFORM background (:419 nn_avb=0,
+        # :420 nn_havtb=0, :421 ln_zdfcst=.true.), which is what the two
+        # scalars below express -- there is no latitude shape and no profile.
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig, OceanConvectionConfig,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig,
+        )
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        model_config = model_config._replace(
+            A_v=_SMT1_RN_AVM0, K_v=_SMT1_RN_AVT0,
+            physics=OceanPhysicsConfig(
+                # ln_zdfcst with a uniform background is NOT a closure: it is
+                # the two scalars above, which the implicit solve already
+                # carries as A_v / K_v.  Selecting a closure here would run a
+                # second one.
+                vertical_mixing=VerticalMixingConfig(scheme="none"),
+                # Every other namzdf / namtra_ldf / namdyn_ldf / namdrg /
+                # namsbc switch on this deck is OFF, and each is stated
+                # rather than inherited (ln_traldf_OFF, ln_dynldf_OFF,
+                # ln_drg_OFF, ln_usr writing zeros, ln_traqsr=.false.).
+                lateral_mixing=LateralMixingConfig(scheme="none"),
+                surface_forcing=SurfaceForcingConfig(scheme="none"),
+                bottom_drag=BottomDragConfig(scheme="none"),
+                shortwave_penetration=None,
+                mle=None,
+                constants=NEMO_CONSTANTS_CONFIG,
+                convection=OceanConvectionConfig(
+                    scheme="enhanced_diffusion",
+                    enhanced_diffusion=EnhancedDiffusionConfig(
+                        # zdfevd.F90:94  p_avt = rn_evd * wmask
+                        K_conv=_SMT1_RN_EVD,
+                        # zdfevd.F90:106  nn_evdm == 1 guards the MOMENTUM
+                        # arm; rung 0 sets nn_evdm = 0, so the viscosity is
+                        # never touched and the convective one is zero.
+                        nu_conv=0.0,
+                        # The stable branch contributes nothing of its own:
+                        # the background is the namelist pair above.
+                        K_bg=0.0, nu_bg=0.0,
+                        smooth_transition=False,
+                        # zdfevd.F90:93  MIN( rn2, rn2b ) <= -1.e-12
+                        n2_threshold=-1.0e-12,
+                        two_level_trigger=True,
+                        # The S-EOS of this deck (decision 69), not the
+                        # campaign TEOS-10: the trigger must see the same
+                        # fluid the rest of the card runs.
+                        n2_mode="nemo_bn2",
+                        n2_eos_form="seos",
+                        # zdfevd.f90:107-110 REPLACES the assembled avt by
+                        # rn_evd where the trigger fires; zdfphy.f90:359
+                        # runs it AFTER the background copy at :348-351, so
+                        # the fired interfaces carry rn_evd ALONE and not
+                        # rn_evd + rn_avt0.  nn_evdm = 0 (rung-0
+                        # namelist_cfg:410) is the nu_conv = 0 above:
+                        # zdfevd.f90:121 leaves avm untouched.
+                        evd_composition="nemo_replace",
+                    ),
+                ),
+            ),
+        )
+    if rung in ("smt2", "smt3"):
+        # DECISION 93 (user), rung SMT-2: ORCA2 rung 0's LINEAR BOTTOM DRAG,
+        # the second module of the mini-ladder.  The deck writes one line,
+        # &namdrg ln_lin = .true. (rung-0 namelist_cfg:270), and takes every
+        # companion from the reference namelist -- which is what rung 0 does
+        # too, so the resolved set is rung 0's and nothing here is a choice:
+        #
+        #   ln_drg_OFF   = .false.   namelist_ref:812   (rung 0 leaves unset)
+        #   ln_non_lin   = .false.   namelist_ref:814
+        #   ln_loglayer  = .false.   namelist_ref:815
+        #   ln_drgimp    = .true.    namelist_ref:817   -> implicit, in the
+        #                                                 tridiagonal diagonal
+        #   rn_Cd0       = 1.e-3     namelist_ref:834   (&namdrg_bot)
+        #   rn_Uc0       = 0.4       namelist_ref:835
+        #   ln_boost     = .false.   namelist_ref:839   -> zmsk_boost == ssmask
+        #
+        # zdfdrg.f90's np_lin branch stores the coefficient ONCE
+        # (`l_zdfdrg = .FALSE.`): rCd0_bot = rn_Cd0 * ssmask and then
+        # rCdU_bot = - rCd0_bot * rn_Uc0.  It never reads the velocity, which
+        # is the whole difference from GYRE's np_non_lin.
+        #
+        # ln_drgimp = .true. with ln_dynspg_ts = .true. is ONE composition in
+        # NEMO and is selected here as one, exactly as the GYRE card selects
+        # it: the frozen rCdU_bot in the external-mode substeps
+        # (dynspg_ts.f90:1245-1246, :1271-1272), the baroclinic residual
+        # correction (dynzdf.f90:160-169), and the bottom-cell implicit
+        # diagonal over PARTIAL cells (dynzdf.f90:306, :473 -- divisor
+        # e3u_3d(iku)*(1+r3u(Kaa)*umask(iku)) at iku = mbku).
+        model_config = model_config._replace(
+            bottom_drag=model_config.bottom_drag._replace(
+                bottom_drag_scheme="nemo_linear",
+                bottom_drag_cd0=_SMT2_RN_CD0,
+                bottom_drag_uc0=_SMT2_RN_UC0,
+                # np_lin reads neither of these; they are stated so the card
+                # records what the namelist resolved rather than leaving the
+                # library default to speak for the run.
+                bottom_drag_cdmax=0.1,
+                bottom_drag_z0=3.0e-3,
+                bottom_drag_ke0=2.5e-3,
+                # ln_boost = .false.: no regional boost, and NEMO applies the
+                # drag to the bottom cell alone, never over a K&E99 band.
+                bottom_drag_bbl_thickness=0.0,
+                bottom_drag_bg_velocity=0.0,
+                bottom_drag_r=0.0,
+            ),
+            zdf_drag_in_matrix=True,
+            zdf_baroclinic_only=True,
+            barotropic_drag_substep=True,
+        )
+    if rung == "smt3":
+        # DECISION 93 (user), rung SMT-3: ORCA2 rung 0's namtra_ldf block.
+        # The deck selects laplacian standard isoneutral diffusion with MSC,
+        # coefficient mode 20, rn_Ud=0.018 m/s and rn_Ld=200 km.  On this
+        # uniform 30-km mesh mode 20 evaluates an equatorial coefficient of
+        # 0.5*rn_Ud*MAX(e1u,e2u)=270 m2/s; the production operator evaluates
+        # the face coefficient from the metric and rn_Ud rather than relying
+        # on that derived scalar.
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            GMRediConfig, VisbeckConfig,
+        )
+        model_config = model_config._replace(
+            K_h=0.0,
+            gm_redi=GMRediConfig(
+                kappa_GM=0.0,
+                kappa_Redi=0.5 * _SMT3_RN_UD * res.dx_m,
+                S_max=0.01,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="nemo_iso_lap",
+                slope_density="neutral",
+                slope_limit="nemo_cap",
+                slope_positions="nemo_native",
+                nemo_mld_slope_ramp=True,
+                mld_criterion="n2_integral",
+                slope_n2="nemo_bn2",
+                slope_n2_evaluation="carried_step_entry",
+                slope_prd_geometry_stage="current_step",
+                slope_prd_evaluation="nemo_literal",
+                slope_metric_evaluation="nemo_reciprocal",
+                slope_face_thickness_evaluation="nemo_qco_live",
+                redi_flux_face_thickness_evaluation="nemo_qco_live",
+                slope_depth_evaluation="nemo_qco_live_literal",
+                nemo_slope_shapiro=True,
+                kappa_redi_horizontal_evaluation="nemo_metric_literal",
+                kappa_redi_diffusive_velocity=_SMT3_RN_UD,
+                redi_vertical_skew_evaluation="nemo_literal",
+                redi_a33_evaluation="nemo_literal",
+                redi_w_slope_stage_evaluation="nemo_post_slope_pair",
+                msc_stabilize=True,
+                implicit_K33=True,
+            ),
+        )
+    recipe = NEMORecipe(
+        model_config=model_config,
+        physics_config=model_config.physics,
+        grid=grid,
+        z_coord=z_coord,
+        land_mask=wet,
+        initial_state=state,
+    )
+    if rung == "smt3":
+        case_name = "VORTEX_SMT3_VEC-zps"
+    elif rung == "smt2":
+        case_name = "VORTEX_SMT2_VEC-zps"
+    elif rung == "smt1":
+        case_name = "VORTEX_SMT1_VEC-zps"
+    elif momentum == "flux":
+        case_name = "VORTEX_SMT-zps"
+    else:
+        case_name = "VORTEX_SMT_VEC-zps"
+    card = NEMOTestcaseCard(
+        case_name,
+        recipe, res.dt_s, res.n_steps, 1, 0, 0, 0.0, 0.0,
         unmeasured_features=VORTEX_UNMEASURED,
     )
     validate_nemo_testcase_card(card)
@@ -1978,6 +2870,23 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         # The vector-EEN deck differs from the flux deck only in the momentum
         # scheme set, so every row this table checks is the same row.
         "VORTEX_VEC-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # Decision 74's refined rungs.  nn_e = 48 is UNCHANGED by NEMO's own
+        # child namelist (1_namelist_cfg:222), so the barotropic substep count
+        # is the same row at every resolution -- it does not follow rn_Dt.
+        "VORTEX-15km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX_VEC-15km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX-10km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # Decision 88's seamount pair: the SAME 30 km deck, so the SAME row.
+        "VORTEX_SMT-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX_SMT_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # Decision 93's mini-ladder rung 1: the SAME deck with namzdf moved
+        # to ORCA2 rung 0, so every row this table checks is the same row.
+        "VORTEX_SMT1_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        # Rung 2 adds namdrg's linear bottom drag; the barotropic filter,
+        # substep count and BBL block are untouched, so the same row again.
+        "VORTEX_SMT2_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX_SMT3_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX_VEC-10km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
     }
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
@@ -2122,8 +3031,15 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                     "remain unmeasured"
                 )
         return
-    if card.case in ("VORTEX-zco", "VORTEX_VEC-zco"):
-        vector = card.case == "VORTEX_VEC-zco"
+    if card.case.startswith(
+            ("VORTEX-", "VORTEX_VEC-", "VORTEX_SMT-", "VORTEX_SMT_VEC-",
+             "VORTEX_SMT1_VEC-", "VORTEX_SMT2_VEC-", "VORTEX_SMT3_VEC-")):
+        # Decision 88's seamount cards run the SAME two momentum decks; every
+        # switch this branch checks is the same switch, so they are checked
+        # by it rather than by a second copy of it.
+        vector = card.case.startswith(
+            ("VORTEX_VEC-", "VORTEX_SMT_VEC-", "VORTEX_SMT1_VEC-",
+             "VORTEX_SMT2_VEC-", "VORTEX_SMT3_VEC-"))
         # VORTEX is the first card on this identity with a LIVE rotation
         # operator, so the structural-elimination escape below must not be
         # reachable for it.  Round 1 declared the operator as a gap; round 2
@@ -2206,9 +3122,16 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             raise ValueError(
                 f"{card.case} requires a live beta-plane Coriolis at F "
                 "points")
-        if np.count_nonzero(np.any(wet, axis=1)) != 61:
+        # usrdef_zgr.F90 closes the box, so exactly the two outermost rows
+        # and columns are land at EVERY rung of the resolution ladder.  The
+        # expected count is taken from the card's own mask shape rather than
+        # hard-coded at 61, which would silently exempt the refined rungs.
+        wet_rows = np.count_nonzero(np.any(wet, axis=1))
+        if wet_rows != np.shape(wet)[0] - 2:
             raise ValueError(
-                "VORTEX-zco requires the 61 wet rows of its closed 63x63 box")
+                f"{card.case} requires the {np.shape(wet)[0] - 2} wet rows of "
+                f"its closed {np.shape(wet)[0]}x{np.shape(wet)[1]} box, "
+                f"got {wet_rows}")
         if card.recipe.z_coord.nemo_een_barotropic is None:
             raise ValueError(
                 "VORTEX-zco requires NEMO's frozen barotropic EEN operands")
@@ -2223,7 +3146,110 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             raise ValueError(
                 "VORTEX-zco requires ln_traldf_OFF, ln_dynldf_OFF and "
                 "ln_drg_OFF (no lateral diffusion, no bottom drag)")
-        if (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
+        # EVERY VORTEX card but rung SMT-2 resolves ln_drg_OFF
+        # (namelist_cfg:114), so none of them may carry a drag law -- checked
+        # here, outside the rung block, because the older bottom_drag_r test
+        # above passes any NEMO scheme whose legacy rate happens to be zero.
+        if card.case not in ("VORTEX_SMT2_VEC-zps", "VORTEX_SMT3_VEC-zps") and (
+                cfg.bottom_drag.bottom_drag_scheme != "legacy"
+                or cfg.zdf_drag_in_matrix
+                or cfg.barotropic_drag_substep):
+            raise ValueError(
+                f"{card.case} resolves ln_drg_OFF (namelist_cfg:114); "
+                "only rung SMT-2 carries a drag law")
+        # Decision 93 rung SMT-1 moves exactly this pair, and the enhanced
+        # vertical diffusion that rung 0 runs beside it; every other card on
+        # this identity keeps the shipped VORTEX namzdf block.
+        if card.case in ("VORTEX_SMT1_VEC-zps", "VORTEX_SMT2_VEC-zps",
+                          "VORTEX_SMT3_VEC-zps"):
+            if (cfg.A_v, cfg.K_v) != (_SMT1_RN_AVM0, _SMT1_RN_AVT0):
+                raise ValueError(
+                    f"{card.case} requires ORCA2 rung 0's rn_avm0="
+                    f"{_SMT1_RN_AVM0} and rn_avt0={_SMT1_RN_AVT0}")
+            _ph = cfg.physics
+            if _ph is None or _ph.convection.scheme != "enhanced_diffusion":
+                raise ValueError(
+                    f"{card.case} requires ln_zdfevd=.true. as an "
+                    "explicit enhanced-vertical-diffusion selection")
+            _ed = _ph.convection.enhanced_diffusion
+            if (_ed.K_conv, _ed.nu_conv, _ed.K_bg, _ed.nu_bg) != (
+                    _SMT1_RN_EVD, 0.0, 0.0, 0.0):
+                raise ValueError(
+                    f"{card.case} requires rn_evd=100 on the tracer "
+                    "arm and nn_evdm=0 (no convective viscosity)")
+            if (_ed.n2_threshold, _ed.two_level_trigger) != (-1.0e-12, True):
+                raise ValueError(
+                    f"{card.case} requires zdfevd's own trigger, "
+                    "MIN(rn2, rn2b) <= -1.e-12 (zdfevd.F90:93)")
+            if _ph.vertical_mixing.scheme != "none":
+                raise ValueError(
+                    f"{card.case} resolves ln_zdfcst with a uniform "
+                    "background; a closure here would be a second one")
+            # Rung SMT-2 and ONLY rung SMT-2 carries namdrg's linear drag.
+            _bd = cfg.bottom_drag
+            _want_lin = card.case in ("VORTEX_SMT2_VEC-zps",
+                                      "VORTEX_SMT3_VEC-zps")
+            if _want_lin:
+                if _bd.bottom_drag_scheme != "nemo_linear":
+                    raise ValueError(
+                        f"{card.case} requires ORCA2 rung 0's linear "
+                        "bottom drag (ln_lin, rung-0 namelist_cfg:270), got "
+                        f"bottom_drag_scheme={_bd.bottom_drag_scheme!r}")
+                if (_bd.bottom_drag_cd0, _bd.bottom_drag_uc0) != (
+                        _SMT2_RN_CD0, _SMT2_RN_UC0):
+                    raise ValueError(
+                        f"{card.case} requires rn_Cd0="
+                        f"{_SMT2_RN_CD0} (namelist_ref:834) and rn_Uc0="
+                        f"{_SMT2_RN_UC0} (namelist_ref:835)")
+                if (_bd.bottom_drag_bbl_thickness,
+                        _bd.bottom_drag_bg_velocity,
+                        _bd.bottom_drag_r) != (0.0, 0.0, 0.0):
+                    raise ValueError(
+                        f"{card.case} applies the drag to the bottom "
+                        "cell alone, with no boost and no legacy rate "
+                        "(ln_boost=.false., namelist_ref:839)")
+                if not (cfg.zdf_drag_in_matrix and cfg.zdf_baroclinic_only
+                        and cfg.barotropic_drag_substep):
+                    raise ValueError(
+                        f"{card.case} resolves ln_drgimp=.true. "
+                        "(namelist_ref:817) with ln_dynspg_ts=.true., which "
+                        "is one composition: the implicit bottom-cell "
+                        "diagonal, the baroclinic-only solve and the frozen "
+                        "rCdU_bot in the external-mode substeps")
+            if card.case == "VORTEX_SMT3_VEC-zps":
+                gm = cfg.gm_redi
+                if gm is None:
+                    raise ValueError(
+                        "VORTEX_SMT3_VEC-zps requires ORCA2 rung 0's "
+                        "laplacian isoneutral tracer diffusion")
+                expected_gm = {
+                    "kappa_GM": 0.0,
+                    "kappa_Redi": 270.0,
+                    "S_max": 0.01,
+                    "slope_scheme": "nemo_iso_lap",
+                    "slope_density": "neutral",
+                    "slope_limit": "nemo_cap",
+                    "slope_positions": "nemo_native",
+                    "msc_stabilize": True,
+                    "implicit_K33": True,
+                    "kappa_redi_horizontal_evaluation":
+                        "nemo_metric_literal",
+                    "kappa_redi_diffusive_velocity": _SMT3_RN_UD,
+                }
+                for name, expected_value in expected_gm.items():
+                    if getattr(gm, name) != expected_value:
+                        raise ValueError(
+                            "VORTEX_SMT3_VEC-zps requires the resolved "
+                            f"namtra_ldf value {name}={expected_value!r}, got "
+                            f"{getattr(gm, name)!r}")
+                if cfg.K_h != 0.0:
+                    raise ValueError(
+                        "VORTEX_SMT3_VEC-zps runs isoneutral diffusion, not "
+                        "a second geopotential K_h operator")
+            elif cfg.gm_redi is not None:
+                raise ValueError(
+                    f"{card.case} resolves ln_traldf_OFF before SMT-3")
+        elif (cfg.A_v, cfg.K_v) != (1.0e-4, 0.0):
             raise ValueError(
                 "VORTEX-zco requires rn_avm0=1.0e-4 and rn_avt0=0.0")
         if cfg.adaptive_implicit_vertadv:
@@ -2276,6 +3302,23 @@ def build_nemo_testcase_card(
         "GYRE-zco": build_gyre_zco_card,
         "VORTEX-zco": build_vortex_zco_card,
         "VORTEX_VEC-zco": lambda: build_vortex_zco_card("vector"),
+        # Decision 74's resolution ladder (operator note BZ).
+        "VORTEX-15km-zco": lambda: build_vortex_zco_card("flux", "15km"),
+        "VORTEX_VEC-15km-zco": lambda: build_vortex_zco_card("vector", "15km"),
+        "VORTEX-10km-zco": lambda: build_vortex_zco_card("flux", "10km"),
+        "VORTEX_VEC-10km-zco": lambda: build_vortex_zco_card("vector", "10km"),
+        # Decision 88: the same two momentum decks over a Gaussian seamount
+        # with z partial bottom cells.
+        "VORTEX_SMT-zps": build_vortex_smt_zps_card,
+        "VORTEX_SMT_VEC-zps": lambda: build_vortex_smt_zps_card("vector"),
+        # Decision 93's seamount mini-ladder, rung 1 (vector deck only).
+        "VORTEX_SMT1_VEC-zps": lambda: build_vortex_smt_zps_card(
+            "vector", "smt1"),
+        # Rung 2: the same deck with namdrg's linear bottom drag.
+        "VORTEX_SMT2_VEC-zps": lambda: build_vortex_smt_zps_card(
+            "vector", "smt2"),
+        "VORTEX_SMT3_VEC-zps": lambda: build_vortex_smt_zps_card(
+            "vector", "smt3"),
     }
     if case == "ORCA2-zps":
         if deck_root is None:
@@ -2288,14 +3331,50 @@ def build_nemo_testcase_card(
     return builders[case]()
 
 
+def with_first_wzv_after_ssh(model_config, form):
+    """MEASUREMENT ARM: run a card with a different after-SSH form stated.
+
+    The cards state their own form and this never changes one of them; it
+    exists so a gate can score the SAME card under both forms in one run and
+    report a before/after pair, which is what an operator decision about
+    switching a card needs.  ``None`` returns the configuration unchanged, so
+    the default arm is byte-identical to no flag at all.
+
+    Refuses a card that never reaches NEMO's own first ``wzv`` call: an arm
+    that silently does nothing would report "no change" as if it were a
+    measurement.
+    """
+    if form is None:
+        return model_config
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        NEMO_FIRST_WZV_AFTER_SSH_FORMS,
+    )
+    if form not in NEMO_FIRST_WZV_AFTER_SSH_FORMS:
+        raise ValueError(
+            f"after-SSH arm {form!r} is not one of "
+            f"{list(NEMO_FIRST_WZV_AFTER_SSH_FORMS)}")
+    if getattr(model_config, "zad_qco_evaluation", "generic") != "nemo_literal":
+        raise ValueError(
+            "this card does not resolve NEMO's own first wzv call "
+            "(zad_qco_evaluation is not 'nemo_literal'), so an after-SSH arm "
+            "on it would measure nothing")
+    return model_config._replace(nemo_first_wzv_after_ssh=form)
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
     "build_gyre_zco_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
+    "apply_orca2_hand_alterations",
+    "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_vortex_zco_card",
+    "build_vortex_smt_zps_card",
+    "vortex_smt_bathymetry",
+    "vortex_smt_partial_cell_geometry",
+    "validate_vortex_resolution",
     "VORTEX_UNMEASURED",
     "build_nemo_testcase_card",
     "gyre_horizontal_coordinates",
@@ -2305,4 +3384,5 @@ __all__ = (
     "vortex_initial_state_fields",
     "validate_nemo_testcase_card",
     "validate_nemo_testcase_card_for_execution",
+    "with_first_wzv_after_ssh",
 )

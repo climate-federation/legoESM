@@ -100,9 +100,11 @@ def apply_le_cap(LE: jax.Array, Rn: jax.Array,
 
     * ``"soft"`` — smooth softplus UPPER bound ``LE <= max(Rn,0)+slack(Rn)`` with a
       radiation-gated slack (wide by day, tight at night).  Default; stops the
-      positive-LE runaway that diverges the leaf-T Newton solve.  Negative LE
-      (dew) passes through unchanged; a zero raw flux stays exactly 0 (no lower
-      bound).
+      positive-LE runaway that diverges the leaf-T Newton solve.  A zero raw
+      flux stays exactly 0 (no lower bound); elsewhere the output is shifted
+      by at most ln(1+exp(-k*cap_hi))/k (<= 0.5 W m-2 at the 30 W m-2 night
+      slack), e.g. dew LE = -50 -> -49.5, and the upper asymptote is
+      softplus(k*cap_hi)/k, that much above cap_hi.
     * ``"hard"`` — legacy ``clip(LE, 0, max(Rn,0))`` (non-smooth; forces H>=0).
     * ``"off"`` — no cap (pre-regression behaviour; can diverge at dry sites).
     """
@@ -149,11 +151,12 @@ def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("rh_cap_width",))
 def canopy_met_variables(
     Ps: jax.Array,
     Tc: jax.Array,
     q_c: jax.Array,
+    rh_cap_width: float,
 ) -> tuple[jax.Array, ...]:
     """Meteorological variables for the canopy air space.
 
@@ -162,6 +165,8 @@ def canopy_met_variables(
     Ps  : atmospheric pressure [Pa]
     Tc  : canopy air temperature [K]
     q_c : canopy air specific humidity [kg kg-1]
+    rh_cap_width : width [-] of the smooth cap RH_c <= 1
+        (``CanopyConfig.rh_cap_smoothing_width``); see the RH_c line below.
 
     Returns
     -------
@@ -179,7 +184,14 @@ def canopy_met_variables(
     ddesTc = dd_saturation_vapor_pressure_aerk(Tc)   # d²es/dT² [Pa K-2]
 
     VPD_c = es_c - e_c
-    RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
+    # Smooth cap RH_c = r - w*softplus((r - 1)/w) -> 1 as r -> inf, instead of
+    # clip(r, 0, 1).  A saturated canopy air space (warm wet ground under a
+    # canopy) put the hard cap's kink on the Ball-Berry gs -> Ci rows of the
+    # canopy Newton solve, which then stalled (replay of 857 stalled production
+    # columns: 105 -> 697 converge).  Bias -w*ln2 at r = 1, -5e-4 at r = 0.97.
+    _r = e_c / jnp.maximum(es_c, 1e-6)
+    # r >= 0, so RH_c >= -w*exp(-1/w) (a denormal); no lower clip (no kink).
+    RH_c  = _r - rh_cap_width * jax.nn.softplus((_r - 1.0) / rh_cap_width)
 
     # Latent heat (temperature-corrected) and psychrometric constant
     # One latent heat for the codebase (user decision 2026-09-30): the core

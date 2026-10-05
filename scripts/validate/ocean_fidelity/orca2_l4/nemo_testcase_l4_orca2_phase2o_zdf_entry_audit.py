@@ -176,11 +176,13 @@ def audit(deck: Path, run: Path) -> dict[str, object]:
         },
         "iwm_rebased_avm_floor_m2_s": {
             "nemo": 1.4e-6, "card": tke.kappaM_min,
-            "status": "CARD_SELECTOR_DEBT",
+            "status": ("CARD_MATCHES_NEMO" if tke.kappaM_min == 1.4e-6
+                       else "CARD_SELECTOR_DEBT"),
         },
         "iwm_rebased_avt_floor_m2_s": {
             "nemo": 1.0e-10, "card": tke.kappaH_min,
-            "status": "CARD_SELECTOR_DEBT",
+            "status": ("CARD_MATCHES_NEMO" if tke.kappaH_min == 1.0e-10
+                       else "CARD_SELECTOR_DEBT"),
         },
         "evd_momentum": {
             "nemo_nn_evdm": 0, "card_nu_conv_m2_s": evd.nu_conv,
@@ -192,7 +194,8 @@ def audit(deck: Path, run: Path) -> dict[str, object]:
         },
         "internal_wave_mixing": {
             "nemo": True, "card": bool(vmix.iwm.enabled),
-            "status": "UNMEASURED_ORCA2_OWNER",
+            "status": ("CARD_MATCHES_NEMO" if vmix.iwm.enabled
+                       else "UNMEASURED_ORCA2_OWNER"),
         },
         "iwm_differential_ts": {
             "nemo": True, "card": bool(vmix.iwm.tsdiff),

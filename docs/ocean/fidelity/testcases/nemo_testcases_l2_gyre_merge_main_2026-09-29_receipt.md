@@ -203,9 +203,9 @@ carry that text, and the gate would (correctly) flag them.
 
 | citation | lane-parent lines | citation after the merge | extent |
 |---|---|---|---:|
-| ZAD operand barriers | 4968 to 4990 | `ocean_pe_latlon_cgrid.py:5022-5056` | 23 lines, unchanged |
-| the lateral-friction velocity operands | 5307 to 5308 | `ocean_pe_latlon_cgrid.py:5427-5428` | 2 lines, unchanged |
-| the `rho_prime` / `h_k` argument | 5330 | `ocean_pe_latlon_cgrid.py:5450` | 1 line, unchanged |
+| ZAD operand barriers | 4968 to 4990 | `ocean_pe_latlon_cgrid.py:5076-5114` | 23 lines, unchanged |
+| the lateral-friction velocity operands | 5307 to 5308 | `ocean_pe_latlon_cgrid.py:5485-5486` | 2 lines, unchanged |
+| the `rho_prime` / `h_k` argument | 5330 | `ocean_pe_latlon_cgrid.py:5508` | 1 line, unchanged |
 
 Applied to `CITATION_MAP` and to the round-8 receipt's prose.  No NEMO
 compiled-source citation moved — the merge does not touch the oracle builds.
@@ -213,7 +213,7 @@ compiled-source citation moved — the merge does not touch the oracle builds.
 After the re-anchor the gate reports `status PASS`, **274 citations, 0
 failures, 0 map entries failing audit, 0 unmapped**, and **all nine self-test
 plants fired**; the worktree stamp is `clean: true`.  Planting a shift on
-`ocean_pe_latlon_cgrid.py:5450` makes the gate `FAIL` and exit 1, so it can
+`ocean_pe_latlon_cgrid.py:5508` makes the gate `FAIL` and exit 1, so it can
 fail.
 
 ## Tests

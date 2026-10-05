@@ -22,7 +22,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     coriolis_cgrid,
     laplacian_cgrid,
 )
-from legoesm.ocean.vertical import _nemo_t_fold_f_owned
+from legoesm.ocean.vertical import nemo_t_fold_f_owned
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ class TestFoldRoundTrip:
         n_lat, n_lon = tripole_grid.n_lat, tripole_grid.n_lon
         field = jnp.arange(n_lat * n_lon * 2, dtype=jnp.float64).reshape(
             n_lat, n_lon, 2)
-        folded = _nemo_t_fold_f_owned(field, tripole_grid)
+        folded = nemo_t_fold_f_owned(field, tripole_grid)
         expected = field[-2, jnp.arange(n_lon - 1, -1, -1)]
         assert jnp.array_equal(folded[-1], expected)
         assert jnp.array_equal(folded[:-1], field[:-1])

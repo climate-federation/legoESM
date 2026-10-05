@@ -59,7 +59,9 @@ def main(argv=None):
 
     def resid(xx, b):
         return S._canopy_residual(xx, b, _CFG.LE_module, _CFG.stomatal_model,
-                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
+                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+                                  _CFG.rh_cap_smoothing_width,
+                                  _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)
     old = make_implicit_newton_solver(resid, x_scale=S._LM_XSCALE, f_scale=S._LM_FSCALE,
                                       max_iters=_CFG.max_iters, rtol=S._LM_RTOL, atol=S._LM_ATOL)
     new = make_implicit_newton_solver(resid, x_scale=S._LM_XSCALE, f_scale=S._LM_FSCALE,

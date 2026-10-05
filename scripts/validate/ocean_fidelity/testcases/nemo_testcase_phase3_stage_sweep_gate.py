@@ -397,6 +397,195 @@ def expected_masks(card) -> dict:
     return {"T": active, "S": active, "u": u, "v": v, "ssh": wet}
 
 
+def run_round49_pair_boundary(
+    root: Path, *, plant: bool = False, allow_dirty: bool = False,
+) -> tuple[dict, dict[str, np.ndarray]]:
+    """One-compile tracer-to-HPG boundary for the round-49 pair walk.
+
+    The two WRITE-only hooks share one ordinary compiled step: T/S/eta expose
+    stage-1 Kaa, while u/v expose the stage-2 HPG operator that consumes that
+    Kaa after the pointer swap.  No diagnostic array is read by production.
+    """
+    import jax
+    from legoesm import constants as _constants
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    allow_dirty_stamps(allow_dirty)
+    revision = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "precision policy is not fp64/libm",
+    )
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+
+    case = "OVERFLOW-zps"
+    card = build_nemo_testcase_card(case)
+    masks = expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
+    stage_path = root / "oracle_stage_kt00000001_s1.bin"
+    mesh_path = root / "mesh_mask.nc"
+    require(stage_path.is_file(), f"missing {stage_path}")
+    require(mesh_path.is_file(), f"missing {mesh_path}")
+    oracle = read_stage(stage_path, case, 1)
+
+    hooks = _NEMOWSRK3TestHooks(
+        expose_tracer_stage=1,
+        expose_momentum_operator="hpg",
+        expose_momentum_operator_stage=2,
+    )
+    exposed = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks,
+    ).step(card.recipe.initial_state, dt=card.dt_s)
+    arrays = {
+        "stage1_T": np.asarray(exposed.T.data, dtype=np.float64),
+        "stage1_S": np.asarray(exposed.S.data, dtype=np.float64),
+        "stage1_ssh": np.asarray(exposed.eta.data, dtype=np.float64),
+        "stage2_hpg_u": np.asarray(exposed.u.data, dtype=np.float64),
+        "stage2_hpg_v": np.asarray(exposed.v.data, dtype=np.float64),
+    }
+    if plant:
+        planted = arrays["stage1_T"].copy()
+        index = tuple(np.argwhere(masks["T"])[0])
+        planted[index] += 1.0
+        arrays["stage1_T"] = planted
+
+    rows = [
+        score(
+            f"{case}.kt1.stage1.pair_boundary.T",
+            oracle["T"][..., :nlev], arrays["stage1_T"], masks["T"],
+            quantity="T",
+        ),
+        score(
+            f"{case}.kt1.stage1.pair_boundary.S",
+            oracle["S"][..., :nlev], arrays["stage1_S"], masks["S"],
+            quantity="T",
+        ),
+        score(
+            f"{case}.kt1.stage1.pair_boundary.ssh",
+            oracle["ssh"], arrays["stage1_ssh"], masks["ssh"],
+            quantity="T",
+        ),
+    ]
+    if plant:
+        require(
+            rows[0]["status"] == "DEBT" and rows[0]["absolute_max"] >= 0.5,
+            "round-49 planted tracer change did not make the gate red",
+        )
+
+    # Independent source replay of the HPG expected from NEMO's stage-1
+    # T/S/ssh.  This is the existing calibrated replay used by run(); the
+    # narrow mode merely avoids compiling all historical causal arms.
+    mesh = read_row_mesh(root)
+    cfg = card.recipe.model_config
+    require(cfg.eos == "nemo_teos10", f"expected nemo_teos10, got {cfg.eos}")
+    eos_fn = make_eos_fn(cfg.eos, None, rho0=cfg.rho_0)
+    expected_hpg_u = hpg_sco_row(
+        mesh, oracle["T"][1], oracle["S"][1], oracle["ssh"][1], eos_fn,
+        cfg.g, cfg.rho_0, cfg.rho_0 * _constants.g,
+    )
+    model_hpg_u = arrays["stage2_hpg_u"][1, 1:, :]
+    model_hpg_u = np.pad(
+        model_hpg_u,
+        ((0, 0), (0, mesh["umask"].shape[-1] - model_hpg_u.shape[-1])),
+    )
+    active_hpg_u = mesh["umask"].astype(bool)
+    active_hpg_u[-1] = False
+    hpg_row = score(
+        f"{case}.kt1.stage2.pair_boundary.hpg_u",
+        expected_hpg_u, model_hpg_u, active_hpg_u,
+    )
+    hpg_row["frame"] = "stage2_Krhs_immediately_after_dyn_hpg"
+    hpg_row["source"] = (
+        "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:323-327; "
+        "dynhpg.f90:341-414")
+    rows.append(hpg_row)
+
+    return ({
+        "format": "nemo-testcase-overflow-round49-pair-boundary-v1",
+        "case": case,
+        "status": "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows)
+        else "DEBT",
+        "worktree": worktree_stamp(),
+        "legoesm_git_sha": revision,
+        "precision_policy": "fp64/libm",
+        "jax_backend": jax.default_backend(),
+        "source_order": ["stage1_T", "stage1_S", "stage1_ssh", "stage2_hpg_u"],
+        "rows": rows,
+        "controls": {"plant": plant},
+        "record_artifacts": {
+            stage_path.name: sha256(stage_path),
+            mesh_path.name: sha256(mesh_path),
+        },
+    }, arrays)
+
+
+def persist_round49_pair_arrays(
+    output: Path, report: dict, arrays: dict[str, np.ndarray],
+) -> None:
+    sidecar = output.with_suffix(".pair_arrays.npz")
+    np.savez_compressed(sidecar, **arrays)
+    report["pair_arrays"] = {
+        "path": str(sidecar),
+        "sha256": sha256(sidecar),
+        "fields": list(arrays),
+    }
+
+
+def compare_round49_pair_arrays(reference_report: Path, candidate: dict) -> dict:
+    reference = json.loads(reference_report.read_text())
+    require(
+        reference.get("format") == candidate.get("format"),
+        "round-49 pair reports have different formats",
+    )
+
+    def load(report: dict) -> dict[str, np.ndarray]:
+        artifact = report.get("pair_arrays")
+        require(isinstance(artifact, dict), "pair-array artifact is absent")
+        path = Path(artifact.get("path", ""))
+        require(path.is_file(), f"missing pair-array artifact {path}")
+        require(sha256(path) == artifact.get("sha256"), f"hash drift in {path}")
+        with np.load(path) as stored:
+            require(stored.files == artifact.get("fields"), "pair-array field drift")
+            return {name: np.asarray(stored[name]) for name in stored.files}
+
+    before, after = load(reference), load(candidate)
+    require(before.keys() == after.keys(), "pair-array key drift")
+    rows = []
+    for name in candidate["source_order"]:
+        left, right = before[name], after[name]
+        require(left.shape == right.shape, f"{name}: shape drift")
+        unequal = left.view(np.uint64) != right.view(np.uint64)
+        rows.append({
+            "name": name,
+            "exact": bool(np.array_equal(left, right)),
+            "n": int(left.size),
+            "n_unequal": int(np.count_nonzero(unequal)),
+            "max_abs_move": float(np.max(np.abs(right - left))),
+        })
+    first = next((row["name"] for row in rows if not row["exact"]), None)
+    return {
+        "format": "nemo-testcase-overflow-round49-pair-comparison-v1",
+        "worktree": worktree_stamp(),
+        "reference": str(reference_report),
+        "reference_commit": reference["legoesm_git_sha"],
+        "candidate_commit": candidate["legoesm_git_sha"],
+        "first_moved_boundary": first,
+        "rows": rows,
+    }
+
+
 def classify_arm(
     faithful_row: dict, control_row: dict, arm_movement: dict, *, improving: bool
 ) -> dict:
@@ -1354,6 +1543,19 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-operand", action="store_true")
     parser.add_argument("--plant-prediction", action="store_true")
     parser.add_argument(
+        "--round49-pair-boundary", action="store_true",
+        help=("compile only the stage-1 tracer / stage-2 HPG boundary used by "
+              "the ORCA2 round-49 OVERFLOW cancelling-pair walk"),
+    )
+    parser.add_argument(
+        "--round49-pair-reference", type=Path,
+        help="base report produced by --round49-pair-boundary",
+    )
+    parser.add_argument(
+        "--round49-pair-plant", action="store_true",
+        help="plant +1 K in the exposed stage-1 tracer; the gate must be red",
+    )
+    parser.add_argument(
         "--faithful-only", action="store_true",
         help=("compile only the public faithful stage path for a compatibility "
               "comparison; private causal arms and their owner labels are omitted"))
@@ -1366,6 +1568,37 @@ def main(argv=None) -> int:
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
+    if args.round49_pair_boundary:
+        try:
+            require(args.case == "OVERFLOW-zps",
+                    "--round49-pair-boundary is OVERFLOW-only")
+            require(args.output is not None,
+                    "--round49-pair-boundary requires --output")
+            require(not (args.plant_stage or args.plant_operand
+                         or args.plant_prediction or args.faithful_only
+                         or args.compare_to),
+                    "round-49 pair mode cannot be combined with the full-arm options")
+            report, pair_arrays = run_round49_pair_boundary(
+                args.oracle_root or ROOTS[args.case],
+                plant=args.round49_pair_plant,
+                allow_dirty=args.allow_dirty,
+            )
+            persist_round49_pair_arrays(args.output, report, pair_arrays)
+            if args.round49_pair_reference:
+                report["pair_comparison"] = compare_round49_pair_arrays(
+                    args.round49_pair_reference, report)
+            encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
+            args.output.write_text(encoded)
+            print(encoded, end="")
+            return 2 if args.round49_pair_plant else (
+                0 if report["status"] == "AT-BAR" else 1)
+        except (GateError, OSError, ValueError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 2
+    require(not args.round49_pair_reference,
+            "--round49-pair-reference requires --round49-pair-boundary")
+    require(not args.round49_pair_plant,
+            "--round49-pair-plant requires --round49-pair-boundary")
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:

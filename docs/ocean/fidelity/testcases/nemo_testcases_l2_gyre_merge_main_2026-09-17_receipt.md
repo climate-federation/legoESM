@@ -114,10 +114,10 @@ the lane parent and the merged tree:
 
 | citation (lane tip) | delta | citation (merged) | extent |
 |---|---:|---|---:|
-| `ocean_pe_latlon_cgrid.py:3276-3279` | +2 | `:3278-3281` | 4 lines |
-| `ocean_pe_latlon_cgrid.py:4762-4783` | +134 | `:4896-4917` | 22 lines |
-| `ocean_pe_latlon_cgrid.py:5077-5078` | +134 | `:5211-5212` | 2 lines |
-| `ocean_pe_latlon_cgrid.py:5100` | +134 | `:5234` | 1 line |
+| `ocean_pe_latlon_cgrid.py:3330-3333` | +2 | `:3278-3281` | 4 lines |
+| `ocean_pe_latlon_cgrid.py:4816-4837` | +134 | `:4896-4917` | 22 lines |
+| `ocean_pe_latlon_cgrid.py:5135-5136` | +134 | `:5211-5212` | 2 lines |
+| `ocean_pe_latlon_cgrid.py:5158` | +134 | `:5234` | 1 line |
 
 Applied to `CITATION_MAP` (4 keys) and to the round-8 receipt (3 quotes;
 `4762-4783` is a map-only entry).  No NEMO compiled-source citation moved (main

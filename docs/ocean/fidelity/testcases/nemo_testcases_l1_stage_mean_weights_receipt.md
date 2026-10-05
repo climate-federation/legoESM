@@ -34,7 +34,7 @@ hu_0(:,:) = hu_0(:,:) + e3u_0(:,:,jk) * umask(:,:,jk)                         ! 
 ```
 
 legoESM: `_replace_stage_mean` used `sum(u*h_u_pre)/H_u_pre` with
-`h_u_pre = min_cell_to_uface(h_k_pre)` (`ocean_model_latlon_cgrid.py:4369`).
+`h_u_pre = min_cell_to_uface(h_k_pre)` (`ocean_model_latlon_cgrid.py:4432`).
 The minimum is taken over two columns whose free-surface Jacobians differ, so
 its per-level argmin can switch sides and the live weights are not a rescale of
 the reference ones.  Equal-depth neighbours make the two coincide, which is why

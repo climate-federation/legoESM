@@ -156,7 +156,7 @@ def test_a_well_formed_per_term_record_parses_every_group(tmp_path):
     ({"declared": 9}, "declares 9 groups"),
     ({"trailing": b"\x00" * 8}, "a group header is truncated"),
     ({"trailing": _group("spare", 3, 2, 2, 2)},
-     "missing group|declares|truncated|remain"),
+     "missing group|unexpected group|declares|truncated|remain"),
     ({"short": True}, "only"),
     ({"rank": 7}, "has rank 7"),
 ])
@@ -165,6 +165,63 @@ def test_a_malformed_per_term_record_is_refused(tmp_path, kwargs, message):
 
     with pytest.raises(Refusal, match=message):
         parse_record(_rhsterm_bytes(tmp_path, **kwargs))
+
+
+# --------------------------------------------------------------------------
+# Round 8 extends the SAME checker with one self-describing record per live
+# momentum stage.  Stage 2 has an explicit-update boundary; stage 3 has LDF
+# and the implicit ZDF output instead.  The parser, not a size formula, owns
+# both layouts.
+def _stage_term_bytes(tmp_path, stage=2, *, names=None, declared=None,
+                      duplicate=False):
+    from check_records import _STAGE_TERM_BY_STAGE
+
+    group_names = list(names or _STAGE_TERM_BY_STAGE[stage])
+    if duplicate:
+        group_names[-1] = group_names[0]
+    body = b""
+    for name in group_names:
+        if name == "ssh_kmm":
+            body += _group(name, 2, _NX, _NY, 1)
+        else:
+            body += _group(name, 3, _NX, _NY, _NZ)
+    header = struct.pack(
+        "=15i", 1, 1, stage, 1, 2, 3, 4, _NX, _NY, _NZ,
+        len(group_names) if declared is None else declared, 0, 0, 0, 64)
+    path = tmp_path / f"oracle_stage_terms_kt00000001_s{stage}.bin"
+    path.write_bytes(b"NEMO_L1_STGTRM1 " + header + body)
+    return path
+
+
+@pytest.mark.parametrize("stage, boundary", [(2, "update_u"), (3, "zdf_u")])
+def test_a_well_formed_stage_term_record_parses_its_stage_layout(
+        tmp_path, stage, boundary):
+    from check_records import parse_record
+
+    record = parse_record(_stage_term_bytes(tmp_path, stage))
+    assert record["stage"] == stage
+    assert boundary in record["groups"]
+    assert record["groups"]["ssh_kmm"]["rank"] == 2
+    assert record["groups"]["ww"]["shape"] == [_NX, _NY, _NZ]
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"names": ("kmm_u",)}, "missing group"),
+    ({"declared": 99}, "declares 99 groups"),
+    ({"duplicate": True}, "duplicate group name"),
+])
+def test_a_malformed_stage_term_record_is_refused(tmp_path, kwargs, message):
+    from check_records import Refusal, parse_record
+
+    with pytest.raises(Refusal, match=message):
+        parse_record(_stage_term_bytes(tmp_path, 2, **kwargs))
+
+
+def test_the_stage_term_extent_plant_is_fail_closed(tmp_path):
+    from check_records import Refusal, parse_record
+
+    with pytest.raises(Refusal):
+        parse_record(_stage_term_bytes(tmp_path, 3), corrupt_header=True)
 
 
 # --------------------------------------------------------------------------

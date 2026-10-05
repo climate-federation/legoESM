@@ -1312,7 +1312,7 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 _EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
                       "convection_trigger", "convection_n2_threshold",
-                      "convection_two_level")
+                      "convection_two_level", "convection_evd_composition")
 # NEMO rn_evd / 2: the occupancy threshold when no convection scheme runs
 # (the control measurement "can the closure alone reach the EVD range?").
 _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
@@ -1361,6 +1361,8 @@ def build_enhanced_diffusion_config(args):
         fields["smooth_transition"] = args.convection_trigger == "smooth"
     if args.convection_n2_threshold is not None:
         fields["n2_threshold"] = args.convection_n2_threshold
+    if args.convection_evd_composition is not None:
+        fields["evd_composition"] = args.convection_evd_composition
     if args.convection_two_level:
         # NEMO's MIN(rn2, rn2b) needs the BEFORE tracers, which only the
         # leap-frog-family outer integrators carry; this driver builds the
@@ -4495,6 +4497,14 @@ def _restart_env_items(environ=None) -> list[tuple[str, str]]:
     )
 
 
+def _restart_reads_rk3_after_ssh(model_config) -> bool:
+    """Use the model's own predicate for the restart slot requirement."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_rk3_after_ssh_is_carried,
+    )
+    return nemo_rk3_after_ssh_is_carried(model_config)
+
+
 def _source_revision(start_dir=None) -> str:
     """Git revision of the checkout this driver is RUNNING FROM.
 
@@ -7159,6 +7169,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--convection-n2-threshold", type=float, default=None,
                    help="N^2 threshold [1/s^2] for the hard trigger "
                         "(NEMO zdfevd: -1e-12).")
+    p.add_argument("--convection-evd-composition", type=str, default=None,
+                   choices=["additive", "nemo_replace"],
+                   help="How the convective coefficient composes with the "
+                        "background and the closure. 'nemo_replace' is "
+                        "NEMO's zdfevd (it OVERWRITES avt with rn_evd where "
+                        "the trigger fires); 'additive' sums them. Selecting "
+                        "--convection-n2-mode nemo_bn2 REQUIRES one of the "
+                        "two: there is no default (decision 94).")
     p.add_argument("--convection-two-level", action="store_true",
                    help="NEMO MIN(rn2, rn2b): also fire on the BEFORE "
                         "tracers. Refused here: this driver has no "
@@ -9326,6 +9344,7 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec,
+            carries_rk3_after_ssh=_restart_reads_rk3_after_ssh(model.config),
             config_fingerprint=(None if args.restart_branch_from_different_config
                                 else _restart_cfg_fp))
         if args.restart_branch_from_different_config:
