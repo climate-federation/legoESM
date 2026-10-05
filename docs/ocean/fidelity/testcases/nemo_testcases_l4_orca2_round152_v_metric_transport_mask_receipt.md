@@ -71,13 +71,18 @@ client: Read-only file system`. No second independent review service is
 available in this sandbox, so the measurement harness remains explicitly
 UNREVIEWED despite its controls.
 
-Focused tests pass 19/19. The one required `tests/ocean/fidelity -n 12`
+The final focused gate and citation battery passes 36/36. The one required
+`tests/ocean/fidelity -n 12`
 invocation is **INCOMPLETE**, not PASS: it reached 99% with 2,577 observed
 passes, 7 skips, and the four registered pre-existing reds (SI3 scalar-math
 provenance, GYRE round-129 spread-record stamp, round-35 escape scope, and
 worktree-stamp scope). All pytest worker processes then disappeared without a
 terminal summary while the execution pipe remained open; the stale session was
 closed. No round-152 test failed.
+
+The round receipt citation gate passes with 1/1 citation mapped and no
+failure. The canonical receipt gate passes with 274 citations and no failure.
+The round citation's shifted-line plant fires as `SYMBOL-NOT-AT-LINE`.
 
 No ORCA2 ladder was run because the result is not yet a production causal arm.
 No `packages/` file changed relative to the round base, so the GYRE trajectory
