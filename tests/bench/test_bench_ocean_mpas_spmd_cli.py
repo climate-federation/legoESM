@@ -20,7 +20,12 @@ from legoesm.ocean.mpas_config import MPASOceanConfig  # noqa: E402
 
 PCG_FIELDS = ("barotropic_implicit_pcg_fixed_iters",
               "barotropic_implicit_pcg_precond",
-              "barotropic_implicit_pcg_poly_sweeps")
+              "barotropic_implicit_pcg_poly_sweeps",
+              "barotropic_implicit_pcg_variant")
+
+# Owner decisions 2026-10-04/05, written out independently of the table.
+_PRODUCTION = {"cpu": (30, "jacobi", 4, "single_reduce_deep"),
+               "gpu": (20, "gpoly", 4, "standard")}
 
 
 def _resolved(argv):
@@ -36,9 +41,9 @@ def _bundle():
 
 
 def test_no_flag_is_the_config_default():
-    """No flag = the backend's resolved production bundle."""
-    d = _bundle()
-    assert _resolved([]) == {f: getattr(d, f) for f in PCG_FIELDS}
+    """No flag = the backend's production bundle."""
+    import jax
+    assert _resolved([]) == dict(zip(PCG_FIELDS, _PRODUCTION[jax.default_backend()]))
     args = mod.build_parser().parse_args(["--n-devices", "1"])
     assert (args.pcg_fixed_iters, args.pcg_precond, args.pcg_poly_sweeps) == (None, None, None)
 
@@ -133,5 +138,7 @@ def test_gpoly_flag_and_halo_depth_default():
     assert halo_depth_for_config(cfg) == 2
     for k, need in ((2, 2), (4, 2), (6, 4), (8, 6)):
         g = cfg._replace(barotropic_implicit_pcg_precond="gpoly",
+                         barotropic_implicit_pcg_variant="standard",
+                         barotropic_implicit_pcg_fixed_iters=20,
                          barotropic_implicit_pcg_poly_sweeps=k)
         assert halo_depth_for_config(g) == need

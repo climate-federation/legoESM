@@ -58,3 +58,16 @@ def test_model_records_the_resolved_bundle():
                            MPASOceanConfig())
     want = MPAS_BAROTROPIC_PCG_DEFAULTS[jax.default_backend()]
     assert {k: getattr(model.config, k) for k in KEYS} == want
+
+
+def test_layout_halo_sizing_refuses_a_mixed_bundle():
+    """The SPMD halo depth is chosen from the resolved bundle, so a
+    preconditioner pinned without its count and recurrence fails at layout
+    time, not later inside the model build."""
+    import jax
+
+    from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
+
+    other = {"cpu": "gpoly", "gpu": "jacobi"}[jax.default_backend()]
+    with pytest.raises(ValueError, match="also pin"):
+        halo_depth_for_config(MPASOceanConfig(barotropic_implicit_pcg_precond=other))

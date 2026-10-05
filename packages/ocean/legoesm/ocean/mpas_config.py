@@ -375,8 +375,10 @@ class MPASOceanConfig(NamedTuple):
     # used.  Set all three to pin a solver.
     barotropic_implicit_pcg_fixed_iters: int | None = None
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    # "standard" (two allreduces per iteration) is the default since
-    # 2026-10-02 (owner decision): it is the recurrence gpoly x 15 was
+    # Unset (None) = per-backend bundle (MPAS_BAROTROPIC_PCG_DEFAULTS):
+    # "standard" on GPU, "single_reduce_deep" on CPU.
+    # "standard" (two allreduces per iteration) was the default 2026-10-02..
+    # 2026-10-04 (owner decision): it is the recurrence gpoly x 15 was
     # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
     # GPUs); gpoly x 15 with "single_reduce" has not been measured.
     # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
@@ -398,11 +400,11 @@ class MPASOceanConfig(NamedTuple):
     # passes, so there it is the per-iteration exchange of two vectors).
     # Derecho CPU s7 L40 f64, 3 repeats, ms/step: 8 nodes 82.8 (poly4 x 20)
     # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
-    # with per-iteration exchange 92.7 / 165.3.  Not the default: owner
-    # decision 2026-10-02 keeps gpoly x 15 (no head-to-head measurement).
+    # with per-iteration exchange 92.7 / 165.3.  The CPU default since
+    # 2026-10-04 (owner decision, per-backend bundle); never measured on GPU.
     barotropic_implicit_pcg_variant: str | None = None  # per backend, see fixed_iters
     # Distributed-only preconditioner for the fixed-iteration PCG
-    # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
+    # (unset = per-backend bundle: "gpoly" on GPU, "jacobi" on CPU; the MPI Voronoi lane
     # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no
     # halo exchange, so it costs nothing in ppermute rounds and buys
@@ -418,7 +420,7 @@ class MPASOceanConfig(NamedTuple):
     # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above);
     # "jacobi" is the pre-2026-09-20 solver and needs fixed_iters=30 for the
     # same residual (and is what "single_reduce_deep" requires).
-    # Default "gpoly" since 2026-10-02 (owner decision; see fixed_iters for
+    # Default "gpoly" 2026-10-02..2026-10-04, now the GPU bundle (owner decision; see fixed_iters for
     # the A/B): the same polynomial on the GLOBAL operator, evaluated
     # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
     # historical 2 satisfies at 4 sweeps); one exchange per iteration as

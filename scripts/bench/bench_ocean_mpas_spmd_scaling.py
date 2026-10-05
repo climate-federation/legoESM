@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
-                   help="unset = MPASOceanConfig default (standard); "
+                   help="unset = the backend's bundle (standard on GPU, single_reduce_deep on CPU); "
                         "single_reduce_deep needs --pcg-precond jacobi and, for the "
                         "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
                         "--pcg-variant single_reduce or standard)")

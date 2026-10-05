@@ -299,9 +299,8 @@ def halo_depth_for_config(config) -> int:
     holds depth+2 rings and the sweeps need depth >= K-2 (measured exact at
     K=4/6/8 with depth 2/4/6, wrong one ring shallower). K=4 fits the
     historical 2."""
-    if getattr(config, "barotropic_implicit_pcg_precond", None) is None:
-        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
-        config = resolve_barotropic_pcg_defaults(config)
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    config = resolve_barotropic_pcg_defaults(config)
     if str(getattr(config, "barotropic_implicit_pcg_precond", "")) == "gpoly":
         return max(_DEFAULT_HALO_DEPTH,
                    int(config.barotropic_implicit_pcg_poly_sweeps) - 2)
