@@ -304,8 +304,8 @@ def test_land_stress_first_step_is_the_seed(monkeypatch, tmp_path):
         assert d.run() == "COMPLETED"
         u[name] = np.asarray(d.state.u.data)
     assert np.max(np.abs(u["on"] - u["off"])) > 0.0
-    assert int(d._land_stress_seed_total) == _n_land_cells(d)
-    assert int(d._land_stress_reused_total) == 0
+    assert d._land_stress_seed_total == _n_land_cells(d)
+    assert d._land_stress_reused_total == 0
 
 
 def test_land_stress_restart_reseeds_once(monkeypatch, tmp_path):
@@ -331,17 +331,30 @@ def test_land_stress_restart_reseeds_once(monkeypatch, tmp_path):
 def test_land_stress_held_column_reuses_its_last_valid_drag(monkeypatch,
                                                             tmp_path):
     """A column the land step holds from its second call on keeps the drag of
-    its first solve: one land column, reused on host steps 2 and 3."""
+    its first solve: reused on host steps 2 and 3, and the drag handed to the
+    boundary layer at the end is still that first solve's value.  Partial land
+    (southern hemisphere ocean), so the land columns are packed and the first
+    land column is not cell 0."""
+    import jax
+    import legoesm.grids.topography as topo
     import legoesm.land.multilayer_land as ml
     _patch_land_loaders(monkeypatch)
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.where(
+            jnp.asarray(grid.grid_lat) > 0.0, 0.5, 0.0))
     d = _build_driver(str(tmp_path / "h"), FOUR_STEPS_DAYS, **_LS_KW,
                       mpas_land_stress_from_land=True)
-    j = int(np.flatnonzero(np.asarray(d._f_land).reshape(-1) > 0.0)[0])
+    land = np.flatnonzero(np.asarray(d._f_land).reshape(-1) > 0.0)
+    assert 0 < land.size < np.asarray(d._f_land).size and land[0] > 0
+    j = int(land[0])
     t0 = float(np.asarray(d._land_ml_state.T_soil)[j, 0])
     orig = ml.step_multilayer_land_with_diagnostics
+    solved = []
 
     def held_after_first(state, *a, **k):
         new_state, resp, carbon, sfc = orig(state, *a, **k)
+        jax.debug.callback(lambda x: solved.append(float(x)), sfc.tau_mag[0])
         # The first (packed) land column is held once its soil has moved
         # off the initial value, i.e. on every call after the first.
         held = jnp.zeros(resp.tau_x.shape, bool).at[0].set(
@@ -350,5 +363,7 @@ def test_land_stress_held_column_reuses_its_last_valid_drag(monkeypatch,
     monkeypatch.setattr(ml, "step_multilayer_land_with_diagnostics",
                         held_after_first)
     assert d.run() == "COMPLETED"
-    assert int(d._land_stress_seed_total) == _n_land_cells(d)
-    assert int(d._land_stress_reused_total) == 2
+    assert d._land_stress_seed_total == land.size
+    assert d._land_stress_reused_total == 2
+    assert len(solved) == 4 and solved[1] != solved[0]
+    assert float(np.asarray(d._land_stress_last)[j]) == solved[0]
