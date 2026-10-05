@@ -121,10 +121,25 @@ The production-input plant exits 1 and reports `STATUS PLANT-FIRED`.  The
 repository citation suite passes after the required SequenceMatcher re-anchor;
 the one enclosing program span grows by exactly the inserted diagnostic line.
 
-The final focused suite, direct receipt citation gate and shifted-citation
-plant results are recorded in the round evidence directory.  The separate
-read-only Codex review verdict is quoted in the final committed revision of
-this section.
+The final focused suite reports:
+
+> 136 passed in 172.44s (0:02:52)
+
+It covers the complete receipt-citation suite, all SMT-card tests, and the
+complete GM/Redi unit file.  The round's direct citation gate finds two mapped
+compiled-source citations, zero failures, zero unmapped citations, and zero
+map-audit failures.  Shifting the ordinary-loop citation by two lines makes
+the gate print `status FAIL` and exit 1.
+
+The required separate read-only Codex review could not initialize inside the
+sandbox.  Its complete verdict transcript is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**; there is no reviewer
+`DO NOT SHIP` verdict.  No physics candidate lands.
 
 ## 6. OPEN
 
