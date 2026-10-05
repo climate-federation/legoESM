@@ -129,7 +129,7 @@ gate passes with 274 citations and the same three zero counts. Adding the four
 private hook lines shifted historical citations in
 `ocean_model_latlon_cgrid.py`; both the map and the default receipt were
 mechanically re-anchored by +4 below the insertion, while the one spanning
-range grew from 440 to 444 lines. Shifting the round's `domhgr.f90:155`
+range grew from 440 to 444 lines. Shifting the round's domhgr.f90 line 155
 citation by two lines makes the gate print `SYMBOL-NOT-AT-LINE` and exit `1`.
 
 The required read-only Codex review was attempted after the diff and evidence
