@@ -147,6 +147,10 @@ def run(root: Path, *, plant: str | None = None,
     require(isinstance(diagnostics, dict) and "slope" in diagnostics,
             "production tracer step returned no LDF slope diagnostics")
     slope_diag = diagnostics["slope"]
+    iso_diag = dict(diagnostics)
+    iso_diag.update(diagnostics.get("zfw_operands", {}))
+    print("live slope diagnostic keys:", sorted(slope_diag))
+    print("live ISO diagnostic keys:", sorted(iso_diag))
 
     slope = _groups(root / "oracle_ldf_slope_kt00000001.bin")
     iso = _groups(root / "oracle_ldf_iso_kt00000001.bin")
@@ -209,7 +213,7 @@ def run(root: Path, *, plant: str | None = None,
         ("iso.rhs_increment", "rhs_increment", "tendency", "T"),
     )
     for name, recorded, live, support in iso_rows:
-        add(name, iso[recorded], diagnostics[live], masks[support])
+        add(name, iso[recorded], iso_diag[live], masks[support])
 
     aggregate = run_stage_walk(
         root, "smt3", allow_dirty=allow_dirty, stage=3)
