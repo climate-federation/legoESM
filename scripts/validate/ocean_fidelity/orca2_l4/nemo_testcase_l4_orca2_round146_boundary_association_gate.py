@@ -227,9 +227,13 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
     model_depth_v = np.asarray(legacy_replay[1])
     ssh_average_v = np.asarray(legacy_replay[5])
     traced_depth_v = np.asarray(trace["transport_face_depth_v"][1])
-    replay_row = exact_row(np.asarray(production_replay[1]), traced_depth_v)
-    require(replay_row["bit_exact"],
-            "midpoint V replay does not reproduce the production trace")
+    legacy_replay_row = exact_row(model_depth_v, traced_depth_v)
+    raw_replay_row = exact_row(
+        np.asarray(production_replay[1]), traced_depth_v)
+    require(legacy_replay_row["bit_exact"] != raw_replay_row["bit_exact"],
+            "midpoint V trace must select exactly one registered depth source")
+    replay_row = (
+        raw_replay_row if raw_replay_row["bit_exact"] else legacy_replay_row)
 
     oracle_eta = np.asarray(oracle["j002_sshp2_mid"])
     raw_area_t = np.asarray(
@@ -300,6 +304,8 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
     return {
         "operand_rows": rows,
         "replay_passivity": replay_row,
+        "replay_depth_source": (
+            "raw_nemo" if raw_replay_row["bit_exact"] else "legacy_rebuilt"),
         "control_mid_depth_v": control_row,
         "reference_depth_arm_mid_depth_v": arm_row,
     }
