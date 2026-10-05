@@ -10763,23 +10763,35 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config
         vmix = getattr(getattr(_cfg_b, "physics", None),
                        "vertical_mixing", None)
-        if vmix is None or vmix.scheme != "tke":
+        _tke_active = vmix is not None and vmix.scheme == "tke"
+        _gm = getattr(_cfg_b, "gm_redi", None)
+        _gm_carried = (_gm is not None and getattr(
+            _gm, "slope_n2_evaluation", "recompute") == "carried_step_entry")
+        if _tke_active:
+            tke_cfg = vmix.tke
+            stage = getattr(
+                tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+            if stage == "implicit_solve_state" and not _gm_carried:
+                return None
+            if stage not in ("implicit_solve_state", "step_entry"):
+                raise ValueError(
+                    "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
+                    "'implicit_solve_state' or 'step_entry', got "
+                    f"{stage!r}.")
+            _n2_mode = getattr(tke_cfg, "n2_mode", "insitu")
+            _n2_eos_form = getattr(tke_cfg, "n2_eos_form", "seos")
+        elif _gm_carried:
+            # stprk3.f90:141-159 builds rn2b at whole-step entry before
+            # ldf_slp even when the vertical closure is constant.  The bundle
+            # is therefore a stage-program operand, not TKE-owned state.
+            _n2_mode = getattr(_gm, "slope_n2", "adiabatic")
+            _n2_eos_form = "seos" if _cfg_b.eos == "nemo_seos" else _cfg_b.eos
+        else:
             return None
-        tke_cfg = vmix.tke
-        stage = getattr(
-            tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
-        if stage == "implicit_solve_state":
-            return None
-        if stage != "step_entry":
+        if _n2_mode != "nemo_bn2":
             raise ValueError(
-                "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
-                "'implicit_solve_state' or 'step_entry', got "
-                f"{stage!r}.")
-        if getattr(tke_cfg, "n2_mode", "insitu") != "nemo_bn2":
-            raise ValueError(
-                "tke_n2_evaluation_stage='step_entry' currently requires "
-                "n2_mode='nemo_bn2', the NEMO eosbn2 construction; got "
-                f"{tke_cfg.n2_mode!r}.")
+                "a carried step-entry N2 bundle requires slope/TKE "
+                f"n2_mode='nemo_bn2', got {_n2_mode!r}")
 
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2,
@@ -10827,8 +10839,9 @@ class LatLonCGridOceanModel:
         e3w_surface = nemo_e3w_from_live_gdept(
             _zc, gdept, stretch=zrw_stretch, interior=False)[..., :1]
         _n2_kwargs = dict(
+            cfg=_cfg_b.eos_nemo_seos,
             g=_cfg_b.constants.g,
-            eos_form=getattr(tke_cfg, "n2_eos_form", "seos"),
+            eos_form=_n2_eos_form,
             e3w_int=e3w,
             e3w_source="mesh_reference",
             zrw_evaluation="nemo_literal",
@@ -10847,8 +10860,8 @@ class LatLonCGridOceanModel:
         else:
             rn2, _bn2_intermediate = _rn2_result, None
 
-        before = self._n2_nemo_before_tracers(
-            state, z_coord=_zc, config=_cfg_b)
+        before = (self._n2_nemo_before_tracers(
+            state, z_coord=_zc, config=_cfg_b) if _tke_active else None)
         if before is None:
             rn2b = rn2
         else:
