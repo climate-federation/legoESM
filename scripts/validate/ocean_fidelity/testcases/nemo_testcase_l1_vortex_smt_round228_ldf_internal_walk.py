@@ -34,7 +34,7 @@ from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
 )
 
 DEFAULT_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round227/"
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round228/"
     "oracle_vortex_smt3_ldf_internal")
 CASE = "VORTEX_SMT3_VEC-zps"
 
