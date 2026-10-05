@@ -352,7 +352,10 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
             unmasked[location], np.float64(np.inf))
 
     production = r97._native_v(np.asarray(trace["transport_metric_v"][index]))
-    vmask = np.max(np.asarray(raw.vmask), axis=-1)
+    oracle_vmask = np.max(np.asarray(raw.vmask), axis=-1)
+    model_vmask = r97._native_v(np.asarray(state.v_mask.data))
+    masked_replay = np.asarray(b(
+        b(jnp.asarray(unmasked)) * b(jnp.asarray(model_vmask))))
     production_unequal = (
         np.ascontiguousarray(production).view(np.uint64)
         != np.ascontiguousarray(oracle_transport).view(np.uint64)
@@ -364,6 +367,8 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
                          * b(jnp.asarray(reference["va_e"]))))),
         "unmasked_transport_v": exact_row(unmasked, oracle_transport),
         "production_transport_v": exact_row(production, oracle_transport),
+        "masked_replay_vs_production": exact_row(masked_replay, production),
+        "model_vmask_vs_oracle": exact_row(model_vmask, oracle_vmask),
     }
     if plant == "transport-v-bit":
         require(rows["unmasked_transport_v"]["differing_cells"] == 1,
@@ -414,8 +419,12 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
         "after_ssh": exact_row(
             candidate_after, np.asarray(oracle[f"{prefix}_ssha_e"])),
         "control_after_ssh_replay": control_replay,
-        "production_mismatch_vmask_zero_cells": int(np.count_nonzero(
-            production_unequal & (vmask == 0.0))),
+        "production_mismatch_model_vmask_zero_cells": int(np.count_nonzero(
+            production_unequal & (model_vmask == 0.0))),
+        "production_mismatch_model_vmask_diff_cells": int(np.count_nonzero(
+            production_unequal & (
+                np.ascontiguousarray(model_vmask).view(np.uint64)
+                != np.ascontiguousarray(oracle_vmask).view(np.uint64)))),
         "production_mismatch_rows": mismatch_rows,
         "dt_fast_s": float(dt_fast),
     }
@@ -836,7 +845,12 @@ def measure(
         transport_v_split["rows"]["unmasked_transport_v"]["bit_exact"]
         and transport_v_split["rows"]["production_transport_v"]
         ["differing_cells"] == 68
-        and transport_v_split["production_mismatch_vmask_zero_cells"] == 68
+        and transport_v_split["rows"]["masked_replay_vs_production"]
+        ["bit_exact"]
+        and transport_v_split[
+            "production_mismatch_model_vmask_zero_cells"] == 68
+        and transport_v_split[
+            "production_mismatch_model_vmask_diff_cells"] == 68
     )
     p152_chain = (
         transport_v_split["continuity_dv"]["bit_exact"]
