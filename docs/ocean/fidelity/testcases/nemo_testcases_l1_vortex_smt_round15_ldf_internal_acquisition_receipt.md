@@ -81,6 +81,8 @@ The committed acquisition's `--preflight` output is retained at
 ```text
 GFORTRAN_SYNTAX_PASS .../vortex_r18_tracer_terms.F90
 GFORTRAN_SYNTAX_PASS .../vortex_r23_ldf_terms.F90
+GFORTRAN_PATCHED_NEMO_SYNTAX_PASS ldfslp.f90
+GFORTRAN_PATCHED_NEMO_SYNTAX_PASS traldf_iso.f90
 PREFLIGHT_OK  variant smt3vecint: instrument and deck patches apply to the shipped sources
 ROUND227_LDF_INTERNAL_PREFLIGHT_PASS .../round227/oracle_vortex_smt3_ldf_internal
 ```

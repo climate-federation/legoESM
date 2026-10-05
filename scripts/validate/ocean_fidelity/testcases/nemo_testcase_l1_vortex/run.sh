@@ -889,6 +889,28 @@ if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
   "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_dir" -J "$ldf_syntax_dir" \
     -fsyntax-only "$LDF_MODULE"
   printf 'GFORTRAN_SYNTAX_PASS %s\n' "$LDF_MODULE"
+  # Also compile the PATCHED NEMO routines, not merely their helper module,
+  # against the admitted SMT-3 build's real module interfaces.  This is the
+  # acquisition-time syntax proof; makenemo remains the operator's later full
+  # dependency/build proof.
+  ldf_syntax_base=$NEMO_ROOT/tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3
+  for path in "$ldf_syntax_base/BLD/inc" "$ldf_syntax_base/WORK"; do
+    [[ -d "$path" ]] \
+      || { printf 'REFUSE: admitted SMT-3 syntax input is missing: %s\n' "$path" >&2; exit 67; }
+  done
+  ldf_real_syntax=$dry/ldf_real_syntax
+  mkdir -p "$ldf_real_syntax"
+  "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_base/BLD/inc" \
+    -J "$ldf_real_syntax" -c "$LDF_MODULE" -o "$ldf_real_syntax/writer.o"
+  for source_name in ldfslp traldf_iso; do
+    cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
+      -I "$dry" -I "$ldf_syntax_base/WORK" -I "$ldf_syntax_base/BLD/inc" \
+      "$dry/$source_name.F90" -o "$ldf_real_syntax/$source_name.f90"
+    "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_base/BLD/inc" \
+      -I "$ldf_real_syntax" -J "$ldf_real_syntax" -fsyntax-only \
+      "$ldf_real_syntax/$source_name.f90"
+    printf 'GFORTRAN_PATCHED_NEMO_SYNTAX_PASS %s.f90\n' "$source_name"
+  done
 fi
 # Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
 # of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
