@@ -348,6 +348,29 @@ def run(root: Path, *, plant: str | None = None,
          - (np.asarray(iso["fw_upper"])[..., :nlev]
             - np.asarray(iso_diag["zfw_kp1"])[..., :nlev]))
         / area / thickness * tmask)
+    nemo_thickness = (
+        np.asarray(iso["e3t_3d"])[..., :nlev]
+        * (1.0 + np.asarray(iso["r3t_kmm"])[..., None]
+           * np.asarray(iso["tmask"])[..., :nlev]))
+    divisor_rows = [
+        _row("iso.e3t_divisor", nemo_thickness, thickness,
+             masks["T"], plant=None),
+        _row("iso.r1_e1e2t", np.asarray(iso["r1_e1e2t"]),
+             1.0 / np.asarray(iso_diag["e1e2t"]),
+             np.asarray(masks["T"])[..., 0], plant=None),
+    ]
+    oracle_fu = np.asarray(iso["fu"])[..., :nlev]
+    oracle_fv = np.asarray(iso["fv"])[..., :nlev]
+    oracle_hdiv = (
+        (oracle_fu - np.roll(oracle_fu, 1, axis=1))
+        + (oracle_fv - np.roll(oracle_fv, 1, axis=0)))
+    oracle_vdiv = (
+        np.asarray(iso["fw_lower"])[..., :nlev]
+        - np.asarray(iso["fw_upper"])[..., :nlev])
+    nemo_source_tendency = (
+        (oracle_hdiv + oracle_vdiv)
+        * np.asarray(iso["r1_e1e2t"])[..., None]
+        / nemo_thickness)
     flux_family_reconstruction = []
     for name, candidate in (
             ("arm.horizontal_flux.rhs_increment",
@@ -355,7 +378,8 @@ def run(root: Path, *, plant: str | None = None,
             ("arm.vertical_flux.rhs_increment",
              model_tendency + delta_vertical),
             ("arm.all_fluxes.rhs_increment",
-             model_tendency + delta_horizontal + delta_vertical)):
+             model_tendency + delta_horizontal + delta_vertical),
+            ("arm.nemo_flux_divisor.rhs_increment", nemo_source_tendency)):
         flux_family_reconstruction.append(_row(
             name, iso["rhs_increment"][..., :nlev], candidate,
             masks["T"], plant=None))
@@ -406,6 +430,7 @@ def run(root: Path, *, plant: str | None = None,
         "factor_reconstruction": factor_reconstruction,
         "face_thickness_arm": face_thickness_arm,
         "flux_family_reconstruction": flux_family_reconstruction,
+        "divisor_rows": divisor_rows,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -459,6 +484,10 @@ def main(argv=None) -> int:
         print("face-thickness remaining LDF fraction:",
               f"{arm['fraction_of_additional_ldf_max_remaining']:.16e}")
     for row in report["flux_family_reconstruction"]:
+        print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
+              f"cells={row['cells_unequal']:7d} "
+              f"max_abs={row['max_abs']:.16e}")
+    for row in report["divisor_rows"]:
         print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
               f"cells={row['cells_unequal']:7d} "
               f"max_abs={row['max_abs']:.16e}")
