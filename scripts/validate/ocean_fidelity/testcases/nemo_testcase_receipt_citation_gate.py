@@ -1272,6 +1272,18 @@ FILES = {
         NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90"),
     "VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90": (
         NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90"),
+    # Round 226 cites the instrumented build that produced the admitted
+    # SMT-3 record, not the nearby pristine or SMT-2 configurations.
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -5582,6 +5594,36 @@ CITATION_MAP = {
         ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
         ('SELECT CASE ( nldf_tra )', 2), ('END SELECT', 2), 18],
+    # --- round 226: admitted SMT-3 compiled branch and magnitude boundary ---
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:231-233': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
+        'IF(lwm) WRITE( numond, namtra_ldf )', 3],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:261-283': [
+        'nldf_tra = np_ERROR',
+        ('IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 1), 23],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:354-390': [
+        'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
+        ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90:105-110': [
+        ('SELECT CASE ( nldf_tra )', 2),
+        'CALL traldf_iso_lap  ( kt, Kbb, Kmm, pts, Krhs, l_ptr, l_hst )', 6],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:159-177': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )', 19],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:455-488': [
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        "CALL vortex_r18_tracer_rhs( 'adv', Krhs, ts )", 34],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:501-546': [
+        'SELECT CASE( kstg )',
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 46],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:532':
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:546':
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:154-304': [
+        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )',
+        ('&                 * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2),
+        151],
 }
 
 
