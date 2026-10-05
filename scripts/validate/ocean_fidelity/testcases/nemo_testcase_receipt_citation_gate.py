@@ -1442,7 +1442,7 @@ CITATION_MAP = {
         27],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:584-615': [
         ("CASE ( 'T' , 'W' )                         ! T-, W-point", 5),
-        'ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)',
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 45),
         32],
     'barotropic_latlon_cgrid.py:552-631': [
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
