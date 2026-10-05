@@ -216,10 +216,11 @@ classification.
 
 FINAL_BATTERY_PLACEHOLDER
 
-The real receipt citation gate reports 10 citations, zero unmapped citations,
+The real receipt citation gate reports 11 citations, zero unmapped citations,
 zero failures and zero audit failures.  The shifted-citation plant moves the
-`ldftra.f90:354-390` span by one line, exits nonzero and reports a source-anchor
-failure.  Because this round edited already-cited Python files, the historical
+`VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:354-390` span by
+one line, exits nonzero and reports a source-anchor failure.  Because this
+round edited already-cited Python files, the historical
 default receipt and citation map were re-anchored together by the repository's
 sequence-mapped re-anchor tool; the default-receipt audit is clean.
 
