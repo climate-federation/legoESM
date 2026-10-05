@@ -110,6 +110,10 @@ def test_transport_v_bit_control_detects_one_ulp():
     assert not row["bit_exact"]
 
 
+def test_transport_v_causal_plant_is_registered():
+    assert "transport-v-causal" in gate.PLANTS
+
+
 def test_reference_depth_override_none_returns_original_prep():
     prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
 

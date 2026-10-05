@@ -57,6 +57,23 @@ def test_closed_periodic_domain_telescopes_area_weighted_divergence():
     assert abs(float(jnp.sum(div * grid.area))) < 1.0e-10
 
 
+def test_private_unmasked_v_transport_omits_only_final_v_mask():
+    h_u, h_v, u, v, um, vm, grid = _case()
+    h_v = h_v.at[0, 1].set(3.25)
+    v = v.at[0, 1].set(-0.125)
+    grid.dx_v = grid.dx_v.at[0, 1].set(17.0)
+    masked_u, masked_v = nemo_literal_metric_transports(
+        h_u, h_v, u, v, um, vm, grid)
+    unmasked_u, unmasked_v = nemo_literal_metric_transports(
+        h_u, h_v, u, v, um, vm, grid, mask_v=False)
+
+    np.testing.assert_array_equal(np.asarray(unmasked_u), np.asarray(masked_u))
+    np.testing.assert_array_equal(
+        np.asarray(unmasked_v), np.asarray((grid.dx_v * v) * h_v))
+    changed = np.argwhere(np.asarray(masked_v) != np.asarray(unmasked_v))
+    np.testing.assert_array_equal(changed, np.array([[0, 1]]))
+
+
 def test_gradient_is_finite():
     h_u, h_v, u, v, um, vm, grid = _case()
 

@@ -1147,6 +1147,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots in the existing SSH-average prep with the card's raw NEMO pair.
     # None is the production value; no model configuration can select it.
     barotropic_reference_face_depth_override: object = None
+    # Private round-153 causal arm: omit only legoESM's extra compact V mask
+    # from NEMO's literal ``zhV = e1v * va_e * zhvp2_e`` statement. False is
+    # the unchanged production path; no constructible config can select it.
+    barotropic_unmasked_v_transport: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -7217,6 +7221,11 @@ class LatLonCGridOceanModel:
                         _baro_seed,
                         _nemo_reference_face_depth_test_override=(
                             _reference_depth_override))
+                if (self._nemo_ws_test_hooks
+                        .barotropic_unmasked_v_transport):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_unmasked_v_transport_test_override=True)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,
