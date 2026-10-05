@@ -90,8 +90,10 @@ registered pre-existing reds (SI3 scalar-math provenance, round-35 escape
 scope, worktree-stamp scope, and GYRE round-129 spread-record stamp). All
 pytest worker processes then disappeared without a terminal summary while the
 execution pipe remained open; the stale session was closed. No round-151 test
-failed. Focused round and citation checks are recorded after this receipt is
-committed.
+failed. Focused round and citation checks pass 34/34. The round receipt
+citation gate passes with two mapped citations and no failures or unmapped
+citations; its shifted-line plant turns the gate red. The canonical round-8
+receipt gate also passes all 274 citations with an empty unmapped set.
 
 No ORCA2 ladder was run: frozen R151-P4 failed, and the registered
 approximately 31 PSU salinity exposure remains a hard veto. No production
