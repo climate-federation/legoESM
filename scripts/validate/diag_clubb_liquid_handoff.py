@@ -39,6 +39,16 @@ def _load_run_amip():
     return mod
 
 
+def closure_liquid(turb_cfg, q_c):
+    """Host liquid to hand the closure: ``q_c`` with the partition on, else None."""
+    if not turb_cfg.liquid_partition:   # a TurbulenceConfig selector
+        return None
+    if q_c is None:
+        raise SystemExit("deck turns the CLUBB liquid partition on but the "
+                         "restart carries no q_c tracer to seed it with")
+    return q_c
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -157,13 +167,19 @@ def main():
         _dts = dt_phys / _ns
         _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
         _T = T; _q = q_v; _m = moments; _rho = rho
+        # Call the closure the way the deck runs it: with the partition on,
+        # the host liquid seeds rt and each sub-step replaces it.
+        _ql = closure_liquid(turb, q_c)
         from legoesm.atmosphere.physics._shared import virtual_temperature
         print(f"[{a.label}] closure call: {_ns} sub-step(s) of {_dts:.1f} s "
               f"(the run's physics step is {dt_phys:.1f} s)")
         for _i in range(_ns):
             out = clubb_step(_u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
-                             T_sfc, q_sfc, _rho, _dts, clubb_cfg)
+                             T_sfc, q_sfc, _rho, _dts, clubb_cfg,
+                             **({} if _ql is None else {"q_c": _ql}))
             _du, _dv, _dT, _dq, _m, diags = out
+            if _ql is not None:
+                _ql = _ql + _dts * diags["dq_c_dt"]
             if _i < _ns - 1:
                 _u = _u + _dts * _du; _v = _v + _dts * _dv
                 _T = _T + _dts * _dT; _q = _q + _dts * _dq

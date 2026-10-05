@@ -43,3 +43,13 @@ def test_passthrough_flags_survive():
          "--extra", "--solar-file", "/s.nc", "--resolution", "6"])
     assert a.label == "CAM6"
     assert a.extra == ["--solar-file", "/s.nc", "--resolution", "6"]
+
+
+def test_closure_gets_the_host_liquid_only_when_the_partition_is_on():
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    f = _load().closure_liquid
+    q_c = object()
+    assert f(TurbulenceConfig(liquid_partition=True), q_c) is q_c
+    assert f(TurbulenceConfig(), q_c) is None
+    with pytest.raises(SystemExit, match="q_c"):
+        f(TurbulenceConfig(liquid_partition=True), None)

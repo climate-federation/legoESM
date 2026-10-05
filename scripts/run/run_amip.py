@@ -965,6 +965,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
     parser.add_argument("--land-soil-ice-impedance-exponent",
                         dest="land_soil_ice_impedance_exponent", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
@@ -988,6 +1000,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "store, throughfall, wet-leaf evaporation). "
                              "Default off. Requires --use-multilayer-land "
                              "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-rh-cap-smoothing-width",
+                        dest="land_canopy_rh_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the canopy-air "
+                             "RH <= 1 cap. Default: the land CanopyConfig value.")
+    parser.add_argument("--land-canopy-zeta-cap-smoothing-width",
+                        dest="land_canopy_zeta_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_zeta_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the stable "
+                             "Monin-Obukhov zeta <= 0.5 cap. Default: the land "
+                             "CanopyConfig value.")
+    parser.add_argument("--land-canopy-most-n-iters",
+                        dest="land_canopy_most_n_iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_most_n_iters,
+                        help="Two-leaf canopy: fixed-point iterations of the "
+                             "above-canopy Monin-Obukhov solve. Default: the "
+                             "land CanopyConfig value.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -2545,6 +2574,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
@@ -2624,6 +2655,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
+        land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
+        land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
+        land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

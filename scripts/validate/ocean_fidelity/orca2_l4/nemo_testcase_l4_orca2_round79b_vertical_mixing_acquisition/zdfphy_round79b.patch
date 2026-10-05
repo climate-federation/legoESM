@@ -1,0 +1,51 @@
+--- zdfphy.F90
++++ zdfphy.F90
+@@ -23,6 +23,8 @@
+    USE zdfmfc         ! vertical physics: Mass Flux Convection
+    USE zdfiwm         ! vertical physics: internal wave-induced mixing
+    USE zdfswm         ! vertical physics: surface  wave-induced mixing
++   USE zdfphy_round79b_writer, ONLY : r79_arm, r79_after_tke, r79_after_rnf,   &
++      &                              r79_after_evd, r79_after_ddm, r79_write
+    USE zdfmxl         ! vertical physics: mixed layer
+    USE tranpc         ! convection: non penetrative adjustment
+    USE trc_oce        ! variables shared between passive tracer & ocean
+@@ -261,6 +263,8 @@
+       !
+       IF( ln_timing )   CALL timing_start('zdf_phy')
+       !
++      CALL r79_arm( kt )
++      !
+       IF( l_zdfsh2 ) THEN        !* shear production at w-points (energy conserving form)
+ #if ! defined key_PSYCLONE_2p5p0
+          ALLOCATE( sh2(A2D(0),jpk) )
+@@ -313,14 +317,17 @@
+             avt(ji,jj,jk) = avt_k(ji,jj,jk)
+             avm(ji,jj,jk) = avm_k(ji,jj,jk)
+          END_3D
++         CALL r79_after_tke()
+          !
+          IF( ln_rnf_mouth ) THEN                   !* increase diffusivity at rivers mouths
+             DO_3D( 0, 0, 0, 0, 2, nkrnf )
+                avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf * rnfmsk(ji,jj) * wmask(ji,jj,jk)
+             END_3D
+          ENDIF
++         CALL r79_after_rnf()
+          !
+          IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )  !* convection: enhanced vertical eddy diffusivity
++         CALL r79_after_evd()
+          !
+          !                                         !* double diffusive mixing
+          IF( ln_zdfddm ) THEN                            ! update avt and compute avs
+@@ -330,10 +337,12 @@
+                avs(ji,jj,jk) = avt(ji,jj,jk)
+             END_3D
+          ENDIF
++         CALL r79_after_ddm()
+          !
+          !                                         !* wave-induced mixing
+          IF( ln_zdfswm )   CALL zdf_swm( kt, Kmm, avm, avt, avs )   ! surface  wave (Qiao et al. 2004)
+          IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )   ! internal wave (de Lavergne et al 2017)
++         CALL r79_write( kt, Kbb, Kmm )
+          !
+          CALL zdf_mxl_turb( kt, Kmm )                   !* turbocline depth
+       END DO

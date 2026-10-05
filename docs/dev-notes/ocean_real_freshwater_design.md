@@ -27,7 +27,7 @@ virtual salt flux `-S_ref*F_fw/(rho_0*dz_0)`, which adds a *separate*
 salt-content change. NEMO, running variable volume (`ocean.output`:
 `dom_qco_init : Variable volume activated`), has no such term.
 
-Both grids are affected: `ocean_model_latlon_cgrid.py:82/3158/4212-4213` and
+Both grids are affected: `ocean_model_latlon_cgrid.py:83/3158/4212-4213` and
 `ocean_model_mpas.py:744` + the VSF in `ocean_pe_mpas.py`. Both validators
 allow only `{none, virtual_salt_flux}`; `real_freshwater` is named ONLY in the
 MPAS error string as unavailable (`ocean_model_mpas.py:185-190`).
@@ -58,7 +58,7 @@ instructive:
    be silently 1000x wrong.
 3. **Double count.** A genuine salt channel ALREADY exists and is already
    applied with the actual top-cell thickness in both cores
-   (`ocean_pe_latlon_cgrid.py:3620-3632`, `ocean_pe_mpas.py:1055-1088`); the
+   (`ocean_pe_latlon_cgrid.py:3674-3686`, `ocean_pe_mpas.py:1055-1088`); the
    coupler already maps `ice_resp.salt_flux` separately from `ice_fw`
    (`coupler/ocean_forcing.py:77-98`).
 
@@ -92,7 +92,7 @@ instructive:
    whether to reproduce NEMO's associated heat correction.
 4. Normalization: eta only. **Cross-grid inconsistency found:** MPAS normalizes
    eta (`ocean_model_mpas.py:741-766`) while lat-lon sends RAW freshwater to eta
-   (`ocean_model_latlon_cgrid.py:3156-3161`). Pick ONE policy explicitly:
+   (`ocean_model_latlon_cgrid.py:3219-3224`). Pick ONE policy explicitly:
    normalize full `P-E+R+ice+restoring` (fixed liquid-ocean volume) OR exclude
    `ice_fw` (NEMO-like ice+ocean volume, `sbcfwb.F90:233-238`).
 5. Conservation invariant = salt MASS, not mean salinity:

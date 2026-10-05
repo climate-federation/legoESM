@@ -239,7 +239,7 @@ planted violations firing.
 
 The second-pass card parameter shifted four current-tree anchors.  The rigid
 re-anchor changes are `363-447` to `371-455`, `228-230` to `236-238`, `428`
-to `436`, and `167,391,1399` to `169,399,1411` in
+to `436`, and `167,391,1399` to `169,399,1493` in
 `nemo_testcase_recipe.py`.  Equal-extent comparisons against `2a6318c42`
 show the old and new cited source text is identical in all four cases; only
 the map keys and the matching Round-8 receipt citation moved.

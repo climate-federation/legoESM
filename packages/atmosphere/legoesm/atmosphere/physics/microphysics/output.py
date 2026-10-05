@@ -342,7 +342,7 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     # Passes past every column's nstep add exact zeros, so stop after the
     # chunk holding max(nstep): bit-identical to running all n_max, and the
     # cond + static-length loops keep reverse-mode AD.
-    n_run = jnp.max(nstep)
+    n_run = jnp.max(nstep, initial=0)  # empty column batch: no passes
 
     def chunk(c, carry):
         return jax.lax.cond(

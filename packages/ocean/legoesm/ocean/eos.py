@@ -751,12 +751,14 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 "e3w_int must be omitted when e3w_source='depth_difference'")
         e3w = None
-    if eos_form not in ("seos", "teos10"):
+    if eos_form not in ("seos", "teos10", "eos80"):
         raise ValueError(
             f"compute_buoyancy_frequency_nemo_bn2 eos_form={eos_form!r} "
-            "invalid; expected 'seos' (the 3-term simplified EOS) or "
+            "invalid; expected 'seos' (the 3-term simplified EOS), "
             "'teos10' (NEMO's Roquet polynomial with the TEOS-10 coefficient "
-            "set, which is what ORCA1 runs: ln_teos10=.true.).")
+            "set, which is what ORCA1 runs: ln_teos10=.true.) or "
+            "'eos80' (the SAME Roquet polynomial with the EOS-80 coefficient "
+            "set, which is what ORCA2 runs: ln_eos80=.true.).")
     eos_gdept = jnp.asarray(gdept)
     if zrw_evaluation == "nemo_literal":
         if zrw_gdept_0 is None or zrw_stretch is None:
@@ -775,12 +777,17 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 "the private bn2 alpha/beta override must match T/S shape; "
                 f"got alpha={alpha.shape}, beta={beta.shape}, T={T.shape}")
-    elif eos_form == "teos10":
+    elif eos_form in ("teos10", "eos80"):
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
         # unchanged, because NEMO's bn2_t is shared across EOS branches.
-        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept)
+        #
+        # EOS-80 and TEOS-10 are ONE branch in the source too: rab_3d_t's
+        # ``CASE( np_teos10, np_eos80 )`` runs a single polynomial and the two
+        # forms differ only in the coefficient set and normalization that
+        # eos_init loads (rdeltaS 20 vs 32, r1_S0 1/40 vs 0.875/35.16504).
+        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept, eos_form=eos_form)
     else:
         if cfg is None:
             cfg = NemoSEOSConfig()
@@ -963,6 +970,40 @@ def nemo_r3t_stretch(
     # eta_safe) never reach this; it exists so an unclamped caller degrades
     # loudly-wrong rather than silently-plausible.
     return jnp.maximum(1.0 + r3t, 1.0e-6)
+
+
+def nemo_r3t_rk3_stage1_stretch(
+    z_coord, eta_before: jnp.ndarray, eta_after: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO RK3 stage-1 ``(1 + r3t(Kaa))`` source association.
+
+    ``stprk3_stg.f90:160-179`` first forms the Kbb and after-level ``r3t``
+    ratios, then assigns ``Kaa = (2/3)*Kbb + (1/3)*after``.  Interpolating
+    SSH before forming its ratio is real-equivalent but not bit-identical.
+    """
+    eta_before = jnp.asarray(eta_before)
+    eta_after = jnp.asarray(eta_after, dtype=eta_before.dtype)
+    if getattr(z_coord, "linear_free_surface", False):
+        return jnp.ones_like(eta_before)
+    depth = jnp.asarray(H_bathy, dtype=eta_before.dtype)
+    wet = depth > 0.0
+    one = jnp.asarray(1.0, dtype=eta_before.dtype)
+    safe_depth = jnp.where(wet, depth, one)
+    r1_depth = nemo_source_round(one / safe_depth)
+    r3_before = jnp.where(
+        wet, nemo_source_round(eta_before * r1_depth), 0.0)
+    r3_after = jnp.where(
+        wet, nemo_source_round(eta_after * r1_depth), 0.0)
+    one_third = nemo_source_round(
+        one / jnp.asarray(3.0, dtype=eta_before.dtype))
+    two_thirds = nemo_source_round(
+        jnp.asarray(2.0, dtype=eta_before.dtype)
+        / jnp.asarray(3.0, dtype=eta_before.dtype))
+    r3_stage = nemo_source_round(
+        nemo_source_round(two_thirds * r3_before)
+        + nemo_source_round(one_third * r3_after))
+    return jnp.where(wet, nemo_source_round(one + r3_stage), one)
 
 
 def nemo_bn2_live_ladders(

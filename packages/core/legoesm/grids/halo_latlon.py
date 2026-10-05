@@ -131,8 +131,9 @@ def pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     # to a single XLA Pad op; the previous ``concatenate([data[:, -halo:],
     # data, data[:, :halo]])`` materialised three buffers + a concat
     # HLO per call.
-    pad_axes = ((0, 0),) * (data.ndim - 1)
-    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
+    # Lon is axis 1 for (lat, lon) and (lat, lon, nlev) alike.
+    lon_pad = ((0, 0), (halo, halo)) + ((0, 0),) * (data.ndim - 2)
+    data_lon = jnp.pad(data, lon_pad, mode="wrap")
 
     # Latitude: pole-folding (scalar — no sign change).  Pole rows are
     # NOT periodic so we still concat the folded rows.
@@ -291,8 +292,9 @@ def pad_halo_latlon_vector_local(
 ) -> jnp.ndarray:
     """Local vector halo: lon-wrap + pole-fold with sign reversal."""
     # Longitude: periodic wrap (single Pad HLO via mode="wrap").
-    pad_axes = ((0, 0),) * (data.ndim - 1)
-    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
+    # Lon is axis 1 for (lat, lon) and (lat, lon, nlev) alike.
+    lon_pad = ((0, 0), (halo, halo)) + ((0, 0),) * (data.ndim - 2)
+    data_lon = jnp.pad(data, lon_pad, mode="wrap")
 
     # Latitude: pole-folding (vector — negate)
     south, north = fold_pole_rows(data_lon, halo, negate=True)

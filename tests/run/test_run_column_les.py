@@ -1388,3 +1388,42 @@ def test_valid_levels_note_distinguishes_diagnosis_rejection():
     # scalar diagnosis (entrainment w_e) → no per-level count
     assert _valid_levels_note(SimpleNamespace(valid=jnp.asarray(True))) == ""
     assert _valid_levels_note(SimpleNamespace()) == ""              # no .valid → empty
+
+
+def test_column_surface_kinematic_fluxes_cesm_water_at_the_constant_it_charges():
+    """With the CESM shr_flux_atmOcn law (``large_yeager_cesm``), which charges
+    the constant L_v, the LES water flux is lhflx / (rho * L_v) and the heat BC
+    carries no latent enthalpy correction (charge == the LES's own L_v).  An
+    inverse at L_v(SST) gives 2.6 % too much water at 300 K and a spurious
+    cooling of the heat BC."""
+    from legoesm.atmosphere.dynamics.les.column_les import column_surface_kinematic_fluxes
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        SurfaceLayerConfig, compute_surface_fluxes)
+    from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
+
+    from legoesm import constants
+
+    nlev = 6
+    T = jnp.linspace(240.0, 295.0, nlev)        # noqa: N806
+    q = jnp.linspace(1e-4, 1.2e-2, nlev)
+    u, v = jnp.full((nlev,), 5.0), jnp.zeros((nlev,))
+    p_full = jnp.linspace(2.0e4, 1.0e5, nlev)
+    p_s, sst = jnp.array(1.0e5), jnp.array(300.0)
+    cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm", z_ref=10.0)
+    w_th, w_qv = column_surface_kinematic_fluxes(
+        T_col=T, q_v_col=q, u_col=u, v_col=v, p_full_col=p_full, sst_K=sst, p_s=p_s,
+        surface_config=cfg)
+    rho = p_full[-1] / (constants.R_d * virtual_temperature(T[-1], q[-1]))
+    q_sfc = saturation_mixing_ratio(sst, p_s)
+    _, _, sh, lh, _ = compute_surface_fluxes(
+        jnp.atleast_1d(u[-1]), jnp.atleast_1d(v[-1]), jnp.atleast_1d(T[-1]),
+        jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
+        jnp.atleast_1d(rho), cfg)
+    assert float(lh[0]) > 1.0
+    np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
+    exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    np.testing.assert_allclose(
+        float(w_th), float(sh[0] / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
+    # Non-vacuous: the Kirchhoff inverse is a different number here.
+    assert abs(float(constants.L_v / latent_heat_vaporization(sst)) - 1.0) > 0.02

@@ -26,6 +26,7 @@ from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
+    apply_shortwave_penetration,
     shortwave_penetration_tendency,
 )
 
@@ -146,6 +147,7 @@ def _make_mle(cfg: MLEConfig) -> Callable:
 def make_ocean_physics(
     config: OceanPhysicsConfig,
     apply_vertical_diffusion: bool = True,
+    seos_cfg=None,
 ) -> Callable:
     """Create a combined ocean physics function.
 
@@ -272,6 +274,7 @@ def make_ocean_physics(
                 emit_momentum_viscosity=(
                     config.vertical_mixing.scheme != "kpp"),
                 constants_config=config.constants,
+                seos_cfg=seos_cfg,
             ))
         # else: TKE/CATKE K profiles are computed INSIDE the implicit
         # solve's compute_vertical_K_profiles fallback (their pipeline
@@ -338,9 +341,17 @@ def make_ocean_physics(
                 if t.A_v is not None:
                     A_v_sum = t.A_v if A_v_sum is None else A_v_sum + t.A_v
         else:
-            z3 = jnp.zeros_like(state.u.data)
-            z2 = jnp.zeros_like(state.eta.data)
-            du_dt, dv_dt, dT_dt, dS_dt, deta_dt = z3, z3, z3, z3, z2
+            # Each slot takes ITS OWN field's shape.  On a C-grid the velocity
+            # faces and the tracer cells are different shapes (u is one column
+            # wider), so seeding every slot from ``u`` handed the TRACER
+            # tendencies a velocity-shaped array -- harmless while some other
+            # module supplied them, and a broadcasting error the moment
+            # shortwave penetration is the only module enabled.
+            du_dt = jnp.zeros_like(state.u.data)
+            dv_dt = jnp.zeros_like(state.v.data)
+            dT_dt = jnp.zeros_like(state.T.data)
+            dS_dt = jnp.zeros_like(state.S.data)
+            deta_dt = jnp.zeros_like(state.eta.data)
 
         # Shortwave penetration: distribute SW heating through water column.
         if (
@@ -348,19 +359,63 @@ def make_ocean_physics(
             and surface_forcing is not None
             and surface_forcing.sw_down is not None
         ):
-            from legoesm.ocean.vertical import compute_ocean_jacobian
+            from legoesm.ocean.vertical import (
+                compute_layer_thickness,
+                compute_ocean_jacobian,
+            )
             J = compute_ocean_jacobian(
                 state.eta.data, state.H_bathy.data, z_coord,
             )
-            sw_tend = shortwave_penetration_tendency(
-                surface_forcing.sw_down,
-                z_coord.dz_ref,
-                z_coord.z_half_ref,
-                J,
-                sw_config,
-                rho_0=config.constants.rho_0,
-                c_sw=config.constants.c_sw,
-            )
+            if sw_config.scheme == "nemo_qsr_rgb":
+                # NEMO ``qsr_RGBc`` (traqsr.f90:213): three chlorophyll bands
+                # plus infrared, on the LIVE key_qco ladder
+                # ``e3t_0*(1+r3t)`` / ``gdepw_1d*(1+r3t)``
+                # (traqsr.f90:388, :349).  Same shared kernel the external
+                # surface-forcing stage already dispatches; nothing here is a
+                # second RGB implementation.  ``J`` is NEMO's ``1 + r3t`` for
+                # this coordinate (``compute_ocean_jacobian``), and
+                # ``compute_layer_thickness`` is ``h_partial * J`` -- the same
+                # single stretch, not a second one.
+                #
+                # ONLY the NEMO identity selector takes this branch.  The
+                # generic ``rgb_chl`` scheme keeps refusing here exactly as it
+                # did before: its deposit is owned by the external
+                # surface-forcing stage (ocean_pe_latlon_cgrid.py), and
+                # letting the pipeline deposit it too would double-count qsr
+                # for every card that selects it.
+                if surface_forcing.chl is None:
+                    raise ValueError(
+                        "physics.shortwave_penetration.scheme="
+                        f"{sw_config.scheme!r} needs a chlorophyll field; "
+                        "OceanSurfaceForcing.chl is None")
+                h_live = compute_layer_thickness(
+                    state.eta.data, state.H_bathy.data, z_coord)
+                dtype = h_live.dtype
+                sw_tend = apply_shortwave_penetration(
+                    sw_config,
+                    jnp.asarray(surface_forcing.sw_down, dtype=dtype),
+                    chl=jnp.asarray(surface_forcing.chl, dtype=dtype),
+                    dz_live=h_live,
+                    wet_cell=jnp.asarray(h_live > 0.0, dtype=dtype),
+                    gdepw_bottom_live=(
+                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=dtype)
+                        * jnp.asarray(J, dtype=dtype)[..., jnp.newaxis]
+                    ),
+                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=dtype),
+                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=dtype),
+                    rho_0=config.constants.rho_0,
+                    c_sw=config.constants.c_sw,
+                )
+            else:
+                sw_tend = shortwave_penetration_tendency(
+                    surface_forcing.sw_down,
+                    z_coord.dz_ref,
+                    z_coord.z_half_ref,
+                    J,
+                    sw_config,
+                    rho_0=config.constants.rho_0,
+                    c_sw=config.constants.c_sw,
+                )
             dT_dt = dT_dt + sw_tend
 
         dims_3d = state.T.dims if hasattr(state.T, 'dims') else ("face", "x", "y", "level")

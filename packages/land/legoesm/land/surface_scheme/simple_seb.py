@@ -20,7 +20,9 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    latent_heat_sublimation, latent_heat_vaporization, saturation_mixing_ratio,
+    saturation_mixing_ratio_ice)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     beta_limited_surface_humidity,
 )
@@ -56,6 +58,9 @@ LAND_CONDENSATION_FLOOR_W = -150.0
 # fluxes when building the semi-implicit surface conductance (Robin BC).  Small enough
 # for an accurate slope, large enough to stay above bulk-flux round-off.
 _SURFACE_LIN_DT_K = 0.1
+# Humidity [kg/kg] below which the layered path's exchange coefficient falls back
+# from the secant E / (q_c - q_air) (0/0 there) to a finite-difference slope.
+_VAPOUR_COND_DQ = 1.0e-5
 
 
 class SimpleSEBConfig(NamedTuple):
@@ -85,6 +90,7 @@ def compute_simple_seb_fluxes(
     albedo_land,
     emissivity,
     z0,
+    snow_cover: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute SimpleSEB surface fluxes for one time step.
 
@@ -113,6 +119,10 @@ def compute_simple_seb_fluxes(
     albedo_land : spatial or scalar bare-land albedo
     emissivity  : spatial or scalar emissivity
     z0          : spatial or scalar roughness length [m]
+    snow_cover  : optional (ncol,) fractional snow cover f of the layered pack.
+                  Snow (ice-saturated, free) and soil (beta-limited) then exchange
+                  separately and are area-weighted; ``LE_snow`` returns the pack's
+                  share.  ``None`` keeps the binary snow/no-snow surface.
 
     Returns
     -------
@@ -188,34 +198,90 @@ def compute_simple_seb_fluxes(
     rho = forcing.rho_lowest
     T_ref, z_ref = surface_reference_state(
         forcing.T_lowest, land_config.z_ref, forcing.z_lowest)
-    if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ustar = compute_most_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            T_ref, forcing.q_lowest,
-            T_surface, q_sfc, rho,
-            z_ref=z_ref,
-            z0_init=z0,
-            scheme=land_config.bulk_scheme,
-            n_iter=land_config.bulk_n_iter,
-            L_latent=L_eff,
-            max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
-        )
-        tau_mag = rho * _ustar ** 2
-    else:
-        tau_mag = None   # constant-coefficient law: no friction velocity
-        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_surface, q_sfc, rho, wind_speed,
-            land_config.Cd_land, land_config.Ch_land,
-            L_latent=L_eff,
-        )
 
-    # Cold-start condensation floor (issue #730): bound the spurious (negative)
-    # condensation shock BEFORE it enters G_soil / the returned demand; evaporation
-    # (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
-    if LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx = jnp.maximum(lhflx, LAND_CONDENSATION_FLOOR_W)
+    def _bulk(T_s, q_s, L):
+        if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
+            tx, ty, sh, lh, ustar = compute_most_fluxes(
+                forcing.u_lowest, forcing.v_lowest,
+                T_ref, forcing.q_lowest,
+                T_s, q_s, rho,
+                z_ref=z_ref,
+                z0_init=z0,
+                scheme=land_config.bulk_scheme,
+                n_iter=land_config.bulk_n_iter,
+                L_latent=L,
+                max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
+            )
+        else:
+            ustar = None   # constant-coefficient law: no friction velocity
+            tx, ty, sh, lh = simple_bulk_fluxes(
+                forcing.u_lowest, forcing.v_lowest,
+                forcing.T_lowest, forcing.q_lowest,
+                T_s, q_s, rho, wind_speed,
+                land_config.Cd_land, land_config.Ch_land,
+                L_latent=L,
+            )
+        # Cold-start condensation floor (issue #730): bound the spurious (negative)
+        # condensation shock BEFORE it enters G_soil / the returned demand;
+        # evaporation (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
+        # On the layered path it bounds each component (snow, soil) per unit of its
+        # own area before the f / (1-f) weighting, so the cell total stays >= floor.
+        lh_raw = lh
+        if LAND_CONDENSATION_FLOOR_W is not None:
+            lh = jnp.maximum(lh, LAND_CONDENSATION_FLOOR_W)
+        return tx, ty, sh, lh, lh_raw, ustar
+
+    def _layered_q(T_s):
+        # Layered pack (fractional cover f): the snow is an ice-saturated, freely
+        # evaporating surface; the soil is beta-limited with the dew bypass.
+        q_ice = saturation_mixing_ratio_ice(T_s, forcing.p_surface)
+        q_liq = saturation_mixing_ratio(T_s, forcing.p_surface)
+        b = jnp.where(q_liq < forcing.q_lowest, 1.0, beta)
+        return q_ice, beta_limited_surface_humidity(
+            q_liq, forcing.q_lowest, jnp.ones_like(q_liq), b)
+
+    LE_snow = None
+    vapour_conductance = None
+    if snow_cover is None:
+        tau_x, tau_y, shflx, lhflx, _, _ustar = _bulk(T_surface, q_sfc, L_eff)
+        tau_mag = None if _ustar is None else rho * _ustar ** 2
+    else:
+        # Snow and soil exchange computed SEPARATELY, then area-weighted by f and
+        # 1-f.  One blended surface (f-weighted q_sat, beta and L) put about f of
+        # the snow's potential on the column, and the caller then gave the pack f
+        # of THAT (f^2): measured 13.8-21 W/m2 of latent demand left unmet on a
+        # dry soil under f = 0.10-0.66.  ``LE_snow`` (per unit CELL area) is the
+        # pack's share, which the multilayer partition charges to the pack.
+        f = snow_cover
+        q_sfc_snow, q_sfc_soil = _layered_q(T_surface)
+        _L_s, _L_v = latent_heat_sublimation(T_surface), latent_heat_vaporization(T_surface)
+        _snow = _bulk(T_surface, q_sfc_snow, _L_s)
+        _soil = _bulk(T_surface, q_sfc_soil, _L_v)
+        tau_x, tau_y, shflx, lhflx = (
+            f * a + (1.0 - f) * b for a, b in zip(_snow[:4], _soil[:4]))
+        LE_snow = f * _snow[3]
+        # Solved stress magnitude rho*u*^2, area-weighted like (tau_x, tau_y).
+        tau_mag = (None if _snow[5] is None
+                   else rho * (f * _snow[5] ** 2 + (1.0 - f) * _soil[5] ** 2))
+        q_sfc = f * q_sfc_snow + (1.0 - f) * q_sfc_soil
+        # Cell vapour conductance [kg m-2 s-1 per kg/kg], > 0: the exchange
+        # coefficient AT THE SOLVED HUMIDITY (and stability) of each component,
+        # E_raw / (q_c - q_air) from the UNFLOORED flux, area-weighted.  Under MOST
+        # the coefficient depends on q through stability, so a local slope dE/dq
+        # is not it.  Where q_c ~ q_air the secant is 0/0 and the slope (the same
+        # coefficient in that limit) is used.  The caller exports q_air + E / g
+        # from the REALISED vapour flux E, so the exported humidity implies that
+        # flux in sign and magnitude through this coefficient.
+        def _coeff(q_c, L, raw):
+            dq_c = q_c - forcing.q_lowest
+            slope = (_bulk(T_surface, q_c + _VAPOUR_COND_DQ, L)[4] - raw) / (
+                L * _VAPOUR_COND_DQ)
+            ok = jnp.abs(dq_c) > _VAPOUR_COND_DQ
+            secant = (raw / L) / jnp.where(ok, dq_c, 1.0)
+            return jnp.where(ok, secant, slope)
+
+        vapour_conductance = (f * _coeff(q_sfc_snow, _L_s, _snow[4])
+                              + (1.0 - f) * _coeff(q_sfc_soil, _L_v, _soil[4]))
 
     # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
     # Use the SAME effective snow mass as the iter-68 bulk-flux phase
@@ -262,32 +328,24 @@ def compute_simple_seb_fluxes(
     # flux then used one formula and the perturbed flux another, so the finite
     # difference carried an artificial -(1-beta)*q_air offset and the >=0 clamp
     # on the inferred conductance could zero the implicit latent damping.
-    _q_sat_lin = jnp.where(
-        has_snow,
-        saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
-        saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
-    )
-    _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
-    q_sfc_lin = beta_limited_surface_humidity(
-        _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
-    if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            T_ref, forcing.q_lowest,
-            T_sfc_lin, q_sfc_lin, rho,
-            z_ref=z_ref, z0_init=z0,
-            scheme=land_config.bulk_scheme, n_iter=land_config.bulk_n_iter,
-            L_latent=L_eff, max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
+    if snow_cover is None:
+        _q_sat_lin = jnp.where(
+            has_snow,
+            saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
+            saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
         )
+        _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
+        q_sfc_lin = beta_limited_surface_humidity(
+            _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
+        _, _, shflx_lin, lhflx_lin, _ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
     else:
-        _, _, shflx_lin, lhflx_lin = simple_bulk_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_sfc_lin, q_sfc_lin, rho, wind_speed,
-            land_config.Cd_land, land_config.Ch_land, L_latent=L_eff,
-        )
-    if LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx_lin = jnp.maximum(lhflx_lin, LAND_CONDENSATION_FLOOR_W)
+        # Same per-component exchange as the flux above (latent heats held at
+        # T_surface, as L_eff is on the binary path).
+        _qs_lin, _ql_lin = _layered_q(T_sfc_lin)
+        _sn = _bulk(T_sfc_lin, _qs_lin, latent_heat_sublimation(T_surface))
+        _so = _bulk(T_sfc_lin, _ql_lin, latent_heat_vaporization(T_surface))
+        shflx_lin = f * _sn[2] + (1.0 - f) * _so[2]
+        lhflx_lin = f * _sn[3] + (1.0 - f) * _so[3]
     _emis_b = jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape)
     lambda_lw = 4.0 * _emis_b * constants.sigma_sb * T_surface ** 3
     lambda_sh = jnp.maximum((shflx_lin - shflx) / _SURFACE_LIN_DT_K, 0.0)
@@ -308,6 +366,8 @@ def compute_simple_seb_fluxes(
         sif=sif_farq,
         stomatal_ratio=stomatal_ratio,
         surface_conductance=surface_conductance,
+        LE_snow=LE_snow,
+        vapour_conductance=vapour_conductance,
         tau_mag=tau_mag,
         # Canopy-specific diagnostics left as None
     )

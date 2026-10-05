@@ -254,7 +254,7 @@ that bottom drag is being applied via two non-equivalent paths:
 
 1. **Bottom-cell explicit drag** at `ocean_pe_latlon_cgrid.py:545–552` —
    correct linear drag on `u[..., -1]` and `v[..., -1]`. Its depth-mean
-   is folded into `F_slow_u/v` at `ocean_model_latlon_cgrid.py:373–374`
+   is folded into `F_slow_u/v` at `ocean_model_latlon_cgrid.py:374–374`
    and carried into the barotropic substep. **Correct path.**
 2. **Independent depth-mean drag** at `barotropic_latlon_cgrid.py:340–346`
    — the `(1 − dt·r/H)` factor on `U_bar`. **Redundant.**

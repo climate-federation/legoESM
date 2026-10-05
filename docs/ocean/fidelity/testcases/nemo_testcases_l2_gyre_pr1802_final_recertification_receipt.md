@@ -94,7 +94,7 @@ campaign's own attribution rule: prove the path executes before citing the line.
 I did not, and the second reviewer caught it.
 
 **So the code is reverted** to the before-arm form at
-`barotropic_latlon_cgrid.py:2648-2649`, with the refutation recorded at the call
+`barotropic_latlon_cgrid.py:2738-2739`, with the refutation recorded at the call
 site so the next reader does not repeat it.  The decision is not dropped — it is
 returned to the user in "Behaviour changes", item 4, with the real statement
 named.
@@ -205,7 +205,7 @@ ratio and the sea-surface-temperature correlation and bias — the table in
 `docs/ocean/fidelity/dino_handoff_2026_07.md`, which reports the year-5 form of
 the same protocol).  Reproduced here, it refuses on the NEMO DINO card with
 
-> `raw-mesh e3w_int must contain only finite values > 0`  (`eos.py:742`)
+> `raw-mesh e3w_int must contain only finite values > 0`  (`eos.py:747`)
 
 **measured in the BEFORE worktree**, so the refusal is pre-existing and not
 decision 66's or 67's.  It is the same class of DINO geometry refusal round 182

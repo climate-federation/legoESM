@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
+from legoesm.land import snow_column as _snow_column
+
+# Snow emissivity: ONE default and ONE legal range, both owned by the snow
+# column's parameter spec.
+_SNOW_EMISSIVITY_DEFAULT = _snow_column.SnowColumnConfig._field_defaults["emissivity_snow"]
+_SNOW_EMISSIVITY_BOUNDS = (
+    _snow_column.__param_spec__["SnowColumnConfig"]["params"]["emissivity_snow"]["bounds"])
 
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
@@ -1209,6 +1216,16 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Multilayer-land snowpack: "bulk" (one SWE reservoir, energy-limited melt at
+    # the soil skin — the library default) or "layered" (legoesm.land.snow_column:
+    # five equal-mass layers solved implicitly with the soil column, enthalpy
+    # phase change, percolation, rain-on-snow).  Whether the library default
+    # should move is an open user decision, so decks set it explicitly.
+    land_snow_scheme: str = "bulk"
+    # Thermal-IR emissivity of snow for the layered pack's surface blend.  The
+    # default and legal range are the snow_column parameter spec's (observations:
+    # Warren 1982; Hori et al. 2006), so the two doors cannot disagree.
+    land_snow_emissivity: float = _SNOW_EMISSIVITY_DEFAULT
     # Frozen-soil ice impedance exponent e (CLM5 e_ice): soil conductivity is
     # multiplied by 10**(-e * ice fraction).  Active only with
     # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
@@ -1880,6 +1897,18 @@ class ExperimentConfig(NamedTuple):
     clubb_gamma_coefb: float | None = None
     clubb_beta: float | None = None
     clubb_c_k10: float | None = None
+    # Two-leaf canopy solver smoothing widths (CanopyConfig.rh_cap_smoothing_
+    # width / zeta_cap_smoothing_width): the canopy-air RH <= 1 cap and the
+    # stable Monin-Obukhov zeta <= 0.5 cap are smooth mins of these widths so
+    # the canopy Newton solve has no kink.  Applied AFTER the land calibration
+    # (which rebuilds the canopy config), so a deck value always reaches the
+    # solve.  None keeps CanopyConfig's value; the production deck names both.
+    # Range: CanopyConfig.validate (one range, owned by the land package).
+    land_canopy_rh_cap_smoothing_width: float | None = None
+    land_canopy_zeta_cap_smoothing_width: float | None = None
+    # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
+    # Monin-Obukhov solve (same placement and None semantics as the widths).
+    land_canopy_most_n_iters: int | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2209,6 +2238,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.land_snow_scheme not in ("bulk", "layered"):
+            errors.append(
+                f"land_snow_scheme must be 'bulk' or 'layered', got "
+                f"{self.land_snow_scheme!r}")
+        if self.land_snow_scheme == "layered" and not self.use_multilayer_land:
+            errors.append(
+                "land_snow_scheme='layered' requires use_multilayer_land: only "
+                "the multilayer land has the layered snowpack — the knob would be "
+                "silently inert.")
+        _eps_lo, _eps_hi = _SNOW_EMISSIVITY_BOUNDS
+        if not (_eps_lo <= self.land_snow_emissivity <= _eps_hi):
+            errors.append(
+                f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
+                f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
         if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
             errors.append(
                 "convective_buoyancy_death_memory=True requires "
@@ -3679,6 +3722,28 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
+        _rhw = self.land_canopy_rh_cap_smoothing_width
+        _zw = self.land_canopy_zeta_cap_smoothing_width
+        _mi = self.land_canopy_most_n_iters
+        if _rhw is not None or _zw is not None or _mi is not None:
+            if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
+                errors.append(
+                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
+                    f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
+                    "multilayer land reads them, so the value would be inert")
+            else:
+                from legoesm.land.canopy.config import CanopyConfig
+                _cc = CanopyConfig()
+                try:
+                    _cc._replace(**({} if _rhw is None else
+                                    {"rh_cap_smoothing_width": float(_rhw)}),
+                                 **({} if _zw is None else
+                                    {"zeta_cap_smoothing_width": float(_zw)}),
+                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 ).validate()
+                except ValueError as exc:
+                    errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud"):
             _v = getattr(self, _nm)

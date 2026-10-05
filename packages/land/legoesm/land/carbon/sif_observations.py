@@ -90,63 +90,11 @@ def per_archetype_observed_sif(
         sif_cell, cell_archetype_id, cell_archetype_weight, n_arch=n_arch)
 
 
-def load_gridded_sif(sif_path, *, ncell, sif_var=None):
-    """Per-cell observed SIF ``(ncell,)`` [umol m-2 s-1] from a gridded SIF NetCDF.
-
-    ``SIF(... , nlat, nlon)`` is time-averaged (any leading axes collapsed to a
-    growing-season / annual mean, IGNORING NaN gaps via ``nanmean``) then reshaped to the
-    SAME row-major ``(ncell = nlat*nlon)`` order the CLM5 cover loader uses, so cell
-    indices align with the archetype membership.  Missing cells are PRESERVED as ``NaN``
-    (never fabricated to 0), so the per-archetype cover-weighted mean
-    (:func:`per_archetype_observed_sif`) averages only the observed cells and an unobserved
-    archetype gets ``NaN`` -- a satellite SIF product is gap-heavy (cloud, high latitude,
-    ocean), so a NaN->0 fill would bias archetype means low.  The product MUST already be on
-    the surfdata grid (same shape AND lat/lon orientation) and in the model's photon-flux
-    units -- regridding + a radiance->photon-flux conversion is the data-prep follow-up (see
-    the module docstring); a shape mismatch is a hard error, never a silent misalignment.
-
-    Parameters
-    ----------
-    sif_path : str
-        Gridded SIF NetCDF path (``--sif-obs``).
-    ncell : int
-        Expected number of cells (= the cover ``ncell``); a mismatch raises.
-    sif_var : str, optional
-        SIF variable name; auto-detected from a small candidate list if omitted.
-    """
-    import xarray as xr
-
-    ds = xr.open_dataset(sif_path, decode_times=False)
-    try:
-        candidates = ("sif", "SIF", "sif_dc", "SIF_740", "sif_740", "sif_ann", "SIF_Corr_740")
-        var = sif_var or next((v for v in candidates if v in ds), None)
-        if var is None:
-            raise SystemExit(
-                f"gridded SIF {sif_path} has no recognised SIF variable "
-                f"(looked for {candidates}); pass --sif-var. Available: "
-                f"{sorted(ds.data_vars)[:40]}")
-        arr = np.asarray(ds[var].values, dtype=float)
-    finally:
-        ds.close()
-    # Collapse any leading axes (e.g. time / months) to a growing-season / annual mean,
-    # ignoring NaN gaps (a cell observed on SOME months keeps that partial mean; a cell
-    # never observed stays NaN -- an all-NaN slice yields NaN, the intended "no data").
-    while arr.ndim > 2:
-        with np.errstate(invalid="ignore"):
-            arr = np.nanmean(arr, axis=0)
-    if arr.ndim != 2:
-        raise SystemExit(
-            f"gridded SIF variable expected 2-D (nlat, nlon) after time-averaging; "
-            f"got shape {arr.shape}.")
-    # PRESERVE NaN gaps (do NOT fabricate 0) -- the cover-weighted mean excludes them.
-    sif_cell = np.asarray(arr, dtype=float).reshape(-1)   # row-major (i_lat, i_lon)
-    if sif_cell.shape[0] != int(ncell):
-        raise SystemExit(
-            f"gridded SIF ncell {sif_cell.shape[0]} (= {arr.shape[0]}x{arr.shape[1]}) "
-            f"!= cover ncell {int(ncell)}; the SIF product must be pre-regridded onto "
-            f"the surfdata grid (same shape AND lat/lon orientation) -- a data-prep "
-            f"follow-up. Use --dry-run-synthetic for a self-contained test.")
-    return sif_cell
+# Variable names :func:`soc_observations.load_gridded_obs` auto-detects in a gridded SIF
+# NetCDF (``--sif-obs``).  The product must be on the surfdata grid and in the model's
+# photon-flux units [umol m-2 s-1]; regridding + the radiance->photon-flux conversion is
+# the data-prep follow-up (see the module docstring).
+SIF_VAR_CANDIDATES = ("sif", "SIF", "sif_dc", "SIF_740", "sif_740", "sif_ann", "SIF_Corr_740")
 
 
 def synthetic_observed_sif(table):
@@ -155,7 +103,7 @@ def synthetic_observed_sif(table):
 
     SIF rises with growing-season shortwave and warmth (brighter/warmer archetypes
     photosynthesise + fluoresce more), so the fluorescence parameters have signal to fit.
-    NOT a real product -- see :func:`load_gridded_sif` for the satellite source + the
+    NOT a real product -- see ``SIF_VAR_CANDIDATES`` for the satellite source + the
     radiance->photon-flux conversion follow-up.
     """
     sw = np.asarray(table.sw_mean_w, dtype=float)

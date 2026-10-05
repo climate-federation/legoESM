@@ -74,7 +74,9 @@ def zero_freshwater(nCells: int) -> FreshwaterForcing:
     return FreshwaterForcing(precip=z, evap=z, runoff=z, ice_fw=z, restoring=z)
 
 
-def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
+def net_freshwater_flux(
+    fw: FreshwaterForcing, *, include_runoff: bool = True,
+) -> jnp.ndarray:
     """Compute net freshwater flux into ocean [kg/m²/s].
 
     F_fw = P - E + R + M + R_restore
@@ -93,7 +95,18 @@ def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
     jax.Array, shape (nCells,)
         Net freshwater flux [kg/m²/s], positive into ocean.
     """
-    base = fw.precip - fw.evap + fw.runoff + fw.ice_fw
+    # ``include_runoff=False`` is NEMO's ``emp``: the evaporation-minus-
+    # precipitation channel WITHOUT the river runoff, which NEMO carries
+    # separately (``stp2d.F90:278-279`` forms ``emp - rnf`` for the sea
+    # surface, ``sbcrnf.F90`` puts the same runoff in the horizontal
+    # divergence, and ``trasbc.F90``'s dilution term reads ``emp`` alone).
+    # The runoff is EXCLUDED FROM THE SUM rather than subtracted from it:
+    # ``(x + r) - r`` is not bitwise ``x``, and on the ORCA2 record the
+    # two spellings differ on 328 cells.
+    if not include_runoff:
+        base = fw.precip - fw.evap + fw.ice_fw
+    else:
+        base = fw.precip - fw.evap + fw.runoff + fw.ice_fw
     # ``restoring is None`` is a Python (trace-time) check — safe
     # under JIT because the field is structural metadata.
     if fw.restoring is None:

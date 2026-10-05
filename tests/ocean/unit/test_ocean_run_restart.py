@@ -111,6 +111,9 @@ _SLOT_KIND = {
     "u_incr_prev": "field", "v_incr_prev": "field",
     "u_before": "field", "v_before": "field", "T_before": "field",
     "S_before": "field", "eta_before": "field",
+    # NEMO's RK3 after-SSH slot ('ssha'), written at the end of every step
+    # (stprk3.F90:225) and read by the next step's first wzv (stp2d.F90:149).
+    "eta_rk3_after": "field",
     "uu_b": "field", "vv_b": "field",
     "F_slow_u_prev": "field", "F_slow_v_prev": "field",
     # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently.
@@ -1387,3 +1390,74 @@ def test_seed_scan_carry_slots_round_trip(tmp_path, gates):
     # ('u', 'v', ...) and a name drift would fail scan reconciliation.
     assert (jax.tree_util.tree_structure(got)
             == jax.tree_util.tree_structure(seeded))
+
+
+# --- VORTEX round 6: NEMO's carried after-SSH slot, format 4 -> 5 -----------
+# NEMO writes its extrapolated after-SSH into its own restart as ``ssha``
+# (restart.F90:184) and reads it back at the next nit000 (restart.F90:362-370),
+# falling back to the step-entry height when the archive has none.  legoESM
+# carries the same quantity as ``eta_rk3_after``.  An archive written before
+# the slot existed has no value to restore it from, and taking NEMO's fallback
+# here would silently make a resumed RK3 run a different trajectory, so such an
+# archive is refused BY NAME.
+
+def test_the_rk3_after_ssh_slot_round_trips(tmp_path):
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+
+    _, _, state = _base_state()
+    carried = jnp.asarray(
+        np.random.default_rng(11).random((N_LAT, N_LON)) * 0.3)
+    state = state._replace(
+        eta_rk3_after=state.eta.replace(data=carried))
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=7, time_days=2.0, grid_type="latlon")
+    got, _, meta = load_run_restart(path, _base_state()[2], grid_type="latlon")
+    assert meta["format"] == 5
+    np.testing.assert_array_equal(np.asarray(got.eta_rk3_after.data),
+                                  np.asarray(carried))
+
+
+def _format_4_copy(path, tmp_path):
+    """Rewrite an archive as format 4 with the new slot absent from it."""
+    import numpy as _np
+
+    with _np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_format"] = _np.asarray(4)
+    inventory = json.loads(str(payload["_inventory"]))
+    inventory.pop("eta_rk3_after")
+    payload["_inventory"] = _np.asarray(json.dumps(inventory))
+    out = tmp_path / "old.npz"
+    _np.savez(out, **payload)
+    return out
+
+
+def test_a_pre_format_5_archive_still_loads_for_a_run_that_never_reads_it(
+        tmp_path):
+    """An uncarried card loses nothing when the old archive omits the slot."""
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    old = _format_4_copy(path, tmp_path)
+    got, _, meta = load_run_restart(old, _base_state()[2], grid_type="latlon")
+    assert meta["format"] == 4
+    assert got.eta_rk3_after is None
+    np.testing.assert_array_equal(np.asarray(got.eta.data),
+                                  np.asarray(state.eta.data))
+
+
+def test_a_pre_format_5_archive_is_refused_by_name_for_a_run_that_reads_it(
+        tmp_path):
+    """Non-vacuity: the refusal must name the slot, and it must NOT fire on
+    the run that does not read it (the test above is that half)."""
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+
+    _, _, state = _base_state()
+    path = tmp_path / "r.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    old = _format_4_copy(path, tmp_path)
+    with pytest.raises(ValueError, match="eta_rk3_after"):
+        load_run_restart(old, _base_state()[2], grid_type="latlon",
+                         carries_rk3_after_ssh=True)

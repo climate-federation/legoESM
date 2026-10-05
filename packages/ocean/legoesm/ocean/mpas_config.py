@@ -132,6 +132,10 @@ class MPASOceanConfig(NamedTuple):
     bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
     bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
     bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
+    # NEMO rn_Uc0 [m/s], the reference velocity of the LINEAR law
+    # (zdfdrg np_lin: rCdU_bot = -rn_Cd0*rn_Uc0, constant in time).
+    # Read by 'nemo_linear' only; namelist_ref &namdrg_bot:835.
+    bottom_drag_uc0: float = 0.4
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -308,7 +312,7 @@ class MPASOceanConfig(NamedTuple):
     # same with the halo exchanged every few iterations — validated at solver
     # entry, ValueError on unknown).
     #
-    # History (superseded 2026-10-02 by gpoly@15, see the end of this block):
+    # History (superseded 2026-10-05 by gpoly@20, see the end of this block):
     # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
     # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
     # Jacobi at 30, same residual).  The Jacobi history that set 30:
@@ -349,16 +353,20 @@ class MPASOceanConfig(NamedTuple):
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
     #
-    # 15 with the GLOBAL polynomial ("gpoly", below) since 2026-10-02 (owner
-    # decision). Saved L9 systems, 128 emulated devices: gpoly@15 beats the
-    # block-local poly@20 it replaces (f64 rel_res 6.4e-8 vs 8.9e-8; f32
-    # surface error vs converged 1.1e-7 m vs 2.4e-7 m). GPU weak ladder
-    # (20480 cells/GPU, f32, two repeats): step -6% / -8.5% / -10.4% at
-    # 8 / 32 / 128 GPUs. Single-device runs are unaffected (stock CG).
+    # 20 with the GLOBAL polynomial ("gpoly", below) since 2026-10-05 (owner
+    # decision). gpoly@15 was faster (-9/-12/-11% at 8/32/128 GPUs,
+    # single_reduce) and beat poly@20 on L9 at dt=300 s, but FAILED the
+    # finer-mesh check (job 27848794): on L10 @512 emulated devices and on
+    # L9 at dt=600 s it is slightly worse than poly@20 (f64 rel_res 4.3e-4
+    # vs 3.9e-4; 1.3e-3 vs 1.0e-3), while gpoly@20 is 4-6x better than
+    # poly@20 there at about the same step cost (gpoly vs poly at 20:
+    # +0.5..+1.5% at 8/32 GPUs, -1% at 128). NOTE: at L10 or dt=600 s every
+    # option is far from converged at 20 (rel_res ~1e-4..1e-3); the count is
+    # mesh/dt-specific. Single-device runs are unaffected (stock CG).
     # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
     # reaches the 1e-10 relative residual in 27-30 iterations on real s7
     # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
-    barotropic_implicit_pcg_fixed_iters: int = 15
+    barotropic_implicit_pcg_fixed_iters: int = 20
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # "standard" (two allreduces per iteration) is the default since
     # 2026-10-02 (owner decision): it is the recurrence gpoly x 15 was

@@ -1201,3 +1201,35 @@ def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
     assert np.max(np.abs(runs["on"] - runs["off"])) > 0.0, (
         "two-leaf land stress did not reach the CLUBB winds")
     np.testing.assert_array_equal(runs["auto"], runs["on"])
+
+
+def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
+    """The calibration replaces surface_scheme with a fresh two-leaf config, so
+    deck widths set before it would be discarded; they must reach the solve."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.config import CanopyConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        mpas_land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+        land_canopy_rh_cap_smoothing_width=0.02,
+        land_canopy_zeta_cap_smoothing_width=0.03,
+        land_canopy_most_n_iters=7,
+    )
+    d = CanopyConfig()
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
+    base.validate_strict()
+    drv = ModelDriver(base, output_dir=tmp_path / "w")
+    drv.setup()
+    ss = drv.physics.land_ml_cfg.surface_scheme
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)

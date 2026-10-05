@@ -40,7 +40,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from legoesm.core.nonlinear import make_implicit_newton_solver
-from legoesm.land.canopy.config import VALID_LE_MODULES, CanopyConfig
+from legoesm.land.canopy.config import (
+    RH_CAP_WIDTH_MAX, VALID_LE_MODULES, ZETA_CAP_WIDTH_MAX, CanopyConfig)
 from legoesm.land.canopy.energy_balance import (
     canopy_air_update,
     canopy_met_variables,
@@ -48,7 +49,6 @@ from legoesm.land.canopy.energy_balance import (
     leaf_energy_balance_pm,
     saturation_specific_humidity,
     soil_energy_balance_bt,
-    soil_energy_balance_pm,
 )
 from legoesm.land.canopy.photosynthesis import photosynthesis
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
@@ -219,6 +219,9 @@ def _canopy_residual(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
+    zeta_cap_width: float,
+    most_n_iters: int,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
 
@@ -240,7 +243,8 @@ def _canopy_residual(
 
     # ---- MOST stability ----
     ustar, rah_above, raw_above, uav, _ = monin_obukhov_stability(
-        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
+        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
 
     # ---- Boundary and below-canopy resistances ----
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
@@ -275,7 +279,7 @@ def _canopy_residual(
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc, q_c)
+        b.Ps, Tc, q_c, rh_cap_width)
 
     # ---- Leaf energy balance ----
     if LE_module == "BT":
@@ -305,18 +309,12 @@ def _canopy_residual(
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
-    if LE_module == "BT":
-        _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
-    else:
-        _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
+    # PM and BT coincide at the soil level (Ts prescribed), so one helper serves both.
+    _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
+        Ts, Tc, q_s, q_c,
+        b.lam, b.rhoa, b.Cp,
+        rah_below, raw_soil_evap, b.fStress_soil,
+        b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
@@ -401,6 +399,9 @@ def canopy_forward(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
+    zeta_cap_width: float,
+    most_n_iters: int,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
 
@@ -417,7 +418,8 @@ def canopy_forward(
     zldis = b.z0 - b.displa
 
     ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
-        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
+        b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m,
+        n_iters=most_n_iters, zeta_cap_width=zeta_cap_width)
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
@@ -453,7 +455,7 @@ def canopy_forward(
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc, q_c)
+        b.Ps, Tc, q_c, rh_cap_width)
 
     if LE_module == "BT":
         q_f_Sun = saturation_specific_humidity(Tf_Sun, b.Ps)
@@ -498,18 +500,11 @@ def canopy_forward(
     LE_wet_Sh = _le_wet(LE_Sh, gs_Sh, Rb_Sh)
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
-    if LE_module == "BT":
-        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
-    else:
-        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
-            Ts, Tc, q_s, q_c,
-            b.lam, b.rhoa, b.Cp,
-            rah_below, raw_soil_evap, b.fStress_soil,
-            b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
+    Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
+        Ts, Tc, q_s, q_c,
+        b.lam, b.rhoa, b.Cp,
+        rah_below, raw_soil_evap, b.fStress_soil,
+        b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
@@ -568,11 +563,22 @@ def solve_canopy_closure(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
+    if not 0.0 < config.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
+        raise ValueError("rh_cap_smoothing_width must be in "
+                         f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
+                         f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+        raise ValueError("zeta_cap_smoothing_width must be in "
+                         f"(0, {ZETA_CAP_WIDTH_MAX}] (the smooth stability "
+                         f"cap divides by it), got {config.zeta_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        rh_cap_width=config.rh_cap_smoothing_width,
+        zeta_cap_width=config.zeta_cap_smoothing_width,
+        most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -601,11 +607,22 @@ def solve_canopy_closure_diag(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
             f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
             "'PM'=Penman-Monteith)")
+    if not 0.0 < config.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
+        raise ValueError("rh_cap_smoothing_width must be in "
+                         f"(0, {RH_CAP_WIDTH_MAX}] (the smooth relative-humidity "
+                         f"cap divides by it), got {config.rh_cap_smoothing_width!r}")
+    if not 0.0 < config.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+        raise ValueError("zeta_cap_smoothing_width must be in "
+                         f"(0, {ZETA_CAP_WIDTH_MAX}] (the smooth stability "
+                         f"cap divides by it), got {config.zeta_cap_smoothing_width!r}")
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
         stomatal_model=config.stomatal_model,
         le_cap_mode=config.le_cap_mode,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        rh_cap_width=config.rh_cap_smoothing_width,
+        zeta_cap_width=config.zeta_cap_smoothing_width,
+        most_n_iters=config.most_n_iters,
         max_iters=config.max_iters,
         tol=config.tol,
     )
@@ -621,6 +638,9 @@ def _make_implicit_newton_solver(
     stomatal_model: str,
     le_cap_mode: str,
     use_ta_for_photosynthesis: bool,
+    rh_cap_width: float,
+    zeta_cap_width: float,
+    most_n_iters: int,
     max_iters: int,
     tol: float,
 ):
@@ -634,6 +654,9 @@ def _make_implicit_newton_solver(
             stomatal_model=stomatal_model,
             le_cap_mode=le_cap_mode,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
+            rh_cap_width=rh_cap_width,
+            zeta_cap_width=zeta_cap_width,
+            most_n_iters=most_n_iters,
         )
 
     return make_implicit_newton_solver(

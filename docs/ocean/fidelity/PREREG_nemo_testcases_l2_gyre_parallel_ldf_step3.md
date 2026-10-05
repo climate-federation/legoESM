@@ -28,7 +28,7 @@ Kbb-content plus Kmm-thickness-times-`Krhs` right-hand side at
 `GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565`.
 
 At the frozen legoESM tip the existing one-variable arm is defined at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1333-1336`
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1359-1362`
 and routes the already computed arrays into the stage-3 tuple at
 `:7721-7731`. The production candidate is exactly that arm with the private
 boolean replaced by the executing `gm_redi is not None` condition.

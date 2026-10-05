@@ -342,7 +342,7 @@ def probe_latlon_cgrid(
                 "NEMO's leapfrog rDt and is not a safe rn_Dt substitute"
             )
         # Production resolves this identically at
-        # ocean_model_latlon_cgrid.py:10018-10022: literal NEMO TKE consumes
+        # ocean_model_latlon_cgrid.py:10101-10105: literal NEMO TKE consumes
         # its dedicated base rn_Dt; all other closures consume momentum dt.
         _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call

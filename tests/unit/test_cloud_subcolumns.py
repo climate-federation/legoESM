@@ -330,11 +330,16 @@ def test_shift_keeps_the_per_layer_marginal():
     assert err.mean() < 0.02, f"mean marginal error {err.mean():.4f}"
 
 
-def test_zero_shift_is_the_unshifted_table():
-    cf = _cf()
-    a = generate_subcolumns(cf, 16)
-    b = generate_subcolumns(cf, 16, shift=jnp.zeros(cf.shape[0]))
-    assert np.array_equal(np.asarray(a), np.asarray(b))
+def test_each_g_point_sees_random_overlap_across_columns():
+    """Two cloud layers separated by a clear one overlap RANDOMLY (cover 0.75).
+    Averaged over columns, every subcolumn (g-point) must see that, not only
+    the mean over g-points: a shift shared by all layers kept each subcolumn's
+    layer pairing fixed, so single g-points sat at cover 0.5 or 1.0 (codex)."""
+    ncol = 2000
+    cf = jnp.broadcast_to(jnp.asarray([0.5, 0.0, 0.5]), (ncol, 3))
+    shift = (jnp.arange(ncol) + 0.5) / ncol
+    cover = np.asarray(generate_subcolumns(cf, 112, shift=shift)).any(-1).mean(1)
+    assert np.abs(cover - 0.75).max() < 0.06, np.abs(cover - 0.75).max()
 
 
 def test_shift_changes_which_subcolumn_is_cloudy():
