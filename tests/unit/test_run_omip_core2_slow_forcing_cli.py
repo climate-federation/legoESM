@@ -47,9 +47,18 @@ def test_nemo_literal_without_carried_mode_is_refused():
     import scripts.run.run_omip_core2 as core2
     from legoesm.ocean.state import BarotropicConfig
     bt = BarotropicConfig()
+    assert bt.barotropic_solver == "explicit_substep"   # the refused case below IS the window
     with pytest.raises(SystemExit, match="carried external mode"):
         core2.assert_slow_forcing_pair_resolved(
             bt._replace(barotropic_slow_forcing_depth_evaluation="nemo_literal"))
+    with pytest.raises(SystemExit, match="inert"):
+        core2.assert_slow_forcing_pair_resolved(
+            bt._replace(barotropic_slow_forcing_depth_evaluation="nemo_literal",
+                        barotropic_solver="implicit_unsplit"))
+    # implicit CN: no window to seed, so the reference mean alone is allowed
+    core2.assert_slow_forcing_pair_resolved(
+        bt._replace(barotropic_slow_forcing_depth_evaluation="nemo_literal",
+                    barotropic_solver="implicit_cn"))
     core2.assert_slow_forcing_pair_resolved(
         bt._replace(barotropic_slow_forcing_depth_evaluation="nemo_literal",
                     nemo_prognostic_barotropic_state=True))

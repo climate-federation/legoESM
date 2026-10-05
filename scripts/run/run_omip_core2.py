@@ -1694,16 +1694,25 @@ def _checked_kappah_min(value):
     return v
 
 def assert_slow_forcing_pair_resolved(bt_cfg) -> None:
-    """Refuse NEMO's reference-thickness slow-forcing mean without the carried
-    external mode: NEMO pairs the two at the loop-entry Coriolis subtraction
-    (e487b3b42), and the half pair is a third hybrid over partial cells,
-    neither NEMO nor any prior run.  Checked on the RESOLVED config so a
-    --config YAML cannot bypass it."""
+    """Refuse NEMO's reference-thickness slow-forcing mean on a split-explicit
+    window without the carried external mode: there NEMO pairs the two
+    (dynspg_ts.F90:296,485-489) and the half pair is a hybrid over partial
+    cells.  Under the implicit-CN free surface there is no window to seed, so
+    the reference-thickness mean alone is the whole statement (user
+    2026-10-05).  Checked on the RESOLVED config so a --config YAML cannot
+    bypass it."""
     if (getattr(bt_cfg, "barotropic_slow_forcing_depth_evaluation", "") == "nemo_literal"
+            and getattr(bt_cfg, "barotropic_solver", "explicit_substep") == "explicit_substep"
             and not getattr(bt_cfg, "nemo_prognostic_barotropic_state", False)):
-        raise SystemExit("barotropic_slow_forcing_depth_evaluation=nemo_literal "
-                         "needs the carried external mode "
-                         "(nemo_prognostic_barotropic_state), not wired in this driver")
+        raise SystemExit("barotropic_slow_forcing_depth_evaluation=nemo_literal on "
+                         "the split-explicit solver needs the carried external mode "
+                         "(--nemo-carried-external-mode)")
+    if (getattr(bt_cfg, "barotropic_slow_forcing_depth_evaluation", "") == "nemo_literal"
+            and getattr(bt_cfg, "barotropic_solver", "") == "implicit_unsplit"):
+        # implicit_unsplit bypasses _step_impl, where the depth mean is built:
+        # the setting would be inert.
+        raise SystemExit("barotropic_slow_forcing_depth_evaluation=nemo_literal is "
+                         "inert under barotropic_solver='implicit_unsplit'")
 
 
 def attach_nemo_carried_pair(state, config, *, balanced_init=False, n_gpus=1):
