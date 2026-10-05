@@ -8,9 +8,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    _nemo_external_mode_boundary_association,
     nemo_literal_continuity_divergence,
     nemo_literal_metric_transports,
 )
+from legoesm.grids.tripole import create_synthetic_tripole
 
 
 def _case():
@@ -69,3 +71,34 @@ def test_rich_geometry_uses_full_u_face_metric():
     got_u, _ = nemo_literal_metric_transports(h_u, h_v, u, v, um, vm, grid)
     expected = ((grid.dy_u * u) * h_u) * um
     np.testing.assert_array_equal(np.asarray(got_u), np.asarray(expected))
+
+
+def test_external_mode_boundary_association_is_one_seven_field_map():
+    grid = create_synthetic_tripole(6, 8)
+    u = jnp.arange(6 * 9, dtype=jnp.float64).reshape(6, 9)
+    v = jnp.arange(7 * 8, dtype=jnp.float64).reshape(7, 8)
+    depth_u = u + 100.0
+    depth_v = v + 200.0
+    inverse_u = u + 300.0
+    inverse_v = v + 400.0
+    eta = jnp.arange(6 * 8, dtype=jnp.float64).reshape(6, 8)
+    got = _nemo_external_mode_boundary_association(
+        u, v, depth_u, depth_v, inverse_u, inverse_v, eta, grid)
+
+    for value, source in ((got[0], u), (got[2], depth_u),
+                          (got[4], inverse_u)):
+        np.testing.assert_array_equal(np.asarray(value[:, 0]),
+                                      np.asarray(source[:, -1]))
+        np.testing.assert_array_equal(np.asarray(value[:, 1:]),
+                                      np.asarray(source[:, 1:]))
+    for value, source, sign in ((got[1], v, -1.0),
+                                (got[3], depth_v, 1.0),
+                                (got[5], inverse_v, 1.0)):
+        np.testing.assert_array_equal(np.asarray(value[0]),
+                                      np.zeros(8, dtype=np.float64))
+        np.testing.assert_array_equal(np.asarray(value[1:-1]),
+                                      np.asarray(source[1:-1]))
+        expected_north = sign * source[-2, grid.fold.perm_T]
+        np.testing.assert_array_equal(np.asarray(value[-1]),
+                                      np.asarray(expected_north))
+    np.testing.assert_array_equal(np.asarray(got[6]), np.asarray(eta))

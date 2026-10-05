@@ -63,6 +63,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
+    pad_ns_scalar,
 )
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -85,6 +86,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_u_to_vface_4pt,
     min_cell_to_uface,
     min_cell_to_vface,
+    pad_ns_vector_v,
     pad_ns_zero,
     pv_flux_al81_partial_cell,
     vface_zonal_cos_lat,
@@ -620,6 +622,35 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
             return H_u, H_v, r1_u, r1_v, ssh_avg_u, ssh_avg_v
         return H_u, H_v, r1_u, r1_v
     return H_u, H_v
+
+
+def _nemo_external_mode_boundary_association(
+    u, v, depth_u, depth_v, inverse_u, inverse_v, eta, grid,
+):
+    """Compact-grid image of NEMO's one seven-field ``lbc_lnk`` call.
+
+    The model stores the periodic U closure as the extra western column and
+    the V fold as explicit south/north rows.  NEMO associates all seven
+    arrays together at ``dynspg_ts.f90:771-779``; this helper preserves that
+    single source boundary for the private operand trace and causal arm.
+    Cell-centred SSH has no explicit halo in the compact representation, so
+    its associated image is the same array.
+    """
+    u_post = u.at[:, 0].set(u[:, -1])
+    depth_u_post = depth_u.at[:, 0].set(depth_u[:, -1])
+    inverse_u_post = inverse_u.at[:, 0].set(inverse_u[:, -1])
+    v_post = v
+    depth_v_post = depth_v
+    inverse_v_post = inverse_v
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        v_post = pad_ns_vector_v(v[1:-1], grid)
+        depth_v_post = pad_ns_scalar(depth_v[1:-1], grid)
+        inverse_v_post = pad_ns_scalar(inverse_v[1:-1], grid)
+    return (
+        u_post, v_post, depth_u_post, depth_v_post,
+        inverse_u_post, inverse_v_post, eta,
+    )
 
 
 def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
@@ -1615,6 +1646,7 @@ def _run_substep_loop(
     nemo_continuity_update_test_override=None,
     nemo_substep_coriolis_override=None,
     nemo_substep_pgf_override=None,
+    nemo_external_mode_association_test_override=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1795,6 +1827,18 @@ def _run_substep_loop(
                 return_literal_inverse=True)
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
+            if nemo_external_mode_association_test_override:
+                associated_entry = _nemo_external_mode_boundary_association(
+                    U_bar_c, V_bar_c, H_u, H_v, r1_H_u, r1_H_v,
+                    eta_c, grid)
+                H_u = jnp.where(
+                    substep_index == 0, H_u, associated_entry[2])
+                H_v = jnp.where(
+                    substep_index == 0, H_v, associated_entry[3])
+                r1_H_u = jnp.where(
+                    substep_index == 0, r1_H_u, associated_entry[4])
+                r1_H_v = jnp.where(
+                    substep_index == 0, r1_H_v, associated_entry[5])
         else:
             H_u, H_v = _face_depths(H_total_c)
             r1_H_u = 1.0 / jnp.maximum(H_u, min_water_col)
@@ -2142,6 +2186,27 @@ def _run_substep_loop(
             else:
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
 
+        association_post = None
+        if return_trace or nemo_external_mode_association_test_override:
+            if _face_depth_mode == "nemo_ssh_avg":
+                association_depths = _nemo_ssh_avg_apply(
+                    eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
+                    return_literal_inverse=True)
+            else:
+                association_depths = _face_depths(
+                    jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
+                association_depths = (
+                    *association_depths,
+                    jnp.where(u_mask != 0, 1.0 / jnp.maximum(
+                        association_depths[0], min_water_col), 0.0),
+                    jnp.where(v_mask != 0, 1.0 / jnp.maximum(
+                        association_depths[1], min_water_col), 0.0),
+                )
+            association_post = _nemo_external_mode_boundary_association(
+                U_bar_new, V_bar_new, *association_depths, eta_new, grid)
+        if nemo_external_mode_association_test_override:
+            U_bar_new, V_bar_new = association_post[:2]
+
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
         # wgtbtp1*ua_e*hu_e, and :956-979 divides the completed mean by the
@@ -2151,6 +2216,8 @@ def _run_substep_loop(
         if primary_transport_average:
             if _face_depth_mode == "nemo_ssh_avg":
                 H_u_primary, H_v_primary = _ssh_avg_face_depths(eta_new)
+                if nemo_external_mode_association_test_override:
+                    H_u_primary, H_v_primary = association_post[2:4]
             else:
                 H_primary = jnp.maximum(
                     eta_new + H_bathy, min_water_col) * mask
@@ -2327,6 +2394,13 @@ def _run_substep_loop(
                 "u_exit": U_bar_new,
                 "v_exit": V_bar_new,
                 "eta_exit": eta_new,
+                "boundary_post_u": association_post[0],
+                "boundary_post_v": association_post[1],
+                "boundary_post_depth_u": association_post[2],
+                "boundary_post_depth_v": association_post[3],
+                "boundary_post_inverse_u": association_post[4],
+                "boundary_post_inverse_v": association_post[5],
+                "boundary_post_eta": association_post[6],
                 # L2 GYRE live-ENE arm: dynspg_ts.F90:686-701 forms the
                 # Coriolis and bottom-drag contributions as ONE momentum trend
                 # operand; the GYRE ENE walk scores that sum, not drag alone.
@@ -2660,6 +2734,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_legacy_seed_faces_test_override=None,
     _nemo_raw_history_test_override=None,
     _nemo_drag_rate_test_override=None,
+    _nemo_external_mode_association_test_override=False,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -3144,6 +3219,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_continuity_update_test_override),
         nemo_substep_coriolis_override=_nemo_substep_coriolis_test_override,
         nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
+        nemo_external_mode_association_test_override=(
+            _nemo_external_mode_association_test_override),
     )
     if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result

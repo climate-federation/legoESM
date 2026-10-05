@@ -1187,6 +1187,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # velocity-form update while the trace still crosses the compiled return
     # pytree. No public configuration can select this test-only arm.
     barotropic_flux_form_update_override: object = None
+    # Private round-146 arm for the one seven-array external-mode boundary
+    # association in dynspg_ts.  False leaves the production carry unchanged.
+    barotropic_external_mode_association: bool = False
 
     # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
     # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
@@ -2088,6 +2091,7 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     slow_forcing: object
     slow_forcing_operands: object
     transport_average: object
+    state_after: object
 
 
 class _NEMOWSLiveOperandTrace(NamedTuple):
@@ -7140,6 +7144,13 @@ class LatLonCGridOceanModel:
                             _baro_seed,
                             _nemo_flux_form_update_test_override=(
                                 _flux_update_override))
+                    if (
+                        self._nemo_ws_test_hooks
+                        .barotropic_external_mode_association
+                    ):
+                        _baro_seed = dict(
+                            _baro_seed,
+                            _nemo_external_mode_association_test_override=True)
                 _cor_sub_override = (
                     self._nemo_ws_test_hooks
                     .barotropic_substep_coriolis_override)
@@ -7228,7 +7239,7 @@ class LatLonCGridOceanModel:
                         "pre_external_u": F_slow_u,
                         "pre_external_v": F_slow_v,
                     },
-                    (Hu_avg, Hv_avg),
+                    (Hu_avg, Hv_avg), None,
                 )
             state_new, (Hu_avg, Hv_avg) = _baro_result
             _stage_baro_override = (
@@ -13147,6 +13158,21 @@ class LatLonCGridOceanModel:
                 _vertical_K_test_override=_vertical_K_test_override,
                 _nemo_stage1_zad_eta_after_override=(
                     _nemo_stage1_zad_eta_after_override))
+            if self._nemo_ws_test_hooks.expose_barotropic_substeps:
+                # Returning the substep registry changes the compiled output
+                # graph.  Pair it with an independently compiled ordinary
+                # state, just as the live-stage and FCT observers below do,
+                # so the round-146 passivity control compares production
+                # state rather than assuming a WRITE-only trace is inert.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
+                return result._replace(state_after=state_after)
             if self._nemo_ws_test_hooks.expose_live_stage_operands:
                 # Returning the diagnostic tuple changes XLA's optimization
                 # boundary and can move a last-bit rounding in the prognostic
