@@ -108,6 +108,13 @@ def boundary_scope(pre, post, face: str) -> dict:
     }
 
 
+def validate_post_registry(registry) -> None:
+    """Pin the compiled call's seven-array order."""
+
+    require(tuple(registry) == tuple(row[0] for row in POST_FIELDS),
+            "seven-array post-association registry reordered")
+
+
 def _state_arrays(state) -> dict[str, np.ndarray]:
     arrays = {}
     for name in STATE_FIELDS:
@@ -166,6 +173,11 @@ def measure(
             "fp64/libm policy is not active")
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-146 gate requires production JIT on CPU")
+
+    post_registry = [row[0] for row in POST_FIELDS]
+    if plant == "registry":
+        post_registry[0], post_registry[1] = post_registry[1], post_registry[0]
+    validate_post_registry(post_registry)
 
     oracle, record_census = r97.assemble_record(spg_root)
     oracle_coeff, coefficient_census = r98.assemble_oracle_coefficients(
@@ -230,11 +242,6 @@ def measure(
 
     post_rows = {}
     scope_rows = {}
-    post_registry = [row[0] for row in POST_FIELDS]
-    if plant == "registry":
-        post_registry[0], post_registry[1] = post_registry[1], post_registry[0]
-    require(tuple(post_registry) == tuple(row[0] for row in POST_FIELDS),
-            "seven-array post-association registry reordered")
     pre_keys = {
         "u": "u_exit", "v": "v_exit",
         "depth_u": "face_depth_u_exit", "depth_v": "face_depth_v_exit",
@@ -327,7 +334,11 @@ def measure(
             "R146-P1": "CONFIRMED",
             "R146-P2": "CONFIRMED" if p2 else "REFUTED",
             "R146-P3": "CONFIRMED" if p3 else "REFUTED",
-            "R146-P4": "CONFIRMED" if p4 else "REFUTED",
+            "R146-P4": (
+                "CONFIRMED" if p3 and p4
+                else "REFUTED" if p3
+                else "UNMEASURED_PREREQUISITE_R146-P3"
+            ),
         },
         "baseline_rows": baseline_rows,
         "arm_rows": arm_rows,
