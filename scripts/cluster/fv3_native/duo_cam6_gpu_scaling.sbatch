@@ -31,9 +31,14 @@ OUT=${OUT:-/burg-archive/glab/users/pg2328/fv3_duo_gaps/gpu_scaling/g${N_GPUS}}
 mkdir -p "$OUT"
 cd "$WT"; echo "sha $(git rev-parse --short HEAD) dirty $(git status --porcelain | grep -v '^??' | wc -l) nodes $SLURM_JOB_NODELIST N_GPUS=$N_GPUS"
 source "$WT/config/amip/amip_production.ginsburg.sh"
+# A preempted/requeued job (burst partition) resumes from the latest
+# checkpoint instead of restarting day 0 (the first 60-day run lost 55 min).
+latest=$(ls -1 "$OUT"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1)
+RESTART=(); [ -n "$latest" ] && RESTART=(--restart-from "$latest")
+echo "latest checkpoint: ${latest:-none}"
 ARGS=(scripts/run/run_amip.py --config config/amip/amip_production_fv3duo_c24.yaml
-      "${AMIP_PATH_FLAGS[@]}" --days "${DAYS:-1}" --checkpoint-days "${DAYS:-1}" --diag-days 1
-      ${EXTRA_FLAGS:-} --output "$OUT")
+      "${AMIP_PATH_FLAGS[@]}" --days "${DAYS:-1}" --checkpoint-days "${CHECKPOINT_DAYS:-${DAYS:-1}}"
+      --diag-days 1 "${RESTART[@]}" ${EXTRA_FLAGS:-} --output "$OUT")
 case "$N_GPUS" in
   1|2) srun -N 1 -n 1 "$PY" -u "${ARGS[@]}" ;;
   6)   srun --nodes=3 --ntasks=6 --ntasks-per-node=2 --mpi=pmix --gpu-bind=map_gpu:0,1 \
