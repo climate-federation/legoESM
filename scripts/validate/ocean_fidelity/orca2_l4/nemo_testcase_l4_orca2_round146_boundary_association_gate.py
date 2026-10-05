@@ -645,8 +645,22 @@ def measure(
         materialized_v_arm_trace = dict(materialized_v_arm_trace)
         planted = np.array(
             materialized_v_arm_trace["transport_metric_v"], copy=True)
-        planted[1, 1, 1] = np.nextafter(
-            planted[1, 1, 1], np.float64(np.inf))
+        native = r97._native_v(planted[1])
+        oracle_transport = np.asarray(oracle["j002_zhV"])
+        raw = card.recipe.z_coord.nemo_een_barotropic
+        require(raw is not None,
+                "materialization plant requires raw NEMO V operands")
+        active_v = np.max(np.asarray(raw.vmask), axis=-1) > 0.0
+        exact_active = np.argwhere(
+            active_v
+            & (np.ascontiguousarray(native).view(np.uint64)
+               == np.ascontiguousarray(oracle_transport).view(np.uint64)))
+        require(exact_active.size > 0,
+                "materialization plant has no exact active V cell")
+        location = tuple(map(int, exact_active[0]))
+        native[location] = np.nextafter(
+            native[location], np.float64(np.inf))
+        planted[1] = r97._to_model_v(native)
         materialized_v_arm_trace["transport_metric_v"] = planted
     v_depth_plant_expected = None
     if plant == "v-depth-bit":
@@ -946,7 +960,9 @@ def measure(
         )
     )
     if plant == "transport-v-materialization":
-        require(not p155_chain or not p155_armed_noop,
+        require(
+            materialized_v_arm_substep2["transport_v"]
+            ["operand_differing_cells"] == 1,
                 "transport-v-materialization plant stayed green")
         raise GateError("transport-v-materialization plant fired")
     return {
