@@ -605,7 +605,8 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
                daily_reset_interval_days: int = 1,
                daily_record_root: Path | None = None,
                daily_record_audit: Path | None = None,
-               expect_commit: str | None = None) -> int:
+               expect_commit: str | None = None,
+               after_ssh_form: str | None = None) -> int:
     """One legoESM member: from rest, ``days`` days, a snapshot every 30 days.
 
     ``snap_steps`` exists so a FINER record can be taken through the SAME
@@ -685,8 +686,15 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
     state = card.recipe.initial_state
     state = state._replace(T=state.T.replace(
         data=jnp.asarray(np.asarray(state.T.data) + pert, dtype=jnp.float64)))
+    # Measurement arm only -- the card still STATES its own after-SSH form
+    # (``None`` here is the card, byte-identical to no flag at all).
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        with_first_wzv_after_ssh,
+    )
+    arm_config = with_first_wzv_after_ssh(
+        card.recipe.model_config, after_ssh_form)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, arm_config)
 
     out = Path(out_root) / (f"lego_seed{seed}" + (f"_{tag}" if tag else ""))
     if daily_reset_family is not None:
@@ -2030,6 +2038,11 @@ def main(argv=None) -> int:
                         help="full clean producer commit required by reset arms")
     parser.add_argument("--daily-reset-self-check", action="store_true")
     parser.add_argument("--days", type=int, default=YEAR_DAYS)
+    parser.add_argument(
+        "--after-ssh-form", default=None,
+        help="measurement arm: run the member with NEMO's first-wzv "
+             "after-SSH form overridden (rk3_extrapolated | "
+             "rk3_extrapolated_carried). Omitting it is the card.")
     parser.add_argument("--snap-steps", type=int, default=SNAP_STEPS,
                         help="snapshot cadence in STEPS; the preregistered "
                              "members use 180 (30 days) and are unchanged by "
@@ -2094,7 +2107,8 @@ def main(argv=None) -> int:
                               args.daily_reset_interval_days),
                           daily_record_root=args.daily_record_root,
                           daily_record_audit=args.daily_record_audit,
-                          expect_commit=args.expect_commit)
+                          expect_commit=args.expect_commit,
+                          after_ssh_form=args.after_ssh_form)
     if args.alignment_gate:
         report = alignment_gate(args.root, mesh_path=args.mesh,
                                 entry_path=args.entry, plant=args.plant)

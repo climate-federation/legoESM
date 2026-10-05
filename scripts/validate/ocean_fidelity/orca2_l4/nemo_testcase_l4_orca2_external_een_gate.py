@@ -107,7 +107,8 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict:
     # eight-field source program; do not reimplement it in the gate.
     candidate = jax.jit(
         lambda eta: _nemo_literal_een_coefficients(
-            eta, card.recipe.z_coord, jnp.float64, scheme="een")
+            eta, card.recipe.z_coord, jnp.float64, scheme="een",
+            grid=card.recipe.grid)
     )(card.recipe.initial_state.eta.data)
     candidate = {name: np.asarray(value)[:, :OWNED_NX]
                  for name, value in candidate.items()}

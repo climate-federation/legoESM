@@ -152,6 +152,7 @@ def _bc_bottom_drag_cdgrid(du_dt, dv_dt, u_a, v_a, h_k, z_coord, config):
             cd_max=float(config.bottom_drag_cdmax),
             z0=float(config.bottom_drag_z0),
             ke0=float(config.bottom_drag_ke0),
+            uc0=float(config.bottom_drag_uc0),
             von_karman=constants.kappa_von_karman,
         )
         r_eff_u = r_t[..., jnp.newaxis]

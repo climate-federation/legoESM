@@ -196,8 +196,79 @@ def test_stage_momentum_census_builds_real_orca2_card():
     orca2 = cards["ORCA2-zps"]
     assert orca2["recipe_source"] == "build_orca2_zps_card"
     assert orca2["executes_route"] is True
-    assert orca2["executes_at_this_tip"] is False
+    assert orca2["executes_at_this_tip"] is True
     assert orca2["unmeasured_features"]
+
+
+def test_stage1_r3t_ratio_execution_is_recipe_derived():
+    module = _module()
+    cards = module._card_execution("stage1_r3t_ratio")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+
+    assert executing == {
+        "GYRE-zco", "LOCK_EXCHANGE-zco", "ORCA2-zps", "OVERFLOW-zps"}
+    assert cards["NEMO-GYRE-recipe"]["linear_free_surface"] is True
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["tracer_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+
+
+def test_zero_ladder_moves_are_vacuously_registered(monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
+    comparison = _comparison()
+    comparison["field_moves"] = []
+    report = module.evaluate(
+        comparison, _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=())
+    assert report["status"] == "PASS"
+    assert report["criteria"]["all_moved_rows_registered"] is True
+
+
+def test_decision59_admits_only_strictly_sub_ten_floor_unit_year_moves(
+        monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
+    before = _year(1.0, "b" * 40)
+    within = _year(0.1, "c" * 40)
+    for row in within["rows"]:
+        if row["day"] in (240, 360):
+            row["rms_T"] = 1.0 + 0.5 * module.DECISION59_MAX_ABS_K
+    passed = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1), before, within,
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=_registry())
+    assert passed["status"] == "PASS"
+    assert passed["criteria"]["year_day240_T_rms_not_worse"] is False
+    assert passed["criteria"]["year_day240_T_rms_admitted"] is True
+
+    outside = _year(0.1, "c" * 40)
+    for row in outside["rows"]:
+        if row["day"] in (240, 360):
+            row["rms_T"] = 1.0 + 2.0 * module.DECISION59_MAX_ABS_K
+    failed = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1), before, outside,
+        expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
+        registered_rows=_registry())
+    assert failed["status"] == "FAIL"
+    assert failed["criteria"]["year_day240_T_rms_admitted"] is False
+
+
+def test_decision_78_census_switches_only_gyre_and_vortex_vector():
+    module = _module()
+    cards = module._card_execution("rk3_after_ssh")
+    executing = {
+        name for name, row in cards.items() if row["executes_route"]}
+    assert executing == {"GYRE-zco", "VORTEX_VEC-zco"}
+    assert cards["ORCA2-zps"]["after_ssh_form"] == "rk3_extrapolated"
+    assert cards["DINO:nemo_dino_kamm"]["after_ssh_form"] == (
+        "leapfrog_continuity")
 
 
 def test_tke_shear_step_entry_eta_execution_is_recipe_derived():
@@ -353,6 +424,38 @@ def test_year_member_admission_requires_the_registered_harness_and_fp64(
     np.savez(member / "day240.npz", **fields)
     with pytest.raises(module.GateError, match="expected float64"):
         module._admit_year_member(root, expected_commit=commit, label="test")
+
+
+def test_year_member_admission_accepts_an_explicit_recorded_tag(tmp_path):
+    module = _module()
+    root = tmp_path / "year"
+    member = root / "lego_seed0_historical"
+    member.mkdir(parents=True)
+    commit = "e" * 40
+    manifest = {
+        "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
+        "case": "GYRE-zco",
+        "seed": 0,
+        "tag": "historical",
+        "days": 360,
+        "steps": 2160,
+        "dt_s": 14400.0,
+        "snapshot_step_interval": 6,
+        "snapshot_days": list(range(1, 361)),
+        "worktree": {"clean": True, "commit": commit},
+    }
+    (member / "manifest.json").write_text(json.dumps(manifest))
+    fields = {
+        name: np.ones((1,), dtype=np.float64)
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    for day in module.YEAR_DAYS:
+        np.savez(member / f"day{day:03d}.npz", **fields)
+
+    admitted = module._admit_year_member(
+        root, expected_commit=commit, label="test", tag="historical")
+
+    assert admitted["record"]["tag"] == "historical"
 
 
 def test_year_day240_cli_plant_prints_and_returns_nonzero(

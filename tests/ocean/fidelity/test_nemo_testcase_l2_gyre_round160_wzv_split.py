@@ -97,19 +97,15 @@ def test_dino_does_not_resolve_it(recipe):
     assert nemo_stage_momentum_wzv_resolved(config) is False
 
 
-def test_orca2_resolves_the_program_but_its_own_config_excludes_it(card):
-    """Round-163 review BLOCKER: ORCA2-zps specializes the same shared
+def test_orca2_resolves_and_decision58_selects_the_program(card):
+    """Round-23 Decision 58: ORCA2-zps specializes the same shared
     ``gyre_vector_ene_c2`` base GYRE-zco does and never overrides
     ``momentum_time_integrator``/``momentum_advection``/
-    ``wzv_call2_evaluation``, so it resolves the SAME two-solve program --
-    but it has never been measured under this route.  The exclusion is an
-    EXPLICIT per-card config choice (``nemo_stage_momentum_wzv_split=False``
-    on ORCA2-zps's own resolved config), never an inference from EOS or any
-    other unrelated field -- keying it on EOS was the review's finding,
-    closed by making this a real config choice each card states.  This test
-    is the non-vacuity control for that config choice, using the same
-    lightweight construction (``_model_config`` directly, no deck files)
-    the round-163 review used to find the gap."""
+    ``wzv_call2_evaluation``, so it resolves the SAME two-solve program.
+    Decision 58 authorizes its own explicit True choice after the ORCA2
+    ladder measurement; this remains independent of EOS or any unrelated
+    selector.  The lightweight construction exercises the production config
+    directly without deck files."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import _model_config
 
     orca2_config = _model_config(
@@ -118,18 +114,16 @@ def test_orca2_resolves_the_program_but_its_own_config_excludes_it(card):
         bbl_aht_m2_s=1000.0, whole_step_identity="orca2_vector_een_c2",
         tke_langmuir_evaluation="vectorized")
     assert nemo_stage_momentum_wzv_resolved(orca2_config) is True
-    assert orca2_config.nemo_stage_momentum_wzv_split is False
-    assert nemo_stage_momentum_wzv_executes(orca2_config) is False
-    # GYRE's own config, for contrast: same resolution, its own config sets
-    # the opposite explicit choice.
+    assert orca2_config.nemo_stage_momentum_wzv_split is True
+    assert nemo_stage_momentum_wzv_executes(orca2_config) is True
+    # GYRE's own config independently makes the same explicit choice.
     gyre_config = card.recipe.model_config
     assert gyre_config.nemo_stage_momentum_wzv_split is True
     assert nemo_stage_momentum_wzv_executes(gyre_config) is True
-    # The exclusion is ORCA2's own card config, not a hard block: an
-    # explicit hook can still select it for a future measurement round.
+    # The test-only hook remains a one-variable way to reach the old arm.
     assert nemo_stage_momentum_wzv_executes(
         orca2_config, _NEMOWSRK3TestHooks(
-            nemo_stage_momentum_wzv_split=True)) is True
+            nemo_stage_momentum_wzv_split=False)) is False
 
 
 def test_a_card_that_resolves_the_program_without_a_config_choice_raises():
@@ -284,9 +278,10 @@ def test_the_admission_gate_census_uses_the_model_s_own_predicate():
     # What the candidate would reach if it were selected...
     assert [name for name, row in rows.items() if row["executes_route"]] == [
         "GYRE-zco", "ORCA2-zps"]
-    # ...and what reaches it today: the same card, since round 163 landed it.
+    # ...and what reaches it today: both explicit card choices are True after
+    # ORCA2 Decision 58.
     assert [name for name, row in rows.items()
-            if row["executes_at_this_tip"]] == ["GYRE-zco"]
+            if row["executes_at_this_tip"]] == ["GYRE-zco", "ORCA2-zps"]
 
     configs = {
         "GYRE-zco": build_nemo_testcase_card("GYRE-zco").recipe.model_config,

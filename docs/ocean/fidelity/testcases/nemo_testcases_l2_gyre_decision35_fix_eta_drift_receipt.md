@@ -18,7 +18,7 @@ tree, so its effect is attributed separately by that round.
 
 The certified GYRE NEMO-identity card applied `fix_eta_drift=True`: a global
 uniform eta shift sized by an area-weighted volume residual
-(`ocean_model_latlon_cgrid.py:6602-6667`). The user was asked (decision 35)
+(`ocean_model_latlon_cgrid.py:6700-6765`). The user was asked (decision 35)
 whether to keep a global correction NEMO does not have; answer, 2026-09-11:
 **turn it off — "no hidden extras; a fixer could hide model errors."**
 

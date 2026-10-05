@@ -50,13 +50,53 @@ OVERFLOW_RUN = Path(
 _OCE = NEMO / "src/OCE"
 _DYN = _OCE / "DYN"
 _R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
+_ORCA2_COMPILED = NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo"
+_ORCA2_R79BZDF_COMPILED = (
+    NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo")
+_ORCA2_R84FRAMES_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R85FRAMEDEBUG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo")
+_ORCA2_R87FRAMES_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R88FRAMEDEBUG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo")
+_ORCA2_R90FRAMES_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo")
+_ORCA2_R92RHS_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo")
+_ORCA2_R93SLOW_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo")
+_ORCA2_R96SPG_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
+_ORCA2_R104EENACC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
+_ORCA2_R105EENACC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo")
+_ORCA2_R107EENSTEP_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo")
+_ORCA2_R110EENFRAC_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo")
+_OVERFLOW_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1/BLD/ppsrc/nemo"
+_OVERFLOW_P3_COMPILED = NEMO / "tests/OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo"
+_OVERFLOW_R50PAIR_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo")
+_OVERFLOW_R56UP3_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo")
+_OVERFLOW_R62ZDF_COMPILED = (
+    NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
+    # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
+    # cannot bind to one of the _SM_ probe builds.
+    "GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "stp2d.F90": _OCE / "stp2d.F90",
     "oce.F90": _OCE / "oce.F90",
     "DOM/istate.F90": _OCE / "DOM/istate.F90",
     "domzgr_substitute.h90": _OCE / "DOM/domzgr_substitute.h90",
+    "DOM/domzgr.F90": _OCE / "DOM/domzgr.F90",
     "dynspg_ts.F90": _DYN / "dynspg_ts.F90",
     "dynhpg.F90": _DYN / "dynhpg.F90",
     "dynadv.F90": _DYN / "dynadv.F90",
@@ -68,6 +108,264 @@ FILES = {
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
     "LDF/ldfslp.F90": _OCE / "LDF/ldfslp.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
+    # ORCA2 round 1 binds its first non-bit entry field to the compiled branch
+    # that executes the category-summed initial snow/ice load adjustment.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
+        _ORCA2_COMPILED / "iceistate.f90"),
+    # ORCA2 round 78 binds the turbulence mixing-length floor to the compiled
+    # two-arm rmxl_min choice this deck's ln_zdfiwm selects.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (
+        _ORCA2_COMPILED / "zdftke.f90"),
+    # ORCA2 round 79b cites the vertical-physics chain and the internal-wave
+    # arm that this deck runs and the card does not.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90": (
+        _ORCA2_COMPILED / "zdfiwm.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
+        _ORCA2_COMPILED / "zdfddm.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2_COMPILED / "sbcmod.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90": (
+        _ORCA2_COMPILED / "sbcrnf.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_ice.f90": (
+        _ORCA2_COMPILED / "sbc_ice.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbini.f90": (
+        _ORCA2_COMPILED / "icbini.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icb_oce.f90": (
+        _ORCA2_COMPILED / "icb_oce.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2_COMPILED / "restart.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
+        _ORCA2_COMPILED / "sbcflx.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R85FRAMEDEBUG_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R87FRAMES_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R87FRAMES_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_R87FRAMES_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "sbc_oce.f90"),
+    "ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R88FRAMEDEBUG_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "zdfdrg.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/istate.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "istate.f90"),
+    "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R93SLOW_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R96SPG_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_R96SPG_COMPILED / "dynvor.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2_R96SPG_COMPILED / "domzgr.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R96SPG_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg.f90": (
+        _ORCA2_R104EENACC_COMPILED / "dynspg.f90"),
+    "ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R104EENACC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R105EENACC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R105EENACC_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R107EENSTEP_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90": (
+        _ORCA2_R107EENSTEP_COMPILED / "l4_r105_een_accum.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "domhgr.f90"),
+    "ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90": (
+        _ORCA2_R110EENFRAC_COMPILED / "lbclnk.f90"),
+    "l4_r104_een_accum.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+        "/nemo_testcase_l4_orca2_round104_een_accum_acquisition"
+        "/l4_r104_een_accum.F90"),
+    # Round 80 uses the compiled, instrumented branch that produced the
+    # admitted per-step avt/avm record, rather than a nearby pristine deck.
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R79BZDF_COMPILED / "zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90": (
+        _ORCA2_R79BZDF_COMPILED / "zdfiwm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2_R79BZDF_COMPILED / "trazdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_R79BZDF_COMPILED / "dynzdf.f90"),
+    # Round 85 diagnoses the optimized frame-build crash against the exact
+    # preprocessed source that produced it.  A debug build must resolve the
+    # precise failing line before either statement can be repaired.
+    "ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R84FRAMES_COMPILED / "stprk3.f90"),
+    "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
+        _OVERFLOW_COMPILED / "dynhpg.f90"),
+    "OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_P3_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "stprk3_stg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "stprk3.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynvor.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/eosbn2.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "eosbn2.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynhpg.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynadv.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynadv_up3.f90"),
+    "OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90": (
+        _OVERFLOW_R50PAIR_COMPILED / "dynzdf.f90"),
+    "OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90": (
+        _OVERFLOW_R56UP3_COMPILED / "dynadv_up3.f90"),
+    # ORCA2 round 61: the two decks themselves, so the card-scoping claim
+    # cites the switch each card resolves rather than describing it.
+    "ORCA2_OMIP_L4/EXP00/namelist_cfg": (
+        NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg"),
+    "OVERFLOW_OMIP_L1/EXP00/namelist_cfg": (
+        NEMO / "tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg"),
+    # The namelist the CERTIFIED OVERFLOW reference run actually used, which
+    # is the zps variant and not the deck's EXP00 copy.
+    "overflow_kt1_10/namelist_cfg": OVERFLOW_RUN / "namelist_cfg",
+    "OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90": (
+        _OVERFLOW_R62ZDF_COMPILED / "dynzdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/traadv_cen.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/fldread.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo"
+        "/restart.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dtatsd.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/istate.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/istate.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/iceistate.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/mppini.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynvor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo/in_out_manager.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo"
+        "/in_out_manager.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/lbclnk.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/lbclnk.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/dynvor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/domain.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/domqco.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/domhgr.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dommsk.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/dommsk.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/divhor.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/divhor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo"
+        "/dynhpg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo"
+        "/eosbn2.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo"
+        "/dynhpg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/dynldf_lev.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo"
+        "/ldfdyn.f90"),
     # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
     "dynvor.F90": _DYN / "dynvor.F90",
     "dynkeg.F90": _DYN / "dynkeg.F90",
@@ -601,6 +899,9 @@ FILES = {
     "eos.py": REPO / "packages/ocean/legoesm/ocean/eos.py",
     "state.py": REPO / "packages/ocean/legoesm/ocean/state.py",
     "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
+    "nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py"),
     # --- round 35 paths: the implicit vertical TRACER solve ---
     # GYRE's OWN run log for this round, so a GYRE resolved value cannot bind
     # to OVERFLOW's ocean.output through the bare key above.
@@ -798,6 +1099,67 @@ FILES = {
     # numbers are not R29ZDF's.  Bare lowercase keys, distinct from the
     # shipped .F90 keys above: FILES is an EXACT-key lookup, so nothing here
     # can capture a citation that already resolves elsewhere.
+    # --- ORCA2 round 13: the river runoff's water, and the emp it is not in
+    # These are the ORCA2 record's OWN compiled branch, so a runoff citation
+    # cannot bind to GYRE's ppsrc through a bare basename.
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/divhor.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/divhor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcrnf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcrnf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/stp2d.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/trasbc.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynkeg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynzad.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dynadv_round62_writer.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo"
+        "/dynadv_round62_writer.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dom_oce.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo"
+        "/dom_oce.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo"
+        "/dynadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo"
+        "/dynzad.f90"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round62_vector_advection_acquisition/"
+    "dynadv_round62_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round62_vector_advection_acquisition/"
+        "dynadv_round62_writer.F90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sshwzv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/traadv_cen.f90"),
+    # --- ORCA2 round 14: the barotropic slow forcing and its solver ---
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynspg_ts.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/domain.f90"),
     "trazdf.f90": _R35 / "trazdf.f90",
     "zdf_oce.f90": _R35 / "zdf_oce.f90",
     "stprk3_stg.f90": _R35 / "stprk3_stg.f90",
@@ -829,6 +1191,46 @@ FILES = {
         NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90"),
     "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
+    # Round 196: the split-explicit barotropic solve, read from the SAME
+    # uninstrumented-dynspg build the rounds 192-195 citations use (that
+    # build instruments stprk3_stg and dynadv only, so its dynspg_ts is the
+    # shipped one).
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    # Round 197: dyn_vor_init builds e3f_0vor, the array dyn_cor_2D_init
+    # divides ff_f by; same uninstrumented-dynamics build as the solve above.
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynzad.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/divhor.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/divhor.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90"),
+    "VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "tests/VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90"),
+    # --- round 6: the after-SSH slot the RK3 program leaves behind, in the
+    # vector card's own build and in GYRE's (the statement is shared). ---
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90"),
+    "VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "tests/VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90"),
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/sshwzv.f90"),
     "vortex_round3/namelist_cfg": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3/"
         "namelist_cfg"),
@@ -858,6 +1260,32 @@ FILES = {
     "geo2ocean.F90": _OCE / "SBC/geo2ocean.F90",
     "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg": (
         NEMO / "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg"),
+    # Round 224 freezes SMT-3 from ORCA2 rung 0 and reads the executable
+    # branch from the already-compiled SMT-2 base.  The new SMT-3 build is
+    # intentionally absent until the operator runs the acquisition.
+    "orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/"
+        "acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg"),
+    "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref": (
+        NEMO / "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref"),
+    "VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90": (
+        NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90"),
+    "VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90"),
+    # Round 226 cites the instrumented build that produced the admitted
+    # SMT-3 record, not the nearby pristine or SMT-2 configurations.
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -875,6 +1303,969 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
+        ('IF( ln_read_cfg ) THEN', 1),
+        ('&              iff   , ff_f  , ff_t', 1), 8],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:233-236': [
+        ("IF(  iom_varid( inum, 'ff_f'", 1),
+        ("CALL iom_get( inum, jpdom_global, 'ff_f'", 1), 4],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1199-1224': [
+        ('ELSE                                                        ! southern/northern side', 1),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 1), 26],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('& ff_f(ji  ,jj-1) /', 1), 5],
+    'barotropic_latlon_cgrid.py:904-906': [
+        ('def _nemo_een_south_ff_copy(ff):', 1),
+        ('return jnp.concatenate([ff[:1], ff[:-1]], axis=0)', 1), 3],
+    'barotropic_latlon_cgrid.py:1002-1008': [
+        ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
+        ('q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))', 1), 7],
+    # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1248': [
+        ('SELECT CASE( nvor_scheme )', 1),
+        ('& ff_f(ji  ,jj-1) /', 1), 8],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dommsk.f90:252-258': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 2),
+        ('fe3mask(:,:,:) = fmask(:,:,:)', 1), 7],
+    'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:135-143': [
+        ('IF( iff == 0 ) THEN', 1),
+        ("CALL lbc_lnk( 'dom_hgr', ff_t", 1), 9],
+    # --- ORCA2 round 109: admitted EEN per-level recurrence ---
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1241-1245': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('& ff_f(ji  ,jj-1) /', 1), 5],
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1256-1263': [
+        ('r107_zpvo_nw(ji,jj,jk) = zpvo_nw', 1),
+        ('r107_acc_after(ji,jj,jk) = ffu_nw(ji,jj)', 1), 8],
+    # --- ORCA2 round 108: inherited recorder initialization chain ---
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1103-1104': [
+        ('CALL r105_een_accum_init', 1),
+        ('CALL r107_een_step_init', 1), 2],
+    'ORCA2_OMIP_L4_R107EENSTEP/BLD/ppsrc/nemo/l4_r105_een_accum.f90:34-45': [
+        ("GET_ENVIRONMENT_VARIABLE('ORCA2_R105_EEN_ACCUM_DIR'", 1),
+        ("ORCA2_R105_EEN_ACCUM_INIT", 1), 12],
+    # --- ORCA2 round 107: literal EEN vertical loop bounds ---
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1229-1230': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('DO jk = 1, mbku(ji,jj)', 1), 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1262-1263': [
+        ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 2),
+        ('DO jk = 1, mbkv(ji,jj)', 1), 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dommsk.f90:223-230': [
+        'IF (jpk>2) THEN',
+        'IF ( MAXVAL(fmask(ji,jj,:))/=0._wp )', 8],
+    # --- ORCA2 round 106: admitted live EEN accumulator/scale producer ---
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1231-1244': [
+        'zpvo_nw = ff_f(ji-1,jj  )',
+        ('ffu_nw(ji,jj) = ffu_nw(ji,jj) +', 1), 14],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1277-1278': [
+        ('ffv_nw(ji,jj) = ffv_nw(ji,jj) +', 1),
+        ('ffv_ne(ji,jj) = ffv_ne(ji,jj) +', 1), 2],
+    'ORCA2_OMIP_L4_R105EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1288-1289': [
+        'ffv_nw(ji,jj) = r1_12 * r1_e2v',
+        'ffv_ne(ji,jj) = r1_12 * r1_e2v', 2],
+    # --- ORCA2 round 105: failed recorder and compiled call frequency ---
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg.f90:300-303': [
+        'SELECT CASE( nspg )',
+        'CASE ( np_NO )', 4],
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:302':
+        'IF( kt == nit000 .OR. .NOT. lk_linssh )   CALL dyn_cor_2D_init( Kmm )',
+    'ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo/dynspg_ts.f90:1294-1297': [
+        'CALL r104_een_accum_dump(r104_acc_u_nw',
+        '& r104_scl_v_sw, r104_scl_v_se, r104_scl_v_nw, r104_scl_v_ne)', 4],
+    'l4_r104_een_accum.F90:23-27': [
+        "IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop",
+        "IF(ios /= 0) CALL ctl_stop('round104: cannot open EEN operand record')", 5],
+    # --- ORCA2 round 99: admitted frozen EEN coefficient discriminator ---
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:126-127': [
+        'ALLOCATE( ffu_nw(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))',
+        '&      ffv_nw(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))', 2],
+    # --- ORCA2 round 97: admitted rung-0 split-explicit statement walk ---
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:580-666': [
+        '!     Compute Sea Level at step jit+1',
+        "CALL r95_spg_w2('cor_v', zv_trd)", 87],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
+        'CASE( np_EEN )',
+        'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domzgr.f90:625,631': [
+        'mbku(:,:) = MAX( NINT( zk(:,:) ), 1 )',
+        'mbkv(:,:) = MAX( NINT( zk(:,:) ), 1 )', 2],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dommsk.f90:224-225': [
+        'IF (mbku(ji,jj)==1) umask(ji,jj,:) = 0._wp',
+        'IF (mbkv(ji,jj)==1) vmask(ji,jj,:) = 0._wp', 2],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1369-1392': [
+        'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
+        ('END SUBROUTINE dyn_cor_2D', 2), 24],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90:912-937': [
+        'SELECT CASE( nn_e3f_typ )',
+        'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 26],
+    # --- ORCA2 round 95: independent rung-0 split-explicit substeps ---
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:301-316': [
+        '! Lane-2 GYRE ENE operand instrument: write the eight frozen coefficient',
+        ('CLOSE(l2_unit)', 1), 16],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:390-442': [
+        '! Lane-2 GYRE causal instrument: open one write-only stream for the',
+        'WRITE(l2_ord_unit) l2_magic, 2, kt, 2, jpi, jpj, STORAGE_SIZE(1._wp), rDt_e', 53],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:287-320': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )', 34],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:339-381': [
+        '! Initialize barotropic variables:',
+        'vn_adv(:,:)     = 0._wp', 43],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:446': (
+        'DO jn = 1, icycle', 1),
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:460-519': [
+        '!* Set extrapolation coefficients for predictor step:',
+        ('+ e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)', 1), 60],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:530-557': [
+        '! resulting flux at mid-step (not over the full domain)',
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 28],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:601-615': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        'zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)', 15],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:618-652': [
+        '! Add Coriolis trend:',
+        ("& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')", 1), 35],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90:655-708': [
+        '! Set next velocities:',
+        'va_e(ji,jj) =  va_e(ji,jj) / ( 1._wp - rDt_e * zCdU_v(ji,jj) * hvr_e(ji,jj) )', 54],
+    # --- ORCA2 round 94: independent rung-0 slow/external boundary walk ---
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:206-219': [
+        '!*  vertical averaging  *!',
+        "CALL r93_slow_put_pair( kt, 'depth', Ue_rhs, Ve_rhs )", 14],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:231-250': [
+        '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
+        'CLOSE(l2_slow_unit)', 20],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:285': (
+        "CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )", 1),
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:290-312': [
+        ('!                 !=======================================!', 1),
+        "IF( kt == nit000 ) CALL r93_slow_put2( 'ssh_rhs', sshe_rhs )", 23],
+    'ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:317-326': [
+        '!    using a split-explicit time integration in forward mode',
+        'CALL r93_slow_finish( kt )', 10],
+    # --- ORCA2 round 93: independent rung-0 stage-1 RHS walk ---
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:141-175': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        'CALL r92_rhs_finish( kt )', 35],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
+        '!*  vertical averaging  *!',
+        ('END SELECT', 2), 13],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:227-230': [
+        '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
+        "l4_canon_2d(Ve_rhs,'V'), l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:232-245': [
+        '!* wind forcing *!',
+        ('ENDIF', 7), 14],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:247-277': [
+        '!* atmospheric pressure forcing *!',
+        ('ENDIF', 10), 31],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:283-300': [
+        '!==   2D sea surface height forcing   ==!',
+        ('ENDIF', 11), 18],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:305-315': [
+        'Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 11],
+    # --- ORCA2 round 92: rung-0 card and source-order RHS acquisition ---
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:148-217': [
+        '! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)',
+        'CALL r84_dump_frame( kstp, 1, Naa )', 70],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90:139-166': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 28],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
+        '!==  Background eddy viscosity and diffusivity  ==!',
+        'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk) =                avmb(jk) * wmask(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk)', 24],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90:262-284': [
+        '!==  type of vertical turbulent closure  ==!',
+        'IF( ln_zdfswm )   CALL zdf_swm_init       ! surface  wave-driven mixing', 23],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfdrg.f90:540-547': [
+        'CASE( np_lin )             !==  linear friction  ==!   (pCdU = Cd0 * Uc0)',
+        'CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )  !  using a constant velocity', 8],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/istate.f90:143-162': [
+        ('IF( .NOT. ln_rstart ) THEN', 1),
+        'vv_b(:,:,Kmm)   = vv_b(:,:,Kbb)', 20],
+    # --- ORCA2 round 91: admitted rung-0 entry/stage frames ---
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:92-108': [
+        '! Lane-1 certified oracle: exact step-entry Nbb state.  This is a',
+        'CALL r84_dump_frame( kstp, 0, Nbb )', 17],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:214-217': [
+        '! Stage 1 :',
+        'CALL r84_dump_frame( kstp, 1, Naa )', 4],
+    # --- ORCA2 round 90: source-resolved OFF-runoff recorder fault ---
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:287':
+        "&       l4_canon_2d(rnf,'T')",
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:357':
+        'IF( llwet ) zfield(ji,jj) = pfield(ji,jj)',
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/sbc_oce.f90:201':
+        'IF(ln_rnf)   ALLOCATE( rnf(jpi,jpj), rnf_b(jpi,jpj), STAT=ierr(3) )',
+    'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/stprk3_stg.f90:555':
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
+    # --- ORCA2 round 88: exact optimized branch and unresolved crash ---
+    'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/stprk3.f90:90-108': [
+        "IF( ln_timing )   CALL timing_start('stp_RK3')",
+        'CALL r84_dump_frame( kstp, 0, Nbb )', 19],
+    'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/traadv.f90:273-287': [
+        ('IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN', 1),
+        "&       l4_canon_2d(rnf,'T')", 15],
+    'ORCA2_OMIP_L4_R87FRAMES/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
+        'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj) , &',
+        'wndm(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , taum (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(6) )', 22],
+    # --- ORCA2 round 87: symbolized crashing debug branch ---
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:149-154': [
+        'IF( ln_tide    )   CALL tide_update( kstp )',
+        'IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )', 6],
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:424-438': [
+        "WRITE(iunit) l4_canon_2d(qsr,'T'), l4_canon_2d(qns,'T'), l4_canon_2d(qns_b,'T'), &",
+        "WRITE(iunit) l4_canon_3d(rnf_tsc,'T'), l4_canon_3d(rnf_tsc_b,'T')", 15],
+    'ORCA2_OMIP_L4_R85FRAMEDEBUG/BLD/ppsrc/nemo/stprk3.f90:443-473': [
+        'FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )',
+        'END FUNCTION l4_canon_2d', 31],
+    # --- ORCA2 round 87: rung-0 disabled-owner surface fields ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
+        'ALLOCATE( utau(jpi,jpj) , utau_b(jpi,jpj) , utauU(jpi,jpj) , &',
+        'wndm(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , taum (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(6) )', 22],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:146-152': [
+        'INTEGER FUNCTION sbc_rnf_alloc()',
+        'rnf_tsc_b(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , rnf_tsc (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , STAT=sbc_rnf_alloc )', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbini.f90:133-140': [
+        'CALL icb_nam               ! Read and print namelist parameters',
+        "IF( icb_alloc() /= 0 )   CALL ctl_stop( 'STOP', 'icb_alloc : unable to allocate arrays' )", 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icb_oce.f90:161-174': [
+        'INTEGER FUNCTION icb_alloc()',
+        '&      berg_grid%tmp        (jpi,jpj) , STAT=ill)', 14],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:274-280': [
+        'IF( nn_ice == 0 ) THEN        !* No sea-ice in the domain : ice fraction is always zero',
+        'cloud_fra(:,:) = pp_cldf      !* cloud fraction over sea ice (used in si3)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:376-383': [
+        ('IF( nn_ice == 0 ) THEN', 2),
+        ('ENDIF', 21), 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_ice.f90:91-121': [
+        'INTEGER FUNCTION sbc_ice_alloc()',
+        '&      emp_ice (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , sstfrz   (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))     , STAT= ierr(ii) )', 31],
+    # --- ORCA2 round 83: rung-0 explicit restart-list repair ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346': [
+        'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
+        'IF( .NOT. ln_rst_list .AND. MOD( nn_stock, nn_fsbc) /= 0 ) THEN', 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119': [
+        'IF( kt == nit000 ) THEN   ! default definitions',
+        'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 26],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
+        ('IF( kt == nitrst ) THEN', 1),
+        ('ENDIF', 14), 15],
+    # --- ORCA2 round 82: hierarchy rung-0 deck semantics ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306': [
+        'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',
+        "sbc_init : choose ONE and only ONE sbc option", 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:440-448': [
+        ('SELECT CASE( nsbc )', 2),
+        'IF( ll_opa    )       CALL sbc_cpl_rcv', 9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
+        ('SELECT CASE( nn_ice )', 2),
+        ('END SELECT', 5), 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90:191-204': [
+        'CALL fld_read( kt, nn_fsbc, sf )',
+        'emp (ji,jj) =   sf(jp_emp )%fnow(ji,jj,1)', 14],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:206-228': [
+        'IF( nn_avb == 0 ) THEN',
+        'avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk)', 23],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:264-270': [
+        'IF( ln_zdfcst ) THEN',
+        'one and only one vertical diffusion option has to be defined', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:334-343': [
+        'SELECT CASE ( nzdf_phy )',
+        'END SELECT', 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:738-740': [
+        'IF( ln_trabbc  )   CALL tra_bbc',
+        'IF( ln_tradmp  )   CALL tra_dmp', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-260': [
+        'IF( ln_ldfeiv .AND. .NOT. ln_traldf_triad ) THEN',
+        'IF( ln_mle    )   THEN', 6],
+    # --- ORCA2 round 81: the recorded build's IWM addition and backgrounds ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:313-316': [
+        '!* update momentum & tracer diffusivity with wave-driven mixing',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfiwm.f90:438-443': [
+        '! This internal-wave-driven mixing parameterization elevates avt and avm in the interior, and',
+        'avtb_2d(:,:) = 1._wp        ! uniform', 6],
+    # --- ORCA2 round 80: admitted end-of-chain coefficients and consumers ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/zdfphy.f90:349-381': [
+        '!                          !==  ocean Kz  ==!   (avt, avs, avm)',
+        'CALL r79_write( kt, Kbb, Kmm )', 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/trazdf.f90:178-215': [
+        '! vertical mixing coef.: avt for temperature, avs for salinity and passive tracers',
+        ('ENDIF', 10), 38],
+    'ORCA2_ORCA1ICE_OMIP_L4_R79BZDF/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
+        ('DO jk =    2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)            ! inner values', 1),
+        ('zwd(ji,1) = 1._wp - zzws', 1), 15],
+    # --- ORCA2 round 61: which card selects which momentum advection ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:346': 'ln_dynadv_vec = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:352': 'ln_dynvor_een = .true.',
+    'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:83': 'ln_dynadv_up3 = .true.',
+    'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
+    'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
+    'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
+    'nemo_testcase_recipe.py:2958':
+        'if (cfg.momentum_advection != "vector_invariant"',
+    'ocean_pe_latlon_cgrid.py:5370': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5388': (
+        '_bc_horizontal_momentum_advection_flux_form(', 2),
+    'nemo_testcase_recipe.py:2961':
+        'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
+    # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        'CALL r56_up3_curv(ji,jj,jk,zlu_uu(ji,jj),zlv_vv(ji,jj),zlu_uv(ji,jj),zlv_vu(ji,jj))',
+        10],
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:182-192': [
+        'DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)',
+        'CALL r56_up3_select_t(ji,jj,jk,zui,zvj,zl_u,zl_v)',
+        11],
+    'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:194-195': [
+        'zFu_t(ji+1,jj  ) = (  zFu(ji,jj) + zFu(ji+1,jj  )  ) * ( zui - gamma1 * zl_u )',
+        'zFv_t(ji  ,jj+1) = (  zFv(ji,jj) + zFv(ji  ,jj+1)  ) * ( zvj - gamma1 * zl_v )',
+        2],
+    # --- ORCA2 round 56: admitted OVERFLOW stage-2 UP3 boundary ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv.f90:134-144': [
+        ('SELECT CASE( n_dynadv )', 1),
+        'CALL dyn_adv_up3     ( kt       , Kbb, Kmm, puu, pvv, Krhs, pau, pav, paw )',
+        11],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:150-158': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        '&             - ( pvv(ji  ,jj  ,jk,Kbb) - pvv(ji-1,jj  ,jk,Kbb) )    * fmask(ji-1,jj  ,jk)',
+        9],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:174-219': [
+        'DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)',
+        '&                                    / (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        46],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynadv_up3.f90:278-359': [
+        'DO jk = 1, jpk-2                    != divergence of advective fluxes =!',
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - zFv_t(ji,jj) * r1_e1e2v(ji,jj) / (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        82],
+    # --- ORCA2 round 52: admitted OVERFLOW stage-2 vorticity replay ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:343-358': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 2),
+        16],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3.f90:200-207': [
+        '! Stage 1 :',
+        'CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )', 8],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:242-248': [
+        ('CASE( np_ENS )                        !* enstrophy conserving scheme',
+         1),
+        ('CALL vor_ens( kt, Kmm, ntot, usd, vsd,', 1), 7],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:866-869': [
+        'CASE( np_FLX_c2 , np_FLX_up3 )',
+        'ntot = np_CME', 4],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynvor.f90:666': (
+        'pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zuav *', 1),
+    # --- ORCA2 round 51: admitted OVERFLOW pair record's executing build ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:327-363': [
+        'CALL r50_mom_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, ts, ssh, uu, vv )',
+        "CALL r50_mom_uv( 'after_adv', uu, vv, Krhs )", 37],
+    # --- ORCA2 round 60: controlled OVERFLOW walk after stage-2 ADV ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:386-403': [
+        ('SELECT CASE( kstg )', 3),
+        '&             /           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        18],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:412-433': [
+        ('CASE ( 3 )        !==  Stage 3  ==!', 1),
+        "CALL r50_mom_uv( 'raw_kaa', uu, vv, Kaa )", 22],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:436-448': [
+        '!==  All stages: correct the barotropic component ==!',
+        'CALL r50_mom_finish( uu, vv, Kaa )', 13],
+    # --- ORCA2 round 62: compiled dyn_zdf internal source order ---
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:139-151': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity',
+        '&              /          ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        13],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:159-162': [
+        'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        4],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:164-170': [
+        'DO ji = ntsi-( 0), ntei+( 0 )      ! Add bottom/top stress due to barotropic component only',
+        ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1),
+        7],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:188-350': [
+        ('!**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 1),
+        'puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
+        163],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynzdf.f90:357-518': [
+        ('!**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 2),
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)',
+        162],
+    # --- ORCA2 round 63: executing acquisition build, including its writer ---
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:140-159': [
+        '!              !==  RHS : time-stepping of all trends but the implicit one  ==!',
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 1), 20],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:165-171': [
+        'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 2), 7],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:172-192': [
+        'DO ji = ntsi-( 0), ntei+( 0 )      ! Add bottom/top stress due to barotropic component only',
+        ('& pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 3), 21],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:344-362': [
+        ('zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)', 1),
+        'CALL r62_zdf_u_solve(jj,puu(ntsi:ntei,jj,1:jpkm1,Kaa))', 19],
+    'OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo/dynzdf.f90:513-531': [
+        ('zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)', 2),
+        'CALL r62_zdf_v_solve(jj,pvv(ntsi:ntei,jj,1:jpkm1,Kaa))', 19],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/stprk3_stg.f90:492-541': [
+        '!                       !==  T-S Tracers  ==!',
+        ('CALL r50_tra_finish( ts, ssh, Kaa )', 1), 50],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/eosbn2.f90:684-718': [
+        ('SELECT CASE( neos )', 2),
+        ('prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 3), 35],
+    'OVERFLOW_OMIP_L1_P3_R50PAIR/BLD/ppsrc/nemo/dynhpg.f90:341-419': [
+        'SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )',
+        'END SUBROUTINE hpg_sco', 79],
+    # --- ORCA2 round 50: executing OVERFLOW P3 kt=3 statement order ---
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:327-354': [
+        ('SELECT CASE( kstg )', 2), ('END SELECT', 6), 28],
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:378-438': [
+        ('SELECT CASE( kstg )', 3), ('DEALLOCATE( zub, zvb )', 2), 61],
+    'OVERFLOW_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:480-567': [
+        '!                       !==  T-S Tracers  ==!',
+        ('END SELECT', 8), 88],
+    # --- ORCA2 round 49: held tracer statement and downstream OVERFLOW order ---
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:501-508': [
+        ('DO jn = 1, jpts', 2), ('END DO', 14), 8],
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:311-338': [
+        ('SELECT CASE( kstg )', 2), ('END SELECT', 6), 28],
+    'OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90:341-414': [
+        'SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )',
+        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 74],
+    # --- ORCA2 card round 20: exact MPI transfer and slow-forcing owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:291-294': [
+        '!                          ! set values computed in RK3_ssh',
+        'zv_frc(:,:) =   Ve_rhs(:,:)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:325-330': [
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        ('END DO   ;   END DO', 1), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:766-786': [
+        ('IF( kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        "CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:623-627': [
+        ('IF( nn_comm <= 1 ) THEN', 4), ('ENDIF', 4), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:1889-1909': [
+        ('!                       !                       ________________________', 3),
+        ('ishtRj(1:4,jf) = (/ ip1j, ip1j, ip0j, im0j /)', 3), 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:1960-1979': [
+        ('! ----------------------------------------------- !', 3),
+        ('CALL MPI_ISEND( buffsnd_dp(ishtS(jn)+1)', 1), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/lbclnk.f90:2055-2073': [
+        ('DO jn = 1, 2   ! next: do the MPI_RECV part', 2),
+        ('ENDIF', 90), 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/stp2d.f90:189-210': [
+        "WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U')",
+        "& l4_canon_2d(r1_hu_0,'U'), l4_canon_2d(r1_hv_0,'V')", 22],
+    'ORCA2_ORCA1ICE_OMIP_L4_R19PREX/BLD/ppsrc/nemo'
+    '/stp2d.f90:218-233': [
+        '!* baroclinic drag forcing *!',
+        ("WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V')", 2), 16],
+    # --- ORCA2 card round 19: ranked histories and exchange-boundary walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:180-182': [
+        'REAL(wp), DIMENSION(jpi,jpj) :: zu_trd, zu_spg',
+        'REAL(wp), DIMENSION(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0) ) :: zu_frc, zv_frc', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:458-467': [
+        '! Round-18 WRITE-only per-rank stream:',
+        'WRITE(l4_uhist_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:501-513': [
+        '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
+        'WRITE(l4_uhist_unit) un_e, ub_e, ubb_e, ua_e', 13],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:688-711': [
+        '! Set next velocities:',
+        '&   ) * ssvmask(ji,jj)', 24],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:754-770': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
+        "CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 17],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:814-822': [
+        ('IF( kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        'un_e   (:,:) = ua_e  (:,:)', 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R18UHIST/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:866-870': [
+        ('IF( kt == nit000 ) THEN', 5),
+        "WRITE(numout,*) 'LANE4_BT_UHIST_DUMP ', kt, 2, narea - 1, TRIM(l4_uhist_filename)", 5],
+    # --- ORCA2 card round 18: ranked halo admission and operand walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:445-455': [
+        '! Round-17 WRITE-only per-rank stream.',
+        ('ENDIF', 14), 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:539-544': [
+        '! values of zhup2_e and zhvp2_e on the halo are not needed in bdy_vol2d',
+        'zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)', 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:562-569': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:571-574': [
+        'IF( kt == nit000 .AND. jn <= 2 ) THEN',
+        ('ENDIF', 21), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:845-848': [
+        ('IF( kt == nit000 ) THEN', 4),
+        ('ENDIF', 41), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R17HALO/BLD/ppsrc/nemo'
+    '/in_out_manager.f90:180-180':
+        'lwp      = .FALSE.    !: boolean : true on the 1st processor only',
+    # --- ORCA2 card round 15: source-ordered split-explicit solver walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:339-347': [
+        '! Initialize barotropic variables:', ('ENDIF', 10), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:355-364': [
+        ('IF( ln_bt_fw ) THEN', 2),
+        'hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:460-493': [
+        '!* Set extrapolation coefficients for predictor step:',
+        'zsshp2_e(:,:) = za1 * sshn_e(:,:)', 34],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:505-536': [
+        ('DO jj = ntsj-( 0), ntej+(  1 ) ; DO ji = ntsi-( 0), ntei+(  1)', 1),
+        ('END DO   ;   END DO', 8), 32],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:550-558': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        ('END DO   ;   END DO', 9), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:601-616': [
+        '! Half-step back interpolation of SSH for surface pressure computation',
+        ('END DO   ;   END DO', 14), 16],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:618-652': [
+        '! Add Coriolis trend:',
+        ('& l4_canon_2d(zu_trd,\'U\'), l4_canon_2d(zv_trd,\'V\')', 1), 35],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:666-679': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 1),
+        ('END DO   ;   END DO', 17), 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:755-779': [
+        ('IF( lwp .AND. kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        ('& l4_canon_2d(ffv_nw,\'V\'), l4_canon_2d(ffv_ne,\'V\')', 2), 25],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:1533-1563': [
+        'FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )',
+        'END FUNCTION l4_canon_2d', 31],
+    # --- ORCA2 card round 14: the barotropic slow forcing, in stp2d's order
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:139-147': [
+        '!*  hydrostatic pressure gradient (HPG))  *!',
+        'CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )', 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:162-166': [
+        'CASE( np_VEC_c2  )',
+        'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:196-199': [
+        'CASE( np_VEC_c2, np_LIN_dyn )',
+        'Ve_rhs(ji,jj) = SUM( e3v_3d', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:218-221': [
+        '!* baroclinic drag forcing *!',
+        "l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:229-230': [
+        'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj)',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:302-303': [
+        'IF( ln_dynspg_ts )',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )',
+        2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:287-291': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        'zCdU_v  (:,:) = CdU_v   (:,:)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:320-324': [
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        'zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/dynspg_ts.f90:668-671': [
+        'ua_e(ji,jj) = (                                 un_e(ji,jj)',
+        '+ zu_frc(ji,jj) ) &', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/domain.f90:199':
+        'hu_0(:,:) = hu_0(:,:) + e3u_3d(:,:,jk) * umask(:,:,jk)',
+    # --- ORCA2 card round 13: the river runoff's WATER and NEMO's emp ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/divhor.f90:142':
+        '!==  + runoffs divergence  ==!',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcrnf.f90:279-282': [
+        '!==   runoff put only at the surface   ==!',
+        'phdivn(ji,jj,1) = phdivn(ji,jj,1) - rnf(ji,jj) * r1_rho0', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90:278-281': [
+        'sshe_rhs(:,:) =                 emp(:,:)',
+        'sshe_rhs(:,:) = r1_rho0 * sshe_rhs(:,:)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:282-286': [
+        'IF( .NOT.lk_linssh ) THEN           '
+        '!* only heat and salt fluxes associated with mass fluxes',
+        'pts(ji,jj,1,jp_sal,Krhs) = pts(ji,jj,1,jp_sal,Krhs) - '
+        'emp(ji,jj)*pts(ji,jj,1,jp_sal,Kbb) * z1_rho0_e3t', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:318-324': [
+        ('IF( ln_rnf ) THEN         '
+         '! input of heat and salt due to river runoff', 2),
+        'pts(ji,jj,jk,jp_sal,Krhs) = pts(ji,jj,jk,jp_sal,Krhs)  '
+        '+ rnf_tsc(ji,jj,jp_sal) * zdep', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/stprk3_stg.f90:137,152-154': [
+        '! save ssh, uu_b, vv_b at N+1  (computed in dynspg_ts)',
+        ('CASE ( np_HYB )', 1),
+        ('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo'
+    '/stprk3_stg.f90:270-277': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; '
+         'DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 1),
+        'zvb(ji,jj) = vn_adv(ji,jj)*(r1_hv_0(ji,jj) '
+        '/(1._wp+r3v(ji,jj,Kmm))) - vv_b(ji,jj,Kmm)', 8],
+    # --- ORCA2 card round 78: the two rmxl_min arms, and which one this deck
+    # takes.  The whole IF/ELSE/ENDIF is pinned as one span because the round's
+    # claim is that the forced arm EXISTS and the derivation is not evaluated.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-841': [
+        'IF( ln_zdfiwm ) THEN',
+        "minimum mixing length with your parameters rmxl_min = ", 7],
+    # --- ORCA2 card round 79b: NEMO's vertical-physics chain, in the order
+    # zdf_phy runs it, and the internal-wave arm the ORCA2 card does not
+    # execute.  Each boundary is pinned on its own so a widened span cannot
+    # silently swallow the neighbouring arm.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350': [
+        'avt(ji,jj,jk) = avt_k(ji,jj,jk)',
+        'avm(ji,jj,jk) = avm_k(ji,jj,jk)', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:355':
+        'avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf '
+        '* rnfmsk(ji,jj) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359':
+        'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363':
+        'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372':
+        'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:294':
+        'zav_wave(ji,jj) = MIN( MAX( 1.4e-7_wp, zav_wave(ji,jj) ), '
+        '1.e-2_wp ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:314-316': [
+        'p_avs(ji,jj,jk) = p_avs(ji,jj,jk) + zav_wave(ji,jj) * zav_ratio(ji,jj)',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 3],
+    # The salt/heat split also adds to the momentum coefficient, which is why
+    # the wave arm's momentum increment is measured after it and not before.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172':
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + MAX( zavft + zavdt, zavfs + zavds )',
+    # --- ORCA2 card round 1: initial category-load SSH adjustment ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
+        'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
+        'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
+    # --- ORCA2 card round 4: returned surface record is root-rank only ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90:396-400': [
+        ('IF( .NOT.lwp ) RETURN', 5),
+        "FORM='UNFORMATTED', STATUS='NEW', ACTION='WRITE', IOSTAT=ios", 5],
+    # --- ORCA2 card round 5: step-entry state remains root-rank only ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:92-94': [
+        'IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN',
+        'WRITE(cl_traj,\'("oracle_step_entry_kt",I8.8,".bin")\') kstp', 3],
+    # --- ORCA2 card round 69: surface operands are complete after sbc ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:151-152': [
+        'CALL sbc        ( kstp, Nbb, Nbb )',
+        'CALL l4_dump_ocean_surface_input( kstp, Nbb )', 2],
+    # --- ORCA2 card round 71: independent-month clock and terminal state ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/fldread.f90:235-246': [
+        'IF( sd(jf)%ln_tint ) THEN',
+        'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb) + ztinta * sd(jf)%fdta(:,:,:,iaa)',
+        12],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/restart.f90:170-184': [
+        "CALL iom_rstput( kt, nitrst, numrow, 'rdt', rn_Dt )",
+        "IF( PRESENT(Kaa) )   CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+        15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3.f90:223-272': [
+        '! Stage 3 :',
+        'IF( ln_sto_eos )   CALL sto_rst_write( kstp )', 50],
+    # --- ORCA2 card round 72: independent temperature source walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
+        ('IF( ln_tile )   CALL dom_tile_start', 1),
+        ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:645-651': [
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )',
+        ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 6), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:670-680': [
+        ('SELECT CASE( kstg )', 4),
+        '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 11],
+    # --- ORCA2 card round 74: independent metric-U transport walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:45-49': [
+        'INTEGER,  PUBLIC, PARAMETER ::   np_LIN = 0',
+        'INTEGER  :: n_baro_upd =  np_HYB', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/stprk3_stg.f90:274-284': [
+        ('CASE ( np_LIN, np_HYB )', 2),
+        ('END DO   ;   END DO   ;   END DO', 1), 11],
+    # --- ORCA2 card round 76: independent external U-transport producer ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:530-536': [
+        '! resulting flux at mid-step (not over the full domain)',
+        ('END DO   ;   END DO', 8), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:563-580': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        "& l4_canon_2d(vn_adv,'V')", 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:829-847': [
+        '! Finalize sums:',
+        "WRITE(l2_adv_unit) l4_canon_2d(un_adv,'U'), l4_canon_2d(vn_adv,'V')", 19],
+    # --- ORCA2 card round 77: external U-transport operand pair ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:460-469': [
+        '!* Set extrapolation coefficients for predictor step:',
+        ('ENDIF', 14), 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:476-485': [
+        '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
+        ('END DO   ;   END DO', 3), 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/dynspg_ts.f90:487-522': [
+        ('IF( .NOT.lk_linssh ) THEN', 1),
+        ('ENDIF', 17), 36],
+    # --- ORCA2 card round 73: independent stage-1 CEN2 walk ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv.f90:491-535': [
+        '! FCT at last stage only with RK3',
+        ('ENDIF', 27), 45],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:149-155': [
+        ('CASE(  2  )                         !* 2nd order centered', 1),
+        ('END DO   ;   END DO', 1), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:157-161': [
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)                     ! Horizontal divergence of advective fluxes',
+        ('END DO   ;   END DO', 2), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R4FULLSURFACE/BLD/ppsrc/nemo/traadv_cen.f90:202-228': [
+        'IF( lk_linssh ) THEN                !* top value   (linear free surf. only as zwz is multiplied by wmask)',
+        ('END DO   ;   END DO', 9), 27],
+    # --- ORCA2 card round 6: full-domain entry and first runtime stop ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:218-253': [
+        'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
+        'sf_tsd(jp_tem)%fnow( mi0(ii0,nn_hls):mi1(ii1,nn_hls) , mj0(ij0,nn_hls):mj1(ij1,nn_hls) , 14:20 ) = 6.0_wp',
+        36],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1587-1647': [
+        'SUBROUTINE bn2( pts, pab, pn2, Kmm, kbnd )',
+        'END SUBROUTINE bn2_t', 61],
+    # --- ORCA2 card round 7: the independent initial state and EOS-80 ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/istate.f90:117-118': [
+        'IF( ln_tsd_init ) THEN',
+        'CALL dta_tsd( nit000, ts(:,:,:,:,Kbb) )', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:308-309': [
+        'ptsd(ji,jj,jk,jp_tem) = ptsd(ji,jj,jk,jp_tem) * tmask(ji,jj,jk)',
+        'ptsd(ji,jj,jk,jp_sal) = ptsd(ji,jj,jk,jp_sal) * tmask(ji,jj,jk)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/mppini.f90:1587-1593': [
+        'mi0(ji,jh) = MAX( 1 , MIN( ji - iimpp + 1, ipi+ishft+1 ) )',
+        'mj1(jj,jh) = MAX( 0 , MIN( jj - ijmpp + 1, ipj+ishft   ) )', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:2284-2293': [
+        'CASE( np_eos80 )                        '
+        '!==  polynomial EOS-80 formulation  ==!',
+        ('r1_Z0  = 1.e-4_wp', 2), 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1281-1330': [
+        ('CASE( np_teos10, np_eos80 )                '
+         '!==  polynomial TEOS-10 / EOS-80 ==!', 7),
+        'pab(ji,jj,jk,jp_sal) = zn / zs * r1_rho0 * ztm', 50],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynvor.f90:912-937': [
+        'SELECT CASE( nn_e3f_typ )',
+        'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
+        26],
+    # --- ORCA2 card round 62: executing vector-advection source order ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:402-420': [
+        'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )',
+        'L2_RK_STAGE2_TERM_DUMP', 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        ('SELECT CASE( n_dynadv )', 1),
+        'CALL dyn_zad', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynkeg.f90:117-130': [
+        'CASE ( nkeg_C2 )',
+        ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 1), 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzad.f90:102-137': [
+        'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
+        '&                                              * zWdzV(ji,jj)', 36],
+    # --- ORCA2 card round 63: incomplete vector record and QCO repair ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dynadv_round62_writer.f90:91-92': [
+        "WRITE(r62_unit) 'e3u_Kmm         '",
+        "WRITE(r62_unit) 'e3v_Kmm         '", 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dom_oce.f90:136-140': [
+        'LOGICAL, PUBLIC, PARAMETER ::   lk_qco    = .TRUE.',
+        'LOGICAL, PUBLIC, PARAMETER ::   lk_vco_1d3d = .TRUE.', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R62VADVSP/BLD/ppsrc/nemo/dom_oce.f90:318-367': [
+        'IF( lk_qco .OR. lk_linssh ) THEN',
+        '&                                e3vw(jpi,jpj,jpk,jpt) ,   STAT=ierr(ii) )', 50],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round62_vector_advection_acquisition/dynadv_round62_writer.F90:79-89': [
+        'ALLOCATE( r62_payload(jpi,jpj,jpk) )',
+        "R62_3D('e3v_Kmm         ',r62_payload)", 11],
+    # --- ORCA2 card round 64: admitted ZAD source-order replay ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynadv.f90:136-143': [
+        ('SELECT CASE( n_dynadv )', 1),
+        'CALL dynadv_round62_after_zad( kt, Kmm, Krhs, nn_dynkeg, puu, pvv )', 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R63VADVSP/BLD/ppsrc/nemo/dynzad.f90:102-137': [
+        'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
+        '&                                              * zWdzV(ji,jj)', 36],
+    # --- ORCA2 card round 21: merge-owner substitution ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:912-937': [
+        'SELECT CASE( nn_e3f_typ )',
+        'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
+        26],
+    # --- ORCA2 card round 31: the two consumers' own frozen F thicknesses ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:123':
+        ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * (e3f_3d(ji-1,jj-1,jk)', 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:914-919': [
+        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  0), ntej+(   0) ; '
+         'DO ji = ntsi-( 0), ntei+(   0)', 1),
+        ('END DO   ;   END DO   ;   END DO', 2), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:935':
+        ("CALL lbc_lnk( 'dynvor', e3f_0vor, 'F', 1._wp )", 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:937':
+        ('WHERE( e3f_0vor(:,:,:) == 0._wp )   '
+         'e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 1),
+    'domzgr_substitute.h90:100':
+        ('#     define  e3f_0(i,j,k)    e3f_3d(i,j,k)', 1),
+    'DOM/domzgr.F90:173': (
+        "CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F', "
+        "psgn = 1._wp, kfill = jpfillcopy )", 1),
+    # --- ORCA2 card round 27: split the shared F-thickness consumers ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:734-738': [
+        ('DO jk = 1, jpkm1', 4),
+        ('z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk)', 1),
+        5],
+    # --- ORCA2 card round 29: EEN numerator/denominator split ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:741-779': [
+        ('SELECT CASE( kvor )                 !==  vorticity considered  ==!', 3),
+        ("CALL ctl_stop('STOP','dyn_vor: wrong value for kvor'  )", 3),
+        39],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:784-802': [
+        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 3),
+        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
+        19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domqco.f90:273-286': [
+        ('IF( PRESENT( pr3f ) ) THEN             !==  ratio at f-point  ==!', 2),
+        ('END DO   ;   END DO', 6), 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domhgr.f90:155-157': [
+        'e1e2t (:,:) = e1t(:,:) * e2t(:,:)',
+        'IF( ie1e2u_v == 0 ) THEN', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/domain.f90:203-206': [
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)', 1),
+        "CALL lbc_lnk('domain', hf_0, 'F', 1._wp)", 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dommsk.f90:258':
+        ('fe3mask(:,:,:) = fmask(:,:,:)', 1),
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:139-166': [
+        ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
+        ('CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 1), 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:189-204': [
+        ("WRITE(l2_slow_unit) l4_canon_3d(e3u_3d,'U')", 1),
+        ('Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + SUM(', 1), 16],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:218-221': [
+        ('!* baroclinic drag forcing *!', 1),
+        ('l4_canon_2d(CdU_v', 1), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stp2d.f90:225-235': [
+        ('WRITE(l2_slow_unit) r1_rho0', 1),
+        ('LANE2_SLOW_FORCING_DUMP', 1), 11],
+    'ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/stp2d.f90:155-187': [
+        ('CALL eos    ( ts, Kbb, rhd )', 1),
+        ('WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs)', 5), 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R40RHSFAM/BLD/ppsrc/nemo/dynhpg.f90:340-451': [
+        ('SUBROUTINE hpg_sco( kt, Kmm, puu, pvv, Krhs )', 1),
+        ('END SUBROUTINE hpg_sco', 1), 112],
+    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/eosbn2.f90:810-842': [
+        ('CASE( np_teos10, np_eos80 )', 3),
+        ('prd(ji,jj,jk) = (  zn * r1_rho0 - 1._wp  ) * ztm', 3), 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R41HPG1/BLD/ppsrc/nemo/dynhpg.f90:403-458': [
+        ('zhpi(ji,jj) = zcoef0 * r1_e1u(ji,jj)', 1),
+        ('r41_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 1), 56],
+    # --- ORCA2 card round 43: stage-1 tracer transport handoff ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:265-284': [
+        ('ALLOCATE( zub(ntsi-', 1),
+        ('END DO   ;   END DO   ;   END DO', 1), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:551-645': [
+        ('IF( .NOT.ln_shuman ) THEN', 1),
+        ('CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )', 1), 95],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv.f90:267-315': [
+        ('IF( ll_Fw ) THEN', 1),
+        ('CLOSE(993)', 1), 49],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sshwzv.f90:271-299': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
+        ('END DO   ;   END DO   ;   END DO', 6), 29],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90:143-160': [
+        ('DO jn = 1, kjpt', 1),
+        ('r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90:202-227': [
+        ('IF( lk_linssh ) THEN', 1),
+        ('r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 4), 26],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90:275-328': [
+        ('!        EMP, SFX and QNS effects', 2),
+        ('ENDIF', 24), 54],
+    # --- ORCA2 card round 44: first downstream source-order debt ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:467-480': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 1),
+        ('END DO   ;   END DO   ;   END DO', 6), 14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:670-681': [
+        ('SELECT CASE( kstg )', 4),
+        ('END DO   ;   END DO   ;   END DO', 8), 12],
+    # --- ORCA2 card round 66: independent from-rest entry ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/istate.f90:93-140': [
+        ('CALL dta_tsd_init', 1),
+        ('vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 1), 48],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:217-254': [
+        ('!                                   !==   ORCA_R2 configuration and T & S damping   ==!', 1),
+        ('ENDIF', 9), 38],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dtatsd.f90:307-310': [
+        ('DO jk =  1,  jpk', 2),
+        ('END DO   ;   END DO   ;   END DO', 2), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:440-465': [
+        ('! 4) Adjust ssh and vertical scale factors to snow-ice mass', 1),
+        ('CALL dom_qco_zgr( Kbb, Kmm )', 1), 26],
+    # --- ORCA2 card round 45: stage-1 r3 interpolation owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
+        ('!                     !==  ssh/h0 ratio at Kaa  ==!', 1),
+        ('r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 1), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynvor.f90:556':
+        ('zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
+    # --- ORCA2 card round 22: exact stage-to-entry transition and LDF owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3.f90:230-241': [
+        'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )',
+        'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 12],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3_stg.f90:493-506': [
+        'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )',
+        'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )',
+        14],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:123-140': [
+        ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk)', 1),
+        ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 18],
+    # --- ORCA2 card round 26: split the three live-thickness positions ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:121-125': [
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
+        ('e1u(ji-1,jj  ) * pu(ji-1,jj  ,jk,Kbb)', 1), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:127-129': [
+        ('zwt(ji,jj)     = ahmt(ji,jj,jk) * r1_e1e2t(ji,jj)', 1),
+        ('e1v(ji,jj-1)*(e3v_3d(ji  ,jj-1,jk)', 1), 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/dynldf_lev.f90:132-140': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 9],
+    # --- ORCA2 card round 24: held Decision-54 whole attribution ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:348-353': [
+        "CASE( -30  )",
+        ('CALL iom_close( inum )', 2),
+        6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/ldfdyn.f90:387-393': [
+        'IF( .NOT.l_ldfdyn_time ) THEN',
+        'ahmf(:,:,1:jpkm1) = SQRT( ahmf(:,:,1:jpkm1) ) * fmask(:,:,1:jpkm1)',
+        7],
+    # --- ORCA2 card round 23: Decision 58 second continuity solve ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/stprk3_stg.f90:323-329': [
+        ('IF( ln_dynadv_vec ) THEN', 1),
+        'CALL wAimp( kstp, Kmm, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, wi, np_velocity, ld_diag=.TRUE. )',
+        7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/traadv.f90:296-300': [
+        'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
+        'CALL wAimp( kt, Kmm, pFu, pFv, ww, wi, np_transport )',
+        5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R20SLOWRANK/BLD/ppsrc/nemo/divhor.f90:123-130': [
+        'SELECT CASE ( ik_ind )',
+        (') * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1),
+        8],
     # --- round 184: DINO developed-state closed V-face repair ---
     'DINO/BLD/ppsrc/nemo/domqco.f90:177-181': [
         'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb)           )',
@@ -956,11 +2347,11 @@ CITATION_MAP = {
     # it and legoESM's three answering lines.
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257':
         ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
-    'ocean_pe_latlon_cgrid.py:1683':
+    'ocean_pe_latlon_cgrid.py:1739':
         ('r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)', 1),
-    'ocean_pe_latlon_cgrid.py:1684':
+    'ocean_pe_latlon_cgrid.py:1740':
         ('live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask', 1),
-    'ocean_pe_latlon_cgrid.py:1708':
+    'ocean_pe_latlon_cgrid.py:1764':
         ('flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],', 1),
     # Round 162's review disputed whether the multiply-back is on the
     # vertical-velocity path.  It is: the statement writes the routine's own
@@ -970,9 +2361,9 @@ CITATION_MAP = {
         ('pe3divUh       ! e3t*div[Uh]', 2),
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/sshwzv.f90:278':
         ('CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div )', 1),
-    'ocean_pe_latlon_cgrid.py:1587':
+    'ocean_pe_latlon_cgrid.py:1609':
         ('return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask', 1),
-    'ocean_pe_latlon_cgrid.py:1759-1760': [
+    'ocean_pe_latlon_cgrid.py:1835-1836': [
         ('r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)', 1),
         ('r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)', 1), 2],
     # --- round 161: the stage face ratio, its producer and its composition ---
@@ -996,13 +2387,13 @@ CITATION_MAP = {
     'vertical.py:251':
         ('e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))', 1),
     # --- round 160: legoESM's own two-solve statements ---
-    'ocean_model_latlon_cgrid.py:1706-1743': [
+    'ocean_model_latlon_cgrid.py:1846-1883': [
         ('def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:', 1),
         ('return bool(config_split)', 1), 38],
-    'ocean_model_latlon_cgrid.py:1867-1872': [
+    'ocean_model_latlon_cgrid.py:2007-2012': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
         ('runoff_mass_flux=runoff_mass_flux)', 2), 6],
-    'ocean_model_latlon_cgrid.py:7079-7085': [
+    'ocean_model_latlon_cgrid.py:7783-7789': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
     # --- round 160: the stage clock, the stage after-level and the two
@@ -1211,11 +2602,11 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
-    'vertical.py:296-378': [
+    'vertical.py:456-554': [
         'def nemo_qco_live_vorticity_e3f_cgrid(',
         'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
-        83],
-    'ocean_model_latlon_cgrid.py:5447-5449': [
+        99],
+    'ocean_model_latlon_cgrid.py:5737-5739': [
         '_ws_uses_nemo_ldf_e3 = (',
         'and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")', 3],
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90:158-164': [
@@ -1224,11 +2615,11 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90:704-739': [
         ('!              !---------------!', 2),
         'IF( kstg == 3 )   CALL dyn_zdf(', 36],
-    'ocean_model_latlon_cgrid.py:5496-5540': [
+    'ocean_model_latlon_cgrid.py:5786-5838': [
         'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
-        'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 45],
-    'ocean_model_latlon_cgrid.py:6051-6110': [
-        '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 60],
+        'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 53],
+    'ocean_model_latlon_cgrid.py:6487-6550': [
+        '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 64],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
@@ -2128,25 +3519,28 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565': [
         ('DO ji = ntsi-( 0), ntei+( 0 )', 2),
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
-    'ocean_model_latlon_cgrid.py:9111-9230': [
+    'ocean_model_latlon_cgrid.py:9892-10011': [
         'T=state_new.T.replace(data=_adv_content_T)',
         ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 120],
-    'ocean_model_latlon_cgrid.py:11260-11266': [
+    'ocean_model_latlon_cgrid.py:12145-12151': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
-    'ocean_model_latlon_cgrid.py:11701-11730': [
+    'ocean_model_latlon_cgrid.py:12640-12669': [
         ('if do_tracers:', 2),
         'implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))', 30],
     # --- parallel LDF step-3 re-proof: current private arm and execution ---
-    'ocean_model_latlon_cgrid.py:1453-1456': [
+    'ocean_model_latlon_cgrid.py:1559-1562': [
         '# Route the already-computed GM/Redi rate into the same stage-3 source',
         'route_gm_redi_stage3_source: bool = False', 4],
-    'ocean_model_latlon_cgrid.py:8544-8552': [
+    'ocean_model_latlon_cgrid.py:9325-9333': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
-    'nemo_testcase_recipe.py:557-644': [
+    # Decision 90 added nine stated lines INSIDE this block (the slow-forcing
+    # depth average, which this call now states rather than defaulting), so
+    # the pinned extent grows with it: 88 -> 97, same two symbols.
+    'nemo_testcase_recipe.py:597-693': [
         'return LatLonCGridOceanConfig.from_flat(',
-        'gm_redi=None,', 88],
+        'gm_redi=None,', 97],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-868': [
         ('DO jn = 1, jpts', 1),
@@ -2168,19 +3562,19 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 8), 19],
     'round64/oracle_krhs_split/ocean.output:649-656': [
         ('no explicit diffusion', 1), 'iso-neutral triad operator', 8],
-    'ocean_model_latlon_cgrid.py:2206-2259': [
+    'ocean_model_latlon_cgrid.py:2359-2422': [
         'h_one_third = h_k_old',
-        '+ dt * h_one_half * stage_source_rates[2][1])', 54],
-    'ocean_model_latlon_cgrid.py:6952-7025': [
+        '+ dt * h_one_half * stage_source_rates[2][1])', 64],
+    'ocean_model_latlon_cgrid.py:7588-7727': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 74],
-    # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
-    # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
-    # two pinned endpoint statements are one line further apart than before.
-    'ocean_model_latlon_cgrid.py:7993-8426': [
+        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 140],
+    # Extent 433 -> 434 at the 2026-09-25 merge, then 434 -> 437 in round 226:
+    # the explicit S-EOS operands add three lines inside this span.  The
+    # endpoint statements still identify the same program boundary.
+    'ocean_model_latlon_cgrid.py:8771-9207': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 434],
-    'ocean_model_latlon_cgrid.py:8620-8661': [
+        'S_mid = S_mid + dt * dS_gm * active_3d', 437],
+    'ocean_model_latlon_cgrid.py:9401-9442': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 42],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
@@ -2393,13 +3787,13 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:407-409': [
+    'nemo_testcase_recipe.py:437-439': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
-    'ocean_model_latlon_cgrid.py:10113-10130': [
+    'ocean_model_latlon_cgrid.py:10950-10967': [
         'if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):',
         '_u_before, _v_before = _u_now, _v_now', 18],
-    'ocean_model_latlon_cgrid.py:10151-10224': [
+    'ocean_model_latlon_cgrid.py:10988-11061': [
         'if metric_source == "nemo_qco_live_face":',
         'ref_v * (1.0 + r3vb[..., None]),', 74],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
@@ -2431,13 +3825,13 @@ CITATION_MAP = {
     'nemo_testcase_l2_gyre_round54_tke_operands.py:225-239': [
         'header = struct.unpack("=13i", take(13 * 4))',
         'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 15],
-    'ocean_model_latlon_cgrid.py:11952-11957': [
+    'ocean_model_latlon_cgrid.py:12900-12905': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
-    'ocean_model_latlon_cgrid.py:12157-12172': [
+    'ocean_model_latlon_cgrid.py:13105-13120': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
-    'state.py:577-581': [
+    'state.py:597-601': [
         '# NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the',
         'tke_avt: object = None', 5],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
@@ -2606,13 +4000,13 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-157': [
         "zsumemp = glob_2Dsum( 'usrdef_sbc', emp  (:,:)   )",
         'emp (ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)', 7],
-    'ocean_model_latlon_cgrid.py:7547-7612': [
+    'ocean_model_latlon_cgrid.py:8325-8390': [
         'if _cfg_b.fix_eta_drift:',
         'eta=state_new.eta.replace(data=eta_fixed),', 66],
     # --- round 51: live WS-RK3 operand selection and history carry ---
-    'ocean_model_latlon_cgrid.py:6001-6002': [
+    'ocean_model_latlon_cgrid.py:6398-6399': [
         ('u0 = state.u.data', 2), ('v0 = state.v.data', 2), 2],
-    'ocean_model_latlon_cgrid.py:7243-7248': [
+    'ocean_model_latlon_cgrid.py:7948-7953': [
         '_p0_with_zub = _mom_pert_ws(',
         ('stage_face_thickness=_face_thickness_kbb, stage_index=1)', 2), 6],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:190-215': [
@@ -2639,9 +4033,6 @@ CITATION_MAP = {
     # --- round 49: compiled GYRE LDF/ENE statements and call order ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:165-167': [
         '&namdyn_vor', 'ln_dynvor_ene = .true.', 3],
-    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-175': [
-        'hydrostatic pressure gradient (HPG))',
-        "CALL r46_rhs( 'after_zad', uu, vv, Krhs )", 35],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:431-480': [
         'CALL    eos    (        ts, Kmm, rhd, rhop )',
         "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 50],
@@ -2718,21 +4109,21 @@ CITATION_MAP = {
         'IF( .NOT. ln_wave ) THEN', 'RETURN', 16],
     'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:469-477': [
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
-    'ocean_pe_latlon_cgrid.py:1956-1990': [
+    'ocean_pe_latlon_cgrid.py:2033-2067': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3152-3178': [
+    'ocean_pe_latlon_cgrid.py:3259-3285': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:5022-5056': [
+    'ocean_pe_latlon_cgrid.py:5209-5247': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
-        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 35],
-    'ocean_model_latlon_cgrid.py:6780-6790': [
+        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 39],
+    'ocean_model_latlon_cgrid.py:7324-7334': [
         '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
         ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],
-    'ocean_model_latlon_cgrid.py:7898-7915': [
+    'ocean_model_latlon_cgrid.py:8676-8693': [
         ('if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1),
         '/ jnp.maximum(_area_v, 1.0e-30))', 18],
-    'ocean_model_latlon_cgrid.py:7926-7948': [
+    'ocean_model_latlon_cgrid.py:8704-8726': [
         '# 7b. Adaptive-implicit vertical momentum advection',
         'and _pflow is None):', 23],
     # --- ROUND 42: this round's compiled header and slope walk ---
@@ -2807,9 +4198,6 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90:123-126': [
         ('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs)', 1),
         '&                                            * ( zWdzV(ji,jj) + zzWdzV )', 4],
-    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
-        'Compute ssh and (uu_b,vv_b)  at N+1',
-        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:695-711': [
         'Round-29 L2 WRITE-only stage-3 pre-LDF momentum frame.',
         'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )', 17],
@@ -2827,11 +4215,11 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:2648-2649': [
+    'barotropic_latlon_cgrid.py:2759-2760': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],
-    'eos.py:742':
+    'eos.py:747':
         '"raw-mesh e3w_int must contain only finite values > 0",',
     # D67: the e1e2-weighted SSH-average face depth NEMO divides the
     # accumulated barotropic transport by, to form puu_b/pvv_b(Kaa).
@@ -2956,11 +4344,11 @@ CITATION_MAP = {
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )',
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
-    'vertical.py:1625': ('def compute_ocean_jacobian(', 1),
-    'ocean_model_latlon_cgrid.py:6038-6042': [
+    'vertical.py:1910': ('def compute_ocean_jacobian(', 1),
+    'ocean_model_latlon_cgrid.py:6471-6475': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
-    'ocean_model_latlon_cgrid.py:7378': ('_g2 = _nemo_ws_stage_transport(', 1),
-    'ocean_model_latlon_cgrid.py:7397': (
+    'ocean_model_latlon_cgrid.py:8156': ('_g2 = _nemo_ws_stage_transport(', 1),
+    'ocean_model_latlon_cgrid.py:8175': (
         '_stage3_hpg_operands = _stage_hpg_operands(', 1),
     'nemo_testcase_l2_gyre_phase3_gate.py:323': (
         'require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")', 1),
@@ -2978,9 +4366,6 @@ CITATION_MAP = {
         'maximum isoppycnal slope             rn_slpmax', 1),
     # --- ROUND 39: the slopes are built ONCE PER STEP on the BEFORE state ---
     'stprk3.F90:173': ('CALL eos ( ts, Nbb, rhd )                   ! before in situ density', 1),
-    'stprk3.F90:195': ('CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 1),
-    'stprk3.F90:200': ('CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )', 1),
-    'stprk3.F90:207': ('CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 1),
     'GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/stprk3.f90:178': (
         'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   ! before slope for standard operator', 1),
     'LDF/ldfslp.F90:80': ('SUBROUTINE ldf_slp( kt, prd, pn2, Kbb, Kmm )', 1),
@@ -2992,8 +4377,8 @@ CITATION_MAP = {
         '&      + ( ahtv(ji,jj-1,jk-1) + ahtv(ji,jj  ,jk) )  ) * zmskv', 4],
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
-    'fidelity/nemo_recipe.py:974': ('def build_nemo_gyre_recipe(', 1),
-    'ocean_model_latlon_cgrid.py:5605': (
+    'fidelity/nemo_recipe.py:988': ('def build_nemo_gyre_recipe(', 1),
+    'ocean_model_latlon_cgrid.py:5929': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
         'Vector form: 2nd order centered scheme           ln_dynadv_vec  =  T', 1),
@@ -3017,17 +4402,17 @@ CITATION_MAP = {
     'traldf_iso.F90:135': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)', 1),
     'trazdf.F90:173': ('zwt(ji,jk) = avt(ji,jj,jk) + ah_wslp2(ji,jj,jk)', 1),
-    'ocean_model_latlon_cgrid.py:8017': (
+    'ocean_model_latlon_cgrid.py:8795': (
         '_T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]', 1),
     # ROUND 39 moved these two: the before-state slope block added lines
     # above them, so the STATEMENT is unchanged and its line number is not.
     # Re-anchored rather than left to rot, which is what the gate exists for.
-    'ocean_model_latlon_cgrid.py:8382': (
+    'ocean_model_latlon_cgrid.py:9162': (
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1751': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3967': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1764': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3983': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
@@ -3170,7 +4555,7 @@ CITATION_MAP = {
     # each tank's OWN resolved momentum-advection arm.
     'lock_kt1_10/ocean.output:705': 'ln_dynadv_vec  =  F',
     'overflow_kt1_10/ocean.output:822': 'ln_dynadv_vec  =  F',
-    'ocean_model_latlon_cgrid.py:6918': '_vector_velocity_stage_update = (',
+    'ocean_model_latlon_cgrid.py:7467': '_vector_velocity_stage_update = (',
     'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
     'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
                            'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
@@ -3293,7 +4678,6 @@ CITATION_MAP = {
     'dynhpg.F90:359,383': ['puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap',
          'puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap',
          2],
-    'dynadv.F90:144': 'vector form : keg + zad + vor is used',
     'domzgr_substitute.h90:139': [('define  gdept(i,j,k,t)', 1), ('define  gdept(i,j,k,t)', 1), 1],
     'domzgr_substitute.h90:145': [('gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))', 1),
          ('gdept_z0(i,j,k,t) (gdept(i,j,k,t)-ssh(i,j,t))', 1),
@@ -3320,9 +4704,6 @@ CITATION_MAP = {
                       ('SELECT CASE( n_dynadv )', 2), 1],
     'stp2d.F90:178': 'CASE( np_VEC_c2, np_LIN_dyn )',
     'stp2d.F90:183': 'CASE ( np_FLX_c2, np_FLX_up3 )',
-    'domqco.F90:166-169': [
-        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)', 1),
-        ('r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
     'namelist_cfg:91': 'ln_dynvor_ens = .true.',
     'lock_kt1_10/ocean.output:715': [('enstrophy conserving scheme', 1),
                                      ('enstrophy conserving scheme', 1), 1],
@@ -3357,7 +4738,8 @@ CITATION_MAP = {
     'domqco.F90:166-169': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
     'domqco.F90:219-222': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
     # ROUND 34: decision 17 added twelve lines above this one.
-    'vertical.py:541': 'def nemo_qco_live_face_geometry_cgrid(',
+    # Round 34 inserted the ten-line carried-hf_0 selector before this site.
+    'vertical.py:772': 'def nemo_qco_live_face_geometry_cgrid(',
     # --- round 31: the walk into dyn_zdf, and the stamp ---
     'dynzdf.F90:97': 'zDt_2 = rDt * 0.5_wp',
     'dynzdf.F90:148': 'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
@@ -3379,11 +4761,11 @@ CITATION_MAP = {
         5],
     # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
     # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
-    'ocean_model_latlon_cgrid.py:7452-7455': [
+    'ocean_model_latlon_cgrid.py:8230-8233': [
         ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
         ('_replace_stage_mean, target_u, target_v)', 1),
         4],
-    'ocean_model_latlon_cgrid.py:9249-9275': [
+    'ocean_model_latlon_cgrid.py:10037-10063': [
         ('if _ws_stage3_correction is not None:', 1),
         ('v=state_new.v.replace(data=_v_after),', 1),
         27],
@@ -3396,13 +4778,59 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:9091-9093': [
+    'ocean_model_latlon_cgrid.py:9872-9874': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:11520': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:11637': ('u_solve_in = u_solve_in - (', 1),
-    'ocean_pe_latlon_cgrid.py:3389-3392': [
+    'ocean_model_latlon_cgrid.py:12407': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:12575': ('u_solve_in = u_solve_in - (', 1),
+    # ORCA2 round 61: private post-dyn_zdf/pre-barotropic raw-Kaa observer.
+    'ocean_model_latlon_cgrid.py:1395': (
+        'expose_stage3_raw_momentum: bool = False', 1),
+    'ocean_model_latlon_cgrid.py:2931-3011': [
+        '_stage3_rhs_hook = self._nemo_ws_test_hooks.expose_stage3_momentum_rhs',
+        'expose_stage3_raw_momentum cannot be combined with another', 81],
+    'ocean_model_latlon_cgrid.py:10030-10037': [
+        'if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:',
+        'if _ws_stage3_correction is not None:', 8],
+    # Merge re-anchor (round 207): the GYRE side adds a third occurrence of
+    # this fragment, so the ORCA2 block's own copy is now the THIRD, not the
+    # second.  Pinning the stale occurrence resolved the range BACKWARDS.
+    'ocean_model_latlon_cgrid.py:10201-10205': [
+        'if _nemo_ws_exposed_stage3_raw is not None:',
+        ('v=state_new.v.replace(data=_raw_v),', 3), 5],
+    # ORCA2 round 63: private write-only dyn_zdf seam observer.
+    'ocean_model_latlon_cgrid.py:1396-1401': [
+        '# WRITE-only observer for the four source-ordered stage-3 dyn_zdf',
+        'zdf_momentum_observer: object = None', 6],
+    'ocean_model_latlon_cgrid.py:3013-3017': [
+        '_zdf_momentum_observer = (',
+        'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
+    'ocean_model_latlon_cgrid.py:11676-11680': [
+        ('_zc = self.z_coord if z_coord is None else z_coord', 11),
+        '# Argument validation at ENTRY, not inside the drag branch below:', 5],
+    'ocean_model_latlon_cgrid.py:12216-12219': [
+        'u_new, v_new = state.u.data, state.v.data',
+        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 4],
+    'ocean_model_latlon_cgrid.py:12407-12410': [
+        'u_solve_in = u_solve_in - _u_bt_mean',
+        'u_solve_in, v_solve_in)', 4],
+    'ocean_model_latlon_cgrid.py:12575-12581': [
+        'u_solve_in = u_solve_in - (',
+        '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in', 7],
+    'ocean_model_latlon_cgrid.py:12763-12770': [
+        'if _zdf_momentum_observer is not None:',
+        'ordered=True,', 8],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:171-230': [
+        'def run(output: Path, expect_commit: str, entry_input: Path,',
+        '"ordinary/observer commit mismatch")', 60],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:232-248': [
+        'observer_rows = _noninterference(ordinary_arrays, observed)',
+        'arrays[name] = R60._active(candidate, mask)', 17],
+    'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:280-292': [
+        'planted = None',
+        'R60.require(after == before + 1, "plant did not add one refusal")', 13],
+    'ocean_pe_latlon_cgrid.py:3551-3554': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -3440,7 +4868,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:625': [
+    'nemo_testcase_recipe.py:674': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -3469,13 +4897,13 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5450': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5427-5428': [
+    'ocean_pe_latlon_cgrid.py:5654': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5631-5632': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
-    'ocean_pe_latlon_cgrid.py:2081-2082': [('z_coord,', 26), ('eta_safe,', 7), 2],
-    'ocean_pe_latlon_cgrid.py:2121-2122': ['requires the raw NEMO',
+    'ocean_pe_latlon_cgrid.py:2158-2159': [('z_coord,', 26), ('eta_safe,', 7), 2],
+    'ocean_pe_latlon_cgrid.py:2199-2200': ['requires the raw NEMO',
          'nemo_e3w_0 mesh field; midpoint reconstruction on',
          2],
     # ROUND 34: decision 19 added seventeen lines above the last of these
@@ -3483,8 +4911,11 @@ CITATION_MAP = {
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
     # added eighteen lines above the SECOND and THIRD anchors, then decision
     # 36 added fifteen more, so the current lines are 314 and 971.  The first
-    # (92) is above both edits and remains unmoved.
-    'nemo_testcase_recipe.py:340,585,2033': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    # (92) is above both edits and remains unmoved.  Round 7 of the ORCA2 lane
+    # inserted the initial-state helper above the THIRD anchor only, moving it
+    # 1411 -> 1493; later card additions moved all three to their current
+    # merged locations without changing the anchor text.
+    'nemo_testcase_recipe.py:370,625,2942': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -3764,10 +5195,10 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/domain.f90:212-215': [
         'r1_ht_0(:,:) = ssmask',
         'r1_hf_0(:,:) = ssfmask', 4],
-    'ocean_model_latlon_cgrid.py:5444-5499': [
+    'ocean_model_latlon_cgrid.py:5734-5789': [
         '_ws_face_thickness_kbb = None',
         ('_ws_v_live_mask, _grid)[:2]', 1), 56],
-    'ocean_model_latlon_cgrid.py:5709-5750': [
+    'ocean_model_latlon_cgrid.py:6108-6149': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * state.v_mask.data', 1), 42],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
@@ -3823,9 +5254,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90:911-950': [
         '!           !==  complete the tracers RHS  ==!   except ZDF (implicit)',
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing', 40],
-    'ocean_model_latlon_cgrid.py:7028-7076': [
+    'ocean_model_latlon_cgrid.py:7732-7780': [
         ('if _return_tracer_process_trace:', 1),
         'process_qsr_rate=_nemo_ws_process_qsr_rate,', 49],
+    # --- ORCA2 round 101: sufficient owner of the merged GYRE year move ---
+    'ocean_model_latlon_cgrid.py:7443-7453': [
+        'nemo_r3t_rk3_stage1_stretch,',
+        '_qt_13 = nemo_r3t_rk3_stage1_stretch(', 11],
+    'eos.py:975-1006': [
+        'def nemo_r3t_rk3_stage1_stretch(',
+        'return jnp.where(wet, nemo_source_round(one + r3_stage), one)', 32],
     # --- restored from the lane tip (980cc6369) after the merge conflict on
     # this file was resolved to HEAD's side, which silently dropped every
     # entry the VORTEX-card rounds had added.  None of these NEMO/VORTEX
@@ -3856,6 +5294,126 @@ CITATION_MAP = {
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:312-316': [
         'CASE ( 1 )        !==  Stage 1  ==!',
         'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 5],
+    # --- VORTEX round 8: stage-2/3 compiled momentum execution order. ---
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:287-293': [
+        'IF( ln_dynadv_vec ) THEN                 !* Vector invariant Form : no use of ww at stage 1 as 3D RHS computed in stp_2D',
+        'IF( ln_zad_Aimp .AND. kstg == 3 )   CALL wAimp( kstp, Kmm, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, wi, np_velocity, ld_diag=.TRUE. )', 7],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:318-332': [
+        '!                 !-------------------!   Flux Form        : HPG + VOR (COR+MET) + ADV',
+        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 15],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
+        'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:363-370': [
+        'CASE ( 1 , 2 )    !==  Stage 1 & 2  ==!   time stepping',
+        ('END DO   ;   END DO   ;   END DO', 4), 8],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:387-405': [
+        'CASE ( 3 )        !==  Stage 3  ==!   add left over RHS terms + time stepping',
+        'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration', 19],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:408-419': [
+        '!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1',
+        ('END DO   ;   END DO   ;   END DO', 6), 12],
+    # --- round 193: exact lines in the acquired R8 build after its additive
+    # writer shifted stprk3_stg; HPG is a write, then VOR and KEG/ZAD follow.
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323-338': [
+        'CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!',
+        'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 16],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:135-141': [
+        'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
+        "CALL vortex_r8_stage_rhs( 'zad', Krhs, puu, pvv )", 7],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:320-334': [
+        'puu(ji,jj,1,Krhs) = zhpi(ji,jj)     ! RK3 case: dyn_hpg always called first',
+        ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj)', 1), 15],
+    # --- round 196: the split-explicit barotropic sub-time-step loop ---
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:359':
+        'DO jn = 1, icycle                             !  sub-time-step loop  !',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:389':
+        'ua_e(ji,jj) = za1 * un_e(ji,jj) + za2 * ub_e(ji,jj) + za3 * ubb_e(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:401':
+        'zsshp2_e(:,:) = za1 * sshn_e(:,:)  + za2 * sshb_e(:,:) + za3 * sshbb_e(:,:)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:414':
+        'zhup2_e(ji,jj) = hu_0(ji,jj) + r1_2 * r1_e1e2u(ji,jj)                        &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:434':
+        'zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:454':
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:463':
+        'un_adv(ji,jj) = un_adv(ji,jj) + za2 * zhU(ji,jj) * r1_e2u(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:478':
+        'zsshu_a(ji,jj) = r1_2 * r1_e1e2u(ji,jj) * ( e1e2t(ji  ,jj  ) * ssha_e(ji  ,jj  )   &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:489':
+        'CALL ts_bck_interp( jn, ll_init, za0, za1, za2, za3 )   ! coeficients of the interpolation',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:491':
+        'zsshp2_e(ji,jj) = za0 *  ssha_e(ji,jj) + za1 *  sshn_e (ji,jj)   &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:498':
+        'zu_spg(ji,jj) = - zldg * ( zsshp2_e(ji+1,jj) - zsshp2_e(ji,jj) ) * r1_e1u(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:503':
+        'CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )',
+    # Round 197: the Coriolis routine itself, the routine that freezes its
+    # coefficients, the statement that divides ff_f by e3f_0vor, and
+    # e3f_0vor's own construction in dyn_vor_init.
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:933':
+        'SUBROUTINE dyn_cor_2D_init( Kmm )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:960':
+        'zpvo_nw = ff_f(ji-1,jj  ) / (e3f_0vor(ji-1,jj  ,jk) '
+        '*(1._wp+r3f(ji-1,jj  )*fe3mask(ji-1,jj  ,jk))) + &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1112':
+        'SUBROUTINE dyn_cor_2D( punb, pvnb, zu_trd, zv_trd   )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:892':
+        'ALLOCATE( e3f_0vor(jpi,jpj,jpk) )',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1016':
+        'ffu_nw(ji,jj) = ffu_nw(ji,jj) + (e3t_1d( jk) '
+        '*(1._wp+r3u(ji  ,jj, Kmm)*umask(ji  ,jj, jk))) * (e3t_1d( jk) '
+        '*(1._wp+r3v(ji  ,jj  , Kmm)*vmask(ji  ,jj  , jk))) '
+        '* vmask(ji  ,jj  ,jk) / (e3f_0vor(ji,jj  ,jk) '
+        '*(1._wp+r3f(ji,jj  )*fe3mask(ji,jj  ,jk)))',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1046':
+        'zr1_e3f = ff_f(ji,jj) / (e3f_0vor(ji,jj  ,jk) '
+        '*(1._wp+r3f(ji,jj  )*fe3mask(ji,jj  ,jk))) + ff_f(ji,jj-1) '
+        '/ (e3f_0vor(ji,jj-1,jk) '
+        '*(1._wp+r3f(ji,jj-1)*fe3mask(ji,jj-1,jk)))',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:890':
+        'CASE( np_ENS , np_ENE , np_EEN , np_MIX )',
+    'GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:167':
+        'ln_dynvor_ene = .true.  !  energy conserving scheme',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:897': (
+        'e3f_0vor(ji,jj,jk) = (   ( e3t_1d(jk)*tmask(ji  ,jj+1,jk)     &   '
+        '! need additional () for', 1),
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:920':
+        'WHERE( e3f_0vor(:,:,jk) == 0._wp )   e3f_0vor(:,:,jk) = e3t_1d(jk)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:517':
+        'zu_trd(ji,jj) = zu_trd(ji,jj) + zCdU_u(ji,jj) * un_e(ji,jj) * hur_e(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:535':
+        'ua_e(ji,jj) = (                                 un_e(ji,jj)   &',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:581':
+        'hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)',
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:628':
+        ('puu_b  (:,:,Kaa) = puu_b  (:,:,Kaa) + za1 * ua_e  (:,:)', 1),
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:648':
+        'un_adv(:,:) = un_adv(:,:) / r1_wgt2s',
+    # --- round 195: the barotropic operand the per-stage correction adds ---
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:133-135': [
+        'ssha(:,:) = ssh (:,:,Kaa)     ! save ssh, uu_b, vv_b at N+1  '
+        '(computed in dynspg_ts)',
+        'va_b(:,:) = vv_b(:,:,Kaa)', 3],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:421-429': [
+        'ALLOCATE( zub(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)), '
+        'zvb(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) )',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 9],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:289-300': [
+        ('IF( ln_dynadv_vec ) THEN', 1),
+        'CALL wzv( kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport )', 12],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/divhor.f90:123-140': [
+        'SELECT CASE ( ik_ind )', 'END SELECT', 18],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:271-299': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
+        ('END DO   ;   END DO   ;   END DO', 6), 29],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynzad.f90:105-137': [
+        'DO jk =  1,  jpk-2',
+        '&                                              * zWdzV(ji,jj)', 33],
+    'VORTEX_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traadv.f90:268-273': [
+        'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
+        ('END DO   ;   END DO   ;   END DO', 3), 6],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],
@@ -3945,6 +5503,36 @@ CITATION_MAP = {
     'zdftke.F90:845-846': [('ELSE                          ! standard case : associated avt minimum = molecular viscosity (10^-6 m2/s)', 1), ('rmxl_min = 1.e-6_wp / ( rn_ediff * SQRT( rn_emin ) )    ! resulting minimum length to recover molecular viscosity', 1), 2],
     'zdftke.F90:841-843': [('IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing', 1), ('rmxl_min = 1.e-03_wp             ! associated avt minimum = molecular salt diffusivity (10^-9 m2/s)', 1), 3],
     'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg:396': ('ln_zdfiwm   = .true.       ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:90-104': [
+        ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
+        ("WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP ', kstp, Nbb, STORAGE_SIZE(1._wp), TRIM(cl_traj)", 1),
+        15,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:211-227': [
+        ('! Stage 1 :', 1),
+        ('IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )', 1),
+        17,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:91-107': [
+        ('! Lane-1 certified oracle: exact step-entry Nbb state.  This is a', 1),
+        ('CALL r84_dump_frame( kstp, 0, Nbb )', 1),
+        17,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:147-154': [
+        ('! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)', 1),
+        ('IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )', 1),
+        8,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:390-441': [
+        ('SUBROUTINE l4_dump_ocean_surface_input( kstp, klevel )', 1),
+        ('END SUBROUTINE l4_dump_ocean_surface_input', 1),
+        52,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:443-473': [
+        ('FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )', 1),
+        ('END FUNCTION l4_canon_2d', 1),
+        31,
+    ],
     'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
     'domhgr.F90:222-227': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ('kff = 1', 1), 6],
     'zdftke.F90:246,253-258': [('IF( nn_eice == 0 ) zice_fra(:) = 0._wp               ! No attenuation of TKE due to sea ice', 1), ('! ice fraction considered for attenuation of langmuir & wave breaking', 1), ('END SELECT', 1), 7],
@@ -3952,7 +5540,99 @@ CITATION_MAP = {
     'zdftke.F90:601-603': [('DO_1Di( 0, 0 )                  ! No sea-ice', 1), ('END_1D', 16), 3],
     'zdftke.F90:859-862': [('IF( ln_mxl0 ) THEN', 4), ('rn_mxl0 = rmxl_min', 2), 4],
     'geo2ocean.F90:168,259-260': [('REAL(wp) ::   zxffu, zyffu, znffu   ! x,y components and norm of the vector: between F points below and above a U point', 1), ('gsinu(ji,jj) = ( zxnpu*zyffu - zynpu*zxffu ) / znffu', 1), ('gcosu(ji,jj) = ( zxnpu*zxffu + zynpu*zyffu ) / znffu', 1), 3],
+    # --- VORTEX round 6: NEMO's carried after-SSH slot ('ssha') ---
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:221-225': [
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs',
+        'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 5],
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3.f90:222-226': [
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs',
+        'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 5],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:149':
+        'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:153':
+        'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stp2d.f90:152':
+        'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stp2d.f90:156':
+        'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:184':
+        "CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:362-370': [
+        "id1 = iom_varid( numror, 'ssha', ldstop = .FALSE. )",
+        ('ssh(:,:,Kaa) = ssh(:,:,Kbb)', 1), 9],
+    'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:295-298': [
+        ('integrate from the bottom the hor. divergence', 4),
+        ('r1_Dt * e3t_1d(jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )', 2), 4],
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/sshwzv.f90:295-298': [
+        ('integrate from the bottom the hor. divergence', 4),
+        ('r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )', 2), 4],
+    # --- round 202: shared stage-one tracer-thickness ratio order ---
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:53-54': [
+        'r1_3 = 1._wp / 3._wp', 'r2_3 = 2._wp / 3._wp', 2],
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:160-179': [
+        '!==  ssh/h0 ratio at Kaa  ==!',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 20],
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:167':
+        'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
+    'GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90:177':
+        'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
     'domhgr.F90:222-223': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ("& iom_varid( inum, 'ff_t', ldstop = .FALSE. ) > 0    ) THEN", 1), 2],
+    # --- round 224: SMT-3 deck provenance and compiled branch ---
+    'orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:319-326': [
+        'ln_traldf_lap   = .true.', 'rn_Ld        = 200.e+3', 8],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:918-933': [
+        'ln_traldf_OFF   = .false.', 'ln_botmix_triad = .false.', 16],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:214-218': [
+        'NAMELIST/namtra_ldf/ ln_traldf_OFF',
+        '&                 nn_aht_ijk_t , rn_Ud          , rn_Ld', 5],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:231-233': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
+        'IF(lwm) WRITE( numond, namtra_ldf )', 3],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:261-283': [
+        'nldf_tra = np_ERROR',
+        ('IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 1), 23],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:354-390': [
+        'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
+        ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
+    'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
+        ('SELECT CASE ( nldf_tra )', 2), ('END SELECT', 2), 18],
+    # --- round 226: admitted SMT-3 compiled branch and magnitude boundary ---
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:231-233': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
+        'IF(lwm) WRITE( numond, namtra_ldf )', 3],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:261-283': [
+        'nldf_tra = np_ERROR',
+        ('IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 1), 23],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:354-390': [
+        'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
+        ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90:105-110': [
+        ('SELECT CASE ( nldf_tra )', 2),
+        'CALL traldf_iso_lap  ( kt, Kbb, Kmm, pts, Krhs, l_ptr, l_hst )', 6],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:159-177': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )', 19],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:456-488': [
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 2),
+        "CALL vortex_r18_tracer_rhs( 'adv', Krhs, ts )", 33],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:501-546': [
+        ('SELECT CASE( kstg )', 4),
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 46],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:532':
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:546':
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:154-304': [
+        ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
+        ('&                 * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2),
+        151],
+    # --- round 227: internal SMT-3 LDF acquisition seams ---
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90:186-338': [
+        'zgru(ji,jj,iikm1) = umask(ji,jj,jpkm1)',
+        ("CALL lbc_lnk( 'ldfslp', uslp", 1), 153],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:780-829': [
+        ('DO jk =    2,  jpkm1', 1),
+        'pakz(ji,jj,jk) = MAX( zcoef0 - 0.5_wp , 0._wp )', 50],
 }
 
 

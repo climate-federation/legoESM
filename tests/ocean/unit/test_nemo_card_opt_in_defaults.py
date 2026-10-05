@@ -242,6 +242,80 @@ def test_orca2_card_inherits_the_rn_mxl0_overwrite():
     assert float(_mxl0_anchor_floor(tke)) != tke.mxl0_min_m
 
 
+def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
+    """Decisions 75 and 76 on the ORCA2 card, measured rather than argued.
+
+    ``nemo_first_wzv_after_ssh`` is fail-closed: a card that reaches NEMO's
+    first ``wzv`` call and leaves it unset RAISES.  ORCA2's own build runs the
+    RK3 vector-invariant program -- ``stp2d.f90`` takes the "Vector Inv. Form"
+    Coriolis arm and the "only KEG + ZAD in Vector Inv. Form" advection -- and
+    that program leaves the previous step's linear extrapolation in the after
+    slot (``stprk3.f90:241``), so the card must resolve ``rk3_extrapolated``.
+
+    The lateral-mixing CFL cap must not be inherited from a library default
+    (decision 75): the card is built twice with every ``enforce_cfl`` default
+    the card could inherit flipped in between, and its resolved block must not
+    move.  Reverting either statement makes this red.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    config = build_orca2_zps_card(deck).recipe.model_config
+    assert config.momentum_time_integrator == "rk3_ws"
+    assert config.momentum_advection == "vector_invariant"
+    assert config.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+
+    # Reuse the decision-75 flip harness rather than writing a second one.
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "_vortex_card_tests_for_orca2",
+        root / "tests" / "ocean" / "unit" / "test_nemo_vortex_card.py")
+    vortex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vortex)
+    clean = build_orca2_zps_card(deck).recipe.model_config.physics
+    with vortex._lateral_mixing_defaults_flipped():
+        flipped = build_orca2_zps_card(deck).recipe.model_config.physics
+    assert flipped.lateral_mixing == clean.lateral_mixing, (
+        "ORCA2's resolved configuration follows a lateral-mixing library "
+        "default; state the field on the card instead of re-pinning")
+    assert clean.lateral_mixing.scheme == "none"
+    assert clean.lateral_mixing.harmonic.enforce_cfl is False
+    assert clean.lateral_mixing.biharmonic.enforce_cfl is True
+
+    # ... and the after-SSH form is STATED on the ORCA2 card, not inherited
+    # from the shared GYRE identity it specialises.  The shared builder is
+    # made to hand back a sentinel; a card that merely inherited would carry
+    # the sentinel through, and deleting the card's own line makes this red.
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe_module
+
+    original = recipe_module._model_config
+
+    def _sentinel_base(*args, **kwargs):
+        built = original(*args, **kwargs)
+        # Poison ONLY the shared GYRE identity the ORCA2 branch builds on,
+        # not the ORCA2 identity's own return value.
+        if kwargs.get("whole_step_identity") == "gyre_vector_ene_c2":
+            return built._replace(
+                nemo_first_wzv_after_ssh="leapfrog_continuity")
+        return built
+
+    recipe_module._model_config = _sentinel_base
+    try:
+        stated = build_orca2_zps_card(deck).recipe.model_config
+    finally:
+        recipe_module._model_config = original
+    assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+
+
 # --------------------------------------------------------------------------
 # S5 — one meaning per nn_eice value, on every integration
 # --------------------------------------------------------------------------
@@ -313,7 +387,7 @@ def test_literal_een_coriolis_refuses_a_curvilinear_grid_without_ff_f():
 def test_carried_seed_is_selected_by_config_not_by_state_presence():
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        _carried_nemo_depth_mean,
+        nemo_carried_barotropic_depth_mean as _carried_nemo_depth_mean,
     )
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -428,3 +502,66 @@ def test_v3_bt_hist_archive_is_refused_with_a_readable_message():
 
     with pytest.raises(ValueError, match="must be REGENERATED"):
         _refuse_v3_deviation_bt_hist(_T(), Path("old_v3.npz"))
+
+
+def test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises():
+    """DECISION 90: the field has NO default and an unset card RAISES.
+
+    Two halves, both needed.  The NamedTuple must not carry a scheme as its
+    default (a default IS the hidden choice the decision removes), and the
+    consumer must refuse the unset value rather than pick one -- with a
+    message that says the card has to state it.  Every NEMO testcase card
+    states NEMO's own form.
+    """
+    import re
+    from pathlib import Path
+    from legoesm.ocean.state import BarotropicConfig
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+    # Every card the builder dispatches, read off the builder's own error
+    # rather than listed here, so a new card cannot slip past this gate.
+    try:
+        build_nemo_testcase_card("__no_such_card__")
+    except ValueError as error:
+        cases = [name for name in re.findall(r"'([A-Za-z0-9_\-]+)'",
+                                             str(error))
+                 if name != "__no_such_card__"]
+    assert len(cases) >= 11, cases
+
+    assert BarotropicConfig().barotropic_slow_forcing_depth_evaluation == "", (
+        "the field carries a scheme as its default; decision 90 says it has "
+        "none and that every card states it")
+
+    # The consumer's refusal, read from the routine that RUNS rather than
+    # asserted about this file: the unset branch must raise and must name
+    # the field.  Reaching it needs a full card step, so the guard is read
+    # out of the compiled source of the method that executes it and then
+    # exercised through the public config below.
+    source = Path(
+        "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"
+    ).read_text()
+    # The guard is SCOPED: the choice between NEMO's statement and
+    # legoESM's live min-rule only exists on a card running NEMO's RK3
+    # momentum program, so that is where the unset value raises.  Both
+    # halves are required -- the scope test and the raise under it.
+    guard = re.search(
+        r"if not _slow_depth_eval:\s*\n\s*if _nemo_rk3_family:"
+        r"\s*\n\s*raise ValueError\(", source)
+    assert guard is not None, (
+        "the consumer has no scoped unset guard for "
+        "barotropic_slow_forcing_depth_evaluation")
+    assert re.search(
+        r'_nemo_rk3_family = getattr\(\s*\n?\s*_cfg_b, '
+        r'"momentum_time_integrator", "euler"\) in \("rk3", "rk3_ws"\)',
+        source) is not None, (
+        "the guard's scope is not NEMO's RK3 momentum family")
+
+    for case in cases:
+        if case == "ORCA2-zps":
+            continue        # needs an external deck root, not available here
+        card = build_nemo_testcase_card(case)
+        got = (card.recipe.model_config.barotropic
+               .barotropic_slow_forcing_depth_evaluation)
+        assert got == "nemo_literal", (
+            f"{case} does not state NEMO's own depth average: {got!r}")

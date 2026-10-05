@@ -42,6 +42,7 @@ from scripts.run.run_omip_core2 import (
     _build_arg_parser,
     _build_atm_to_surface_core2,
     _idx_t,
+    _restart_reads_rk3_after_ssh,
     orca1_zdftke_config,
 )
 
@@ -958,3 +959,14 @@ def test_a_resumed_leg_reads_the_forcing_records_it_would_have_read():
         f"a leg resumed at step {start_step} applies forcing records "
         f"{resumed} where continuing would apply {continuous[start_step:]}; "
         "the run is driven by the wrong days and no state comparison sees it")
+
+
+def test_restart_slot_requirement_comes_from_the_model_predicate():
+    """The production loader cannot forget a slot a switched card reads."""
+    class Config:
+        zad_qco_evaluation = "nemo_literal"
+        nemo_first_wzv_after_ssh = "rk3_extrapolated_carried"
+
+    assert _restart_reads_rk3_after_ssh(Config())
+    Config.zad_qco_evaluation = "generic"
+    assert not _restart_reads_rk3_after_ssh(Config())

@@ -1,0 +1,20 @@
+--- dynadv.F90
++++ dynadv.F90
+@@ -24,6 +24,7 @@
+    USE in_out_manager  ! I/O manager
+    USE lib_mpp         ! MPP library
+    USE timing          ! Timing
++   USE vortex_r8_stage_terms, ONLY : vortex_r8_stage_rhs
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -78,7 +79,9 @@
+       CASE( np_VEC_c2  )                                                         != vector form =!
+          !                                                                             !* horizontal gradient of kinetic energy
+          CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )
++         IF( kt == nit000 )   CALL vortex_r8_stage_rhs( 'keg', Krhs, puu, pvv )
+          CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection
++         IF( kt == nit000 )   CALL vortex_r8_stage_rhs( 'zad', Krhs, puu, pvv )
+          !
+       CASE( np_FLX_c2  )                                                         !=  flux form =!
+          CALL dyn_adv_cen2( kt                , Kmm, puu, pvv, Krhs, pau, pav, paw )   !* 2nd order centered scheme

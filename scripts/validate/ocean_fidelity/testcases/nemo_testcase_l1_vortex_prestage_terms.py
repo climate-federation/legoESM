@@ -155,6 +155,7 @@ def increments(terms: dict) -> dict:
 
 
 def run(terms_root: Path, walk_root: Path, *, stage1_error: float,
+        case: str = CASE,
         allow_dirty: bool = False, plant: str | None = None,
         substitute_zad_w: bool = False) -> dict:
     import jax
@@ -183,13 +184,29 @@ def run(terms_root: Path, walk_root: Path, *, stage1_error: float,
             "momentum accumulator, so the dumps are not in the order this "
             "probe assumes and no increment below is a term")
 
-    card = build_nemo_testcase_card(CASE)
+    # Same refusal as the substep walk: the records carry no case stamp and
+    # the flat and seamount decks share a grid size, so a card walked against
+    # the other card's acquisition would pass every downstream guard.
+    if case != CASE:
+        for name, given in (("--terms-dir", terms_root),
+                            ("--walk-dir", walk_root)):
+            require("VORTEX_SMT" in str(given),
+                    f"{case} must be walked against its own acquisition; "
+                    f"{name} is {given}")
+    else:
+        for name, given in (("--terms-dir", terms_root),
+                            ("--walk-dir", walk_root)):
+            require("VORTEX_SMT" not in str(given),
+                    f"{CASE} is the flat card; {name} is a seamount "
+                    f"acquisition ({given})")
+
+    card = build_nemo_testcase_card(case)
     nlev = int(card.recipe.z_coord.n_levels)
     masks = expected_masks(card)
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry1 = read_entry(walk_root / "oracle_step_entry_kt00000001.bin", CASE,
+    entry1 = read_entry(walk_root / "oracle_step_entry_kt00000001.bin", case,
                         expect_interior=interior)
-    entry2 = read_entry(walk_root / "oracle_step_entry_kt00000002.bin", CASE,
+    entry2 = read_entry(walk_root / "oracle_step_entry_kt00000002.bin", case,
                         expect_interior=interior)
     frame = read_bt_frame(walk_root / "oracle_bt_frames_kt00000001.bin",
                           expect_step=1)
@@ -385,7 +402,7 @@ def run(terms_root: Path, walk_root: Path, *, stage1_error: float,
         owner = top["row"]
 
     report = {
-        "case": CASE, "legoesm_git_sha": sha, "plant": plant,
+        "case": case, "legoesm_git_sha": sha, "plant": plant,
         "zad_w_substituted_from_nemo": substitute_zad_w,
         "per_term_observer_perturbation": passivity,
         "terms_root": str(terms_root), "walk_root": str(walk_root),
@@ -412,6 +429,10 @@ def run(terms_root: Path, walk_root: Path, *, stage1_error: float,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", default=CASE,
+                        choices=(CASE, "VORTEX_SMT_VEC-zps"),
+                        help="which card; a seamount card needs its own "
+                             "--terms-dir and --walk-dir")
     parser.add_argument("--terms-dir", type=Path, default=DEFAULT_TERMS)
     parser.add_argument("--walk-dir", type=Path, default=DEFAULT_WALK)
     parser.add_argument("--stage1-error", type=float, default=1.7073783406e-05,
@@ -435,7 +456,7 @@ def main(argv=None) -> int:
         report = run(args.terms_dir, args.walk_dir,
                      stage1_error=args.stage1_error,
                      allow_dirty=args.allow_dirty, plant=args.plant,
-                     substitute_zad_w=args.substitute_zad_w)
+                     substitute_zad_w=args.substitute_zad_w, case=args.case)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2

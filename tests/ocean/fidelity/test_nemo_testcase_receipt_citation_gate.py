@@ -174,3 +174,29 @@ def test_the_real_receipt_run_can_fail():
     assert report["status"] == "FAIL"
     assert any(row["citation"] == "stp2d.F90:128"
                for row in report["failures"])
+
+
+def test_no_citation_map_key_is_written_twice():
+    """A repeated key is an anchor that was thrown away without a word.
+
+    ``CITATION_MAP`` is a dict LITERAL, so a key written twice keeps only the
+    last value and the earlier anchor is never evaluated -- it cannot fail,
+    cannot be audited, and cannot be noticed, because ``audit_map`` walks the
+    built dict and the shadowed entry is not in it.  Seven keys were shadowed
+    this way on BOTH lanes before the 2026-09-30 fold-in, each with a
+    DIFFERENT anchor from the one that survived.  Reverting that removal makes
+    this red.
+    """
+    import ast
+    import collections
+
+    source = Path(gate.__file__).read_text()
+    assignment = next(
+        node.value for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and getattr(node.targets[0], "id", "") == "CITATION_MAP")
+    written = [ast.literal_eval(key) for key in assignment.keys]
+    repeated = sorted(
+        key for key, count in collections.Counter(written).items() if count > 1)
+    assert repeated == [], f"shadowed citation-map keys: {repeated}"
+    assert len(written) == len(gate.CITATION_MAP)
