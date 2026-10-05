@@ -51,3 +51,12 @@ def test_boundary_scope_rejects_interior_change():
     row = gate.boundary_scope(pre, post, "u")
     assert row["outside_allowed_cells"] == 1
     assert row["first_outside_index"] == [1, 2]
+
+
+def test_boundary_scope_accepts_u_pivot_half_row():
+    pre = np.zeros((4, 9), dtype=np.float64)
+    post = pre.copy()
+    post[-1, 5:] = 1.0
+    row = gate.boundary_scope(pre, post, "u")
+    assert row["changed_cells"] == 4
+    assert row["outside_allowed_cells"] == 0

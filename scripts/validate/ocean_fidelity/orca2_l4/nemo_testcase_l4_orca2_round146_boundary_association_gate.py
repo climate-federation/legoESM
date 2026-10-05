@@ -93,6 +93,11 @@ def boundary_scope(pre, post, face: str) -> dict:
     allowed = np.zeros(pre.shape, dtype=bool)
     if face == "u":
         allowed[:, 0] = True
+        # Compact U stores one periodic closure column before NEMO's native
+        # row.  On a T-pivot mesh the U association also rewrites the native
+        # pivot row's right half (lbcnfd.f90:665-681).
+        half = (pre.shape[1] - 1) // 2
+        allowed[-1, half + 1:] = True
     elif face == "v":
         allowed[0] = True
         allowed[-1] = True
