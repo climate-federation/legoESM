@@ -1432,9 +1432,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )                               ! U-point", 5),
         ('END DO   ;   END DO', 5), 45],
-    'barotropic_latlon_cgrid.py:627-669': [
+    'barotropic_latlon_cgrid.py:627-668': [
         ('def _nemo_external_mode_boundary_association(', 1),
-        ('inverse_u_post, inverse_v_post, eta,', 1), 43],
+        ('inverse_u_post, inverse_v_post, eta,', 1), 42],
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
