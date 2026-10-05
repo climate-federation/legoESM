@@ -68,7 +68,7 @@ client: Read-only file system`. No second independent review service is
 available in this sandbox, so the measurement harness remains explicitly
 UNREVIEWED despite its mechanical controls.
 
-Focused round-146/150 tests pass 13/13. The one required
+Focused round-146/150 and citation-gate tests pass 30/30. The one required
 `tests/ocean/fidelity -n 12` invocation is **INCOMPLETE**, not PASS: it reached
 99%, with 2,578 passed, 7 skipped, and the four registered pre-existing reds
 (SI3 scalar-math provenance, round-35 escape scope, worktree-stamp scope, and
