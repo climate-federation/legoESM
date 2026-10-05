@@ -290,6 +290,14 @@ def run(root: Path, *, plant: str | None = None,
                 f"record.{name}", iso[name][..., :nlev],
                 stripped[..., :nlev], masks[supports[name]], plant=None))
 
+    recorded_face_u = (
+        np.asarray(iso["e3u_3d"])[..., :nlev]
+        * (1.0 + np.asarray(iso["r3u_kmm"])[..., None]
+           * np.asarray(iso["umask"])[..., :nlev]))
+    recorded_face_v = (
+        np.asarray(iso["e3v_3d"])[..., :nlev]
+        * (1.0 + np.asarray(iso["r3v_kmm"])[..., None]
+           * np.asarray(iso["vmask"])[..., :nlev]))
     face_thickness_arm = None
     if corrected_factors:
         # One-variable production-step arm through the existing fidelity hook:
@@ -299,8 +307,8 @@ def run(root: Path, *, plant: str | None = None,
         override_hooks = _NEMOWSRK3TestHooks(
             stage_barotropic_output_override=external,
             tracer_ldf_diagnostics=(
-                jnp.asarray(iso["e3u_3d"][..., :nlev]),
-                jnp.asarray(iso["e3v_3d"][..., :nlev])))
+                jnp.asarray(recorded_face_u),
+                jnp.asarray(recorded_face_v)))
         override_trace = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=override_hooks).step(seed, dt=card.dt_s)
@@ -420,8 +428,8 @@ def run(root: Path, *, plant: str | None = None,
         def run_same_stage_arm(name: str, *, use_divisor: bool,
                                use_faces: bool) -> dict:
             divisor_input = np.asarray(nemo_thickness).copy()
-            face_u = np.asarray(iso["e3u_3d"])[..., :nlev].copy()
-            face_v = np.asarray(iso["e3v_3d"])[..., :nlev].copy()
+            face_u = recorded_face_u.copy()
+            face_v = recorded_face_v.copy()
             plant_location = None
             if plant == f"{name}.divisor_input":
                 support = np.asarray(masks["T"], dtype=bool)
