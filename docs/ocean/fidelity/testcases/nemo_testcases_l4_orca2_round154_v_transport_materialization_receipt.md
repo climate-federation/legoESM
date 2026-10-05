@@ -108,5 +108,13 @@ Verification was run CPU-only in fp64/x64. The canonical citation map was
 mechanically re-anchored with `difflib.SequenceMatcher`; its real-receipt run
 has zero unmapped citations, zero failures, and zero failing map entries.
 This receipt's two compiled spans are live and a two-line shift makes each
-fail. Focused tests and the required full fidelity battery are recorded in the
-round evidence and final campaign report.
+fail. Focused unit, ladder, causal-arm, and citation tests pass **80/80**.
+
+The one required `tests/ocean/fidelity -n 12` invocation is **INCOMPLETE**, not
+PASS. It collected 2,613 items and reached 99% with 2,587 observed passes, 7
+skips, and exactly four registered pre-existing failures: the SI3 scalar-math
+provenance gate, GYRE round-129 spread-record stamp, round-35 escape scope, and
+worktree-stamp scope. Fifteen items never reported a result and the controller
+disappeared without a terminal summary; the corrected process census then
+found zero live pytest processes. No round-154 test failed, and the battery was
+not rerun.
