@@ -327,6 +327,39 @@ def run(root: Path, *, plant: str | None = None,
                 rhs_row["max_abs"] / baseline_rhs["max_abs"]),
         }
 
+    # Post-hoc family split from the materialized production-JIT fluxes.  This
+    # is not promoted to a production row: it only discriminates whether the
+    # remaining RHS error is carried by the horizontal or vertical flux
+    # family before the next round adds a one-variable production override.
+    model_tendency = np.asarray(iso_diag["tendency"])[..., :nlev]
+    area = np.asarray(iso_diag["e1e2t"])[..., None]
+    thickness = np.asarray(iso_diag["e3t"])[..., :nlev]
+    tmask = np.asarray(iso_diag["tmask"])[..., :nlev]
+    delta_fu = (np.asarray(iso["fu"])[..., :nlev]
+                - np.asarray(iso_diag["zfu"])[..., :nlev])
+    delta_fv = (np.asarray(iso["fv"])[..., :nlev]
+                - np.asarray(iso_diag["zfv"])[..., :nlev])
+    delta_horizontal = (
+        (delta_fu - np.roll(delta_fu, 1, axis=1))
+        + (delta_fv - np.roll(delta_fv, 1, axis=0))) / area / thickness * tmask
+    delta_vertical = (
+        ((np.asarray(iso["fw_lower"])[..., :nlev]
+          - np.asarray(iso_diag["zfw_top"])[..., :nlev])
+         - (np.asarray(iso["fw_upper"])[..., :nlev]
+            - np.asarray(iso_diag["zfw_kp1"])[..., :nlev]))
+        / area / thickness * tmask)
+    flux_family_reconstruction = []
+    for name, candidate in (
+            ("arm.horizontal_flux.rhs_increment",
+             model_tendency + delta_horizontal),
+            ("arm.vertical_flux.rhs_increment",
+             model_tendency + delta_vertical),
+            ("arm.all_fluxes.rhs_increment",
+             model_tendency + delta_horizontal + delta_vertical)):
+        flux_family_reconstruction.append(_row(
+            name, iso["rhs_increment"][..., :nlev], candidate,
+            masks["T"], plant=None))
+
     # Post-hoc magnitude discriminator for the first genuine non-bit row.
     # Replace only the A33 coefficient in the already-materialized production
     # operands and rebuild the exact flux/divergence algebra below it.  This is
@@ -372,6 +405,7 @@ def run(root: Path, *, plant: str | None = None,
                        "temporaries after their producing loop")}),
         "factor_reconstruction": factor_reconstruction,
         "face_thickness_arm": face_thickness_arm,
+        "flux_family_reconstruction": flux_family_reconstruction,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -424,6 +458,10 @@ def main(argv=None) -> int:
               f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
         print("face-thickness remaining LDF fraction:",
               f"{arm['fraction_of_additional_ldf_max_remaining']:.16e}")
+    for row in report["flux_family_reconstruction"]:
+        print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
+              f"cells={row['cells_unequal']:7d} "
+              f"max_abs={row['max_abs']:.16e}")
     print(json.dumps(report["aggregate_reproduction"], sort_keys=True))
     print("first non-bit:", report["first_non_bit"])
     if args.output:
