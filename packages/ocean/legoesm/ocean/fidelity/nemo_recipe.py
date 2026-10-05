@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
-from legoesm.ocean.constants_config import ConstantsConfig
+import jax.numpy as jnp
+from legoesm.core.field import Field
+from legoesm.core.transcendentals import cos as precision_cos
+from legoesm.core.transcendentals import sin as precision_sin
+from legoesm.core.transcendentals import tanh as precision_tanh
+from legoesm.ocean.constants_config import (
+    NEMO_CONSTANTS_CONFIG as _CANONICAL_NEMO_CONSTANTS,
+)
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import (
@@ -21,7 +28,9 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.lateral_mixing.config import (
+    BiharmonicConfig,
     GMRediConfig,
+    HarmonicConfig,
     LateralMixingConfig,
     VisbeckConfig,
 )
@@ -35,9 +44,6 @@ from legoesm.ocean.physics.vertical_mixing.config import (
 from legoesm.ocean.state import LatLonCGridOceanConfig
 
 from legoesm import constants
-from legoesm.ocean.constants_config import (
-    NEMO_CONSTANTS_CONFIG as _CANONICAL_NEMO_CONSTANTS,
-)
 
 # THE CANONICAL NEMO PRESET, re-exported -- not a second one built here.
 #
@@ -61,6 +67,10 @@ class NEMORecipe(NamedTuple):
     z_coord: object
     land_mask: object
     initial_state: object
+    # Static internal-wave power / decay-scale maps for cards whose deck
+    # runs NEMO's wave-driven mixing.  None everywhere else, so every
+    # existing recipe is unchanged.
+    iwm_forcing: object = None
 
 
 @dataclass(frozen=True)
@@ -236,6 +246,20 @@ def _nemo_tke_config() -> TKEConfig:
         # reproduces NEMO's dumped avt_k to 3-4 significant figures at
         # every level; choice 2 is 7x high at 10 m.
         tke_mxl_choice=3,
+        # GYRE sets no ln_zdfiwm, so namelist_ref:1200 leaves it .FALSE. and
+        # zdf_tke_init takes the DERIVED arm rmxl_min = 1e-6/(rn_ediff*
+        # SQRT(rn_emin)) = 1e-2 m (zdftke.F90:845-846), not the namelist
+        # mxl_min.  ORCA2 overrides this pair: its namelist_cfg:396 sets
+        # ln_zdfiwm=.TRUE., which forces rmxl_min = 1e-3 (zdftke.F90:841-843).
+        nemo_derived_mxl_min=True,
+        # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+        # :640-642 is the rn_mxl0 floor that follows it.
+        nemo_mxl0_surface_tmask=True,
+        # ln_mxl0=.TRUE. here, so zdf_tke_init OVERWRITES the namelist rn_mxl0
+        # with rmxl_min (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) and
+        # the anchor's floor is the mixing-length floor, not rn_mxl0.  This is
+        # the NEMO-literal arm; DECISION 72 keeps the ORCA1 OMIP card off it.
+        nemo_mxl0_rmxl_min_overwrite=True,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection
         # T/S stops the single-step fct2 bottom-cell drift from flipping the
@@ -299,7 +323,18 @@ def _nemo_physics_config(cfg: NEMOModelRecipeConfig) -> OceanPhysicsConfig:
             scheme="tke",
             tke=_nemo_tke_config(),
         ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
+        # DECISION 75 (operator note BL addendum): the card STATES the
+        # explicit-CFL cap for both lateral-mixing blocks that carry a field
+        # of that name, so its resolved value is the card's own and not
+        # whatever the library happens to default to.  Both values below are
+        # the ones main resolves to today; both are inert here because this
+        # card selects no lateral mixing at all.  A card's resolved
+        # configuration must not depend on a library default.
+        lateral_mixing=LateralMixingConfig(
+            scheme="none",
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
+        ),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
         # convection: default off on the shared card; build_nemo_gyre_recipe turns
@@ -364,6 +399,20 @@ def nemo_lat_lon_model_config(
         # GYRE runs ln_ldfeiv=F (no GM bolus), and the operator raises on
         # kappa_GM≠0, so force kappa_GM=0 when it is selected.
         _kappa_gm = 0.0 if cfg.lateral_operator == "nemo_iso_lap" else cfg.kappa_GM
+        # Decision 23 belongs to the compiled GYRE identity (WS-RK3 plus
+        # traldf_iso).  Other reusable NEMO recipes do not carry GYRE's raw
+        # gdept_0/gdepw_0 geometry and must retain their historical slope path.
+        _gyre_ldfslp = (
+            cfg.lateral_operator == "nemo_iso_lap"
+            and cfg.momentum_time_integrator == "rk3_ws"
+        )
+        _gyre_ldfslp_options = ({
+            "mld_criterion": "n2_integral",
+            "slope_metric_evaluation": "nemo_reciprocal",
+            "slope_face_thickness_evaluation": "nemo_qco_live",
+            "slope_depth_evaluation": "nemo_qco_live_literal",
+            "redi_a33_evaluation": "nemo_literal",
+        } if _gyre_ldfslp else {})
         gm_redi_cfg = GMRediConfig(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
@@ -396,6 +445,7 @@ def nemo_lat_lon_model_config(
             # nemo_iso_lap wants NEMO's ldfslp ML ramp + Shapiro slope fidelity.
             nemo_mld_slope_ramp=(cfg.lateral_operator == "nemo_iso_lap"),
             nemo_slope_shapiro=(cfg.lateral_operator == "nemo_iso_lap"),
+            **_gyre_ldfslp_options,
         )
 
     return LatLonCGridOceanConfig.from_flat(
@@ -407,6 +457,22 @@ def nemo_lat_lon_model_config(
         pgf_scheme=cfg.pgf_scheme,
         pgf_quadrature=cfg.pgf_quadrature,
         barotropic_solver=cfg.barotropic_solver,
+        # Every NEMO recipe allocates the prognostic external mode
+        # (rest_state_latlon_cgrid_ocean(nemo_prognostic_barotropic_velocity
+        # =True) below), and dynspg_ts.F90:484-500 seeds the barotropic window
+        # from that carried pair.  The CONFIG says so, so the choice is not
+        # read off whether the state happens to hold the arrays.
+        nemo_prognostic_barotropic_state=True,
+        # DECISION 90 (user, 2026-10-04): the slow-forcing depth average has
+        # NO default and every card running NEMO's RK3 momentum program
+        # states it.  These are NEMO recipes, so they state NEMO's own
+        # statement, stp2d.F90:177-186: the REFERENCE face thickness times
+        # the stored reciprocal r1_hu_0, with no sea-surface stretching.
+        # These recipes resolve FULL-STEP z-star meshes, where that form and
+        # the per-level minimum of the two live thicknesses are algebraically
+        # the same -- one per-face scalar cancels -- so the STATEMENT is
+        # NEMO's and the arithmetic is unchanged.
+        barotropic_slow_forcing_depth_evaluation="nemo_literal",
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
         momentum_time_integrator=cfg.momentum_time_integrator,
@@ -469,6 +535,7 @@ def build_nemo_rest_recipe(
         z_coord,
         H_max=H_max,
         land_lat_threshold=90.0,
+        nemo_prognostic_barotropic_velocity=True,
     )
     return NEMORecipe(
         model_config=model_config,
@@ -493,13 +560,31 @@ def build_nemo_eady_recipe(
 
     base = build_eady_uniform_setup(n_lat=n_lat, n_lon=n_lon, nlev=nlev)
     model_config = nemo_lat_lon_model_config(cfg)
+    # NEMO carries uu_b/vv_b on every configuration (oce.F90:39,99), not
+    # only on testcase cards.  This setup explicitly removes the depth mean
+    # from its initial shear, so istate.F90:143-167 yields an exact-zero pair.
+    # Keep the pair attached only to this NEMO recipe; the underlying Eady
+    # experiment remains a non-NEMO state with None leaves.
+    base_state = base.initial_state
+    initial_state = base_state._replace(
+        uu_b=Field(
+            data=jnp.zeros(base_state.u.data.shape[:-1],
+                           dtype=base_state.u.data.dtype),
+            name="uu_b", dims=base_state.u.dims[:-1], units="m/s",
+            staggering="edge"),
+        vv_b=Field(
+            data=jnp.zeros(base_state.v.data.shape[:-1],
+                           dtype=base_state.v.data.dtype),
+            name="vv_b", dims=base_state.v.dims[:-1], units="m/s",
+            staggering="edge"),
+    )
     return NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
         grid=base.grid,
         z_coord=base.z_coord,
         land_mask=base.wall_mask,
-        initial_state=base.initial_state,
+        initial_state=initial_state,
     )
 
 
@@ -653,17 +738,17 @@ def nemo_gyre_initial_T_S(depth_pos_m):
 
     d = jnp.asarray(depth_pos_m)
     # NEMO's two-piece blend weights (deep w1, shallow w2; each 0.5 at d=500 m).
-    w1 = (-jnp.tanh((500.0 - d) / 150.0) + 1.0) / 2.0
-    w2 = (-jnp.tanh((d - 500.0) / 150.0) + 1.0) / 2.0
-    T = ((16.0 - 12.0 * jnp.tanh((d - 400.0) / 700.0)) * w1
-         + (15.0 * (1.0 - jnp.tanh((d - 50.0) / 1500.0))
-            - 1.4 * jnp.tanh((d - 100.0) / 100.0)
+    w1 = (-precision_tanh((500.0 - d) / 150.0) + 1.0) / 2.0
+    w2 = (-precision_tanh((d - 500.0) / 150.0) + 1.0) / 2.0
+    T = ((16.0 - 12.0 * precision_tanh((d - 400.0) / 700.0)) * w1
+         + (15.0 * (1.0 - precision_tanh((d - 50.0) / 1500.0))
+            - 1.4 * precision_tanh((d - 100.0) / 100.0)
             + 7.0 * (1500.0 - d) / 1500.0) * w2)
-    S = ((36.25 - 1.13 * jnp.tanh((d - 305.0) / 460.0)) * w1
+    S = ((36.25 - 1.13 * precision_tanh((d - 305.0) / 460.0)) * w1
          + (35.55 + 1.25 * (5000.0 - d) / 5000.0
-            - 1.62 * jnp.tanh((d - 60.0) / 650.0)
-            + 0.2 * jnp.tanh((d - 35.0) / 100.0)
-            + 0.2 * jnp.tanh((d - 1000.0) / 5000.0)) * w2)
+            - 1.62 * precision_tanh((d - 60.0) / 650.0)
+            + 0.2 * precision_tanh((d - 35.0) / 100.0)
+            + 0.2 * precision_tanh((d - 1000.0) / 5000.0)) * w2)
     return T, S
 
 
@@ -675,34 +760,50 @@ def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     target (T*) uses ``zcos_sais2``.
     """
     import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
-    ztime = t_seconds / 3600.0                     # hours since start
-    ztimemax1 = (5.0 * 30.0 + 21.0) * 24.0
-    ztimemin1 = ztimemax1 + 24.0 * _NEMO_GYRE_YEAR_DAYS / 2.0
-    ztimemax2 = (6.0 * 30.0 + 21.0) * 24.0
-    ztimemin2 = ztimemax2 - 24.0 * _NEMO_GYRE_YEAR_DAYS / 2.0
-    zcos_sais1 = jnp.cos((ztime - ztimemax1) / (ztimemin1 - ztimemax1) * jnp.pi)
-    zcos_sais2 = jnp.cos((ztime - ztimemax2) / (ztimemax2 - ztimemin2) * jnp.pi)
+    value = jnp.asarray(t_seconds, dtype=jnp.float64)
+    rpi = jnp.asarray(np.pi, dtype=value.dtype)
+    ztime = sr(value / sr(jnp.asarray(60.0, value.dtype) * 60.0))
+    ztimemax1 = sr(sr(sr(5.0 * 30.0) + 21.0) * 24.0)
+    ztimemin1 = sr(
+        ztimemax1 + sr(sr(24.0 * _NEMO_GYRE_YEAR_DAYS) / 2.0)
+    )
+    ztimemax2 = sr(sr(sr(6.0 * 30.0) + 21.0) * 24.0)
+    ztimemin2 = sr(
+        ztimemax2 - sr(sr(24.0 * _NEMO_GYRE_YEAR_DAYS) / 2.0)
+    )
+    arg1 = sr(sr(sr(ztime - ztimemax1) / sr(ztimemin1 - ztimemax1)) * rpi)
+    arg2 = sr(sr(sr(ztime - ztimemax2) / sr(ztimemax2 - ztimemin2)) * rpi)
+    zcos_sais1 = precision_cos(arg1)
+    zcos_sais2 = precision_cos(arg2)
     return zcos_sais1, zcos_sais2
 
 
 def nemo_gyre_qsr(lat_deg, t_seconds: float = 0.0):
     """NEMO GYRE analytic penetrative solar ``qsr(lat)`` [W/m^2] (usrdef_sbc)."""
     import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
+    lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
-    return 230.0 * jnp.cos(
-        _NEMO_QSR_PI * (jnp.asarray(lat_deg) - 23.5 * zcos_sais1) / (0.9 * 180.0))
+    shifted = sr(lat - sr(23.5 * zcos_sais1))
+    argument = sr(sr(_NEMO_QSR_PI * shifted) / sr(0.9 * 180.0))
+    return sr(230.0 * precision_cos(argument))
 
 
 def nemo_gyre_t_star(lat_deg, t_seconds: float = 0.0):
     """NEMO GYRE analytic restoring target SST ``T*(lat)`` [degC] (usrdef_sbc)."""
     import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
+    lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     _, zcos_sais2 = nemo_gyre_seasonal_cosines(t_seconds)
-    return (28.3 * (1.0 + zcos_sais2 / 50.0) * jnp.cos(
-        jnp.pi * (jnp.asarray(lat_deg) - 5.0)
-        / (53.5 * (1.0 + 11.0 / 53.5 * zcos_sais2) * 2.0)))
+    scale = sr(1.0 + sr(sr(1.0 / 50.0) * zcos_sais2))
+    inner = sr(1.0 + sr(sr(11.0 / 53.5) * zcos_sais2))
+    denominator = sr(sr(53.5 * inner) * 2.0)
+    argument = sr(sr(np.pi * sr(lat - 5.0)) / denominator)
+    return sr(sr(28.3 * scale) * precision_cos(argument))
 
 
 def nemo_gyre_emp(lat_deg, t_seconds: float = 0.0):
@@ -713,15 +814,28 @@ def nemo_gyre_emp(lat_deg, t_seconds: float = 0.0):
     domain mean so the flux is net-zero, then applies it as a virtual salt flux.
     """
     import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
-    lat = jnp.asarray(lat_deg)
+    lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
-    south = (_NEMO_GYRE_EMP_S * _NEMO_GYRE_EMP_CONV
-             * jnp.sin(jnp.pi / 2.0 * (lat - 37.2) / (24.6 - 37.2))
-             * (1.0 - _NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_S * zcos_sais1))
-    north = (-_NEMO_GYRE_EMP_N * _NEMO_GYRE_EMP_CONV
-             * jnp.sin(jnp.pi / 2.0 * (lat - 37.2) / (46.8 - 37.2))
-             * (1.0 - _NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_N * zcos_sais1))
+    half_pi = sr(np.pi / 2.0)
+    delta = sr(lat - 37.2)
+    south_argument = sr(sr(half_pi * delta) / sr(24.6 - 37.2))
+    north_argument = sr(sr(half_pi * delta) / sr(46.8 - 37.2))
+    south_season = sr(
+        1.0 - sr(sr(_NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_S) * zcos_sais1)
+    )
+    north_season = sr(
+        1.0 - sr(sr(_NEMO_GYRE_EMP_SAIS / _NEMO_GYRE_EMP_N) * zcos_sais1)
+    )
+    south = sr(
+        sr(sr(_NEMO_GYRE_EMP_S * _NEMO_GYRE_EMP_CONV) * precision_sin(south_argument))
+        * south_season
+    )
+    north = sr(
+        sr(sr((-_NEMO_GYRE_EMP_N) * _NEMO_GYRE_EMP_CONV) * precision_sin(north_argument))
+        * north_season
+    )
     return jnp.where((lat >= 14.845) & (lat <= 37.2), south, north)
 
 
@@ -734,12 +848,62 @@ def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
     v-point latitudes for vtau.
     """
     import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
 
-    lat = jnp.asarray(lat_deg)
+    lat = jnp.asarray(lat_deg, dtype=jnp.float64)
     zcos_sais1, _ = nemo_gyre_seasonal_cosines(t_seconds)
-    ztaun = _NEMO_GYRE_WIND_TAU0 / jnp.sqrt(2.0) - _NEMO_GYRE_WIND_SAIS * zcos_sais1
-    s = jnp.sin(jnp.pi * (lat - 15.0) / (29.0 - 15.0))
-    return -ztaun * s, ztaun * s
+    ztau = sr(_NEMO_GYRE_WIND_TAU0 / jnp.sqrt(jnp.asarray(2.0, lat.dtype)))
+    ztaun = sr(ztau - sr(_NEMO_GYRE_WIND_SAIS * zcos_sais1))
+    argument = sr(sr(np.pi * sr(lat - 15.0)) / sr(29.0 - 15.0))
+    sine = precision_sin(argument)
+    return sr((-ztaun) * sine), sr(ztaun * sine)
+
+
+def _nemo_ddpdd_sum_2d(values, mask):
+    """NEMO reproducible masked sum in Fortran ``ji``-inner order."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    terms = sr(jnp.ravel(values) * jnp.ravel(mask).astype(values.dtype))
+    zero = jnp.asarray(0.0, dtype=values.dtype)
+
+    def add_doublet(carry, addend):
+        high, low = carry
+        zt1 = sr(addend + high)
+        zerr = sr(zt1 - addend)
+        zt2 = sr(sr(sr(high - zerr) + sr(addend - sr(zt1 - zerr))) + low)
+        normalized = sr(zt1 + zt2)
+        return (normalized, sr(zt2 - sr(normalized - zt1))), None
+
+    (high, _), _ = jax.lax.scan(add_doublet, (zero, zero), terms)
+    return high
+
+
+def nemo_gyre_zero_mean_emp(emp_raw, wet):
+    """Apply GYRE's masked DDPDD ``glob_2Dsum`` mean subtraction literally."""
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    values = jnp.asarray(emp_raw, dtype=jnp.float64)
+    mask = jnp.asarray(wet, dtype=values.dtype)
+    mean = sr(_nemo_ddpdd_sum_2d(values, mask) / _nemo_ddpdd_sum_2d(mask, mask))
+    return sr(values - sr(mean * mask))
+
+
+def nemo_gyre_qns(surface_ct, surface_pt, t_star, qsr, emp):
+    """Literal GYRE non-solar flux, ``usrdef_sbc.F90:120,144``."""
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    ct = jnp.asarray(surface_ct, dtype=jnp.float64)
+    pt = jnp.asarray(surface_pt, dtype=jnp.float64)
+    restoring = sr(jnp.asarray(-40.0, ct.dtype) * sr(ct - t_star))
+    qns = sr(restoring - qsr)
+    emp_heat = sr(
+        sr(emp * pt) * jnp.asarray(NEMO_CONSTANTS_CONFIG.c_sw, ct.dtype)
+    )
+    return sr(qns - emp_heat)
 
 
 def nemo_gyre_wind_forcing(n_lat: int, n_lon: int, t_seconds: float = 0.0):
@@ -766,7 +930,6 @@ def nemo_gyre_wind_forcing(n_lat: int, n_lon: int, t_seconds: float = 0.0):
     Fields are 2D T-point (lat varies, lon uniform).
     """
     import jax.numpy as jnp
-
     from legoesm.ocean.state import OceanSurfaceForcing
 
     lat_t = jnp.asarray(nemo_gyre_latitudes(n_lat))
@@ -897,6 +1060,7 @@ def build_nemo_gyre_recipe(
         grid, z_coord,
         H_max=z_coord.H_max,
         land_mask_override=land_mask,
+        nemo_prognostic_barotropic_velocity=True,
     )
     state = state._replace(
         T=Field(data=T, name="T", dims=state.T.dims, units=state.T.units),
@@ -966,12 +1130,37 @@ def build_nemo_gyre_recipe(
         vorticity_scheme="ene_total",
         barotropic_coriolis_split="frozen",
         # NEMO's actual RK3 (Wicker-Skamarock stage structure + the per-stage
-        # RHS asymmetry) — sweep item #6.
+        # RHS asymmetry) — sweep item #6.  NEMO's key_RK3 `stp_RK3_stg`
+        # advances momentum AND tracers inside ONE stage routine
+        # (stprk3_stg.F90:324-378 momentum, :453-601 tracers), so the tracer
+        # integrator is not free: it is the same program.  User decision 15A
+        # (2026-09-05) selects rk3_ws for both.
         momentum_time_integrator="rk3_ws",
+        tracer_time_integrator="rk3_ws",
+        # NEMO's own vertical momentum advection.  GYRE resolves the vector
+        # form, whose printed program is "keg + zad + vor"
+        # (``dynadv.F90:144``, the ``np_VEC_c2`` arm), so the vertical piece
+        # is ``dyn_zad`` -- not an upwind perturbation.  ``ln_zad_Aimp`` is
+        # ``.false.`` by reference default (``SHARED/namelist_ref:1177``) and
+        # resolves ``F`` on this deck, and the adaptive-implicit path REPLACES
+        # the explicit vertical advection entirely, so the two move together
+        # or the model refuses the pair.  User decision 15C (2026-09-05).
+        vertical_momentum_scheme="nemo_advective",
+        adaptive_implicit_vertadv=False,
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
             barotropic_diffusion_alpha=0.0,
+            # DECISION 90 (user, 2026-10-04): the slow-forcing depth average
+            # has NO default and every card states it.  This is the generic
+            # NEMO-GYRE recipe, so it states NEMO's own statement,
+            # stp2d.F90:177-186 -- the REFERENCE face thickness times the
+            # stored reciprocal r1_hu_0, with no sea-surface stretching.
+            # This recipe resolves a z-star FULL-STEP mesh, where that form
+            # and the per-level minimum of the two live thicknesses are
+            # algebraically the same (one per-face scalar cancels), so the
+            # statement is NEMO's and the arithmetic is unchanged.
+            barotropic_slow_forcing_depth_evaluation="nemo_literal",
             # Required by surface_stress_implicit (init-validated): the
             # implicit stress deposition shifts the depth mean after the
             # barotropic solve; NEMO re-imposes it every stage
@@ -1139,8 +1328,10 @@ __all__ = (
     "build_nemo_rest_recipe",
     "nemo_gyre_initial_T_S",
     "nemo_gyre_latitudes",
+    "nemo_gyre_qns",
     "nemo_gyre_qsr",
     "nemo_gyre_seasonal_cosines",
     "nemo_gyre_t_star",
+    "nemo_gyre_zero_mean_emp",
     "nemo_lat_lon_model_config",
 )

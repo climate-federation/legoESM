@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
@@ -15,8 +15,12 @@
 #   MATRIX=ocean_gpu / ocean_cpu likewise.
 #
 # Existing receipts that this ladder does NOT repeat (reuse decision):
-# atm lat-lon LL2048/LL4096 + MPAS s9/s10 GPU strong f32/f64 1-128 (Aug 2026,
-# /work/bd1083/b309178/diffESM/scaling_receipts/ladder2n).
+# atm lat-lon LL2048/LL4096 GPU strong f32/f64 1-128 (Aug 2026,
+# /work/bd1083/b309178/diffESM/scaling_receipts/ladder2n).  The MPAS s9/s10
+# GPU strong series from the same campaign ran at 8 NCCL channels and is NOT
+# reused: both MPAS lanes now pin 32 channels (2026-09-21 sweep at s9:
+# 5.57 -> 4.65 ms at 128 GPUs, 7.70 -> 7.26 at 32; atm_mpas_nccl_sweep.sbatch)
+# and the plotter refuses MPAS GPU rows measured at any other channel count.
 #
 # Weak arms of the MPAS-atm and cube lanes are strong-bench runs at a larger
 # mesh per device count (those benches have no --mode); the receipt then says
@@ -36,12 +40,28 @@ export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg
 export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
 if [[ "$BACKEND" == gpu ]]; then
   export JAX_PLATFORMS=cuda,cpu
-  PPN=4; ARM_TIMEOUT=1200
-  SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none)
+  PPN=4; ARM_TIMEOUT="${ARM_TIMEOUT:-1200}"
+  # Each GPU rank gets its full 64-thread host share (A/B gpu_cpubind_ab,
+  # job 27586798, 32 GPUs x2: ocean-MPAS 43.25 -> 42.62 ms, atm-MPAS 7.36
+  # -> 7.23/7.39, i.e. -1.5% / within spread); receipts stamp cpu_affinity.
+  SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none --cpu-bind=cores
+            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))")
 else
   export JAX_PLATFORMS=cpu
-  PPN="${PPN:-32}"; ARM_TIMEOUT=2400
-  SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic)
+  # Overridable: the 256- and 512-rank CPU arms spend most of their wall
+  # clock building and partitioning the mesh on every rank, and silently
+  # died at the fixed 2400 s.
+  PPN="${PPN:-8}"; ARM_TIMEOUT="${ARM_TIMEOUT:-2400}"
+  # Each rank gets its full share of the node's hardware threads.  Without
+  # --cpus-per-task srun binds every rank to ONE core (affinity = 2 hw
+  # threads): every CPU ladder before 2026-09-21 ran that way, 7.4x slower
+  # per rank than the 32-core share (s7 atm, 4 ranks/node: 1270 -> 172 ms).
+  # 4 ranks/node measured best on the interactive node (4x32: 172, 8x16:
+  # 195, 16x8: 199, 2x64: 211 ms); every CPU submission passes PPN=4.
+  # SLURM_CPUS_ON_NODE is the batch step's per-node allocation (whole node
+  # under --exclusive); no fallback, a wrong divisor must fail loudly.
+  SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic
+            --cpus-per-task="$(( ${SLURM_CPUS_ON_NODE:?} / PPN ))")
 fi
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"   # $REPO, $PY, PYTHONPATH
 cd "$REPO"
@@ -60,6 +80,14 @@ rc=0
 #   lane: latlon | mpas | cube | tripole | omps    res: latlon rows / mpas level / cube N:kt
 run_arm() {
   local lane="$1" mode="$2" res="$3" nd="$4" x64="$5"
+  # LANES filters this submission to a subset of lanes, so a lane whose
+  # per-rank footprint forces a different rank density can be re-run at that
+  # density WITHOUT re-running (and so changing the density of) the others.
+  if [[ -n "${LANES:-}" && " $LANES " != *" $lane "* ]]; then return 0; fi
+  # MODES likewise: the strong arms need a lower rank density than the weak
+  # ones (per-rank memory grows with rank count on this lane), and a curve
+  # whose points were measured at different densities is not a curve.
+  if [[ -n "${MODES:-}" && " $MODES " != *" $mode "* ]]; then return 0; fi
   local nn=$(( (nd + PPN - 1) / PPN ))
   if (( nn > NODES || nd > MAX_ND || nd < MIN_ND )); then
     echo "[skip] ${lane}_${mode}_${res} d${nd} (needs ${nn} nodes / outside [$MIN_ND,$MAX_ND])"
@@ -72,6 +100,24 @@ run_arm() {
   unset NCCL_P2P_NET_CHUNKSIZE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS \
         LEGOESM_LATLON_PACKED_EXCHANGE LEGOESM_LATLON_SPMD_FUSED_HALO LEGOESM_MESH_CACHE_DIR \
         LEGOESM_OCEAN_MIXED LEGOESM_VMIX_F32_SOLVE LEGOESM_BAROCLINIC_F32 LEGOESM_ENABLE_TF32
+  # ATMOSPHERE VERTICAL LEVELS. 40, matching what production AMIP runs
+  # (run_amip.py --nlev default), changed from 26 on 2026-09-23 by user
+  # decision after this was measured on four A100s, float32, icosahedral
+  # core, 30 timed steps, two replicates, arms interleaved:
+  #
+  #     mesh      26 lev   32 lev   40 lev   (picoseconds per cell per level)
+  #     sub7         707      471      488
+  #     sub9         614      375      382
+  #
+  # 26 was the most expensive count in the repo's own table and it is the
+  # count every published MPAS scaling number was taken at. Per cell at
+  # subdivision 9 the totals are 15,964 ps at 26 levels and 15,280 at 40 --
+  # the same cost for 54% more vertical resolution, on the configuration AMIP
+  # actually runs.
+  #
+  # RECEIPTS TAKEN AT 26 ARE NOT COMPARABLE TO THESE. Every curve has to be
+  # rebuilt; do not mix them in one figure.
+  local ATM_NLEV="${ATM_NLEV:-40}"
   local bench args=(--multicontroller --n-devices "$nd")
   case "$lane" in
     latlon)
@@ -83,19 +129,22 @@ run_arm() {
       else
         args+=(--mode weak --nlat-per-dev "$res" --n-lon "$NLON_WEAK")
       fi
-      args+=(--nlev 26 --steps "$STEPS" --warmup "$WARMUP") ;;
+      args+=(--nlev "$ATM_NLEV" --steps "$STEPS" --warmup "$WARMUP") ;;
     mpas)
-      export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+      # 64 channels (was 32; owner decision 2026-09-25): s9 L26 at 128 GPUs
+      # 3.41/3.38 -> 3.15/3.16 ms with the 64-channel arms run FIRST (job
+      # 27670098), -6.9% with them run second (27627022); equal at 32 GPUs.
+      export NCCL_MIN_NCHANNELS=64 NCCL_MAX_NCHANNELS=64 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_mpas_spmd_scaling.py
-      args+=(--subdivision "$res" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc
+      args+=(--subdivision "$res" --nlev "$ATM_NLEV" --lloyd 0 --wide-halo --partition-method sfc
              --steps "$STEPS" --warmup "$WARMUP") ;;
     cube)
       if (( ${res%:*} % ${res#*:} != 0 )); then echo "[skip] $tag: kt does not divide N"; return 0; fi
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
       bench=scripts/bench/bench_cube_tiled_step_scaling.py
       # the tiled bench has no --n-devices: the count is 6*kt^2 by construction
-      args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev 26
+      args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev "$ATM_NLEV"
             --steps "$STEPS" --warmup "$WARMUP") ;;
     tripole)
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
@@ -108,6 +157,14 @@ run_arm() {
       fi
       args+=(--steps "$STEPS" --warmup "$WARMUP") ;;
     omps)
+      # 8, NOT the atmosphere's 32. Same machine, same binary, same mesh
+      # family, opposite answer: at 128 GPUs the atmosphere mesh is fastest at
+      # 32 channels (4.65 ms) while the ocean mesh produced no output at all
+      # and was killed at the arm limit, twice, then a third time under a
+      # doubled limit. 8 channels completed twice in the same job (36.83 and
+      # 36.92 ms). At 32 GPUs both work and 32 is only ~2.4% faster, so this
+      # costs the low end almost nothing and is the only setting that makes
+      # the high end runnable. Chosen by the user 2026-09-24.
       export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
       export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
       bench=scripts/bench/bench_ocean_mpas_spmd_scaling.py
@@ -139,7 +196,8 @@ case "$MATRIX" in
   atm_gpu)
     NLON_WEAK=8192
     add latlon weak   32   $P2_GPU                # 32 rows x 8192 x 26 per GPU (= LL4096@128 share)
-    add mpas   strong 10   192
+    add mpas   strong 9    $P2_GPU
+    add mpas   strong 10   2 4 8 16 32 64 128 192
     add mpas   weak 7 2;  add mpas weak 8 8;  add mpas weak 9 32;  add mpas weak 10 128   # ~81k cells/GPU
     add cube   strong 768:2 24; add cube strong 768:3 54
     add cube   strong 768:4 96                    # kt must divide 768: {2,3,4,6,8}; 216 > GPU cap
@@ -159,7 +217,12 @@ case "$MATRIX" in
     NLON_TRIPOLE=4352                             # ORCA12-class: 3072 x 4352 x 75
     add tripole strong 3072 8 16 32 64 128 192
     add tripole weak   24   $P2_GPU
-    add omps    strong 9    $P2_GPU               # ico9 2.6M cells (~14 km) x 40 levels
+    add omps    strong 9    $P2_GPU               # ico9 2.6M cells (~15 km) x 40 levels
+    # Twice as fine: ico10 is 10.5M cells (~7.5 km, near 1/15 degree). Its
+    # mesh is already cached. Four devices carry the same per-device load as
+    # one device does at ico9, which is a row that ran, so the ladder starts
+    # there rather than at one.
+    add omps    strong 10   4 8 16 32 64 128 192
     add omps    weak 20480 2 8 32 128             # level-quantized: s6@2, s7@8, s8@32, s9@128
     ;;
   ocean_cpu)

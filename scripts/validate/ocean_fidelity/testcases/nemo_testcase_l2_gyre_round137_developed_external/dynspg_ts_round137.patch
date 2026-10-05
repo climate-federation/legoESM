@@ -1,0 +1,161 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,5 +154,6 @@
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
++      INTEGER  ::   r137_unit, r137_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -188,11 +189,13 @@
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_drag_u, l2_drag_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_adv_before_u, l2_adv_before_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_du, l2_dv, l2_zhdiv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r137_div
+       REAL(wp) :: l2_mid_za1, l2_mid_za2, l2_mid_za3
+       CHARACTER(LEN=96) :: l2_filename
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
++      CHARACTER(LEN=96) :: r137_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -537,6 +540,23 @@
+       pssh  (:,:,Kaa) = 0._wp       ! Sum for after averaged sea level
+       un_adv(:,:)     = 0._wp       ! Sum for now transport issued from ts loop
+       vn_adv(:,:)     = 0._wp
++      ! Round 137: passive reuse of the established Round-81 external-step
++      ! layout at the developed step.  The only extra payload is the final
++      ! pssh after the compiled nn_bt_flt=3 finalisation below.
++      IF( lwp .AND. kt == 1081 ) THEN
++         IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round-137 external trace requires fp64' )
++         ALLOCATE( r137_div(jpi,jpj) )
++         r137_div(:,:) = 0._wp
++         WRITE(r137_filename,'("oracle_bt_step_operands_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=r137_unit, FILE=TRIM(r137_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=r137_ios )
++         IF( r137_ios /= 0 )   CALL ctl_stop( 'cannot open round-137 external-step trace' )
++         l2_magic = 'NEMO_L2_BTSTP_1'
++         WRITE(r137_unit) l2_magic, 1, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp), &
++            & ntsi, ntei, ntsj, ntej, 37, rDt_e
++         WRITE(r137_unit) ssmask(ntsi:ntei,ntsj:ntej), ssumask(ntsi:ntei,ntsj:ntej), &
++            & ssvmask(ntsi:ntei,ntsj:ntej)
++      ENDIF
+       !
+       IF( ln_wd_dl ) THEN
+          zuwdmask(:,:) = 0._wp  ! set to zero for definiteness (not sure this is necessary) 
+@@ -648,6 +668,15 @@
+             !--      ssh      = (3/2+beta) ssh   -(1/2+2beta) ssh      + beta ssh          --!
+             !--------------------------------------------------------------------------------!
+             zsshp2_e(:,:) = za1 * sshn_e(:,:)  + za2 * sshb_e(:,:) + za3 * sshbb_e(:,:)
++            IF( lwp .AND. kt == 1081 ) THEN
++               WRITE(r137_unit) jn, za1, za2, za3
++               WRITE(r137_unit) un_e(ntsi:ntei,ntsj:ntej), vn_e(ntsi:ntei,ntsj:ntej), &
++                  & sshn_e(ntsi:ntei,ntsj:ntej), ub_e(ntsi:ntei,ntsj:ntej), &
++                  & vb_e(ntsi:ntei,ntsj:ntej), sshb_e(ntsi:ntei,ntsj:ntej), &
++                  & ubb_e(ntsi:ntei,ntsj:ntej), vbb_e(ntsi:ntei,ntsj:ntej), &
++                  & sshbb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej), &
++                  & va_e(ntsi:ntei,ntsj:ntej), zsshp2_e(ntsi:ntei,ntsj:ntej)
++            ENDIF
+ 
+             IF( lwp .AND. kt == nit000 ) THEN
+                l2_eta_mid(:,:) = zsshp2_e(:,:)
+@@ -685,6 +714,9 @@
+             END_2D
+ #endif               
+             !
++            IF( lwp .AND. kt == 1081 ) THEN
++               WRITE(r137_unit) zhup2_e(ntsi:ntei,ntsj:ntej), zhvp2_e(ntsi:ntei,ntsj:ntej)
++            ENDIF
+          ENDIF
+          !
+          !                    !==  after SSH  ==!   (jn+1)
+@@ -724,8 +756,14 @@
+                l2_dv(ji,jj) = zhV(ji,jj) - zhV(ji,jj-1)
+                l2_zhdiv(ji,jj) = zhdiv
+             ENDIF
++            IF( lwp .AND. kt == 1081 )   r137_div(ji,jj) = zhdiv
+             ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) zhU(ntsi:ntei,ntsj:ntej), zhV(ntsi:ntei,ntsj:ntej), &
++               & ssh_frc(ntsi:ntei,ntsj:ntej), r137_div(ntsi:ntei,ntsj:ntej), &
++               & ssha_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          ! Duplicate sea level across open boundaries (this is only cosmetic if linssh=T)
+          IF( ln_bdy )   CALL bdy_ssh( ssha_e )
+@@ -785,6 +823,9 @@
+             zsshp2_e(ji,jj) = za0 *  ssha_e(ji,jj) + za1 *  sshn_e (ji,jj)   &
+                &            + za2 *  sshb_e(ji,jj) + za3 *  sshbb_e(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) za0, za1, za2, za3, zsshp2_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          !                             ! Surface pressure gradient
+          zldg = ( 1._wp - rn_scal_load ) * grav    ! local factor
+@@ -792,9 +833,15 @@
+             zu_spg(ji,jj) = - zldg * ( zsshp2_e(ji+1,jj) - zsshp2_e(ji,jj) ) * r1_e1u(ji,jj)
+             zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) zu_spg(ntsi:ntei,ntsj:ntej), zv_spg(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          ! Add Coriolis trend:
+          CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          IF( lwp .AND. kt == nit000 ) THEN
+             l2_u_cor(:,:) = zu_trd(:,:)
+             l2_v_cor(:,:) = zv_trd(:,:)
+@@ -816,6 +863,12 @@
+                zv_trd(ji,jj) = zv_trd(ji,jj) + zCdU_v(ji,jj) * vn_e(ji,jj) * hvr_e(ji,jj)
+             END_2D
+          ENDIF
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) zCdU_u(ntsi:ntei,ntsj:ntej), zCdU_v(ntsi:ntei,ntsj:ntej), &
++               & hur_e(ntsi:ntei,ntsj:ntej), hvr_e(ntsi:ntei,ntsj:ntej), &
++               & zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej), &
++               & zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          IF( lwp .AND. kt == nit000 ) THEN
+             l2_drag_product_u(:,:) = zCdU_u(:,:) * un_e(:,:)
+             l2_drag_product_v(:,:) = zCdU_v(:,:) * vn_e(:,:)
+@@ -920,6 +973,9 @@
+          ENDIF
+          !                                                 ! open boundaries
+          IF( ln_bdy )   CALL bdy_dyn2d( jn, ua_e, va_e, un_e, vn_e, hur_e, hvr_e, ssha_e )
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) ua_e(ntsi:ntei,ntsj:ntej), va_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+ #if defined key_agrif                                                           
+          CALL agrif_dyn_ts( jn )  ! Agrif
+ #endif
+@@ -953,6 +1009,10 @@
+          sshbb_e(:,:) = sshb_e(:,:)
+          sshb_e (:,:) = sshn_e(:,:)
+          sshn_e (:,:) = ssha_e(:,:)
++         IF( lwp .AND. kt == 1081 ) THEN
++            WRITE(r137_unit) un_e(ntsi:ntei,ntsj:ntej), vn_e(ntsi:ntei,ntsj:ntej), &
++               & sshn_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          !                                             !* Sum over whole bt loop (except in weight average)
+          !                                             !  ----------------------
+@@ -1020,6 +1080,12 @@
+          pvv_b(:,:,Kaa) = va_e  (:,:)
+          pssh (:,:,Kaa) = ssha_e(:,:)
+       ENDIF
++      IF( lwp .AND. kt == 1081 ) THEN
++         WRITE(r137_unit) pssh(ntsi:ntei,ntsj:ntej,Kaa)
++         CLOSE(r137_unit)
++         DEALLOCATE( r137_div )
++         WRITE(numout,*) 'ROUND137_BTSTEP_DUMP ', kt, icycle, TRIM(r137_filename)
++      ENDIF
+       !
+ #if defined key_RK3
+       !                                                !*  RK3 case

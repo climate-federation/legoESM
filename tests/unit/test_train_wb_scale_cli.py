@@ -463,3 +463,54 @@ def test_yaml_non_integral_epochs_rejected():
         mod._resolve_training_keys(cfg, {"n_epochs": True})
     cfg2, _, _ = mod._resolve_training_keys(cfg, {"n_epochs": 12.0})
     assert cfg2.n_epochs == 12
+
+
+def test_warmup_steps_cli_roundtrip_and_deck_default():
+    """--warmup-steps lets one campaign arm depart from a shared deck.
+
+    The flux A/B trained both arms at a warmup the deck did not carry; editing
+    the deck instead would have moved the column-MLP and SFNO arms, which read
+    the same file.
+    """
+    assert mod.build_scale_config_from_args([]).warmup_steps is None
+    assert mod.build_scale_config_from_args(
+        ["--warmup-steps", "200"]).warmup_steps == 200
+
+
+def test_a_link_that_changes_the_warmup_refuses_the_previous_state():
+    """Two links of one chain that disagree must not share optimizer state.
+
+    The resolved warmup is part of the resume fingerprint, so an arm whose
+    launcher passes a different --warmup-steps cannot silently continue on
+    Adam moments built for another schedule.  This is the invariant the
+    launcher's "every link passes the same values" note depends on.
+    """
+    cfg = mod.build_scale_config_from_args(
+        ["--mode", "physics", "--training-core", "spectral", "--epochs", "4",
+         "--lr", "1.5e-3", "--optimizer", "adamw"])
+    yml = {"n_lat": 96, "n_lon": 192, "nlev": 32, "warmup_steps": 500}
+    deck = mod._run_fingerprint(cfg, yml, 500, 12, 240, 1)
+    override = mod._run_fingerprint(cfg, yml, 200, 12, 240, 1)
+    assert deck["warmup_steps"] == 500 and override["warmup_steps"] == 200
+    assert deck != override
+    # ...and nothing else moved: the deck content is identical, so a chain
+    # that keeps its values keeps its state.
+    assert deck["config_sha256"] == override["config_sha256"]
+    assert mod._run_fingerprint(cfg, yml, 500, 12, 240, 1) == deck
+
+
+def test_only_the_first_argument_selects_the_signature_query():
+    """A value that merely EQUALS the query token must not skip training.
+
+    The pre-parser scanned every argument, so a wrapper whose CONFIG or OUT
+    held this token printed a signature and exited 0 having trained nothing —
+    and an afterany chain then repeated that no-op for every link.
+    """
+    tok = "--print-latest-complete"
+    with pytest.raises(SystemExit) as e:
+        # The token sits where CONFIG's value goes, with a following argument
+        # for the old code to mistake for a directory. Reaching argparse's
+        # rejection of the bad mode proves the pre-parser declined to claim
+        # this invocation; the old scan printed a signature and returned 0.
+        mod.main(["--config", tok, "--mode", "bogus"])
+    assert e.value.code != 0

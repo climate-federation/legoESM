@@ -1,5 +1,7 @@
-"""Advective bottom boundary layer (Campin & Goosse 1999) — NEMO trabbl
-``nn_bbl_adv=2``.
+"""Bottom boundary layers from NEMO ``trabbl``.
+
+This module carries the selectable diffusive ``nn_bbl_ldf=1`` and advective
+Campin--Goosse ``nn_bbl_adv=2`` arms in one shared implementation.
 
 At coarse resolution (1 deg), dense shelf/overflow water (Mediterranean at
 Gibraltar, Denmark Strait, Antarctic shelves) cannot descend the continental
@@ -43,21 +45,20 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 
 
 __physics_contract__ = {
     "summary": (
-        "Advective bottom boundary layer (Campin & Goosse 1999; NEMO trabbl "
-        "nn_bbl_adv=2): where the up-slope (shelf) bottom cell is denser "
-        "than the down-slope (deep) bottom cell at a common reference "
-        "depth, a down-slope transport tr = width*e3_bbl*g*gamma*"
-        "max(0, drho/rho0) exchanges tracers through a closed 3-leg "
-        "circulation cell (shelf bottom -> deep bottom, upward return in "
-        "the deep column, horizontal return at shelf level). Resolves the "
-        "1-deg overflow problem (Gibraltar/Med, Denmark Strait)."
+        "Selectable NEMO trabbl identities: nn_bbl_ldf=1 applies the source "
+        "bottom-cell diffusive flux divergence through gated ahu_bbl/"
+        "ahv_bbl; nn_bbl_adv=2 applies the Campin-Goosse down-slope "
+        "transport through a closed three-leg tracer exchange. Both are "
+        "shared implementations selected by the NEMO namelist identity."
     ),
     "inputs": {
         "T": "degC", "S": "PSU", "h_ref": "m", "land_mask": "1",
@@ -81,13 +82,14 @@ __physics_contract__ = {
     "differentiable": True,
     "reference": (
         "Campin & Goosse (1999) Tellus 51A 412-430; Beckmann & Doscher "
-        "(1997) JPO 27 581-591; NEMO 5.0.2 TRA/trabbl.F90 (ORCA1 RUN_REF: "
-        "nn_bbl_adv=2, rn_gambbl=20 s)"
+        "(1997) JPO 27 581-591; NEMO 5.0.2 TRA/trabbl.F90:187-200, "
+        "342-380, 507-537 (ORCA2 nn_bbl_ldf=1) and :243-284 "
+        "(ORCA1/OVERFLOW nn_bbl_adv=2)"
     ),
     "idealized_test": (
-        "tests/ocean/unit/test_bbl_adv.py: analytic 2-column dense-shelf "
-        "overflow (closed-form transport, down-slope sign), exact "
-        "conservation, flat-bottom/land inactivity, host-step bounds."
+        "tests/ocean/unit/test_bbl_adv.py: diffusive source coefficient EOS "
+        "selector and JIT/grad-safe bottom RHS; analytic two-column "
+        "dense-shelf overflow, exact conservation, and inactive-face gates."
     ),
 }
 
@@ -112,6 +114,224 @@ class BBLGeometry(NamedTuple):
     v_active: jnp.ndarray   # j-face mask
     bot_k: jnp.ndarray      # per-CELL bottom level index (n_lat, n_lon)
     h_ref: jnp.ndarray      # per-cell reference thicknesses (n_lat, n_lon, nlev)
+
+
+class BBLDiffusiveGeometry(NamedTuple):
+    """Static full-domain operands for NEMO ``nn_bbl_ldf=1``.
+
+    U/V arrays use NEMO's native convention: element ``(j,i)`` is the east
+    or north face of T cell ``(j,i)``.  This differs from the redundant-edge
+    representation used by generic C-grid operators and is intentional.
+    """
+
+    bot_k: jnp.ndarray
+    dep_bot_ref: jnp.ndarray
+    mgrhu: jnp.ndarray
+    mgrhv: jnp.ndarray
+    ahu_bbl_0: jnp.ndarray
+    ahv_bbl_0: jnp.ndarray
+    t_active: jnp.ndarray
+    u_active: jnp.ndarray
+    v_active: jnp.ndarray
+
+
+def _north_cell(value: jnp.ndarray, grid) -> jnp.ndarray:
+    """T-point value immediately north, including an ORCA T-fold."""
+    north = jnp.concatenate([value[1:], value[-1:]], axis=0)
+    fold = getattr(grid, "fold", None)
+    if fold is not None and bool(getattr(fold, "is_active", False)):
+        north = north.at[-1].set(value[-1, fold.perm_T])
+    return north
+
+
+def _gather_level(field: jnp.ndarray, level: jnp.ndarray) -> jnp.ndarray:
+    return jnp.take_along_axis(field, level[..., None], axis=-1)[..., 0]
+
+
+def nemo_bbl_diffusive_geometry(
+    h_ref: jnp.ndarray,
+    land_mask: jnp.ndarray,
+    gdept_0: jnp.ndarray,
+    e3u_0: jnp.ndarray,
+    e3v_0: jnp.ndarray,
+    e1u: jnp.ndarray,
+    e2u: jnp.ndarray,
+    e1v: jnp.ndarray,
+    e2v: jnp.ndarray,
+    umask: jnp.ndarray,
+    vmask: jnp.ndarray,
+    *,
+    aht_m2_s: float,
+    grid,
+) -> BBLDiffusiveGeometry:
+    """Transcribe ``tra_bbl_init`` for the diffusive BBL arm.
+
+    Source: NEMO 5.0.2 ``trabbl.F90:507-537``.  The supplied reference
+    arrays are the native NEMO T/U/V arrays read from ``domain_cfg.nc``;
+    no face reconstruction is substituted.
+    """
+    b = nemo_source_round
+    h = jnp.asarray(h_ref)
+    dtype = h.dtype
+    active3 = h > jnp.asarray(1.0e-3, dtype=dtype)  # coeff-ok: wet-cell thickness floor [m]
+    t_active = jnp.asarray(land_mask, dtype=dtype) > 0.5
+    bot_k = jnp.maximum(jnp.sum(active3.astype(jnp.int32), axis=-1) - 1, 0)
+    depth = jnp.asarray(gdept_0, dtype=dtype)
+    e3u = jnp.asarray(e3u_0, dtype=dtype)
+    e3v = jnp.asarray(e3v_0, dtype=dtype)
+    if depth.shape != h.shape or e3u.shape != h.shape or e3v.shape != h.shape:
+        raise ValueError("diffusive BBL reference depth/e3 arrays must match h_ref")
+
+    dep_bot = _gather_level(depth, bot_k)
+    east_bot = jnp.roll(bot_k, -1, axis=1)
+    north_bot = _north_cell(bot_k, grid)
+    east_dep = jnp.roll(dep_bot, -1, axis=1)
+    north_dep = _north_cell(dep_bot, grid)
+    mgrhu = jnp.sign(b(east_dep - dep_bot)).astype(jnp.int32)
+    mgrhv = jnp.sign(b(north_dep - dep_bot)).astype(jnp.int32)
+
+    e3u_here = _gather_level(e3u, bot_k)
+    e3u_there = _gather_level(e3u, east_bot)
+    e3v_here = _gather_level(e3v, bot_k)
+    e3v_there = _gather_level(e3v, north_bot)
+    e3u_bbl = jnp.minimum(e3u_here, e3u_there)
+    e3v_bbl = jnp.minimum(e3v_here, e3v_there)
+
+    um = jnp.asarray(umask, dtype=dtype)
+    vm = jnp.asarray(vmask, dtype=dtype)
+    if um.ndim == 3:
+        um = jnp.max(um, axis=-1)
+    if vm.ndim == 3:
+        vm = jnp.max(vm, axis=-1)
+    aht = jnp.asarray(aht_m2_s, dtype=dtype)
+    # trabbl.F90:535-537.  e2_e1u/e1_e2v are the source divisions stored by
+    # NEMO's domain initialization before these products are evaluated.
+    e2_e1u = b(jnp.asarray(e2u, dtype=dtype) / jnp.asarray(e1u, dtype=dtype))
+    e1_e2v = b(jnp.asarray(e1v, dtype=dtype) / jnp.asarray(e2v, dtype=dtype))
+    ahu0 = b(b(b(aht * e2_e1u) * e3u_bbl) * um)
+    ahv0 = b(b(b(aht * e1_e2v) * e3v_bbl) * vm)
+    return BBLDiffusiveGeometry(
+        bot_k=bot_k, dep_bot_ref=dep_bot, mgrhu=mgrhu, mgrhv=mgrhv,
+        ahu_bbl_0=ahu0, ahv_bbl_0=ahv0, t_active=t_active,
+        u_active=um > 0.5, v_active=vm > 0.5,
+    )
+
+
+def nemo_bbl_diffusive_coefficients(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    geom: BBLDiffusiveGeometry,
+    *,
+    bottom_depth_m: jnp.ndarray,
+    rho_0: float,
+    grid,
+    eos_form: str = "teos10",
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate NEMO ``bbl``'s diffusive face gate.
+
+    Source: ``trabbl.F90:342-380``.  In particular this preserves NEMO's
+    two-times-alpha/beta sums and Fortran ``SIGN`` zero convention; it does
+    not replace the gate with a direct density comparison.
+    """
+    from legoesm.ocean.eos import nemo_roquet_alpha_beta
+
+    b = nemo_source_round
+    dtype = jnp.asarray(T).dtype
+    half = jnp.asarray(0.5, dtype=dtype)
+    Tb = _gather_level(jnp.asarray(T), geom.bot_k)
+    Sb = _gather_level(jnp.asarray(S), geom.bot_k)
+    alpha, beta = nemo_roquet_alpha_beta(
+        Tb, Sb, jnp.asarray(bottom_depth_m, dtype=dtype), rho0=rho_0,
+        eos_form=eos_form)
+
+    def sign_half(argument):
+        # GFortran's SIGN result for a zero second argument is +ABS(first),
+        # including when the arithmetic expression carries a -0 sign bit.
+        return jnp.where(argument >= 0.0, half, -half)
+
+    Te, Se = jnp.roll(Tb, -1, axis=1), jnp.roll(Sb, -1, axis=1)
+    ae, be = jnp.roll(alpha, -1, axis=1), jnp.roll(beta, -1, axis=1)
+    za = b(ae + alpha)
+    zb = b(be + beta)
+    zgdrho_u = b(b(b(za * b(Te - Tb)) - b(zb * b(Se - Sb)))
+                   * geom.u_active.astype(dtype))
+    arg_u = b(b(-zgdrho_u) * geom.mgrhu.astype(dtype))
+    zsign_u = sign_half(arg_u)
+    ahu = b(b(half - zsign_u) * geom.ahu_bbl_0)
+
+    Tn, Sn = _north_cell(Tb, grid), _north_cell(Sb, grid)
+    an, bn = _north_cell(alpha, grid), _north_cell(beta, grid)
+    za = b(an + alpha)
+    zb = b(bn + beta)
+    zgdrho_v = b(b(b(za * b(Tn - Tb)) - b(zb * b(Sn - Sb)))
+                   * geom.v_active.astype(dtype))
+    arg_v = b(b(-zgdrho_v) * geom.mgrhv.astype(dtype))
+    zsign_v = sign_half(arg_v)
+    ahv = b(b(half - zsign_v) * geom.ahv_bbl_0)
+    return ahu, ahv
+
+
+def apply_bbl_diffusive_tendency(
+    dT_dt: jnp.ndarray,
+    dS_dt: jnp.ndarray,
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    h_k: jnp.ndarray,
+    area: jnp.ndarray,
+    geom: BBLDiffusiveGeometry,
+    ahu_bbl: jnp.ndarray,
+    ahv_bbl: jnp.ndarray,
+    *,
+    grid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Add ``tra_bbl_dif`` to the bottom-cell tracer RHS.
+
+    This is the literal ``trabbl.F90:187-200`` association: U and V flux
+    pairs are grouped separately, their two divergences are added, the result
+    is multiplied by ``r1_e1e2t/e3t(Kmm)``, then added to Krhs.
+    """
+    b = nemo_source_round
+    dtype = jnp.asarray(T).dtype
+    area = jnp.asarray(area, dtype=dtype)
+    h_k = jnp.asarray(h_k, dtype=dtype)
+    active = geom.t_active
+    bottom_h = _gather_level(h_k, geom.bot_k)
+    safe_area = jnp.where(active, area, jnp.asarray(1.0, dtype=dtype))
+    safe_h = jnp.where(active, bottom_h, jnp.asarray(1.0, dtype=dtype))
+    r1_area = b(jnp.asarray(1.0, dtype=dtype) / safe_area)
+
+    ahu = jnp.asarray(ahu_bbl, dtype=dtype)
+    ahv = jnp.asarray(ahv_bbl, dtype=dtype)
+
+    def apply(rhs, tracer):
+        zptb = _gather_level(jnp.asarray(tracer), geom.bot_k)
+        east, west = jnp.roll(zptb, -1, axis=1), jnp.roll(zptb, 1, axis=1)
+        north = _north_cell(zptb, grid)
+        south = jnp.concatenate([zptb[:1], zptb[:-1]], axis=0)
+        ahu_w = jnp.roll(ahu, 1, axis=1)
+        ahv_s = jnp.concatenate([jnp.zeros_like(ahv[:1]), ahv[:-1]], axis=0)
+        u_pair = b(b(ahu * b(east - zptb))
+                   - b(ahu_w * b(zptb - west)))
+        v_pair = b(b(ahv * b(north - zptb))
+                   - b(ahv_s * b(zptb - south)))
+        # trabbl.F90:194-200 evaluates the completed horizontal divergence,
+        # multiplies by the stored r1_e1e2t, and then performs one ordinary
+        # division by e3t(Kmm).  Materialize BOTH operands so XLA cannot
+        # reassociate ``numerator / e3t`` to ``numerator * (1/e3t)`` or fuse
+        # the preceding product into the divide.  The quotient itself stays a
+        # plain IEEE division: compiler control belongs here; nextafter search
+        # over oracle-adjacent values does not.
+        numerator = b(b(u_pair + v_pair) * r1_area)
+        denominator = b(safe_h)
+        increment = b(b(numerator) / b(denominator))
+        before = _gather_level(jnp.asarray(rhs), geom.bot_k)
+        after = jnp.where(active, b(before + increment), before)
+        return jnp.asarray(rhs).at[
+            jnp.arange(rhs.shape[0])[:, None],
+            jnp.arange(rhs.shape[1])[None, :], geom.bot_k,
+        ].set(after)
+
+    return apply(dT_dt, T), apply(dS_dt, S)
 
 
 def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
@@ -396,10 +616,14 @@ def apply_bbl_adv_tendency(dT_dt, dS_dt, T, S, h_k, area, geom: BBLGeometry,
 
 
 __all__ = [
+    "BBLDiffusiveGeometry",
     "BBLGeometry",
+    "apply_bbl_diffusive_tendency",
     "apply_bbl_adv_step",
     "apply_bbl_adv_tendency",
     "bbl_static_geometry",
+    "nemo_bbl_diffusive_coefficients",
+    "nemo_bbl_diffusive_geometry",
     "nemo_bbl_static_geometry",
     "bbl_transports",
 ]

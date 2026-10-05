@@ -22,11 +22,7 @@ from legoesm.parallel.metal import (
     is_metal_backend,
     ensure_spectral_on_cpu,
 )
-from legoesm.core.hardware import (
-    get_backend,
-    detect_devices,
-    _UNSUPPORTED_F64_BACKENDS,
-)
+from legoesm.runtime import get_backend, supports_float64
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +44,7 @@ class TestMetalConfig:
     def test_is_metal_flag_matches_backend(self):
         config = get_metal_config()
         backend = get_backend()
-        if backend == "MPS":
+        if backend == "mps":
             # On the Apple GPU (mps) backend
             assert config.is_metal is True
             assert config.metal_device is not None
@@ -83,7 +79,7 @@ class TestDeviceTransfer:
     def test_to_metal_on_non_metal_is_identity(self):
         """On non-mps backends, to_metal should return input unchanged."""
         backend = get_backend()
-        if backend == "MPS":
+        if backend == "mps":
             pytest.skip("Running on mps — to_metal is not identity")
         x = jnp.ones(5, dtype=jnp.float32)
         x_out = to_metal(x)
@@ -123,7 +119,6 @@ class TestIsMetalBackend:
 
     def test_matches_get_backend(self):
         # Both use runtime.backend.get_backend() (lowercase) under the hood.
-        # core.hardware.get_backend() returns uppercase for legacy callers.
         from legoesm.runtime.backend import get_backend as rt_get_backend
         assert is_metal_backend() == (rt_get_backend() == "mps")
 
@@ -162,26 +157,11 @@ class TestEnsureSpectralOnCpu:
 # ---------------------------------------------------------------------------
 
 class TestHardwareDetection:
-    def test_detect_devices_returns_dict(self):
-        info = detect_devices()
-        assert isinstance(info, dict)
-        assert "backend" in info
-        assert "n_devices" in info
-        assert "devices" in info
-        assert "supports_f64" in info
-        assert "distributed" in info
-
-    def test_n_devices_positive(self):
-        info = detect_devices()
-        assert info["n_devices"] >= 1
-
     def test_backend_is_string(self):
         assert isinstance(get_backend(), str)
 
-    def test_unsupported_f64_backends_is_frozenset(self):
-        assert isinstance(_UNSUPPORTED_F64_BACKENDS, frozenset)
-        # The canonical set uses lowercase names
-        assert "mps" in _UNSUPPORTED_F64_BACKENDS
+    def test_mps_has_no_float64(self):
+        assert not supports_float64("mps")
 
 
 # ---------------------------------------------------------------------------

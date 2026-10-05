@@ -262,11 +262,38 @@ class SurfaceLayerConfig(NamedTuple):
     Ch_neutral: float = 1.5e-3
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
-    # True: the MOST solver is told the actual per-column height of the lowest
-    # full level (~150 m on L30) instead of labelling its inputs as z_ref.
-    z_ref_model_level: bool = False
-    # True: ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water, at the surface
-    # pressure) via core.bulk_flux.ocean_surface_q_sat, as the coupled lane does.
+    # The MOST solver is told the actual per-column height of the lowest full
+    # level (~135 m on L30) instead of labelling its inputs as z_ref (10 m).
+    # Labelling a 135 m level as 10 m inflates ocean latent heat 16-18% and
+    # stress 16-54% (measured offline over the tropical and trade oceans).
+    #
+    # Production default, and it lives HERE (one default): the driver's
+    # ExperimentConfig.surface_z_ref_model_level and the run_amip flag are
+    # None = "leave the scheme's value alone", so an untouched run resolves to
+    # this value and a dry-dynamics deck (fv3_duo) sees no non-default field.
+    # Only the MOST schemes (most/coare3/large_yeager) honour it, and only
+    # when the caller supplies the level height (surface_fluxes_at_lowest_level);
+    # the constant-coefficient path is byte-identical either way.  The
+    # dry-adiabatic adjustment is meaningful only against a REAL surface
+    # temperature: a lane that substitutes the lowest air temperature for a
+    # missing surface and still selects a MOST scheme must set this False,
+    # or the adjustment invents an air-surface contrast and a downward
+    # sensible heat flux out of nothing.
+    z_ref_model_level: bool = True
+    # Ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water at the surface pressure)
+    # via core.bulk_flux.ocean_surface_q_sat.  The coupler tile ALWAYS applies
+    # this factor, so leaving it off makes the two sides of one air-sea
+    # interface disagree: the ocean evaporates sea water while the atmosphere
+    # evaporates fresh water.  It is also what the reference algorithm does
+    # (COARE 3.0, Fairall et al. 2003).
+    #
+    # It stays False HERE and is turned on by the driver
+    # (ExperimentConfig.surface_ocean_q_sfc_saline, default True since
+    # 2026-09-20) rather than at the scheme, because it needs an ocean to
+    # apply to.  The structured-grid turbulence lanes carry no land fraction
+    # and their T_sfc defaults to the lowest air temperature -- there is no
+    # sea surface there to be saline, so a scheme-level True would be a
+    # sea-water correction applied to a column with no sea.
     ocean_q_sfc_saline: bool = False
     bulk_n_iter: int = 5
     # COARE 3.0 convective-gustiness BL depth z_i [m] (compute_most_fluxes).
@@ -341,6 +368,11 @@ class SurfaceLayerConfig(NamedTuple):
     # not a tunable closure.
     prescribed_shflx_w_m2: float | None = None
     prescribed_lhflx_w_m2: float | None = None
+    # Prescribed surface WATER flux [kg/m2/s, positive up] from the coupler's
+    # tiles.  When set, the kernel's moisture lower BC is this mass flux (no
+    # heat -> water conversion); when None, the water flux is
+    # prescribed_lhflx_w_m2 / L_v(T_sfc) (surface_layer.surface_moisture_flux).
+    prescribed_evap_kg_m2_s: float | None = None
     # Stress ON THE ATMOSPHERE (opposite sign to the wind), matching
     # tau_x/tau_y in compute_surface_fluxes. [Pa]
     prescribed_tau_x_pa: float | None = None
@@ -889,6 +921,12 @@ class TurbulenceConfig(NamedTuple):
     ysu: YSUConfig = YSUConfig()
     edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
     clubb: CLUBBConfig | None = None
+    # CAM's two-sided cloud-liquid exchange with the CLUBB closure
+    # (clubb_intr.F90).  A dispatch selector, so it lives here beside ``scheme``
+    # and not among CLUBBConfig's tunable leaves: the factory hands the host's
+    # q_c to the kernel and routes its dq_c_dt to the tracer; the kernel keys on
+    # q_c being supplied.  Selected by ExperimentConfig.clubb_liquid_partition.
+    liquid_partition: bool = False
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

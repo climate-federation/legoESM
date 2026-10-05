@@ -222,6 +222,23 @@ def _ensure_results_tree() -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _isolate_corner_fill_process_state():
+    """The mode a model claimed and the modes a halo fill already traced are
+    process globals that make later model builds raise; reset both per test so
+    results do not depend on test order.  The current mode is kept and restored
+    after the test."""
+    import legoesm.grids.halo as halo
+    saved = (halo._corner_fill_mode, halo._corner_fill_claimed,
+             set(halo._corner_fill_traced))
+    halo._corner_fill_claimed = None
+    halo._corner_fill_traced.clear()
+    yield
+    halo._corner_fill_mode, halo._corner_fill_claimed = saved[0], saved[1]
+    halo._corner_fill_traced.clear()
+    halo._corner_fill_traced.update(saved[2])
+
+
 @pytest.fixture(scope="session")
 def small_grid() -> CubedSphereGrid:
     """A small C8 grid for fast unit tests."""

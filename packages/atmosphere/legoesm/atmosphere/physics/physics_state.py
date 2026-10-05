@@ -197,6 +197,13 @@ class PhysicsState(NamedTuple):
     # pytree; byte-identical for runs that never read it).  Appended LAST
     # with a default so existing direct constructors are unaffected.
     conv_precip: jnp.ndarray = None
+    # CONVECTIVE heating rate [K/s], shape (ncol, nlev), written by the
+    # convection module each step and read one step LAGGED by the E3SM/CAM
+    # Beres convective gravity-wave source on the standalone (MPAS /
+    # hydrostatic factory) path — CAM's pbuf ``TTEND_DP`` analogue.  Same
+    # lagged-carry convention as ``conv_precip``; zeros for runs that never
+    # read it.  Appended LAST with a default.
+    conv_heating: jnp.ndarray = None
     # OPTIONAL per-step PRESCRIBED surface KINEMATIC fluxes, shape (ncol,), in
     # the same units and sign convention as ``SCMForcing.w_th_s`` / ``w_qv_s``:
     # ``surface_wth_override`` [K m/s] and ``surface_wqv_override``
@@ -228,8 +235,27 @@ class PhysicsState(NamedTuple):
     # overrides above).
     surface_shflx_override_w_m2: jnp.ndarray = None   # [W/m^2] sensible, positive up
     surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
+    surface_evap_override_kg_m2_s: jnp.ndarray = None  # [kg/m^2/s] water, positive up (tile mass flux)
     surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
     surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
+    # Physics-cadence cache (physics_update_steps > 1): the FULL tendency
+    # pytree (HydrostaticTendencies incl. precip / surface / TOA diagnostics
+    # and ledger rows) of the most recent physics step, re-applied unchanged
+    # by the held-physics step variant on the steps in between -- the CAM
+    # physics-every-1800-s pattern, generalising ``rad_heating``.  Seeded by
+    # the driver from ``jax.eval_shape`` of the full variant so the carry
+    # structure is fixed before the first step; never persisted (the first
+    # step of every job is a physics step and repopulates it).
+    held_physics: object = None
+    # CAM6 ``cam6_clubb`` deep-convective cloud-fraction inputs, written by a
+    # convection scheme that exposes ``ConvectionOutput.mass_flux_up`` /
+    # ``icwmr`` and read one step LAGGED by radiation (same convention as
+    # ``conv_precip``).  Interface updraft mass flux (ncol, nlev+1) [kg/m^2/s]
+    # top->bottom, and deep in-cloud condensate (ncol, nlev) [kg/kg]; always
+    # materialised as zeros (uniform pytree; zero => deepcu exactly 0).
+    # Appended LAST so positional constructors keep their field order.
+    conv_mass_flux_up: jnp.ndarray = None
+    conv_icwmr: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -239,10 +265,21 @@ class PhysicsState(NamedTuple):
 # ERA5-surface-flux lane) and then carried unchanged -- so the
 # restart/carry-completeness gate must neither require them nor treat their
 # absence as a hole in the physics memory.
-PHYSSTATE_INPUT_FIELDS = frozenset({
+# The subset of the inputs that ``update_physics_state`` RESETS to None on
+# every call (consumed per physics call).  A sub-cycle inside one physics call
+# must carry them across its intermediate carry updates so every sub-module of
+# the same call sees them; only the call's final update may clear them.
+PHYSSTATE_PER_CALL_INPUTS = (
     "dyn_tendency_T", "dyn_tendency_qv",
     "surface_wth_override", "surface_wqv_override",
+)
+PHYSSTATE_INPUT_FIELDS = frozenset({
+    "dyn_tendency_T", "dyn_tendency_qv",
+    # per-job physics-cadence cache: carried across steps, never persisted
+    "held_physics",
+    "surface_wth_override", "surface_wqv_override",
     "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
+    "surface_evap_override_kg_m2_s",
     "surface_tau_x_override_pa", "surface_tau_y_override_pa",
 })
 
@@ -413,6 +450,9 @@ def init_physics_state(
         # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
+        conv_heating=jnp.zeros((ncol, nlev), dtype=dtype),
+        conv_mass_flux_up=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -476,6 +516,7 @@ def update_physics_state(phys_state, updates):
         # diurnal cycle at whatever instant the driver last refreshed.
         surface_wth_override=updates.get("surface_wth_override", None),
         surface_wqv_override=updates.get("surface_wqv_override", None),
+        held_physics=updates.get("held_physics", phys_state.held_physics),
         # Prescribed-flux anchors are window-constant inputs: CARRY them
         # (like surface_T_sfc_override), do NOT reset like wth/wqv above.
         surface_shflx_override_w_m2=updates.get(
@@ -484,6 +525,9 @@ def update_physics_state(phys_state, updates):
         surface_lhflx_override_w_m2=updates.get(
             "surface_lhflx_override_w_m2",
             phys_state.surface_lhflx_override_w_m2),
+        surface_evap_override_kg_m2_s=updates.get(
+            "surface_evap_override_kg_m2_s",
+            phys_state.surface_evap_override_kg_m2_s),
         surface_tau_x_override_pa=updates.get(
             "surface_tau_x_override_pa",
             phys_state.surface_tau_x_override_pa),
@@ -494,4 +538,8 @@ def update_physics_state(phys_state, updates):
         # carried forward unchanged when the step's convection published
         # nothing (schemes without a rain split).
         conv_precip=updates.get("conv_precip", phys_state.conv_precip),
+        conv_heating=updates.get("conv_heating", phys_state.conv_heating),
+        conv_mass_flux_up=updates.get(
+            "conv_mass_flux_up", phys_state.conv_mass_flux_up),
+        conv_icwmr=updates.get("conv_icwmr", phys_state.conv_icwmr),
     )

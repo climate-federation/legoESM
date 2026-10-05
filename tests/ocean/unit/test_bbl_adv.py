@@ -32,9 +32,12 @@ from legoesm.ocean.eos import (
     wright_eos,
 )
 from legoesm.ocean.physics.bbl_adv import (
+    BBLDiffusiveGeometry,
+    apply_bbl_diffusive_tendency,
     apply_bbl_adv_tendency,
     bbl_static_geometry,
     bbl_transports,
+    nemo_bbl_diffusive_coefficients,
     nemo_bbl_static_geometry,
 )
 
@@ -192,6 +195,81 @@ def test_nemo_reference_bbl_thickness_gathers_unmasked_face_metric():
     assert float(geom.dep_bot[0, 1]) == 50.0
     assert float(geom.e3u_bbl[0, 0]) == 7.0
     assert float(geom.u_active[0, 0]) == 1.0
+
+
+def test_diffusive_bbl_coefficient_selector_uses_requested_nemo_eos():
+    """``bbl`` must use the card's EOS80/TEOS10 ``eos_rab`` arm.
+
+    ORCA2 selects EOS80; retaining the helper's historical TEOS10 default
+    changes the density gate on real bottom faces.  This synthetic fixture
+    makes the selector observable without relying on an external deck.
+    """
+    from types import SimpleNamespace
+
+    shape = (1, 2)
+    geom = BBLDiffusiveGeometry(
+        bot_k=jnp.zeros(shape, dtype=jnp.int32),
+        dep_bot_ref=jnp.full(shape, 3000.0),
+        mgrhu=jnp.ones(shape, dtype=jnp.int32),
+        mgrhv=jnp.ones(shape, dtype=jnp.int32),
+        ahu_bbl_0=jnp.ones(shape),
+        ahv_bbl_0=jnp.ones(shape),
+        t_active=jnp.ones(shape, dtype=bool),
+        u_active=jnp.ones(shape, dtype=bool),
+        v_active=jnp.ones(shape, dtype=bool),
+    )
+    # Near the gate boundary, the two source coefficient families select
+    # opposite directions on this face.  These values are deliberately not
+    # rounded so a replacement with a generic density comparison also fires.
+    T = jnp.asarray([[[14.73718664657434], [13.687022703777936]]])
+    S = jnp.asarray([[[39.99958086478045], [39.613727777084314]]])
+    grid = SimpleNamespace(fold=None)
+    eos80 = nemo_bbl_diffusive_coefficients(
+        T, S, geom, bottom_depth_m=geom.dep_bot_ref, rho_0=1026.0,
+        grid=grid, eos_form="eos80")
+    teos10 = nemo_bbl_diffusive_coefficients(
+        T, S, geom, bottom_depth_m=geom.dep_bot_ref, rho_0=1026.0,
+        grid=grid, eos_form="teos10")
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(eos80, teos10))
+
+
+def test_diffusive_bbl_rhs_is_jittable_and_differentiable():
+    """The source-literal bottom RHS remains production-JIT/grad safe."""
+    from types import SimpleNamespace
+
+    ny, nx, nk = 2, 3, 2
+    shape2 = (ny, nx)
+    geom = BBLDiffusiveGeometry(
+        bot_k=jnp.ones(shape2, dtype=jnp.int32),
+        dep_bot_ref=jnp.full(shape2, 150.0),
+        mgrhu=jnp.zeros(shape2, dtype=jnp.int32),
+        mgrhv=jnp.zeros(shape2, dtype=jnp.int32),
+        ahu_bbl_0=jnp.ones(shape2),
+        ahv_bbl_0=jnp.ones(shape2),
+        t_active=jnp.ones(shape2, dtype=bool),
+        u_active=jnp.ones(shape2, dtype=bool),
+        v_active=jnp.ones(shape2, dtype=bool),
+    )
+    tracer = jnp.arange(ny * nx * nk, dtype=jnp.float64).reshape(ny, nx, nk)
+    h = jnp.full_like(tracer, 100.0)
+    area = jnp.full(shape2, 2.0e8)
+    ahu = jnp.asarray([[2.0, 3.0, 0.0], [4.0, 5.0, 0.0]])
+    ahv = jnp.asarray([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]])
+    grid = SimpleNamespace(fold=None)
+
+    def loss(x):
+        out, _ = apply_bbl_diffusive_tendency(
+            jnp.zeros_like(x), jnp.zeros_like(x), x, x, h, area,
+            geom, ahu, ahv, grid=grid)
+        return jnp.sum(out * out)
+
+    eager = loss(tracer)
+    compiled = jax.jit(loss)(tracer)
+    tangent = jax.jit(jax.grad(loss))(tracer)
+    assert np.array_equal(np.asarray(eager), np.asarray(compiled))
+    assert np.isfinite(np.asarray(tangent)).all()
+    assert np.any(np.asarray(tangent) != 0.0)
 
 
 def test_exact_tracer_conservation_and_direction():

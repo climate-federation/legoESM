@@ -379,7 +379,7 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   wind-stress SIGN BUG**: `air_sea_fluxes` returns *atmospheric*-convention tau (−ρCd|U|U,
   opposing wind); the applicator applied **+tau** → ocean driven BACKWARDS. Fixed to ocean
   reaction **−tau** across latlon/tripole/cube/mpas (matches dynamics-core
-  `ocean_pe_latlon_cgrid.py:1892`). Added sign-regression + tripole unit tests → **all 12 pass**
+  `ocean_pe_latlon_cgrid.py:1946`). Added sign-regression + tripole unit tests → **all 12 pass**
   (job 8089767). codex adversarial-review running (b9a6j470w).
 - **iter 1 (codex round 1):** adversarial review = needs-attention, 3 findings, all valid + fixed/gated:
   (1) [high] converter collapsed 6-hourly→daily before the NONLINEAR bulk flux (flux(mean U)≠mean(flux)).
@@ -466,7 +466,7 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   external `apply_omip2_surface_fluxes` (forward-Euler force-then-step) is energetically inconsistent
   with the dynamics → pumps spurious KE. FAITHFUL + likely-stable path = integrate forcing INSIDE the
   step via **`model.step(state, dt, surface_forcing=OceanSurfaceForcing(tau_x,tau_y,q_net,sw_down))`**
-  (the dynamics-core tau block, ocean_pe_latlon_cgrid.py:1884 — the path run_omip's jra55 mode uses),
+  (the dynamics-core tau block, ocean_pe_latlon_cgrid.py:1938 — the path run_omip's jra55 mode uses),
   NOT the external applicator. **NEXT (leading fix):** compute CORE-II bulk tau/q_net per step → pass
   as `surface_forcing` to `model.step`; re-smoke rest-state (runaway gone?) then WOA; if WOA cold-start
   still fails → thermal-wind balanced initial velocity. **HONEST: no stable faithful global legoESM

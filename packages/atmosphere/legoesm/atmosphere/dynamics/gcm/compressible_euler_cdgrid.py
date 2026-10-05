@@ -1750,28 +1750,3 @@ def make_legoesm_nh_min_edge_config(**overrides) -> CDGridCompressibleEulerConfi
     # User overrides > iter-466 overrides > factory defaults
     edge_min_overrides.update(overrides)
     return make_fv3_component_fidelity_nh_config(**edge_min_overrides)
-
-
-def make_legoesm_nh_min_edge_aggressive_config(
-    **overrides
-) -> CDGridCompressibleEulerConfig:
-    """FV3_3D iter 483: aggressive NH edge-min config.
-
-    Stacks iter-466 hurting-flag drops + iter-481 corner_div boost
-    (d2_bg=5e-2, 100× factory).  iter-482 measured 59.5% edge ratio
-    reduction (3.50 → 1.42×) — composite is 18.7% better than
-    min_edge alone.
-
-    Trade-off: high corner_div_damp_d2_bg=5e-2 over-damps physical
-    waves more than the factory default.  Use only when minimizing
-    cube-edge artifacts at small scale (e.g., C8/C16 visualizations)
-    is the priority, not climate accuracy.
-    """
-    aggressive_overrides = dict(
-        use_fv3_metric_aware_d_con=False,
-        heat_source_del2_iters=0,
-        d_con_top_zero_levels=0,
-        corner_div_damp_d2_bg=5e-2,
-    )
-    aggressive_overrides.update(overrides)
-    return make_fv3_component_fidelity_nh_config(**aggressive_overrides)

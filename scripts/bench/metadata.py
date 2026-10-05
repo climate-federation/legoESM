@@ -79,6 +79,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "gpu_direct_active",
     "host_staged_halo",
     "transport",
+    "gloo_iface",
     "virtual_cpu_devices",
     "launcher",
 )
@@ -359,6 +360,23 @@ def detect_launcher() -> str:
     return "none"
 
 
+def _gloo_iface_stamp(transport, process_count):
+    """What legoesm.parallel.early_init.pin_gloo_interface did: an interface
+    name, "default" (JAX's hostname-derived choice, explicitly kept) or
+    "declined:<why>". A multi-process gloo run with NO stamp means the pin
+    never ran, i.e. the launcher bypassed early_init: refuse to write a
+    receipt whose transport cannot be attributed to a link."""
+    stamp = os.environ.get("LEGOESM_GLOO_IFACE_PINNED")
+    # resolve_transport spells "gloo" only for process_count > 1.
+    if stamp is None and transport == "gloo":
+        raise RuntimeError(
+            "gloo transport but pin_gloo_interface() never ran in this "
+            "process (LEGOESM_GLOO_IFACE_PINNED unset): "
+            "initialise through legoesm.parallel.early_init so the receipt "
+            "records which link carried the collectives.")
+    return stamp if stamp is not None else "n/a"
+
+
 def resolve_transport(
     transport: str | None,
     *,
@@ -529,12 +547,23 @@ def scaling_metadata(
         "backend": backend,
         "precision_knobs": precision_knobs(),
         "transport": resolved_transport,
+        # Interface the gloo transport was pinned to by
+        # legoesm.parallel.early_init.pin_gloo_interface; "default" = JAX's
+        # hostname-derived choice (the 1 GbE link on Levante).
+        "gloo_iface": _gloo_iface_stamp(resolved_transport, process_count),
         "virtual_cpu_devices": detect_virtual_cpu_devices(backend),
         "launcher": detect_launcher(),
         "hostname": os.environ.get("HOSTNAME")
         or os.environ.get("SLURMD_NODENAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
         "git_sha": git_sha(),
+        # Hardware threads this rank may run on.  A ladder step launched
+        # without --cpus-per-task binds each rank to ONE core (2 here), and
+        # every CPU row before 2026-09-21 was measured that way; the plotter
+        # refuses CPU rows below CPU_AFFINITY_MIN.  None where the platform
+        # has no sched_getaffinity (macOS): unknown, never a machine count.
+        "cpu_affinity": (len(os.sched_getaffinity(0))
+                         if hasattr(os, "sched_getaffinity") else None),
     }
     md.update(gpu_direct_mode(backend, transport=resolved_transport))
     if partition_metrics:
@@ -905,6 +934,24 @@ def calibrated_bound(
             "rank_imbalance": rank_imbalance,
         },
     }
+
+
+def state_all_finite(state) -> bool:
+    """True iff every array leaf of ``state`` is finite (global, sharded-safe).
+
+    Non-finite values persist once they appear, so checking the state at the
+    END of a timed window catches a blow-up anywhere inside it.  A timing of
+    a non-finite state is not a measurement of the model.
+    """
+    import jax
+    import jax.numpy as jnp
+    leaves = [x if hasattr(x, "dtype") else jnp.asarray(x)
+              for x in jax.tree.leaves(state) if isinstance(x, (float, complex)) or hasattr(x, "dtype")]
+    leaves = [x for x in leaves if jnp.issubdtype(x.dtype, jnp.inexact)]
+    if not leaves:
+        return True
+    return bool(jax.jit(lambda ls: jnp.all(jnp.stack(
+        [jnp.isfinite(x).all() for x in ls])))(leaves))
 
 
 def timed_scan_blocks(

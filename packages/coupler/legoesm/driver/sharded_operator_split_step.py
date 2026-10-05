@@ -46,8 +46,8 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked, checked_replicated_put,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 from legoesm.parallel.latlon_spmd import (
     cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
@@ -149,7 +149,7 @@ def _agree_opsplit_mesh_entry(mesh, tree=None, tree2=None, *,
     ``sharded_split_step`` additionally derives its shard_map specs from the
     carry/forcing structure.
     """
-    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OPSPLIT_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -222,22 +222,6 @@ _OPSPLIT_SPMD_ENTRY_FLAGS = (
 )
 
 
-def _opsplit_mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists; never raises."""
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
-
-
 def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
                               rad_update_steps, ghg_keys, where: str) -> None:
     """Agree every rank-local input, as the FIRST statement of this factory.
@@ -264,7 +248,7 @@ def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     problems = []
 
     def _count(value, label, absent=FLAG_ABSENT):
@@ -478,12 +462,15 @@ def make_sharded_operator_split_step(
     assert_schema_agrees(_ordered, n_dev,
                          context="make_sharded_operator_split_step",
                          arrays=[raw[n] for n in _ordered])
+    # checked_replicated_put keeps that guarded broadcast and places the
+    # canonical bytes WITHOUT jax's whole-array device_put equality assert,
+    # whose per-field all-gather (~P*N*(2s+1) bytes) made per-rank memory grow
+    # with the rank count on the lat-lon lane until a 128-rank arm was
+    # OOM-killed.
     stacks = {
-        name: jax.device_put(
-            jnp.asarray(broadcast_checked(
-                raw[name], name,
-                context="make_sharded_operator_split_step")),
-            rep)
+        name: checked_replicated_put(
+            raw[name], name, rep,
+            context="make_sharded_operator_split_step")
         for name in _ordered
     }
     _cache = {}

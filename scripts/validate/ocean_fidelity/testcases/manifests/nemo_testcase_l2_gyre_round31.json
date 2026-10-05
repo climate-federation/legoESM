@@ -1,0 +1,828 @@
+{
+  "format": "nemo-testcase-l2-gyre-round31-v1",
+  "date": "2026-09-06",
+  "starting_tip": "ce38f20c89a0",
+  "tip": "da93c090cf73c4fbb7f2063b7f24aef16ebf33f4",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "preregistration": "manifests/nemo_testcase_l2_gyre_round31_preregister.json",
+  "item1_round30_worsened_rows": {
+    "threshold": "worsened = after > before on the trajectory gate's normalized_max_abs; above roundoff = relative increase > 1e-6",
+    "count": 8,
+    "count_above_roundoff": 7,
+    "boundary": "the stage-3 momentum RHS: the only model change between the arms is the velocity time level the lateral viscosity reads",
+    "owner": "UNKNOWN; nothing in round 30 or round 31 attributes them",
+    "rows": [
+      {
+        "row": "GYRE-zco.kt8.before.v",
+        "before": 0.0245271618661643,
+        "after": 0.06203419313522218,
+        "relative_increase": 1.5292038872544633,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt4.before.ssh",
+        "before": 5.060423371181302e-07,
+        "after": 5.294946455237405e-07,
+        "relative_increase": 0.0463445579260606,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt5.before.v",
+        "before": 0.043797665645157385,
+        "after": 0.04572141673556504,
+        "relative_increase": 0.04392359871399584,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt6.before.v",
+        "before": 0.06021959208698796,
+        "after": 0.062092404213714036,
+        "relative_increase": 0.031099714591569714,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt4.before.T",
+        "before": 0.0010594738051818496,
+        "after": 0.001066212778793673,
+        "relative_increase": 0.0063606797816645345,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt5.before.T",
+        "before": 0.003053742478142864,
+        "after": 0.0030599261436702885,
+        "relative_increase": 0.002024946625880807,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt4.before.S",
+        "before": 8.225740462674584e-05,
+        "after": 8.238302701754894e-05,
+        "relative_increase": 0.0015271864140757347,
+        "above_roundoff": true
+      },
+      {
+        "row": "GYRE-zco.kt3.before.T",
+        "before": 0.00037223441372709554,
+        "after": 0.0003722344204818822,
+        "relative_increase": 1.8146593711676622e-08,
+        "above_roundoff": false
+      }
+    ],
+    "round30_receipt_listed": [
+      "GYRE-zco.kt4.before.T",
+      "GYRE-zco.kt5.before.v",
+      "GYRE-zco.kt6.before.v",
+      "GYRE-zco.kt8.before.v"
+    ],
+    "round30_receipt_omitted": [
+      "GYRE-zco.kt4.before.ssh",
+      "GYRE-zco.kt5.before.T",
+      "GYRE-zco.kt4.before.S",
+      "GYRE-zco.kt3.before.T"
+    ]
+  },
+  "item1_arm_provenance": {
+    "withdrawn": "the AFTER arm was NOT run on the committed clean tree",
+    "after_arm_written": "2026-09-05T22:13:10-04:00",
+    "before_arm_written": "2026-09-05T22:16:54-04:00",
+    "fix_commit": "7521513a54c39447027f36ccfe909a0151714e36",
+    "fix_commit_time": "2026-09-05T22:20:56-04:00",
+    "reverted_file": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "restoration_sha256_at_the_fix_commit": "1878abd84548f115b31cf9972c644351bea65af67bbdb995819d3fad904f0c89",
+    "round30_artifacts_carrying_a_revision_stamp": 0
+  },
+  "item1_rule12_dyn_ldf": {
+    "discharged_on": [],
+    "GYRE-zco": "the operator ran on zero non-zero-input cells: uu_Kbb_in and vv_Kbb_in are identically zero in the round-29 record and both zcur and zdiv are multiplicative in velocity",
+    "LOCK_EXCHANGE-zco": "ln_dynldf_OFF",
+    "OVERFLOW-zps": "ln_dynldf_OFF",
+    "ORCA2-zps": "legoESM cannot evaluate the operator at all: ocean_pe_latlon_cgrid.py:3262-3265 refuses a tripolar grid; and no ORCA2 oracle record carries a stage-3 momentum operand",
+    "status": "OPEN"
+  },
+  "item2_commit_stamp": {
+    "report_dicts_stamped": 62,
+    "gates_wired": 37,
+    "gates_whose_own_allow_dirty_flag_was_bridged": 8,
+    "ratchet_floor": 62,
+    "tests": 10
+  },
+  "item3_depth_profile": {
+    "verdict": "IMPLICIT-SOLVE CANDIDATE",
+    "rows": [
+      {
+        "absolute_max": 9.48236979236058e-07,
+        "bar": 1e-15,
+        "candidate_dtype": "float64",
+        "exact": false,
+        "n": 17400,
+        "n_unequal": 17400,
+        "name": "GYRE-zco.kt1.stage3.state.u",
+        "normalized_max_abs": 9.48236979236058e-07,
+        "oracle_dtype": "float64",
+        "reference_max_abs": 0.059801261685050996,
+        "relative_max_abs": 1.5856471126479536e-05,
+        "status": "DEBT"
+      },
+      {
+        "absolute_max": 8.94866292055948e-07,
+        "bar": 1e-15,
+        "candidate_dtype": "float64",
+        "exact": false,
+        "n": 17100,
+        "n_unequal": 17100,
+        "name": "GYRE-zco.kt1.stage3.state.v",
+        "normalized_max_abs": 8.94866292055948e-07,
+        "oracle_dtype": "float64",
+        "reference_max_abs": 0.05978747276597867,
+        "relative_max_abs": 1.4967454730168168e-05,
+        "status": "DEBT"
+      }
+    ],
+    "column_uniformity": {
+      "u": {
+        "columns_column_uniform_to_1e-2": 0,
+        "columns_exact": 0,
+        "columns_scored": 580,
+        "columns_with_two_or_more_wet_levels": 580,
+        "fraction_column_uniform": 0.0,
+        "max_abs_column_mean": 3.7315236921710624e-08,
+        "max_abs_error": 9.48236979236058e-07,
+        "median_spread_over_peak": 1.0752041821721456
+      },
+      "v": {
+        "columns_column_uniform_to_1e-2": 0,
+        "columns_exact": 0,
+        "columns_scored": 570,
+        "columns_with_two_or_more_wet_levels": 570,
+        "fraction_column_uniform": 0.0,
+        "max_abs_column_mean": 3.521441144449005e-08,
+        "max_abs_error": 8.94866292055948e-07,
+        "median_spread_over_peak": 1.075204517306152
+      }
+    },
+    "level_profile": {
+      "u": [
+        {
+          "level": 1,
+          "max_abs": 7.131145388777904e-08,
+          "mean_abs": 3.503770931296657e-08,
+          "mean_signed": -1.0192401655491777e-09,
+          "n": 580
+        },
+        {
+          "level": 2,
+          "max_abs": 7.131147179012531e-08,
+          "mean_abs": 3.5037719826543484e-08,
+          "mean_signed": -1.0192476678977398e-09,
+          "n": 580
+        },
+        {
+          "level": 3,
+          "max_abs": 7.131155590426458e-08,
+          "mean_abs": 3.5037730857103096e-08,
+          "mean_signed": -1.0192476014837294e-09,
+          "n": 580
+        },
+        {
+          "level": 4,
+          "max_abs": 7.131157739797634e-08,
+          "mean_abs": 3.5037735658946526e-08,
+          "mean_signed": -1.019247994971901e-09,
+          "n": 580
+        },
+        {
+          "level": 5,
+          "max_abs": 7.131159249858156e-08,
+          "mean_abs": 3.503773861635702e-08,
+          "mean_signed": -1.0192485418023429e-09,
+          "n": 580
+        },
+        {
+          "level": 6,
+          "max_abs": 7.131160367719385e-08,
+          "mean_abs": 3.503774075909091e-08,
+          "mean_signed": -1.0192489196918156e-09,
+          "n": 580
+        },
+        {
+          "level": 7,
+          "max_abs": 7.131160795984665e-08,
+          "mean_abs": 3.503774149741537e-08,
+          "mean_signed": -1.0192489996011257e-09,
+          "n": 580
+        },
+        {
+          "level": 8,
+          "max_abs": 7.131160034403112e-08,
+          "mean_abs": 3.5037739820245866e-08,
+          "mean_signed": -1.01924857118742e-09,
+          "n": 580
+        },
+        {
+          "level": 9,
+          "max_abs": 7.131157381452553e-08,
+          "mean_abs": 3.503773427943723e-08,
+          "mean_signed": -1.0192473245410938e-09,
+          "n": 580
+        },
+        {
+          "level": 10,
+          "max_abs": 7.131152246654801e-08,
+          "mean_abs": 3.503772359261487e-08,
+          "mean_signed": -1.019244966764144e-09,
+          "n": 580
+        },
+        {
+          "level": 11,
+          "max_abs": 7.131144993792211e-08,
+          "mean_abs": 3.503770842712514e-08,
+          "mean_signed": -1.0192416177799104e-09,
+          "n": 580
+        },
+        {
+          "level": 12,
+          "max_abs": 7.131137513209217e-08,
+          "mean_abs": 3.5037692745591335e-08,
+          "mean_signed": -1.0192381482615186e-09,
+          "n": 580
+        },
+        {
+          "level": 13,
+          "max_abs": 7.131131947300156e-08,
+          "mean_abs": 3.503768112802552e-08,
+          "mean_signed": -1.0192355889385907e-09,
+          "n": 580
+        },
+        {
+          "level": 14,
+          "max_abs": 7.131128777792314e-08,
+          "mean_abs": 3.503767450645032e-08,
+          "mean_signed": -1.0192341177511436e-09,
+          "n": 580
+        },
+        {
+          "level": 15,
+          "max_abs": 7.131127643771051e-08,
+          "mean_abs": 3.503767205097546e-08,
+          "mean_signed": -1.0192335274563712e-09,
+          "n": 580
+        },
+        {
+          "level": 16,
+          "max_abs": 7.131128346404532e-08,
+          "mean_abs": 3.503767356116736e-08,
+          "mean_signed": -1.0192338307185434e-09,
+          "n": 580
+        },
+        {
+          "level": 17,
+          "max_abs": 7.131128757300893e-08,
+          "mean_abs": 3.503767432396294e-08,
+          "mean_signed": -1.0192339019953697e-09,
+          "n": 580
+        },
+        {
+          "level": 18,
+          "max_abs": 7.13112756997483e-08,
+          "mean_abs": 3.5037671532508203e-08,
+          "mean_signed": -1.0192331262549339e-09,
+          "n": 580
+        },
+        {
+          "level": 19,
+          "max_abs": 7.131125868731518e-08,
+          "mean_abs": 3.503766772135646e-08,
+          "mean_signed": -1.0192321593711824e-09,
+          "n": 580
+        },
+        {
+          "level": 20,
+          "max_abs": 7.131124534983952e-08,
+          "mean_abs": 3.50376647977289e-08,
+          "mean_signed": -1.019231442062026e-09,
+          "n": 580
+        },
+        {
+          "level": 21,
+          "max_abs": 7.131123719018818e-08,
+          "mean_abs": 3.503766303502821e-08,
+          "mean_signed": -1.0192310184359055e-09,
+          "n": 580
+        },
+        {
+          "level": 22,
+          "max_abs": 7.13112329756775e-08,
+          "mean_abs": 3.503766213658999e-08,
+          "mean_signed": -1.0192308061294574e-09,
+          "n": 580
+        },
+        {
+          "level": 23,
+          "max_abs": 7.131123105685649e-08,
+          "mean_abs": 3.503766173205795e-08,
+          "mean_signed": -1.0192307117385679e-09,
+          "n": 580
+        },
+        {
+          "level": 24,
+          "max_abs": 7.131123026652732e-08,
+          "mean_abs": 3.503766156670479e-08,
+          "mean_signed": -1.0192306734057064e-09,
+          "n": 580
+        },
+        {
+          "level": 25,
+          "max_abs": 7.131122996761278e-08,
+          "mean_abs": 3.503766150436316e-08,
+          "mean_signed": -1.019230658918496e-09,
+          "n": 580
+        },
+        {
+          "level": 26,
+          "max_abs": 7.131122986309569e-08,
+          "mean_abs": 3.503766148243972e-08,
+          "mean_signed": -1.019230653732744e-09,
+          "n": 580
+        },
+        {
+          "level": 27,
+          "max_abs": 7.131122981842656e-08,
+          "mean_abs": 3.5037661469776186e-08,
+          "mean_signed": -1.0192306517409197e-09,
+          "n": 580
+        },
+        {
+          "level": 28,
+          "max_abs": 7.131115607625317e-08,
+          "mean_abs": 3.503762524032902e-08,
+          "mean_signed": -1.019229597191843e-09,
+          "n": 580
+        },
+        {
+          "level": 29,
+          "max_abs": 7.097569039926036e-08,
+          "mean_abs": 3.487279945542156e-08,
+          "mean_signed": -1.0144348843433364e-09,
+          "n": 580
+        },
+        {
+          "level": 30,
+          "max_abs": 9.48236979236058e-07,
+          "mean_abs": 4.6590135485903794e-07,
+          "mean_signed": 1.3552890198424294e-08,
+          "n": 580
+        }
+      ],
+      "v": [
+        {
+          "level": 1,
+          "max_abs": 6.729658949544692e-08,
+          "mean_abs": 2.1872974872283372e-08,
+          "mean_signed": 2.7025693776435513e-09,
+          "n": 570
+        },
+        {
+          "level": 2,
+          "max_abs": 6.729655587650596e-08,
+          "mean_abs": 2.187297922472759e-08,
+          "mean_signed": 2.7025574560498628e-09,
+          "n": 570
+        },
+        {
+          "level": 3,
+          "max_abs": 6.729625992313998e-08,
+          "mean_abs": 2.187296795770577e-08,
+          "mean_signed": 2.702559584166551e-09,
+          "n": 570
+        },
+        {
+          "level": 4,
+          "max_abs": 6.729617505239023e-08,
+          "mean_abs": 2.1872963992716227e-08,
+          "mean_signed": 2.7025603790249462e-09,
+          "n": 570
+        },
+        {
+          "level": 5,
+          "max_abs": 6.729612946220387e-08,
+          "mean_abs": 2.1872962641350677e-08,
+          "mean_signed": 2.7025600666067777e-09,
+          "n": 570
+        },
+        {
+          "level": 6,
+          "max_abs": 6.729609950282471e-08,
+          "mean_abs": 2.1872961882113814e-08,
+          "mean_signed": 2.70255989127024e-09,
+          "n": 570
+        },
+        {
+          "level": 7,
+          "max_abs": 6.72960961365667e-08,
+          "mean_abs": 2.1872962090825372e-08,
+          "mean_signed": 2.7025599714372155e-09,
+          "n": 570
+        },
+        {
+          "level": 8,
+          "max_abs": 6.729613790651249e-08,
+          "mean_abs": 2.187296392329366e-08,
+          "mean_signed": 2.702560479336416e-09,
+          "n": 570
+        },
+        {
+          "level": 9,
+          "max_abs": 6.729625033670568e-08,
+          "mean_abs": 2.1872968265763926e-08,
+          "mean_signed": 2.702561677522729e-09,
+          "n": 570
+        },
+        {
+          "level": 10,
+          "max_abs": 6.72964540175821e-08,
+          "mean_abs": 2.1872975800919404e-08,
+          "mean_signed": 2.702563833238105e-09,
+          "n": 570
+        },
+        {
+          "level": 11,
+          "max_abs": 6.72967340318751e-08,
+          "mean_abs": 2.187298595430992e-08,
+          "mean_signed": 2.7025668666054584e-09,
+          "n": 570
+        },
+        {
+          "level": 12,
+          "max_abs": 6.729702056200632e-08,
+          "mean_abs": 2.1872996280015145e-08,
+          "mean_signed": 2.702570008736862e-09,
+          "n": 570
+        },
+        {
+          "level": 13,
+          "max_abs": 6.729723605258201e-08,
+          "mean_abs": 2.18730041145387e-08,
+          "mean_signed": 2.7025723261655608e-09,
+          "n": 570
+        },
+        {
+          "level": 14,
+          "max_abs": 6.729736336258266e-08,
+          "mean_abs": 2.1873008865905337e-08,
+          "mean_signed": 2.7025736956468984e-09,
+          "n": 570
+        },
+        {
+          "level": 15,
+          "max_abs": 6.729741647593947e-08,
+          "mean_abs": 2.1873011034074948e-08,
+          "mean_signed": 2.702574333478971e-09,
+          "n": 570
+        },
+        {
+          "level": 16,
+          "max_abs": 6.729740773274342e-08,
+          "mean_abs": 2.187301121469735e-08,
+          "mean_signed": 2.702574181360841e-09,
+          "n": 570
+        },
+        {
+          "level": 17,
+          "max_abs": 6.729741859612393e-08,
+          "mean_abs": 2.1873012306659584e-08,
+          "mean_signed": 2.702574344761527e-09,
+          "n": 570
+        },
+        {
+          "level": 18,
+          "max_abs": 6.729748863566558e-08,
+          "mean_abs": 2.187301545155044e-08,
+          "mean_signed": 2.702575334710199e-09,
+          "n": 570
+        },
+        {
+          "level": 19,
+          "max_abs": 6.729757213354433e-08,
+          "mean_abs": 2.1873018922757513e-08,
+          "mean_signed": 2.7025764330068495e-09,
+          "n": 570
+        },
+        {
+          "level": 20,
+          "max_abs": 6.729763533973917e-08,
+          "mean_abs": 2.1873021510803186e-08,
+          "mean_signed": 2.7025772180565454e-09,
+          "n": 570
+        },
+        {
+          "level": 21,
+          "max_abs": 6.729767363072413e-08,
+          "mean_abs": 2.187302307404528e-08,
+          "mean_signed": 2.7025776728719104e-09,
+          "n": 570
+        },
+        {
+          "level": 22,
+          "max_abs": 6.729769346400737e-08,
+          "mean_abs": 2.1873023886702207e-08,
+          "mean_signed": 2.702577898204618e-09,
+          "n": 570
+        },
+        {
+          "level": 23,
+          "max_abs": 6.729770259217651e-08,
+          "mean_abs": 2.1873024263519763e-08,
+          "mean_signed": 2.7025779979362036e-09,
+          "n": 570
+        },
+        {
+          "level": 24,
+          "max_abs": 6.729770641884097e-08,
+          "mean_abs": 2.187302442312718e-08,
+          "mean_signed": 2.7025780385936246e-09,
+          "n": 570
+        },
+        {
+          "level": 25,
+          "max_abs": 6.729770790465874e-08,
+          "mean_abs": 2.1873024485952186e-08,
+          "mean_signed": 2.702578054193431e-09,
+          "n": 570
+        },
+        {
+          "level": 26,
+          "max_abs": 6.729770844675982e-08,
+          "mean_abs": 2.1873024509324032e-08,
+          "mean_signed": 2.7025780599714085e-09,
+          "n": 570
+        },
+        {
+          "level": 27,
+          "max_abs": 6.72977086268458e-08,
+          "mean_abs": 2.1873024514466207e-08,
+          "mean_signed": 2.702578061744683e-09,
+          "n": 570
+        },
+        {
+          "level": 28,
+          "max_abs": 6.729763911455166e-08,
+          "mean_abs": 2.1873001902263436e-08,
+          "mean_signed": 2.7025752684001605e-09,
+          "n": 570
+        },
+        {
+          "level": 29,
+          "max_abs": 6.69810545594039e-08,
+          "mean_abs": 2.177010585320874e-08,
+          "mean_signed": 2.6898616632694483e-09,
+          "n": 570
+        },
+        {
+          "level": 30,
+          "max_abs": 8.94866292055948e-07,
+          "mean_abs": 2.9084895399701956e-07,
+          "mean_signed": -3.593658108224462e-08,
+          "n": 570
+        }
+      ]
+    },
+    "rank_one_reading": {
+      "source": "stprk3_stg.F90:440 builds zub from the SOLVE OUTPUT, so the correction is rank-1: a single-level error d at the deepest wet level appears as (1-f)*d there and -f*d above",
+      "f": 0.069921016765114,
+      "predicted_levels_1_29_over_level_30": 0.075178,
+      "predicted_median_span_over_peak": 1.075177
+    }
+  },
+  "item4_pre_solve": {
+    "calibration": {
+      "status": "AT-BAR",
+      "rows": [
+        {
+          "exact": true,
+          "max_abs": 0.0,
+          "n": 17400,
+          "n_unequal": 0,
+          "name": "GYRE-zco.kt1.stage3.zdf_pre_solve_reconstruction.u"
+        },
+        {
+          "exact": true,
+          "max_abs": 0.0,
+          "n": 17100,
+          "n_unequal": 0,
+          "name": "GYRE-zco.kt1.stage3.zdf_pre_solve_reconstruction.v"
+        }
+      ]
+    },
+    "calibration_label": "certifies the gate's TRANSCRIPTION of dynzdf.F90:121-122, :149-150 and :156-159; it is internal to the oracle and establishes no alignment with legoESM and none of the solve's own inputs",
+    "three_entry_boundaries": {
+      "closest": "GYRE-zco.kt1.stage3.zdf_entry_A_explicit_update.v",
+      "rows": [
+        {
+          "absolute_max": 0.0004269765124169735,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.0004255609371245806,
+          "exact": false,
+          "n": 17400,
+          "n_unequal": 17400,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_A_explicit_update.u",
+          "nemo_statement": "dynzdf.F90:121-122",
+          "normalized_max_abs": 0.0004269765124169735,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.00037899494398016217,
+          "relative_max_abs": 1.126602133350156,
+          "status": "DEBT"
+        },
+        {
+          "absolute_max": 0.0004029443737139659,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.00036111997792234594,
+          "exact": false,
+          "n": 17100,
+          "n_unequal": 17100,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_A_explicit_update.v",
+          "nemo_statement": "dynzdf.F90:121-122",
+          "normalized_max_abs": 0.0004029443737139659,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.0004106141972833131,
+          "relative_max_abs": 0.9813210950325343,
+          "status": "DEBT"
+        },
+        {
+          "absolute_max": 0.000852493740091163,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.0004255609371245806,
+          "exact": false,
+          "n": 17400,
+          "n_unequal": 17400,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_B_barotropic_removed.u",
+          "nemo_statement": "dynzdf.F90:149-150",
+          "normalized_max_abs": 0.000852493740091163,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.000427346510456741,
+          "relative_max_abs": 1.994853635706611,
+          "status": "DEBT"
+        },
+        {
+          "absolute_max": 0.0007240207753019079,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.00036111997792234594,
+          "exact": false,
+          "n": 17100,
+          "n_unequal": 17100,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_B_barotropic_removed.v",
+          "nemo_statement": "dynzdf.F90:149-150",
+          "normalized_max_abs": 0.0007240207753019079,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.00040364228083635787,
+          "relative_max_abs": 1.793718868602459,
+          "status": "DEBT"
+        },
+        {
+          "absolute_max": 0.0008535125698514775,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.0004255609371245806,
+          "exact": false,
+          "n": 17400,
+          "n_unequal": 17400,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_C_pre_solve_vector.u",
+          "nemo_statement": "dynzdf.F90:156-159",
+          "normalized_max_abs": 0.0008535125698514775,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.0004279516327268969,
+          "relative_max_abs": 1.994413631309027,
+          "status": "DEBT"
+        },
+        {
+          "absolute_max": 0.0007248853089209414,
+          "bar": 1e-15,
+          "candidate_dtype": "float64",
+          "candidate_max_abs": 0.00036111997792234594,
+          "exact": false,
+          "n": 17100,
+          "n_unequal": 17100,
+          "name": "GYRE-zco.kt1.stage3.zdf_entry_C_pre_solve_vector.v",
+          "nemo_statement": "dynzdf.F90:156-159",
+          "normalized_max_abs": 0.0007248853089209414,
+          "oracle_dtype": "float64",
+          "reference_max_abs": 0.00040364228083635787,
+          "relative_max_abs": 1.7958606997734707,
+          "status": "DEBT"
+        }
+      ]
+    },
+    "ordering_size": [
+      {
+        "max_abs_delta": 0.00042697651206621503,
+        "max_bottom_drag_factor": 0.0023943348583166887,
+        "median_abs_delta": 0.00021929123658848452,
+        "n_columns": 580,
+        "name": "GYRE-zco.kt1.stage3.ordering_constant.u",
+        "predicted_bottom_error": 1.022324152002595e-06
+      },
+      {
+        "max_abs_delta": 0.0004029443735827262,
+        "max_bottom_drag_factor": 0.002394334719730749,
+        "median_abs_delta": 0.00010640778676445929,
+        "n_columns": 570,
+        "name": "GYRE-zco.kt1.stage3.ordering_constant.v",
+        "predicted_bottom_error": 9.64783703789279e-07
+      }
+    ],
+    "ordering_regression": {
+      "verdict": "ORDERING TERM CONFIRMED COLUMN-WISE",
+      "rows": [
+        {
+          "at_bar": true,
+          "f_deepest_over_depth_max": 0.06992101676511424,
+          "f_deepest_over_depth_min": 0.0699210167651142,
+          "max_abs_ordering_term": 1.022324152002595e-06,
+          "max_abs_post_correction_error": 9.48236979236058e-07,
+          "max_abs_single_cell_error": 1.0195230688237005e-06,
+          "n_columns": 580,
+          "name": "GYRE-zco.kt1.stage3.ordering_regression.u",
+          "r_squared": 0.999999999999996,
+          "slope_through_origin": 0.9972600622699379
+        },
+        {
+          "at_bar": true,
+          "f_deepest_over_depth_max": 0.06992101676511425,
+          "f_deepest_over_depth_min": 0.0699210167651142,
+          "max_abs_ordering_term": 9.64783703789279e-07,
+          "max_abs_post_correction_error": 8.94866292055948e-07,
+          "max_abs_single_cell_error": 9.621401065784054e-07,
+          "n_columns": 570,
+          "name": "GYRE-zco.kt1.stage3.ordering_regression.v",
+          "r_squared": 0.9999999999999649,
+          "slope_through_origin": 0.9972600305068343
+        }
+      ]
+    },
+    "owner": "the ORDER of the barotropic correction relative to the implicit vertical solve: legoESM applies it before the solve (ocean_model_latlon_cgrid.py:6300-6322) and again after (nemo_stage_mean_imposition, GYRE True); NEMO applies it once, after (stprk3_stg.F90:437-446), and subtracts uu_b before (dynzdf.F90:149-150)",
+    "first_non_bit_statement_in_dynzdf": "NONE -- dyn_zdf's statements are never reached with NEMO's inputs",
+    "landed": "nothing (P4k, preregistered)"
+  },
+  "item5_orca2": {
+    "scratch_worktree": "/tmp/r31-orca2-scratch at c6f3e33f063b, nothing committed, flagged for removal",
+    "patch_applies": true,
+    "patch_applied": false,
+    "blocker_1": "ocean_pe_latlon_cgrid.py:3262-3265 refuses a tripolar grid (dlon <= 0)",
+    "blocker_2": "ORCA2 resolves nn_ahm_ijk_t = -30 (ahmt_3d/ahmf_3d from eddy_viscosity_3D.nc); legoESM synthesises a 1-D profile",
+    "blocker_3": "no ORCA2 oracle record carries a stage-3 momentum operand; 101 oracle_* streams enumerated",
+    "row": "UNMEASURED",
+    "thickness_operand": {
+      "levels_with_horizontal_e3_spread_ORCA2": "27 of 30",
+      "levels_with_horizontal_e3_spread_GYRE": "0 of 30"
+    }
+  },
+  "item6_decision_16": {
+    "disposition": "re-filed as an open card-identity gap; nothing landed"
+  },
+  "item7_decision_17": {
+    "verdict": "CONFIRMED -- one cause, one raise site",
+    "raise_site": "vertical.py:64-70",
+    "failing_tests": [
+      "test_nemo_gyre_coordinate_is_consistent_clean_w_bc",
+      "test_nemo_gyre_forced_trajectory_is_finite_and_stable",
+      "test_nemo_gyre_wind_forcing_sign_chain_end_to_end",
+      "test_surface_stress_implicit_wiring"
+    ],
+    "missing_operand": "is_active only; e3t_0 is supplied by the caller",
+    "finding": "the guard sits ABOVE the linear-free-surface early return at vertical.py:76-77, which never reads the mask, so the card is refused for an operand its own arm does not consume",
+    "oracle_side": {
+      "GYRE_BARE keys": "key_linssh key_vco_1d key_RK3 (cpp_GYRE_BARE.fcm:1)",
+      "oracle deck keys": "key_qco key_vco_1d3d key_RK3 (cpp_GYRE_OMIP_L2_P3_SM.fcm:1)",
+      "ln_linssh": "not a live namelist variable in NEMO 5.0.2"
+    },
+    "changed": "nothing"
+  },
+  "trajectory_rerun_at_this_tip": {
+    "first_over_bar": {
+      "fields": [
+        "T",
+        "S",
+        "u",
+        "v"
+      ],
+      "kt": 2
+    },
+    "worktree": {
+      "allow_dirty_escape_used": false,
+      "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+      "clean": true,
+      "commit": "da93c090cf73c4fbb7f2063b7f24aef16ebf33f4",
+      "detached": false,
+      "diff_sha256": null,
+      "dirty_paths": [],
+      "root": "/tmp/codex-gyre/packages/ocean/legoesm/ocean/fidelity",
+      "untracked_count": 0
+    },
+    "rows_differing_from_the_round30_after_arm": [],
+    "n_rows": 50
+  }
+}

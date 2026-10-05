@@ -190,6 +190,10 @@ class IWMConfig(NamedTuple):
     # "nemo_bn2" (NEMO zdfiwm reads rn2 = eosbn2 bn2, zdfiwm.F90:185-211).
     n2_mode: str = "insitu"
     n2_eos_form: str = "seos"        # alpha/beta for nemo_bn2: seos | teos10
+    # A card that reads real de Lavergne maps sets this, so a host that
+    # forgets to thread them gets a refusal instead of the uniform
+    # constant-power fallback, which is different physics.
+    require_forcing_maps: bool = False
 
 
 class IWMForcing(NamedTuple):

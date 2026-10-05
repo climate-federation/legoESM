@@ -53,7 +53,6 @@ __param_spec__ = {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
-            "cape_sink_heating_ratio": "inert: the quasi-equilibrium heating ceiling it scales has no consumer in bechtold.py, so the leaf carries no loss gradient; re-tier to 2 in the same PR that implements the sink",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
@@ -154,12 +153,10 @@ __param_spec__ = {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
-            "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
-            "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
@@ -176,7 +173,6 @@ __param_spec__ = {
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
-            "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
             "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
             "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
             "downdraft_omtrain_pa_s": {"units": "Pa/s", "bounds": (10.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTRAIN, rain fall speed (convect43c.f:194)", "shape": None},
@@ -334,25 +330,21 @@ __param_spec__ = {
     "ZhangMcFarlaneConfig": {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
-            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
-            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger",
-            "epsilon_0": "entrainment: bulk-plume base rate held fixed (dilute CAPE uses dmpdz)",
-            "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
-            "parcel_tpert": "default 0 = disabled/off (optional PBL temperature perturbation)",
-            "tp_fac": "default 0 = disabled/off (PBL-perturbation multiplier)",
-            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
+            "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
+            "pbl_top_pa": "measurement convention: launch-search bound standing in for the host's missing pblh",
+            "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
         },
         "params": {
-            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Zhang & McFarlane (1995) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Zhang & McFarlane (1995)", "shape": None},
-            "cmt_c_d": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
-            "cmt_c_u": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
-            "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Zhang & McFarlane (1995) bulk plume", "shape": None},
-            "dmpdz": {"units": "1/m", "bounds": (-0.003, -0.00033), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Zhang & McFarlane (1995) dilute-parcel entrainment (Raymond-Blyth 1992)", "shape": None},
-            "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995) sub-cloud perturbation", "shape": None},
-            "pbl_top_pa": {"units": "Pa", "bounds": (50000.0, 90000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "cloud_base", "reference": "Zhang & McFarlane (1995) launch-level search bound", "shape": None},
-            "tau_cape": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Zhang & McFarlane (1995) CAPE relaxation", "shape": None},
+            "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
+            "c0_ocn": {"units": "1/m", "bounds": (0.002, 0.06), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_ocn namelist span (0.002-0.045 across configurations)", "shape": None},
+            "ke": {"units": "s^-1 (kg/m^2/s)^-1/2", "bounds": (1.0e-6, 2.0e-5), "tunable_tier": 1, "transform": "sigmoid", "category": "rain_evaporation", "reference": "CAM zmconv_ke namelist span (3e-6 to 1e-5)", "shape": None},
+            "momcu": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "Richter & Rasch (2008) CMT pressure-gradient coefficient; CAM 0.4-0.7", "shape": None},
+            "momcd": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "Richter & Rasch (2008) CMT pressure-gradient coefficient; CAM 0.4-0.7", "shape": None},
+            "tau": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Zhang & McFarlane (1995) CAPE consumption timescale", "shape": None},
+            "capelmt": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995) CAPE threshold", "shape": None},
             "tiedke_add": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995) cloud-level buoyancy offset", "shape": None},
+            "dmpdz": {"units": "1/m", "bounds": (-0.003, -0.00033), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Neale et al. (2008) dilute-parcel entrainment (Raymond-Blyth 1992)", "shape": None},
+            "alfa": {"units": "1", "bounds": (0.05, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Zhang & McFarlane (1995) downdraft fraction (0.1 test4 / 0.2 normal, zm_conv.F90:3417)", "shape": None},
         },
     },
 }
@@ -664,7 +656,7 @@ class MassFluxConfig(NamedTuple):
     cape_threshold: float = 70.0
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    M_b_max: float = 0.05   # hard cap on the cloud-base mass flux [kg/m^2/s]
     # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
     # Selects the compensating-subsidence + detrainment solve in the SHARED
     # kernel ``mass_flux.apply_mass_flux_kernel``; see
@@ -689,100 +681,80 @@ class MassFluxConfig(NamedTuple):
 
 
 class ZhangMcFarlaneConfig(NamedTuple):
-    """Configuration for the Zhang & McFarlane (1995) deep-convection scheme.
+    """CAM6 Zhang-McFarlane deep convection (faithful ``zm_conv.F90`` port).
 
-    Single-plume mass-flux scheme with CAPE-relaxation closure and
-    optional Gregory et al. 1997 convective momentum transport.
+    Field names follow the CAM6 ``zmconv_*`` namelist / ``zm_conv.F90``
+    module parameters; defaults are the CESM2.1 CAM6 f09 (``mg2`` +
+    ``clubb_sgs``, ``dyn=fv``) resolved values from
+    ``bld/namelist_files/namelist_defaults_cam.xml``.  ``zmconv_microp``
+    and ``zm_org`` are ``.false.`` in CAM6 and are not ported (so
+    ``zmconv_ke_lnd`` is inert there and is not a field).
 
     Fields
     ------
-    tau_cape : float
-        CAPE relaxation timescale [s] (default 3600 = 1 hour).
-    cape_threshold : float
-        CAPE threshold [J/kg] below which convection is suppressed
-        (default 70.0, the classic ZM 1995 value).
-    cape_sharpness : float
-        Sigmoid sharpness on the CAPE trigger [1/(J/kg)].  Default
-        ``0.1`` — ≈0.5 activation at threshold and ~95% activation
-        ~30 J/kg above it.
-    parcel_dT : float
-        Sub-cloud parcel temperature perturbation [K] (default 0.5).
-    parcel_dq : float
-        Sub-cloud parcel humidity perturbation [kg/kg] (default 1e-3).
-    epsilon_0 : float
-        Bulk-plume entrainment rate [1/m] (default 1e-3).
-    delta_0 : float
-        Bulk-plume detrainment rate [1/m] (default 1e-3).
+    c0_lnd, c0_ocn : float
+        Cloud-water to rain autoconversion coefficient [1/m] over land /
+        ocean (``zmconv_c0_lnd`` 0.0075, ``zmconv_c0_ocn`` 0.03), blended
+        by the column land fraction (``cldprp`` ``c0mask``).
+    ke : float
+        Rain evaporation efficiency [s^-1 (kg/m^2/s)^-1/2] (``zmconv_ke`` 5e-6
+        for ``dyn=fv``).
+    momcu, momcd : float
+        Updraft / downdraft pressure-gradient coefficients of the
+        Richter-Rasch momentum transport (``zmconv_momcu``/``momcd`` 0.7).
+    num_cin : int
+        Number of negative-buoyancy regions allowed before the cloud top
+        (``zmconv_num_cin`` = 1 for CAM6).
+    tau : float
+        CAPE consumption timescale [s] (``tau`` 3600, zm_conv.F90:61).
+    capelmt : float
+        CAPE threshold [J/kg] for deep convection (``capelmt`` 70,
+        zm_conv.F90:59).
+    tiedke_add : float
+        Parcel buoyancy / updraft static-energy offset [K] (0.5,
+        zm_conv.F90:60).
+    dmpdz : float
+        Dilute-parcel fractional entrainment rate [1/m] (``dmpdz`` -1e-3,
+        zm_conv.F90:4328; negative by the oracle's sign convention).
+    alfa : float
+        Downdraft mass-flux fraction of the updraft (``alfa`` 0.1,
+        zm_conv.F90:3419).
+    limcnv_p_pa : float
+        Convection is capped at the interface where the reference pressure
+        crosses this value [Pa] (40 hPa, zm_conv_intr.F90:334).
+    pbl_top_pa : float
+        DEPARTURE: the host does not carry the PBL height ``pblh`` that the
+        oracle's ``pblt`` launch-level bound needs, so the max-MSE launch
+        search is restricted to levels with ``p >= pbl_top_pa`` [Pa] unless
+        ``pblh`` is passed explicitly.
+    parcel_tpert : float
+        PBL temperature perturbation ``tpert`` [K] added to the parcel; 0 on
+        the CAM6 CLUBB path (no scheme writes ``tpert`` there).
     enable_cmt : bool
-        Whether to compute convective momentum transport tendencies
-        (default ``True``).  When ``False``, the bridge zero-fills
-        ``du_dt_conv`` / ``dv_dt_conv``.
-    cmt_c_u, cmt_c_d : float
-        Pressure-gradient correction coefficients in the Gregory et
-        al. 1997 closure (default 0.55 each — the canonical value).
-    M_b_max : float
-        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
-        (default 0.05 — about half the literature peak tropical value
-        ~0.1; tighter than peak because the unbounded CAPE/tau closure
-        can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer
-        heating ~M·(T_u−T)·δ scales linearly).  The
-        CAPE/τ_cape closure is unbounded above; without this cap a
-        column with CAPE >> 5 kJ/kg yields M_b that drives
-        column-integrated heating > 10⁴ W/m² and blows up the
-        integration on the next dynamics step.
+        Run ``momtran`` (convective momentum transport + KE-dissipation
+        heating); when False ``du_dt_conv``/``dv_dt_conv`` are ``None``.
     """
-    tau_cape: float = 3600.0
-    cape_threshold: float = 70.0
-    cape_sharpness: float = 0.1
-    parcel_dT: float = 0.5
-    parcel_dq: float = 1.0e-3
-    epsilon_0: float = 1.0e-3
-    delta_0: float = 1.0e-3
-    # --- FAITHFUL ZM dilute-parcel CAPE (Raymond-Blyth 1992) -----------
-    # The ZM trigger and closure use the CAPE of a DILUTE entraining
-    # plume (``buoyan_dilute``/``parcel_dilute`` in zm_conv.F90), not an
-    # undilute moist adiabat.  ``dmpdz`` is the fractional entrainment
-    # rate [1/m] (E3SM/CAM default ``−1.0e-3``; NEGATIVE by the oracle's
-    # ``mp`` sign convention).  ``tiedke_add`` is the buoyancy offset [K]
-    # added at every cloud level (oracle default 0.5 K).  ``tp_fac`` ×
-    # ``parcel_tpert`` is the optional PBL temperature perturbation (both
-    # default 0).  ``pbl_top_pa`` bounds the launch-level (max-MSE)
-    # search to the PBL.  Set ``use_dilute_cape = False`` to recover the
-    # legacy undilute moist-adiabat CAPE.
-    use_dilute_cape: bool = True
-    dmpdz: float = -1.0e-3
+    c0_lnd: float = 0.0075
+    c0_ocn: float = 0.03
+    ke: float = 5.0e-6
+    momcu: float = 0.7
+    momcd: float = 0.7
+    num_cin: int = 1
+    tau: float = 3600.0
+    capelmt: float = 70.0
     tiedke_add: float = 0.5
-    tp_fac: float = 0.0
-    parcel_tpert: float = 0.0
+    dmpdz: float = -1.0e-3
+    alfa: float = 0.1
+    limcnv_p_pa: float = 4000.0
     pbl_top_pa: float = 7.0e4
+    parcel_tpert: float = 0.0
     enable_cmt: bool = True
-    cmt_c_u: float = 0.55
-    cmt_c_d: float = 0.55
-    M_b_max: float = 0.05
-    # Buoyancy-death memory is OFF by default.  The audit's cycle-2 P2
-    # concern (a plume terminated by negative buoyancy can revive
-    # above an inversion) is real, but several attempted detector
-    # designs each introduced their own edge cases (sub-LCL warm-
-    # bubble leak, miss of weak positive CAPE, miss of cloud-base
-    # launch, growth of the launched gate during revival).  The
-    # ``_plume.entraining_detraining_plume`` ``buoyancy_death_memory``
-    # kwarg is wired through and the option is fully tested in
-    # isolation, but enabling it by default would require a more
-    # robust state-machine design plus a dedicated validation
-    # campaign.  Schemes that *want* the single-plume monotone
-    # termination can opt in by setting this to True; the default
-    # preserves the legacy local-only filter behaviour that all
-    # existing scheme test fixtures were calibrated against.
-    buoyancy_death_memory: bool = False
-    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
-    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
-    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
-    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
-    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
-    # ``"implicit_flux"`` is the conservative flux-form solve that also books
-    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
-    subsidence_solve: str = "advective"
-    theta_implicit: float = 1.0
+    # Column land fraction policy (static, closure-time).  "required": the host
+    # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
+    # one raises instead of silently treating every column as ocean.  "none":
+    # an aquaplanet run with no land, recorded as a choice -- ocean
+    # coefficients everywhere, and passing a land fraction is an error.
+    land_fraction: str = "required"
 
 
 class KainFritschConfig(NamedTuple):
@@ -858,13 +830,13 @@ class KainFritschConfig(NamedTuple):
     # Deep-convection entrainment/detrainment (~2e-4 /m).  The earlier
     # ``2e-3`` (shallow-cumulus range) over-diluted the single plume so it
     # lost buoyancy in the lower troposphere and could not warm the free
-    # troposphere — see ZhangMcFarlaneConfig / EmanuelConfig.
+    # troposphere — see EmanuelConfig.
     epsilon_0: float = 2.0e-4
     delta_0: float = 2.0e-4
     cloud_depth_min: float = 4000.0
     cloud_depth_sharpness: float = 1.0e-3
     enable_shallow: bool = True
-    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    # Single-plume scheme — see _plume.entraining_detraining_plume(buoyancy_death_memory).
     buoyancy_death_memory: bool = False
     cape_threshold: float = 0.0
     cape_sharpness: float = 0.1
@@ -1033,10 +1005,7 @@ class EmanuelConfig(NamedTuple):
         Sub-cloud parcel humidity perturbation [kg/kg] (default 1e-3).
     enable_unsaturated_downdraft : bool
         Whether to include the unsaturated downdraft branch (rain
-        evaporation cooling) (default ``True``).
-    downdraft_efficiency : float
-        Fraction of precipitation that re-evaporates below cloud base
-        in the downdraft (default 0.2).
+        evaporation cooling) (default ``False``).
     smooth_trigger_sharpness : float
         Sigmoid sharpness on the buoyancy-sort weighting [1/K]
         (default 0.5).
@@ -1073,16 +1042,6 @@ class EmanuelConfig(NamedTuple):
     # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
     # transition, matching the shared LCL crossing sharpness.
     lcl_pressure_sharpness: float = 1.0e-3
-    # Sharpness [1/level] of the below-LCL smooth index indicator used by the
-    # optional unsaturated-downdraft re-evaporation (surface-last: level index
-    # > k_lcl_smooth ⇒ below LCL).  Default 2.0 gives an ~1-level transition,
-    # matching the historical inline value.  Numerics (not a tunable closure).
-    below_lcl_index_sharpness: float = 2.0
-    # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
-    # relaxed CBMF so it is ~0 when the relaxation target goes negative
-    # (stable column) without a hard ``max`` that would kill the gradient.
-    # Large because CBMF magnitudes are O(0.01-0.1) kg/m²/s.
-    cbmf_positive_sharpness: float = 1.0e3
     # Upper bound [kg/m²/s] on the *carried* prognostic CBMF — looser than
     # the per-step transport cap ``M_b_max`` so the closure's memory can
     # ramp to the oracle's deep-tropical CBMF (~0.12 kg/m²/s) instead of
@@ -1099,7 +1058,6 @@ class EmanuelConfig(NamedTuple):
     # Production runs with a full microphysics chain that owns q_r
     # should override this to ``True``.
     enable_unsaturated_downdraft: bool = False
-    downdraft_efficiency: float = 0.2
     # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
     # Read ONLY when ``enable_unsaturated_downdraft`` is set, which selects
     # the ported shaft (``_emanuel_downdraft``) rather than the legacy
@@ -1307,9 +1265,9 @@ class TiedtkeConfig(NamedTuple):
     # vanishing in dry ones.
     mc_proxy_RH_crit: float = 0.6
     tau_shallow_M_b: float = 3600.0  # Shallow-cloud-base mass-flux timescale [s]
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    M_b_max: float = 0.05   # hard cap on the cloud-base mass flux [kg/m^2/s]
     midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
-    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    # Single-plume scheme — see _plume.entraining_detraining_plume(buoyancy_death_memory).
     buoyancy_death_memory: bool = False
     # Convective precipitation efficiency [0,1]: the fraction of the detrained
     # plume condensate that has precipitated in the updraft and is therefore
@@ -1548,30 +1506,6 @@ class BechtoldConfig(NamedTuple):
     use_pbl_cape: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
-    # CAPE quasi-equilibrium heating ceiling (the C12/RCE warm-runaway
-    # harden).  Bechtold's M_b closure is a CAPE-relaxation SURROGATE with
-    # no quasi-equilibrium constraint on the APPLIED heating: at pinned
-    # M_b_max the scheme sustains large column heating for months while the
-    # PBL-parcel CAPE never drains (measured: the scheme's own tendencies
-    # GENERATE CAPE on a convecting fixture — downdraft below-LCL moistening
-    # feeds the parcel), so nothing bounds the warming (C12 pilot: mean T
-    # 267->312 K over days 90-170; SCM-RCE moist-adiabat bias ~50 K).  The
-    # sink caps the column-integrated positive convective heating by the
-    # quasi-equilibrium energy flux (Arakawa & Schubert 1974 lineage):
-    #     H = (c_p/g)·∫ max(dT_dt,0) dp  ≤  ratio · M_b · CAPE   [W/m²]
-    # scaling ALL tendencies (and the M_u carry) by
-    #     f = clip(ratio·M_b·CAPE / H, 0, 1).
-    # M_b·CAPE is the closure's own available-energy flux; `heating_ratio` absorbs the
-    # heating-to-KE-generation ratio (tunable, SCM-RCE-calibrated).  A
-    # vigorous tower (large CAPE) keeps its full heating; the runaway mode
-    # (heating at pinned M_b with modest CAPE) is throttled.  False =
-    # bit-exact legacy path.
-    # DEFAULT OFF since the 2026-07-17 merge: use_ifs_cape_closure (default
-    # True, IFS cumastrn ZMFUB1 closure) consumes CAPE at the SOURCE, fixing
-    # the same runaway faithfully; stacking the surrogate ceiling on top
-    # double-throttles.  Opt-in lever for legacy/no-IFS-closure configs.
-    cape_relaxation_sink: bool = False
-    cape_sink_heating_ratio: float = 5.0
     # IFS convective-turnover CAPE-closure timescale (audit F1).  When True
     # (default) the deep closure divides PBL-CAPE by the state-dependent
     # tau_conv = cloud_depth/(2+w_mean), clamped [720,10800] s (cumastrn.F90:773),
@@ -1629,6 +1563,20 @@ class BechtoldConfig(NamedTuple):
     # 297 baseline with the residual std improved, moisture residual
     # improved).  False restores the legacy split path byte-identically.
     use_ifs_inplume_precip: bool = True
+    # Where the vapour that becomes in-plume rain is debited from the
+    # environment (and its latent heat released), use_ifs_inplume_precip only:
+    #   "formation"   - at the rain-formation levels (precip_frac*M_u profile,
+    #                   cuascn PDMFUP), capacity-limited per level after the
+    #                   transport tendencies; excess redistributed within the
+    #                   formation support, and any remainder REDUCES the rain
+    #                   and its heating consistently.  DEFAULT.
+    #   "vapour_mass" - legacy: column-exact sink spread over ALL levels by
+    #                   q_v*dp ("same relative drying rate everywhere"), which
+    #                   took 43% of the ITCZ's convective rain water, and put
+    #                   its heat, below 850 hPa where the plume never condensed
+    #                   (2026-09-21 banded ledgers; codex + GLM confirmed
+    #                   against cudtdqn).  Kept selectable for the A/B.
+    rain_vapor_sink: str = "formation"
     # Horizontal grid spacing [m] for the IFS ZTAURES resolution factor on the
     # convective turnover time (ZDX = sqrt(cell area), cumastrn.F90:713,
     # 762-768).  0 (default) = legacy resolution-agnostic ZTAURES = 1.0; the
@@ -1662,17 +1610,18 @@ class BechtoldConfig(NamedTuple):
     # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
     # bool, so only one branch is ever traced.
     #
-    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Measured 2026-09-17 on a
-    # frozen deep column: a +-11000 K/day dipole across the two lowest levels.
-    # Cause (codex oracle review): the chain omits CUFLXN, which cumastrn runs
-    # BEFORE cudtdqn (cumastrn.F90:1104 then :1226) to subtract the
-    # environmental transport and build the below-cloud-base fluxes, so raw
-    # plume fluxes reach a stage that expects processed ones.  Also open: the
-    # humidity convention differs across the trigger/ascent boundary, KTYPE is
-    # not reclassified against the actual ascent top (cumastrn.F90:634-641),
-    # the detrained condensate and precipitation are dropped from the host
-    # water budget, and the early return bypasses the legacy downdraught and
-    # sub-cloud evaporation rather than keeping them.
+    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Closed so far: CUFLXN and
+    # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
+    # the two lowest levels) and the humidity convention across the trigger /
+    # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
+    # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
+    # actual ascent top (cumastrn.F90:635-641) and the return of the detrained
+    # condensate and the convective precipitation to the host water budget.
+    # Still open: the early return
+    # bypasses the legacy downdraught and sub-cloud evaporation rather than
+    # keeping them, and the ported ascent does not return an updated LDCUM
+    # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
+    # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
@@ -1733,12 +1682,12 @@ class BechtoldConfig(NamedTuple):
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    M_b_max: float = 0.05   # hard cap on the cloud-base mass flux [kg/m^2/s]
     # Strong-convergence normaliser used to make the moisture-convergence
     # enhancement an O(1) multiplier of M_b (Bechtold 2008 Fig. 2 — typical
     # tropical strong-convergence is ≈ 0.05 kg/m²/s).
     mc_normalize_scale: float = 0.05
-    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    # Single-plume scheme — see _plume.entraining_detraining_plume(buoyancy_death_memory).
     buoyancy_death_memory: bool = False
     # Vertical solve for the compensating subsidence + detrainment in the
     # shared mass-flux kernel.  ``"advective"`` (default) is the legacy
@@ -1853,7 +1802,7 @@ class ConvectiveEDMFConfig(NamedTuple):
     # CAPE=0 leak from the earlier 50 % activation).
     cape_activation_scale: float = 10.0
     cape_threshold: float = 70.0
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    M_b_max: float = 0.05   # hard cap on the cloud-base mass flux [kg/m^2/s]
     # Conservative, damping subsidence solve by default (#824): the legacy
     # explicit "advective" solve leaked column static energy and, with the
     # non-detraining updraft profile, drove a day-5 full-physics AMIP blowup.

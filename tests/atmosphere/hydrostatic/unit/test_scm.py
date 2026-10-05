@@ -406,9 +406,12 @@ def test_swap_radiation_schemes(rad_scheme):
      "tiedtke", "bechtold"],
 )
 def test_swap_convection_schemes(conv_scheme):
+    conv = ConvectionConfig(scheme=conv_scheme)
+    if conv_scheme == "zhang_mcfarlane":  # the SCM column has no land fraction
+        conv = conv._replace(zhang_mcfarlane=conv.zhang_mcfarlane._replace(land_fraction="none"))
     cfg = _baseline_cfg(
         radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
-        convection=ConvectionConfig(scheme=conv_scheme),
+        convection=conv,
     )
     _run_and_assert_stable(cfg)
 

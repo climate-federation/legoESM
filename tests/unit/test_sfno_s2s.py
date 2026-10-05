@@ -80,6 +80,14 @@ def _write_minimal_s2s_store(tmp_path: Path) -> ChaosBenchS2SConfig:
                     coords={"level": levels, "latitude": source_lat, "longitude": source_lon},
                     dims=("level", "latitude", "longitude"),
                 ),
+                **{
+                    wind: xr.DataArray(
+                        np.full((len(levels), source_lat.size, source_lon.size), value, dtype=np.float32),
+                        coords={"level": levels, "latitude": source_lat, "longitude": source_lon},
+                        dims=("level", "latitude", "longitude"),
+                    )
+                    for wind, value in (("u", 5.0), ("v", -3.0))
+                },
             },
             coords={"time": np.datetime64(f"2000-01-{day_index + 1:02d}")},
         )
@@ -130,13 +138,15 @@ def _write_minimal_s2s_store(tmp_path: Path) -> ChaosBenchS2SConfig:
     xr.Dataset(
         {
             "mean": xr.DataArray(
-                np.zeros(4, dtype=np.float32),
-                coords={"param": ["t-500", "t-850", "q-500", "q-850"]},
+                np.zeros(8, dtype=np.float32),
+                coords={"param": ["t-500", "t-850", "q-500", "q-850",
+                                  "u-500", "u-850", "v-500", "v-850"]},
                 dims=("param",),
             ),
             "sigma": xr.DataArray(
-                np.ones(4, dtype=np.float32),
-                coords={"param": ["t-500", "t-850", "q-500", "q-850"]},
+                np.ones(8, dtype=np.float32),
+                coords={"param": ["t-500", "t-850", "q-500", "q-850",
+                                  "u-500", "u-850", "v-500", "v-850"]},
                 dims=("param",),
             ),
         }
@@ -671,11 +681,12 @@ def test_prepare_arco_surface_forcing_regrids_and_preserves_sst_mask(tmp_path: P
 class _PassThroughCoupledAtmosModel(eqx.Module):
     def __call__(self, x, grid):
         del grid
-        return x[..., :4]
+        return x[..., :8]   # t, q, u, v at 2 levels (the slab forcing needs u, v)
 
 
 def test_coupled_rollout_targets_future_sst_without_external_surface_forcing(tmp_path: Path):
-    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
 
     ds = coupled_rollout_to_dataset(
         _PassThroughCoupledAtmosModel(),
@@ -702,7 +713,8 @@ def test_coupled_rollout_targets_future_sst_without_external_surface_forcing(tmp
 
 
 def test_uncoupled_rollout_keeps_fixed_sst_finite_in_forcing_state(tmp_path: Path):
-    config = _write_minimal_s2s_store(tmp_path)._replace(normalize=False)
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
     target = build_target_grid(config.gaussian_n_max)
     lat = target.latitude_deg.astype(np.float32)
     lon = target.longitude_deg.astype(np.float32)
@@ -827,3 +839,136 @@ def test_summarize_window_metrics_preserves_crps_columns():
     assert np.isclose(windows[0]["mae"], 1.0)
     assert np.isclose(windows[0]["crps"], 0.5)
     assert np.isclose(windows[0]["n_members"], 5.0)
+
+
+def _sfno_lowest_level_inputs(missing: str | None = None):
+    labels = ["t-1000", "q-1000", "u-1000", "v-1000", "t-850"]
+    if missing is not None:
+        labels = [lab for lab in labels if lab != missing] + ["z-500"]
+    rng = np.random.default_rng(3)
+    pred = np.stack(
+        [rng.uniform(280.0, 300.0, (3, 4)), rng.uniform(0.005, 0.02, (3, 4)),
+         rng.normal(0.0, 5.0, (3, 4)), rng.normal(0.0, 5.0, (3, 4)),
+         rng.uniform(270.0, 290.0, (3, 4))], axis=-1).astype(np.float32)
+    aux = {"sp": np.full((3, 4), 101000.0, np.float32),
+           "sw_down": np.full((3, 4), 200.0, np.float32),
+           "lw_down": np.full((3, 4), 350.0, np.float32)}
+    return pred, aux, labels
+
+
+def test_sfno_slab_forcing_uses_shared_builder_virtual_density():
+    pred, aux, labels = _sfno_lowest_level_inputs()
+    forcing = s2s_coupling._build_atm_to_surface(
+        pred, aux, channel_labels=labels, pressure_levels=(1000, 850),
+        config=s2s_coupling.S2SSlabCouplingConfig())
+    from legoesm import constants
+    t, q = pred[..., 0].astype(float), pred[..., 1].astype(float)
+    rho = 100000.0 / (constants.R_d * t * (1.0 + (1.0 / constants.epsilon - 1.0) * q))
+    np.testing.assert_allclose(np.asarray(forcing.rho_lowest), rho, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(forcing.p_lowest), 100000.0)
+    np.testing.assert_allclose(np.asarray(forcing.p_surface), 101000.0)
+    np.testing.assert_allclose(np.asarray(forcing.q_lowest), pred[..., 1])
+
+
+@pytest.mark.parametrize("missing", ["q-1000", "u-1000", "v-1000"])
+def test_sfno_slab_forcing_missing_channel_raises(missing):
+    pred, aux, labels = _sfno_lowest_level_inputs(missing)
+    with pytest.raises(KeyError, match=missing):
+        s2s_coupling._build_atm_to_surface(
+            pred, aux, channel_labels=labels, pressure_levels=(1000, 850),
+            config=s2s_coupling.S2SSlabCouplingConfig())
+
+
+def test_sfno_slab_forcing_passthrough_and_nonfinite_raises():
+    pred, aux, labels = _sfno_lowest_level_inputs()
+    kw = dict(channel_labels=labels, pressure_levels=(1000, 850),
+              config=s2s_coupling.S2SSlabCouplingConfig())
+    forcing = s2s_coupling._build_atm_to_surface(pred, aux, **kw)
+    np.testing.assert_allclose(np.asarray(forcing.T_lowest), pred[..., 0])
+    np.testing.assert_allclose(np.asarray(forcing.u_lowest), pred[..., 2])
+    np.testing.assert_allclose(np.asarray(forcing.v_lowest), pred[..., 3])
+    np.testing.assert_allclose(np.asarray(forcing.sw_down), 200.0)
+    np.testing.assert_allclose(np.asarray(forcing.lw_down), 350.0)
+    np.testing.assert_allclose(np.asarray(forcing.cos_zenith), 1.0)
+    bad_pred = pred.copy()
+    bad_pred[1, 2, 1] = np.nan
+    with pytest.raises(ValueError, match="non-finite lowest-level"):
+        s2s_coupling._build_atm_to_surface(bad_pred, aux, **kw)
+    bad_aux = dict(aux, lw_down=aux["lw_down"].copy())
+    bad_aux["lw_down"][0, 0] = np.nan
+    with pytest.raises(ValueError, match="lw_down"):
+        s2s_coupling._build_atm_to_surface(pred, bad_aux, **kw)
+
+
+def test_coupled_rollout_raises_when_the_slab_returns_nan_sst(tmp_path: Path, monkeypatch):
+    """A non-finite slab SST must stop the rollout, not be replaced by the previous SST."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
+    real_make_ocean = s2s_coupling.make_ocean
+
+    def _nan_ocean(ocean_config):
+        step = real_make_ocean(ocean_config)
+
+        def poisoned(state, forcing, dt):
+            new_state, sst, a, b = step(state, forcing, dt)
+            return new_state, jnp.asarray(sst).at[0, 0].set(jnp.nan), a, b
+        return poisoned
+
+    monkeypatch.setattr(s2s_coupling, "make_ocean", _nan_ocean)
+    with pytest.raises(FloatingPointError, match="non-finite SST"):
+        coupled_rollout_to_dataset(
+            _PassThroughCoupledAtmosModel(),
+            config,
+            sample_index=0,
+            coupled=True,
+            surface_forcing=None,
+            stochastic_config=S2SStochasticConfig(
+                ensemble_members=1, noise_channels=0, use_time_signal=False),
+        )
+
+
+class _PassThroughTQModel(eqx.Module):
+    def __call__(self, x, grid):
+        del grid
+        return x[..., :4]   # t, q at 2 levels: no wind channels
+
+
+def _uncoupled(config, model):
+    return coupled_rollout_to_dataset(
+        model,
+        config,
+        sample_index=0,
+        coupled=False,
+        surface_forcing=None,
+        stochastic_config=S2SStochasticConfig(
+            ensemble_members=1, noise_channels=0, use_time_signal=False),
+    )
+
+
+def test_uncoupled_rollout_needs_no_wind_channels(tmp_path: Path):
+    """The fixed-SST control never builds slab forcing, so a t/q-only model runs."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q"))   # no u/v: the old head raised here
+    ds = _uncoupled(config, _PassThroughTQModel())
+    assert ds.sizes["lead_day"] == 2
+    assert ds.sizes["channel"] == 4
+    assert np.isfinite(ds["prediction"].values).all()
+
+
+def test_uncoupled_rollout_does_not_step_the_slab(tmp_path: Path, monkeypatch):
+    """A slab that would return NaN must not matter to the fixed-SST control."""
+    config = _write_minimal_s2s_store(tmp_path)._replace(
+        normalize=False, atmosphere_vars=("t", "q", "u", "v"))
+    real_make_ocean = s2s_coupling.make_ocean
+
+    def _nan_ocean(ocean_config):
+        step = real_make_ocean(ocean_config)
+
+        def poisoned(state, forcing, dt):
+            new_state, sst, a, b = step(state, forcing, dt)
+            return new_state, jnp.full_like(jnp.asarray(sst), jnp.nan), a, b
+        return poisoned
+
+    monkeypatch.setattr(s2s_coupling, "make_ocean", _nan_ocean)
+    ds = _uncoupled(config, _PassThroughCoupledAtmosModel())
+    assert np.isfinite(ds["forcing"].values).all()

@@ -345,15 +345,25 @@ def make_mpas_ocean_physics(
             if _sf_q_net is not None:
                 from legoesm.ocean.eos import c_sw
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
+                # Live (z*/partial-cell) thickness, zero below the seabed. The
+                # non-solar surface deposit and every shortwave kernel use it,
+                # so a partial TOP cell (seabed inside the top reference
+                # layer) closes the column heat budget; on plain z* it equals
+                # dz_ref*jacobian.
+                _h_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                dz_0_cell_q = _h_live[:, 0]
 
-                if _sf_sw is not None and _sf_chl is not None:
+                # RGB only when no explicit scheme was selected (lat-lon lane
+                # order): otherwise an attached chl silently replaced the
+                # requested sweeney_2band / jerlov_2band scheme.
+                if (_sf_sw is not None and _sf_chl is not None
+                        and getattr(sf_config, "shortwave_scheme", "auto") == "auto"):
                     # NEMO RGB chlorophyll penetration (ln_qsr_rgb), the SAME
                     # shared kernel the lat-lon C-grid PE step selects when chl
                     # is attached (ocean_pe_latlon_cgrid).  NEMO partitions 100%
                     # of net SW across IR + R/G/B bands, so there is NO 0.94
                     # "skin" pre-split here: the FULL sw is the penetrating qsr
                     # and the non-solar surface flux is q_net - sw.
-                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
                     inv_rho_csw_dz = 1.0 / (
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     q_nonsolar = _sf_q_net - _sf_sw
@@ -373,7 +383,7 @@ def make_mpas_ocean_physics(
                     # unchanged.  wet_cell = h_k>0 excludes below-seabed cells and
                     # is the RGB kernel's safe-denominator guard; a dry column has
                     # thickness 0 -> wet_cell 0 (masked anyway).
-                    dz_live = compute_layer_thickness(eta, H_bathy, z_coord)
+                    dz_live = _h_live
                     wet_cell = jnp.asarray(dz_live > 0.0, dtype=T_3d.dtype)
                     sw_tend = apply_shortwave_penetration(
                         ShortwavePenetrationConfig(scheme="rgb_chl"),
@@ -429,17 +439,7 @@ def make_mpas_ocean_physics(
                     q_nonsolar = _sf_q_net - sw_absorbed
 
                     if _sw_scheme == "sweeney_2band":
-                        # Live thickness of the lane's coordinate (z-star OR
-                        # partial cells with ETOPO): dry levels carry h = 0,
-                        # so wetness and the deposit of the remainder in the
-                        # deepest wet cell follow the same geometry the
-                        # dynamics integrate against.
-                        _h_live = compute_layer_thickness(
-                            state.eta.data, state.H_bathy.data, z_coord)
                         _wet_live = jnp.asarray(_h_live > 0.0, dtype=_h_live.dtype)
-                        dz_0_cell_q = _h_live[:, 0]
-                    else:
-                        dz_0_cell_q = z_coord.dz_ref[0] * jacobian
 
                     # Non-solar part: surface cell only
                     inv_rho_csw_dz = 1.0 / (
@@ -454,17 +454,18 @@ def make_mpas_ocean_physics(
                     elif _sw_scheme == "jerlov_2band":
                         sw_tend = shortwave_penetration_tendency(
                             sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
-                            jacobian, _sw_cfg, rho_0=rho_0_ref, c_sw=c_sw)
+                            jacobian, _sw_cfg, rho_0=rho_0_ref, c_sw=c_sw,
+                            dz_live=_h_live)
                     else:
                         # Solar part: Jerlov penetration through column
                         sw_tend = shortwave_penetration_tendency(
                             sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
                             jacobian, rho_0=rho_0_ref, c_sw=c_sw,
+                            dz_live=_h_live,
                         )
                     dT_dt = dT_dt + sw_tend * mask[:, None]
                 else:
                     # No SW field — all heat into surface (legacy)
-                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
                     inv_rho_csw_dz = 1.0 / (
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     dT_dt = dT_dt.at[:, 0].add(
@@ -529,6 +530,29 @@ def make_mpas_ocean_physics(
             # trigger from T/S/p_cell via the EOS, so it needs cell-centre
             # pressure; compute it ONLY on that path (default 'insitu' path
             # stays byte-identical — no extra pressure solve).
+            # Decision 94.  This is the EXPLICIT tendency path: the
+            # convective coefficient enters as an added dT/dt, so NEMO's
+            # zdfevd REPLACEMENT (zdfevd.f90:107-110 overwrites the
+            # assembled avt) cannot be expressed here at all.  Fail closed
+            # rather than let a card state "nemo_replace" and silently get
+            # the sum -- and refuse the unstated case on a NEMO trigger the
+            # same way the implicit paths do.
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                resolve_evd_composition,
+            )
+            if resolve_evd_composition(cfg_c) == "nemo_replace":
+                raise ValueError(
+                    'EnhancedDiffusionConfig.evd_composition="nemo_replace" '
+                    "is not implemented on the MPAS explicit convection "
+                    "path: this path ADDS the convective tendency, and "
+                    "NEMO's zdfevd overwrites the vertical coefficient "
+                    "instead (zdfevd.f90:107-110).  Run the mesh card with "
+                    'evd_composition="additive" and state that it is '
+                    "legoESM's composition, not NEMO's.")
+            # The card's own NEMO &nameos coefficients for the nemo_bn2
+            # trigger; absent on a mesh config that states none, which
+            # resolves to NemoSEOSConfig() exactly as its density path does.
+            _seos = getattr(config, "eos_nemo_seos", None)
             if getattr(cfg_c, "n2_mode", "insitu") == "adiabatic":
                 from legoesm.ocean.eos import compute_ocean_rho_and_pressure
                 _, p_cell = compute_ocean_rho_and_pressure(
@@ -539,6 +563,7 @@ def make_mpas_ocean_physics(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     p_cell=p_cell, eos_fn=eos_fn,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    seos_cfg=_seos,
                     # The run's constants: the density above is now built with
                     # them, and a trigger evaluated on the library's would put
                     # the two halves of one decision on different physics.
@@ -548,6 +573,7 @@ def make_mpas_ocean_physics(
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    seos_cfg=_seos,
                     g=config.constants.g, rho_ref=config.constants.rho_0,
                 )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]

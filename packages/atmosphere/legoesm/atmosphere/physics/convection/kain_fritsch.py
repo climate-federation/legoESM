@@ -1161,7 +1161,7 @@ def kain_fritsch_convection(
         / (constants.g * timec)
     )
     # Bound the *applied* M_b to a literature peak tropical value
-    # (config.M_b_max) — see ZhangMcFarlaneConfig.  The cap protects the
+    # (config.M_b_max).  The cap protects the
     # integration from the unbounded CAPE/tau closure spiking in a
     # high-CAPE column; it does NOT alter the diagnostic carry above.
     M_b = jnp.clip(M_b_closure, 0.0, config.M_b_max)

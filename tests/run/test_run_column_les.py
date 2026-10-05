@@ -649,9 +649,18 @@ def test_column_surface_kinematic_fluxes_sign_and_reuse():
         jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
         jnp.atleast_1d(rho), cfg)
     exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    # Water: the bulk law charged Kirchhoff L_v(SST), so the inverse uses it too.
+    from legoesm.thermo import latent_heat_vaporization
+    evap = lh[0] / latent_heat_vaporization(sst)
+    np.testing.assert_allclose(float(w_qv), float(evap / rho), rtol=1e-12)
+    # Heat: the moist-enthalpy correction lh - L_v * E rides on the heat BC
+    # (the LES credits vapour at the constant L_v); ~3 % of lh at 300 K, negative.
+    corr = lh[0] - constants.L_v * evap
+    assert float(corr) < 0.0
+    np.testing.assert_allclose(float(corr / lh[0]),
+                               1.0 - constants.L_v / float(latent_heat_vaporization(sst)), rtol=1e-12)
     np.testing.assert_allclose(
-        float(w_th), float(sh[0] / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
-    np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
+        float(w_th), float((sh[0] + corr) / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
 
     # COLD SST (SST < T_1) ⇒ surface COOLS the air ⇒ w'θ'_s < 0 (sign flips) — non-vacuity.
     w_th_cold, _ = column_surface_kinematic_fluxes(
@@ -699,8 +708,15 @@ def test_column_surface_kinematic_fluxes_independent_analytic():
     wind = float(jnp.sqrt(u_col[s] ** 2 + v_col[s] ** 2 + 1e-4))  # production floor
     exner = float((constants.p_ref / p_s) ** constants.kappa)
     q_sfc = float(saturation_mixing_ratio(sst, p_s))
-    w_th_expected = ch * wind * (float(sst) - float(T_col[s])) * exner
     w_qv_expected = ch * wind * (q_sfc - float(q_col[s]))
+    # The heat BC carries the moist-enthalpy correction (lh - L_v E)/(rho c_pd):
+    # the bulk law charged Kirchhoff L_v(SST) per kg, the LES credits L_v; the
+    # rho cancels here too, leaving Ch |U| dq (L_v(SST) - L_v) / c_pd.
+    from legoesm.thermo import latent_heat_vaporization
+    corr = (w_qv_expected
+            * (float(latent_heat_vaporization(sst)) - constants.L_v) / constants.c_pd)
+    assert corr < 0.0   # 292 K > T0: L_v(SST) < L_v
+    w_th_expected = (ch * wind * (float(sst) - float(T_col[s])) + corr) * exner
 
     assert float(w_th) == pytest.approx(w_th_expected, rel=1e-12)
     assert float(w_qv) == pytest.approx(w_qv_expected, rel=1e-12)
@@ -1372,3 +1388,42 @@ def test_valid_levels_note_distinguishes_diagnosis_rejection():
     # scalar diagnosis (entrainment w_e) → no per-level count
     assert _valid_levels_note(SimpleNamespace(valid=jnp.asarray(True))) == ""
     assert _valid_levels_note(SimpleNamespace()) == ""              # no .valid → empty
+
+
+def test_column_surface_kinematic_fluxes_cesm_water_at_the_constant_it_charges():
+    """With the CESM shr_flux_atmOcn law (``large_yeager_cesm``), which charges
+    the constant L_v, the LES water flux is lhflx / (rho * L_v) and the heat BC
+    carries no latent enthalpy correction (charge == the LES's own L_v).  An
+    inverse at L_v(SST) gives 2.6 % too much water at 300 K and a spurious
+    cooling of the heat BC."""
+    from legoesm.atmosphere.dynamics.les.column_les import column_surface_kinematic_fluxes
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        SurfaceLayerConfig, compute_surface_fluxes)
+    from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
+
+    from legoesm import constants
+
+    nlev = 6
+    T = jnp.linspace(240.0, 295.0, nlev)        # noqa: N806
+    q = jnp.linspace(1e-4, 1.2e-2, nlev)
+    u, v = jnp.full((nlev,), 5.0), jnp.zeros((nlev,))
+    p_full = jnp.linspace(2.0e4, 1.0e5, nlev)
+    p_s, sst = jnp.array(1.0e5), jnp.array(300.0)
+    cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm", z_ref=10.0)
+    w_th, w_qv = column_surface_kinematic_fluxes(
+        T_col=T, q_v_col=q, u_col=u, v_col=v, p_full_col=p_full, sst_K=sst, p_s=p_s,
+        surface_config=cfg)
+    rho = p_full[-1] / (constants.R_d * virtual_temperature(T[-1], q[-1]))
+    q_sfc = saturation_mixing_ratio(sst, p_s)
+    _, _, sh, lh, _ = compute_surface_fluxes(
+        jnp.atleast_1d(u[-1]), jnp.atleast_1d(v[-1]), jnp.atleast_1d(T[-1]),
+        jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
+        jnp.atleast_1d(rho), cfg)
+    assert float(lh[0]) > 1.0
+    np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
+    exner_inv = (constants.p_ref / p_s) ** constants.kappa
+    np.testing.assert_allclose(
+        float(w_th), float(sh[0] / (rho * constants.c_pd) * exner_inv), rtol=1e-12)
+    # Non-vacuous: the Kirchhoff inverse is a different number here.
+    assert abs(float(constants.L_v / latent_heat_vaporization(sst)) - 1.0) > 0.02

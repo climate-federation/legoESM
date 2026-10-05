@@ -87,7 +87,6 @@ import hashlib
 import json
 import re
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -511,13 +510,9 @@ def _validate_args(a):
                 "omit the flag entirely for the unsmoothed scorecard.")
 
 
-def _git_sha(repo):
-    try:
-        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              check=True).stdout.strip()
-    except Exception:  # noqa: BLE001 -- provenance is best-effort, never fatal
-        return "unknown"
+def _git_sha(repo) -> str:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(repo).commit or "unknown"
 
 
 def main() -> int:

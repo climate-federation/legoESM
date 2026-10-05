@@ -65,3 +65,18 @@ class PhysicsOutput(NamedTuple):
     # keeps the pytree byte-identical to the pre-ledger output.  Appended
     # LAST to preserve positional-construction ABI.
     budget_ledger: jax.Array | None = None
+    # Per-column MG2-style CFL sedimentation sub-step count the microphysics
+    # REQUIRED this step (``MicrophysicsOutput.sed_substeps_required``); a
+    # value above the configured cap means the fall was clamped.  ``None``
+    # (sub-stepping off, or a scheme that does not sediment) keeps the pytree
+    # byte-identical.  Carried so the finite-volume lanes can report the
+    # clamp the way the MPAS loop does.  Appended after ``budget_ledger``
+    # (positional ABI); ``evap_sfc`` below is now the last field.
+    sed_substeps_required: jax.Array | None = None
+    # Surface water flux actually applied to the column [kg/m2/s, positive up]:
+    # the kernel's moisture BC (tiled / prescribed water when folded, else the
+    # bulk L_v(T_sfc) inverse).  None when no surface scheme ran, and None
+    # when a kernel replaced lhflx without publishing its water (the pipeline
+    # reports absence rather than a stale pair).  Appended LAST (positional
+    # ABI).
+    evap_sfc: jax.Array | None = None

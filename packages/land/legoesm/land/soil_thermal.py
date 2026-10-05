@@ -23,7 +23,10 @@ to O(dt) per step (exact in the linearised metric — see
 reduces EXACTLY to sensible-heat diffusion (bit-identical to prior behaviour).
 
 Scope of this first implementation: THERMAL freeze/thaw only (the dominant
-zero-curtain physics).  Two coupled refinements are deliberately NOT included
+zero-curtain physics).  Water moved by Richards at fixed temperature changes
+the diagnosed ice without any temperature change; its fusion heat enters the
+final thermal solve as an explicit per-layer source
+(``moisture_fusion_heat_source``).  Two coupled refinements are deliberately NOT included
 and are tracked follow-ups: (a) ice-aware thermal CONDUCTIVITY (frozen soil
 conducts better, k_ice ~ 2.0 vs k_water ~ 0.57) — the conductivity still uses
 total ``theta``; (b) hydraulic IMMOBILISATION of the ice fraction in Richards
@@ -204,6 +207,42 @@ def liquid_water_content(
     return theta_liq, dtheta_liq_dT
 
 
+def moisture_fusion_heat_source(
+    T_soil: jnp.ndarray,
+    theta_old: jnp.ndarray,
+    theta_new: jnp.ndarray,
+    dz: jnp.ndarray,
+    thermal_config: SoilThermalConfig,
+    dt: float,
+) -> jnp.ndarray:
+    """Fusion heat [W/m2 per layer, + = heating] of the ice change caused by a
+    soil-water change at FIXED temperature.
+
+    The apparent heat capacity only charges latent heat for ice that changes
+    with T.  When water moves (infiltration, drainage, root uptake,
+    evaporation) at fixed T, the diagnosed ice ``theta - theta_liq(T, theta)``
+    changes too, with no fusion heat — an enthalpy leak.  This returns
+    ``rho_water * L_f * [ice(T, theta_new) - ice(T, theta_old)] * dz / dt``:
+    ice created releases heat, ice removed absorbs it.  ``T_soil`` MUST be the
+    start-of-step temperature.  With one thermal step this closes the solver's
+    linearised identity exactly; with sub-steps (capacity re-evaluated at each
+    sub-step start) the closed identity is the sum over sub-steps, and the true
+    nonlinear enthalpy balance holds only approximately.
+
+    Conventions: moving water carries no sensible heat (unchanged); ice that
+    leaves a layer by drainage, roots or evaporation, or moves between layers,
+    is melted there at the layer's expense (new with this source).
+    """
+    # Same dtype for both moisture states, so unchanged water gives exactly 0.
+    theta_old = jnp.asarray(theta_old).astype(jnp.result_type(theta_old, theta_new))
+    theta_new = jnp.asarray(theta_new).astype(theta_old.dtype)
+    liq_old, _ = liquid_water_content(T_soil, theta_old, thermal_config)
+    liq_new, _ = liquid_water_content(T_soil, theta_new, thermal_config)
+    d_ice = (theta_new - liq_new) - (theta_old - liq_old)
+    # Sign: freezing (d_ice > 0) releases latent heat into the layer.
+    return constants.rho_water * constants.L_f * d_ice * dz / dt
+
+
 def compute_apparent_heat_capacity(
     T_soil: jnp.ndarray,
     theta: jnp.ndarray,
@@ -289,6 +328,44 @@ def compute_thermal_conductivity(
     return k_dry + (k_sat - k_dry) * K_e
 
 
+def _soil_heat_system(T_soil, theta, grid, hydro_config, thermal_config, dt):
+    """Backward-Euler soil heat system WITHOUT boundary terms.
+
+    Returns ``(diag, coeff, rhs, k_eff)``: the diagonal ``C_eff*dz/dt`` plus the
+    conductances, the interface conductances ``k_half/dz_if`` [W/m^2/K], the RHS
+    ``C_eff*dz*T/dt`` and the layer conductivity ``k_eff`` [W/m/K].
+    """
+    dz = grid.dz                  # (nlayers,)
+    dz_if = grid.dz_interface     # (nlayers-1,)
+
+    # Compute thermal properties.  With freeze/thaw enabled the effective heat
+    # capacity is the apparent heat capacity (sensible split + latent
+    # zero-curtain), evaluated at the current T_soil; disabled (default) reduces
+    # EXACTLY to the sensible-only C_eff (bit-identical for every prior caller).
+    if thermal_config.enable_freeze_thaw:
+        C_eff = compute_apparent_heat_capacity(
+            T_soil, theta, hydro_config, thermal_config)      # (ncol, nlayers)
+    else:
+        C_eff = compute_heat_capacity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
+    k_eff = compute_thermal_conductivity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
+
+    # Interface conductivity (harmonic mean for heat diffusion)
+    k_half = 2.0 * k_eff[:, :-1] * k_eff[:, 1:] / (
+        k_eff[:, :-1] + k_eff[:, 1:] + 1e-20
+    )  # (ncol, nlayers-1)
+
+    # Diffusion coefficient at interfaces
+    coeff = k_half / dz_if  # (ncol, nlayers-1)
+
+    # Build tridiagonal system for backward Euler:
+    # C_eff * dz * (T_new - T_old) / dt = diffusion operator on T_new + source
+    diag = C_eff * dz / dt
+    diag = diag.at[:, 1:].add(coeff)
+    diag = diag.at[:, :-1].add(coeff)
+    rhs = C_eff * dz * T_soil / dt
+    return diag, coeff, rhs, k_eff
+
+
 def solve_soil_thermal(
     T_soil: jnp.ndarray,
     theta: jnp.ndarray,
@@ -298,6 +375,8 @@ def solve_soil_thermal(
     G_surface: jnp.ndarray,
     dt: float,
     surface_conductance: jnp.ndarray | None = None,
+    layer_source: jnp.ndarray | None = None,
+    n_substeps: int = 1,
 ) -> jnp.ndarray:
     """Solve soil heat diffusion for one time step (backward Euler).
 
@@ -328,71 +407,119 @@ def solve_soil_thermal(
         instead of overshooting and diverging.  ``None`` (default) reduces
         EXACTLY to the explicit Neumann ground-heat-flux BC (bit-identical for
         every existing caller).
+    layer_source : jnp.ndarray, optional
+        Explicit per-layer heat source [W/m2 of column, positive = heating],
+        shape (ncol, n_layers), added to each layer's RHS.  ``None`` (default)
+        adds nothing (bit-identical).  See ``moisture_fusion_heat_source``.
+    n_substeps : int
+        Number of equal backward-Euler sub-steps (static Python int, default 1
+        = one step, bit-identical).  The apparent heat capacity is re-evaluated
+        at each sub-step's start temperature, which keeps a thin layer from
+        overshooting the freezing curtain at a long step.
 
     Returns
     -------
     T_new : jnp.ndarray
         Updated soil temperature [K], shape (ncol, n_layers).
     """
-    dz = grid.dz                  # (nlayers,)
-    dz_if = grid.dz_interface     # (nlayers-1,)
+    # Backward Euler over ``n_substeps`` equal sub-steps; G_surface, Q_geo and
+    # layer_source are rates held over the whole step.  The semi-implicit
+    # surface term stays linearised about the step's ORIGINAL top temperature.
+    dt_sub = dt / n_substeps
+    T_top0 = T_soil[:, 0]
+    T = T_soil
+    for _ in range(n_substeps):
+        # ``_soil_heat_system`` re-evaluates the apparent heat capacity at the
+        # sub-step's start temperature (sensible-only when freeze/thaw is off).
+        diag, coeff, rhs, _ = _soil_heat_system(
+            T, theta, grid, hydro_config, thermal_config, dt_sub)
 
-    # Compute thermal properties.  With freeze/thaw enabled the effective heat
-    # capacity is the apparent heat capacity (sensible split + latent
-    # zero-curtain), evaluated at the current T_soil; disabled (default) reduces
-    # EXACTLY to the sensible-only C_eff (bit-identical for every prior caller).
-    if thermal_config.enable_freeze_thaw:
-        C_eff = compute_apparent_heat_capacity(
-            T_soil, theta, hydro_config, thermal_config)      # (ncol, nlayers)
-    else:
-        C_eff = compute_heat_capacity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
-    k_eff = compute_thermal_conductivity(theta, hydro_config, thermal_config)  # (ncol, nlayers)
+        # Top BC: ground heat flux
+        rhs = rhs.at[:, 0].add(G_surface)
 
-    # Interface conductivity (harmonic mean for heat diffusion)
-    k_half = 2.0 * k_eff[:, :-1] * k_eff[:, 1:] / (
-        k_eff[:, :-1] + k_eff[:, 1:] + 1e-20
-    )  # (ncol, nlayers-1)
+        # Semi-implicit (linearised) surface BC.  The surface flux into the top
+        # layer is G(T_sfc_new) ~= G_surface - lambda*(T_new0 - T_top0) with
+        # lambda = -dG/dT_sfc >= 0: lambda on the top diagonal, lambda*T_top0 on
+        # the top RHS.  lambda=0 (surface_conductance is None) leaves the
+        # explicit Neumann flux above untouched.
+        if surface_conductance is not None:
+            diag = diag.at[:, 0].add(surface_conductance)
+            rhs = rhs.at[:, 0].add(surface_conductance * T_top0)
 
-    # Diffusion coefficient at interfaces
-    coeff = k_half / dz_if  # (ncol, nlayers-1)
+        # Bottom BC: geothermal heat flux (Neumann, positive into soil)
+        rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
 
-    # Build tridiagonal system for backward Euler:
-    # C_eff * dz * (T_new - T_old) / dt = diffusion operator on T_new + source
+        if layer_source is not None:
+            rhs = rhs + layer_source
 
-    # Diagonal
-    diag = C_eff * dz / dt
-    diag = diag.at[:, 1:].add(coeff)
-    diag = diag.at[:, :-1].add(coeff)
+        # Assemble the off-diagonals via ``jnp.pad`` — one Pad HLO op per
+        # diagonal vs ``zeros + .at[].set`` (alloc + scatter).
+        a = jnp.pad(-coeff, ((0, 0), (1, 0)))
+        c = jnp.pad(-coeff, ((0, 0), (0, 1)))
+        T = thomas_solve(a, diag, c, rhs)
+    return T
 
-    # Sub-diagonal (lower)
-    sub = -coeff  # (ncol, nlayers-1)
 
-    # Super-diagonal (upper)
-    sup = -coeff  # (ncol, nlayers-1)
+def solve_snow_soil_thermal(
+    T_snow: jnp.ndarray,
+    C_snow: jnp.ndarray,
+    coeff_snow: jnp.ndarray,
+    r_snow_base: jnp.ndarray,
+    f_snow: jnp.ndarray,
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    grid: SoilGrid,
+    hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig,
+    G_surface: jnp.ndarray,
+    dt: float,
+    surface_conductance: jnp.ndarray | None = None,
+    T_snow_top_ref: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """ONE implicit (backward-Euler) heat solve of a snowpack stacked on the soil.
 
-    # RHS
-    rhs = C_eff * dz * T_soil / dt
+    Rows ``0..ns-1`` are the pack layers (top first) with sensible heat capacity
+    ``C_snow`` [J/m^2/K] and inter-layer conductances ``coeff_snow`` [W/m^2/K]
+    (``snow_column.snow_thermal_props``); rows ``ns..`` are the soil layers, built
+    exactly as in :func:`solve_soil_thermal` (apparent heat capacity when
+    freeze/thaw is on).  The pack base couples to the top soil node through the
+    series resistance ``r_snow_base + z_node0 / k_soil0`` (CLM5 structure).
 
-    # Top BC: ground heat flux
-    rhs = rhs.at[:, 0].add(G_surface)
+    The ground heat flux ``G_surface`` [W/m^2, positive INTO the ground] is split
+    by the snow-covered fraction ``f_snow``: ``f*G`` enters the pack top and
+    ``(1-f)*G`` the soil top (the snow-free tile).  A Robin ``surface_conductance``
+    lambda is split the same way (``f*lambda`` on the pack top, ``(1-f)*lambda``
+    on the soil top), each linearised about the temperature the flux was
+    evaluated at: ``T_snow_top_ref`` for the pack top (default ``T_snow[:, 0]``;
+    pass it when the pack was modified, e.g. by rain, after the surface fluxes)
+    and the start-of-step soil top.  The
+    geothermal flux enters the bottom soil row.  The solve conserves the column's
+    sensible energy exactly; latent heat in the pack is handled afterwards by the
+    enthalpy re-equilibration (``snow_column.snow_phase_and_percolate``).
 
-    # Semi-implicit (linearised) surface BC.  The surface flux into the top
-    # layer is G(T_sfc_new) ~= G_surface + dG/dT_sfc * (T_new0 - T_old0)
-    # = G_surface - lambda*(T_new0 - T_old0) with lambda = -dG/dT_sfc >= 0.
-    # Moving the implicit -lambda*T_new0 term to the LHS adds lambda to the top
-    # diagonal and lambda*T_old0 to the top RHS.  lambda=0 (surface_conductance
-    # is None) leaves the explicit Neumann flux above untouched.
+    Returns ``(T_snow_new (ncol, ns), T_soil_new (ncol, nlayers))``.
+    """
+    ns = T_snow.shape[-1]
+    d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
+        T_soil, theta, grid, hydro_config, thermal_config, dt)
+    c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
+    coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
+    diag = jnp.concatenate([C_snow / dt, d_soil], axis=-1)
+    # The soil diagonal already carries its internal conductances; add the pack's
+    # internal ones and the snow-soil interface to the rows they join.
+    diag = diag.at[:, 1:ns + 1].add(coeff[:, :ns])
+    diag = diag.at[:, :ns].add(coeff[:, :ns])
+    rhs = jnp.concatenate([C_snow * T_snow / dt, r_soil], axis=-1)
+    rhs = rhs.at[:, 0].add(f_snow * G_surface)
+    rhs = rhs.at[:, ns].add((1.0 - f_snow) * G_surface)
     if surface_conductance is not None:
-        diag = diag.at[:, 0].add(surface_conductance)
-        rhs = rhs.at[:, 0].add(surface_conductance * T_soil[:, 0])
-
-    # Bottom BC: geothermal heat flux (Neumann, positive into soil)
+        lam_s = f_snow * surface_conductance
+        lam_g = (1.0 - f_snow) * surface_conductance
+        diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
+        T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
+        rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_soil[:, 0])
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
-
-    # Assemble full arrays via ``jnp.pad`` — one Pad HLO op per
-    # diagonal vs ``zeros + .at[].set`` (alloc + scatter).
-    a = jnp.pad(sub, ((0, 0), (1, 0)))
-    c = jnp.pad(sup, ((0, 0), (0, 1)))
-
+    a = jnp.pad(-coeff, ((0, 0), (1, 0)))
+    c = jnp.pad(-coeff, ((0, 0), (0, 1)))
     T_new = thomas_solve(a, diag, c, rhs)
-    return T_new
+    return T_new[:, :ns], T_new[:, ns:]

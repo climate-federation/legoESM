@@ -54,14 +54,21 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    exner_function,
+    half_to_full,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     first_crossing_height,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     diagnostic_heat_flux_full,
@@ -261,10 +268,9 @@ def holtslag_boville_turbulence(
     Ri = n2 / s2  # (ncol, nlev-1)
 
     # ----- Surface fluxes, ustar, kinematic buoyancy flux, Obukhov -----
-    tau_x, tau_y, shflx, lhflx, ustar_raw = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar_raw = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     ustar = jnp.maximum(ustar_raw, config.ustar_min)
 
     # rrho = 1/density at the bottom level.  Use the ORACLE dry-air form
@@ -274,7 +280,7 @@ def holtslag_boville_turbulence(
     rrho = constants.R_d * T[:, -1] / jnp.clip(p_full[:, -1], 1.0, None)
     # Kinematic surface fluxes (oracle calc_obklen).
     khfs = shflx * rrho / cpair                    # [m K/s]
-    kqfs = lhflx / constants.L_v * rrho            # qflx*rrho, qflx=lhflx/L_v
+    kqfs = surface_moisture_flux(config.surface, lhflx, T_sfc) * rrho   # qflx*rrho
     kbfs = khfs + zvir * th_bot * kqfs             # surface buoyancy flux [m^2/s^3]
     # Obukhov length: L = -thvs*u*^3 / (g*vk*(kbfs + sign(1e-10,kbfs))).
     kbfs_signed = kbfs + jnp.sign(kbfs) * 1.0e-10 + (kbfs == 0) * 1.0e-10
@@ -287,16 +293,17 @@ def holtslag_boville_turbulence(
     )
 
     # Interpolate K to full levels for diagnostics.
-    Km_full = _half_to_full(Km_half)
-    Kh_full = _half_to_full(Kh_half)
+    Km_full = half_to_full(Km_half)
+    Kh_full = half_to_full(Kh_half)
 
     # ----- Apply implicit vertical diffusion -----
     dz_layer = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / cpair               # [K kg/m^2/s]
-    sflx_q = lhflx / constants.L_v       # [kg/m^2/s]
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)   # [kg/m^2/s]
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / cpair   # [K kg/m^2/s]
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
@@ -321,18 +328,10 @@ def holtslag_boville_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
-    )
-
-
-def _half_to_full(K_half: jax.Array) -> jax.Array:
-    """Interpolate interface diffusivities to full levels (diagnostic)."""
-    interior = 0.5 * (K_half[:, :-1] + K_half[:, 1:])
-    return jnp.concatenate(
-        [K_half[:, :1], interior, K_half[:, -1:]], axis=1,
     )
 
 

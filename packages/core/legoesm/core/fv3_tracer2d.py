@@ -144,6 +144,29 @@ def alloc_flux_capacitors(n: int, ng: int, km: int, *,
             "cy": jnp.zeros((nb, m_a, npx, km), dtype=dtype)}
 
 
+def _window_seam_refresh(tab, exch, nq: int):
+    """WINDOW lane only (no-op on six faces): full seam-pad refresh of
+    the tracer stack after a sub-iteration's exchange.
+
+    That exchange is a band-restricted firing (face-edge bands only), so
+    each sub-iteration eats one stencil reach of intra-face seam pad and
+    nothing rebuilds it mid-phase; the phase's ENTRY refresh cannot help.
+    MEASURED (C24 kt=2 pad=5, gate jobs 9913482/9913484): nsplt=2
+    bitwise, nsplt=3 corrupts q (1056 -> 25883 of 27000 owned cells
+    over 3 steps; dynamics untouched).  A full refresh per sub-iteration
+    is the acoustic-substep entry pattern and makes the phase pad-depth
+    safe for any nsplt.  One tracer per key: ``exch[:, iq]`` is
+    ``(nb, W, W)`` per level or ``(nb, W, W, km)`` batched, the layouts
+    the entry refresh and pt already rely on.  ponytail: fires on every
+    masked scan slot (NSPLT_MAX); gate on the active mask if the ladder
+    shows it."""
+    wc = getattr(tab, "window_comm", None)
+    if wc is None:
+        return exch
+    ref = wc.refresh({f"q{iq}": exch[:, iq] for iq in range(nq)})
+    return jnp.stack([ref[f"q{iq}"] for iq in range(nq)], axis=1)
+
+
 def check_nsplt_schedule(out: dict) -> None:
     """D3's loud check.  Must run OUTSIDE jit on the concrete outputs
     (handing it tracers raises, which is also loud).  D5: fixtures sit
@@ -453,6 +476,7 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                 ext_scalar_sixface_allk(
                     jnp.moveaxis(base, 1, -1), tab, "A"),
                 -1, 1)
+            exch = _window_seam_refresh(tab, exch, nq)
             # PROVEN no-op when inactive: where returns the old arrays
             # bit-exactly; both arms are total and finite (rule 2).
             return (jnp.where(run, exch, qn2),
@@ -653,6 +677,7 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
                 jnp.moveaxis(base, 1, -1).reshape(nb_, m_a, m_a, km * nq),
                 tab, "A").reshape(nb_, m_a, m_a, km, nq),
             -1, 1)
+        exch = _window_seam_refresh(tab, exch, nq)
         return (jnp.where(run_q(run), exch, qn2),
                 jnp.where(run_d(run), dp2, dp1i),
                 jnp.where(run_q(last), base, qfin)), None
@@ -665,19 +690,6 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
     return {"q": q, "dp1": dp1, "mfx": mfx6, "mfy": mfy6,
             "cx": cx6, "cy": cy6,
             "nsplt": nsplt_i, "nsplt_exceeded": nsplt_exceeded}
-
-
-def make_alloc_flux_capacitors_jit(n: int, ng: int, km: int):
-    """jit twin of alloc_flux_capacitors (every input is static)."""
-    return jax.jit(functools.partial(alloc_flux_capacitors,
-                                     n=n, ng=ng, km=km))
-
-
-def make_require_tracer_2d_1l_lane_jit():
-    """The guard reads only static config and never a tracer, so its
-    jit twin is the guard itself; provided for the per-public-routine
-    convention."""
-    return require_tracer_2d_1l_lane
 
 
 def make_tracer_2d_1l_sixface_jit(ctx: dict, *, km: int, nq: int,

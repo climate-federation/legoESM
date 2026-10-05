@@ -1,0 +1,79 @@
+ROUND 97 STAGE CANDIDATE (2026-09-14; measured candidate d0dce11ba072;
+identical-tree delivered-lineage commit 3bca78d0270c): HELD.
+
+LOCAL STAGE PROOF. Given NEMO's recorded kt=1 stage entry and external-step
+output, the full du_dt/dv_dt accumulator is BIT in both momentum-RHS rows and
+all eight source-walk rows. The corrected stage-1 U/V outputs become BIT from
+7,620/8,460 unequal cells at 5.421010862427522e-20. The same two output rows
+are BIT in the model-chained table. NEMO accumulates the full Krhs at compiled
+stp2d.f90:141-176, diagnoses its depth mean separately at :202-213, passes
+Krhs unchanged at stprk3.f90:190-202, and consumes it at
+stprk3_stg.f90:664-673.
+
+TRAJECTORY VETO. The canonical comparison against the Round-85 after arm is
+FAIL across 954 rows: 85 fields move and 56 rows contain at least one cell
+worsening by more than the two-ULP oracle-relative bar. No row changes class
+and first-over-bar stays kt2 U/V. The registered headline maxima remain
+bitwise unchanged: kt2 T/S/U/V 1.4210854715202004e-14 /
+2.1316282072803006e-14 / 2.7377110452773967e-12 /
+3.284922138989399e-12 and kt3 T/S 1.627497246303733e-4 /
+6.327735185607253e-6. Day-30 T RMS also remains
+1.239701129497169e-2 K. Rule 12 therefore refuses the candidate.
+
+WHY THE WALK CONTINUES IN THIS STAGE. Local source proof and the ladder do not
+contradict each other: correcting stage-1 U/V exposes downstream cellwise
+movement while the first remaining owned output in execution order is the
+same stage's W, non-bit in all 18,000 wet cells at
+3.5937485546815465e-8. No causal claim that W owns the trajectory response is
+made without a compiled-order walk. Re-evaluate this held patch only together
+with a stage-1 candidate proven to close that earlier remaining stage output;
+do not apply it to a later stage or land it alone.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 1d75dbd8d4b5..51ca68e011be 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -6403,7 +6403,13 @@ class LatLonCGridOceanModel:
+             # the zub advection survives (isomorphism row S-21; measured
+             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
+             # rest).
+-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
++            # stp2d.f90:141-176 accumulates the full 3-D Krhs, then
++            # :202-213 diagnoses its depth mean into the separate Ue_rhs /
++            # Ve_rhs arrays without projecting Krhs.  stprk3.f90:190-202
++            # passes that unchanged Krhs to stage 1, whose vector assignment
++            # consumes it at stprk3_stg.f90:664-673.  Keep F_slow separate for
++            # the external solve, but do not remove it from the stage RHS.
++            _du1_rhs, _dv1_rhs = du_dt, dv_dt
+             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
+             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
+             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
+diff --git a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+index b37cf720f313..551783e4bf87 100644
+--- a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
++++ b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import importlib.util
++import inspect
+ import struct
+ import sys
+ from pathlib import Path
+@@ -189,6 +190,16 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
+     assert '"first_nonbit_model_statement"' in source
+ 
+ 
++def test_ws_stage_one_consumes_the_full_unprojected_momentum_rhs():
++    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
++        LatLonCGridOceanModel,
++    )
++
++    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
++    assert "_du1_rhs, _dv1_rhs = du_dt, dv_dt" in source
++    assert "_du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert" not in source
++
++
+ def test_final_external_history_uses_last_pre_swap_current_and_before():
+     arrays = {}
+     for index, name in enumerate(

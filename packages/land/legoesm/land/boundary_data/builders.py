@@ -37,7 +37,8 @@ import equinox as eqx
 from legoesm.land.surface_params import LandSurfaceParams
 from legoesm.land.param_providers import PFTParamProvider
 from legoesm.land.canopy.config import CanopyLandParams
-from legoesm.land.soil_albedo import soil_albedo, soil_albedo_broadband
+from legoesm.land.soil_albedo import (
+    soil_albedo_bounds, soil_albedo_broadband, wet_soil_albedo)
 from legoesm.land.pedotransfer import cosby_hydraulic_params
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.global_surface_data import interp_monthly
@@ -143,15 +144,23 @@ def build_canopy_params(
     is_veg = lut["is_veg"][dom]
     LAI = np.where(is_veg > 0.0, np.nan_to_num(LAI, nan=0.0), 0.0)
 
-    _av, _an = soil_albedo(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top))
-    alb_vis, alb_nir = np.asarray(_av), np.asarray(_an)
-
-    # Glacier columns: ice surface — no vegetation, high snow/ice albedo.
+    # Per-column dry/saturated soil-colour bounds; the land step re-evaluates the
+    # band albedos from the live top-layer water (soil_albedo.rewet_soil_bands).
+    # ``theta_top`` here only sets the build-time ALB_VIS/ALB_NIR.
+    # Glacier columns: ice surface — no vegetation, dry == sat == the ice
+    # albedo, so the wetness relation returns it exactly.
     ice = glacier_mask(gsd)
     is_veg = np.where(ice, 0.0, is_veg)
     LAI = np.where(ice, 0.0, LAI)
-    alb_vis = np.where(ice, glacier_alb_vis, alb_vis)
-    alb_nir = np.where(ice, glacier_alb_nir, alb_nir)
+    bounds = [np.asarray(b) for b in
+              soil_albedo_bounds(jnp.asarray(np.asarray(gsd.soil_color)))]
+    dry_vis, dry_nir, sat_vis, sat_nir = (
+        jnp.asarray(np.where(ice, g, b)) for g, b in zip(
+            (glacier_alb_vis, glacier_alb_nir, glacier_alb_vis, glacier_alb_nir),
+            bounds))
+    _theta = jnp.asarray(theta_top)
+    alb_vis = wet_soil_albedo(dry_vis, sat_vis, _theta)
+    alb_nir = wet_soil_albedo(dry_nir, sat_nir, _theta)
 
     # Optional per-column root-zone params (dominant PFT).  Absent => the scalar
     # MultiLayerLandConfig values via multilayer_land._get.
@@ -175,6 +184,8 @@ def build_canopy_params(
         emissivity=full(EMISS_VEG),
         rz0m=jnp.asarray(np.where(is_veg > 0.0, lut["rz0m"][dom], RZ0M_BARE)),
         rd=jnp.asarray(np.where(is_veg > 0.0, lut["rd"][dom], 0.0)),
+        ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
+        ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
         **_root_kw,
     )
 
@@ -195,7 +206,7 @@ def build_soil_hydraulics(
     texture profile, which the loader already remapped to the model's
     :class:`SoilGrid` via :func:`_remap_soil_layers`.  Hydraulic params come
     back as ``(ncol, n_layer)`` arrays that align cell-for-cell with the
-    Richards solver's soil state — ``slice_layer`` picks the right layer for
+    Richards solver's soil state; the solver takes the top / bottom layer for
     single-layer call sites (``K_top`` / ``K_bot``).  Any (col, layer) where
     HWSD has no soil (NaN) falls back to ``fallback_*`` (a sandy default) in
     just that cell, so a column with partial coverage keeps its real layers.

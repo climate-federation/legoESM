@@ -210,11 +210,20 @@ _RUN_METADATA_REQUIRED: tuple[str, ...] = (
     "_state_class", "_ice_class", "_inventory", "_ice_inventory",
     "_excluded", "_slot_kinds", "_ice_slot_kinds",
 )
-# Bumped when the on-disk layout changes incompatibly.
+# Bumped when the on-disk layout or persisted carry semantics change.
 # 3: every manifest entry carries the payload's shape + dtype, so the loader
 #    can cross-check the array against an independent record instead of relying
 #    on the resuming template (whose optional carries are None) — codex r8.
-_RUN_RESTART_FORMAT: int = 3
+# 4: bt_hist carries NEMO's six absolute AB3/AM4 arrays.  Version 3 stored
+#    final-minus-history deviations and is migrated explicitly on load.
+# 5: eta_rk3_after carries NEMO's extrapolated after-SSH slot -- the 'ssha'
+#    NEMO's own restart writes (restart.F90:184) and reads back
+#    (restart.F90:362-370).  A format-4 archive has no such slot, and
+#    substituting NEMO's missing-'ssha' fallback (the step-entry height) would
+#    make a resumed RK3 run a different trajectory with nothing said, so a
+#    format-4 archive is REFUSED by name instead.
+_RUN_RESTART_FORMAT: int = 5
+_READABLE_RUN_RESTART_FORMATS: frozenset[int] = frozenset((3, 4, 5))
 # Upper bound on a tuple-valued carry's element count.  The manifest's `n`
 # drives key-name expansion BEFORE any array is read, so a hand-edited archive
 # with a huge n would otherwise allocate that many strings.  bt_hist (6) is the
@@ -270,12 +279,18 @@ _SLOT_POLICY: dict[str, str] = {
     # --- ocean prognostics -------------------------------------------------
     "u": _SLOT_PROGNOSTIC, "v": _SLOT_PROGNOSTIC,
     "T": _SLOT_PROGNOSTIC, "S": _SLOT_PROGNOSTIC, "eta": _SLOT_PROGNOSTIC,
+    # NEMO key_RK3's separately prognostic depth-mean velocity (restart.F90:
+    # 175-182 writes Kbb uu_n/vv_n; :304-314 reads it).  This is live input to
+    # the next external-mode window and S-21 transport, never diagnostic.
+    "uu_b": _SLOT_PROGNOSTIC, "vv_b": _SLOT_PROGNOSTIC,
     # SOM (Prather) advection moments — carried by the scheme.
     "T_som": _SLOT_PROGNOSTIC, "S_som": _SLOT_PROGNOSTIC,
     # AB2 tracer-advection history.
     "T_flux_div_prev": _SLOT_PROGNOSTIC, "S_flux_div_prev": _SLOT_PROGNOSTIC,
     # Prognostic eddy / turbulent kinetic energy + their histories.
     "eke": _SLOT_PROGNOSTIC, "tke": _SLOT_PROGNOSTIC,
+    "tke_avm": _SLOT_PROGNOSTIC, "tke_avt": _SLOT_PROGNOSTIC,
+    "tke_dissl": _SLOT_PROGNOSTIC, "tke_avm_surface": _SLOT_PROGNOSTIC,
     "dtke": _SLOT_PROGNOSTIC, "eke_diss": _SLOT_PROGNOSTIC,
     # NEMO zdftke closure memory read by the NEXT step's matrix (avm_k/avt_k
     # under carried_previous_step, SAVE'd dissl, surface avm_k): carried
@@ -297,6 +312,10 @@ _SLOT_POLICY: dict[str, str] = {
     "dpsin_prev": _SLOT_PROGNOSTIC,
     # NEMO AB3/AM4 cross-window barotropic history (tuple of arrays).
     "bt_hist": _SLOT_PROGNOSTIC,
+    # NEMO's RK3 after-SSH slot ('ssha'), written at the end of every step
+    # (stprk3.F90:225) and read by the NEXT step's first wzv call
+    # (stp2d.F90:149 -> :153).  NEMO persists it itself (restart.F90:184).
+    "eta_rk3_after": _SLOT_PROGNOSTIC,
     # Centred barotropic forcing history.
     "tau_x_prev": _SLOT_PROGNOSTIC, "tau_y_prev": _SLOT_PROGNOSTIC,
     "freshwater_eta_prev": _SLOT_PROGNOSTIC,
@@ -1027,10 +1046,11 @@ def _require_run_format(fmt: Any, in_path: Path) -> None:
     can never disagree about what this build reads.
     """
     got = int(fmt) if fmt is not None else 0
-    if got != _RUN_RESTART_FORMAT:
+    if got not in _READABLE_RUN_RESTART_FORMATS:
         raise ValueError(
             f"load_run_restart: {in_path} has format version {got}, this build "
-            f"reads version {_RUN_RESTART_FORMAT}.  Regenerate the restart with "
+            f"reads versions {sorted(_READABLE_RUN_RESTART_FORMATS)}.  "
+            "Regenerate the restart with "
             "this build; older archives lack the per-slot shape/dtype records "
             "the loader cross-checks the payload against.")
 
@@ -1438,7 +1458,8 @@ def _validate_payload_keys(meta: dict, payload_keys, in_path: Path) -> None:
 
 
 def _validate_run_layout(template, kinds: dict, inventory, saved_class,
-                         what: str, in_path: Path) -> None:
+                         what: str, in_path: Path,
+                         migrate_absent: tuple[str, ...] = ()) -> None:
     """Manifest/inventory/state-class layout checks (no payload array read)."""
     # Diagnostic-persisted check FIRST: it is the most specific diagnosis
     # of a policy-mismatched archive, and the generic inventory
@@ -1477,6 +1498,12 @@ def _validate_run_layout(template, kinds: dict, inventory, saved_class,
             f"{what} inventory ({inventory!r}); without it the exact-layout "
             "checks cannot run and a carry could resume cold-started.")
     declared = set(_iter_state_fields(template))
+    if migrate_absent and declared - set(inventory) == set(migrate_absent):
+        # A slot this build declares that the writing build did not have.  The
+        # loader restores it as absent, which for eta_rk3_after is NEMO's own
+        # documented no-previous-step value (restart.F90:370) and is exactly
+        # what every card does today, so an older archive keeps loading.
+        declared = declared - set(migrate_absent)
     if set(inventory) != declared:
         raise ValueError(
             f"load_run_restart: {in_path} records {what} slots "
@@ -1601,12 +1628,76 @@ def _rebuild_slots(template, kinds: dict, prefix: str, loaded: dict,
     return out
 
 
+def _refuse_v3_deviation_bt_hist(state, in_path: Path):
+    """Refuse a version-3 archive that carries the deviation-form ``bt_hist``.
+
+    Version 3 persisted ``final - history`` for each NEMO AB3/AM4 b/bb slot.
+    Recovering the absolute histories needs the matching FINAL values, i.e.
+    the depth-mean external mode.  A version-3 archive does not hold one:
+    ``uu_b``/``vv_b`` are version-4 slots, and reducing the 3-D velocity here
+    would need the grid, the face masks and the live layer thicknesses, none
+    of which the loader has.  So there is no readable conversion, and a
+    version-3 ``bt_hist`` is rejected with that said plainly rather than
+    silently reinterpreted as absolute histories.
+
+    Version-3 archives WITHOUT ``bt_hist`` (the common case: any run that did
+    not use the NEMO AB3/AM4 barotropic filter) still load unchanged.
+    """
+    if getattr(state, "bt_hist", None) is None:
+        return state
+    raise ValueError(
+        f"load_run_restart: {in_path} is a format-3 archive whose barotropic "
+        "AB3/AM4 history was stored as final-minus-history deviations. That "
+        "form cannot be converted to the absolute histories this build reads "
+        "(the matching final values are not in the archive), so this restart "
+        "must be REGENERATED with the current build. Format-3 archives that "
+        "carry no barotropic history load normally.")
+
+
+def _refuse_pre_v5_missing_rk3_after_ssh(meta, template, in_path: Path, *,
+                                         carries: bool) -> None:
+    """Refuse a pre-format-5 archive for a run that READS NEMO's ``ssha`` slot.
+
+    Format 5 added ``eta_rk3_after``: NEMO's extrapolated after-SSH slot, which
+    its own restart carries as ``ssha`` (restart.F90:184) and reads back at the
+    next ``nit000`` (restart.F90:362-370).  An older archive has no such entry.
+
+    For a run that does NOT carry the slot, the absence is not a loss: the
+    slot is never read, so such an archive still loads and
+    the resume is byte-identical to what it was before this field existed.
+    That is why the layout check migrates the one slot rather than refusing.
+
+    For a run that DOES carry it, the archive cannot supply the value and
+    NEMO's own missing-``ssha`` fallback (the step-entry height,
+    restart.F90:370) would silently make the resumed trajectory differ from a
+    continuous one, so the archive is refused BY NAME instead.
+    """
+    if not carries or meta.get("format", 0) >= 5:
+        return
+    if "eta_rk3_after" not in set(_iter_state_fields(template)):
+        return
+    inventory = meta.get("inventory")
+    if isinstance(inventory, dict) and "eta_rk3_after" in inventory:
+        return
+    raise ValueError(
+        f"load_run_restart: {in_path} is a format-{meta.get('format')} "
+        "archive, written before NEMO's extrapolated after-SSH slot "
+        "('eta_rk3_after', NEMO's own 'ssha') became carried state. This run "
+        "READS that slot (its card states "
+        "nemo_first_wzv_after_ssh='rk3_extrapolated_carried') and there is no "
+        "value in the archive to restore it from; substituting the step-entry "
+        "height (NEMO's own missing-'ssha' fallback, restart.F90:370) would "
+        "make the resumed run a DIFFERENT trajectory from the continuous one. "
+        "Regenerate the restart with the current build.")
+
+
 def load_run_restart(path: str | Path, template_state, *,
                      ice_template=None,
                      grid_type: str | None = None,
                      dt_seconds: float | None = None,
                      n_forcing_records: int | None = None,
-                     config_fingerprint: str | None = None) -> tuple:
+                     config_fingerprint: str | None = None,
+                     carries_rk3_after_ssh: bool = False) -> tuple:
     """Resume from a :func:`save_run_restart` archive.
 
     Returns ``(state, ice_state, meta)`` where ``ice_state`` is ``None`` when
@@ -1645,9 +1736,13 @@ def load_run_restart(path: str | Path, template_state, *,
             n_forcing_records=n_forcing_records,
             config_fingerprint=config_fingerprint)
         _validate_payload_keys(meta, payload_keys, in_path)
+        _refuse_pre_v5_missing_rk3_after_ssh(
+            meta, template_state, in_path, carries=carries_rk3_after_ssh)
         _validate_run_layout(template_state, meta["slots"],
                              meta.get("inventory"), meta.get("state_class"),
-                             "ocean", in_path)
+                             "ocean", in_path,
+                             migrate_absent=("eta_rk3_after",)
+                             if meta["format"] < 5 else ())
         ice_kinds = meta["ice_slots"]
         if ice_kinds and ice_template is None:
             raise ValueError(
@@ -1673,6 +1768,8 @@ def load_run_restart(path: str | Path, template_state, *,
 
     # Payload-dependent reconstruction (decode + shape + static geometry).
     state = _rebuild_slots(template_state, meta["slots"], "", loaded, in_path)
+    if meta["format"] == 3:
+        state = _refuse_v3_deviation_bt_hist(state, in_path)
     ice_state = (_rebuild_slots(ice_template, ice_kinds, _ICE_PREFIX, loaded,
                                 in_path)
                  if ice_kinds else None)

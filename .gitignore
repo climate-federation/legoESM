@@ -185,3 +185,29 @@ e3sm-source/
 # vendored: the transition composites are 36 MB each, and provenance belongs
 # upstream. The gSAM decks above stay tracked; these do not.
 data/les_cases/dephy/
+
+# --- Caches and derived data that were committed by accident (2026-09-20) ---
+# matplotlib's font cache.  Nothing points MPLCONFIGDIR here — the scripts that
+# set it use a temp dir (e.g. scripts/run/run_ocean_spectral_tests.py) — so the
+# tracked copy was a stray commit, not a deliberate vendoring.
+.mplconfig/
+# Derived ERA5 climatology, ~26 MB, REGENERABLE: its generator is committed at
+# scripts/validate/amip_bias/extract_era5_omega.py and its only consumer is
+# scripts/validate/amip_bias/tropical_circulation.py.  A derived artifact with a
+# committed recipe belongs to the run directory, not to git history.
+scripts/validate/amip_bias/era5_omega_clim.npz
+# Debug plots.  Visual artifacts are regenerated on demand.  THREE are kept
+# tracked on purpose: scripts/data/build_legoesm_deck.py uses them as the
+# committed fallback figures (``first_existing(RESULTS/..., DEBUG/...)``) so a
+# machine with no run output can still build the slide deck.  The other six
+# were unreferenced.  The other carve-out stays the tiny numeric
+# visual-regression baselines under tests/visual_baselines.
+tests/debug/
+!tests/debug/spectral_hs100.png
+!tests/debug/spectral_hs100_final.png
+!tests/debug/spectral_hs100_eqinit.png
+# Reviewer stderr captures.
+.physics-validator/**/*.err
+# SI3 l3thd year-gate runtime dumps (8-26 MB each) -- evidence lives on disk
+# at LEGOESM_NEMO_EVIDENCE_ROOT/si3thd/, not in git.
+docs/ocean/fidelity/testcases/nemo_testcases_l3thd_*.json

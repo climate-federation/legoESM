@@ -8,11 +8,10 @@ applied by the driver lane (``_run_fv3_duo``) when
 dynamics-only.  Every restriction is the certified lane's own contract,
 enforced loudly here and at the component factory rather than assumed:
 
-* moist coupling is not routed by THIS wrapper: it passes neither
-  ``zvir`` nor a humidity index, so ``dp1`` is never formed.  The core
-  itself now SUPPORTS ``zvir != 0`` on both arms; ``consv_te != 0`` is
-  still refused there.  Slice 1 is dry by construction here, not by the
-  core's refusal, and the config wall below is what enforces it;
+* moist coupling is routed ONLY by ``FV3DuoConfig.moist`` (2026-09-24):
+  it passes the oracle's ``zvir`` with tracer 0 as specific humidity and
+  builds the moist IC; the default deck stays adiabatic (``zvir = 0``,
+  ``dp1`` never formed).  ``consv_te != 0`` is still refused by the core;
 * f64 is the DEFAULT and certified storage dtype (``storage_dtype``);
   the phase gates enforce dtype UNIFORMITY and ``step`` enforces the
   configured storage dtype at the boundary. fp32/mixed storage is
@@ -59,7 +58,8 @@ from legoesm.core.fv3_native_dcmip16_ic import (
 from legoesm.core.fv3_native_eta import set_eta_analytic
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.core.fv3_tracer2d import check_nsplt_schedule
-from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+from legoesm.grids.fv3_native_gridstruct import (FV3_CP_AIR, FV3_KAPPA,
+                                                 FV3_RDGAS, FV3_RVGAS)
 
 #: The bundled-pytree keys ``step`` threads — the ``fv_dynamics_step``
 #: return keys minus its non-array metadata.
@@ -94,6 +94,49 @@ class FV3DuoConfig(NamedTuple):
     # before an fp32 step passes the uniformity gates. Setting "float32"
     # today fails LOUDLY at the first fp64 workspace, by design.
     storage_dtype: str = "float64"
+    #: MOIST coupling (2026-09-24): ``True`` routes the oracle's own
+    #: ``zvir = rvgas/rdgas - 1`` with tracer 0 as specific humidity into
+    #: the step (virtual temperature in pt_to_theta_v and the remap; the
+    #: core arm certified at 1.19e-09 vs the Fortran moist deck) and
+    #: builds the MOIST DCMIP16 IC (pt divided by 1 + zvir*q).  ``False``
+    #: is the certified adiabatic deck: humidity a passenger.  Selected
+    #: automatically by Kessler in the driver (user 2026-09-24), never a
+    #: knob there.
+    moist: bool = False
+    #: Vertical coordinate table (2026-09-27, route A M4): "analytic" is
+    #: the certified set_eta_analytic branch (km in {5, 10}, fv_eta.F90:
+    #: 334-344); "cam6_l32" is CAM6's L32 hybrid table (CESM2
+    #: cam_vcoords_L32_c180105: ak = A*1e5 Pa, bk = B, top 225.5 Pa,
+    #: 15 pure-pressure interfaces), km must be 32.  The step reads
+    #: ak/bk/ptop generically (no ks); the L32 deck is NOT
+    #: Fortran-certified -- rung 4 gates it (rest states, DCMIP16 km=32).
+    eta: str = "analytic"
+
+
+def duo_eta_table(eta: str, km: int):
+    """``(ak [Pa], bk, ptop [Pa])`` for :class:`FV3DuoConfig.eta`.
+
+    ``"analytic"``: :func:`set_eta_analytic` (km in {5, 10}, raises
+    otherwise).  ``"cam6_l32"``: the CAM6 L32 interface table, km == 32;
+    the top 15 interfaces are pure pressure (bk exactly 0.0, so
+    ``pe = ak + bk*ps`` is ps-independent there without any ``ks``
+    branch -- gated by a test that perturbs ps).
+    """
+    if eta == "analytic":
+        ak, bk, ptop, _ks = set_eta_analytic(km)
+        return np.asarray(ak, dtype=np.float64), np.asarray(bk, dtype=np.float64), float(ptop)
+    if eta == "cam6_l32":
+        from legoesm import constants
+        from legoesm.grids.vertical import CAM6_L32_HYAI, CAM6_L32_HYBI
+        if km != 32:
+            raise ValueError(
+                f"FV3DuoConfig(eta='cam6_l32') is the 32-level table; got "
+                f"km={km}")
+        ak = np.asarray(CAM6_L32_HYAI, dtype=np.float64) * constants.p_ref
+        bk = np.asarray(CAM6_L32_HYBI, dtype=np.float64)
+        return ak, bk, float(ak[0])
+    raise ValueError(
+        f"FV3DuoConfig.eta={eta!r}: expected 'analytic' or 'cam6_l32'")
 
 
 def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
@@ -210,8 +253,7 @@ class FV3DuoDynamicsModel:
             raise ValueError(
                 f"k_split={config.k_split} / n_split={config.n_split} must "
                 f"both be >= 1 (fv_dynamics.F90:451 / dyn_core.F90:337).")
-        # km in {5, 10} — set_eta_analytic raises with the fv_eta citation.
-        ak, bk, ptop, _ks = set_eta_analytic(config.km)
+        ak, bk, ptop = duo_eta_table(config.eta, config.km)
 
         self.grid = grid
         self.config = config
@@ -310,7 +352,29 @@ class FV3DuoDynamicsModel:
             w_limiter=(None if config.hydrostatic else True),
             out_shardings=step_out_shardings,
             batched=step_face_batched,
+            zvir=self.zvir, sphum_index=(0 if config.moist else None),
         )
+
+    @property
+    def ak(self) -> np.ndarray:
+        """Hybrid ``ak`` interface coefficients [Pa], ``(km+1,)``."""
+        return self._ak
+
+    @property
+    def bk(self) -> np.ndarray:
+        """Hybrid ``bk`` interface coefficients, ``(km+1,)``."""
+        return self._bk
+
+    @property
+    def ptop(self) -> float:
+        """Model-top pressure [Pa] (``ak[0]``)."""
+        return self._ptop
+
+    @property
+    def zvir(self) -> float:
+        """``rvgas/rdgas - 1`` with the oracle's gas constants when the
+        deck is moist (atmosphere.F90:156-161), else exactly 0.0."""
+        return (FV3_RVGAS / FV3_RDGAS - 1.0) if self.config.moist else 0.0
 
     # ------------------------------------------------------------------
     # DycoreProtocol
@@ -414,7 +478,7 @@ class FV3DuoDynamicsModel:
         cfg = self.config
         st6, sphum6 = dcmip16_bc_six_face_state(
             self.grid.ctx_np, self._ak, self._bk, cfg.km,
-            hydrostatic=cfg.hydrostatic, do_pert=do_pert)
+            hydrostatic=cfg.hydrostatic, do_pert=do_pert, zvir=self.zvir)
         jstate = state_3d_to_jax(st6)
         n, ng = self.grid.n, self.grid.ng
         flat_ctx = (self._flat_ctx_jax if self.window_layout is not None
@@ -462,6 +526,16 @@ class FV3DuoDynamicsModel:
                                          jnp.inexact) else a),
             bundle)
         return self.to_windows(bundle) if self.window_layout else bundle
+
+    @property
+    def sixface_halo_tables(self):
+        """The six-face ``DuoHaloTables`` this model's exchanges are built
+        on (the flat context's tables under a window layout).  Public so
+        the driver's face-stacked physics step can reuse the certified
+        exchange tables instead of reaching into private context."""
+        ctx = (self._flat_ctx_jax if self.window_layout is not None
+               else self._ctx_jax)
+        return ctx.tab
 
     # ------------------------------------------------------------------
     # window layout conversions (M6)

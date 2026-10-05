@@ -620,7 +620,7 @@ class TestBiharmonicViscosity:
             measured, predicted)
 
     def test_tendencies_noarg_falls_back_to_constructor_dt(self, grid):
-        """model.tendencies(state) without dt (DycoreComponent path) must
+        """model.tendencies(state) without dt must
         work with nu_del4 > 0 via the constructor-dt fallback (codex
         iter-3)."""
         cfg = CGridLatLonShallowWaterConfig(nu_del4=self.NU4)

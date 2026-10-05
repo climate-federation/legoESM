@@ -1499,6 +1499,11 @@ class CoupledESMDriver:
         a MIXED cell the atmosphere is correctly forced by the blended flux while
         the ocean gets the ocean component -- the air-sea (ocean) exchange still
         closes; land/ice/lake heat goes to those reservoirs, not the ocean.
+        This closure holds for the prognostic 3D ocean only: the slab /
+        two-layer ocean computes its own turbulent fluxes, albedo and
+        emissivity (``simple_ocean``) and never reads ``tile.shflx``/
+        ``tile.lhflx``, so with a slab the flag changes the atmosphere's
+        forcing without closing the air-sea budget.
 
         Sign convention: ``shflx``/``lhflx`` are [W/m2, positive UP =
         surface->atmosphere], exactly the convention the atmosphere's bulk
@@ -1579,8 +1584,18 @@ class CoupledESMDriver:
             # conservation tests).
             r = self._last_sfc_response
             if r is None or getattr(r, "shflx", None) is None:
-                return None, None
-            return r.shflx, r.lhflx
+                return None, None, None
+            if getattr(r, "surface_mass_flux", None) is None:
+                raise ValueError(
+                    "couple_surface_fluxes: the surface response carries no "
+                    "surface_mass_flux; the atmosphere's moisture source must be "
+                    "the tiles' water flux, never lhflx re-divided by a latent heat.")
+            # Physical latent heat (each tile's own L(T, phase)) for the heat
+            # consumers, and the tiles' WATER flux for the moisture source.
+            # Energy closes inside the atmosphere: its heat lower BC adds
+            # surface_layer.latent_enthalpy_correction = lhflx - L_v*E to the
+            # sensible heat, so the column takes up exactly shflx + lhflx.
+            return r.shflx, r.lhflx, r.surface_mass_flux
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(
@@ -1639,8 +1654,7 @@ class CoupledESMDriver:
                 u_low = _u_cell[..., -1]
                 v_low = _v_cell[..., -1]
             q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        p_low = p_s * sigma_full[-1]
+        p_low = self._atm.sigma.pressure_at_full(p_s)[..., -1]
         # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
         # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
         # tropics (q_v ~ 17 g/kg) and biases every downstream bulk-flux surface
@@ -1795,7 +1809,11 @@ class CoupledESMDriver:
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
+        from legoesm.core.coupling_fields import lowest_level_height
         return AtmToSurface(
+            z_lowest=lowest_level_height(
+                T_low, self._atm.sigma.pressure_at_half(p_s),
+                self._atm.sigma.pressure_at_full(p_s)),
             sw_down=sw_down,
             lw_down=lw_down,
             precip_total=precip_total,
@@ -1820,6 +1838,10 @@ class CoupledESMDriver:
         is the calendar-month-interpolated q-flux climatology map for this
         step; ``None`` falls back to the scalar ``config.Q_flux`` in the slab
         step (byte-identical when no climatology is loaded).
+
+        The slab's own open-ocean atmospheric fluxes are applied over the
+        ice-free fraction only (``_slab_open_water_frac``, lagged one coupling
+        step like the 3D path); under ice the slab receives only ``q_flux``.
 
         **One-way ice -> ocean coupling (intentional for the slab ocean).**
         ``step_sea_ice`` populates ice -> ocean back-reaction channels on
@@ -1846,6 +1868,7 @@ class CoupledESMDriver:
         if not getattr(self, "_is_dynamic_ocean", False):
             self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
                 self._ocean_state, atm_forcing, dt, q_flux=q_flux,
+                open_water_frac=self._slab_open_water_frac(),
             )
             self._ocean_u_sfc = u_sfc
             self._ocean_v_sfc = v_sfc
@@ -1869,6 +1892,25 @@ class CoupledESMDriver:
         # once per coupling step over the full dt; no-op when the restoring
         # timescales are 0 or no WOA target was loaded (byte-identical).
         self._apply_ocean_restoring(dt)
+
+    def _slab_open_water_frac(self):
+        """Ice-free fraction of the slab's water area, on the ocean grid.
+
+        Sea-ice concentration is relative to the water area (tile fractions:
+        ``f_ice = f_water * sic``), so the per-unit-water-area slab column
+        receives the open-ocean atmospheric fluxes over ``1 - sic`` of its
+        area; the ice-covered part is forced by the ice tile.  ``1.0`` when no
+        ice state exists.
+        """
+        from legoesm.coupler.grid_remap import remap_field
+        _sfc = getattr(self, "_sfc_state", None)
+        if _sfc is None or getattr(_sfc, "ice", None) is None:
+            return 1.0
+        sic = _total_ice_sic(_sfc.ice)
+        _rem = getattr(self, "_grid_remapper", None)
+        if _rem is not None and getattr(_rem, "a2o", None) is not None:
+            sic = remap_field(sic, _rem.a2o)
+        return 1.0 - jnp.clip(sic, 0.0, 1.0)
 
     def _apply_ocean_restoring(self, dt):
         """Relax the 3D-ocean surface T/S toward the WOA-climatology IC.
@@ -1976,8 +2018,6 @@ class CoupledESMDriver:
         from legoesm.coupler.tile_fractions import compute_tile_fractions
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm.ocean.state import OceanSurfaceForcing
-
-        from legoesm import constants
 
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
@@ -2104,7 +2144,9 @@ class CoupledESMDriver:
         sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
         tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
         tau_y = f_ocean * tile.tau_y
-        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # The tile's own water flux (charged at L_v(SST) with its lhflx): the
+        # SAME mass the atmosphere receives through the water channel.
+        evap = f_ocean * tile.surface_mass_flux       # [kg/m²/s], +up (open water)
         # Precip over the ice fraction: WHERE it is counted depends on whether
         # the active ice model owns a snow reservoir.  Sign: +into ocean.  The
         # LAND and LAKE fractions are ALWAYS excluded here -- their precip is the
@@ -2293,9 +2335,8 @@ class CoupledESMDriver:
 
         co2_flux = self._last_sfc_response.co2_flux  # kgCO2/m2/s, +up
         p_s = self._atm.state.p_s.data
-        dsigma = jnp.asarray(self._atm.sigma.dsigma)
         # Layer mass of lowest level: dp / g [kg/m2]
-        dp = p_s * dsigma[-1]
+        dp = self._atm.sigma.layer_thickness_dp(p_s)[..., -1]
         mass_air = dp / constants.g
         dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
         self._co2_field = self._co2_field.at[..., -1].add(dco2)

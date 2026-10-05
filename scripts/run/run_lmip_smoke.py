@@ -50,7 +50,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
-from legoesm.land.slab_land import step_land
+from legoesm.land.slab_land import step_land_with_diagnostics
 from legoesm.land.global_surface_data import interp_monthly
 from legoesm.land.soil_albedo import soil_albedo_broadband
 from legoesm.land.boundary_data import (
@@ -191,7 +191,7 @@ def main() -> None:
         step_fn = step_multilayer_land
     else:                                                  # slab
         base_cfg = LandConfig(surface_scheme=surf)
-        step_fn = step_land
+        step_fn = step_land_with_diagnostics
     base_cfg = resolve_land_config(args.land_mode, base_cfg)
 
     # --- run the surface-data loader at simulation start: regrid to this grid,
@@ -247,14 +247,20 @@ def main() -> None:
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer
                        else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, cover_year)
-        new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
-                                     lat=lat_rad,
-                                     land_params=land_params_t, doy=doy_t)
+        new_state, resp, *_rest = step_fn(state, forcing_t, config, U_MIN, dt,
+                                          lat=lat_rad,
+                                          land_params=land_params_t, doy=doy_t)
         diag = (resp.T_sfc, resp.shflx, resp.lhflx, lai_diag, resp.albedo, doy_t)
         if is_multilayer:
             diag = diag + (new_state.theta_soil[:, 0],
                            new_state.T_soil[:, 0],
                            new_state.snow_depth)
+        else:
+            # The slab lane does not hold a failed canopy root solve (the
+            # multilayer lane does), so count those columns here.
+            conv = _rest[1].converged
+            diag = diag + ((jnp.zeros(ncol, bool) if conv is None
+                            else ~jnp.asarray(conv).reshape(-1)),)
         return new_state, diag
 
     print(f"stepping {args.n_steps} timestep(s) (dt={dt:.0f}s, "
@@ -267,7 +273,7 @@ def main() -> None:
         (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr,
          theta_top_t, T_soil_top_t, snow_depth_t) = scan_out
     else:
-        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr) = scan_out
+        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr, unconv_t) = scan_out
 
     # Subsample with --output-every.
     sel = np.arange(0, args.n_steps, args.output_every)
@@ -347,6 +353,11 @@ def main() -> None:
     nan_land = int(np.isnan(fields["T_sfc"][0][land]).sum())
     status = "PASS" if nan_land == 0 else "FAIL"
     print(f"land cells: {n_land} | NaN T_sfc over land: {nan_land} -> {status}")
+    if not is_multilayer:
+        n_unconv = int(np.asarray(unconv_t)[:, land].sum())
+        print(f"unconverged canopy root solves over land: {n_unconv} column-step(s) "
+              f"({100 * n_unconv / max(n_land * args.n_steps, 1):.3f}%), fluxes used "
+              f"as-is (slab lane does not hold them)")
     rng = lambda a: f"[{np.nanmin(a):.2f}, {np.nanmax(a):.2f}]"
     for k in ("sand_pct", "clay_pct", "bulk_density", "LAI", "T_sfc"):
         print(f"  {k:12s} {rng(fields[k][0])}")

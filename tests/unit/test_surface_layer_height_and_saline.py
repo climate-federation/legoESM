@@ -77,7 +77,8 @@ def test_mpas_bridge_applies_both_switches():
         phis=Field(jnp.zeros((ncol,))), tracers={"q_v": Field(q)})
     sst = jnp.full((ncol,), 301.0)
     f_land = np.zeros(ncol); f_land[:3] = 1.0     # three land cells
-    forcing = {"T_sfc": sst, "lhflx_land": jnp.zeros((ncol,)), "shflx_land": jnp.zeros((ncol,))}
+    forcing = {"T_sfc": sst, "lhflx_land": jnp.zeros((ncol,)), "shflx_land": jnp.zeros((ncol,)),
+               "evap_land": jnp.zeros((ncol,))}
     seen = {}
     real = sl.compute_surface_fluxes   # the bridge imports it at call time
 
@@ -118,10 +119,15 @@ def test_mpas_bridge_applies_both_switches():
     np.testing.assert_allclose(hgt["T_in"] - off["T_in"], constants.g / constants.c_pd * z, rtol=1e-12)
 
 
-def test_switches_are_refused_where_they_would_be_inert():
-    """codex whole-branch review P2: the two switches are MPAS-bridge
-    implementations; other bridges and the MPAS path without supplied land
-    fluxes must refuse them instead of silently ignoring them."""
+def test_height_switch_accepted_and_saline_refused_on_structured_lanes():
+    """codex whole-branch review P2, updated: the level height now reaches
+    every lane (each kernel calls surface_fluxes_at_lowest_level), so it is
+    honoured, not refused; the sea-water humidity still needs a land fraction
+    the structured-grid factories do not carry, so it is refused there
+    instead of silently ignored.  That the height is HONOURED (not merely
+    accepted) is pinned at the kernel by test_surface_reference_height
+    (correction lowers the latent flux; switch off is byte-identical) and on
+    the MPAS bridge by test_mpas_bridge_applies_both_switches above."""
     import pytest
     from legoesm.atmosphere.physics.turbulence import integration as ti
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -129,5 +135,7 @@ def test_switches_are_refused_where_they_would_be_inert():
     tc = ti.materialize_sub_config(TurbulenceConfig(scheme="louis"))
     surf = tc.louis.surface._replace(bulk_scheme="coare3", z_ref_model_level=True)
     tc = tc._replace(louis=tc.louis._replace(surface=surf))
-    with pytest.raises(NotImplementedError, match="MPAS"):
+    assert callable(ti.make_turbulence_physics(tc, model_type="hydrostatic", dt=600.0))
+    tc = tc._replace(louis=tc.louis._replace(surface=surf._replace(ocean_q_sfc_saline=True)))
+    with pytest.raises(NotImplementedError, match="land fraction"):
         ti.make_turbulence_physics(tc, model_type="hydrostatic", dt=600.0)

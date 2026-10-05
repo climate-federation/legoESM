@@ -4,6 +4,20 @@
 User directive 2026-08-21: *"Be concise and clear — make this a default."*
 Eleventh ask. Default, not mode.
 
+**2026-09-08, NAMED AT OPUS 5 (and every Mythos/Fable-class model):
+*"Force opus 5 to be concise and clear as default."*** Twelfth ask. The
+long-session drift is the failure mode: replies start terse and grow back
+into paragraphs after an hour of tool calls. So the cap is not a mood, it
+is checked EVERY reply, and re-read whenever a session runs long.
+
+GATE (RULE 2 demands one, so here it is, mechanical, self-applied before
+send): count the rendered lines of the reply. **>5 lines, or any table
+the user did not ask to compare, or any header in a reply under ~500
+words → DELETE and rewrite.** Verdict first line; then at most 3 short
+bullets; then stop. A status report on background jobs is ONE line per
+job, no preamble. If it will not fit, the content wanted a table — keep
+the table, delete the prose.
+
 - **Verdict first line.** Then max 3 short bullets. Stop.
 - **~60 words.** Longer only if report/walkthrough asked.
 - **Plain words.** No file:line, function names, config keys, job ids, PR
@@ -73,7 +87,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - `TrainablePhysicsParams` wraps 8 params, Equinox module, sigmoid constraints.
 - ERA5: `era5_to_state.py` lat-lon → grid, Zarr cache.
 - Losses: `training/losses.py` imports `ml/loss.py`. No dup.
-- **MPI AD**: `global_sum_mpi` (allreduce SUM) full VJP. MPI halo: `_sendrecv_vjp` custom_vjp. `fix_mass`/`zero_mean_tendency` flow grads via global reductions. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
+- **MPI AD**: `global_sum_mpi` (allreduce SUM) backward = identity — correct ONLY when the sum is the final loss. Sum used INSIDE the computation (mass fixers, global dot, eta floor, freshwater/barotropic sums) needs `broadcast_allreduce_sum` (`parallel/reductions.py`); 15 sites still use identity (2026-09-26 review, tracked issue). MPI halo: `_sendrecv_vjp` custom_vjp. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
 - **NO INERT PARAMETERS EVER (STRICT, user 2026-08-17).** Every leaf of trainable pytree must carry loss gradient. Mode-inactive params frozen OUT of trainable set (`_inactive_keys` pattern); first training step gates rest via `assert_no_inert` (`train_land_params_era5.py`) — zero-gradient leaf aborts run. Any new trainer/calibrator adopt both pieces; param "wired in but off" without freeze-out = defect.
 
 ## RULE 4 — SEARCH BEFORE YOU BUILD, AND PONYTAIL FULL IS THE DEFAULT.
@@ -774,7 +788,7 @@ findable offline in seconds; arms bought nothing.
 - Backends differ (Metal/GPU/CPU/spectral/MPI). Apple Silicon: spectral on CPU.
 - **MPI**: `initialize_distributed(global_n=N)` → `scatter_to_local()` → rank-local step → `gather_to_global()` for I/O only. Never full global per rank.
 - **4D halo**: `pad_halo_4d()`+`pad_halo_vector_4d()` all vert in one msg. All 3D ops in `operators_3d.py` use 4D. Never `vmap(pad_halo)`.
-- **MPI halo AD**: all `sendrecv` via `_sendrecv_vjp` (`@jax.custom_vjp` in `halo_exchange.py`). Only `allreduce(SUM)` AD-safe; `MAX`/`MIN`/`allgather`/`bcast` = diagnostics only.
+- **MPI halo AD**: all `sendrecv` via `_sendrecv_vjp` (`@jax.custom_vjp` in `halo_exchange.py`). Only `allreduce(SUM)` AD-safe (final-loss sums; intermediate sums need `broadcast_allreduce_sum`); `MAX`/`MIN`/`allgather`/`bcast` = diagnostics only.
 - **Device mesh under MPI**: per-rank count to `create_device_mesh()`, not total.
 
 ## Oracle-Recipe Fidelity (ocean) — see docs/ocean/fidelity/oracle_recipe_strategy.md

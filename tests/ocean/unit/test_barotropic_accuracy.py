@@ -96,7 +96,7 @@ def _run_channel(solver: str, time_filter: str, *, n_lat: int = _NLAT,
                  coriolis: str | None = None, outer: str | None = None,
                  slow_ab2: bool = False, tides: bool = False,
                  t_seconds: float | None = None, n_steps_max: int | None = None,
-                 periods: float = _PERIODS):
+                 periods: float = _PERIODS, eager: bool = False):
     """Integrate the channel eigenmode and report how well it was carried.
 
     Returns ``{"ratio": T_model/T_exact, "l2": relative L2 in eta at the end,
@@ -186,8 +186,9 @@ def _run_channel(solver: str, time_filter: str, *, n_lat: int = _NLAT,
                                  float(np.sum(e * p_cos))))
             t_samp.append(n * dt)
         if n < n_steps:
-            s = (model.step(s, dt) if t_seconds is None
-                 else model.step(s, dt, t_seconds=t_seconds + n * dt))
+            step = model._step_impl if eager else model.step
+            s = (step(s, dt) if t_seconds is None
+                 else step(s, dt, t_seconds=t_seconds + n * dt))
     ph = np.unwrap(np.asarray(ph))
     omega_fit = abs(float(np.polyfit(np.asarray(t_samp), ph, 1)[0]))
     assert np.isfinite(omega_fit) and omega_fit > 0.0, (
@@ -493,42 +494,29 @@ def test_power_law_does_not_converge_to_the_right_period():
 
 
 def test_the_frozen_tide_still_uses_loop_start_sampling(monkeypatch):
-    """Pins the tide sample time, because two attempts to change it were wrong.
+    """The former frozen-tide test now pins the landed per-substep sampling.
 
-    Centring the window stretched the substep loop to ~t+2*dt while the
-    equilibrium tide stays FROZEN at the loop's start, so a tide-enabled
-    box/cosine run now carries about twice the forcing-quadrature error it
-    used to (M2 at dt = 1800 s: 14.5 degrees of phase). Both cheap fixes
-    were tried and reverted:
-
-      * sampling at ``t + n_substeps*dt_s`` is the window centroid ONLY for
-        the forward-frame box/cosine filters -- under MLF dt_s = dt_mom/n
-        with dt_mom = 2*dt so it lands a full outer step late, power_law's
-        trimmed window has centroid n + 0.0088*n, and nemo_ab3am4 does no
-        averaging at all (codex 2026-08-12);
-      * refusing the combination breaks the working, tested tide wiring in
-        test_tidal_forcing.py::test_wire_*.
-
-    So the sampling is deliberately UNCHANGED and the limitation is
-    documented at the call site. This test exists so the next person does
-    not re-attempt either fix without reading why. FOLLOW-UP: evaluate the
-    tide per substep at t+(i+1)*dt_s.
+    Commit 385d2410a deliberately completed the follow-up this test used to
+    name: the equilibrium tide is evaluated at every fast step, beginning at
+    ``t + dt_s``.  Keep the historical test ID so the red-test ledger can
+    trace the stale expectation to that commit.
     """
     import legoesm.ocean.physics.tidal_forcing as tf
-    seen, real = [], tf.apply_tidal_forcing
+    seen, real = [], tf.tidal_phase_factors
 
-    def _spy(du_dt, dv_dt, grid, t_seconds, config, **kw):
-        seen.append(t_seconds)
-        return real(du_dt, dv_dt, grid, t_seconds, config, **kw)
+    def _spy(basis, t_seconds):
+        seen.append(np.asarray(t_seconds, dtype=np.float64).copy())
+        return real(basis, t_seconds)
 
-    monkeypatch.setattr(tf, "apply_tidal_forcing", _spy)
+    monkeypatch.setattr(tf, "tidal_phase_factors", _spy)
     t0 = 12345.0
     with jax.disable_jit():
-        _run_channel("explicit_substep", "cosine", n_lat=12, n_lon=24,
-                     tides=True, t_seconds=t0, n_steps_max=1)
-    assert seen and seen[0] is not None, (
+        result = _run_channel(
+            "explicit_substep", "cosine", n_lat=12, n_lon=24,
+            tides=True, t_seconds=t0, n_steps_max=1, eager=True)
+    assert seen, (
         "the tide path did not execute, so this pins nothing")
-    assert float(seen[0]) == pytest.approx(t0), (
-        f"tide sampled at {float(seen[0])} instead of the loop start {t0}; "
-        f"if this was a deliberate change, it must be correct for the MLF "
-        f"frame and for power_law/nemo_ab3am4 too -- see the docstring")
+    dt_s = result["dt"] / 30.0
+    samples = np.concatenate([np.ravel(x) for x in seen])
+    expected = t0 + np.arange(1, samples.size + 1) * dt_s
+    np.testing.assert_allclose(samples, expected, rtol=0.0, atol=1e-12)

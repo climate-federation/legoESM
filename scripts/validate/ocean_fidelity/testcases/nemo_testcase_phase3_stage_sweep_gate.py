@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 
 BAR = 1.0e-15
@@ -103,6 +108,13 @@ def read_stage(path: Path, case: str, expected_stage: int) -> dict:
         "T": _xyz(values[:count], nx, ny, nz),
         "S": _xyz(values[count : 2 * count], nx, ny, nz),
         "u": _xyz(values[2 * count : 3 * count], nx, ny, nz),
+        # The record DOES carry v: stprk3.F90:326-327 writes ts, uu, vv, ssh
+        # and the payload check above is 4*count + nx*ny for exactly that
+        # reason.  This reader used to skip the third block, which made a
+        # Rule-12 discharge on these cards report the v face UNMEASURED when
+        # the oracle had provided it all along (Rule 1: coverage is driven by
+        # what the oracle provides, not by what the reader asks for).
+        "v": _xyz(values[3 * count : 4 * count], nx, ny, nz),
         "ssh": _xy(values[4 * count :], nx, ny),
     }
 
@@ -312,13 +324,23 @@ def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> d
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(active)[0])] += 1.0
     require(np.all(np.isfinite(candidate[active])), f"{name}: non-finite")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+    record_residual_field(name, oracle, candidate, active)
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
     reference = float(np.max(np.abs(oracle[active])))
     normalized = absolute / max(reference, 1.0)
+    # AT-BAR is a RELATIVE verdict, so it can be true of a row that is not bit
+    # for bit.  Report the bit-unequal COUNT next to it, the way the lane-2
+    # GYRE gate already does (nemo_testcase_l2_gyre_phase3_gate.py:607-616),
+    # so a Rule-12 row can never quote AT-BAR without saying how far from
+    # exact it is.
+    n_unequal = int(np.count_nonzero(
+        candidate[active].view(np.uint64) != oracle[active].view(np.uint64)))
     return {
         "name": name,
         "status": "AT-BAR" if normalized <= BAR else "DEBT",
         "exact": bool(np.array_equal(candidate[active], oracle[active])),
+        "n_unequal": n_unequal,
         "normalized_max_abs": normalized,
         "absolute_max": absolute,
         "reference_max_abs": reference,
@@ -364,7 +386,204 @@ def expected_masks(card) -> dict:
     active = np.asarray(card.recipe.z_coord.is_active) & wet[..., None]
     u = active & np.roll(active, -1, axis=1)
     u[:, -1] = False
-    return {"T": active, "u": u}
+    # S, v and ssh are built by the SAME rule the lane-2 GYRE gate uses
+    # (nemo_testcase_l2_gyre_phase3_gate.py:573-581), so one convention serves
+    # every card.  They were absent here, not because these cards lack those
+    # faces, but because nothing had asked for them yet -- which is how a
+    # Rule-12 discharge came to report the v face UNMEASURED on a record that
+    # carries it.
+    v = active & np.roll(active, -1, axis=0)
+    v[-1] = False
+    return {"T": active, "S": active, "u": u, "v": v, "ssh": wet}
+
+
+def run_round49_pair_boundary(
+    root: Path, *, plant: bool = False, allow_dirty: bool = False,
+) -> tuple[dict, dict[str, np.ndarray]]:
+    """One-compile tracer-to-HPG boundary for the round-49 pair walk.
+
+    The two WRITE-only hooks share one ordinary compiled step: T/S/eta expose
+    stage-1 Kaa, while u/v expose the stage-2 HPG operator that consumes that
+    Kaa after the pointer swap.  No diagnostic array is read by production.
+    """
+    import jax
+    from legoesm import constants as _constants
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    allow_dirty_stamps(allow_dirty)
+    revision = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+        "precision policy is not fp64/libm",
+    )
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+
+    case = "OVERFLOW-zps"
+    card = build_nemo_testcase_card(case)
+    masks = expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
+    stage_path = root / "oracle_stage_kt00000001_s1.bin"
+    mesh_path = root / "mesh_mask.nc"
+    require(stage_path.is_file(), f"missing {stage_path}")
+    require(mesh_path.is_file(), f"missing {mesh_path}")
+    oracle = read_stage(stage_path, case, 1)
+
+    hooks = _NEMOWSRK3TestHooks(
+        expose_tracer_stage=1,
+        expose_momentum_operator="hpg",
+        expose_momentum_operator_stage=2,
+    )
+    exposed = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks,
+    ).step(card.recipe.initial_state, dt=card.dt_s)
+    arrays = {
+        "stage1_T": np.asarray(exposed.T.data, dtype=np.float64),
+        "stage1_S": np.asarray(exposed.S.data, dtype=np.float64),
+        "stage1_ssh": np.asarray(exposed.eta.data, dtype=np.float64),
+        "stage2_hpg_u": np.asarray(exposed.u.data, dtype=np.float64),
+        "stage2_hpg_v": np.asarray(exposed.v.data, dtype=np.float64),
+    }
+    if plant:
+        planted = arrays["stage1_T"].copy()
+        index = tuple(np.argwhere(masks["T"])[0])
+        planted[index] += 1.0
+        arrays["stage1_T"] = planted
+
+    rows = [
+        score(
+            f"{case}.kt1.stage1.pair_boundary.T",
+            oracle["T"][..., :nlev], arrays["stage1_T"], masks["T"],
+            quantity="T",
+        ),
+        score(
+            f"{case}.kt1.stage1.pair_boundary.S",
+            oracle["S"][..., :nlev], arrays["stage1_S"], masks["S"],
+            quantity="T",
+        ),
+        score(
+            f"{case}.kt1.stage1.pair_boundary.ssh",
+            oracle["ssh"], arrays["stage1_ssh"], masks["ssh"],
+            quantity="T",
+        ),
+    ]
+    if plant:
+        require(
+            rows[0]["status"] == "DEBT" and rows[0]["absolute_max"] >= 0.5,
+            "round-49 planted tracer change did not make the gate red",
+        )
+
+    # Independent source replay of the HPG expected from NEMO's stage-1
+    # T/S/ssh.  This is the existing calibrated replay used by run(); the
+    # narrow mode merely avoids compiling all historical causal arms.
+    mesh = read_row_mesh(root)
+    cfg = card.recipe.model_config
+    require(cfg.eos == "nemo_teos10", f"expected nemo_teos10, got {cfg.eos}")
+    eos_fn = make_eos_fn(cfg.eos, None, rho0=cfg.rho_0)
+    expected_hpg_u = hpg_sco_row(
+        mesh, oracle["T"][1], oracle["S"][1], oracle["ssh"][1], eos_fn,
+        cfg.g, cfg.rho_0, cfg.rho_0 * _constants.g,
+    )
+    model_hpg_u = arrays["stage2_hpg_u"][1, 1:, :]
+    model_hpg_u = np.pad(
+        model_hpg_u,
+        ((0, 0), (0, mesh["umask"].shape[-1] - model_hpg_u.shape[-1])),
+    )
+    active_hpg_u = mesh["umask"].astype(bool)
+    active_hpg_u[-1] = False
+    hpg_row = score(
+        f"{case}.kt1.stage2.pair_boundary.hpg_u",
+        expected_hpg_u, model_hpg_u, active_hpg_u,
+    )
+    hpg_row["frame"] = "stage2_Krhs_immediately_after_dyn_hpg"
+    hpg_row["source"] = (
+        "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:323-327; "
+        "dynhpg.f90:341-414")
+    rows.append(hpg_row)
+
+    return ({
+        "format": "nemo-testcase-overflow-round49-pair-boundary-v1",
+        "case": case,
+        "status": "AT-BAR" if all(row["status"] == "AT-BAR" for row in rows)
+        else "DEBT",
+        "worktree": worktree_stamp(),
+        "legoesm_git_sha": revision,
+        "precision_policy": "fp64/libm",
+        "jax_backend": jax.default_backend(),
+        "source_order": ["stage1_T", "stage1_S", "stage1_ssh", "stage2_hpg_u"],
+        "rows": rows,
+        "controls": {"plant": plant},
+        "record_artifacts": {
+            stage_path.name: sha256(stage_path),
+            mesh_path.name: sha256(mesh_path),
+        },
+    }, arrays)
+
+
+def persist_round49_pair_arrays(
+    output: Path, report: dict, arrays: dict[str, np.ndarray],
+) -> None:
+    sidecar = output.with_suffix(".pair_arrays.npz")
+    np.savez_compressed(sidecar, **arrays)
+    report["pair_arrays"] = {
+        "path": str(sidecar),
+        "sha256": sha256(sidecar),
+        "fields": list(arrays),
+    }
+
+
+def compare_round49_pair_arrays(reference_report: Path, candidate: dict) -> dict:
+    reference = json.loads(reference_report.read_text())
+    require(
+        reference.get("format") == candidate.get("format"),
+        "round-49 pair reports have different formats",
+    )
+
+    def load(report: dict) -> dict[str, np.ndarray]:
+        artifact = report.get("pair_arrays")
+        require(isinstance(artifact, dict), "pair-array artifact is absent")
+        path = Path(artifact.get("path", ""))
+        require(path.is_file(), f"missing pair-array artifact {path}")
+        require(sha256(path) == artifact.get("sha256"), f"hash drift in {path}")
+        with np.load(path) as stored:
+            require(stored.files == artifact.get("fields"), "pair-array field drift")
+            return {name: np.asarray(stored[name]) for name in stored.files}
+
+    before, after = load(reference), load(candidate)
+    require(before.keys() == after.keys(), "pair-array key drift")
+    rows = []
+    for name in candidate["source_order"]:
+        left, right = before[name], after[name]
+        require(left.shape == right.shape, f"{name}: shape drift")
+        unequal = left.view(np.uint64) != right.view(np.uint64)
+        rows.append({
+            "name": name,
+            "exact": bool(np.array_equal(left, right)),
+            "n": int(left.size),
+            "n_unequal": int(np.count_nonzero(unequal)),
+            "max_abs_move": float(np.max(np.abs(right - left))),
+        })
+    first = next((row["name"] for row in rows if not row["exact"]), None)
+    return {
+        "format": "nemo-testcase-overflow-round49-pair-comparison-v1",
+        "worktree": worktree_stamp(),
+        "reference": str(reference_report),
+        "reference_commit": reference["legoesm_git_sha"],
+        "candidate_commit": candidate["legoesm_git_sha"],
+        "first_moved_boundary": first,
+        "rows": rows,
+    }
 
 
 def classify_arm(
@@ -610,7 +829,7 @@ def preregistered_prediction_check(
 
 
 def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
-        plant_prediction=False, allow_dirty=False) -> dict:
+        plant_prediction=False, allow_dirty=False, faithful_only=False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -622,9 +841,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     )
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
     masks = expected_masks(card)
@@ -724,6 +944,10 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 legacy_2d_stage_face_mask=True
             ),
         }
+    if faithful_only:
+        require(not (plant_operand or plant_prediction),
+                "--faithful-only cannot run arm-dependent planted controls")
+        arms = {"faithful": arms["faithful"]}
 
     states = {}
     stage_states = {}
@@ -739,12 +963,22 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     )
     hu0 = np.asarray(min_cell_to_uface(h0))[:, 1:, :]
     for arm, hooks in arms.items():
-        states[arm] = LatLonCGridOceanModel(
+        final_state = LatLonCGridOceanModel(
             card.recipe.grid,
             card.recipe.z_coord,
             card.recipe.model_config,
             _nemo_ws_test_hooks=hooks,
         ).step(card.recipe.initial_state, dt=card.dt_s)
+        # Materialize before compiling either exposed-stage executable.  A
+        # GYRE/OVERFLOW production step is small, but retaining three XLA
+        # executables at once is not; the comparison harness must not turn a
+        # 30x20-class card into a host-memory exhaustion.
+        states[arm] = final_state._replace(
+            u=final_state.u.replace(data=np.asarray(final_state.u.data)),
+            T=final_state.T.replace(data=np.asarray(final_state.T.data)),
+            eta=final_state.eta.replace(data=np.asarray(final_state.eta.data)),
+        )
+        jax.clear_caches()
         stage_states[arm] = {}
         for stage in (1, 2, 3):
             if stage == 3:
@@ -776,19 +1010,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                     masks["u"]),
                 masks["u"],
             ))
+            if stage != 3:
+                stage_states[arm][stage] = stage_state._replace(
+                    u=stage_state.u.replace(data=np.asarray(stage_state.u.data)))
+                jax.clear_caches()
         # Each arm compiles three fresh executables; with 9 arms the process
         # exhausts vm.max_map_count (LLVM "Unable to allocate section memory")
         # long before host RAM.  Materialize the arm's fields as numpy, then
         # drop the compilation cache.  Pure resource hygiene: no arithmetic.
-        states[arm] = states[arm]._replace(
-            u=states[arm].u.replace(data=np.asarray(states[arm].u.data)),
-            T=states[arm].T.replace(data=np.asarray(states[arm].T.data)),
-            eta=states[arm].eta.replace(data=np.asarray(states[arm].eta.data)),
-        )
-        for stage in (1, 2):
-            stage_states[arm][stage] = stage_states[arm][stage]._replace(
-                u=stage_states[arm][stage].u.replace(
-                    data=np.asarray(stage_states[arm][stage].u.data)))
         stage_states[arm][3] = states[arm]
         jax.clear_caches()
 
@@ -941,7 +1170,13 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
             one_variable = "momentum_transport_reconcile"
         arm_results[arm]["one_variable"] = one_variable
 
-    if case == "LOCK_EXCHANGE-zco" and not any(
+    if faithful_only:
+        ownership = {
+            "classification": "COMPATIBILITY_GUARD_ONLY",
+            "reason": "private ablation arms intentionally not compiled",
+            "arms": {},
+        }
+    elif case == "LOCK_EXCHANGE-zco" and not any(
         result["clears_bar"] for result in arm_results.values()
     ):
         ownership = {
@@ -981,7 +1216,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     stage_operand_ownership = None
     operand_rows = []
     replay = None
-    if case == "OVERFLOW-zps":
+    if case == "OVERFLOW-zps" and not faithful_only:
         def _bc_row(stage, arm):
             suffix = f".stage{stage}.{arm}.baroclinic_u"
             return next(row for row in baroclinic_rows if suffix in row["name"])
@@ -1212,8 +1447,8 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
                 "domqco.F90:160; eos at live gdept (eosbn2.F90:1166)"),
         }
 
-    scaling = face_thickness_and_qco_scaling(
-        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0)
+    scaling = (None if faithful_only else face_thickness_and_qco_scaling(
+        card, masks, nlev, oracle_stages, entry1_for_scaling, hu0))
     if plant_prediction:
         # Planted control for the prediction block: inflate the frozen H2
         # predictions by 1000x.  Every stage predicate must then read NOT-MET;
@@ -1221,13 +1456,15 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         # the gate exits 2.
         for row in scaling["h2_qco_stage_factor"]:
             row["predicted_baroclinic_u_movement_m_s"] *= 1000.0
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        compute_face_masks_3d as _face_masks_3d)
-    prediction_check = preregistered_prediction_check(
-        case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
-        plant_selector=plant_prediction,
-        live_u_face_mask=np.asarray(_face_masks_3d(
-            card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
+    prediction_check = None
+    if not faithful_only:
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d as _face_masks_3d)
+        prediction_check = preregistered_prediction_check(
+            case, scaling, rows, baroclinic_rows, stage_states, masks, arms,
+            plant_selector=plant_prediction,
+            live_u_face_mask=np.asarray(_face_masks_3d(
+                card.recipe.z_coord.is_active, card.recipe.grid)[0]).astype(float))
     if plant_prediction:
         # The gated predicate is the live round's owner claim (S1); the
         # older P3 reads NOT-MET by construction since the selector round
@@ -1252,6 +1489,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         require(case == "OVERFLOW-zps",
                 "--plant-prediction needs the OVERFLOW prediction rows")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
         "status": "AT-BAR" if not failed else "DEBT",
@@ -1288,12 +1526,14 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         "ownership": ownership,
         "stage_operand_ownership": stage_operand_ownership,
         "controls": {"plant_stage": plant_stage, "plant_operand": plant_operand,
-                     "plant_prediction": plant_prediction},
+                     "plant_prediction": plant_prediction,
+                     "faithful_only": faithful_only},
         "legoesm_git_sha": legoesm_git_sha,
         "artifacts": artifacts,
     }
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case", choices=tuple(ROOTS))
@@ -1302,40 +1542,96 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-stage", action="store_true")
     parser.add_argument("--plant-operand", action="store_true")
     parser.add_argument("--plant-prediction", action="store_true")
+    parser.add_argument(
+        "--round49-pair-boundary", action="store_true",
+        help=("compile only the stage-1 tracer / stage-2 HPG boundary used by "
+              "the ORCA2 round-49 OVERFLOW cancelling-pair walk"),
+    )
+    parser.add_argument(
+        "--round49-pair-reference", type=Path,
+        help="base report produced by --round49-pair-boundary",
+    )
+    parser.add_argument(
+        "--round49-pair-plant", action="store_true",
+        help="plant +1 K in the exposed stage-1 tracer; the gate must be red",
+    )
+    parser.add_argument(
+        "--faithful-only", action="store_true",
+        help=("compile only the public faithful stage path for a compatibility "
+              "comparison; private causal arms and their owner labels are omitted"))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
-        add_ulp_compare_arguments, comparison_exit_code, run_ulp_comparison,
+        add_ulp_compare_arguments, capture_residual_fields,
+        comparison_exit_code, persist_ulp_comparison, run_ulp_comparison,
+        write_residual_artifact,
     )
     add_ulp_compare_arguments(parser)
     args = parser.parse_args(argv)
+    if args.round49_pair_boundary:
+        try:
+            require(args.case == "OVERFLOW-zps",
+                    "--round49-pair-boundary is OVERFLOW-only")
+            require(args.output is not None,
+                    "--round49-pair-boundary requires --output")
+            require(not (args.plant_stage or args.plant_operand
+                         or args.plant_prediction or args.faithful_only
+                         or args.compare_to),
+                    "round-49 pair mode cannot be combined with the full-arm options")
+            report, pair_arrays = run_round49_pair_boundary(
+                args.oracle_root or ROOTS[args.case],
+                plant=args.round49_pair_plant,
+                allow_dirty=args.allow_dirty,
+            )
+            persist_round49_pair_arrays(args.output, report, pair_arrays)
+            if args.round49_pair_reference:
+                report["pair_comparison"] = compare_round49_pair_arrays(
+                    args.round49_pair_reference, report)
+            encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
+            args.output.write_text(encoded)
+            print(encoded, end="")
+            return 2 if args.round49_pair_plant else (
+                0 if report["status"] == "AT-BAR" else 1)
+        except (GateError, OSError, ValueError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 2
+    require(not args.round49_pair_reference,
+            "--round49-pair-reference requires --round49-pair-boundary")
+    require(not args.round49_pair_plant,
+            "--round49-pair-plant requires --round49-pair-boundary")
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:
-        report = run(args.case, args.oracle_root or ROOTS[args.case],
-                     plant_stage=args.plant_stage, plant_operand=args.plant_operand,
-                     plant_prediction=args.plant_prediction,
-                     allow_dirty=args.allow_dirty)
+        with capture_residual_fields() as residuals:
+            report = run(args.case, args.oracle_root or ROOTS[args.case],
+                         plant_stage=args.plant_stage, plant_operand=args.plant_operand,
+                         plant_prediction=args.plant_prediction,
+                         allow_dirty=args.allow_dirty, faithful_only=args.faithful_only)
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        print("FAIL: --compare-to requires --output for the residual sidecar", file=sys.stderr)
         return 2
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(encoded)
     print(encoded, end="")
     if args.compare_to:
-        # Exit status then reports the ULP COMPARISON against a committed
-        # reference, not this gate's own AT-BAR/DEBT verdict.  Every arm here
+        # Exit status then reports the oracle-relative cellwise comparison
+        # against a committed before report. Every arm here
         # other than "faithful" is a private ablation whose meaning a refactor
         # may legitimately redefine, so a comparison of this gate normally
         # passes --compare-rows-matching .faithful. and says so in the receipt.
         comparison = run_ulp_comparison(args, report)
         print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
         code = comparison_exit_code(comparison)
         if code == 2:
-            print("PLANTED CONTROL DID NOT LAND: a planted "
-                  f"{comparison['planted_ulp_move']}-ulp move left the "
-                  "comparison green, so the comparison is inspecting nothing",
+            print("PLANTED CONTROL DID NOT PRODUCE ITS REQUIRED VERDICT: "
+                  f"{comparison['plant']}",
                   file=sys.stderr)
         return code
     return 0 if report["status"] == "AT-BAR" else 1

@@ -1,0 +1,35 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -91,0 +92 @@
++      INTEGER  ::   r40_family_unit, r40_family_ios
+@@ -93,0 +95 @@
++      CHARACTER(LEN=16)  :: r40_family_magic
+@@ -94,0 +97 @@
++      CHARACTER(LEN=256) :: r40_family_filename
+@@ -129,0 +133,12 @@
++         IF( kt == nit000 ) THEN
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round-40 RHS families require 64-bit wp' )
++            WRITE(r40_family_filename,'("oracle_rhs_families_ranked_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
++            OPEN( NEWUNIT=r40_family_unit, FILE=TRIM(r40_family_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r40_family_ios )
++            IF( r40_family_ios /= 0 )   CALL ctl_stop( 'cannot open round-40 RHS family dump' )
++            r40_family_magic = 'NEMO_L4_R40FAM'
++            WRITE(r40_family_unit) r40_family_magic, 1, kt, Kbb, Krhs, narea - 1, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(r40_family_unit) SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               & SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), &
++               & SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs)), SIZE(uu(:,:,:,Krhs)), SIZE(vv(:,:,:,Krhs))
++         ENDIF
+@@ -131,0 +147 @@
++         IF( kt == nit000 )   WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs),'U'), l4_canon_3d(vv(:,:,:,Krhs),'V')
+@@ -134,0 +151 @@
++         IF( kt == nit000 )   WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs),'U'), l4_canon_3d(vv(:,:,:,Krhs),'V')
+@@ -149,0 +167 @@
++         IF( kt == nit000 )   WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs),'U'), l4_canon_3d(vv(:,:,:,Krhs),'V')
+@@ -166,0 +185 @@
++            IF( kt == nit000 )   WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs),'U'), l4_canon_3d(vv(:,:,:,Krhs),'V')
+@@ -168,0 +188,5 @@
++            IF( kt == nit000 ) THEN
++               WRITE(r40_family_unit) l4_canon_3d(uu(:,:,:,Krhs),'U'), l4_canon_3d(vv(:,:,:,Krhs),'V')
++               CLOSE(r40_family_unit)
++               WRITE(numout,*) 'ORCA2_R40_RHS_FAMILIES_DUMP ', kt, TRIM(r40_family_filename)
++            ENDIF

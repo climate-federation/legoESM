@@ -108,7 +108,6 @@ def _f(x) -> jnp.ndarray:
 
 class IFSClosureConfig(NamedTuple):
     """Tunables and switches of the cumastrn closure (sucumf.F90)."""
-    lmfwstar: bool = False       # sucumf.F90:232  LMFWSTAR=.FALSE. (Grant w*)
     rcapdcycl: float = RCAPDCYCL  # sucumf.F90:234  land/PBL diurnal-cycle corr.
     rcapqadv: float = RCAPQADV    # sucumf.F90:237  moisture advection term
     rmincape: float = RMINCAPE    # sucumf.F90:239
@@ -646,6 +645,7 @@ def ifs_closure(
     dT_dt_adv, dq_dt_adv,
     land_frac, dx_m, dt,
     cfg: IFSClosureConfig = IFSClosureConfig(),
+    ktype_first_guess=None,
 ):
     """Compose (1)-(4) over a column set (leading dimension = columns).
 
@@ -711,8 +711,14 @@ def ifs_closure(
     # cumastrn.F90:569:  ZDH=RG*MAX(ZDH,1.E5_JPRB*ZDQMIN)
     zdh_base = RG * jnp.maximum(
         RCPD * (t_u_b - th_b) + RLVTT * zqumqe, ZDH_DQMIN_SCALE * zdqmin)
+    # The first guess is cumastrn's ZMFUB at :563-576, computed BEFORE the
+    # ascent and therefore with the PRE-reclassification type; the final
+    # scaling ZMFS = ZMFUB1/ZMFUB (:963) must divide by that same ZMFUB.  A
+    # caller that reclassifies KTYPE after the ascent (cumastrn.F90:635-641)
+    # passes the earlier type here; everything below uses the new one.
+    ktype_fg = ktype if ktype_first_guess is None else ktype_first_guess
     M_b0, zmfmax, ldcum = first_guess_mass_flux(
-        p_half, k_cbot, ldcum, ktype, zdhpbl, zdh_base, dt, cfg)
+        p_half, k_cbot, ldcum, ktype_fg, zdhpbl, zdh_base, dt, cfg)
 
     # (2) deep closure ----------------------------------------------------
     M_b1, zcape, zheat, zxtau = deep_cape_closure(
@@ -739,6 +745,6 @@ def ifs_closure(
     return {
         "M_u": M_u, "PMFUS": PMFUS, "PMFUQ": PMFUQ, "PMFUL": PMFUL,
         "PLUDE": PLUDE, "PDMFUP": PDMFUP, "PMFUDE_RATE": PMFUDE_RATE,
-        "PDMFEN": PDMFEN, "M_b1": M_b1, "ldcum": ldcum,
+        "PDMFEN": PDMFEN, "M_b0": M_b0, "M_b1": M_b1, "ldcum": ldcum,
         "zcape": zcape, "zheat": zheat, "zxtau": zxtau, "zmfs": zmfs,
     }

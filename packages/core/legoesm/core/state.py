@@ -136,8 +136,8 @@ class HydrostaticTendencies(NamedTuple):
     # Surface turbulent fluxes [W/m^2, positive UPWARD out of the surface —
     # the CMOR hfss/hfls convention, matching the surface-layer helpers'
     # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
-    # feed (evspsbl is derived downstream as lhflx / L_v). None when
-    # turbulence is off or a scheme computes no surface fluxes.
+    # feed.  None when turbulence is off or a scheme computes no surface
+    # fluxes.
     shflx_sfc: Field | None = None
     lhflx_sfc: Field | None = None
     # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
@@ -175,6 +175,17 @@ class HydrostaticTendencies(NamedTuple):
     # field set is unaffected.
     sw_up_toa_clr: Field | None = None
     lw_up_toa_clr: Field | None = None
+    # Per-column REQUIRED sedimentation sub-step count (int, unclipped) from
+    # MG2-style CFL sub-stepping in the microphysics
+    # (``MicrophysicsOutput.sed_substeps_required``); a value above the
+    # scheme's static cap means that column's fall was clamped.  None when the
+    # sub-stepping is off.  Diagnostic only; appended with a None default.
+    sed_substeps_required: Field | None = None
+    # Surface water flux [kg/m2/s, positive up]: the water the column actually
+    # received (the kernel's moisture BC: tiled / prescribed water, else the
+    # bulk L_v(T_sfc) inverse).  CMOR evspsbl and the moisture closure read
+    # it -- never lhflx / L_v.  Appended LAST so no field index moves.
+    evap_sfc: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -192,11 +203,24 @@ class HydrostaticTendencies(NamedTuple):
 # ``_mpas_cmip_feed_enabled`` explicitly enables the CMOR feed for — accepted
 # ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.  A shared
 # constant makes that class of drift impossible instead of merely tested-for.
+# The three fixed leading slots of the same tuple, so a consumer can derive an
+# extras index instead of hand-counting the prefix.
+MPAS_SFC_DIAG_BASE_KEYS = ("sw_net_sfc", "lw_net_sfc", "precip")
 MPAS_SFC_DIAG_EXTRA_KEYS = (
     "lw_up_toa", "sw_up_toa", "sw_down_toa",
     "shflx_sfc", "lhflx_sfc",
     "sw_down_sfc", "lw_down_sfc",
     "sw_up_toa_clr", "lw_up_toa_clr",
+    # slot 12: the microphysics' REQUIRED CFL sedimentation sub-step count
+    # (int, unclipped).  Appended at the END so every existing slot index is
+    # unchanged; the driver logs it so an overflow (the loop clamped, the
+    # species fell slower than its terminal speed) is visible in a real run
+    # instead of dying only under the strict abort.
+    "sed_substeps_required",
+    # slot 13: the surface water flux the column received [kg/m2/s, +up]
+    # (turbulence ``evap_sfc``); appended at the END so no existing slot
+    # index moves.  CMOR evspsbl / moisture closure read this, never hfls/L_v.
+    "evap_sfc",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

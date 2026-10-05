@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
+from legoesm.land.snow_column import SnowColumnConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -79,7 +80,7 @@ class LandConfig(NamedTuple):
     # DEFAULT: Monin-Obukhov, the exchange law the coupled land tile runs;
     # "constant" is a fixed coefficient for idealized work.
     bulk_scheme: str = "most"  # "most" or "constant"
-    z_ref: float = 10.0           # Reference height for MOST [m]
+    z_ref: float = 10.0           # Observed forcing height [m]; model uses z_lowest
     bulk_n_iter: int = 5          # MOST iterations
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback
@@ -159,7 +160,7 @@ class MultiLayerLandConfig(NamedTuple):
     # forest-floor range (~1e2-1e3 s/m).
     soil_evap_litter_resistance_s_m: float = 300.0
     bulk_scheme: str = "most"       # see LandConfig.bulk_scheme
-    z_ref: float = 10.0
+    z_ref: float = 10.0           # Observed forcing height [m]; model uses z_lowest
     bulk_n_iter: int = 5
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback
@@ -169,6 +170,12 @@ class MultiLayerLandConfig(NamedTuple):
     # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
     # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
     elev_bands: ElevationSnowBandConfig | None = None
+    # Snowpack model: "bulk" (one SWE reservoir, energy-limited melt at the soil
+    # skin) or "layered" (``legoesm.land.snow_column``: an equal-mass multi-layer
+    # pack solved implicitly together with the soil column, with phase change,
+    # percolation and rain-on-snow).  Validated in ``step_multilayer_land``.
+    snow_scheme: str = "bulk"
+    snow_column: SnowColumnConfig = SnowColumnConfig()
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     # ``theta_wp`` is the SOIL wilting point [m3/m3] — the moisture reference for
@@ -213,10 +220,11 @@ class MultiLayerLandConfig(NamedTuple):
     surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
-    # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
-    # ``W_canopy`` store, drips the excess as throughfall, and evaporates the wet
-    # leaf — reducing soil infiltration and re-partitioning the canopy latent
-    # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
+    # When set, the two-leaf path intercepts rain into a prognostic ``W_canopy``
+    # store, drips the excess as throughfall, and evaporates the wet leaf —
+    # reducing soil infiltration and re-partitioning the canopy latent flux.
+    # SimpleSEB has no canopy latent stream and ignores it; the CLM-ML canopy
+    # has its OWN internal interception and ignores it too.
     interception: Any | None = None
 
 
@@ -234,6 +242,87 @@ def resolve_land_config(land_mode: str, land_config=None):
     if land_mode == "none":
         return LandConfig()
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
+
+
+def inactive_land_param_names(config: MultiLayerLandConfig) -> frozenset:
+    """Registry-qualified land tunables that carry no gradient in ``config``.
+
+    A trainable-parameter collector over the multilayer land must drop these
+    (no inert parameters): the ice impedance exponent is read only when soil
+    freeze/thaw is on.
+    """
+    if config.thermal.enable_freeze_thaw:
+        return frozenset()
+    return frozenset({"land.richards.ice_impedance_exponent"})
+
+
+LAND_MODELS = ("none", "slab", "multilayer")
+
+
+def land_model_switches(land_model: str) -> dict:
+    """``land_model`` name -> the AMIP driver's land switches.
+
+    ONE VOCABULARY FOR ONE CONCEPT.  The coupled driver and ``run_lmip_smoke``
+    have always selected the land surface by name through
+    ``CoupledESMConfig.land_mode`` and :func:`resolve_land_config`, using
+    exactly these three values.  The AMIP driver instead exposed two
+    independent booleans, ``slab_land_active`` and ``use_multilayer_land``,
+    whose FOUR combinations encode only THREE states — and whose all-false
+    combination means "no land surface at all", which is not a simpler land
+    model but the absence of one.  That ambiguity has cost this project real
+    campaign time before.  This function is the bridge, so a run can name its
+    land model the same way everywhere.
+
+    STRICTLY AN ALIAS.  Each name sets exactly the switch the existing flag
+    sets, and nothing else:
+
+        none       -> slab_land_active=False, use_multilayer_land=False
+        slab       -> slab_land_active=True
+        multilayer -> use_multilayer_land=True
+
+    In particular "multilayer" does NOT also set ``slab_land_active``, even
+    though the multilayer soil is layered on top of the slab's surface energy
+    balance and needs an active land tile.  Setting both would make
+    ``--land-model multilayer`` a DIFFERENT run from today's
+    ``--use-multilayer-land`` for any deck that relies on topography or a
+    land-mask file to activate the tile: the driver already turns the runtime
+    tile on when a mask is present (``model_driver`` activates on
+    ``land_mask_path or slab_land_active``), so forcing the config flag would
+    change the one case where neither is set.  Whether a tile ends up active is
+    left exactly where it already lives — with the topography, the mask, and
+    the driver's own validation, which refuses a requested land tile over an
+    idealized topography with a clear error.
+
+    Raises on an unknown name rather than falling back to a default, so a typo
+    cannot silently select a different land surface.
+    """
+    if land_model not in LAND_MODELS:
+        raise ValueError(
+            f"unknown land_model {land_model!r}; expected one of "
+            f"{LAND_MODELS}. Note that 'none' means NO land surface model — "
+            "land temperature falls back to the neighbouring prescribed SST "
+            "minus a lapse rate — and is not a simplified land model."
+        )
+    return {
+        "none": dict(slab_land_active=False, use_multilayer_land=False),
+        "slab": dict(slab_land_active=True, use_multilayer_land=False),
+        "multilayer": dict(slab_land_active=False, use_multilayer_land=True),
+    }[land_model]
+
+
+def describe_land_model(*, slab_land_active: bool, use_multilayer_land: bool,
+                        has_land_mask: bool = False) -> str:
+    """The land model a set of switches RESOLVES to, as one of :data:`LAND_MODELS`.
+
+    The inverse of :func:`land_model_switches`, for printing what a run is
+    actually about to do instead of trusting what its deck says it does.  A
+    land-mask file activates the tile on its own, so it is part of the answer.
+    """
+    if use_multilayer_land:
+        return "multilayer"
+    if slab_land_active or has_land_mask:
+        return "slab"
+    return "none"
 
 
 # ===========================================================================

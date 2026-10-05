@@ -20,7 +20,8 @@ mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)
 pr = probe_latlon_cgrid(br.state, br.geometry, br.z_coord, mc,
-                        surface_forcing=sf, dt=2700.0)
+                        surface_forcing=sf, dt=2700.0,
+                        tke_rn_dt=2700.0)
 
 # --- weights on NEMO u-points (interior), channel rows ---
 mm = nc.Dataset(f"{RUN}/mesh_mask.nc")

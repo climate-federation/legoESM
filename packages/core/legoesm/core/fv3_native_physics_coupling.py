@@ -327,6 +327,92 @@ def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     return u_new, v_new, pt_new, ua_new, va_new
 
 
+def moist_cp_warm_rain(q_v, q_c, q_r, *, cp_air, cp_vapor, c_liq):
+    """``moist_cp`` for ``nwat = 4`` (fv_mapz.F90:3704-3708, the
+    "K_warm_rain scheme with fake ice" case): the moist heat capacity
+    ``(1 - qv - qd)*cp_air + qv*cp_vapor + qd*c_liq`` with
+    ``qd = liq_wat + rainwat``.  Kessler carries no ice, so the fake ice
+    slot is zero and drops out."""
+    qd = q_c + q_r
+    return (1.0 - (q_v + qd)) * cp_air + q_v * cp_vapor + qd * c_liq
+
+
+def heating_to_fv3_cp_air(t_dt):
+    """legoESM physics heating (``Q/(m c_pd)``, ``constants.c_pd``) in
+    FV3's ``cp_air`` convention: ``fv_update_phys`` rescales ``t_dt`` by
+    ``cp_air/cvm``, so handing it ``t_dt*c_pd/cp_air`` lands the energy
+    ``Q`` on ``cvm`` exactly (codex 2026-09-24; the two ``c_p`` differ by
+    5e-5)."""
+    from legoesm import constants
+    from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR
+    return t_dt * (constants.c_pd / FV3_CP_AIR)
+
+
+def fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt, *, n, ng,
+                                 cp_air, cp_vapor, c_liq):
+    """Port of FV3 ``fv_update_phys``'s ``nwat > 0`` scalar block on the
+    compute window, hydrostatic (fv_update_phys.F90:318-372), for the
+    Kessler tracer set ``q = [sphum, liq_wat, rainwat]`` (``nwat = 4``
+    with the fake-ice slot absent).  Winds are not touched here (the
+    D-grid increment is the dry twin's job and Kessler has none).
+
+    Per level k, compute window only:
+        q(m)   = q(m) + dt*q_dt(m)                          (:324)
+        ps_dt  = 1 + dt*sum(q_dt(1:nwat))                   (:335)
+        delp   = delp * ps_dt                               (:336)
+        q(m)   = q(m) / ps_dt        (every mass-adjusted tracer, :352)
+        pt     = pt + t_dt*dt*cp_air/cvm, cvm = moist_cp(q AFTER the
+                 update, :367-371 -- moist_cp reads ``q``, which :324
+                 has already advanced)
+
+    The pressures (pe/peln/pk/pkz/ps, :662-686) are NOT rebuilt here:
+    the caller rebuilds them from the returned delp with the lane's own
+    ``p_var_hydrostatic`` -- the same producer that built them at the IC.
+
+    WHY IT MATTERS (GLM 2026-09-24): condensation is layer-neutral
+    (``sum(q_dt) = 0``, ``ps_dt = 1``); rain SEDIMENTATION moves water
+    between layers and out of the column bottom, and only this block lets
+    the layer mass follow it.  Without it precipitated water becomes dry
+    air (~1 hPa of surface pressure per 100 mm accumulated rain).
+
+    NO ORACLE RECEIPT: every Fortran deck in the wdump runs ``nwat = 0``,
+    so this block is gated analytically (tests): identity at
+    ``q_dt = 0``; column mass change == -(bottom rain flux)*dt; the
+    dry-mass mixing ratio ``q/(1 - sum q)`` invariant under the
+    renormalisation; the cp/cvm factor reproduced from ``moist_cp``.
+
+    Shapes: pt, delp ``(m, m, npz)``; q, q_dt lists of three
+    ``(m, m, npz)``; t_dt ``(m, m, npz)``.  Halos untouched.  Returns
+    ``(pt_new, delp_new, [q_new x3], ps_dt)`` -- ``ps_dt`` on the compute
+    block ``(n, n, npz)`` so the caller can renormalise every OTHER
+    mass tracer it carries (:349-357 adjusts all of them); no input is
+    mutated.
+    """
+    import jax.numpy as jnp
+    pt, delp, t_dt = map(jnp.asarray, (pt, delp, t_dt))
+    q = [jnp.asarray(a) for a in q]
+    q_dt = [jnp.asarray(a) for a in q_dt]
+    if len(q) != 3 or len(q_dt) != 3:
+        raise ValueError(
+            f"fv_update_phys_moist_duo_jax: nwat = 3 warm-rain tracers "
+            f"[sphum, liq_wat, rainwat] expected, got {len(q)}/{len(q_dt)}")
+    ng = int(ng)
+    ci = slice(ng, ng + int(n))
+    qc = [a[ci, ci] for a in q]
+    dqc = [a[ci, ci] for a in q_dt]
+    q_upd = [a + dt * da for a, da in zip(qc, dqc)]          # :324
+    ps_dt = 1.0 + dt * (dqc[0] + dqc[1] + dqc[2])             # :335
+    delp_c = delp[ci, ci] * ps_dt                             # :336
+    q_adj = [a / ps_dt for a in q_upd]                        # :352
+    cvm = moist_cp_warm_rain(q_adj[0], q_adj[1], q_adj[2], cp_air=cp_air,
+                             cp_vapor=cp_vapor, c_liq=c_liq)  # :367
+    pt_c = pt[ci, ci] + t_dt[ci, ci] * dt * cp_air / cvm      # :371
+    pt_new = pt.at[ci, ci].set(pt_c)
+    delp_new = delp.at[ci, ci].set(delp_c)
+    q_new = [a.at[ci, ci].set(b) for a, b in zip(q, q_adj)]
+    return pt_new, delp_new, q_new, ps_dt
+
+
 def held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
                          strat=True, radius=None):
     """JAX twin of :func:`held_suarez_tend` (~1e-12 vs the NumPy authority at
@@ -613,3 +699,243 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True,
             wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"], ng)
         state[t]["u"], state[t]["v"], state[t]["pt"] = u2, v2, pt2
     return None
+
+
+def stack_held_suarez_metrics(ctx):
+    """Face-stack the per-face metric inputs of the Held-Suarez step once.
+
+    Returns ``(amat6, agrid_lat6, wind_vectors6)`` for
+    :func:`apply_held_suarez_step_sixface_jax`: ``amat6`` a 4-tuple of
+    ``(6, m, m)`` arrays, ``agrid_lat6`` ``(6, m, m)``, ``wind_vectors6``
+    a dict of ``(6, ...)`` stacks -- exactly the arrays the NumPy
+    authority reads per face from ``ctx["ectx"]["amat6"]``,
+    ``ctx["gs6"]`` and ``compute_fv3_native_wind_vectors``.
+    """
+    from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
+    ectx = ctx.get("ectx")
+    if ectx is None:
+        raise ValueError(
+            "stack_held_suarez_metrics needs ctx['ectx'] (build the duo "
+            "context with use_ext_bundle=True) for the c2l Earth-frame winds")
+    amat6 = tuple(np.stack([np.asarray(ectx["amat6"][t][c]) for t in range(6)])
+                  for c in range(4))
+    agrid_lat6 = np.stack([np.asarray(ctx["gs6"][t]["agrid_lat"])
+                           for t in range(6)])
+    wvs = []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        wvs.append(compute_fv3_native_wind_vectors(
+            gs["grid_lon"], gs["grid_lat"], gs["agrid_lon"], gs["agrid_lat"]))
+    wind_vectors6 = {k: np.stack([np.asarray(wv[k]) for wv in wvs])
+                     for k in ("vlon", "vlat", "es1", "ew2")}
+    return amat6, agrid_lat6, wind_vectors6
+
+
+def column_view_sixface_jax(state, tab, amat6, *, n, ng, km):
+    """The duo's physics-facing COLUMN view (passes 0-1 of the six-face
+    Held-Suarez twin, factored out so every column physics shares them):
+    D-grid halo strips (DGRID_NE) refreshed, then Earth-frame A-grid
+    winds by the order-4 c2l per face and level, halo NaNs zeroed as the
+    NumPy authority does.  Returns ``(u6, v6, ua6, va6)`` on ``(6, m, m,
+    km)``; ``u6``/``v6`` are the exchanged D winds the dry twin must be
+    handed (its contract, fv3_native_physics_coupling:750-799)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.grids.fv3_duo_halos import exchange_dgrid_vector_halos
+    from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face_jax
+
+    n, ng, km = int(n), int(ng), int(km)
+    m = n + 2 * ng
+    u6 = jnp.asarray(state["u"])
+    v6 = jnp.asarray(state["v"])
+    if jnp.asarray(state["pt"]).shape != (6, m, m, km):
+        raise ValueError(
+            f"column_view_sixface_jax: pt {jnp.asarray(state['pt']).shape} "
+            f"!= {(6, m, m, km)}")
+
+    # PASS 0: D-grid u/v halo strips (DGRID_NE), one level at a time
+    ex_d = jax.vmap(lambda u, v: exchange_dgrid_vector_halos(u, v, tab),
+                    in_axes=(-1, -1), out_axes=(-1, -1))
+    u6, v6 = ex_d(u6, v6)
+
+    # PASS 1: Earth-frame A-grid winds (per face, per level)
+    c2l_k = jax.vmap(lambda u, v, a: c2l_ord4_face_jax(u, v, a, n, ng),
+                     in_axes=(-1, -1, None), out_axes=(-1, -1))
+    c2l_6 = jax.vmap(c2l_k, in_axes=(0, 0, 0), out_axes=(0, 0))
+    ua6, va6 = c2l_6(u6, v6, tuple(jnp.asarray(a) for a in amat6))
+    # c2l leaves the halo NaN by contract; the authority's bare
+    # np.nan_to_num(nan=0.0) also clamps +-inf to the float64 extrema, and
+    # jnp.nan_to_num's defaults do the same -- port its exclusions verbatim.
+    ua6 = jnp.nan_to_num(ua6, nan=0.0)
+    va6 = jnp.nan_to_num(va6, nan=0.0)
+    return u6, v6, ua6, va6
+
+
+def apply_column_increments_sixface_jax(state, press, q, view, tab,
+                                        wind_vectors6, u_dt_c, v_dt_c,
+                                        t_dt_c, q_dt_c, *, dt, n, ng, km,
+                                        ptop, akap, moist_cp=False):
+    """fv_update_phys on six faces for COLUMN tendencies given on the
+    compute window ``(6, n, n, km)`` (passes 2-3 of the Held-Suarez twin
+    plus the moist scalar block of the Kessler bridge, so both and the
+    column lane apply increments through ONE function):
+
+    * ``q_dt_c`` non-empty (``{slot: (6, n, n, km)}``, slots 0..2 =
+      sphum/liq_wat/rainwat only): tracers, layer mass and ``pt`` (on
+      ``cvm``) through :func:`fv_update_phys_moist_duo_jax`, every other
+      tracer renormalised to the new layer mass, pressures rebuilt with
+      ``p_var_hydrostatic`` (``ptop``/``akap``) -- the Kessler bridge's
+      block.  A tendency on a slot beyond the three warm-rain tracers is
+      REFUSED: the ``nwat`` sum would miss its mass (an ice/snow deck
+      needs the nwat=6 block).  Empty ``{}``: pressures and tracers
+      untouched; ``pt += t_dt*dt`` on the compute window, or -- with
+      ``moist_cp=True`` (a MOIST deck, ``FV3DuoConfig.moist``) -- the
+      same block with zero water tendencies, i.e. ``pt += t_dt*dt*
+      cp_air/cvm`` (fv_update_phys.F90:367-371 rescales EVERY physics
+      heating by the moist heat capacity, water tendency or not; the
+      layer mass is exactly unchanged since ``ps_dt == 1``).  So one deck
+      applies heating one way, whichever tendencies physics returns.
+      Heating convention: the moist block takes legoESM ``c_pd`` heating
+      (what every legoESM physics returns) and rescales it to FV3's
+      ``cp_air`` first (:func:`heating_to_fv3_cp_air`); the dry path
+      applies ``t_dt_c`` as given (the closed lane's Held-Suarez is
+      FV3's own hswf, already in its convention).
+    * ``u_dt_c`` given: pad, one-ring A-grid exchange of ``u_dt``/``v_dt``
+      (``tab``), then the dry twin (geographic A-grid increments -> D
+      winds with ``wind_vectors6``) on ``view`` =
+      :func:`column_view_sixface_jax`'s ``(u6, v6, ua6, va6)`` for the
+      SAME ``state``.  ``None``: winds untouched (Kessler), and
+      ``view``/``tab``/``wind_vectors6`` are not read.
+
+    Returns ``(state_new, press_new, q_new)``; no input is mutated.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.grids.fv3_duo_halos import exchange_agrid_scalar_halos
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
+
+    n, ng, km = int(n), int(ng), int(km)
+    m = n + 2 * ng
+    ci = slice(ng, ng + n)
+    pt6 = jnp.asarray(state["pt"])
+    delp6 = jnp.asarray(state["delp"])
+    zeros = jnp.zeros((6, m, m, km), dtype=pt6.dtype)
+    t_dt6 = zeros.at[:, ci, ci].set(t_dt_c)
+
+    q_dt_c = dict(q_dt_c)
+    water = bool(q_dt_c)
+    moist = water or bool(moist_cp)
+    if moist:
+        bad = sorted(k for k in q_dt_c if k not in (0, 1, 2))
+        if bad or len(q) < 3:
+            raise ValueError(
+                f"apply_column_increments_sixface_jax: water tendencies on "
+                f"tracer slots {bad} (bundle carries {len(q)}); only the "
+                f"warm-rain slots 0..2 [sphum, liq_wat, rainwat] enter the "
+                f"nwat mass block -- an ice/snow deck needs the nwat=6 port")
+        q3 = [jnp.asarray(q[i]) for i in range(3)]
+        q_dt6 = [zeros.at[:, ci, ci].set(q_dt_c[i]) if i in q_dt_c else zeros
+                 for i in range(3)]
+
+        def _moist(pt, delp, qv, qc, qr, tdt, dqv, dqc, dqr):
+            pt_n, delp_n, q_n, ps_dt = fv_update_phys_moist_duo_jax(
+                pt, delp, [qv, qc, qr], tdt, [dqv, dqc, dqr], dt, n=n, ng=ng,
+                cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR, c_liq=FV3_C_LIQ)
+            return pt_n, delp_n, q_n[0], q_n[1], q_n[2], ps_dt
+        # rescale on the compute block BEFORE padding (the bridge's op
+        # order; rescaling the padded array lets XLA fold the factor into
+        # the block's dt*cp_air chain and moves pt by ~1e-12 under jit)
+        t_dt6_m = zeros.at[:, ci, ci].set(heating_to_fv3_cp_air(t_dt_c))
+        pt6, delp_m, qv2, qc2, qr2, ps_dt6 = jax.vmap(_moist)(
+            pt6, delp6, q3[0], q3[1], q3[2], t_dt6_m, *q_dt6)
+        t_dt6 = zeros            # pt already advanced on cvm
+    if water:
+        delp6 = delp_m
+        press_new = p_var_hydrostatic(delp6, ptop=ptop, akap=akap, n=n,
+                                      ng=ng, km=km)
+        q_new = list(q)
+        q_new[0], q_new[1], q_new[2] = qv2, qc2, qr2
+        # every OTHER mass tracer rides the same layer mass and is
+        # renormalised with it (fv_update_phys.F90:349-357 adjusts all of
+        # them; codex 2026-09-24: leaving a passenger's mixing ratio while
+        # delp moves changes its mass without a source)
+        for i in range(3, len(q_new)):
+            qi = jnp.asarray(q_new[i])
+            q_new[i] = qi.at[:, ci, ci].set(qi[:, ci, ci] / ps_dt6)
+    else:
+        # no water tendency: ps_dt == 1 exactly, so the layer mass, the
+        # tracers and the step's own pressures pass through untouched
+        press_new, q_new = press, q
+
+    state_new = {**state, "pt": pt6}
+    if water:
+        state_new["delp"] = delp6
+    if u_dt_c is None:
+        if not moist:
+            state_new["pt"] = pt6.at[:, ci, ci].set(
+                pt6[:, ci, ci] + t_dt6[:, ci, ci] * dt)
+        return state_new, press_new, q_new
+
+    u6, v6, ua6, va6 = view
+    u_dt6 = zeros.at[:, ci, ci].set(u_dt_c)
+    v_dt6 = zeros.at[:, ci, ci].set(v_dt_c)
+
+    # PASS 2: A-grid halo strips of the vector tendencies, per level
+    ex_a = jax.vmap(lambda f: exchange_agrid_scalar_halos(f, tab),
+                    in_axes=-1, out_axes=-1)
+    u_dt6 = ex_a(u_dt6)
+    v_dt6 = ex_a(v_dt6)
+
+    # PASS 3: apply (per face)
+    wv = {k: jnp.asarray(wind_vectors6[k]) for k in ("vlon", "vlat", "es1",
+                                                     "ew2")}
+
+    def _upd(u, v, pt, ua, va, u_dt, v_dt, t_dt, vlon, vlat, es1, ew2):
+        u2, v2, pt2, _, _ = fv_update_phys_dry_duo_jax(
+            u, v, pt, ua, va, u_dt, v_dt, t_dt, dt, vlon, vlat, es1, ew2, ng)
+        return u2, v2, pt2
+    u2, v2, pt2 = jax.vmap(_upd)(
+        u6, v6, pt6, ua6, va6, u_dt6, v_dt6, t_dt6,
+        wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"])
+    state_new.update(u=u2, v=v2, pt=pt2)
+    return state_new, press_new, q_new
+
+
+def apply_held_suarez_step_sixface_jax(state, press, tab, amat6, agrid_lat6,
+                                       wind_vectors6, *, dt, n, ng, km,
+                                       strat=True):
+    """Face-stacked, pure-JAX twin of :func:`apply_held_suarez_step`.
+
+    Same three passes on ``(6, ...)`` stacks (now the shared
+    :func:`column_view_sixface_jax` / :func:`apply_column_increments_sixface_jax`
+    pair around the Held-Suarez tendency); the NumPy path stays the
+    authority.  Returns a new ``state`` dict with ``u``/``v``/``pt``
+    replaced; inputs are never mutated.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    n, ng, km = int(n), int(ng), int(km)
+    ci = slice(ng, ng + n)
+    view = column_view_sixface_jax(state, tab, amat6, n=n, ng=ng, km=km)
+    _, _, ua6, va6 = view
+    pt6 = jnp.asarray(state["pt"])
+    delp6 = jnp.asarray(state["delp"])
+    peln6 = jnp.transpose(jnp.asarray(press["peln"]), (0, 1, 3, 2))
+    pe6 = jnp.transpose(jnp.asarray(press["pe"])[:, 1:n + 1, :, 1:n + 1],
+                        (0, 1, 3, 2))
+    pkz6 = jnp.asarray(press["pkz"])
+    lat6 = jnp.asarray(agrid_lat6)[:, ci, ci]
+
+    def _tend(pt, ua, va, delp, peln, pkz, pe, lat):
+        return held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, dt,
+                                    strat=strat)
+    t_dt_c, u_dt_c, v_dt_c = jax.vmap(_tend)(
+        pt6[:, ci, ci], ua6[:, ci, ci], va6[:, ci, ci], delp6[:, ci, ci],
+        peln6, pkz6, pe6, lat6)
+    state_new, _, _ = apply_column_increments_sixface_jax(
+        state, press, [], view, tab, wind_vectors6, u_dt_c, v_dt_c, t_dt_c,
+        {}, dt=dt, n=n, ng=ng, km=km, ptop=None, akap=None)
+    return state_new

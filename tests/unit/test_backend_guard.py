@@ -10,14 +10,12 @@ from unittest.mock import MagicMock, patch
 import jax
 import pytest
 
-from legoesm.core.hardware import check_spectral_backend, get_backend
 from legoesm.runtime.backend import (
     check_spectral_backend as rt_check_spectral,
 )
 
 
 # Patch target: runtime.backend.get_backend is the single source of truth.
-# core.hardware.get_backend delegates to it and uppercases the result.
 _RT_GET_BACKEND = "legoesm.runtime.backend.get_backend"
 
 
@@ -92,18 +90,6 @@ class TestCheckSpectralBackend:
         with patch(_RT_GET_BACKEND, return_value="mps"):
             with pytest.raises(ValueError, match="allow_unsupported"):
                 rt_check_spectral()
-
-
-class TestGetBackend:
-    """Tests for get_backend() in core.hardware (legacy, uppercase)."""
-
-    def test_returns_uppercase(self):
-        with patch(_RT_GET_BACKEND, return_value="cpu"):
-            assert get_backend() == "CPU"
-
-    def test_returns_uppercase_mps(self):
-        with patch(_RT_GET_BACKEND, return_value="mps"):
-            assert get_backend() == "MPS"
 
 
 class TestGaussianGridGuard:

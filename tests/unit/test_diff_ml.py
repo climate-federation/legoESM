@@ -871,6 +871,31 @@ class TestChannelPackingPE:
         np.testing.assert_allclose(np.asarray(g), np.asarray(w),
                                    rtol=1e-8, atol=1e-10)
 
+    def test_repeated_round_trip_preserves_vor_div(self):
+        """pack -> unpack must be idempotent on vor/div, including the
+        n = n_max row: an identity network run for several state_update
+        steps may not amplify the wind field (Bourke analysis did)."""
+        from legoesm.ml.channel_packing import pack_pe_state, unpack_pe_output
+        st = _pe_state()
+        k = jax.random.split(jax.random.PRNGKey(7), 4)
+        shp = st.vor_hat.data.shape
+        nonmean = (GRID_T8.ls > 0)[:, None]
+        zonal = (GRID_T8.ms == 0)[:, None]  # m = 0 of a real field is real
+
+        def _rand(a, b):
+            im = jnp.where(zonal, 0.0, jax.random.normal(b, shp))
+            return jnp.where(nonmean, jax.random.normal(a, shp) + 1j * im, 0.0)
+
+        vor0, div0 = _rand(k[0], k[1]), _rand(k[2], k[3])
+        s = st._replace(vor_hat=st.vor_hat.replace(data=vor0),
+                        div_hat=st.div_hat.replace(data=div0))
+        for _ in range(3):
+            s = unpack_pe_output(pack_pe_state(s, GRID_T8), s, GRID_T8,
+                                 mode="state_update")
+        for got, ref in ((s.vor_hat.data, vor0), (s.div_hat.data, div0)):
+            rel = float(jnp.linalg.norm(got - ref) / jnp.linalg.norm(ref))
+            assert rel < 1e-9, rel
+
     def test_round_trip_preserves_values(self):
         from legoesm.ml.channel_packing import pack_pe_state, unpack_pe_output
         st = _pe_state()
@@ -1161,10 +1186,8 @@ class TestConservationCorrectors:
         assert float(jnp.max(jnp.abs(g_land[2:]))) == 0.0, (
             "ocean cells influence land-cell eta — the mask gate leaked")
 
-    @pytest.mark.parametrize("which", ["heat", "salt"])
-    def test_ocean_tracer_correctors_pin_the_volume_integral(self, which):
-        from legoesm.ml.conservation import correct_ocean_heat, correct_ocean_salt
-        fn = correct_ocean_heat if which == "heat" else correct_ocean_salt
+    def test_ocean_tracer_corrector_pins_the_volume_integral(self):
+        from legoesm.ml.conservation import correct_ocean_tracer as fn
         mask = jnp.ones((_NLAT, _NLON))
         h_old = jnp.full((_NLAT, _NLON, NLEV), 50.0)
         h_new = h_old
@@ -1183,7 +1206,7 @@ class TestConservationCorrectors:
         g_local = jax.grad(
             lambda xn: jnp.sum(
                 fn(xn, x_old, h_new, h_old, GRID_T5, mask)[0, 0] ** 2))(x_new)
-        _finite_and_nonzero(g_local, f"correct_ocean_{which} local gradient")
+        _finite_and_nonzero(g_local, "correct_ocean_tracer local gradient")
 
 
 # ============================================================================

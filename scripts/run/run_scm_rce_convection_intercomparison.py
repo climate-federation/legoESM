@@ -250,49 +250,31 @@ SUBCLOUD_MICROPHYSICS_INCLUDE = {
 #: Only the schemes that expose such a knob appear; for the others the focused
 #: set is turbulence + microphysics, reported rather than silently assumed.
 #:
-#: EMANUEL IS ABSENT BY DEFAULT AND THAT IS A FINDING, NOT AN OVERSIGHT.  Its
-#: ``downdraft_efficiency`` is read only inside
-#: ``if config.enable_unsaturated_downdraft:`` (emanuel.py:465), a STATIC
-#: Python branch whose field defaults to ``False`` (config.py:1073) -- so
-#: Emanuel currently has NO convective downdraft re-evaporation at all, and
-#: there is nothing to slow until the branch is switched on.  (The field's own
-#: docstring at config.py:995-1011 still claims "default ``True``"; the code is
-#: the authority and the docstring is stale.)  Enabling it is a one-variable
-#: experiment of its own -- the branch MOISTENS the sub-cloud layer, per the
-#: comment at emanuel.py:463 -- so it is exposed as
-#: ``--emanuel-unsaturated-downdraft`` and enters the checkpoint signature,
-#: rather than being turned on silently as part of a tuning set.
+#: Emanuel has no entry: its downdraft tunables (downdraft_sigd, downdraft_sigs,
+#: downdraft_omtrain_pa_s) are read only by the unsaturated-downdraft branch,
+#: which is off by default (``--emanuel-unsaturated-downdraft``), so in the
+#: shipped configuration they would carry no gradient.  Switching the branch on
+#: is different physics and enters the checkpoint signature.
 SUBCLOUD_CONVECTION_INCLUDE = {
     "bechtold": ("atm.conv.BechtoldConfig.downdraft_evap_efficiency",),
     "tiedtke": ("atm.conv.TiedtkeConfig.downdraft_evap_efficiency",),
 }
 
-#: Curated only when the gating flag is on; see the note above.
-EMANUEL_DOWNDRAFT_INCLUDE = ("atm.conv.EmanuelConfig.downdraft_efficiency",)
-
 
 def default_focused_include(
     *, turbulence: str, microphysics: str, convection: str,
-    emanuel_unsaturated_downdraft: bool = False,
 ) -> tuple[str, ...]:
     """The focused parameter set for one (turbulence, microphysics, convection).
 
     Built per configuration rather than as one flat list because a name that
     belongs to an INACTIVE scheme is a hard error in the tuner (by design), so
     the default must contain exactly the knobs the active schemes own.
-
-    Emanuel's downdraft efficiency is included ONLY when its gating flag is on,
-    because with the flag off the parameter is read by no executed code and
-    would be a search dimension that cannot move anything.
     """
-    include = (
+    return (
         SUBCLOUD_TURBULENCE_INCLUDE.get(turbulence, ())
         + SUBCLOUD_MICROPHYSICS_INCLUDE.get(microphysics, ())
         + SUBCLOUD_CONVECTION_INCLUDE.get(convection, ())
     )
-    if convection == "emanuel" and emanuel_unsaturated_downdraft:
-        include = include + EMANUEL_DOWNDRAFT_INCLUDE
-    return include
 
 
 def _run_signature(args) -> dict:
@@ -1338,10 +1320,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Switch ON Emanuel's unsaturated-downdraft re-evaporation, which "
-            "ships OFF behind a static Python branch. With it off, "
-            "EmanuelConfig.downdraft_efficiency is read by no executed code. "
-            "The branch re-evaporates a fraction of the column condensate "
-            "below the LCL, which COOLS and MOISTENS the sub-cloud layer, so "
+            "ships OFF behind a static Python branch. "
+            "The branch runs the ported CONVECT downdraft, which re-evaporates "
+            "precipitation and COOLS and MOISTENS the sub-cloud layer, so "
             "it is different physics and enters the checkpoint signature."
         ),
     )
@@ -1605,8 +1586,6 @@ def main(argv: list[str] | None = None) -> int:
                         turbulence=args.turbulence,
                         microphysics=args.microphysics,
                         convection=scheme,
-                        emanuel_unsaturated_downdraft=(
-                            args.emanuel_unsaturated_downdraft),
                     )
                 ),
                 subcloud_top_m=args.subcloud_top_m,

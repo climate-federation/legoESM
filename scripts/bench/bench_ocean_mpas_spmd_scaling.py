@@ -25,7 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,6 +36,7 @@ from bench_ocean_mpas_scaling import (  # noqa: E402
 from metadata import (  # noqa: E402
     annotate_incomplete,
     scaling_metadata,
+    state_all_finite,
     tidy_throughput_fields,
     timed_scan_blocks,
 )
@@ -55,7 +55,7 @@ def weak_level_for(cells_per_device: int, n_devices: int, levels=range(2, 11)) -
     return best
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--n-devices", type=int, required=True)
     p.add_argument("--subdivision", type=int, default=6)
@@ -73,8 +73,77 @@ def main() -> int:
     p.add_argument("--blocks", type=int, default=3)
     p.add_argument("--probe-steps", type=int, default=3)
     p.add_argument("--multicontroller", action="store_true")
+    # No bench-side default for either: unset means MPASOceanConfig's own
+    # default (gpoly, 4 sweeps), so a ladder arm measures the production solver.
+    # A "jacobi" default here silently ran the whole 2026-09-21 CPU ladder
+    # on the retired preconditioner (RULE 3: a flag default that keeps the
+    # old behaviour is a bug with a knob).
+    p.add_argument("--pcg-precond", default=None,
+                   choices=["jacobi", "poly", "gpoly"],
+                   help="distributed PCG preconditioner (config default gpoly); "
+                        "'poly' is the communication-free local Neumann polynomial, "
+                        "'gpoly' the same polynomial on the GLOBAL operator "
+                        "(evaluated on a max(2, K-2)-ring halo, one exchange per "
+                        "iteration)")
+    p.add_argument("--halo-depth", type=int, default=None,
+                   help="cell-halo rings of the SPMD layout (default: what the "
+                        "config needs -- 2, or max(2, K-2) for gpoly); set it to "
+                        "price a "
+                        "deeper halo on its own")
+    p.add_argument("--pcg-poly-sweeps", type=int, default=None,
+                   help="sweeps K of the local polynomial preconditioner "
+                        "(config default 4)")
+    # Barotropic-solve comm knobs. The distributed implicit_cn solve costs
+    # 1+2M batched allreduces per step at pcg_variant="standard" and 1+M at
+    # "single_reduce" (Chronopoulos-Gear, parity-gated), plus one cell-halo
+    # exchange per PCG iteration -- i.e. the solve's communication is set by
+    # these two numbers alone. They are exposed so a ladder arm can measure
+    # how much of the plateau the barotropic solve owns, instead of inferring
+    # it from a reduction count.
+    p.add_argument("--pcg-variant",
+                   choices=["standard", "single_reduce", "single_reduce_deep"],
+                   default=None,
+                   help="unset = MPASOceanConfig default (standard); "
+                        "single_reduce_deep needs --pcg-precond jacobi and, for the "
+                        "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
+                        "--pcg-variant single_reduce or standard)")
+    p.add_argument("--pcg-fixed-iters", type=int, default=None,
+                   help="distributed PCG iteration count (config default 15); "
+                        "a PROBE knob -- lowering it changes the solve")
+    p.add_argument("--eta-clamp-iters", type=int, default=3)
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Trace the timed fused blocks from ranks 0-3 (one "
+                        "node, shared clock) into <dir>/rank<k>/. The "
+                        "chrome-format trace.json.gz feeds "
+                        "scripts/bench/analyze_jax_trace_gaps.py, which "
+                        "splits the step into kernel time, collective time "
+                        "and gap. A traced run's own timing carries "
+                        "profiler overhead, so its receipt is a capture "
+                        "artifact, never a ladder row. nsys silently drops "
+                        "the halo collectives on this lane and is not an "
+                        "option.")
     p.add_argument("--out", type=str, default="ocean_mpas_spmd_scaling.jsonl")
-    args = p.parse_args()
+    return p
+
+
+def apply_pcg_overrides(config, args):
+    """Config with the PCG flags applied; a flag left unset (None) keeps the
+    MPASOceanConfig default, so a ladder arm without flags measures the
+    production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py)."""
+    if args.pcg_fixed_iters is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+    if args.pcg_precond is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_precond=str(args.pcg_precond))
+    if args.pcg_poly_sweeps is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
+    return config
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     import jax
 
@@ -103,6 +172,7 @@ def main() -> int:
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         disarm_mpas_ocean_spmd,
+        halo_depth_for_config,
         make_sharded_mpas_ocean_step,
         n_real_cells,
         shard_state_mpas_ocean_spmd,
@@ -112,12 +182,17 @@ def main() -> int:
     # Same config/perturbation as the mpi4jax sibling (implicit-CN production
     # barotropic path) on the ONE requested mesh, reordered+padded for nd
     # devices exactly as run_omip._create_setup does under --enable-mpas-spmd.
-    z_coord, config = build_problem_config(args.nlev, barotropic_solver="implicit_cn")
+    z_coord, config = build_problem_config(
+        args.nlev, barotropic_solver="implicit_cn",
+        pcg_variant=args.pcg_variant,
+        eta_floor_clamp_iters=args.eta_clamp_iters)
+    config = apply_pcg_overrides(config, args)
     mesh = create_voronoi_mesh(subdivision_level=subdivision,
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
     if nd > 1:
-        mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method)
+        mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method,
+                                            edge_order="block")
     n_real = n_real_cells(mesh)
     state = perturbed_rest_state(mesh, z_coord, n_cells_real=n_real)
     model = MPASOceanModel(mesh, z_coord, config)
@@ -126,7 +201,9 @@ def main() -> int:
     if nd > 1:
         layout = build_mpas_ocean_spmd_layout(
             mesh, nd, n_cells_real=n_real,
-            tracer_advection=str(config.tracer_advection), nlev=args.nlev)
+            tracer_advection=str(config.tracer_advection), nlev=args.nlev,
+            halo_depth=(halo_depth_for_config(config) if args.halo_depth is None
+                        else int(args.halo_depth)))
         spmd_step = make_sharded_mpas_ocean_step(model, layout)
         state = shard_state_mpas_ocean_spmd(state, layout)
         rounds = len(layout.ppermute_perms)
@@ -144,22 +221,46 @@ def main() -> int:
         def advance(st, aux=None):   # timed_scan_blocks calls 1-arg when aux is None
             return model.step(st, args.dt)
 
-    @jax.jit
-    def _all_finite(st):
-        return jnp.all(jnp.array([jnp.isfinite(l).all()
-                                  for l in jax.tree.leaves(st)]))
-
     try:
         t0 = time.perf_counter()
         jax.block_until_ready(jax.tree.leaves(advance(state, aux)))
         compile_ms = (time.perf_counter() - t0) * 1e3
+        # Trace the FUSED BLOCKS the receipt times, not a hand-rolled replay:
+        # a Python-dispatched replay carries dispatch gaps the enclosing scan
+        # does not have, so its kernel/collective/gap shares could not budget
+        # the reported step. Only the first four ranks pass a directory,
+        # because they share a node clock and that is what makes the
+        # cross-rank collective start spread meaningful; the helper runs the
+        # blocks on every rank either way, which is required because a block
+        # is collective. A traced run's own timing carries profiler overhead,
+        # so its receipt is a capture artifact and never a ladder row.
+        trace_dir = None
+        if args.profile_dir is not None and jax.process_index() < 4:
+            trace_dir = f"{args.profile_dir}/rank{jax.process_index()}"
+        if args.profile_dir is not None and jax.process_index() == 0 and nd > 1:
+            # The analyzer's cross-rank arrival skew is only quotable when it
+            # matches each collective to its SCHEDULED partner; its fallback,
+            # matching by overlap, pairs ranks that never talked to each other.
+            # Rank 0 already holds the schedule, so emit the map here rather
+            # than rebuilding the partition in a second job.
+            import json as _json
+            import pathlib as _pl
+            _pm = {}
+            for _rk in range(4):
+                _pm[str(_rk)] = [
+                    [_r, int(_dst)]
+                    for _r, _perm in enumerate(layout.ppermute_perms)
+                    for _src, _dst in _perm if _src == _rk]
+            _pl.Path(args.profile_dir).mkdir(parents=True, exist_ok=True)
+            with open(f"{args.profile_dir}/partner_map.json", "w") as _f:
+                _json.dump({"n_rounds": rounds, "ranks": _pm}, _f)
         state, t = timed_scan_blocks(
             advance, state, block_steps=args.block_steps, n_blocks=args.blocks,
             probe_steps=args.probe_steps, sync_label="ocean_mpas_spmd_bench",
-            aux=aux)
+            trace_dir=trace_dir, aux=aux)
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
-        finite = bool(_all_finite(state))
+        finite = state_all_finite(state)
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
@@ -197,7 +298,31 @@ def main() -> int:
         extra={"cells_per_device": cells_per, "ppermute_rounds": rounds,
                "block_steps": args.block_steps, "blocks": args.blocks,
                "target_cells_per_device": (args.cells_per_device
-                                           if args.mode == "weak" else None)},
+                                           if args.mode == "weak" else None),
+               # The barotropic solve's whole communication bill, so a row
+               # can never be compared against one that solved differently:
+               # allreduces/step = 1+2M (standard) or 1+M (single_reduce),
+               # plus M cell-halo exchanges. Single-device rows run stock CG
+               # to a tolerance instead, so they do NOT do fixed_iters work.
+               # The NCCL transport the arm ran with: the channel count moves
+               # the s9 ATMOSPHERE step 17% at 128 GPUs, so rows at different settings are
+               # different measurements (plot_nature_scaling.py refuses mixes).
+               "nccl_env": {
+                   k: os.environ.get(k, "")
+                   for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
+                                "NCCL_P2P_NET_CHUNKSIZE")
+               },
+               "pcg_variant": str(config.barotropic_implicit_pcg_variant),
+               "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
+               "pcg_precond": str(config.barotropic_implicit_pcg_precond),
+               "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
+               "halo_depth": (int(layout.halo_depth) if nd > 1 else None),
+               "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
+               "eta_floor_clamp_iters": args.eta_clamp_iters,
+               "barotropic_allreduces_per_step": (
+                   1 + (1 if config.barotropic_implicit_pcg_variant != "standard" else 2)
+                   * int(config.barotropic_implicit_pcg_fixed_iters)
+                   if nd > 1 else None)},
     ))
     if jax.process_index() == 0:
         with open(args.out, "a") as fh:

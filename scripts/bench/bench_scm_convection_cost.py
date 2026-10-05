@@ -9,7 +9,7 @@ exited after 6 minutes, so ZM had the node essentially to itself and was still
 the slowest), which leaves a scheme-intrinsic cost.
 
 THE HYPOTHESIS THIS PROBE TESTS.  ZM's dilute-parcel CAPE
-(``convection/_zm_dilute.py``, ``use_dilute_cape=True`` by default) nests a
+(``convection/_zm_dilute.py``, always on in the CAM6 port) nests a
 Newton solve inside an unrolled loop inside a level scan:
 
     lax.scan over nlev levels                     (sequential)
@@ -27,9 +27,7 @@ the global model the identical op count is spread across 10^4-10^5 columns.
 THREE CONTROLS, because a structural reading of the source is not a measured
 cause (CLAUDE.md: a proposed mechanism must survive a perturbation test):
 
-1.  ON/OFF -- ``use_dilute_cape=False`` selects the legacy undilute
-    moist-adiabat CAPE and removes the nest entirely.  The hypothesis predicts
-    ZM collapses into the pack.
+1.  (retired) ON/OFF -- the CAM6 ZM port has no undilute arm.
 2.  SCALING -- ``_NEWTON_ITERS`` is the trip count of the inner solve.  The
     hypothesis predicts cost roughly linear in it.  The probe asserts the
     patch actually changed the timing rather than silently failing to retrace,
@@ -71,6 +69,7 @@ from legoesm.atmosphere.physics import (                          # noqa: E402
     ConvectionConfig, GravityWaveDragConfig, MicrophysicsConfig, PhysicsConfig,
     RadiationConfig, TurbulenceConfig, make_physics,
 )
+from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig  # noqa: E402
 from legoesm.core.field import Field                              # noqa: E402
 from legoesm.core.state import HydrostaticState                   # noqa: E402
 from legoesm.grids.vertical import create_sigma_coordinate        # noqa: E402
@@ -131,9 +130,10 @@ def build_state(nlev: int, ncol: int):
 
 
 def _physics(scheme: str, dt: float, sub_overrides: dict | None = None):
-    conv_kwargs: dict = {"scheme": scheme}
+    # The SCM column has no land fraction: ZM runs as an explicit aquaplanet.
+    conv_kwargs: dict = {"scheme": scheme, "zhang_mcfarlane": ZhangMcFarlaneConfig(land_fraction="none")}
     if sub_overrides:
-        base = getattr(ConvectionConfig(scheme=scheme), scheme)
+        base = getattr(ConvectionConfig(**conv_kwargs), scheme)
         conv_kwargs[scheme] = base._replace(**sub_overrides)
     return make_physics(
         PhysicsConfig(
@@ -323,26 +323,9 @@ def main(argv: list[str] | None = None) -> int:
             print("  no active comparison scheme — ratio NOT computed")
     payload["by_ncol"] = {str(k): v for k, v in by_ncol.items()}
 
-    # ---------------------------------------------------------------- #
-    # 2. ON/OFF control: the dilute-parcel CAPE is what costs.
-    # ---------------------------------------------------------------- #
+    # (The former undilute ON/OFF control is gone: the CAM6 port has no
+    # undilute arm, the dilute parcel IS the oracle.)
     state1, sigma1 = build_state(args.nlev, 1)
-    on = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
-                     repeats=args.repeats, warmups=args.warmups,
-                     sub_overrides={"use_dilute_cape": True})
-    off = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
-                      repeats=args.repeats, warmups=args.warmups,
-                      sub_overrides={"use_dilute_cape": False})
-    print("\n===== control 1: dilute-parcel CAPE ON vs OFF (ncol=1) =====")
-    print(f"  use_dilute_cape=True   {on['call_ms']:9.3f} ms  "
-          f"active={on['active']}")
-    print(f"  use_dilute_cape=False  {off['call_ms']:9.3f} ms  "
-          f"active={off['active']}")
-    print(f"  ratio ON/OFF = {on['call_ms'] / off['call_ms']:.2f}x")
-    if not (on["active"] and off["active"]):
-        print("  WARNING: an arm produced no tendency — this compares an "
-              "active scheme against a no-op, not two CAPE closures.")
-    payload["dilute_control"] = {"on": on, "off": off}
 
     # ---------------------------------------------------------------- #
     # 3. SCALING control: cost vs the inner solve's trip count.
@@ -360,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             jax.clear_caches()
             r = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
                             repeats=args.repeats, warmups=args.warmups,
-                            sub_overrides={"use_dilute_cape": True})
+                            sub_overrides=None)
             r["newton_iters"] = n
             scaling.append(r)
     finally:

@@ -136,6 +136,17 @@ class TestSFNOShallowWaterModel:
         assert not jnp.any(jnp.isnan(new_state.vor_hat.data))
         assert not jnp.any(jnp.isnan(new_state.phi_hat.data))
 
+    def test_state_update_refuses_dt_other_than_dt_sfno(self, grid_t10, sw_state, sfno_config):
+        """The network jumps exactly dt_sfno per call, so a different dt
+        (here 600 s against the 3600 s default) must raise, not silently
+        run six one-hour jumps per simulated hour."""
+        config = SFNOShallowWaterConfig(sfno_config=sfno_config, mode="state_update")
+        model = SFNOShallowWaterModel(grid=grid_t10, config=config, key=jax.random.PRNGKey(0))
+        with pytest.raises(ValueError, match="dt_sfno=3600.0"):
+            model.step(sw_state, dt=600.0)
+        with pytest.raises(ValueError, match="dt_sfno"):
+            model.integrate(sw_state, duration=3600.0, dt=600.0)
+
     def test_hybrid_mode(self, grid_t10, sw_state, sfno_config):
         """Hybrid tendency mode should produce valid output."""
         config = SFNOShallowWaterConfig(

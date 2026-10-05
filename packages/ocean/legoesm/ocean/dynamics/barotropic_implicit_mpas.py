@@ -160,13 +160,24 @@ def _helmholtz_apply_mpas(
     w.r.t. the operator parameters (``θ̄ = -(∂_θ A(θ)·x)ᵀ·λ``) via
     ``jax.vjp`` without closure-capturing tracers (scan-lowering safe;
     mirrors ``barotropic_implicit_latlon_cgrid._helmholtz_apply``).
+
+    ``fill_land_cells_mpas`` is deliberately NOT applied here, and its
+    absence is value-preserving rather than a behaviour change.
+    ``gradient_edge`` is the two-cell stencil
+    ``grad(e) = (phi[c2(e)] - phi[c1(e)]) / dcEdge`` and
+    ``edge_mask = mask[c1]*mask[c2]`` is zero on every edge with a land
+    endpoint; the fill only alters land cells, so any edge whose gradient
+    could see an altered value carries zero flux. The filled field cannot
+    reach the output. It was removed because this operator is the inner
+    matvec of the barotropic PCG — 60 applications per step — and the fill
+    costs several scatter-add passes in each one, which measured as dead
+    work in the lane's strong-scaling plateau. The routine is still used
+    where its output IS consumed: ``init_mpas``, ``ocean_pe_mpas``, and the
+    eta_old/eta_new fills elsewhere in this file.
     """
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
     H_e_face = H_e * edge_mask
     eta_m = eta_in * mask
-    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
-    grad = gradient_edge(eta_filled, mesh)
+    grad = gradient_edge(eta_m, mesh)
     flux = H_e_face * grad
     div_grad = divergence_cell(flux, mesh) * mask
     return (eta_m - coeff * div_grad) * mask
@@ -447,6 +458,38 @@ def barotropic_implicit_mpas(
             "stock-CG solve and its mass projection would silently run "
             "rank-local.  Use 'explicit_substep' otherwise."
         )
+    # Preconditioner selection: validated on the static config string here,
+    # after the multi-rank refusal above so that guard keeps firing first.
+    _pcg_precond = str(config.barotropic_implicit_pcg_precond)
+    if _pcg_precond not in ("jacobi", "poly", "gpoly"):
+        raise ValueError(
+            f"Unknown barotropic PCG preconditioner variant {_pcg_precond!r}: "
+            "config.barotropic_implicit_pcg_precond must be one of "
+            "'jacobi', 'poly' or 'gpoly'"
+        )
+    if int(config.barotropic_implicit_pcg_poly_sweeps) < 1:
+        raise ValueError(
+            "config.barotropic_implicit_pcg_poly_sweeps must be >= 1, got "
+            f"{int(config.barotropic_implicit_pcg_poly_sweeps)}"
+        )
+    _gpoly = _pcg_precond == "gpoly"
+    if _gpoly and _vlayout is not None:
+        raise ValueError(
+            "barotropic_implicit_pcg_precond='gpoly' is implemented on the "
+            "SPMD (shard_map) lane only (a single device keeps the stock "
+            "CG solve to tolerance); the MPI Voronoi layout cannot run it — "
+            "select 'poly' there (with barotropic_implicit_pcg_fixed_iters=20, "
+            "the count poly was validated at).")
+    if _gpoly and _hr_owned is not None:
+        _hd = getattr(halo_refresh, "halo_depth", None)
+        _k = int(config.barotropic_implicit_pcg_poly_sweeps)
+        # K-1 one-ring sweeps must leave z exact on owned + ring 1; the
+        # layout holds depth + 2 rings (see halo_depth_for_config).
+        if _hd is None or int(_hd) < _k - 2:
+            raise ValueError(
+                f"barotropic_implicit_pcg_precond='gpoly' with {_k} sweeps needs "
+                f"a layout halo_depth of >= {_k - 2}; the SPMD layout has {_hd}. "
+                "Build it with halo_depth=halo_depth_for_config(config).")
     g = jnp.asarray(config.g)
     mask = state.land_mask.data
     H_bathy = state.H_bathy.data
@@ -501,10 +544,17 @@ def barotropic_implicit_mpas(
     # predictor consumes 1-2 more tangential hops of both.  One packed
     # edge message re-arms them (solver-internal matvecs already exchange
     # per iteration — audit table stage 4').
-    if halo_refresh is not None:
-        u_bar_old, F_slow_u = halo_refresh.edges(u_bar_old, F_slow_u)
-    eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
+    # [stage-halo I1] the step-3 flux divergence of the eta gradient needs a
+    # refreshed gradient ring (stage audit).  grad_eta_old does not depend on
+    # the I0-refreshed fields, so it rides in the same message; the predictor
+    # keeps the unrefreshed copy.
+    eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2,
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
+    grad_eta_for_div = grad_eta_old
+    if halo_refresh is not None:
+        u_bar_old, F_slow_u, grad_eta_for_div = halo_refresh.edges(
+            u_bar_old, F_slow_u, grad_eta_old)
     f_e = mesh.fEdge.astype(eta_dtype)
 
     v_t_old = tangential_velocity(u_bar_old, mesh)
@@ -536,12 +586,6 @@ def barotropic_implicit_mpas(
     div_HU_pred = divergence_cell(flux_HU_pred, mesh) * mask
     div_HU_pred = div_HU_pred.astype(eta_dtype)
 
-    # [stage-halo I1] fill+grad already consumed eta's 2-ring budget; the
-    # flux divergence below is a 3rd chained hop, so refresh the gradient
-    # ring first (edge field).
-    grad_eta_for_div = grad_eta_old
-    if halo_refresh is not None:
-        (grad_eta_for_div,) = halo_refresh.edges(grad_eta_for_div)
     flux_eta_old = H_e_old * grad_eta_for_div * edge_mask
     div_grad_eta_old = divergence_cell(flux_eta_old, mesh) * mask
     div_grad_eta_old = div_grad_eta_old.astype(eta_dtype)
@@ -584,7 +628,9 @@ def barotropic_implicit_mpas(
         # The local TRiSK A_op is correct on OWNED cells provided its
         # input carries fresh ghost values — compose one cell-halo
         # exchange per application (one message round per PCG
-        # iteration, static collective schedule).  Dots are owned-
+        # iteration, static collective schedule) — or, for
+        # "single_reduce_deep", exchange (r, s) once every certified-ring
+        # count of iterations and recompute the halo.  Dots are owned-
         # masked AND area-weighted: owned-masking removes the halo
         # double-count in the allreduce; the area weight is the inner
         # product in which this FV Helmholtz is self-adjoint (required
@@ -613,12 +659,82 @@ def barotropic_implicit_mpas(
         def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
             return A_op(_exchange_cells(eta_in))
 
-        def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
-            return r * inv_diag
+        _pcg_variant = str(config.barotropic_implicit_pcg_variant)
+        _deep_halo = None
+        if _pcg_variant == "single_reduce_deep":
+            # jacobi implies not gpoly, so this branch is the distributed one
+            if _pcg_precond != "jacobi":
+                raise NotImplementedError(
+                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs "
+                    "barotropic_implicit_pcg_precond='jacobi' (got "
+                    f"{_pcg_precond!r}): the preconditioner must be pointwise; "
+                    "select pcg_variant='single_reduce' for the polynomial ones.")
+            if _vlayout is not None:
+                _rings = int(_vlayout.complete_cell_rings)
+                _exch_many = (halo_refresh.cells if halo_refresh is not None
+                              else lambda *fs: tuple(_exchange_cells(f) for f in fs))
+            else:
+                _rings = int(halo_refresh.complete_cell_rings)
+                _exch_many = halo_refresh.cells
+            if _rings < 1:
+                raise NotImplementedError(
+                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs a "
+                    f"layout certifying >= 1 complete cell ring (got {_rings}).")
+            _deep_halo = (_exch_many, _owned, _rings)
+
+        _x0_solve = eta_old
+        if _gpoly:
+            # GLOBAL Neumann polynomial (no device-boundary coupling
+            # dropped), evaluated redundantly on the halo. The one-ring
+            # Helmholtz erodes one valid ring per application, so with r
+            # fresh on the layout's depth+2 rings the K-1 sweeps leave z
+            # valid on owned + ring 1 when depth >= K-2; p = z + beta p
+            # stays valid there and A p is exact on owned cells, which is
+            # all the owned-weighted dots and x/r updates read. One
+            # exchange per iteration (of r, inside M_inv) replaces the
+            # exchange of p inside A_op. Coefficients and the warm start
+            # are refreshed once so the halo rings carry OWNER values (the
+            # outer ring's local diagonal and edges see missing neighbours).
+            (_H_g, _em_g), (_mask_g, _inv_g, _x0_solve) = halo_refresh.both(
+                (H_e_old, edge_mask), (mask, inv_diag, eta_old))
+            _A_g = _make_helmholtz(_H_g, coeff, mesh, _mask_g, _em_g)
+            _gsweeps = int(config.barotropic_implicit_pcg_poly_sweeps)
+            _gw = 2.0 / 3.0
+
+            def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:  # noqa: F811
+                return _A_g(eta_in)
+
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                r = _exchange_cells(r)
+                z = _gw * _inv_g * r
+                for _ in range(_gsweeps - 1):
+                    z = z + _gw * _inv_g * (r - _A_g(z))
+                return z
+        elif _pcg_precond == "jacobi":
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                return r * inv_diag
+        else:
+            _poly_sweeps = int(config.barotropic_implicit_pcg_poly_sweeps)
+            _neumann_w = 2.0 / 3.0
+
+            def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
+                # SPD polynomial in the device-local block of A: TRUE
+                # diagonal (inv_diag), off-diagonals restricted to
+                # owned-owned couplings by zeroing the halo BEFORE the
+                # operator.  Applies A_op, never A_op_dist, so no halo
+                # exchange is composed in; pure jnp, reverse mode goes
+                # straight through.
+                z = _neumann_w * inv_diag * r * _owned
+                for _ in range(_poly_sweeps - 1):
+                    r_local = A_op(z) * _owned
+                    z = z + _neumann_w * inv_diag * (r - r_local) * _owned
+                return z
 
         _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
         eta_new, _solve_diag = solve_helmholtz_implicit(
-            A_op_dist, rhs, _M_inv_dist, eta_old,
+            # deep halo: the LOCAL operator; the solver does the exchanges
+            A_op if _deep_halo is not None else A_op_dist,
+            rhs, _M_inv_dist, _x0_solve,
             distributed=True,
             fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
             # f32-safe acceptance tolerance (f64 unchanged); the fixed-iter
@@ -629,8 +745,9 @@ def barotropic_implicit_mpas(
             ),
             stock_cg_tol=config.barotropic_implicit_pcg_tol,
             stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
-            pcg_variant=str(config.barotropic_implicit_pcg_variant),
+            pcg_variant=_pcg_variant,
             dot_weight=_w_dots,
+            deep_halo=_deep_halo,
         )
         # Refresh the halo ring of the solution before downstream
         # stencils consume it.
@@ -698,14 +815,19 @@ def barotropic_implicit_mpas(
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
+    # ``eta_floor_clamp_iters`` was declared on the config but never read
+    # here (the explicit-substep path honours it); the bench's
+    # --eta-clamp-iters knob was inert on this solver.  Default 3 is the
+    # value that was hard-wired, so nothing changes unless it is set.
+    _clamp_iters = int(config.eta_floor_clamp_iters)
     if _dist:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
             owned_weight=_owned, force_global=True,
         )
     else:
         eta_new = _clamp_redistribute(
-            eta_new, eta_floor, mask, mesh.areaCell,
+            eta_new, eta_floor, mask, mesh.areaCell, _clamp_iters,
         )
 
     # Residual diagnostic of the FINAL eta (post projection + clamp).
@@ -728,7 +850,8 @@ def barotropic_implicit_mpas(
     )
 
     # ----- Step 5: corrector for u_bar using new η gradient delta ------
-    eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2)
+    eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2,
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
     grad_eta_new = gradient_edge(eta_filled_new, mesh).astype(eta_dtype)
     delta_grad = grad_eta_new - grad_eta_old
 

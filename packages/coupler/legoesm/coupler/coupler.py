@@ -16,7 +16,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
-    simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+    simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
+    apply_gustiness,
     ocean_surface_q_sat,
 )
 from legoesm.land.multilayer_land import init_multilayer_land_state
@@ -41,7 +42,7 @@ from legoesm.core.coupling_fields import (
 # The saturation vapor pressure over saline water is ~2 % lower than over
 # fresh water; q_sat at the air-sea interface is correspondingly reduced.
 # Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
-_Q_SAT_SALINE_FACTOR = 0.98
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
@@ -307,7 +308,8 @@ def ocean_tile_response(
         )
     rho = forcing.rho_lowest
 
-    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    valid_schemes = ("constant", "most", "coare3", "large_yeager",
+                     "large_yeager_cesm")
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
@@ -327,7 +329,15 @@ def ocean_tile_response(
         thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
         saline_factor=_Q_SAT_SALINE_FACTOR)
 
-    if _is_most:
+    if config.bulk_scheme == "large_yeager_cesm":
+        # CESM/CIME shr_flux_atmOcn: wind relative to the surface current,
+        # lowest-level height ``z_ref`` as CESM's ``zbot``.
+        tau_x, tau_y, shflx, lhflx, _ = compute_sam_oceflx_fluxes(
+            forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
+            forcing.T_lowest, forcing.q_lowest, ocean_sst, q_sfc, rho,
+            z_bot=config.z_ref, variant="cesm",
+        )
+    elif _is_most:
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -393,10 +403,15 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
-    # Ocean tile freshwater: P − E, where evap is back-derived from
-    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
-    # freshwater INTO ocean.
-    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    # Ocean tile freshwater: P − E, where evap is back-derived from lhflx
+    # with the SAME latent heat the flux used (ocean is liquid, never
+    # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
+    # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
+    # which charges its oracle's constant (thermo.charged_latent_heat).
+    # Positive = freshwater INTO ocean.
+    from legoesm.thermo import charged_latent_heat
+    # kg/m²/s, positive = up (ocean → atm)
+    evap_rate = lhflx / charged_latent_heat(config.bulk_scheme, ocean_sst)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,
@@ -422,8 +437,7 @@ def ocean_tile_response(
         # tau_x/tau_y) — back-reaction is the ice tile's job.
         ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
         ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
-        # Ocean evaporation: lhflx already used L_v, so evap_rate
-        # is the correct mass flux.
+        # Ocean evaporation: evap_rate is the mass flux of lhflx.
         surface_mass_flux=evap_rate,
         # Ocean tile is the salt-budget sink, not a source of salt
         # back to itself — zero flux on this channel.

@@ -32,7 +32,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
 )
 from legoesm import constants
 
@@ -94,7 +93,7 @@ class TurbulenceSchemeTraits(NamedTuple):
 
 
 # Sea-water saturation reduction of q_sat (coupler.py uses the same value).
-_Q_SAT_SALINE_FACTOR = 0.98
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
@@ -258,6 +257,32 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     return carry if carry.shape == (ncol, nlev) else floor
 
 
+def _prognostic_clubb_rad_kwargs(carry_field, phys_state, nCells, nlev, dtype):
+    """Radheating kwargs for the ``turb_fn`` call, prognostic CLUBB only.
+
+    Returns ``{"rad_dT_dt": array}`` when the resolved scheme is prognostic
+    CLUBB (``carry_field == "clubb_moments"``, a STATIC build-time decision)
+    and the host hands a ``phys_state`` whose cached ``rad_heating`` slot is
+    populated; otherwise ``{}`` so every other scheme and the diagnostic
+    CLUBB path stay byte-identical (their kernels do not accept the kwarg).
+    The decision never depends on array values, only on ``carry_field`` and
+    None-ness, so it is a pure Python branch resolved at trace time.
+
+    CACHE LAG NOTE: ``combined.py`` updates ``PhysicsState.rad_heating`` AFTER
+    the turbulence step runs, so the array seen here is from the PRECEDING
+    radiation solve (one step stale).  That is the documented contract: the
+    thlp2 budget's radiative source term uses the latest cached heating
+    available at turbulence time.
+    """
+    if carry_field != "clubb_moments":
+        return {}
+    rad_heating = (getattr(phys_state, "rad_heating", None)
+                   if phys_state is not None else None)
+    if rad_heating is None:
+        return {}
+    return {"rad_dT_dt": jnp.asarray(rad_heating, dtype=dtype).reshape(nCells, nlev)}
+
+
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
@@ -300,7 +325,7 @@ def _resolve_T_sfc(T_col, phys_state):
 
 def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
                                    lhflx_w_m2=None, tau_x_pa=None,
-                                   tau_y_pa=None):
+                                   tau_y_pa=None, evap_kg_m2_s=None):
     """Fold prescribed energetic/stress surface fluxes into a scheme config.
 
     Writes the given ALREADY-energetic / ALREADY-stress (ncol,) arrays into
@@ -334,9 +359,18 @@ def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
         flux; the input object unchanged (identity) when all are None.
     """
     if (shflx_w_m2 is None and lhflx_w_m2 is None
-            and tau_x_pa is None and tau_y_pa is None):
+            and tau_x_pa is None and tau_y_pa is None and evap_kg_m2_s is None):
         return scheme_config
+    if evap_kg_m2_s is not None and lhflx_w_m2 is None:
+        raise ValueError(
+            "fold_prescribed_surface_fluxes: a prescribed surface water flux "
+            "(evap_kg_m2_s) must come with its latent heat flux (lhflx_w_m2); "
+            "the heat consumers (buoyancy, closures, diagnostics) need the "
+            "physical flux the tile charged for that water.")
     surface = scheme_config.surface
+    if evap_kg_m2_s is not None:
+        # Already kg/m2/s (positive up): the tiles' water flux, not re-derived.
+        surface = surface._replace(prescribed_evap_kg_m2_s=evap_kg_m2_s)
     if shflx_w_m2 is not None:
         # Already W/m^2 (positive up): no rho conversion.
         surface = surface._replace(prescribed_shflx_w_m2=shflx_w_m2)
@@ -402,9 +436,10 @@ def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
     wqv = getattr(phys_state, "surface_wqv_override", None)
     shf = getattr(phys_state, "surface_shflx_override_w_m2", None)
     lhf = getattr(phys_state, "surface_lhflx_override_w_m2", None)
+    evp = getattr(phys_state, "surface_evap_override_kg_m2_s", None)
     tux = getattr(phys_state, "surface_tau_x_override_pa", None)
     tuy = getattr(phys_state, "surface_tau_y_override_pa", None)
-    if (wth is None and wqv is None and shf is None and lhf is None
+    if (wth is None and wqv is None and shf is None and lhf is None and evp is None
             and tux is None and tuy is None):
         return scheme_config
     rho_sfc = rho[:, -1]
@@ -428,11 +463,16 @@ def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
                 "prescribe exactly one form (caller bug).")
         # Kinematic [kg/kg m/s] -> energetic [W/m^2] with the lowest-level
         # density.
-        lhf = rho_sfc * constants.L_v * wqv
+        # The kinematic override IS a water flux: hand it over as such.  Its
+        # latent heat for the heat consumers is charged at the constant
+        # (surface temperature and phase are not in scope on this training
+        # path; the training lane prescribes ERA5 kinematic fluxes).
+        evp = rho_sfc * wqv
+        lhf = rho_sfc * constants.L_v * wqv  # latent-ok: kinematic training override, no surface phase in scope
     # Energetic fluxes / stresses pass through unchanged (no rho conversion)
     # into the shared fold.
     return fold_prescribed_surface_fluxes(
-        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf,
+        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf, evap_kg_m2_s=evp,
         tau_x_pa=tux, tau_y_pa=tuy)
 
 
@@ -496,6 +536,23 @@ def make_turbulence_physics(
     Callable
         Physics function with the correct signature for the model.
     """
+    # The lever lives on TurbulenceConfig, so any scheme can carry it; only
+    # CLUBB's closure implements the exchange. Refuse rather than build a
+    # model that silently runs without the liquid exchange that was selected.
+    if (getattr(turbulence_config, "liquid_partition", False)
+            and turbulence_config.scheme != "clubb"):
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition is CLUBB's cloud-liquid "
+            f"exchange; scheme={turbulence_config.scheme!r} has no closure "
+            "liquid to exchange. Use scheme='clubb' or leave it off.")
+    if (getattr(turbulence_config, "liquid_partition", False)
+            and not getattr(turbulence_config.clubb, "prognostic", False)):
+        # The diagnostic CLUBB kernel takes no q_c; without this the lane
+        # fails as a TypeError inside the traced column (GLM).
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition needs prognostic CLUBB "
+            "(CLUBBConfig(prognostic=True)); the diagnostic closure does not "
+            "advance the total water the exchange partitions.")
     if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
         raise ValueError(
             "f_land/land_beta are the MPAS land surface boundary knobs; the "
@@ -506,12 +563,32 @@ def make_turbulence_physics(
         _sub = getattr(materialize_sub_config(turbulence_config),
                        turbulence_config.scheme, None)
         _srf = getattr(_sub, "surface", None)
-        if _srf is not None and (getattr(_srf, "z_ref_model_level", False)
-                                 or getattr(_srf, "ocean_q_sfc_saline", False)):
+        # z_ref_model_level now reaches EVERY lane: each turbulence kernel
+        # calls surface_fluxes_at_lowest_level, which honours it from the
+        # config with the level height the kernel already has.  The saline
+        # ocean humidity still cannot: it applies to the OCEAN fraction only,
+        # and the structured-grid lanes deliberately have no land fraction in
+        # the turbulence factory (see the f_land guard above), so applying it
+        # would put sea water under the continents.  Raise rather than ignore.
+        # The liquid partition hands back a cloud-liquid tendency PAIRED with a
+        # vapour tendency that has had that liquid removed. Only the MPAS lane
+        # routes it to a tracer today; dropping it on a lane that cannot would
+        # destroy exactly that much water every step, silently. Refuse instead.
+        if turbulence_config.liquid_partition:
             raise NotImplementedError(
-                "SurfaceLayerConfig.z_ref_model_level / ocean_q_sfc_saline are "
-                f"implemented on the MPAS turbulence bridge only; model_type="
-                f"{model_type!r} would silently ignore them")
+                "TurbulenceConfig.liquid_partition returns a cloud-liquid tendency "
+                f"(TurbulenceOutput.dq_c_dt) that the {model_type!r} turbulence "
+                "lane does not route to a condensate tracer, so the liquid the "
+                "closure removed from vapour would be destroyed. Use "
+                "model_type='mpas', or extend this lane to apply dq_c_dt.")
+        if _srf is not None and getattr(_srf, "ocean_q_sfc_saline", False):
+            raise NotImplementedError(
+                "SurfaceLayerConfig.ocean_q_sfc_saline needs a land fraction "
+                "to apply the sea-water humidity to the ocean tile only, and "
+                f"the {model_type!r} turbulence factory has none (f_land is "
+                "the MPAS bridge's knob). Pass surface=...\n"
+                "._replace(ocean_q_sfc_saline=False) on this lane, or extend "
+                "the lane to carry a land fraction.")
     if model_type == "hydrostatic":
         return _make_hydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "nonhydrostatic":
@@ -582,8 +659,8 @@ def _make_hydrostatic_turbulence(
         shape_2d = p_s.shape
 
         # Pressure
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -673,13 +750,14 @@ def _make_hydrostatic_turbulence(
         # Surface turbulent fluxes [W/m^2, positive upward -- the schemes' own
         # sign, already the CMOR convention], exported on the tendency exactly
         # as the MPAS path below does.  They were missing HERE, so on the
-        # hydrostatic lane the CMOR hfls/hfss feed (and evspsbl = lhflx/L_v)
+        # hydrostatic lane the CMOR hfls/hfss feed (and, via evap_sfc, evspsbl)
         # had nothing to read, and a single-column water budget could not see
         # its own evaporation: the SCM-RCE budget measured E = 0.0000 mm/day on
         # a column whose bulk formula gives 1.559 (2026-08-11).  None-guarded,
         # so a scheme without surface fluxes is byte-identical to before.
         _shf_h = getattr(turb_out, "shflx", None)
         _lhf_h = getattr(turb_out, "lhflx", None)
+        _evp_h = getattr(turb_out, "evap_sfc", None)
         tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
@@ -693,6 +771,9 @@ def _make_hydrostatic_turbulence(
             lhflx_sfc=(None if _lhf_h is None else Field(
                 data=jnp.asarray(_lhf_h).reshape(shape_2d),
                 name="lhflx_sfc_turb", dims=dims_2d, units="W/m^2")),
+            evap_sfc=(None if _evp_h is None else Field(
+                data=jnp.asarray(_evp_h).reshape(shape_2d),
+                name="evap_sfc_turb", dims=dims_2d, units="kg/m^2/s")),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
@@ -740,6 +821,10 @@ def _make_mpas_turbulence(
     # raises with its own name on the first step instead of as a TypeError
     # inside a traced column.
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
+    # Static feature gate (build-time closure constant, not traced): with it off
+    # the liquid exchange below is absent from the trace entirely.
+    _liquid_partition = (bool(turbulence_config.liquid_partition)
+                         and scheme_name == "clubb")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import (
@@ -755,7 +840,8 @@ def _make_mpas_turbulence(
             zero_ps = jnp.zeros_like(state.p_s.data)
             tendencies = HydrostaticTendencies(
                 du_dt=state.u.replace(data=zero_edges),
-                dv_dt=None,
+                dv_dt=(None if state.v is None
+                       else state.v.replace(data=jnp.zeros_like(state.v.data))),
                 dT_dt=state.T.replace(data=zero_cells),
                 dp_s_dt=state.p_s.replace(data=zero_ps),
                 dphis_dt=state.phis.replace(data=zero_ps),
@@ -768,12 +854,24 @@ def _make_mpas_turbulence(
         nlev = sigma_coord.n_levels
         nCells = T.shape[0]
 
-        # Edge → cell wind reconstruction (Perot 2000).
-        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+        # Edge -> cell wind reconstruction (Perot 2000); a column model
+        # that carries cell winds (state.v present: the FV3 duo view)
+        # hands them over directly and gets cell tendencies back.
+        _cell_winds = state.v is not None
+        if _cell_winds:
+            # geographic east/north cell winds, (nCells, nlev) like T: a
+            # staggered lane must never land here by carrying a v leaf
+            if state.v.data.shape != T.shape or u_edge.shape != T.shape:
+                raise ValueError(
+                    "column-model winds must be cell fields shaped like T "
+                    f"{T.shape}; got u {u_edge.shape}, v {state.v.data.shape}")
+            u_cell, v_cell = u_edge, state.v.data
+        else:
+            u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
 
         # Pressures
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (nCells, nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (nCells, nlev+1)
+        p_full = sigma_coord.pressure_at_full(p_s)  # (nCells, nlev)
+        p_half = sigma_coord.pressure_at_half(p_s)  # (nCells, nlev+1)
 
         # Column-format inputs (already 1D × nlev, so reshape is a no-op).
         T_col = T.reshape(nCells, nlev)
@@ -789,6 +887,31 @@ def _make_mpas_turbulence(
             q_v_col = _qv_data.reshape(nCells, nlev)
         else:
             q_v_col = jnp.zeros((nCells, nlev), dtype=_state_dtype)
+
+        # Host cloud liquid, for the CLUBB liquid partition only.  Absent the
+        # lever this stays None and nothing below it is traced.  The tracer must
+        # EXIST: with the lever on, a missing q_c would seed the closure with no
+        # liquid and then write its rcm back over a tracer nobody carries, which
+        # is the one-way ratchet the seeding exists to prevent.
+        _qc_col = None
+        if _liquid_partition:
+            # BOTH halves of the pair, not just the liquid: the vapour block
+            # above substitutes zeros for a missing 'q_v' and the tendency
+            # section below then emits no vapour tendency, so a state carrying
+            # liquid but no vapour would evaporate liquid into a tendency
+            # nothing applies -- water destroyed, silently (codex).
+            _missing = [n for n in ("q_v", "q_c")
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    "TurbulenceConfig.liquid_partition exchanges water between the "
+                    f"vapour and liquid tracers, and {_missing} is not carried "
+                    "by this state. Both must exist, or the half that is "
+                    "missing is destroyed. Carry them, or switch the partition "
+                    "off.")
+            _qc_raw = state.tracers["q_c"]
+            _qc_col = (_qc_raw.data if hasattr(_qc_raw, "data")
+                       else _qc_raw).reshape(nCells, nlev)
 
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
@@ -902,13 +1025,6 @@ def _make_mpas_turbulence(
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
-        if (_shf_land is None
-                and getattr(_surf, "z_ref_model_level", False)):
-            raise ValueError(
-                "surface z_ref_model_level is only honoured on the MPAS path "
-                "that computes the ocean fluxes itself (land fluxes supplied "
-                "via forcing['shflx_land'/'lhflx_land']); this call has none, "
-                "so the switch would be silently inert")
         if _shf_land is not None:
             if f_land is None:
                 raise ValueError(
@@ -924,27 +1040,45 @@ def _make_mpas_turbulence(
                     f"solved. Use one of {schemes_accepting_surface_flux()}, "
                     "or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                compute_surface_fluxes,
+                surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            if getattr(_surf, "z_ref_model_level", False):
-                # The inputs ARE lowest-full-level values: tell the MOST solver
-                # their height instead of labelling them as config.z_ref (10 m),
-                # and hand it the potential temperature at that height (COARE:
-                # dT = T_sfc - (T + g/c_p * z), ~1.5 K at 150 m) so the stability
-                # is not read off a dry-adiabatic lapse.
-                _z_in = z_full[:, -1]
-                _T_in = T_col[:, -1] + (constants.g / constants.c_pd) * _z_in
-            else:
-                _z_in = None
-                _T_in = T_col[:, -1]
-            _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
-                u_col[:, -1], v_col[:, -1], _T_in, q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface, z_ref=_z_in,
+            # Through the shared helper rather than an inline copy: this
+            # branch had its own adjustment, which kept the warmed air while
+            # the bulk law dropped the height on a constant-coefficient
+            # scheme -- the same one-sided contrast the helper exists to
+            # prevent, surviving in the one place that did not call it
+            # (codex).  Height measured from the LOCAL surface.
+            _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
+                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                z_full[:, -1] - z_half[:, -1],
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
-            _sh_land = jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells)
+            if forcing.get("evap_land") is None:
+                raise ValueError(
+                    "MPAS land coupling: forcing['lhflx_land'] must come with "
+                    "forcing['evap_land'] (the land's own water flux); inverting "
+                    "the land latent heat with the ocean's L_v(T_sfc) loses the "
+                    "snow-sublimation and canopy shares of the water.")
+            # The land model's own water flux, blended with the ocean half's bulk
+            # water (lhflx over the latent heat its law charged: the exact inverse
+            # of the bulk charge,
+            # taken BEFORE the heat blend), handed to the kernel as mass.  Land
+            # values over pure-ocean cells may be NaN/undefined: masked out.
+            from legoesm.thermo import charged_latent_heat
+            _ev_land = jnp.asarray(
+                forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
+            _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
+            _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
+            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(
+                             step_config.surface.bulk_scheme, T_sfc)
+                         + _fl * _ev_land)
+            step_config = step_config._replace(surface=step_config.surface._replace(
+                prescribed_evap_kg_m2_s=_ev_blend))
+            _sh_land = jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,
@@ -957,6 +1091,16 @@ def _make_mpas_turbulence(
         # would drop the land coupling for exactly those two.
         _sfc_kw = ({"surface_flux": _surface_flux}
                    if _surface_flux is not None else {})
+        if _liquid_partition:
+            _sfc_kw = dict(_sfc_kw, q_c=_qc_col)
+
+        # Radiative-heating kwargs: prognostic CLUBB only, and only when the
+        # host cached a rad_heating.  CACHE LAG: combined.py refreshes the
+        # cache AFTER turbulence, so this is the PRECEDING radiation solve's
+        # heating.  {} (no kwarg at all) for every other scheme and the
+        # diagnostic CLUBB path — their turb_fn signatures do not accept it.
+        _rad_kw = _prognostic_clubb_rad_kwargs(
+            carry_field, phys_state, nCells, nlev, _state_dtype)
 
         if needs_tke:
             tke_in = _read_turb_carry(
@@ -965,7 +1109,7 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
-                **_sfc_kw,
+                **_sfc_kw, **_rad_kw,
             )
             tke_out = tke_new
         else:
@@ -975,6 +1119,11 @@ def _make_mpas_turbulence(
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
             )
+        if _liquid_partition and turb_out.dq_c_dt is None:
+            raise ValueError(
+                f"turbulence scheme {scheme_name!r} accepted the liquid "
+                "partition but returned no dq_c_dt, so the liquid removed from "
+                "vapour would vanish. This is a scheme bug, not a config one.")
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the
@@ -984,7 +1133,11 @@ def _make_mpas_turbulence(
         # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
         du_cell = turb_out.du_dt  # (nCells, nlev)
         dv_cell = turb_out.dv_dt
-        du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
+        if _cell_winds:
+            du_edge_normal, _dv_leaf = du_cell, dv_cell
+        else:
+            du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
+            _dv_leaf = None
 
         dT_cell = turb_out.dT_dt
 
@@ -1000,6 +1153,17 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
+        if _liquid_partition:
+            # Paired with the vapour tendency above: together they conserve
+            # total water, so this must land wherever that one did.
+            _qc_raw = state.tracers["q_c"]
+            if hasattr(_qc_raw, "replace"):
+                tracer_tends["q_c"] = _qc_raw.replace(
+                    data=turb_out.dq_c_dt.reshape(_qc_raw.data.shape),
+                    name="dq_c_dt_turb",
+                )
+            else:
+                tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,
@@ -1009,9 +1173,11 @@ def _make_mpas_turbulence(
         # unset, byte-identical to the pre-export tendency.
         _shf = getattr(turb_out, "shflx", None)
         _lhf = getattr(turb_out, "lhflx", None)
+        _evp = getattr(turb_out, "evap_sfc", None)
         tendencies = HydrostaticTendencies(
             du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
-            dv_dt=None,
+            dv_dt=(None if _dv_leaf is None
+                   else state.v.replace(data=_dv_leaf, name="dv_dt_turb")),
             dT_dt=state.T.replace(data=dT_cell, name="dT_dt_turb"),
             dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
             dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
@@ -1024,6 +1190,9 @@ def _make_mpas_turbulence(
             lhflx_sfc=None if _lhf is None else state.p_s.replace(
                 data=_lhf.reshape(p_s.shape), name="lhflx_sfc_turb",
                 units="W/m^2"),
+            evap_sfc=None if _evp is None else state.p_s.replace(
+                data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
+                units="kg/m^2/s"),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
@@ -1226,22 +1395,32 @@ def _make_spectral_pe_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
-    if carry_field in ("qke", "clubb_moments"):
-        # Phase C codex iter-3 high: spectral PE dynamics drops the
-        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so an
-        # evolved prognostic carry (qke, or the prognostic-CLUBB moments)
-        # would silently re-initialise on every step.  Fail fast until
-        # phys_state is threaded through the spectral PE step.
-        _what = "MYNN-2.5" if carry_field == "qke" else "prognostic CLUBB"
+    if carry_field == "qke":
+        # MYNN-2.5 stays refused on this lane. The mechanism below is not
+        # carry-specific, so it would probably work -- but "probably" is not a
+        # measurement, and nothing exercises qke here. Lift it with its own
+        # continuity test, not as a side effect of the CLUBB one.
         raise NotImplementedError(
-            f"{_what} turbulence requires a dynamics driver that "
-            "persists PhysicsState across steps.  The current "
-            "spectral PE driver discards the returned phys_state, "
-            f"which would silently re-initialise the {carry_field} carry on "
-            f"every step.  Use ``model_type='hydrostatic'`` for {_what} (MPAS "
-            "turbulence is not yet wired up); tracking issue: thread "
-            "PhysicsState through the spectral PE step path."
-        )
+            "MYNN-2.5 turbulence carries a prognostic qke on a spectral PE "
+            "lane that has no test pinning the carry across steps. Use "
+            "``model_type='hydrostatic'``, or add the continuity test "
+            "(tests/unit/test_spectral_prognostic_clubb_carry.py is the "
+            "pattern) before enabling it here.")
+    # Prognostic CLUBB used to be refused alongside it, because the spectral
+    # lane dropped the returned PhysicsState and the moments would have
+    # re-initialised every step. What is true NOW, consumer by consumer:
+    #   * the TRAINING rollout threads it: spectral_rollout scans
+    #     (state, rad_cache, phys_state) whenever the physics_fn carries the
+    #     with_phys_state / init_phys_state markers, which the classical
+    #     factory attaches. This is the lane the AMIP-matched WB arm runs.
+    #   * the MODEL's step() threads it on the LEAPFROG path only; under
+    #     ssp_rk3 physics is evaluated per sub-stage, where a per-step carry is
+    #     ill-defined, and ``refuse_unthreaded_stateful_physics`` still refuses
+    #     there. That guard protects the RK3 model path, not this one.
+    #   * a caller that threads NOTHING is refused per step below, rather than
+    #     silently re-seeding.
+    # The NONHYDROSTATIC lane keeps its own refusal: that driver still drops
+    # the state.
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         tke_out = None
@@ -1259,10 +1438,8 @@ def _make_spectral_pe_turbulence(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon
@@ -1313,6 +1490,17 @@ def _make_spectral_pe_turbulence(
             scheme_config, phys_state, rho)
 
         if needs_tke:
+            if carry_field == "clubb_moments" and phys_state is None:
+                # Seeding fresh here would look like a working run and be a
+                # memoryless one: the moments would restart from the floor
+                # every step. A caller on this lane must thread the carry (the
+                # markers on the classical factory do).
+                raise ValueError(
+                    "prognostic CLUBB on the spectral PE lane was called "
+                    "without a physics state, so its moments would re-seed "
+                    "every step. Thread the carry (spectral_rollout does this "
+                    "through the with_phys_state/init_phys_state markers), or "
+                    "select diagnostic CLUBB.")
             tke_in = _read_turb_carry(
                 phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(

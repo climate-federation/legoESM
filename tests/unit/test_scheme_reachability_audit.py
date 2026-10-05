@@ -250,7 +250,11 @@ def test_gwd_composites_are_selectable_from_every_driver(parsers, driver, spec):
     # composites that are membership-valid but SEMANTICALLY invalid; a
     # membership-only CLI check accepted these while validate_strict rejected
     # them, so the flag advertised a spec the config then refused (codex).
-    "none+hines", "e3sm_cam+hines", "ml_emulator+hines", "hines+hines",
+    # (e3sm_cam+hines became VALID with the CAM6 suite: its source fields are
+    # threaded through composites; only e3sm_cam's orographic source next to
+    # lindzen/mcfarlane is rejected, and that depends on e3sm_cam_source, which
+    # the CLI spec probe cannot see -- validate_strict catches it later.)
+    "none+hines", "ml_emulator+hines", "hines+hines",
 ])
 @pytest.mark.parametrize("driver", sorted(_DRIVERS))
 def test_gwd_typos_are_rejected_at_the_cli(parsers, driver, bad):
@@ -324,6 +328,14 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
             # algorithm as the ocean tile), so satisfy it rather than trip it.
             if axis == "surface_bulk_scheme" and scheme != "constant":
                 kwargs["turbulence"] = "louis"
+            # CAM6's cloud fraction IS the CLUBB PDF fraction plus the carry
+            # routing, and is wired on the MPAS lane only (documented
+            # cross-field contract, validate_strict enforces all three).
+            if axis == "clouds" and scheme == "cam6_clubb":
+                from legoesm.driver.config import DycoreConfig
+                kwargs.update(turbulence="clubb", use_clubb_cloud_fraction=True,
+                              microphysics="sundqvist", radiation="rrtmgp",
+                              dycore=DycoreConfig(discretization="mpas"))
             try:
                 ExperimentConfig(**kwargs).validate_strict()
             except ValueError as e:  # pragma: no cover - failure path

@@ -1,0 +1,18 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -23,6 +23,7 @@
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
+    USE lib_mpp, ONLY : l_perpetual_ts
++   USE l4_r69_surface, ONLY : l4_r69_dump
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -136,6 +137,7 @@
+       IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
+       IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
++                         CALL l4_r69_dump( kstp, Nbb )                     ! round-69 WRITE-only surface operands
+ !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
+ 

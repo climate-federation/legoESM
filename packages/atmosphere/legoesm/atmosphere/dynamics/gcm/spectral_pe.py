@@ -58,8 +58,10 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     pressure_from_hybrid,
     dp_from_hybrid,
+    compute_geopotential,
     compute_geopotential_hybrid,
     compute_mass_flux_from_cumsum,
+    vertical_advection,
     vertical_advection_hybrid,
     compute_omega_hybrid,
 )
@@ -349,32 +351,6 @@ class SpectralPEConfig(NamedTuple):
 # Internal vertical helpers (generic shapes, no cubed-sphere assumptions)
 # =============================================================================
 
-def _compute_geopotential_gaussian(T, p_s, sigma_coord, phis):
-    """Simmons-Burridge geopotential on Gaussian grid.
-
-    Same math as vertical.compute_geopotential but with generic
-    broadcasting: T is (..., nlev), p_s is (...), phis is (...).
-    """
-    R_d = constants.R_d
-    ln_ratio = sigma_coord.ln_ratio   # (nlev,)
-    alpha = sigma_coord.alpha         # (nlev,)
-
-    dPhi = R_d * T * ln_ratio         # broadcast: (..., nlev)
-
-    dPhi_reversed = dPhi[..., ::-1]
-    cumsum_reversed = jnp.cumsum(dPhi_reversed, axis=-1)
-    cumsum = cumsum_reversed[..., ::-1]
-
-    Phi_above = phis[..., None] + cumsum
-
-    Phi_below = jnp.concatenate(
-        [Phi_above[..., 1:], phis[..., None]], axis=-1,
-    )
-
-    Phi_full = Phi_below + alpha * R_d * T
-    return Phi_full
-
-
 def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
     """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev).
 
@@ -406,28 +382,6 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
     pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
     sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
     return sigma_dot, D_total
-
-
-def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
-    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes.
-
-    Top/bottom boundaries pad with a zero gradient; using ``jnp.pad``
-    instead of ``concatenate([jnp.zeros(...), ...])`` lowers to a
-    single XLA ``Pad`` op rather than allocating a fresh zero buffer
-    every RHS evaluation (this helper runs 3-5× per outer step under
-    SSP-RK).
-    """
-    sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
-    dsigma_bwd = sigma_coord.dsigma_full
-    df_bwd = jnp.diff(field, axis=-1)
-    diff = df_bwd / dsigma_bwd
-
-    pad_axes = ((0, 0),) * (diff.ndim - 1)
-    grad_bwd = jnp.pad(diff, (*pad_axes, (1, 0)))
-    grad_fwd = jnp.pad(diff, (*pad_axes, (0, 1)))
-
-    grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
-    return -sigma_dot_full * grad
 
 
 _WARNED_NON_CONSERVING: set[tuple[str, bool]] = set()
@@ -492,7 +446,7 @@ def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
     supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
 
     Measured motivation: the legacy first-order UPWIND advective form
-    (:func:`_vertical_advection_sigma_gaussian`) carries a systematic
+    (:func:`legoesm.grids.vertical.vertical_advection`) carries a systematic
     -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
     weighted temperature sink at T63L8 — the dominant term of the dycore's
     measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
@@ -596,7 +550,7 @@ def _tracer_advection_gaussian(
         # non-conditional on ``sigma_dot``.
         return horiz_adv
 
-    vert_adv = _vertical_advection_sigma_gaussian(q_grid, sigma_dot, sigma_coord)
+    vert_adv = vertical_advection(q_grid, sigma_dot, sigma_coord)
     return horiz_adv + vert_adv
 
 
@@ -630,7 +584,7 @@ def spectral_pe_tendencies(
     _vadv_scheme = config.vertical_advection_scheme
     if _vadv_scheme == "upwind":
         _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
-        _vadv_sigma = _vertical_advection_sigma_gaussian
+        _vadv_sigma = vertical_advection
         _vadv_hybrid = vertical_advection_hybrid
     elif _vadv_scheme == "sb_centered":
         if not config.frictional_heating:
@@ -724,7 +678,7 @@ def spectral_pe_tendencies(
     if _hybrid:
         Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
     else:
-        Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
 
     # --- 5. Kinetic energy (pole-safe via oc2 transform) ---
     # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).  Computing KE on the
@@ -1780,8 +1734,8 @@ class SpectralPrimitiveEquationModel:
         coord = self.sigma_coord
         # Grid-space layer mass dp from lnps (one SH synthesis).  On pure sigma
         # the per-column p_s cancels in the borrow rescale, but real dp is
-        # correct on hybrid too and keeps the global net-negative-column
-        # residual mass-weighted.
+        # correct on hybrid too; with the Gaussian cell area it keeps the
+        # global net-negative-column residual mass-weighted.
         p_s = jnp.exp(sh_synthesis(self.grid, state.lnps_hat.data))
         if isinstance(coord, HybridSigmaPressureCoordinate):
             dp = jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)  # +weight contract
@@ -1790,7 +1744,8 @@ class SpectralPrimitiveEquationModel:
         tracers_out, _ = apply_water_positivity(
             state.tracers, None, dp,
             conservative=self.config.conservative_tracer_clamp,
-            energy_consistent=False)  # T is spectral here — borrow is the E-C path
+            energy_consistent=False,  # T is spectral here — borrow is the E-C path
+            area=self.grid.grid_area)
         return state._replace(tracers=tracers_out)
 
     def _ensure_si_data_leapfrog(self, dt: float):

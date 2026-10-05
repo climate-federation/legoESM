@@ -22,6 +22,9 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    latent_enthalpy_correction,
+    surface_moisture_flux,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
@@ -135,7 +138,7 @@ def _apply_predicted_diffusivity_turbulence(
             Km=Km,
             Kh=Kh,
             shflx=zeros_2d,
-            lhflx=zeros_2d,
+            lhflx=zeros_2d, evap_sfc=zeros_2d,
             ustar=zeros_2d,
             h_pbl=zeros_2d,
         )
@@ -150,7 +153,12 @@ def _apply_predicted_diffusivity_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    # Through the shared helper: the pipeline runs this lane INSTEAD of
+    # ordinary turbulence and consumes its tendencies, so a direct call here
+    # left the learned lane on the uncorrected surface law while the slab it
+    # is coupled to used the corrected one -- two different laws across one
+    # interface (codex).
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1],
         v[:, -1],
         T[:, -1],
@@ -159,12 +167,13 @@ def _apply_predicted_diffusivity_turbulence(
         q_sfc,
         rho[:, -1],
         surface_config,
+        z_full[:, -1] - z_half[:, -1],
     )
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(surface_config, lhflx, T_sfc)
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
@@ -180,7 +189,7 @@ def _apply_predicted_diffusivity_turbulence(
         Km=Km,
         Kh=Kh,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
     )

@@ -269,7 +269,7 @@ legoESM selects the NEMO TKE configuration in
 `packages/ocean/legoesm/ocean/experiments/dino.py:2890-2941` and layers the
 same enhanced-diffusion momentum option at `:3234-3259`.  The production call
 and coefficient handoff to implicit mixing are in
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6347-6519`;
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6517-6689`;
 the closure entry is `physics/vertical_mixing/k_profiles.py:108`.  The import
 receipt resolves that module inside this worktree.
 

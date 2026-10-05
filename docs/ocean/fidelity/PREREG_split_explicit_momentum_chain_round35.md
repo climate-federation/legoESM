@@ -10,7 +10,7 @@ barotropic mean and compared different representations. This round changes no
 physics and substitutes no operand. It runs one unmodified production day-180
 step and observes the first U and V calls to
 `implicit_vertical_diffusion_ocean_momentum_dispatch` at
-`ocean_model_latlon_cgrid.py:7442-7540`. The captured dispatch input and raw
+`ocean_model_latlon_cgrid.py:7687-7785`. The captured dispatch input and raw
 return both precede production's mean readdition at `:7550-7557`, matching
 NEMO's barotropic-free `dyn_zdf` stage-8 representation
 (`stpmlf.F90:398-407`; `dynzdf.F90:137-214,305-371`).

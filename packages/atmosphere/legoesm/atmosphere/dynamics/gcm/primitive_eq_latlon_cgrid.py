@@ -93,7 +93,7 @@ from legoesm.core.conservation import (
     batch_global_area_sums,
     conservation_accumulator,
 )
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.operators_fv_latlon import (
     fv_gradient_lon_3d as _fv_gradient_lon_3d,
     fv_gradient_lat_3d as _fv_gradient_lat_3d,
@@ -1243,7 +1243,13 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state_new = self._apply_safety_rails(
             state_new, target_mass, state, grid=grid, sigma_coord=sigma_coord)
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        state_out = finalize_to_storage(
+            cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state yields the carry-out
@@ -1386,8 +1392,17 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=grid.area)
             state = state._replace(tracers=_tr_out, T=_T_out)
+
+        # #1675: the mass fixer's accumulate-dtype correction promotes ``p_s``
+        # on purpose, but the tracer mass rescale above then carries that
+        # float64 into the 3-D bulk state, so a ``mixed`` run silently stops
+        # being fp32-storage (measured: q_v/q_c/q_r all float64 after one
+        # step).  Re-cast the bulk state to storage and leave ``p_s`` at
+        # accumulate.  No-op in every mode where the two roles share a dtype.
+        state = finalize_to_storage(state)
 
         return state
 

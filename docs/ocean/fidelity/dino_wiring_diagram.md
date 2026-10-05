@@ -138,9 +138,9 @@ default vs recipe override — the recurring trap).
 barotropic Coriolis is double-counted under the default `matsuno_split`, but code
 inspection REFUTES it (4th agent over-claim this loop): under `matsuno_split`, `du_dt`
 EXCLUDES the planetary Coriolis (the stage-7b' planetary-Coriolis add,
-`ocean_pe_latlon_cgrid.py:3627`, is gated on `coriolis_scheme=="explicit_ab2"`), so
+`ocean_pe_latlon_cgrid.py:3681`, is gated on `coriolis_scheme=="explicit_ab2"`), so
 `F_slow` carries NO f, and the substep applies `f×U_bt` exactly once (`_add_bt_cor=True`,
-`ocean_model_latlon_cgrid.py:2544-2546`); the Matsuno rotation applies f to the
+`ocean_model_latlon_cgrid.py:2676-2678`); the Matsuno rotation applies f to the
 perturbation. Under `explicit_ab2`, `du_dt` HAS f → `F_slow` carries it → substep skips
 (`_add_bt_cor=False`). Each mode gets f exactly once in BOTH schemes — matches NEMO's
 zu_frc-subtract-then-live-substep accounting. No jet driver here.
@@ -942,7 +942,7 @@ component** — upstream of `dyn_spg`/wind. Same density, same grid ⇒ the only
 u/v-asymmetric ingredient is the meridional metric and the **terrain-following
 (z-star) PGF** over DINO's meridionally-sloping bowl/ACC bathymetry. The default
 `pgf_scheme="adcroft"` on `OceanZStarCoordinate` applies NO slope correction
-(`ocean_pe_latlon_cgrid.py:1608-1623`): densities are differenced at equal level-index
+(`ocean_pe_latlon_cgrid.py:1608-1657`): densities are differenced at equal level-index
 but unequal physical depth across the slope. The error is benign on the smooth 62-day
 state (v = 0.9999) and grows with depth AND developed meridional density structure
 (v → 0.63 at 180 d) — confirming hypothesis (i) (legoESM deep-cell HPG magnitude

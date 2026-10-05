@@ -51,7 +51,7 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree, finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -2027,11 +2027,20 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.cdgrid.base.area)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` SKIPS downcasts by default, so in ``mixed``
+        # this line never rounded the mass fixer's float64 back out of the bulk
+        # state -- adversarial review traced winds, temperature and every
+        # tracer arriving float64 on step TWO.  ``finalize_to_storage`` is the
+        # downcasting version and keeps ``p_s`` at the accumulate dtype on
+        # purpose (the exact mass correction is load-bearing).  It is a no-op
+        # whenever storage and accumulate share a dtype, i.e. in every mode
+        # except mixed, so fp32/fp64 stay byte-identical.
+        state_out = finalize_to_storage(cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out
@@ -2316,24 +2325,3 @@ def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfi
     )
     edge_min_overrides.update(overrides)
     return make_fv3_component_fidelity_pe_config(**edge_min_overrides)
-
-
-def make_legoesm_pe_min_edge_aggressive_config(
-    **overrides
-) -> CDGridPrimitiveEquationConfig:
-    """FV3_3D iter 484: PE mirror of NH iter-483 aggressive factory.
-
-    Stacks iter-466 hurting-flag drops + iter-481 corner_div boost
-    (d2_bg=5e-2).  iter-469/470 found PE T/u_d insensitive to most
-    factory flags at C8 — this aggressive config is unlikely to help
-    much on PE compared to NH, but provided for API symmetry with
-    NH iter-483.  Trade-off: over-damps physical waves.
-    """
-    aggressive_overrides = dict(
-        use_fv3_metric_aware_d_con=False,
-        heat_source_del2_iters=0,
-        d_con_top_zero_levels=0,
-        corner_div_damp_d2_bg=5e-2,
-    )
-    aggressive_overrides.update(overrides)
-    return make_fv3_component_fidelity_pe_config(**aggressive_overrides)

@@ -276,7 +276,7 @@ def step_snow_bands(
     Q_net: jnp.ndarray,
     cfg: ElevationSnowBandConfig,
     T_snow_melt: float = constants.T_freeze,
-    snow_age_activation_K: float = 0.0,
+    snow_age_activation_K: float,
     precip_rain_bands: jnp.ndarray | None = None,
     wind: jnp.ndarray | None = None,
 ) -> SnowBandStep:

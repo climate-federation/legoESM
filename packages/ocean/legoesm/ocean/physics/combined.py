@@ -26,6 +26,7 @@ from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
+    apply_shortwave_penetration,
     shortwave_penetration_tendency,
 )
 
@@ -146,6 +147,7 @@ def _make_mle(cfg: MLEConfig) -> Callable:
 def make_ocean_physics(
     config: OceanPhysicsConfig,
     apply_vertical_diffusion: bool = True,
+    seos_cfg=None,
 ) -> Callable:
     """Create a combined ocean physics function.
 
@@ -166,7 +168,8 @@ def make_ocean_physics(
 
     Returns
     -------
-    Callable : physics_fn(state, grid, z_coord, surface_forcing=None) -> OceanTendencies
+    Callable : physics_fn(state, grid, z_coord, surface_forcing=None, dt=None)
+        -> OceanTendencies.  ``dt`` [s] reaches lateral mixing only.
     """
     # Tidal mixing rides on VerticalMixingConfig but is a SEPARATE caller-applied
     # additive step (ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step),
@@ -207,6 +210,7 @@ def make_ocean_physics(
         )
 
     fns = []
+    lateral_fn = None  # the one sub-physics that takes the run's dt
 
     if config.vertical_mixing.scheme != "none":
         fns.append(make_vertical_mixing_physics(
@@ -215,8 +219,9 @@ def make_ocean_physics(
             constants_config=config.constants,
         ))
     if config.lateral_mixing.scheme != "none":
-        fns.append(make_lateral_mixing_physics(
-            config.lateral_mixing, constants_config=config.constants))
+        lateral_fn = make_lateral_mixing_physics(
+            config.lateral_mixing, constants_config=config.constants)
+        fns.append(lateral_fn)
     if config.surface_forcing.scheme != "none":
         fns.append(make_surface_forcing_physics(config.surface_forcing))
     # Physics-level bottom drag is deprecated — use the dynamics-level
@@ -269,6 +274,7 @@ def make_ocean_physics(
                 emit_momentum_viscosity=(
                     config.vertical_mixing.scheme != "kpp"),
                 constants_config=config.constants,
+                seos_cfg=seos_cfg,
             ))
         # else: TKE/CATKE K profiles are computed INSIDE the implicit
         # solve's compute_vertical_K_profiles fallback (their pipeline
@@ -294,7 +300,13 @@ def make_ocean_physics(
         grid: CubedSphereGrid,
         z_coord: OceanZStarCoordinate,
         surface_forcing: OceanSurfaceForcing | None = None,
+        dt: float | None = None,
     ) -> OceanTendencies:
+        def _call(fn):
+            if fn is lateral_fn:
+                return fn(state, grid, z_coord, surface_forcing, dt=dt)
+            return fn(state, grid, z_coord, surface_forcing)
+
         if not fns and sw_config is None:
             return zero_ocean_tendencies(state)
 
@@ -306,7 +318,7 @@ def make_ocean_physics(
         K_v_sum = None
         A_v_sum = None
         if fns:
-            first = fns[0](state, grid, z_coord, surface_forcing)
+            first = _call(fns[0])
             du_dt = first.du_dt.data
             dv_dt = first.dv_dt.data
             dT_dt = first.dT_dt.data
@@ -318,7 +330,7 @@ def make_ocean_physics(
                 A_v_sum = first.A_v
 
             for fn in fns[1:]:
-                t = fn(state, grid, z_coord, surface_forcing)
+                t = _call(fn)
                 du_dt = du_dt + t.du_dt.data
                 dv_dt = dv_dt + t.dv_dt.data
                 dT_dt = dT_dt + t.dT_dt.data
@@ -329,9 +341,17 @@ def make_ocean_physics(
                 if t.A_v is not None:
                     A_v_sum = t.A_v if A_v_sum is None else A_v_sum + t.A_v
         else:
-            z3 = jnp.zeros_like(state.u.data)
-            z2 = jnp.zeros_like(state.eta.data)
-            du_dt, dv_dt, dT_dt, dS_dt, deta_dt = z3, z3, z3, z3, z2
+            # Each slot takes ITS OWN field's shape.  On a C-grid the velocity
+            # faces and the tracer cells are different shapes (u is one column
+            # wider), so seeding every slot from ``u`` handed the TRACER
+            # tendencies a velocity-shaped array -- harmless while some other
+            # module supplied them, and a broadcasting error the moment
+            # shortwave penetration is the only module enabled.
+            du_dt = jnp.zeros_like(state.u.data)
+            dv_dt = jnp.zeros_like(state.v.data)
+            dT_dt = jnp.zeros_like(state.T.data)
+            dS_dt = jnp.zeros_like(state.S.data)
+            deta_dt = jnp.zeros_like(state.eta.data)
 
         # Shortwave penetration: distribute SW heating through water column.
         if (
@@ -339,17 +359,63 @@ def make_ocean_physics(
             and surface_forcing is not None
             and surface_forcing.sw_down is not None
         ):
-            from legoesm.ocean.vertical import compute_ocean_jacobian
+            from legoesm.ocean.vertical import (
+                compute_layer_thickness,
+                compute_ocean_jacobian,
+            )
             J = compute_ocean_jacobian(
                 state.eta.data, state.H_bathy.data, z_coord,
             )
-            sw_tend = shortwave_penetration_tendency(
-                surface_forcing.sw_down,
-                z_coord.dz_ref,
-                z_coord.z_half_ref,
-                J,
-                sw_config,
-            )
+            if sw_config.scheme == "nemo_qsr_rgb":
+                # NEMO ``qsr_RGBc`` (traqsr.f90:213): three chlorophyll bands
+                # plus infrared, on the LIVE key_qco ladder
+                # ``e3t_0*(1+r3t)`` / ``gdepw_1d*(1+r3t)``
+                # (traqsr.f90:388, :349).  Same shared kernel the external
+                # surface-forcing stage already dispatches; nothing here is a
+                # second RGB implementation.  ``J`` is NEMO's ``1 + r3t`` for
+                # this coordinate (``compute_ocean_jacobian``), and
+                # ``compute_layer_thickness`` is ``h_partial * J`` -- the same
+                # single stretch, not a second one.
+                #
+                # ONLY the NEMO identity selector takes this branch.  The
+                # generic ``rgb_chl`` scheme keeps refusing here exactly as it
+                # did before: its deposit is owned by the external
+                # surface-forcing stage (ocean_pe_latlon_cgrid.py), and
+                # letting the pipeline deposit it too would double-count qsr
+                # for every card that selects it.
+                if surface_forcing.chl is None:
+                    raise ValueError(
+                        "physics.shortwave_penetration.scheme="
+                        f"{sw_config.scheme!r} needs a chlorophyll field; "
+                        "OceanSurfaceForcing.chl is None")
+                h_live = compute_layer_thickness(
+                    state.eta.data, state.H_bathy.data, z_coord)
+                dtype = h_live.dtype
+                sw_tend = apply_shortwave_penetration(
+                    sw_config,
+                    jnp.asarray(surface_forcing.sw_down, dtype=dtype),
+                    chl=jnp.asarray(surface_forcing.chl, dtype=dtype),
+                    dz_live=h_live,
+                    wet_cell=jnp.asarray(h_live > 0.0, dtype=dtype),
+                    gdepw_bottom_live=(
+                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=dtype)
+                        * jnp.asarray(J, dtype=dtype)[..., jnp.newaxis]
+                    ),
+                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=dtype),
+                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=dtype),
+                    rho_0=config.constants.rho_0,
+                    c_sw=config.constants.c_sw,
+                )
+            else:
+                sw_tend = shortwave_penetration_tendency(
+                    surface_forcing.sw_down,
+                    z_coord.dz_ref,
+                    z_coord.z_half_ref,
+                    J,
+                    sw_config,
+                    rho_0=config.constants.rho_0,
+                    c_sw=config.constants.c_sw,
+                )
             dT_dt = dT_dt + sw_tend
 
         dims_3d = state.T.dims if hasattr(state.T, 'dims') else ("face", "x", "y", "level")

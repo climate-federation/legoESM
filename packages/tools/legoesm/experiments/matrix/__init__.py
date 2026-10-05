@@ -21,7 +21,6 @@ from legoesm.experiments.matrix.core import (
 )
 from legoesm.experiments.matrix.gates import (
     CONS_THRESH,
-    aam_gate,
     benchmark_error_gate,
     default_tol,
     drift_gate,
@@ -29,7 +28,6 @@ from legoesm.experiments.matrix.gates import (
     finite_gate,
     heat_gate,
     mass_gate,
-    moisture_gate,
     salt_gate,
 )
 from legoesm.experiments.matrix.namelist import (
@@ -50,7 +48,6 @@ __all__ = [
     "RunStatus",
     "Tier",
     "CONS_THRESH",
-    "aam_gate",
     "benchmark_error_gate",
     "default_tol",
     "drift_gate",
@@ -58,7 +55,6 @@ __all__ = [
     "finite_gate",
     "heat_gate",
     "mass_gate",
-    "moisture_gate",
     "salt_gate",
     "MatrixRunner",
     "build_namelist",

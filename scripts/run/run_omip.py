@@ -276,6 +276,26 @@ def build_config_from_args(args) -> OMIPRunConfig:
     )
 
 
+def with_kpp_cfl_dt(run_config: OMIPRunConfig, dt: float) -> OMIPRunConfig:
+    """Tie the KPP explicit-diffusion CFL cap to the run's timestep.
+
+    ``KPPConfig.cfl_cap_dt_s`` must equal the ocean dynamics dt (its default
+    300 s matched only the MPAS default dt), so the driver passes the value it
+    knows instead of leaving a default that disagrees with ``--dt``.  A value
+    already moved off the default (set explicitly upstream) that disagrees
+    with ``dt`` raises instead of being silently overwritten.
+    """
+    vm = run_config.vertical_mixing
+    current = float(vm.kpp.cfl_cap_dt_s)
+    default = float(KPPConfig._field_defaults["cfl_cap_dt_s"])
+    if current != default and current != float(dt):
+        raise ValueError(
+            f"KPPConfig.cfl_cap_dt_s was set to {current} s but the run "
+            f"timestep is {float(dt)} s; the KPP CFL cap must use the run dt")
+    return run_config._replace(vertical_mixing=vm._replace(
+        kpp=vm.kpp._replace(cfl_cap_dt_s=float(dt))))
+
+
 def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
     """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
     and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
@@ -2021,7 +2041,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 reorder_voronoi_for_sharding,
             )
             _n0 = mesh.nCells
-            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices)
+            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices,
+                                                edge_order=MPAS_SPMD_EDGE_ORDER)
             print(f"  MPAS SPMD mesh: reordered for {spmd_n_devices} devices, "
                   f"{_n0} -> {mesh.nCells} cells ({mesh.nCells - _n0} padded "
                   f"ghosts, land)")
@@ -2978,7 +2999,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
-    fw = jra55_to_freshwater(slc, tile_resp.lhflx)
+    fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
         q_net=q_net,
@@ -4607,6 +4628,9 @@ _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
 # Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
 # writer has no view of the SPMD layout).  [0] = serial order.
 _MPAS_SPMD_N_DEVICES = [0]
+# Edge layout of the MPAS SPMD reorder (recorded in restarts and checked on
+# load, so a restart from another layout is refused, never scrambled).
+MPAS_SPMD_EDGE_ORDER = "block"
 
 
 def _save_restart(state, day, step, output_dir, ice_state=None,
@@ -4669,6 +4693,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         # 0 = serial cell order; >1 = MPAS SPMD reordered+padded order for
         # that device count (set once by run_omip_single's SPMD wiring).
         "mpas_spmd_n_devices": int(_MPAS_SPMD_N_DEVICES[0]),
+        # Edge layout of that order (reorder_voronoi_for_sharding edge_order).
+        "mpas_spmd_edge_order": MPAS_SPMD_EDGE_ORDER,
     }
     for f in state._fields:
         if f in _RESTART_DIAGNOSTIC_SLOTS:
@@ -4821,6 +4847,17 @@ def _load_restart(restart_path, template_state, grid_type=None,
             f"Restart {restart_path} was written by an MPAS SPMD run over "
             f"{_saved_nd} device(s) (0 = serial order) but this run uses "
             f"{int(mpas_spmd_n_devices)}; the cell order differs.")
+    # Same for the EDGE order: SPMD restarts written before the "block" edge
+    # layout (no key) hold u in another edge order — a scrambled velocity.
+    if _saved_nd > 1:
+        _saved_eo = (str(data["mpas_spmd_edge_order"])
+                     if "mpas_spmd_edge_order" in data else "owner")
+        if _saved_eo != MPAS_SPMD_EDGE_ORDER:
+            raise ValueError(
+                f"Restart {restart_path} stores MPAS SPMD edges in the "
+                f"{_saved_eo!r} layout but this build uses "
+                f"{MPAS_SPMD_EDGE_ORDER!r}; its velocity would load scrambled. "
+                "Re-spin, or resume with a build from before the change.")
     if grid_type is not None and "grid_type" in data:
         saved_grid_type = str(data["grid_type"])
         if saved_grid_type != grid_type:
@@ -5770,6 +5807,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     else:
         resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
+    run_config = with_kpp_cfl_dt(run_config, dt)
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)
     diag_every = args.diag_every or max(1, int(86400.0 / dt))  # ~daily
@@ -5779,6 +5817,8 @@ def run_omip_single(grid_type: str, args) -> dict:
           f"dt={dt:.0f}s | {days:.0f} days ({n_steps} steps)")
     print(f"  Physics: {args.physics} | SW: {args.sw_down} W/m² | "
           f"Water type: {args.water_type}")
+    print(f"  KPP CFL cap timestep (from dt): "
+          f"{run_config.vertical_mixing.kpp.cfl_cap_dt_s:.0f} s")
     print(f"{'='*70}")
 
     t_setup = time.time()
@@ -6703,6 +6743,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         "resolution": resolution,
         "n_levels": int(z_coord.n_levels),
         "dt_seconds": float(dt),
+        "kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s),
         "days": float(args.days),
         "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),
@@ -6919,6 +6960,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             from legoesm.parallel.voronoi_spmd_ocean import (
                 build_mpas_ocean_spmd_layout,
                 gather_state_mpas_ocean_spmd,
+                halo_depth_for_config,
                 make_sharded_mpas_ocean_step,
                 n_real_cells,
                 shard_cell_stack_spmd,
@@ -6927,7 +6969,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             _layout = build_mpas_ocean_spmd_layout(
                 grid, _nd, n_cells_real=n_real_cells(grid),
                 tracer_advection=str(model.config.tracer_advection),
-                nlev=int(args.nlev))
+                nlev=int(args.nlev),
+                halo_depth=halo_depth_for_config(model.config))
             spmd_step = make_sharded_mpas_ocean_step(model, _layout)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather

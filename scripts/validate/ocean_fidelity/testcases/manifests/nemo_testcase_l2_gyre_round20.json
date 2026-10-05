@@ -1,0 +1,98 @@
+{
+  "format": "nemo-testcase-l2-gyre-round20-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-05",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "03c6e8d96ff7f69207abdee43ec28e223d083f4e",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "DEBT",
+  "commits": {
+    "preregistration": "cb724fed6",
+    "barotropic_gate_route": "38da514ab",
+    "precision_provenance": "5014446d8",
+    "coastal_surface_stress": "6742b024a",
+    "stored_barotropic_stage_mean": "d6741f3b6"
+  },
+  "merge_baselines": {
+    "round19": "c83f73c23ff82cd7148a68bee020ec3568e5d1d8",
+    "integration_census": "b46e617d02a5ddef5d6b1a04d8124db75bcfbaf2",
+    "overflow_trajectory_vs_round19": "FAIL: 4 rows, max 5.5 ulp, 0 status changes",
+    "overflow_trajectory_vs_census": "49 / 50 identical; kt2 SSH DEBT->AT-BAR"
+  },
+  "outcomes": {
+    "barotropic_gate": "DEBT verdict reproduced; 13 tests passed; production JIT route",
+    "precision_provenance": "OVERFLOW BBL/Aimp/ZDF payloads and 15 run-arm arrays unchanged",
+    "coastal_stress": "oracle exact; legacy differs only on 124 U and 102 V dry coastal faces; 0 / 580 active U and 0 / 570 active V moved",
+    "stage1_tracer_update_v2": "T 0 / 17600 and S 0 / 17600 differing",
+    "stage2_kaa": "DEBT: u=2.1986806906376666e-15, v=2.2380914396075147e-15",
+    "first_over_bar": "kt=2: T,S,u,v",
+    "whole_step_move_vs_merge": "20 improved / 20 worsened / 10 identical",
+    "stage3_transport_zdf_tke": "UNMEASURED_UPSTREAM_STAGE2_DEBT",
+    "crosscard_stage_transport_eligibility": "HOLD: stage gates unchanged at 0 ulp; OVERFLOW and LOCK trajectories FAIL from kt3; persistent Kbb barotropic mean is the next operand"
+  },
+  "crosscard": {
+    "post_coastal_change": {
+      "overflow_stage": "PASS 9 rows 0 ulp",
+      "overflow_trajectory": "PASS 50 rows 0 ulp",
+      "lock_stage": "PASS 9 rows 0 ulp",
+      "lock_trajectory": "PASS 50 rows 0 ulp"
+    },
+    "post_stored_mean_change": {
+      "status": "HOLD_RULE12_SECOND_ERROR",
+      "overflow_stage": "PASS 9 rows 0 ulp",
+      "overflow_trajectory": "FAIL 50 rows max 3563707596 ulp; first_over_bar kt2 T,u unchanged; S AT-BAR->DEBT at kt7-10",
+      "lock_stage": "PASS 9 rows 0 ulp",
+      "lock_trajectory": "FAIL 50 rows max 1549621 ulp; first_over_bar kt4 u -> kt3 T,u; 10 AT-BAR->DEBT changes",
+      "next_boundary": "PERSISTENT_KBB_BAROTROPIC_MEAN_UNMEASURED",
+      "jax_cache": "/tmp/gyre-r20-jaxcache.Ccdm2p (retained; AOT prefer-no-gather/prefer-no-scatter warnings reproduced with an empty cache)"
+    }
+  },
+  "artifacts": {
+    "barotropic_gate": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round20/gate_repair/frame_walk_kt1.json",
+      "sha256": "ac2728dc4b9e1b4cec322dbf4cb3ef743417c68f0f3c56a30b9e9d95e360369f"
+    },
+    "precision_scalar_bbl": "18208ad23d8a4e8b0c7787a2eb40fe57db211a59f02cc2c7238d024dedf3f6b2",
+    "precision_scalar_aimp": "222c62f2cbda7aa71b15d81ddc0685cdcad71e9dbfead1c11b8135108a5f45a3",
+    "precision_scalar_zdf": "60453ef9497c36072b33adcddeeb33d5dcf4c16d4d66657c1930a797946e3621",
+    "precision_run_arm_states": "1b4a98f2af4ae81815bbaf47775aa82408fad7d2efbb1b0a8f6b12c390cd0ac7",
+    "coastal_faithful": "97935cd5700c8b5d5d8c58b63ff8f3b7810cfe933863c2fea9579586a300cd95",
+    "coastal_legacy": "b32230c94736e48500733a59a901be9a39e4d837a0bea456dc514d9e9c523600",
+    "coastal_plant": "8d566430468bc319fb4fc14462fc63eeeebf9d4733f890cc8a37a1cfab80ba97",
+    "tracer_source_order_v1": "708c0c36faaba04ffbf3ef63cba3bf9ad29aea153c132d0aaa5e5b0816bfc02f",
+    "tracer_source_order_v2": "1fbc35eddbe434af947425d307b8475d96f7eb624bd3077a4a3bfe1884203564",
+    "transport_candidate_prefx": "8cd7dbff511ba08f49d8a584fd77690eaa20d4014ed4d98351bfe71bc19f4b93",
+    "transport_candidate_final": "48760ba644f973b23eea2f66f2810d907aef4be1fb9f5abd0d938bc1718244a7",
+    "transport_candidate_plant": "54246684a28f9a5bf040fea2001d0531778d72702ec111dbe260b303ee8aa43c",
+    "stage2_corrected": "2aaf008c4d3347c97f102398e18e15aaef6da962da054150d44c9d7b73d07706",
+    "stage2_raw": "239f5b2c8fa298817e7d225ca2462b3accdba248d678c151711724a44debdde1",
+    "stage2_rhs": "f4a94eda35fe8636fb1f9189e504f34f4ab7fad003f4dbb012c9d4eb248fb733",
+    "stage2_hpg_operands": "74727101ba1238645672a336865e1da3c8bb0bef47c7e1052bf4c60a8a48c513",
+    "stage2_hpg_literal": "9353f31743ef9f8f7e18fece3f25866931ff3c9eda11c6bc3454e12725396fc8",
+    "whole_step_sweep": "5accb34b100e447badd1795c76181c1445a9ec15b59147a37cdf98fdfb945bc5",
+    "post_coastal_overflow_stage_compare": "18368de8eb27432a2ae021a9f84209b535ca8c2fb452419ebada49aba6c3d053",
+    "post_coastal_overflow_trajectory_compare": "d0be02f6a4320aee58e63cb129c4f76021d71d3b13f9e8d6c1276b33bdf76a5f",
+    "post_coastal_lock_stage_compare": "f4a1d2e9bb2ae246c2f135645d2c22e9adf9a919a9af7c350133d252b763d961",
+    "post_coastal_lock_trajectory_compare": "2feb576ec04ed861460d78b600edaca5502146172038bbb87929d965df6814fb",
+    "post_stored_mean_overflow_stage": "fa477bbfc1325bff5d494b7e19461397484bd1284484bf4bef4b002ac28c4d64",
+    "post_stored_mean_overflow_stage_residuals": "04e707727634f09ec6af1e4c182f536a05d55b2dab421fefaecab7c2d454e69d",
+    "post_stored_mean_overflow_stage_compare": "21c18e46b9986501166011059243b27c7de7b126bb9ea0f4b83ac793f54601db",
+    "post_stored_mean_overflow_trajectory": "161a138c0d9c840bd30d78ad2c201220459b613097bf0afc2c14fe5597feef9a",
+    "post_stored_mean_overflow_trajectory_residuals": "9987c6b012b99c550685bb88de9faa7518f147e93c6a3dd92a80bde670ecf84f",
+    "post_stored_mean_overflow_trajectory_compare": "273ba577ddb66f7118112ed9f71a4d1cd1bc4f368571fa8a894c1b278e6e1819",
+    "post_stored_mean_lock_stage": "b8babadaec39bfa7ac602b5abce4d225b822802c1f693bf5b7a4034c390c1266",
+    "post_stored_mean_lock_stage_residuals": "cf6f72069015452d568a900bac093748f4756282cafc7ac44c4d301190fcb601",
+    "post_stored_mean_lock_stage_compare": "6a6137ea5d874f9c45bfb5b0d000d27eeaa0b06be13e0a7958e3dcacec122932",
+    "post_stored_mean_lock_trajectory": "279e6f789c203439d6260d7df557fc7b149b3a2cfe0b306c177547bd5a3e3fa8",
+    "post_stored_mean_lock_trajectory_residuals": "bc50372f08703c16e3a65109ce679a2810a82c7dcff699f5dd89cbb5f606236d",
+    "post_stored_mean_lock_trajectory_compare": "74672def65a001076de5a35a683b3c66df4a2cbf559bec08b4f80e4aef01ceab"
+  },
+  "verification": {
+    "gate_route_tests": "13 passed in 287.60 s",
+    "coastal_focused_tests": "41 passed",
+    "stored_mean_targeted_tests": "3 passed in 3.77 s",
+    "scheme_isomorphism_tests": "35 passed in 3.76 s",
+    "stored_mean_plant": "exit 1",
+    "independent_review": "OUTSTANDING"
+  }
+}

@@ -27,6 +27,13 @@ import math
 from typing import NamedTuple
 
 
+# Legal Hines launch pressure [Pa]: above the boundary layer, below the
+# upper troposphere.  The ONE range for ``HinesConfig.launch_p`` and the
+# driver's ``hines_launch_p`` (validated in ``ExperimentConfig``); matches the
+# E3SM frontal sibling's ``launch_p`` spec bounds.
+HINES_LAUNCH_P_RANGE_PA = (3.0e4, 9.0e4)
+
+
 __param_spec__ = {
     "E3SMBeresConfig": {
         "scheme_key": "atm.gwd.E3SMBeresConfig",
@@ -120,6 +127,7 @@ __param_spec__ = {
         "excluded": {
             "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
             "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
+            "launch_p": "selects a launch level INDEX by argmin, so the drag is piecewise-constant in it and not usefully differentiable (E3SM selects kbotbg statically at init)",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
@@ -446,25 +454,15 @@ class HinesConfig(NamedTuple):
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
-    # Launch pressure [Pa].  ``None`` (default) launches at the SURFACE —
-    # the legacy behaviour, byte-identical.  A non-orographic wave launched
-    # at the surface is born SUPERSATURATED wherever the launch amplitude
-    # exceeds ``sigma_sat = N/m_star``, and N is SMALLEST in the well-mixed
-    # boundary layer: on the 2.5 deg AMIP state the default 2.0 m/s exceeds
-    # the 1.25 m/s sigma_sat at 140 m over 78.5% of the planet's area, so
-    # the wave breaks AT its own launch level and deposits 55% of its
-    # momentum below 1 km (only 35% above 12 km).  Setting a launch level
-    # above the BL makes the scheme behave like a non-orographic source:
-    # no drag is deposited below it and the wave starts propagating there.
-    # Sibling schemes all carry one (E3SMFrontalConfig.launch_p, E3SM
-    # ``gw_front`` kbotbg); Hines was the only one without.
-    #
-    # NOT in ``__param_spec__``: spec eligibility is computed from a plain
-    # ``: float`` annotation, and this is ``float | None``.  That is the
-    # right classification anyway — the value selects a level INDEX by
-    # argmin, so the drag is piecewise-constant in it and it is not usefully
-    # differentiable (mirrors E3SM's static init-time kbotbg selection).
-    launch_p: float | None = None
+    # Launch pressure [Pa], default 700 hPa, legal range
+    # ``HINES_LAUNCH_P_RANGE_PA``.  There is no surface launch: a
+    # non-orographic wave launched at the surface is born SUPERSATURATED
+    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N is
+    # SMALLEST in the well-mixed boundary layer (2.5 deg AMIP state: 2.0 m/s
+    # exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of the area), so it
+    # broke at its own launch level and deposited 55% of its momentum below
+    # 1 km.  No drag is deposited at or below the launch level.
+    launch_p: float = 7.0e4
 
 
 class PrognosticSpectralConfig(NamedTuple):
@@ -570,6 +568,13 @@ class E3SMFrontalConfig(NamedTuple):
         quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
         of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
         (default 0.1, E3SM ``gw_front.F90`` ``dca``).
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_cm``; CAM6 f09
+        namelist 1.0).  ``None`` (default, byte-identical) falls back to
+        ``E3SMCAMConfig.effgw`` for the single-source path; a multi-source
+        ``E3SMCAMConfig.source`` ("orographic+frontal+convective") uses the
+        per-source value where set so each source keeps its own CAM
+        efficiency.
     latitude_taper : bool
         Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
         sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
@@ -593,6 +598,7 @@ class E3SMFrontalConfig(NamedTuple):
     front_p: float = 6.0e4
     front_spectrum_dc_resolution: float = 0.1
     latitude_taper: bool = False
+    effgw: float | None = None
 
 
 class E3SMBeresConfig(NamedTuple):
@@ -660,6 +666,40 @@ class E3SMBeresConfig(NamedTuple):
         heating depth (default 0.05), a documented monotone surrogate for
         the real table's deepening-convection dependence.  Only used when
         ``use_stand_in_table=True``.
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_beres_dp``;
+        CAM6 f09 namelist 0.4).  ``None`` (default, byte-identical) falls
+        back to ``E3SMCAMConfig.effgw``; see ``E3SMFrontalConfig.effgw``.
+    mfcc_table_path : str
+        Path of the offline Beres lookup-table netcdf (CAM/E3SM
+        ``gw_drag_file``, e.g. ``newmfspectra40_dc25.nc``: dims ``PS``, ``MW``,
+        ``HD``, variable ``mfcc``).  Empty (default) = no file; the kernel then
+        follows ``use_stand_in_table``.  When set, the GWD factories load it
+        once (``e3sm_cam.load_mfcc_table``) and thread it as ``mfcc_table``,
+        which the kernel uses regardless of ``use_stand_in_table``.
+    spectrum_shift : str
+        How the looked-up spectrum is Doppler-shifted to ground-relative
+        speeds: ``"circular"`` (E3SM ``cshift``, wraps the spectrum ends;
+        default) or ``"end_off"`` (CAM6 ``eoshift``, shifted-in bins are
+        zero).  CAM6 ``gw_convect.F90:239``.
+    storm_speed_truncate : bool
+        ``True`` (E3SM, default): the cell speed ``CS`` is truncated to an
+        integer before it shifts ``uh`` and the spectrum.  ``False`` (CAM6):
+        ``CS`` is kept real (``gw_convect.F90:217``; ``uh - CS`` real,
+        ``shift = -nint(CS/dc)``).
+    hd_index_rule : str
+        How the heating depth picks the table row: ``"nint"`` (E3SM
+        ``NINT(hdepth [km])``, half-km ties round UP; default) or
+        ``"nearest_grid"`` (CAM6 ``index_of_nearest(hdepth, hd)``,
+        gw_convect.F90:308-325: ``idx = 1 + count(hdepth > interfaces)`` with
+        interfaces at the half-km points, so an exact tie takes the LOWER
+        row).  Identical away from exact ties.
+    source_level_rule : str
+        Which midpoint supplies the source wind: ``"nearest_midpoint"``
+        (E3SM: the level whose column-mean pressure is nearest
+        ``source_wind_p``; default) or ``"interface_below_p"`` (CAM6
+        ``gw_drag.F90:871-874``: the lowest midpoint whose TOP interface
+        pressure is below ``source_wind_p``, i.e. the layer straddling it).
     mfcc_uh_slope : float
         Fractional change of the stand-in spectrum amplitude per (m/s) of the
         heating-region mean wind ``uh`` (default 0.0 -> uh-independent).  The
@@ -684,6 +724,12 @@ class E3SMBeresConfig(NamedTuple):
     mfcc_c0: float = 30.0
     mfcc_hdepth_growth: float = 0.05
     mfcc_uh_slope: float = 0.0
+    effgw: float | None = None
+    mfcc_table_path: str = ""
+    spectrum_shift: str = "circular"
+    storm_speed_truncate: bool = True
+    source_level_rule: str = "nearest_midpoint"
+    hd_index_rule: str = "nint"
 
 
 class E3SMCAMConfig(NamedTuple):
@@ -700,9 +746,14 @@ class E3SMCAMConfig(NamedTuple):
     ------
     source : str
         Wave source: ``"orographic"`` (McFarlane c=0), ``"frontal"``
-        (uniform Gaussian spectrum tied to frontogenesis), or
-        ``"convective"`` (Beres 2004 source from the deep-convective
-        heating profile).  The Beres convective source's full
+        (uniform Gaussian spectrum tied to frontogenesis), ``"background"``
+        or ``"convective"`` (Beres 2004 source from the deep-convective
+        heating profile) — or a ``+``-joined set of them (e.g.
+        ``"orographic+frontal+convective"``, the CAM6 f09 suite): each source
+        runs its own ``gw_drag_prof`` solve with its own efficiency
+        (``frontal.effgw`` / ``beres.effgw``, falling back to ``effgw``) and
+        the tendencies are summed, as CAM's ``gw_tend`` accumulates them
+        into ``ptend``.  The Beres convective source's full
         bit-faithfulness needs an offline ``mfcc`` lookup table that is not
         bundled with the repo; by default ``"convective"`` runs with a
         documented analytic stand-in spectrum (see ``E3SMBeresConfig``).

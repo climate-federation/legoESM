@@ -66,7 +66,8 @@ def test_get_gwd_fn_resolves_composite():
 
 
 @pytest.mark.parametrize("bad", [
-    "e3sm_cam+hines",              # e3sm_cam not composable (#834)
+    "mcfarlane+e3sm_cam",          # e3sm_cam's (default) orographic source next
+                                   # to mcfarlane: double-counted topography
     "ml_emulator+hines",          # ml_emulator not composable
     "hines+",                     # empty part -> non-composable ""
     "prognostic_spectral+prognostic_spectral",  # >1 stateful carry

@@ -12,9 +12,6 @@ Example
 >>> registry = make_moisture_registry()
 >>> tracers = init_tracers(registry, shape_3d=(6, 48, 48, 40))
 >>> tracers["q_v"] = tracers["q_v"].at[...].set(initial_q_v)
->>> # Transport all tracers at once:
->>> stacked = stack_tracers(tracers, registry)  # (6, 48, 48, 40, n_tracers)
->>> unstacked = unstack_tracers(stacked, registry)
 """
 
 from __future__ import annotations
@@ -120,43 +117,3 @@ def init_tracers(
     return {info.name: jnp.zeros(shape_3d, dtype=_sd) for info in registry.tracers}
 
 
-def stack_tracers(
-    tracers: dict[str, jnp.ndarray],
-    registry: TracerRegistry,
-) -> jnp.ndarray:
-    """Stack tracer dict into a single array with trailing tracer dim.
-
-    Parameters
-    ----------
-    tracers : dict[str, jax.Array]
-        Each value has shape ``(..., nlev)``.
-    registry : TracerRegistry
-        Defines the stacking order.
-
-    Returns
-    -------
-    jax.Array, shape ``(..., nlev, n_tracers)``
-    """
-    arrays = [tracers[name] for name in registry.names]
-    return jnp.stack(arrays, axis=-1)
-
-
-def unstack_tracers(
-    stacked: jnp.ndarray,
-    registry: TracerRegistry,
-) -> dict[str, jnp.ndarray]:
-    """Unstack array with trailing tracer dim into tracer dict.
-
-    Parameters
-    ----------
-    stacked : jax.Array, shape ``(..., nlev, n_tracers)``
-    registry : TracerRegistry
-
-    Returns
-    -------
-    dict[str, jax.Array]
-    """
-    return {
-        name: stacked[..., i]
-        for i, name in enumerate(registry.names)
-    }

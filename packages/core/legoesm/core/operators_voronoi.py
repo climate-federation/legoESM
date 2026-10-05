@@ -368,7 +368,10 @@ def vector_laplacian_del2(u_edge, mesh):
     # For C-grid: tangent of curl gradient = (curl[v1] - curl[v0]) / dvEdge
     v0 = mesh.verticesOnEdge[0]
     v1 = mesh.verticesOnEdge[1]
-    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / mesh.dvEdge
+    # Padding edges carry dvEdge = 0 (and v0 == v1): 0/0 there is NaN, and
+    # its derivative poisons reverse mode even where the value is discarded.
+    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / jnp.where(
+        mesh.dvEdge > 0, mesh.dvEdge, 1.0)
 
     return grad_div - grad_curl_tangent
 
@@ -760,7 +763,10 @@ def vector_laplacian_del2_3d(u_edge_3d, mesh):
 
     v0 = mesh.verticesOnEdge[0]
     v1 = mesh.verticesOnEdge[1]
-    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / mesh.dvEdge[:, None]
+    # Padding edges carry dvEdge = 0 (and v0 == v1): 0/0 there is NaN, and
+    # its derivative poisons reverse mode even where the value is discarded.
+    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / jnp.where(
+        mesh.dvEdge > 0, mesh.dvEdge, 1.0)[:, None]
 
     return grad_div - grad_curl_tangent
 
@@ -851,6 +857,38 @@ def vector_laplacian_del4_3d(u_edge_3d, mesh, *, mid_refresh=None):
     if mid_refresh is not None:
         (del2_u,) = mid_refresh(del2_u)
     return -vector_laplacian_del2_3d(del2_u, mesh)
+
+
+def div_damp_del4_3d(u_edge_3d, mesh):
+    """Divergence-SELECTIVE biharmonic operator ``grad(del2(div(u)))``.
+
+    The vector Laplacians above damp the rotational and divergent parts of
+    the wind together.  This one damps only the divergent part: it is the
+    curl-free half of ``vector_laplacian_del4_3d``, since ``grad`` of a
+    scalar has no curl, so balanced (rotational) flow is untouched.
+
+    Used as ``du/dt -= nu_div4 * div_damp_del4_3d(u, mesh)``, the same sign
+    convention as the biharmonic term ``-nu_del4 * del2(del2(u))``.
+
+    This is CAM-FV's ``ldiv4`` written for an unstructured C-grid
+    (``cd_core.F90`` lines 620-684, selected by ``fv_div24del2flag=4``,
+    which is the CAM6 physics default at every horizontal grid).  A
+    pure-pressure (B=0) layer cannot absorb divergence into its own mass,
+    so continuity turns whatever divergence survives into vertical mass
+    flux; damping the divergent mode selectively is what keeps the
+    isobaric top of a hybrid table quiet without also damping the jets.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    div_c = divergence_cell_3d(u_edge_3d, mesh)
+    return gradient_edge_3d(laplacian_cell_3d(div_c, mesh), mesh)
 
 
 def laplacian_cell_3d(f_cell_3d, mesh, *, mask=None):

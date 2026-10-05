@@ -269,3 +269,43 @@ def test_z_half_stretch_preserves_column_conservation():
     dz_live = dz_ref[None, None, :] * stretch[:, :, None]
     col_heating = jnp.sum(dT_dt * rho_0 * c_sw * dz_live, axis=-1)
     assert jnp.allclose(col_heating, sw_down, rtol=1e-12)
+
+
+def _partial_cell_columns():
+    """Two columns on a 5 x 10 m reference ladder: a deep one (all wet) and a
+    partial-cell one whose seabed sits at 25 m (third cell 5 m, then dry)."""
+    import numpy as np
+    dz_ref = jnp.full(5, 10.0)
+    z_half_ref = -jnp.concatenate([jnp.zeros(1), jnp.cumsum(dz_ref)])
+    dz_live = jnp.asarray(np.array([[10.0, 10.0, 10.0, 10.0, 10.0],
+                                    [10.0, 10.0, 5.0, 0.0, 0.0]]))
+    return dz_ref, z_half_ref, dz_live
+
+
+def test_live_geometry_column_integral_equals_absorbed_sw():
+    """With dz_live the column integral of rho*c*dT*dz is exactly the absorbed
+    shortwave, and the seabed remainder lands in the deepest WET cell."""
+    import numpy as np
+    from legoesm.ocean.eos import rho_0, c_sw
+    dz_ref, z_half_ref, dz_live = _partial_cell_columns()
+    sw = jnp.array([200.0, 150.0])
+    dT = shortwave_penetration_tendency(
+        sw, dz_ref, z_half_ref, jnp.ones(2), ShortwavePenetrationConfig(),
+        rho_0=rho_0, c_sw=c_sw, dz_live=dz_live)
+    col = np.asarray((rho_0 * c_sw * dT * dz_live).sum(axis=-1))
+    np.testing.assert_allclose(col, [200.0, 150.0], rtol=1e-12)
+    # no deposition below the seabed of the partial-cell column
+    assert np.all(np.asarray(dT)[1, 3:] == 0.0)
+    # the deepest wet cell also carries the light that reached the seabed
+    p = JERLOV_TYPES[ShortwavePenetrationConfig().water_type]
+    I = lambda z: p.R * np.exp(-z / p.zeta1) + (1 - p.R) * np.exp(-z / p.zeta2)
+    np.testing.assert_allclose(
+        float(dT[1, 2]) * rho_0 * c_sw * 5.0, 150.0 * I(20.0), rtol=1e-12)
+
+
+def test_live_geometry_rejects_both_stretch_and_dz_live():
+    dz_ref, z_half_ref, dz_live = _partial_cell_columns()
+    with pytest.raises(ValueError, match="either dz_live or z_half_stretch"):
+        shortwave_penetration_tendency(
+            jnp.ones(2), dz_ref, z_half_ref, jnp.ones(2),
+            dz_live=dz_live, z_half_stretch=jnp.ones(2))

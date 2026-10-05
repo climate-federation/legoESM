@@ -173,6 +173,7 @@ __param_spec__ = {
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
             "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
+            "kk2000_cam6_relvar": "physics-fidelity: CAM6 relvarmax fallback constant (clubb_intr.F90:2416-2421) for the kk2000_cam6 option; CAM6 diagnoses relvar per cell from CLUBB variance, not ported, so this is a fixed reference value, not a calibration knob",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
@@ -253,6 +254,8 @@ __param_spec__ = {
             "graupel_embryo_mass": {"units": "kg", "bounds": (5e-11, 5e-10), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
+            "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; lower bound covers that CAM6-equivalent range; upper bound 20 leaves room for enhancement tests", "shape": None},
+            "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way. MG2 pairs it with the cloud-number sink npra=pra*nc/qc, which this port lacks (N_c is not evolved when predict_Nc=False)", "shape": None},
         },
     },
     "P3Config": {
@@ -891,6 +894,40 @@ class MorrisonConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
+    # --- Who supplies the cloud liquid: this scheme, or the turbulence closure
+    # Default False keeps this scheme's saturation adjustment as the liquid
+    # SOURCE, which is what every run before this field did.
+    #
+    # True says an assumed-PDF closure (CLUBB) already diagnosed the layer's
+    # cloud liquid and handed it to the host, so the saturation adjustment here
+    # is switched OFF ENTIRELY -- both signs.  This is the CAM6 arrangement, not
+    # an invention: micro_mg2_0.F90:2688-2730 carries a residual
+    # "remove any excess over-saturation" block, it is gated on
+    # ``allow_sed_supersat`` at :2700, and micro_mg_cam.F90:668-672 sets that
+    # flag ``.false.`` whenever ``do_clubb_sgs``.  Enumerating every write to
+    # ``qctend`` in MG2 (:2634 ice melt, :2680 homogeneous freezing -- a sink,
+    # :2718 the gated residual) leaves MG2 with NO vapour-to-liquid
+    # condensation at all in a CLUBB configuration.
+    #
+    # POSITIVE BRANCH ONLY.  An earlier version said "both signs"; that was
+    # wrong twice.  CAM's block is guarded by ``qtmp > qvn``
+    # (micro_mg2_0.F90:2700), so it fires on positive supersaturation and has
+    # no evaporation branch to switch off.  And our default
+    # ``wbf_scheme="emergent"`` has no explicit Bergeron rate: the mixed-phase
+    # cloud-water sink IS that negative branch.  Every genuine sink
+    # (autoconversion, accretion, the emergent WBF, riming, sedimentation) is
+    # untouched.
+    #
+    # WHY IT MATTERS: the adjustment removes the whole supersaturation on every
+    # call, so running microphysics N times inside one physics step adjusts N
+    # times.  A 3/6/15 sub-step sweep moved band liquid monotonically by 21%,
+    # which is a step-count sensitivity a liquid SOURCE should not have.
+    #
+    # Turning this on without the closure actually delivering liquid removes the
+    # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
+    # that pairing rather than letting it run.
+    liquid_from_closure: bool = False
+
     # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
     # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
     # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
@@ -898,6 +935,74 @@ class MorrisonConfig(NamedTuple):
     # moment cloud ice exists. ON by default (SAM-faithful); set False to
     # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
     homogeneous_ice_supersaturation: bool = True
+
+    # --- MG2 CFL sub-stepped sedimentation -------------------------------
+    # APPENDED AT THE TUPLE END so every positional construction and every
+    # pickle written before 2026-09-22 keeps binding the same fields.
+    # MG2 (micro_mg2_0.F90 sedimentation loop) CFL sub-stepping of rain /
+    # ice / snow / graupel sedimentation: per column nstep = 1 + floor(max
+    # V·dt/dz), capped at ``sed_cfl_substeps_max``.  True (DEFAULT, user
+    # decision 2026-09-22 -- the one-pass form let a hydrometeor fall at most
+    # one layer per call, a defect at every dt where V·dt/dz > 1: production
+    # rain CFL ~3.4 at 112.5 s).  False = the legacy one-pass flux-capped
+    # form, kept for reproducing pre-2026-09-22 runs.
+    sed_cfl_substeps: bool = True
+    # Static bound of the fixed-shape sub-step loop (a loop count, not a
+    # tunable): iterations beyond a column's own nstep are masked, so the
+    # COST is linear in this number -- measured on 2048 columns, CPU x64,
+    # whole Morrison call: one pass 10 ms, cap 8 20 ms, 16 24 ms, 32 32 ms,
+    # 96 59 ms, 128 74 ms, 256 131 ms (sigma-36 dt 112.5; L32 dt 600 is
+    # within 15 %).  Required counts per lane (ISA column, the caps' density
+    # factor included): production sigma-36 at 112.5 s needs 8, CAM L32 at
+    # 600 s needs 90, at 1800 s 269.  Capped at 1024.  Exceeding the cap
+    # clamps the fall (mass conserved, transport wrong); the required count
+    # is always reported and ``sed_cfl_substeps_strict`` makes it fatal.
+    # 256 stays the value in BOTH arms of CAM6 run 1; per-deck sizing
+    # (production 16, CAM6 128) is deferred to the next campaign as its own
+    # one-lever change (user 2026-09-22, amip_runs/_cam6/PREREGISTRATION.md).
+    sed_cfl_substeps_max: int = 256
+    # Fail loudly (runtime error under jit, attached to the sedimentation
+    # tendencies so it cannot be eliminated as dead code) when any column
+    # needs more sub-steps than the cap; off = the count is only reported
+    # (``MicrophysicsOutput.sed_substeps_required``).
+    sed_cfl_substeps_strict: bool = False
+
+    # DIAGNOSTIC ONLY.  Publish the APPLIED (post-donor-clamp) cloud-water
+    # budget terms on ``MicrophysicsOutput.qc_budget``.  Static Python branch,
+    # so the default graph and every existing run are untouched; nothing in the
+    # model reads it.  Exists because the donor clamp scales all q_c sinks by a
+    # common factor, so terms re-derived outside the scheme are PRE-clamp and
+    # cannot close the budget.  NOT a tunable: it selects no physics.
+    publish_qc_budget: bool = False
+    # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch
+    # (appended at the END: positional ABI).  autocon_fact scales the KK2000
+    # autoconversion rate before the SAM number caps, so the rain-number
+    # source and cloud-number sink follow it; accre_enhan_fact scales KK2000
+    # accretion (MG2 accre_enhan, micro_mg_utils.F90 accrete_cloud_water_rain;
+    # MG2's paired cloud-number sink npra is absent here).  1.0 = unscaled.
+    autocon_fact: float = 1.0
+    accre_enhan_fact: float = 1.0
+    # Relative variance of in-cloud liquid for warm_rain_scheme="kk2000_cam6"
+    # (CAM6 ``relvar``).  10.0 = CAM6's ``relvarmax`` when deep convection is
+    # not CLUBB (clubb_intr.F90:2416-2421), the value it falls back to where
+    # CLUBB's qc variance is unavailable; CAM6 clips to [0.001, relvarmax].
+    kk2000_cam6_relvar: float = 10.0
+    # CAM6 MG2 in-cloud warm rain: autoconversion + accretion on q_c/lcldm,
+    # q_r/precip_frac (N_c/lcldm when prognostic), tendencies times lcldm,
+    # with lcldm = max(ast, 1e-4), ast = max(CLUBB liquid fraction, CAM6
+    # aist ice-stratus fraction) (micro_mg2_0.F90:878, :1224-1322;
+    # micro_mg_cam.F90:1809-1810; clubb_intr.F90:2575).  Needs that cloud
+    # fraction at the call (``cloud_fraction=``); raises without it.
+    # False = rates on the grid-mean state (the pre-existing behaviour).
+    warm_rain_incloud: bool = False
+
+
+# Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
+# ExperimentConfig): the loop cost is LINEAR in the cap, so a typo ("2560")
+# silently decouples a run's cost from its physics.  The largest configured
+# lane needs 269 (CAM L32 at 1800 s).  ONE definition, imported by the other
+# validators (GLM 2026-09-22: three independent 1024s can drift apart).
+SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
 
 
 class ThompsonConfig(NamedTuple):
@@ -1174,6 +1279,13 @@ def apply_microphysics_experiment_flags(
     homogeneous_ice_nucleation: bool = False,
     morrison_scalars: dict | None = None,
     morrison_flavor: str | None = None,
+    morrison_sed_cfl_substeps: bool | None = None,
+    liquid_from_closure: bool | None = None,
+    morrison_sed_cfl_substeps_max: int | None = None,
+    morrison_sed_cfl_substeps_strict: bool | None = None,
+    morrison_do_graupel: bool | None = None,
+    morrison_warm_rain_scheme: str | None = None,
+    morrison_warm_rain_incloud: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1273,6 +1385,95 @@ def apply_microphysics_experiment_flags(
                 "--microphysics morrison or drop the override.")
         scheme_config = scheme_config._replace(
             morrison_flavor=morrison_flavor)
+    if liquid_from_closure is not None and not hasattr(
+            scheme_config, "liquid_from_closure"):
+        # Scheme gate, same shape as the Morrison-only knobs below: a deck that
+        # asks for this on a scheme with no saturation adjustment to switch off
+        # must be told, not silently ignored.
+        if liquid_from_closure:
+            raise ValueError(
+                f"liquid_from_closure=True is not supported by the {scheme!r} "
+                "microphysics scheme (it has no saturation adjustment to hand "
+                "over); use --microphysics morrison or drop it.")
+    elif liquid_from_closure is not None:
+        # TRI-STATE, and the None matters.  This knob is slaved to the closure,
+        # so a driver passing False must CLEAR a directly-constructed True
+        # rather than leave it standing -- otherwise a model builds with no
+        # liquid source at all (codex round 1).  But the helper is also called
+        # a SECOND time further down this same file to thread the Morrison
+        # scalar knobs, and a plain ``False`` default made that second call
+        # silently undo the first: setting morrison_flavor or
+        # morrison_sed_cfl_substeps_max disabled the gate while the closure
+        # stayed on (codex round 2, reproduced).  None means "not this
+        # caller's business, leave it".
+        scheme_config = scheme_config._replace(
+            liquid_from_closure=bool(liquid_from_closure))
+    if morrison_sed_cfl_substeps is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_sed_cfl_substeps={morrison_sed_cfl_substeps!r} is "
+                "only supported by the morrison microphysics scheme (got "
+                f"{scheme!r}); use --microphysics morrison or drop it.")
+        if not isinstance(morrison_sed_cfl_substeps, bool):
+            raise TypeError(
+                "morrison_sed_cfl_substeps must be a bool, got "
+                f"{morrison_sed_cfl_substeps!r}")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps=morrison_sed_cfl_substeps)
+    if morrison_sed_cfl_substeps_max is not None:
+        # scheme gate FIRST: a non-Morrison deck that also mistyped the value
+        # should be told which knob does not belong, not its range
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_sed_cfl_substeps_max is only supported by the "
+                f"morrison microphysics scheme (got {scheme!r}).")
+        if (not isinstance(morrison_sed_cfl_substeps_max, int)
+                or isinstance(morrison_sed_cfl_substeps_max, bool)
+                or not 1 <= morrison_sed_cfl_substeps_max
+                <= SED_CFL_SUBSTEPS_MAX_LIMIT):
+            raise ValueError(
+                "morrison_sed_cfl_substeps_max must be an int in "
+                f"[1, {SED_CFL_SUBSTEPS_MAX_LIMIT}] (the sub-step loop cost "
+                f"is linear in it), got {morrison_sed_cfl_substeps_max!r}")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps_max=morrison_sed_cfl_substeps_max)
+    if morrison_sed_cfl_substeps_strict is not None:
+        if not isinstance(morrison_sed_cfl_substeps_strict, bool):
+            raise TypeError(
+                "morrison_sed_cfl_substeps_strict must be a bool, got "
+                f"{morrison_sed_cfl_substeps_strict!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_sed_cfl_substeps_strict is only supported by the "
+                f"morrison microphysics scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            sed_cfl_substeps_strict=morrison_sed_cfl_substeps_strict)
+    if morrison_do_graupel is not None:
+        if not isinstance(morrison_do_graupel, bool):
+            raise TypeError(
+                f"morrison_do_graupel must be a bool, got {morrison_do_graupel!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_do_graupel is only supported by the morrison "
+                f"microphysics scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(do_graupel=morrison_do_graupel)
+    if morrison_warm_rain_incloud is not None:
+        if not isinstance(morrison_warm_rain_incloud, bool):
+            raise TypeError("morrison_warm_rain_incloud must be a bool, got "
+                            f"{morrison_warm_rain_incloud!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_warm_rain_incloud is only read by the morrison "
+                f"scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            warm_rain_incloud=morrison_warm_rain_incloud)
+    if morrison_warm_rain_scheme is not None:
+        if scheme != "morrison":
+            raise ValueError(
+                f"morrison_warm_rain_scheme={morrison_warm_rain_scheme!r} is "
+                f"only read by the morrison scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            warm_rain_scheme=morrison_warm_rain_scheme)
     if morrison_scalars:
         # Morrison ice-process tunables (``morrison_*`` ExperimentConfig flat
         # scalars).  HARD scheme gate, NOT field-presence: Thompson carries

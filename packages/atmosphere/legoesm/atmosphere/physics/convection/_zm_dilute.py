@@ -73,14 +73,14 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.physics.thermodynamics import latent_heat_vaporization
+from legoesm.thermo import saturation_specific_humidity
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
 )
 
 
-__all__ = ("DiluteParcel", "dilute_parcel_cape")
+__all__ = ("LWMAX", "DiluteParcel", "dilute_parcel_cape", "invert_entropy", "moist_entropy")
 
 
 __physics_contract__ = {
@@ -120,17 +120,15 @@ __physics_contract__ = {
 }
 
 
-# Both the oracle ``qsat_hPa`` and our shared ``saturation_mixing_ratio``
-# return a vapor/dry-air mass mixing ratio (``ε·e/(p − ω·e)`` vs
-# ``ε·e/(p − e)`` — the same convention, differing only in the ``ω = 1−ε``
-# vs ``1`` factor in the small ``e`` correction).  Both feed the same
-# Raymond-Blyth entropy formula; the validated CAPE difference is < 0.5 %.
-# Convention note: the ZM oracle treats the model ``q`` field as a
-# vapor/dry mixing ratio throughout (entropy, virtual T with the 1.608
-# coefficient), so we do the same here for faithfulness.
+# Saturation humidity: the oracle ``qsat_hPa`` wraps CAM/E3SM ``qsat_water``,
+# which returns the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
+# (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``), so every qsat here is the
+# shared ``saturation_specific_humidity`` (algebraically the same expression).
+# The oracle then uses ``e = qv·p/(ε + qv)`` and the 1.608 virtual-T
+# coefficient on that same ``q``; those formulas are kept verbatim.
 
 # Maximum condensate retained before rainout [kg/kg] (oracle ``lwmax``).
-_LWMAX = 1.0e-3
+LWMAX = 1.0e-3
 # Number of latent-heat (condensate + freezing) iterations (oracle
 # ``nit_lheat``).
 _NIT_LHEAT = 2
@@ -172,7 +170,7 @@ class DiluteParcel(NamedTuple):
     k_launch_smooth: jax.Array
 
 
-def _moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
+def moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     """Raymond-Blyth (1992) moist entropy [J/kg/K].
 
     ``s = (c_pd + qtot·c_pw) ln(T/T0) − R_d ln((p−e)/p_ref)
@@ -184,7 +182,7 @@ def _moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     keep Pa throughout and ``p_ref = 1e5 Pa`` — the ``ln`` of the ratio
     is identical).
     """
-    q_sat = saturation_mixing_ratio(T, p_pa)
+    q_sat = saturation_specific_humidity(T, p_pa)
     qv = jnp.minimum(qtot, q_sat)
     # Numerical floor so ln(qv/qs) is finite for a bone-dry parcel.
     qv_safe = jnp.maximum(qv, 1.0e-12)
@@ -205,13 +203,13 @@ def _moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     )
 
 
-def _invert_entropy(
+def invert_entropy(
     s_target: jax.Array,
     p_pa: jax.Array,
     qtot: jax.Array,
     T_first_guess: jax.Array,
 ) -> jax.Array:
-    """Newton inversion: solve ``_moist_entropy(T, p, qt) = s_target`` for T.
+    """Newton inversion: solve ``moist_entropy(T, p, qt) = s_target`` for T.
 
     Fixed ``_NEWTON_ITERS`` iterations with a centered finite-difference
     derivative (the entropy has a ``min(qtot, qs)`` kink that a closed-
@@ -224,10 +222,10 @@ def _invert_entropy(
     _dtype = T_first_guess.dtype
 
     def body(_, T):
-        f = _moist_entropy(T, p_pa, qtot) - s_target
+        f = moist_entropy(T, p_pa, qtot) - s_target
         fp = (
-            _moist_entropy(T + dT, p_pa, qtot)
-            - _moist_entropy(T - dT, p_pa, qtot)
+            moist_entropy(T + dT, p_pa, qtot)
+            - moist_entropy(T - dT, p_pa, qtot)
         ) / (2.0 * dT)
         # Guard the derivative magnitude away from zero while preserving
         # its sign.  ``dS/dT`` for the moist entropy is positive in
@@ -318,7 +316,7 @@ def dilute_parcel_cape(
     q_launch = jnp.sum(launch_w * q_v_env, axis=-1)
     p_launch = jnp.sum(launch_w * p_full, axis=-1)
 
-    s0 = _moist_entropy(T_launch, p_launch, q_launch)        # (ncol,)
+    s0 = moist_entropy(T_launch, p_launch, q_launch)        # (ncol,)
     qt0 = q_launch
     # Per-level "at-or-above launch" weight.  The oracle defines parcel
     # buoyancy for ``k <= mx`` (the launch level INCLUSIVE) — so the
@@ -376,7 +374,7 @@ def dilute_parcel_cape(
     # Initial carry at the surface-first index 0.  The launch level is at
     # or above the surface, so we begin accumulating from the surface but
     # the ``above_launch`` weight zeros contributions below the launch.
-    T_mix0 = _invert_entropy(
+    T_mix0 = invert_entropy(
         s0.astype(_dtype), p_launch.astype(_dtype),
         qt0.astype(_dtype), T_launch.astype(_dtype),
     )
@@ -401,7 +399,7 @@ def dilute_parcel_cape(
         qt_env_lyr = 0.5 * (q_e + q_env_prev)
         T_env_lyr = 0.5 * (T_e + T_env_prev)
         p_env_lyr = 0.5 * (p_e + p_env_prev)
-        s_env_lyr = _moist_entropy(T_env_lyr, p_env_lyr, qt_env_lyr)
+        s_env_lyr = moist_entropy(T_env_lyr, p_env_lyr, qt_env_lyr)
 
         # Fractional entrainment /Pa from /m via hydrostatic dp/dz.
         # dpdz = −(p·g)/(R·T); dzdp = 1/dpdz; dmpdp = dmpdz·dzdp.
@@ -424,8 +422,8 @@ def dilute_parcel_cape(
         s_mix = (s0c + s_entr_new) / (1.0 + m_entr_new)
         qt_mix = (qt0 + qt_entr_new) / (1.0 + m_entr_new)
 
-        T_mix = _invert_entropy(s_mix, p_e, qt_mix, T_mix_prev)
-        qs_mix = saturation_mixing_ratio(T_mix, p_e)
+        T_mix = invert_entropy(s_mix, p_e, qt_mix, T_mix_prev)
+        qs_mix = saturation_specific_humidity(T_mix, p_e)
 
         # Pin carry to input precision (scan-carry dtype invariant —
         # Python-float constants otherwise promote to float64).
@@ -507,13 +505,13 @@ def dilute_parcel_cape(
         # the ``sabv`` blend below restricts the modification to the
         # strictly-above-launch region.
         T_mix_k = T_mix_entr
-        qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
+        qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
         new_q = qt_m
         xsh2o_k = xsh2o_prev
         dsx_k = dsx_prev
         dsf_k = dsf_prev
         for _ in range(_NIT_LHEAT):
-            xsh2o_k = jnp.maximum(0.0, qt_m - qs_mix_k - _LWMAX)
+            xsh2o_k = jnp.maximum(0.0, qt_m - qs_mix_k - LWMAX)
             dsx_k = dsx_prev - constants.c_pw * jnp.log(T_mix_k / constants.T_freeze) * jnp.maximum(
                 0.0, xsh2o_k - xsh2o_prev
             )
@@ -542,8 +540,8 @@ def dilute_parcel_cape(
             )
             new_s = s_m + dsx_k + dsf_k
             new_q = qt_m - xsh2o_k
-            T_mix_k = _invert_entropy(new_s, p_e, new_q, T_mix_k)
-            qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
+            T_mix_k = invert_entropy(new_s, p_e, new_q, T_mix_k)
+            qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
 
         # Restrict the latent-heat modification to STRICTLY above launch
         # (oracle loops only ``k < klaunch``; the launch level and below are
@@ -564,7 +562,7 @@ def dilute_parcel_cape(
         new_q = sabv * new_q + (1.0 - sabv) * q_e
         # Tp: above launch = lheat-adjusted; at/below = entrained-only T_mix.
         T_mix_k = sabv * T_mix_k + (1.0 - sabv) * T_mix_entr
-        qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
+        qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
 
         # Retained vapor (qstp): above launch = qs if super-saturated else
         # new_q; at/below launch = q_env (oracle qstp(mx)=q(mx)).

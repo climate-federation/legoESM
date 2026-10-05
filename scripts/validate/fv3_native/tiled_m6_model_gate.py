@@ -139,8 +139,10 @@ def main(argv=None):
                          "within this fraction of the leaf's peak. Two XLA:GPU "
                          "programs differ at rounding (measured 1.5e-14 of "
                          "peak on u/v, C24 kt=1 vs the 6-GPU flat reference, "
-                         "job 9789931); the launcher passes 1e-13. CPU rows "
-                         "leave it unset and stay bitwise")
+                         "job 9789931) and the gap grows with steps (2.6e-13 on "
+                         "C48 u/v at step 2, ladder 9922513); the launchers "
+                         "pass 1e-12 (user 2026-09-23). CPU rows leave it "
+                         "unset and stay bitwise")
     ap.add_argument("--n-split", type=int, default=3)
     ap.add_argument("--distributed", action="store_true",
                     help="MULTI-PROCESS run (jax.distributed.initialize via "
@@ -194,6 +196,14 @@ def main(argv=None):
                          "exclusive nodes only) -- REFUSED unless the gated "
                          "steps were bitwise")
     args = ap.parse_args(argv)
+    # Hang autopsy (GLM 2026-09-24): LEGOESM_HANG_DUMP_S=<sec> makes every
+    # rank dump all Python thread stacks to stderr every <sec> seconds, so
+    # a first-dispatch stall shows WHERE each rank sits (block_until_ready
+    # vs a host-side collective) even when nothing else is printed.
+    _dump_s = os.environ.get("LEGOESM_HANG_DUMP_S", "")
+    if _dump_s:
+        import faulthandler
+        faulthandler.dump_traceback_later(float(_dump_s), repeat=True)
 
     if args.distributed and not args.flat_ref and not args.ref_npz:
         print("[m6] REFUSED: --distributed needs a reference -- either "
@@ -596,12 +606,18 @@ def main(argv=None):
                 # still printed a p50 -- timing a diverged model. Every rank
                 # must reach the SAME verdict before any of them leaves the
                 # loop, or the ranks desynchronise on the next collective.
+                # OWNED cells only, the same view the scored steps use: a
+                # window's outer pad rows are non-finite BY DESIGN (the
+                # stencil-reach cells no neighbour fills), so counting raw
+                # shards refused every kt>=2 row while kt=1 (no seam pads)
+                # passed -- ladders 9867744/5, 715-1485 "values" per rank
+                # on a state whose owned cells scored within the ceiling.
+                # flat_leaves allgathers, so every rank sees the same count.
                 bad = int(sum(
-                    int((~np.isfinite(np.asarray(sh.data))).sum())
-                    for _p, v in leaves(win)
+                    int((~np.isfinite(np.asarray(v))).sum())
+                    for _p, v in flat_leaves(win)
                     if getattr(v, "dtype", None) is not None
-                    and v.dtype.kind == "f"
-                    for sh in getattr(v, "addressable_shards", [])))
+                    and v.dtype.kind == "f"))
                 ns_t = np.asarray(win_model.last_nsplt)
                 local_bad = int(bad > 0 or (ns_t < 1).any())
                 if jax.process_count() > 1:
@@ -611,7 +627,7 @@ def main(argv=None):
                         jnp.asarray(local_bad, dtype=jnp.int32))).max())
                 if local_bad:
                     print(f"[m6] TIMING REFUSED: timed step {it + 1} left a "
-                          f"non-finite state on some rank (this rank: {bad} "
+                          f"non-finite OWNED state on some rank ({bad} "
                           f"values, nsplt {ns_t.tolist()}) -- the deck is not "
                           f"stable at dt={args.dt}, so the timing would be of "
                           f"a diverged model")

@@ -62,8 +62,24 @@ import jax.numpy as jnp
 from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    saturation_mixing_ratio,
+    saturation_mixing_ratio_goff,
+    saturation_mixing_ratio_ice,
+    saturation_vapor_pressure_goff,
+    saturation_vapor_pressure_ice_flatau,
+)
 from legoesm import constants
+
+# --- CAM6 aist_vector limiters (cldfrc2m.F90, CESM2.1 cam_cesm2_1_rel_60) ---
+_CAM6_AIST_MINICE = 1.0e-12   # cldfrc2m.F90:776 minice: grid-mean qi below this => no ice cloud
+_CAM6_AIST_MINCLD = 1.0e-4    # cldfrc2m.F90:777 mincld: minimum ice-cloud fraction when qi >= minice
+_CAM6_QIST_MIN = 1.0e-7       # cldfrc2m.F90:46 qist_min: minimum in-stratus ice [kg/kg]
+_CAM6_QIST_MAX = 5.0e-3       # cldfrc2m.F90:47 qist_max: maximum in-stratus ice [kg/kg]
+_CAM6_AIST_MAX = 0.999        # cldfrc2m.F90:895 upper clip on aist
+# --- CAM6 analytic tropopause (tropopause.F90:395) tP = 25000 - 15000 cos^2(lat) [Pa] ---
+_CAM6_TROP_P0_PA = 25000.0
+_CAM6_TROP_P1_PA = 15000.0
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). This is
 # a DIAGNOSTIC (state -> cloud fraction + optical properties), not a tendency
@@ -72,8 +88,10 @@ __physics_contract__ = {
     "summary": (
         "Diagnostic cloud fraction and cloud optical properties (grid-mean "
         "liquid/ice water paths + effective radii) from the column state: "
-        "RH-based Sundqvist, RH+condensate Xu-Randall, or resolved-condensate "
-        "schemes, with an optional precip-based convective cover surrogate."
+        "RH-based Sundqvist, RH+condensate Xu-Randall, resolved-condensate, "
+        "or CAM6 cam6_clubb (CLUBB liquid + cldfrc2m ice stratus + deep-"
+        "convective fraction) schemes, with an optional precip-based "
+        "convective cover surrogate."
     ),
     "inputs": {
         "T": "K", "p_full": "Pa", "q_v": "kg/kg", "dp": "Pa",
@@ -81,6 +99,9 @@ __physics_contract__ = {
         "n_cloud": "1/m^3 (droplet number, per volume)",
         "n_ice": "1/kg (ice number, per mass)",
         "conv_precip": "kg/m^2/s",
+        "cloud_fraction_override": "1 (CLUBB PDF liquid cloud fraction)",
+        "lat": "rad", "conv_mass_flux_up": "kg/m^2/s (interfaces, top->bottom)",
+        "conv_icwmr": "kg/kg", "p_half": "Pa (interfaces, top->bottom)",
     },
     "outputs": {
         "cloud_fraction": "1 (0-1 area fraction)",
@@ -759,6 +780,110 @@ def _partial_coverage_factor_lw(tau_ic: jnp.ndarray, cf: jnp.ndarray) -> jnp.nda
     )
 
 
+def cam6_tropopause_analytic(lat_rad: jnp.ndarray) -> jnp.ndarray:
+    """CAM6 analytic tropopause pressure [Pa] (tropopause.F90:395).
+
+    ``tP = 25000 - 15000 cos^2(lat)``: the LAST fallback of CAM's
+    ``tropopause_findChemTrop``.  DEPARTURE: CAM tries the twmo lapse-rate
+    locator first and a climatology file second; neither is ported, so the
+    aist stratosphere switch (rhminis/rhmaxis) uses this analytic surface.
+    """
+    return _CAM6_TROP_P0_PA - _CAM6_TROP_P1_PA * jnp.cos(lat_rad) ** 2
+
+
+def cam6_ice_stratus_fraction(
+    q_v: jnp.ndarray,
+    T: jnp.ndarray,
+    p_full: jnp.ndarray,
+    q_i: jnp.ndarray,
+    lat_rad: jnp.ndarray,
+    config: CloudConfig,
+    p_top: jnp.ndarray,
+) -> jnp.ndarray:
+    """CAM6 ice-stratus fraction ``aist`` (cldfrc2m.F90 aist_vector, iceopt=5).
+
+    cldfrc2m.F90:846-856: ``rhi = (qv+qi)/qs * esl/esi``, ``rhdif =
+    (rhi-rhmini)/(rhmaxi-rhmini)`` (a step at rhmini when rhmaxi == rhmini),
+    ``aist = min(1, max(rhdif, 0)^2)``; :870-889 limiters (minice, mincld,
+    qist_min/qist_max in-cloud ice bounds); :895 clip to [0, 0.999].  The
+    stratosphere uses rhminis/rhmaxis: CAM's ``troplev`` is the layer whose
+    TOP interface first satisfies ``tP >= pint(k)`` scanning upward
+    (tropopause.F90:398-403), and ``k <= troplev`` (clubb_intr.F90) is every
+    layer whose top-interface pressure ``p_top <= tP`` -- the layer that
+    straddles the tropopause counts as stratosphere.  ``qsatfac`` (do_subgrid_growth) is not returned: its only
+    CAM consumer is MG2's in-cloud saturation, which is not ported.
+
+    DEPARTURE (curves): CAM's ``qs`` is Goff-Gratch liquid (``qsat_water``)
+    and ``esi`` Goff-Gratch ice; here ``qs``/``esl`` are the shared Goff
+    liquid curve and ``esi`` the Flatau (1992) ice polynomial (< 0.5 % apart
+    over 200-273 K).  Shapes (ncol, nlev); ``lat_rad`` (ncol,) [rad];
+    ``p_top`` (ncol, nlev) is each layer's top-interface pressure [Pa].
+
+    DEPARTURE (top cutoff): clubb_intr.F90:2535 zeroes ``aist`` above
+    ``top_lev`` (ref_pres ``trop_cloud_top_press``, CAM6 namelist 100 Pa);
+    not applied here -- every current lid sits below 1 hPa, where it would be
+    inert.  Port it with the CLUBB ``trop_cloud_top_press`` taper if a
+    higher-top grid is ever run with this scheme.
+    """
+    q_s = saturation_mixing_ratio_goff(T, p_full)
+    esl = saturation_vapor_pressure_goff(T)
+    esi = saturation_vapor_pressure_ice_flatau(T)
+    rhi = (q_v + q_i) / jnp.maximum(q_s, 1.0e-30) * (esl / jnp.maximum(esi, 1.0e-30))
+    strat = p_top <= cam6_tropopause_analytic(lat_rad)[:, None]
+    rhmini = jnp.where(strat, config.cam6_rhminis, config.cam6_rhmini)
+    rhmaxi = jnp.where(strat, config.cam6_rhmaxis, config.cam6_rhmaxi)
+    ramp = rhmaxi - rhmini
+    # cldfrc2m.F90:847-855: the step branch is taken on EXACT equality only
+    # (an inverted ramp, rhmini > rhmaxi, follows the Fortran's sign-flipped
+    # ramp -- not a validated configuration, kept faithful rather than fixed).
+    degenerate = ramp == 0.0
+    rhdif = jnp.where(
+        degenerate,
+        jnp.where(rhi > rhmini, 1.0, 0.0),
+        (rhi - rhmini) / jnp.where(degenerate, 1.0, ramp),
+    )
+    aist = jnp.minimum(1.0, jnp.maximum(rhdif, 0.0) ** 2)
+    has_ice = q_i >= _CAM6_AIST_MINICE
+    aist = jnp.where(has_ice, jnp.maximum(_CAM6_AIST_MINCLD, aist), 0.0)
+    icimr = q_i / jnp.where(has_ice, aist, 1.0)
+    aist = jnp.where(has_ice & (icimr < _CAM6_QIST_MIN),
+                     jnp.clip(q_i / _CAM6_QIST_MIN, 0.0, 1.0), aist)
+    aist = jnp.where(has_ice & (icimr > _CAM6_QIST_MAX),
+                     jnp.clip(q_i / _CAM6_QIST_MAX, 0.0, 1.0), aist)
+    return jnp.clip(aist, 0.0, _CAM6_AIST_MAX)
+
+
+def cam6_deep_convective_fraction(
+    mass_flux_up_half: jnp.ndarray,
+    icwmr: jnp.ndarray,
+    config: CloudConfig,
+) -> jnp.ndarray:
+    """CAM6 deep-convective cloud fraction ``deepcu`` (clubb_intr.F90:2492-2506).
+
+    ``deepcu(k) = max(0, min(dp1*log(1 + dp2*cmfmc(k+1)), max))`` with
+    ``cmfmc`` the deep updraft mass flux on interfaces (CAM top->bottom, so
+    ``k+1`` is layer k's LOWER face); zeroed when ``deepcu <= frac_limit`` or
+    the deep in-cloud water ``dp_icwmr < ic_limit``; bottom layer 0.  CAM's
+    shallow mass flux ``cmfmc_sh`` is identically zero under CLUBB (no shallow
+    scheme) and is omitted.  The mass flux is floored at 0 before the log so
+    a stray negative cannot NaN it (CAM's is non-negative by construction).
+
+    ``mass_flux_up_half`` (ncol, nlev+1) [kg/m^2/s] top->bottom interfaces;
+    ``icwmr`` (ncol, nlev) [kg/kg].
+    """
+    m_lower = jnp.maximum(mass_flux_up_half[:, 1:], 0.0)
+    deepcu = jnp.maximum(
+        0.0,
+        jnp.minimum(config.cam6_deepcu_dp1 * jnp.log1p(config.cam6_deepcu_dp2 * m_lower),
+                    config.cam6_deepcu_max),
+    )
+    deepcu = jnp.where(
+        (deepcu <= config.cam6_deepcu_frac_limit)
+        | (icwmr < config.cam6_deepcu_ic_limit),
+        0.0, deepcu)
+    return deepcu.at[:, -1].set(0.0)
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -771,6 +896,10 @@ def compute_cloud_properties(
     n_cloud: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
     cloud_fraction_override: jnp.ndarray | None = None,
+    lat: jnp.ndarray | None = None,
+    conv_mass_flux_up: jnp.ndarray | None = None,
+    conv_icwmr: jnp.ndarray | None = None,
+    p_half: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -857,10 +986,55 @@ def compute_cloud_properties(
         q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
         q_condensate = q_c + q_i
         cf = q_condensate / (q_condensate + config.q_cloud_resolved_ref)
+    elif config.scheme == "cam6_clubb":
+        # CAM6 clubb_intr.F90 assembly: alst = CLUBB PDF liquid fraction (the
+        # carry override), aist = cldfrc2m ice stratus, deepcu = deep
+        # convective fraction; ast = max(alst, aist) (:2575); cloud_frac =
+        # min(ast + deepcu, 1) (:2586).  The RH blend / floor / level-gate
+        # knobs and the convective overlay below are NOT part of CAM6 and are
+        # bypassed (the overlay is refused so it can never silently no-op).
+        if cloud_fraction_override is None:
+            raise ValueError(
+                "cloud scheme 'cam6_clubb' requires the CLUBB PDF cloud "
+                "fraction (cloud_fraction_override); got None.  Run "
+                "turbulence='clubb' with use_clubb_cloud_fraction=True so the "
+                "carry reaches the cloud call.")
+        if lat is None or p_half is None:
+            raise ValueError(
+                "cloud scheme 'cam6_clubb' needs lat [rad] and p_half "
+                "(interface pressures) for the CAM6 tropopause layer switch "
+                "(rhminis/rhmaxis); got None.")
+        if q_cloud is None and q_ice is None:
+            raise ValueError(
+                "cloud scheme 'cam6_clubb' requires explicit q_cloud/q_ice "
+                "from microphysics (CAM6 has no diagnostic condensate floor).")
+        if config.convective_cloud:
+            raise ValueError(
+                "CloudConfig.convective_cloud is not part of CAM6's "
+                "clubb_intr cloud fraction (deepcu takes that role); unset it "
+                "for scheme 'cam6_clubb'.")
+        if (conv_mass_flux_up is None) != (conv_icwmr is None):
+            raise ValueError(
+                "cam6_clubb deepcu needs BOTH conv_mass_flux_up and conv_icwmr "
+                "(or neither); got one of them None.")
+        q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        alst = jnp.clip(cloud_fraction_override, 0.0, 1.0)
+        aist = cam6_ice_stratus_fraction(q_v, T, p_full, q_i, lat, config,
+                                         p_half[:, :-1])
+        if conv_mass_flux_up is None:
+            # No deep-convection producer wired (a scheme that publishes no
+            # updraft mass flux): deepcu = 0, exactly CAM's value when the
+            # deep scheme's cmfmc is zero.
+            deepcu = jnp.zeros_like(T)
+        else:
+            deepcu = cam6_deep_convective_fraction(
+                conv_mass_flux_up, conv_icwmr, config)
+        cf = jnp.minimum(jnp.maximum(alst, aist) + deepcu, 1.0)
     else:
         raise ValueError(
             f"Unknown cloud scheme: {config.scheme!r}. "
-            f"Valid schemes: 'sundqvist', 'xu_randall', 'resolved'. "
+            f"Valid schemes: 'sundqvist', 'xu_randall', 'resolved', "
+            f"'cam6_clubb'. "
             f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
         )
 
@@ -879,7 +1053,7 @@ def compute_cloud_properties(
     # AD-safe: a plain clip, no NaN sentinel — the caller supplies a real
     # fraction; on the first step before turbulence has run it is the zero-init
     # carry, which merely drops the floor for that single step.
-    if cloud_fraction_override is not None:
+    if cloud_fraction_override is not None and config.scheme != "cam6_clubb":
         _cf_clubb = jnp.clip(cloud_fraction_override, 0.0, 1.0)
         # STRENGTH: partial blend toward CLUBB rather than a full replacement
         # (``strength*CLUBB + (1-strength)*RH``).  Full replacement removed enough
@@ -1315,3 +1489,33 @@ def compute_cloud_properties(
         lwp_lw=lwp_lw,
         iwp_lw=iwp_lw,
     )
+
+
+def apply_cap_cloud_floor(props: CloudProperties, lat_rad, p_full, dp, config: CloudConfig) -> CloudProperties:
+    """Polar-cap radiative cloud floor (attribution lever, see ``CloudConfig``).
+
+    Poleward of ``config.cap_floor_lat_deg`` and where ``p_full > cap_floor_p_max_pa``
+    the layer cloud fraction becomes ``max(cf, cap_floor_cf)`` and the grid-mean
+    liquid path ``max(lwp, cf_new * cap_floor_q_c * dp / g)`` (the LW-only path
+    too when the scheme carries one).  Ice paths, effective radii and every
+    other layer are returned unchanged.  ``lat_rad`` is the radiation backend's
+    latitude [rad] (the backend's ozone factor uses ``sin(lat)`` on the same
+    array); ``dp`` the layer pressure thickness [Pa].  NORTHERN cap only
+    (``lat >= +lat_deg``): built for the Arctic A/B, the Antarctic is not
+    floored.  The liquid floor scales with the FLOORED fraction (``cf_new``),
+    so a layer already above ``cap_floor_cf`` gets ``cf * q_c * dp/g`` with its
+    own cf; nothing is ever lowered.  The solver never receives the fraction
+    (``to_rrtmg_kwargs``): under ``cloud_vertical_overlap_optics="max_random"``
+    ``cap_floor_cf`` sets how many subcolumns are cloudy, under ``"none"`` it
+    acts only through the grid-mean liquid path (a partial cover then reads
+    as a thinner full cover, which longwave barely distinguishes).  The A/B
+    this was built for pins ``max_random``.
+    """
+    if not config.cap_floor_on:
+        return props
+    cap = (lat_rad >= jnp.deg2rad(config.cap_floor_lat_deg))[:, None] & (p_full > config.cap_floor_p_max_pa)
+    cf_new = jnp.where(cap, jnp.maximum(props.cloud_fraction, config.cap_floor_cf), props.cloud_fraction)
+    lwp_floor = cf_new * config.cap_floor_q_c * dp / constants.g
+    lwp_new = jnp.where(cap, jnp.maximum(props.lwp, lwp_floor), props.lwp)
+    lwp_lw = None if props.lwp_lw is None else jnp.where(cap, jnp.maximum(props.lwp_lw, lwp_floor), props.lwp_lw)
+    return props._replace(cloud_fraction=cf_new, lwp=lwp_new, lwp_lw=lwp_lw)

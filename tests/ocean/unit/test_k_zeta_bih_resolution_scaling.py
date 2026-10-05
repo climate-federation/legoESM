@@ -40,7 +40,7 @@ def test_anchor_mesh_is_bit_identical_to_the_tuned_value():
     assert cfg.K_zeta_bih_ref == 1.0e14       # the recipe's tuned value
     mesh = create_voronoi_mesh(6)             # ico6 at the DEFAULT 50 Lloyd its
     dc, dv = np.asarray(mesh.dcEdge), np.asarray(mesh.dvEdge)
-    dx = float(dc[(dv > 0) & (dc > 0)].mean())
+    dx = float(dc[(dv > 0) & (dc > 0)].mean(dtype=np.float64))
     assert resolution_scaled_k_zeta_bih(dx, cfg) == 1.0e14   # bit-identical
 
 
@@ -119,7 +119,7 @@ def test_derived_coefficient_records_the_mesh_it_came_from():
     dc, dv = np.asarray(mesh.dcEdge), np.asarray(mesh.dvEdge)
     derived = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=None)).config
     assert derived.K_zeta_bih_dx_m == pytest.approx(
-        float(dc[(dv > 0) & (dc > 0)].mean()))
+        float(dc[(dv > 0) & (dc > 0)].mean(dtype=np.float64)))
     pinned = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=1.0e14)).config
     assert pinned.K_zeta_bih_dx_m == 0.0
 
@@ -133,7 +133,7 @@ def test_model_derives_from_its_own_mesh_and_a_pin_survives():
     mesh = create_voronoi_mesh(3, lloyd_iterations=0)
     z = create_ocean_z_star(n_levels=3, H_max=1000.0)
     dc, dv = np.asarray(mesh.dcEdge), np.asarray(mesh.dvEdge)
-    dx_mean = float(dc[(dv > 0) & (dc > 0)].mean())
+    dx_mean = float(dc[(dv > 0) & (dc > 0)].mean(dtype=np.float64))
 
     derived = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=None))
     cfg = MPASOceanConfig(K_zeta_bih=None)
@@ -161,7 +161,7 @@ def test_sharding_padded_mesh_derives_the_same_coefficient():
     z = create_ocean_z_star(n_levels=3, H_max=1000.0)
     plain = MPASOceanModel(mesh, z, MPASOceanConfig(K_zeta_bih=None)).config
 
-    padded = reorder_voronoi_for_sharding(mesh, 7)   # 7 does not divide this mesh
+    padded = reorder_voronoi_for_sharding(mesh, 7, edge_order="owner")  # 7 does not divide this mesh
     n_ghost = int(np.asarray(padded.dvEdge).size) - int(np.asarray(mesh.dvEdge).size)
     assert n_ghost > 0, "this mesh/device count must actually pad, or the gate is vacuous"
     assert float(np.asarray(padded.dcEdge).min()) == pytest.approx(1.0), \

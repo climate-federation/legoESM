@@ -198,18 +198,15 @@ def bootstrap(
     else:
         resolved_backend = backend or get_backend()
 
-    # #1665 interim: refuse 'mixed' BEFORE touching the global x64 flag —
-    # enabling x64 then raising in apply_precision would leave x64=True residue
-    # that turns a later fp32 run into a state-affecting f64-promotion path.
-    if precision.strip().lower() in ("mixed", "mixed_fp64_storage"):
-        from legoesm.runtime.precision import apply_precision as _ap
-        _ap(precision)  # raises NotImplementedError with the actionable message
-
     # 2. X64 policy ----------------------------------------------------------
     need_x64 = x64
     if need_x64 is None:
-        # Infer: fp64 needs x64. (mixed is refused above.)
-        need_x64 = precision.strip().lower() in ("fp64", "float64")
+        # Infer: fp64 stores state in float64, and 'mixed' keeps float64
+        # accumulate/control roles — both are meaningless without x64, which
+        # would silently demote them to float32 (#1675; the #1665 interim
+        # refused 'mixed' here instead).
+        need_x64 = precision.strip().lower() in (
+            "fp64", "float64", "mixed", "mixed_fp64_storage")
 
     if need_x64:
         enable_x64(quiet=True)
@@ -259,6 +256,27 @@ def bootstrap(
     return rc
 
 
+def precision_mode_from_yaml_config(config) -> str:
+    """Precision mode a YAML ``Config`` asks for.
+
+    An explicit ``hardware.precision.mode`` wins; otherwise the per-component
+    ``hardware.precision.dynamics`` / ``conservation`` keys decide (fp64
+    dynamics -> ``fp64``; fp64 conservation alone -> ``mixed``); nothing set
+    gives ``fp32``.
+    """
+    explicit_mode = config.get("hardware.precision.mode", None)
+    if explicit_mode is not None:
+        return str(explicit_mode).strip().lower()
+    dynamics_prec = config.get("hardware.precision.dynamics", None)
+    if dynamics_prec is not None and str(dynamics_prec).strip().lower() in (
+            "float64", "fp64", "double"):
+        return "fp64"
+    cons = config.get("hardware.precision.conservation", None)
+    if cons is not None and str(cons).strip().lower() in ("float64", "fp64"):
+        return "mixed"
+    return "fp32"
+
+
 def bootstrap_from_yaml_config(config) -> RuntimeConfig:
     """Bootstrap from a legoESM YAML ``Config`` object.
 
@@ -267,25 +285,7 @@ def bootstrap_from_yaml_config(config) -> RuntimeConfig:
 
     This replaces the old ``core.hardware.apply_hardware_config``.
     """
-    # Precision mode: prefer explicit mode key, fall back to legacy 3-component.
-    explicit_mode = config.get("hardware.precision.mode", None)
-    if explicit_mode is not None:
-        precision = str(explicit_mode).strip().lower()
-    else:
-        dynamics_prec = config.get("hardware.precision.dynamics", None)
-        if dynamics_prec is not None:
-            prec_str = str(dynamics_prec).strip().lower()
-            if prec_str in ("float64", "fp64", "double"):
-                precision = "fp64"
-            else:
-                # Check conservation for mixed hint.
-                cons = config.get("hardware.precision.conservation", None)
-                if cons is not None and str(cons).strip().lower() in ("float64", "fp64"):
-                    precision = "mixed"
-                else:
-                    precision = "fp32"
-        else:
-            precision = "fp32"
+    precision = precision_mode_from_yaml_config(config)
 
     n_devices = config.get("hardware.parallelism.n_devices", "auto")
     backend = config.get("hardware.parallelism.backend", None)

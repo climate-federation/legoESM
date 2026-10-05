@@ -1274,6 +1274,10 @@ def _load_source_mesh():
 
 @pytest.fixture(scope="module")
 def source_mesh():
+    pytest.importorskip(
+        "fesom_jax",
+        reason="optional fesom_jax package is not installed in this CPU test environment",
+    )
     return _load_source_mesh()
 
 

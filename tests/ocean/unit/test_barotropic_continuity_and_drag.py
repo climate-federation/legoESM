@@ -42,6 +42,8 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
+    _nemo_ssh_avg_apply,
+    _nemo_ssh_avg_prep,
     _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
     nemo_literal_accumulate_transport,
@@ -318,6 +320,40 @@ class TestBottomDragSingleOwner:
             "barotropic drag closer to the DOUBLE-counted rate than the "
             "single-owner rate (finding #6 regression)")
 
+    def test_private_drag_rate_override_reaches_the_substep(self):
+        """Round-15 fidelity hook substitutes rates, never configuration."""
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        u0 = jnp.full(state.u.data.shape, 0.2) \
+            * state.u_mask.data[..., None]
+        state = state._replace(u=state.u.replace(data=u0))
+        cfg = _cfg(
+            barotropic_time_filter="box", barotropic_drag_substep=True)
+        cfg = cfg._replace(constants=cfg.constants._replace(g=0.0))
+        zero = (jnp.zeros_like(state.u_mask.data),
+                jnp.zeros_like(state.v_mask.data))
+        active = (jnp.full_like(state.u_mask.data, 1.0e-3),
+                  jnp.full_like(state.v_mask.data, 1.0e-3))
+        no_drag, _ = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 2, grid, z, cfg, add_barotropic_coriolis=False,
+            _nemo_drag_rate_test_override=zero)
+        with_drag, _ = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 2, grid, z, cfg, add_barotropic_coriolis=False,
+            _nemo_drag_rate_test_override=active)
+        wet = np.asarray(state.u_mask.data) > 0.0
+        assert np.max(np.abs(
+            np.asarray(with_drag.u.data)[..., 0][wet]
+            - np.asarray(no_drag.u.data)[..., 0][wet])) > 0.0
+
+    def test_private_drag_rate_override_refuses_bad_shapes(self):
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        cfg = _cfg(
+            barotropic_time_filter="box", barotropic_drag_substep=True)
+        bad = (jnp.zeros((1, 1)), jnp.zeros_like(state.v_mask.data))
+        with pytest.raises(ValueError, match="shape mismatch"):
+            barotropic_substeps_latlon_cgrid(
+                state, 30.0, 2, grid, z, cfg,
+                _nemo_drag_rate_test_override=bad)
+
 
 class TestBarotropicFaceDepthNemoSshAvg:
     """#1226 ``barotropic_face_depth="nemo_ssh_avg"`` (dynspg_ts.F90:568-592
@@ -476,6 +512,28 @@ class TestBarotropicSeedFaceDepth:
     thickness once the loop is already running (see the state.py field
     docstrings for the full NEMO citation).
     """
+
+    def test_nemo_entry_inverse_has_finite_closed_meridional_faces(self):
+        """DINO developed ssh must not turn the two storage faces into NaN."""
+        grid, _, state = _flat_basin(n_lat=8, n_lon=16, H=1000.0)
+        geom = ensure_geometry(grid)
+        dtype = state.eta.data.dtype
+        prep = _nemo_ssh_avg_prep(
+            state.H_bathy.data, state.land_mask.data, grid, dtype, None)
+        eta = (jnp.asarray(0.125, dtype=dtype)
+               * state.land_mask.data)
+
+        def entry_inverse(eta_arg):
+            return _nemo_ssh_avg_apply(
+                eta_arg, state.u_mask.data, state.v_mask.data, grid,
+                geom.area, prep, return_entry_inverse=True)[2:]
+
+        r1_u, r1_v = entry_inverse(eta)
+        r1_u_jit, r1_v_jit = jax.jit(entry_inverse)(eta)
+        for value in (r1_u, r1_v, r1_u_jit, r1_v_jit):
+            assert np.isfinite(np.asarray(value)).all()
+        np.testing.assert_array_equal(np.asarray(r1_v)[[0, -1]], 0.0)
+        np.testing.assert_array_equal(np.asarray(r1_v_jit)[[0, -1]], 0.0)
 
     def test_unknown_seed_face_depth_raises(self):
         with pytest.raises(ValueError, match="barotropic_seed_face_depth"):

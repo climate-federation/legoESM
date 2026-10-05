@@ -171,13 +171,15 @@ def _first_guess(s):
         s.p_half, s.k_cbot, s.ldcum, s.ktype, zdhpbl, zdh, s.dt, s.cfg)
 
 
-def _ifs_closure(s, T=None):
+def _ifs_closure(s, T=None, ktype=None, ktype_first_guess=None):
     return cl.ifs_closure(
+        ktype_first_guess=ktype_first_guess,
         M_u=s.M_u, PMFUS=s.PMFUS, PMFUQ=s.PMFUQ, PMFUL=s.PMFUL,
         PLUDE=s.PLUDE, PDMFUP=s.PDMFUP, PMFUDE_RATE=s.PMFUDE_RATE,
         PDMFEN=s.PDMFEN, T_u=s.T_u, q_u=s.q_u, l_u=s.l_u,
         k_ctop=s.k_ctop, pwmean=s.pwmean, zdpmean=s.zdpmean,
-        ldcum=s.ldcum, ktype=s.ktype, k_cbot=s.k_cbot, k_dpl=s.k_dpl,
+        ldcum=s.ldcum, ktype=s.ktype if ktype is None else ktype,
+        k_cbot=s.k_cbot, k_dpl=s.k_dpl,
         T=s.T if T is None else T, q=s.q, qs=s.qs, p_full=s.p_full,
         p_half=s.p_half, geo_full=s.geo_full, geo_half=s.geo_half,
         T_h=s.T_h, q_h=s.q_h,
@@ -952,3 +954,22 @@ def test_zmfs_floor_branches():
     assert float(M_b1_big[0] / float(M_b0[0])) > 1.0e-10  # precondition: binds
     assert float(zmfs_b[0]) == pytest.approx(1.0e-10, rel=1e-3, abs=0.0), (
         float(zmfs_b[0]),)
+
+
+def test_first_guess_follows_the_pre_reclassification_type():
+    """cumastrn builds ZMFUB at :563-576, BEFORE the ascent, and forms
+    ZMFS = ZMFUB1/ZMFUB at :963 with that same number -- but it reclassifies
+    KTYPE in between, at :635-641.  So a caller that reclassifies has to tell
+    the closure which type the first guess was built with.  Deep and shallow
+    take different branches there (ZMFMAX*0.1 against ZDHPBL/ZDH), so M_b0
+    must follow ktype_first_guess and NOT the type used by the closure
+    branches.  Deleting the kwarg makes the two calls below identical.
+    """
+    s, _, _ = _setup("deep")
+    one = jnp.ones_like(s.ktype)
+    as_deep = _ifs_closure(s, ktype=2 * one, ktype_first_guess=one)
+    as_shallow = _ifs_closure(s, ktype=2 * one, ktype_first_guess=2 * one)
+    assert float(as_deep["M_b0"][0]) != float(as_shallow["M_b0"][0])
+    # the deep first guess is ZMFMAX*0.1 (cumastrn.F90:564), independent of
+    # the sub-cloud supply, and much larger than the shallow ZDHPBL/ZDH here
+    assert float(as_deep["M_b0"][0]) > float(as_shallow["M_b0"][0])

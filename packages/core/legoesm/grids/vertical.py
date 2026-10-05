@@ -705,7 +705,10 @@ def _vertical_advection_upwind_sigma(
     return -sigma_dot_full * grad
 
 
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+# "sb" is the conservative Simmons-Burridge flux form, HYBRID-lane only
+# (:func:`vertical_advection_hybrid_sb`); "van_leer" is SIGMA-lane only.
+# Each lane refuses the other's scheme rather than run it silently inert.
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb")
 
 
 def van_leer_face_values_sigma(
@@ -725,6 +728,25 @@ def van_leer_face_values_sigma(
     :func:`_vertical_advection_van_leer_sigma` for the derivation, the
     boundary treatment and the monotonicity scope.
     """
+    return _van_leer_face_values(field, sigma_coord.dsigma_full,
+                                 sigma_coord.dsigma)
+
+
+def _pad_last(x: jax.Array, before: int, after: int) -> jax.Array:
+    return jnp.pad(x, ((0, 0),) * (x.ndim - 1) + ((before, after),), mode="edge")
+
+
+def _van_leer_face_values(
+    field: jax.Array,
+    dc_full: jax.Array,
+    d_layer: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Metric-aware van-Leer face values on any monotone vertical coordinate.
+
+    ``dc_full`` (..., nlev-1) are centre-to-centre spacings and ``d_layer``
+    (..., nlev) layer thicknesses, in the same unit (sigma or Pa); both may be
+    1-D (sigma) or carry the column axes (hybrid pressure).
+    """
     from legoesm.core.flux_limiters import (
         grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
     )
@@ -732,7 +754,7 @@ def van_leer_face_values_sigma(
     nlev = field.shape[-1]
     if nlev < 4:
         raise ValueError(
-            f"the van-Leer sigma reconstruction needs at least 4 vertical "
+            f"the van-Leer vertical reconstruction needs at least 4 vertical "
             f"levels for its 4-cell stencil; got nlev={nlev}."
         )
     # Linear-extrapolation ghosts: f_{-1} = 2f_0 - f_1 places the ghost one
@@ -751,12 +773,14 @@ def van_leer_face_values_sigma(
     f_jp1 = fp[..., 3:nlev + 4]
     # Centre-to-centre spacings, edge-padded: dc_up/dc_loc/dc_dn at face j are
     # sigma_full[j-1]-sigma_full[j-2], [j]-[j-1], [j+1]-[j].
-    dcp = jnp.pad(sigma_coord.dsigma_full, (2, 2), mode="edge")  # (nlev+3,)
-    dc_up, dc_loc, dc_dn = dcp[0:nlev + 1], dcp[1:nlev + 2], dcp[2:nlev + 3]
+    dcp = _pad_last(dc_full, 2, 2)  # (..., nlev+3)
+    dc_up = dcp[..., 0:nlev + 1]
+    dc_loc = dcp[..., 1:nlev + 2]
+    dc_dn = dcp[..., 2:nlev + 3]
     # MUSCL face weights: donor half-thickness / centre-to-centre distance.
     # Exactly 0.5 each on a uniform grid.
-    dsp = jnp.pad(sigma_coord.dsigma, (1, 1), mode="edge")  # (nlev+2,)
-    d_above, d_below = dsp[:-1], dsp[1:]                    # (nlev+1,)
+    dsp = _pad_last(d_layer, 1, 1)  # (..., nlev+2)
+    d_above, d_below = dsp[..., :-1], dsp[..., 1:]          # (..., nlev+1)
     d_sum = d_above + d_below
 
     eps = 1e-30
@@ -1435,6 +1459,137 @@ def make_hybrid_levels(
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
 
 
+# --- CAM6 L32 hybrid interface coefficients (CESM2.1 cam_vcoords_L32_c180105.nc) ---
+# p_half[k] = A_half[k] * P0 + B_half[k] * p_s with P0 = 1e5 Pa, top at 2.255 hPa
+# (CAM6 / CESM2 default 32-level grid, Danabasoglu et al. 2020).  Layer mass
+# is positive for every p_s >= 500 hPa (min dp = 277.6 Pa, independent of
+# p_s in the pure-pressure top), unlike make_hybrid_levels' analytic A(eta),
+# which inverts below ~656 hPa.  Values are the file's float64 contents.
+CAM6_L32_HYAI = (
+    0.00225523952394724, 0.00503169186413288, 0.0101579474285245,
+    0.0185553170740604, 0.0297346755951211, 0.0392730012536049,
+    0.0471144989132881, 0.0562404990196228, 0.0668004974722862,
+    0.0807014182209969, 0.0949410423636436, 0.11169321089983,
+    0.131401270627975, 0.154586806893349, 0.181863352656364,
+    0.17459799349308, 0.166050657629967, 0.155995160341263,
+    0.14416541159153, 0.130248308181763, 0.113875567913055,
+    0.0946138575673103, 0.0753444507718086, 0.0576589405536652,
+    0.0427346378564835, 0.0316426791250706, 0.0252212174236774,
+    0.0191967375576496, 0.0136180268600583, 0.00853108894079924,
+    0.00397881818935275, 0.0, 0.0,
+)
+CAM6_L32_HYBI = (
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0393548272550106, 0.0856537595391273, 0.140122056007385,
+    0.204201176762581, 0.279586911201477, 0.368274360895157,
+    0.47261056303978, 0.576988518238068, 0.672786951065063,
+    0.753628432750702, 0.813710987567902, 0.848494648933411,
+    0.881127893924713, 0.911346435546875, 0.938901245594025,
+    0.963559806346893, 0.985112190246582, 1.0,
+)
+CAM6_L32_P0 = 1.0e5
+
+
+def make_cam6_l32_levels(p_ref: float = CAM6_L32_P0) -> HybridSigmaPressureCoordinate:
+    """CAM6's 32-level hybrid grid from its published interface coefficients.
+
+    ``p_ref`` must equal the table's own P0 (1e5 Pa): the A coefficients
+    are defined against it, so another reference pressure would silently
+    move every interface.
+    """
+    if p_ref != CAM6_L32_P0:
+        raise ValueError(
+            f"CAM6 L32 coefficients are defined against P0 = {CAM6_L32_P0} Pa; "
+            f"got p_ref={p_ref}")
+    A_half = jnp.asarray(CAM6_L32_HYAI, dtype=jnp.float64)
+    B_half = jnp.asarray(CAM6_L32_HYBI, dtype=jnp.float64)
+    return create_hybrid_coordinate(len(CAM6_L32_HYAI) - 1, A_half, B_half, p_ref)
+
+
+def assert_hybrid_valid_for_surface_pressure(
+    coord, p_s_min_Pa: float, *, context: str = "",
+) -> None:
+    """Refuse a hybrid coordinate that would carry NEGATIVE layer mass.
+
+    ``B(eta) = eta**transition_exponent`` makes ``dB/deta -> exponent`` at the
+    surface, so a near-surface layer has positive mass only while ``p_s`` stays
+    above a threshold the coordinate alone fixes.  Below it ``dp_from_hybrid``
+    returns negative thicknesses, and that feeds the dycore -- not a
+    diagnostic.
+
+    Why this is an error and not a warning (#1029).  The warning has existed,
+    nothing passed ``p_s_min_Pa``, and the default L40 coordinate forbids
+    surface pressures under 663.9 hPa, i.e. elevations above about 3450 m.
+    Measured against 1-degree ETOPO that is **0.92% of the planet by area** --
+    the Tibetan Plateau, the Andean altiplano, the Greenland and Antarctic
+    domes -- and the figure is the same at 30, 32 and 40 levels.  On the
+    idealized ``held_suarez_topo`` reproducer, TWO cells in that regime killed
+    a 200-day run inside 200 steps.  A condition that lethal, silently active
+    over a percent of the globe, is not something to keep warning about.
+
+    Remedies, measured on the same probe
+    (``scripts/validate/hybrid_negative_layer_mass_exposure.py``):
+
+    * ``transition_exponent=2`` admits p_s down to ~498 hPa (~5870 m) and is
+      valid over 100% of ETOPO;
+    * ``vertical_coord='sigma'`` has no such threshold at all;
+    * a coarser ``nlev`` does NOT help -- the threshold barely moves with it.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+        The coordinate to validate.  Objects without ``A_half``/``B_half``
+        (sigma, the CAM table) are not hybrid in this sense and pass.
+    p_s_min_Pa : float
+        The lowest surface pressure this run will actually produce.
+    context : str, optional
+        Prepended to the message, e.g. the grid and level count, so the error
+        names the run rather than only the coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the coordinate inverts at or above ``p_s_min_Pa``.
+    """
+    import numpy as np
+
+    A_half = getattr(coord, "A_half", None)
+    B_half = getattr(coord, "B_half", None)
+    if A_half is None or B_half is None:
+        return
+    if not np.isfinite(p_s_min_Pa) or p_s_min_Pa <= 0.0:
+        raise ValueError(
+            f"p_s_min_Pa must be a positive, finite pressure in Pa; "
+            f"got {p_s_min_Pa!r}. A non-finite minimum usually means the "
+            f"surface geopotential has not been built yet."
+        )
+
+    thr = float(hybrid_min_valid_surface_pressure(
+        np.asarray(A_half), np.asarray(B_half), constants.p_ref))
+    if thr <= 0.0 or p_s_min_Pa > thr:
+        return
+
+    # Make the threshold legible: "663.9 hPa" does not obviously read as
+    # "forbids the Tibetan Plateau".
+    z_thr = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / thr))
+    z_run = float(constants.R_d * 288.0 / constants.g
+                  * np.log(constants.p_ref / p_s_min_Pa))
+    where = f"{context}: " if context else ""
+    raise ValueError(
+        f"{where}this hybrid coordinate carries NEGATIVE layer mass below "
+        f"p_s = {thr / 100:.1f} hPa (about {z_thr:.0f} m of orography), and "
+        f"this run reaches p_s = {p_s_min_Pa / 100:.1f} hPa (about "
+        f"{z_run:.0f} m). The near-surface layers invert there and the "
+        f"negative thicknesses go into the dycore, not just a diagnostic "
+        f"(#1029: two such cells killed a 200-day idealized run in 200 "
+        f"steps). Fix by setting grid.transition_exponent=2 (valid to "
+        f"~498 hPa / ~5870 m, i.e. all of ETOPO), or "
+        f"grid.vertical_coord='sigma' (no threshold). Raising nlev does not "
+        f"help; the threshold barely moves with it."
+    )
+
+
 def standard_hybrid_levels(
     n_levels: int = 40,
     p_ref: float = constants.p_ref,
@@ -1559,542 +1714,6 @@ def dp_from_hybrid(
         Layer pressure thickness, shape (..., nlev).
     """
     return coord.dA * coord.p_ref + coord.dB * p_s[..., None]
-
-
-def get_eta_level(
-    ak: jax.Array,
-    bk: jax.Array,
-    p_s: jax.Array,
-    pscale: float | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 634: FV3 hybrid → (pf, ph) log-mean full-level pressure.
-
-    Faithful JAX port of FV3 ``get_eta_level``
-    (tools/fv_eta.F90:1859-1890).  Computes:
-
-        ph[k]  = ak[k] + bk[k]·p_s            # half-level pressure
-        pf[k]  = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])  # log-mean full
-
-    At the top edge (k=0) FV3 distinguishes:
-        - ak[0] > 1e-8 → standard log-mean (avoids log(0))
-        - ak[0] ≤ 1e-8 → use kappa-based limit:
-          pf[0] = (ph[1] - ph[0]) · kappa/(kappa+1)
-
-    The FV3 ``kappa`` is R_d / c_p (here ``constants.kappa``).
-
-    Differs from legoESM's ``pressure_from_hybrid(full=True)``
-    which uses pre-computed ``A_full``/``B_full`` (linear midpoint
-    or scheme-dependent); FV3 uses the logarithmic mean.  Both are
-    valid full-level definitions; this helper makes FV3-faithful
-    available standalone.
-
-    Parameters
-    ----------
-    ak : jax.Array, shape ``(npz+1,)``
-        Hybrid A coefficient at half levels.
-    bk : jax.Array, shape ``(npz+1,)``
-        Hybrid B coefficient at half levels.
-    p_s : jax.Array, shape ``(...,)``
-        Surface pressure (Pa).
-    pscale : float, optional
-        Multiplier applied to ph (FV3 lines 1874-1878).  Default
-        None = no scaling.
-
-    Returns
-    -------
-    pf : jax.Array, shape ``(..., npz)``
-        Full-level pressure (log-mean).
-    ph : jax.Array, shape ``(..., npz+1)``
-        Half-level pressure.
-    """
-    # Broadcast p_s to a trailing level axis
-    ps = p_s[..., None]                          # (..., 1)
-    # ph[k] = ak[k] + bk[k]·p_s
-    # FV3 line 1869: ph(1) = ak(1) (no p_s contribution at top edge)
-    # FV3 lines 1870-1872: ph(k) = ak(k) + bk(k)·p_s for k=2..npz+1
-    # In 0-indexed JAX: ph[0] = ak[0]; ph[k] = ak[k] + bk[k]·p_s for k>=1
-    # We use the vectorized form ak + bk·p_s — equivalent if bk[0] = 0
-    # (FV3 convention).  Add an explicit override for ph[0] to match the
-    # FV3 special case for safety.
-    ph = ak + bk * ps                            # (..., npz+1)
-    # Override top edge to exactly ak[0] (FV3 line 1869)
-    ph = ph.at[..., 0].set(ak[0])
-    if pscale is not None:
-        ph = pscale * ph
-
-    # pf[k] = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])
-    dph = ph[..., 1:] - ph[..., :-1]             # (..., npz)
-    # Top-edge special branch (FV3 lines 1880-1884)
-    log_ratio = jnp.log(
-        jnp.where(ph[..., 1:] > 0.0, ph[..., 1:], 1.0)
-        / jnp.where(ph[..., :-1] > 0.0, ph[..., :-1], 1.0)
-    )
-    safe_log = jnp.where(jnp.abs(log_ratio) > 1e-30, log_ratio, 1.0)
-    pf_general = dph / safe_log
-    # Top branch: if ak[0] <= 1e-8, replace pf[0] with kappa-limit
-    kappa = constants.kappa
-    pf_top_kappa = dph[..., 0] * (kappa / (kappa + 1.0))
-    use_kappa = ak[0] <= 1e-8
-    pf_top = jnp.where(use_kappa, pf_top_kappa, pf_general[..., 0])
-    pf = pf_general.at[..., 0].set(pf_top)
-    return pf, ph
-
-
-def compute_dz_fv3(
-    km: int, ztop: float,
-) -> jax.Array:
-    """FV3_3D iter 635: FV3 initial uniform-with-stretched-edges dz.
-
-    Faithful JAX port of FV3 ``compute_dz``
-    (tools/fv_eta.F90:1894-1928).  Builds an initial layer-
-    thickness array used as a starting point for FV3's hybrid-z
-    setup (FV3 then iterates to satisfy ztop and other
-    constraints).
-
-    Algorithm:
-        dz_uniform = ztop / km
-        dz[0]   = 2·dz_uniform     # top (stretched)
-        dz[km-1] = 0.5·dz_uniform  # bottom (compressed)
-        dz[1..km-2] = dz_uniform   # interior
-
-    Note: total height = (km + 0.5)·ztop/km > ztop by design
-    (this is an initial guess; FV3 later iterates).
-
-    Parameters
-    ----------
-    km : int
-        Number of levels.
-    ztop : float
-        Approximate top height (m).
-
-    Returns
-    -------
-    dz : jax.Array, shape ``(km,)``
-        Layer thicknesses (top→bottom indexing, FV3 convention).
-    """
-    dz_uniform = ztop / km
-    dz = jnp.full((km,), dz_uniform)
-    dz = dz.at[0].set(2.0 * dz_uniform)
-    dz = dz.at[km - 1].set(0.5 * dz_uniform)
-    return dz
-
-
-def zflip(q: jax.Array, axis: int = -1) -> jax.Array:
-    """FV3_3D iter 635: flip array along vertical axis.
-
-    Faithful JAX port of FV3 ``zflip`` (tools/fv_eta.F90:2482-2497).
-    Reverses level ordering of ``q`` along ``axis``.  Useful to
-    convert between FV3 top-down (k=1 at model top) and bottom-up
-    conventions.
-
-    Parameters
-    ----------
-    q : jax.Array
-        Field to flip.
-    axis : int, default -1
-        Vertical axis to flip.
-
-    Returns
-    -------
-    jax.Array
-        ``q`` flipped along ``axis``.  Same shape as input.
-    """
-    return jnp.flip(q, axis=axis)
-
-
-def set_external_eta(
-    ak: jax.Array, bk: jax.Array, eps: float = 1.0e-7,
-) -> tuple[jax.Array, int]:
-    """FV3_3D iter 637: derive (ptop, ks) from external ak/bk arrays.
-
-    Faithful JAX port of FV3 ``set_external_eta``
-    (tools/fv_eta.F90:788-807).  Given hybrid coefficients
-    ``ak`` (Pa) and ``bk`` (dimensionless), returns::
-
-        ptop = ak[0]                              # model top pressure (Pa)
-        ks   = max k where bk[k] < eps  -  1     # # pure-pressure layers
-
-    The "-1" converts FV3's level count to layer count (FV3 stores
-    levels at edges; layers are between edges).
-
-    Parameters
-    ----------
-    ak : jax.Array, shape ``(km+1,)``
-        Hybrid A coefficient at half levels (Pa).
-    bk : jax.Array, shape ``(km+1,)``
-        Hybrid B coefficient at half levels.
-    eps : float, default 1e-7
-        Threshold to classify a level as "pure pressure" (bk < eps).
-
-    Returns
-    -------
-    ptop : jax.Array (scalar)
-        Top-of-model pressure (Pa).
-    ks : int
-        Number of pure-pressure LAYERS.
-    """
-    ptop = ak[0]
-    # ks (level count) = max k with bk[k] < eps; in 0-indexed:
-    #   ks = (count of consecutive bk < eps from k=0) - 1
-    # but FV3 also counts ks even if subsequent bk increase; we take the
-    # largest k.  Use jnp.argmax over the reverse-sorted boolean array.
-    is_pure = bk < eps
-    # Cumulative AND backward: only valid as long as all preceding were pure
-    # Actually FV3 sets ks = k whenever bk[k] < eps; so ks ends up being
-    # the LAST index where bk[k] < eps (using a sweep from low to high).
-    # In JAX: ks_level = argmax(reverse[bk < eps]) interpreted as last True
-    # index.  Simpler: use jnp.where + max.
-    idx = jnp.arange(bk.shape[0])
-    # Last index where is_pure is True
-    masked_idx = jnp.where(is_pure, idx, -1)
-    ks_level = int(jnp.max(masked_idx))
-    # FV3: 1-indexed levels, ks = max k where bk(k) < eps; then ks = ks-1
-    # 0-indexed: ks_level + 1 (1-indexed) → minus 1 → ks_level (0-indexed)
-    ks = ks_level
-    return ptop, ks
-
-
-def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 638: FV3 L32 layer thicknesses + ztop.
-
-    Faithful JAX port of FV3 ``compute_dz_L32``
-    (tools/fv_eta.F90:2000-2067).  Builds the FV3-canonical
-    32-layer vertical structure with ztop ≈ 60 km:
-
-    Three blocks (FV3 1-indexed, see ze/dz arrays):
-      - k=1, 2 (special bottom): dz[0]=75, dz[1]=112.5 m
-      - k=3..23 (middle, k1=21): linear stretching to z1=10 km
-        dz[k] = dz0 + (k-k0)·dz1
-      - k=24..31 (upper, k2=8): linear stretching to z2=30 km
-        dz[k] = dz0_new + (k-k0-k1)·dz2
-      - k=32 (top): dz[31] = 2·dz[30]
-
-    Then ``zflip`` reverses to top-down indexing (FV3 final
-    convention).
-
-    Returns
-    -------
-    dz : jax.Array, shape ``(32,)``
-        Layer thicknesses (top→bottom indexing).
-    ztop : jax.Array (scalar)
-        Total height = sum(dz).
-    """
-    km = 32
-    _k0, k1, k2 = 2, 21, 8
-    z1, z2 = 10.0e3, 30.0e3
-    dz0_init = 75.0
-
-    # Build bottom-up dz in 1-indexed style then zflip at end
-    dz = jnp.zeros((km,))
-    # dz[0] = dz0; dz[1] = 1.5*dz0   (FV3 1-indexed k=1, 2)
-    dz = dz.at[0].set(dz0_init)
-    dz_special = 1.5 * dz0_init                       # 112.5
-    dz = dz.at[1].set(dz_special)
-    # ze[2] (1-indexed) = ze[3] in FV3 = dz[0] + dz[1] = 187.5
-    ze3 = dz_special + dz0_init                        # 187.5
-
-    # Middle block (FV3 k = k0+1..k0+k1 = 3..23 → 0-indexed [2, 22])
-    dz0_mid = dz_special                               # 112.5
-    dz1 = 2.0 * (z1 - ze3 - k1 * dz0_mid) / (k1 * (k1 - 1))
-    # FV3 loop: do k = k0+1, k0+k1: dz[k] = dz0 + (k-k0)*dz1
-    # 0-indexed k_python = k_fortran - 1
-    # For k_fortran = 3..23 → k_python = 2..22; (k - k0) = (k_fortran - 2)
-    k_arr = jnp.arange(2, 23)                          # 0-indexed
-    k_minus_k0 = k_arr - 1                             # k_fortran - k0 in 1-indexed
-    # k_fortran = k_python + 1; (k_fortran - k0) = (k_python - 1)
-    dz_mid = dz0_mid + k_minus_k0 * dz1
-    dz = dz.at[2:23].set(dz_mid)
-
-    # After middle, ze[k0+k1+1 (1-indexed) = ze[24] = 0-indexed ze[23]]
-    ze_after_mid = ze3 + float(jnp.sum(dz_mid))
-    # Upper block (FV3 k = k0+k1+1..k0+k1+k2 = 24..31 → 0-indexed [23, 30])
-    dz0_upper = float(dz[22])                          # dz[k1+k0] 1-indexed = dz[23]
-    dz2 = 2.0 * (z2 - ze_after_mid - k2 * dz0_upper) / (k2 * (k2 - 1))
-    k_arr_upper = jnp.arange(23, 31)
-    k_minus_k0_k1 = k_arr_upper - 22                   # (k_fortran - k0 - k1) = (k_python - 22) when k_python = k_fortran - 1, k_fortran = k_python + 1, (k_python + 1 - 2 - 21) = k_python - 22
-    dz_upper = dz0_upper + k_minus_k0_k1 * dz2
-    dz = dz.at[23:31].set(dz_upper)
-
-    # Top (FV3 k=km): dz[km-1] (0-indexed) = 2·dz[km-2]
-    dz = dz.at[km - 1].set(2.0 * dz[km - 2])
-
-    # zflip: FV3 dz was built bottom-up; flip to top-down
-    dz_flipped = jnp.flip(dz)
-    ztop = jnp.sum(dz_flipped)
-    return dz_flipped, ztop
-
-
-# iter-93: stored as numpy (not jnp) at module-top. jnp.asarray at
-# import time eagerly dispatches to the default JAX backend (Metal
-# on macOS), which currently rejects convert_element_type with
-# "UNIMPLEMENTED: default_memory_space is not supported". That
-# bricks `import legoesm` on Apple Silicon even for pure-Python
-# unit tests. Defer jnp conversion to inside `set_eta_L60()` so
-# only callers that actually need the FV3 L60 hybrid coord pay the
-# JAX device-init cost.
-_A60 = np.asarray([
-    300.0000, 430.00000, 558.00000, 700.00000, 863.05803,
-    1051.07995, 1265.75194, 1510.71101, 1790.05098, 2108.36604,
-    2470.78817, 2883.03811, 3351.46002, 3883.05187, 4485.49315,
-    5167.14603, 5937.04991, 6804.87379, 7780.84698, 8875.64338,
-    10100.20534, 11264.35673, 12190.64366, 12905.42546, 13430.87867,
-    13785.88765, 13986.77987, 14047.96335, 13982.46770, 13802.40331,
-    13519.33841, 13144.59486, 12689.45608, 12165.28766, 11583.57006,
-    10955.84778, 10293.60402, 9608.08306, 8910.07678, 8209.70131,
-    7516.18560, 6837.69250, 6181.19473, 5552.39653, 4955.72632,
-    4394.37629, 3870.38682, 3384.76586, 2937.63489, 2528.37666,
-    2155.78385, 1818.20722, 1513.68173, 1240.03585, 994.99144,
-    776.23591, 581.48797, 408.53400, 255.26520, 119.70243,
-    0.0,
-])
-_B60 = np.asarray([
-    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
-    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
-    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
-    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
-    0.00000, 0.00201, 0.00792, 0.01755, 0.03079,
-    0.04751, 0.06761, 0.09097, 0.11746, 0.14690,
-    0.17911, 0.21382, 0.25076, 0.28960, 0.32994,
-    0.37140, 0.41353, 0.45589, 0.49806, 0.53961,
-    0.58015, 0.61935, 0.65692, 0.69261, 0.72625,
-    0.75773, 0.78698, 0.81398, 0.83876, 0.86138,
-    0.88192, 0.90050, 0.91722, 0.93223, 0.94565,
-    0.95762, 0.96827, 0.97771, 0.98608, 0.99347,
-    1.0,
-])
-
-
-def set_eta_L60() -> tuple[jax.Array, jax.Array, jax.Array, int]:
-    """FV3_3D iter 647: FV3 L60 hardcoded hybrid-coord ak/bk table.
-
-    Faithful JAX port of the L60 ``a60`` / ``b60`` data tables in
-    FV3 ``set_eta`` (tools/fv_eta.F90:45-85).
-
-    The FV3 docstring notes: "The following L63 setting is the
-    same as NCEP GFS's L64 except the top 3 layers".  Used as
-    the FV3 reference for 60-layer baroclinic-instability and
-    GFS-comparison tests.
-
-    Returns
-    -------
-    ak : jax.Array, shape (61,)
-        Hybrid A coefficient (Pa).
-    bk : jax.Array, shape (61,)
-        Hybrid B coefficient (dimensionless sigma).
-    ptop : jax.Array (scalar)
-        Top-of-model pressure = ak[0] = 300 Pa.
-    ks : int
-        Number of pure-pressure LAYERS = max index where bk < eps
-        (from iter-637 set_external_eta).
-    """
-    ak = jnp.asarray(_A60)
-    bk = jnp.asarray(_B60)
-    ptop = ak[0]
-    # ks = last index where bk < 1e-7
-    eps = 1.0e-7
-    idx = jnp.arange(bk.shape[0])
-    masked = jnp.where(bk < eps, idx, -1)
-    ks = int(jnp.max(masked))
-    return ak, bk, ptop, ks
-
-
-def hydro_eq(
-    ak: jax.Array, bk: jax.Array,
-    hs: jax.Array,
-    drym: float = 1000.0e2,
-    mountain: bool = False,
-    area: jax.Array | None = None,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """FV3_3D iter 646: hydrostatic-equilibrium IC builder.
-
-    Faithful JAX port of FV3 ``hydro_eq``
-    (tools/init_hydro.F90:277-456), hybrid sigma-p branch
-    (``hybrid_z=False``, hydrostatic-only).
-
-    Reference profile:
-        p1 = 250 hPa, z1 = 10 km · g (tropopause; geopotential)
-        T1 = 200 K (isothermal above tropopause)
-        T0 = 300 K (sea-level)
-        a0 = 0.5·(T1 - T0)/z1
-        c0 = T0/a0
-
-    Algorithm:
-        Surface pressure:
-          if mountain: ps = mslp·exp(-1/(a0·R)·hs/(hs + c0))
-                        (with global dps correction)
-          else:        ps = drym (uniform)
-        ph[k] = ak[k] + bk[k]·ps
-        Build gz top-down:
-          if ph[k] ≤ p1: gz[k] = gz[k+1] + R·T1·log(ph[k+1]/ph[k])
-                                              (isothermal stratosphere)
-          else:          gz[k] = c0/(1 + a0·R·log(ph[k]/ps)) + hs - c0
-                                              (lapse-rate troposphere)
-        pt[k] = (gz[k] - gz[k+1]) / (R·log(ph[k+1]/ph[k]))
-        pt[k] = max(T1, pt[k])
-        delp[k] = ph[k+1] - ph[k]
-
-    Parameters
-    ----------
-    ak, bk : jax.Array, shape (km+1,)
-        Hybrid coordinates (FV3 convention).
-    hs : jax.Array, shape (...,)
-        Surface geopotential (m²/s²).
-    drym : float, default 100000 Pa
-        Mean dry-mass surface pressure (used as mslp when mountain).
-    mountain : bool, default False
-        If True, ``ps`` follows topography via ``hs``.  Else uniform.
-    area : jax.Array, shape (...,), optional
-        Cell areas (used for dps mass correction if mountain).
-
-    Returns
-    -------
-    ps : jax.Array, shape (...,)
-        Surface pressure (Pa).
-    delp : jax.Array, shape (..., km)
-        Layer pressure thicknesses.
-    pt : jax.Array, shape (..., km)
-        Layer-mean temperature (K).
-    """
-    g = constants.g
-    rdgas = constants.R_d
-
-    p1 = 25000.0
-    z1 = 10.0e3 * g
-    t1 = 200.0
-    t0 = 300.0
-    a0 = (t1 - t0) / z1 * 0.5
-    c0 = t0 / a0
-    float(ak[0])
-
-    # Surface pressure
-    if mountain:
-        mslp = 100917.4
-        ps_init = mslp * jnp.exp(
-            -1.0 / (a0 * rdgas) * hs / (hs + c0)
-        )
-        if area is not None:
-            psm = jnp.sum(ps_init * area) / jnp.sum(area)
-            dps = drym - psm
-        else:
-            dps = 0.0
-        ps = ps_init + dps
-    else:
-        ps = jnp.full(hs.shape, drym)
-
-    # ph[..., k] = ak[k] + bk[k]·ps
-    km = ak.shape[0] - 1
-    ph = ak + bk * ps[..., None]                # shape (..., km+1)
-
-    # Build gz top-down from surface (gz[km] = hs)
-    # Use a Python loop over k (km is static, ~32-101)
-    gz = jnp.zeros(ps.shape + (km + 1,))
-    gz = gz.at[..., km].set(hs)
-    for k in range(km - 1, 0, -1):
-        # Branch on ph[k] ≤ p1 (tropopause)
-        ph_k = ph[..., k]
-        ph_kp1 = ph[..., k + 1]
-        gz_kp1 = gz[..., k + 1]
-        # Stratosphere branch
-        gz_strat = gz_kp1 + rdgas * t1 * jnp.log(
-            jnp.maximum(ph_kp1, 1.0) / jnp.maximum(ph_k, 1.0)
-        )
-        # Troposphere branch
-        ratio = ph_k / ps
-        safe_log = jnp.log(jnp.maximum(ratio, 1e-30))
-        denom = 1.0 + a0 * rdgas * safe_log
-        gz_trop = c0 / denom + hs - c0
-        gz_new = jnp.where(ph_k <= p1, gz_strat, gz_trop)
-        gz = gz.at[..., k].set(gz_new)
-
-    # k=0 (model top): same branch logic; ph[0]=ptop = ak[0]
-    ph_0 = ph[..., 0]
-    ph_1 = ph[..., 1]
-    gz_strat_top = gz[..., 1] + rdgas * t1 * jnp.log(
-        jnp.maximum(ph_1, 1.0) / jnp.maximum(ph_0, 1.0)
-    )
-    ratio_top = ph_0 / ps
-    safe_log_top = jnp.log(jnp.maximum(ratio_top, 1e-30))
-    denom_top = 1.0 + a0 * rdgas * safe_log_top
-    gz_trop_top = c0 / denom_top + hs - c0
-    gz_top = jnp.where(ph_0 <= p1, gz_strat_top, gz_trop_top)
-    gz = gz.at[..., 0].set(gz_top)
-
-    # pt and delp
-    log_ph_ratio = jnp.log(
-        jnp.maximum(ph[..., 1:], 1.0) / jnp.maximum(ph[..., :-1], 1.0)
-    )
-    safe_log_ph = jnp.where(jnp.abs(log_ph_ratio) > 1e-30, log_ph_ratio, 1.0)
-    pt = (gz[..., :-1] - gz[..., 1:]) / (rdgas * safe_log_ph)
-    pt = jnp.maximum(pt, t1)
-    delp = ph[..., 1:] - ph[..., :-1]
-
-    return ps, delp, pt
-
-
-def drymadj(
-    delp: jax.Array,
-    q: jax.Array | None,
-    area: jax.Array,
-    ptop: float,
-    dry_mass: float,
-    adjust_dry_mass: bool = True,
-    nwat: int = 0,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """FV3_3D iter 645: dry-mass surface pressure + adjustment.
-
-    Faithful JAX port of FV3 ``drymadj`` (tools/init_hydro.F90:
-    195-275), serial branch (no MPI).
-
-    Algorithm:
-        ps[i,j]  = ptop + Σ_k delp[i,j,k]
-        psd[i,j] = ptop + Σ_k delp[i,j,k] · (1 - Σ_n q[i,j,k,n])
-                                       # dry surface pressure
-        psdry    = area-weighted global mean of psd
-        dpd      = dry_mass - psdry  (if adjust_dry_mass; else 0)
-
-    Parameters
-    ----------
-    delp : jax.Array, shape (..., km)
-        Layer pressure thicknesses (Pa).
-    q : jax.Array, shape (..., km, nwat), optional
-        Water-substance tracers (mass mixing ratios).  If None or
-        ``nwat==0``, psd defaults to ps.
-    area : jax.Array, shape (...,)
-        Cell areas (matching delp leading axes).
-    ptop : float
-        Top-of-model pressure (Pa).
-    dry_mass : float
-        Target global mean dry surface pressure (Pa).
-    adjust_dry_mass : bool, default True
-        If True, return ``dpd = dry_mass - psdry``; else dpd = 0.
-    nwat : int, default 0
-        Number of water-substance tracers in ``q[..., :nwat]``.
-
-    Returns
-    -------
-    ps : jax.Array, shape (...,)
-        Total surface pressure.
-    psd : jax.Array, shape (...,)
-        Dry surface pressure.
-    dpd : jax.Array (scalar)
-        Mass adjustment (dry_mass - psdry), or 0 if disabled.
-    """
-    ps = ptop + jnp.sum(delp, axis=-1)
-    if q is not None and nwat >= 1:
-        # Sum of nwat water tracers per cell (last axis runs over species)
-        q_sum = jnp.sum(q[..., :nwat], axis=-1)        # shape (..., km)
-        psd = ptop + jnp.sum(delp * (1.0 - q_sum), axis=-1)
-    else:
-        psd = ps
-    # Area-weighted mean of psd (iter-623 g_sum mode=1 analog)
-    total_area = jnp.sum(area)
-    safe_area = jnp.where(total_area > 0.0, total_area, 1.0)
-    psdry = jnp.sum(psd * area) / safe_area
-    if adjust_dry_mass:
-        dpd = dry_mass - psdry
-    else:
-        dpd = jnp.asarray(0.0)
-    return ps, psd, dpd
 
 
 def mount_waves(
@@ -2472,48 +2091,6 @@ def hybrid_z_dz(
     # Recompute dz from ze (FV3 line 1851-1853: dz(k) = ze(k) - ze(k+1))
     dz_final = ze[:-1] - ze[1:]
     return dz_final
-
-
-def compute_dz_L101(
-    stretch_f: float = 1.16,
-    dz0: float = 40.0,
-    k0: int = 24,  # FV3 1-indexed k0=25 → 0-indexed 24
-    k1: int = 1,   # FV3 1-indexed k1=2  → 0-indexed 1
-) -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 637: FV3 L101 layer thicknesses + ztop.
-
-    Faithful JAX port of FV3 ``compute_dz_L101``
-    (tools/fv_eta.F90:2069-2108).  Builds the FV3-canonical
-    101-layer vertical structure with ztop ≈ 20.3 km:
-
-        - Bottom (k = k0..km-1, 0-indexed):  uniform dz = dz0 = 40 m
-        - Middle (k = k1..k0):  geometric, dz[k] = stretch_f · dz[k+1]
-        - Top (k = 0):  dz[0] = 4 · dz[1]
-
-    With defaults (FV3 reference): k1=1, k0=24, dz0=40 m,
-    stretch_f=1.16 → 25 geometric layers from 46.4 m to 1656 m,
-    77 uniform 40-m bottom layers, single 6.6 km top layer.
-    Total ztop ≈ 20.3 km.
-
-    Returns
-    -------
-    dz : jax.Array, shape ``(101,)``
-        Layer thicknesses (top→bottom indexing).
-    ztop : jax.Array (scalar)
-        Total height = sum(dz).
-    """
-    km = 101
-    dz = jnp.full((km,), dz0)
-    # Geometric middle: dz[k] = stretch_f^(k0+1-k) · dz0 for k in [k1, k0]
-    # (k0 = 24, k1 = 1)  →  exponents (k0+1-k) for k=1..24:  exponents 24..1
-    k_idx = jnp.arange(k1, k0 + 1)              # 0-indexed [1, 24]
-    exponents = (k0 + 1) - k_idx                # 24, 23, ..., 1
-    geo_dz = (stretch_f ** exponents) * dz0
-    dz = dz.at[k1:k0 + 1].set(geo_dz)
-    # Top: dz[0] = 4 · dz[1]
-    dz = dz.at[0].set(4.0 * dz[1])
-    ztop = jnp.sum(dz)
-    return dz, ztop
 
 
 def sm1_edge_fv3(
@@ -2946,11 +2523,57 @@ def vertical_advection_hybrid_sb(
     return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
 
 
+def vertical_advection_hybrid_van_leer(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Conservative, slope-limited (van Leer) tracer vertical advection, hybrid.
+
+    Face-minus-cell increment form of :func:`_vertical_advection_van_leer_sigma`
+    with the interface mass flux ``mdot`` [Pa/s, > 0 downward, 0 at top and
+    surface] and the column's own layer thickness ``dp_k``::
+
+        -[mdot_{k+1/2}(q_{k+1/2} - f_k) - mdot_{k-1/2}(q_{k-1/2} - f_k)] / dp_k
+
+    This is the flux divergence minus ``f_k (mdot_{k+1/2}-mdot_{k-1/2})/dp_k``,
+    so paired with the continuity that built ``mdot`` the column sum of
+    ``dp*f`` telescopes to the zero boundary fluxes -- the property
+    :func:`vertical_advection_hybrid` (advective upwind on half->full averaged
+    fluxes) lacks.  A constant field has zero tendency at every level.  Scope:
+    this closes the VERTICAL term only; the MPAS horizontal tracer operator is
+    advective and not paired with the layer-thickness continuity.
+
+    Face values: the metric-aware van-Leer reconstruction in pressure,
+    clipped to the two adjacent cells.  The faces next to the top and bottom
+    layers use the donor cell instead: a reconstructed value there is downwind
+    of the boundary layer for inflow into the domain interior (see the sigma
+    kernel's docstring for the instability), and a face shared by two cells
+    must carry ONE value for the telescoping to hold.
+    """
+    dp = dp_from_hybrid(coord, p_s)                                  # (..., nlev)
+    dc = jnp.diff(pressure_from_hybrid(coord, p_s, full=True), axis=-1)
+    q_pos, q_neg = _van_leer_face_values(field, dc, dp)              # (..., nlev+1)
+    donor_pos = jnp.concatenate([field[..., :1], field], axis=-1)    # cell above
+    donor_neg = jnp.concatenate([field, field[..., -1:]], axis=-1)   # cell below
+    nlev = field.shape[-1]
+    edge = jnp.zeros(nlev + 1, dtype=bool).at[jnp.array([1, nlev - 1])].set(True)
+    q_pos = jnp.where(edge, donor_pos, q_pos)
+    q_neg = jnp.where(edge, donor_neg, q_neg)
+    q_face = jnp.where(mass_flux > 0, q_pos, q_neg)
+    inc_top = mass_flux[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = mass_flux[..., 1:] * (q_face[..., 1:] - field)
+    return -(inc_bot - inc_top) / jnp.clip(dp, 1e-10, None)
+
+
 def vertical_advection_theta_hybrid(
     T: jax.Array,
     mass_flux: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
+    *,
+    conservative: bool = False,
 ) -> jax.Array:
     """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
 
@@ -2996,8 +2619,13 @@ def vertical_advection_theta_hybrid(
     # Potential temperature θ = T / exner = T·(p₀/p)^κ
     theta = T / exner
 
-    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
-    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+    # Advect θ, then convert back: -exner·F·∂θ/∂p.  ``conservative=True``
+    # swaps the upwind advective operator for the Simmons-Burridge flux form,
+    # which satisfies the discrete product rule (column residual 6.7e-16
+    # against the advective form's 3.8e-2 of the interfacial exchange on the
+    # CAM L32 table); the exner round-trip is identical either way.
+    _op = vertical_advection_hybrid_sb if conservative else vertical_advection_hybrid
+    return exner * _op(theta, mass_flux, p_s, coord)
 
 
 def sb81_omega_over_p_dyn(

@@ -1,0 +1,33 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -61,0 +62 @@
++   USE l4_r104_een_accum, ONLY : r104_een_accum_dump ! round-104 write-only operands
+@@ -1584,0 +1586,8 @@
++      REAL(wp), DIMENSION(jpi,jpj) :: r104_acc_u_nw, r104_acc_u_ne, r104_acc_u_sw, r104_acc_u_se
++      REAL(wp), DIMENSION(jpi,jpj) :: r104_acc_v_sw, r104_acc_v_se, r104_acc_v_nw, r104_acc_v_ne
++      REAL(wp), DIMENSION(jpi,jpj) :: r104_scl_u_nw, r104_scl_u_ne, r104_scl_u_sw, r104_scl_u_se
++      REAL(wp), DIMENSION(jpi,jpj) :: r104_scl_v_sw, r104_scl_v_se, r104_scl_v_nw, r104_scl_v_ne
++      r104_acc_u_nw(:,:) = 0._wp ; r104_acc_u_ne(:,:) = 0._wp ; r104_acc_u_sw(:,:) = 0._wp ; r104_acc_u_se(:,:) = 0._wp
++      r104_acc_v_sw(:,:) = 0._wp ; r104_acc_v_se(:,:) = 0._wp ; r104_acc_v_nw(:,:) = 0._wp ; r104_acc_v_ne(:,:) = 0._wp
++      r104_scl_u_nw(:,:) = 0._wp ; r104_scl_u_ne(:,:) = 0._wp ; r104_scl_u_sw(:,:) = 0._wp ; r104_scl_u_se(:,:) = 0._wp
++      r104_scl_v_sw(:,:) = 0._wp ; r104_scl_v_se(:,:) = 0._wp ; r104_scl_v_nw(:,:) = 0._wp ; r104_scl_v_ne(:,:) = 0._wp
+@@ -1612,0 +1623,6 @@
++            r104_acc_u_nw(ji,jj) = ffu_nw(ji,jj) ; r104_acc_u_ne(ji,jj) = ffu_ne(ji,jj)
++            r104_acc_u_sw(ji,jj) = ffu_sw(ji,jj) ; r104_acc_u_se(ji,jj) = ffu_se(ji,jj)
++            r104_scl_u_nw(ji,jj) = r1_12 * r1_e1u(ji,jj) * r1_hu(ji,jj,Kmm) * e1v(ji  ,jj  )
++            r104_scl_u_ne(ji,jj) = r1_12 * r1_e1u(ji,jj) * r1_hu(ji,jj,Kmm) * e1v(ji+1,jj  )
++            r104_scl_u_sw(ji,jj) = r1_12 * r1_e1u(ji,jj) * r1_hu(ji,jj,Kmm) * e1v(ji  ,jj-1)
++            r104_scl_u_se(ji,jj) = r1_12 * r1_e1u(ji,jj) * r1_hu(ji,jj,Kmm) * e1v(ji+1,jj-1)
+@@ -1639,0 +1657,6 @@
++            r104_acc_v_nw(ji,jj) = ffv_nw(ji,jj) ; r104_acc_v_ne(ji,jj) = ffv_ne(ji,jj)
++            r104_acc_v_sw(ji,jj) = ffv_sw(ji,jj) ; r104_acc_v_se(ji,jj) = ffv_se(ji,jj)
++            r104_scl_v_nw(ji,jj) = r1_12 * r1_e2v(ji,jj) * r1_hv(ji,jj,Kmm) * e2u(ji-1,jj+1)
++            r104_scl_v_ne(ji,jj) = r1_12 * r1_e2v(ji,jj) * r1_hv(ji,jj,Kmm) * e2u(ji  ,jj+1)
++            r104_scl_v_sw(ji,jj) = r1_12 * r1_e2v(ji,jj) * r1_hv(ji,jj,Kmm) * e2u(ji-1,jj  )
++            r104_scl_v_se(ji,jj) = r1_12 * r1_e2v(ji,jj) * r1_hv(ji,jj,Kmm) * e2u(ji  ,jj  )
+@@ -1646,0 +1670,5 @@
++         CALL r104_een_accum_dump(r104_acc_u_nw, r104_acc_u_ne, r104_acc_u_sw, r104_acc_u_se, &
++            & r104_acc_v_sw, r104_acc_v_se, r104_acc_v_nw, r104_acc_v_ne, &
++            & r104_scl_u_nw, r104_scl_u_ne, r104_scl_u_sw, r104_scl_u_se, &
++            & r104_scl_v_sw, r104_scl_v_se, r104_scl_v_nw, r104_scl_v_ne)
++         !
