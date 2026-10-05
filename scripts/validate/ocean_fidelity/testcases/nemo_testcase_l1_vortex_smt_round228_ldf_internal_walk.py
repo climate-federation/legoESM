@@ -557,26 +557,33 @@ def run(root: Path, *, plant: str | None = None,
                     .tobytes(order="C")).hexdigest(),
             }
 
-        mask_only = run_same_stage_arm(
-            "arm.closed_bottom_wmask", use_divisor=False, use_faces=False)
-        pair = run_same_stage_arm(
-            "arm.pair", use_divisor=True, use_faces=False)
-        triple = None
-        if (include_live_faces
-                or pair["fraction_of_baseline_rhs_max_removed"] < 0.9):
-            triple = run_same_stage_arm(
-                "arm.triple", use_divisor=True, use_faces=True)
-        pairwise = None
-        if pairwise_horizontal_flux:
-            pairwise = run_same_stage_arm(
-                "arm.pairwise_flux", use_divisor=True, use_faces=True,
-                flux_evaluation="nemo_pairwise")
-        literal = None
-        if literal_horizontal_flux:
-            literal = run_same_stage_arm(
-                "arm.literal_flux", use_divisor=True, use_faces=True,
-                flux_evaluation="nemo_literal")
+        mask_only = pair = triple = pairwise = literal = None
         divergence_arms = {}
+        if area_reciprocal_walk:
+            # Round 235 needs only the frozen complete-divergence control and
+            # its two one-variable area-reciprocal arms. Compiling every
+            # historical cumulative arm again exhausted host memory without
+            # adding a discriminator.
+            divergence_arms["divergence"] = run_same_stage_arm(
+                "arm.literal_divergence", use_divisor=True, use_faces=True,
+                flux_evaluation="nemo_literal_divergence")
+        else:
+            mask_only = run_same_stage_arm(
+                "arm.closed_bottom_wmask", use_divisor=False, use_faces=False)
+            pair = run_same_stage_arm(
+                "arm.pair", use_divisor=True, use_faces=False)
+            if (include_live_faces
+                    or pair["fraction_of_baseline_rhs_max_removed"] < 0.9):
+                triple = run_same_stage_arm(
+                    "arm.triple", use_divisor=True, use_faces=True)
+            if pairwise_horizontal_flux:
+                pairwise = run_same_stage_arm(
+                    "arm.pairwise_flux", use_divisor=True, use_faces=True,
+                    flux_evaluation="nemo_pairwise")
+            if literal_horizontal_flux:
+                literal = run_same_stage_arm(
+                    "arm.literal_flux", use_divisor=True, use_faces=True,
+                    flux_evaluation="nemo_literal")
         if literal_divergence_walk:
             for suffix in (
                     "differences", "horizontal_sum", "flux_sum",
@@ -722,6 +729,12 @@ def main(argv=None) -> int:
                 "--literal-divergence-walk requires --same-stage-set")
         require(not args.area_reciprocal_walk or args.same_stage_set,
                 "--area-reciprocal-walk requires --same-stage-set")
+        require(not args.area_reciprocal_walk or not any((
+                    args.include_live_faces, args.pairwise_horizontal_flux,
+                    args.literal_horizontal_flux,
+                    args.literal_divergence_walk)),
+                "--area-reciprocal-walk is a complete frozen-control walk; "
+                "do not combine it with historical cumulative-arm flags")
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
                      divisor_arm=args.divisor_arm,
