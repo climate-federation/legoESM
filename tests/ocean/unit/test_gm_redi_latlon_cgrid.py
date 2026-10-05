@@ -1560,6 +1560,36 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, return_operand_diagnostics=True)
 
+    def test_nemo_iso_lap_divisor_override_is_exactly_scoped(self):
+        """A live T thickness changes only the final volume divisor."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        plain, before = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        pinned, same = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True,
+            divisor_thickness=before["e3t"])
+        assert jnp.array_equal(pinned, plain)
+        divisor = before["e3t"].at[1, 1, 0].multiply(1.25)
+        changed, after = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True, divisor_thickness=divisor)
+        for name in ("zfu", "zfv", "zfw_kp1", "zfw_top"):
+            assert jnp.array_equal(after[name], same[name])
+        assert not jnp.array_equal(changed, plain)
+        with pytest.raises(ValueError, match="full tracer shape"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, divisor_thickness=divisor[..., 0])
+
     def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
         """Round-88's source association is explicit and generic-safe."""
         setup = _stratified_with_meridional_tilt()

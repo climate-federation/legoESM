@@ -2359,6 +2359,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     a33_evaluation: str = "normalized_square",
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
+    divisor_thickness: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2776,7 +2777,13 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     vdiv = zfw_top - zfw_kp1
 
     r1_e1e2t = 1.0 / (e1t * e2t)
-    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t
+    e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(
+        divisor_thickness, dtype=dtype)
+    if e3t_divisor.shape != q.shape:
+        raise ValueError(
+            "divisor_thickness must have the full tracer shape "
+            f"{q.shape}, got {e3t_divisor.shape}")
+    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t_divisor
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
@@ -2792,7 +2799,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "q": q, "tmask": act, "umask": umask, "vmask": vmask,
                 "wmask": wmask, "ahtu": aht, "ahtv": aht_v,
                 "uslp": uslp, "vslp": vslp, "wslpi": wslpi,
-                "wslpj": wslpj, "e3t": e3t, "e3u_flux": e3u_flux,
+                "wslpj": wslpj, "e3t": e3t_divisor, "e3u_flux": e3u_flux,
                 "e3v_flux": e3v_flux, "dit": zdit, "djt": zdjt,
                 "dkt": zdkt, "A11": zA11, "A22": zA22, "A13": zA13,
                 "A23": zA23, "hmsku": zmsku_h, "hmskv": zmskv_h,
@@ -4053,6 +4060,7 @@ def gm_redi_tracer_tendency_latlon(
     return_bolus_transport: bool = False,
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    redi_divisor_thickness_override: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4526,7 +4534,8 @@ def gm_redi_tracer_tendency_latlon(
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
-                return_operand_diagnostics=return_redi_diagnostics)
+                return_operand_diagnostics=return_redi_diagnostics,
+                divisor_thickness=redi_divisor_thickness_override)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
@@ -4544,7 +4553,8 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
-                a33_evaluation=_a33_eval)
+                a33_evaluation=_a33_eval,
+                divisor_thickness=redi_divisor_thickness_override)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             if return_redi_diagnostics:
@@ -4573,6 +4583,7 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=redi_divisor_thickness_override,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4586,6 +4597,7 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=redi_divisor_thickness_override,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus

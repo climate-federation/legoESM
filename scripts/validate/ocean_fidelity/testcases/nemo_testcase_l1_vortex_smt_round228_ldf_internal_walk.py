@@ -11,6 +11,7 @@ closure is used for a claimed row.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
@@ -105,6 +106,7 @@ def _row(name, oracle, candidate, mask, *, plant: str | None):
 
 def run(root: Path, *, plant: str | None = None,
         corrected_factors: bool = False,
+        divisor_arm: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -359,6 +361,52 @@ def run(root: Path, *, plant: str | None = None,
              1.0 / np.asarray(iso_diag["e1e2t"]),
              np.asarray(masks["T"])[..., 0], plant=None),
     ]
+    divisor_production_arm = None
+    if divisor_arm:
+        divisor_input = np.asarray(nemo_thickness).copy()
+        divisor_plant_location = None
+        if plant == "arm.live_divisor.input":
+            support = np.asarray(masks["T"], dtype=bool)
+            magnitude = np.where(
+                support,
+                np.abs(np.asarray(iso["rhs_increment"])[..., :nlev]), -1.0)
+            divisor_plant_location = tuple(
+                int(value) for value in np.unravel_index(
+                    int(np.argmax(magnitude)), magnitude.shape))
+            divisor_input[divisor_plant_location] = np.nextafter(
+                divisor_input[divisor_plant_location], np.inf)
+        hook = _NEMOWSRK3TestHooks(tracer_ldf_diagnostics={
+            "divisor_thickness": jnp.asarray(divisor_input),
+        })
+        arm_trace = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=hook).step(seed, dt=card.dt_s)
+        arm_diag = arm_trace.ldf_diagnostics
+        require(isinstance(arm_diag, dict),
+                "divisor production arm returned no LDF diagnostics")
+        arm_row = _row(
+            "arm.live_divisor.rhs_increment",
+            iso["rhs_increment"][..., :nlev],
+            arm_diag["tendency"][..., :nlev], masks["T"], plant=None)
+        upstream = []
+        for name, support in (("zfu", "u"), ("zfv", "v"),
+                              ("zfw_kp1", "T"), ("zfw_top", "T")):
+            upstream.append(_row(
+                f"arm.live_divisor.upstream.{name}", iso_diag[name],
+                arm_diag[name], masks[support], plant=None))
+        divisor_production_arm = {
+            "execution_regime": "production_step_jit",
+            "rhs_row": arm_row,
+            "upstream_rows": upstream,
+            "fraction_of_baseline_rhs_max_removed": (
+                1.0 - arm_row["max_abs"]
+                / next(row for row in rows
+                       if row["name"] == "iso.rhs_increment")["max_abs"]),
+            "input_plant_location": divisor_plant_location,
+            "tendency_sha256": hashlib.sha256(
+                np.asarray(arm_diag["tendency"], dtype=np.float64)
+                .tobytes(order="C")).hexdigest(),
+        }
     oracle_fu = np.asarray(iso["fu"])[..., :nlev]
     oracle_fv = np.asarray(iso["fv"])[..., :nlev]
     oracle_hdiv = (
@@ -431,6 +479,7 @@ def run(root: Path, *, plant: str | None = None,
         "face_thickness_arm": face_thickness_arm,
         "flux_family_reconstruction": flux_family_reconstruction,
         "divisor_rows": divisor_rows,
+        "divisor_production_arm": divisor_production_arm,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -455,12 +504,14 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant")
     parser.add_argument("--corrected-factors", action="store_true")
+    parser.add_argument("--divisor-arm", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
+                     divisor_arm=args.divisor_arm,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
@@ -491,6 +542,14 @@ def main(argv=None) -> int:
         print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
               f"cells={row['cells_unequal']:7d} "
               f"max_abs={row['max_abs']:.16e}")
+    if report["divisor_production_arm"] is not None:
+        arm = report["divisor_production_arm"]
+        for row in [*arm["upstream_rows"], arm["rhs_row"]]:
+            print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
+                  f"cells={row['cells_unequal']:7d} "
+                  f"max_abs={row['max_abs']:.16e}")
+        print("live-divisor fraction removed:",
+              f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
     print(json.dumps(report["aggregate_reproduction"], sort_keys=True))
     print("first non-bit:", report["first_non_bit"])
     if args.output:
@@ -500,6 +559,16 @@ def main(argv=None) -> int:
         require(args.clean_report is not None,
                 "a plant requires --clean-report")
         clean = json.loads(args.clean_report.read_text())
+        if args.plant == "arm.live_divisor.input":
+            require(report["divisor_production_arm"] is not None,
+                    "divisor input plant requires --divisor-arm")
+            clean_arm = clean.get("divisor_production_arm")
+            require(clean_arm is not None,
+                    "clean report has no divisor production arm")
+            fired = (report["divisor_production_arm"]["tendency_sha256"]
+                     != clean_arm["tendency_sha256"])
+            print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
+            return 1 if fired else 0
         before = {row["name"]: row for row in clean["rows"]}
         planted = [row for row in report["rows"] if row["planted"]]
         require(len(planted) == 1, "plant did not select exactly one row")
