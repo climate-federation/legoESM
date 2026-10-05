@@ -48,14 +48,19 @@ def _checker():
     return module
 
 
+def _raw_groups(path: Path) -> dict[str, np.ndarray]:
+    """Parse a group record using only its self-described extents."""
+    checker = _checker()
+    checker.parse_record(path)
+    return checker._read_group_values(path)
+
+
 def _groups(path: Path) -> dict[str, np.ndarray]:
     """Parse and strip a group record using its own declared extents."""
-    checker = _checker()
-    parsed = checker.parse_record(path)
-    values = checker._read_group_values(path)
+    values = _raw_groups(path)
     out = {}
     for name, value in values.items():
-        shape = tuple(parsed["groups"][name]["shape"])
+        shape = value.shape
         flat = np.asarray(value).reshape(-1, order="F")
         if len(shape) == 3:
             out[name] = _strip3(flat, *shape)
@@ -99,6 +104,7 @@ def _row(name, oracle, candidate, mask, *, plant: str | None):
 
 
 def run(root: Path, *, plant: str | None = None,
+        corrected_factors: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -153,7 +159,8 @@ def run(root: Path, *, plant: str | None = None,
     print("live ISO diagnostic keys:", sorted(iso_diag))
 
     slope = _groups(root / "oracle_ldf_slope_kt00000001.bin")
-    iso = _groups(root / "oracle_ldf_iso_kt00000001.bin")
+    iso_path = root / "oracle_ldf_iso_kt00000001.bin"
+    iso = _groups(iso_path)
     for family, groups in (("slope", slope), ("iso", iso)):
         print(f"{family} record groups={len(groups)}")
         for name in sorted(groups):
@@ -203,6 +210,14 @@ def run(root: Path, *, plant: str | None = None,
         ("iso.dit", "dit", "dit", "u"),
         ("iso.djt", "djt", "djt", "v"),
         ("iso.dkt", "dkt", "dkt", "T"),
+        *((
+            ("iso.A11", "A11", "A11", "u"),
+            ("iso.A22", "A22", "A22", "v"),
+            ("iso.hmsku", "hmsku", "hmsku", "u"),
+            ("iso.hmskv", "hmskv", "hmskv", "v"),
+            ("iso.A13", "A13", "A13", "u"),
+            ("iso.A23", "A23", "A23", "v"),
+        ) if corrected_factors else ()),
         ("iso.fu", "fu", "zfu", "u"),
         ("iso.fv", "fv", "zfv", "v"),
         ("iso.vmsku", "vmsku", "vmsku", "T"),
@@ -218,6 +233,48 @@ def run(root: Path, *, plant: str | None = None,
     for name, recorded, live, support in iso_rows:
         add(name, iso[recorded], iso_diag[live], masks[support],
             skip_surface=name in ("iso.ah_wslp2", "iso.akz"))
+
+    factor_reconstruction = []
+    if corrected_factors:
+        # Independent calibration of the corrected writer: rebuild the six
+        # scalar factors on the full halo-bearing arrays, then strip them only
+        # after evaluating NEMO's compiled source association.  This catches
+        # the Round-227 defect where the writer copied one loop's final scalar
+        # into every cell.
+        raw = _raw_groups(iso_path)
+        wmask = raw["wmask"]
+        wm_ip1 = np.roll(wmask, -1, axis=0)
+        wm_jp1 = np.roll(wmask, -1, axis=1)
+        wm_kp1 = np.roll(wmask, -1, axis=2)
+        hmsku = 1.0 / np.maximum(
+            (wm_ip1 + wm_kp1) + (np.roll(wm_ip1, -1, axis=2) + wmask),
+            1.0)
+        hmskv = 1.0 / np.maximum(
+            (wm_jp1 + wm_kp1) + (np.roll(wm_jp1, -1, axis=2) + wmask),
+            1.0)
+        A11 = (raw["e2_e1u"][..., None]
+               * (raw["e3u_3d"]
+                  * (1.0 + raw["r3u_kmm"][..., None] * raw["umask"])))
+        A22 = (raw["e1_e2v"][..., None]
+               * (raw["e3v_3d"]
+                  * (1.0 + raw["r3v_kmm"][..., None] * raw["vmask"])))
+        A13 = (-raw["e2u"][..., None] * raw["uslp"]) * hmsku
+        A23 = (-raw["e1v"][..., None] * raw["vslp"]) * hmskv
+        reconstructed = {
+            "A11": A11, "A22": A22, "hmsku": hmsku, "hmskv": hmskv,
+            "A13": A13, "A23": A23,
+        }
+        supports = {
+            "A11": "u", "A22": "v", "hmsku": "u", "hmskv": "v",
+            "A13": "u", "A23": "v",
+        }
+        for name in ("A11", "A22", "hmsku", "hmskv", "A13", "A23"):
+            value = reconstructed[name]
+            stripped = _strip3(
+                value.reshape(-1, order="F"), *value.shape)
+            factor_reconstruction.append(_row(
+                f"record.{name}", iso[name][..., :nlev],
+                stripped[..., :nlev], masks[supports[name]], plant=None))
 
     # Post-hoc magnitude discriminator for the first genuine non-bit row.
     # Replace only the A33 coefficient in the already-materialized production
@@ -254,11 +311,15 @@ def run(root: Path, *, plant: str | None = None,
     report = {
         "case": CASE, "legoesm_git_sha": sha, "oracle_root": str(root),
         "plant": plant, "rows": rows,
-        "record_defect": {
+        "record_defect": ({
+            "invalid_groups": [],
+            "reason": "R16 writer copies scalar factors inside their producing loop",
+        } if corrected_factors else {
             "invalid_groups": ["A11", "A22", "A13", "A23", "hmsku",
                                "hmskv"],
             "reason": ("compiled writer lines 262-268 copy scalar "
-                       "temporaries after their producing loop")},
+                       "temporaries after their producing loop")}),
+        "factor_reconstruction": factor_reconstruction,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -282,16 +343,22 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle-dir", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant")
+    parser.add_argument("--corrected-factors", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
         report = run(args.oracle_dir, plant=args.plant,
+                     corrected_factors=args.corrected_factors,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
     for row in report["rows"]:
+        print(f"{row['name']:22s} bit={str(row['bit_exact']):5s} "
+              f"cells={row['cells_unequal']:7d} "
+              f"max_abs={row['max_abs']:.16e}")
+    for row in report["factor_reconstruction"]:
         print(f"{row['name']:22s} bit={str(row['bit_exact']):5s} "
               f"cells={row['cells_unequal']:7d} "
               f"max_abs={row['max_abs']:.16e}")
