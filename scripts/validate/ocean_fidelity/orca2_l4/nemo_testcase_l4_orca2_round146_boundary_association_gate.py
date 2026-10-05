@@ -484,7 +484,10 @@ def measure(
             "R148-P4": "CONFIRMED" if p148_chain else "REFUTED",
             "R149-P1": "CONFIRMED" if p3 else "REFUTED",
             "R149-P2": "CONFIRMED" if p149_control else "REFUTED",
-            "R149-P3": "CONFIRMED" if p149_inverse else "REFUTED",
+            "R149-P3": (
+                "CONFIRMED" if p149_control and p149_inverse
+                else "REFUTED" if p149_control
+                else "UNMEASURED_PREREQUISITE_R149-P2"),
             "R149-P4": (
                 "CONFIRMED" if p149_chain_retained else "REFUTED"),
         },

@@ -2432,14 +2432,11 @@ def _run_substep_loop(
                 "drag_coefficient_t": (
                     -drag_r_t if drag_r_t is not None
                     else jnp.zeros_like(eta)),
-                "inverse_depth_u": jnp.where(
-                    u_mask != 0,
-                    r1_H_u,
-                    0.0),
-                "inverse_depth_v": jnp.where(
-                    v_mask != 0,
-                    r1_H_v,
-                    0.0),
+                # Preserve associated halo operands in the private trace.
+                # The scorer applies active masks separately; zeroing here
+                # manufactured round-148's 68-cell hvr_e boundary debt.
+                "inverse_depth_u": r1_H_u,
+                "inverse_depth_v": r1_H_v,
                 "slow_u": F_slow_u_i,
                 "slow_v": F_slow_v_i,
                 "drag_u": jnp.asarray(_drag_u) * jnp.ones_like(U_bar_c),
