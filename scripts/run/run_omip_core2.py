@@ -6517,14 +6517,24 @@ class _ZdfTrendAccumulator:
     before the K33/ddm terms (``K_trd_mean``, NEMO avt - avt_evd).  Read-only.
     """
 
-    def __init__(self):
+    _NSER = 30   # top levels kept in the per-step box series
+
+    def __init__(self, box_weight=None):
         self._sum, self._ksum, self._n, self._total = None, None, 0, 0
+        # Optional (ny, nx) area weight of one box: per-step box-mean
+        # profiles (ttrd_series / K_series) for diurnal phasing.
+        self._w = None if box_weight is None else box_weight / box_weight.sum()
+        self._ser, self._kser = [], []
 
     def __call__(self, x, k):
         x = np.asarray(x, dtype=np.float64)
         k = np.asarray(k, dtype=np.float64)
         self._sum = x.copy() if self._sum is None else self._sum + x
         self._ksum = k.copy() if self._ksum is None else self._ksum + k
+        if self._w is not None:
+            n = self._NSER
+            self._ser.append(np.tensordot(self._w, x[..., :n], axes=([0, 1], [0, 1])))
+            self._kser.append(np.tensordot(self._w, k[..., :n - 1], axes=([0, 1], [0, 1])))
         self._n += 1
         self._total += 1
 
@@ -6540,6 +6550,10 @@ class _ZdfTrendAccumulator:
         out = {"ttrd_zdf_mean": self._sum / self._n,
                "K_trd_mean": self._ksum / self._n,
                "ttrd_zdf_n_steps": np.asarray(self._n)}
+        if self._w is not None:
+            out["ttrd_series"] = np.asarray(self._ser)
+            out["K_series"] = np.asarray(self._kser)
+            self._ser, self._kser = [], []
         self._sum, self._ksum, self._n = None, None, 0
         return out
 
@@ -7853,6 +7867,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "ttrd_zdf, degC/s) into each snapshot as "
                         "ttrd_zdf_mean. Read-only diagnostic; costs one "
                         "device-to-host copy of T per step.")
+    p.add_argument("--trd-series-box", type=float, nargs=3, default=None,
+                   metavar=("LON0", "LON1", "HALFLAT"),
+                   help="With --trd-accumulate: also store the per-step "
+                        "area-mean profile (top 30 levels) of the trend and "
+                        "diffusivity over the box LON0..LON1 (degE), |lat| <= "
+                        "HALFLAT, as ttrd_series / K_series in each snapshot.")
     p.add_argument("--flux-accumulate", action="store_true",
                    help="Accumulate the APPLIED ocean surface heat flux "
                         "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
@@ -8362,6 +8382,8 @@ def main() -> int:
         raise SystemExit("--nemo-een-coriolis with --momentum-rk3 is refused: the "
                          "implicit_cn barotropic solve then steps the barotropic "
                          "Coriolis forward-Euler (unstable rotation).")
+    if args.trd_series_box is not None and not args.trd_accumulate:
+        raise SystemExit("--trd-series-box needs --trd-accumulate")
     if args.trd_accumulate and args.grid != "tripole":
         raise SystemExit("--trd-accumulate is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -11059,7 +11081,17 @@ def main() -> int:
     # Attached HERE, after every setup-time rebuild of the model (a hook set at
     # build time was silently dropped by those rebuilds).
     if args.trd_accumulate:
-        model._trd_callback = _ZdfTrendAccumulator()
+        _trd_w = None
+        if args.trd_series_box is not None:
+            _l0, _l1, _hl = args.trd_series_box
+            _lon = np.asarray(lon2d) % 360.0
+            _trd_w = (np.asarray(getattr(grid.area_T, "data", grid.area_T))
+                      * (np.asarray(state.land_mask.data) > 0.5)
+                      * (np.abs(np.asarray(lat2d)) <= _hl)
+                      * (_lon >= _l0) * (_lon <= _l1))
+            if _trd_w.sum() <= 0:
+                raise SystemExit("--trd-series-box selects no ocean cell")
+        model._trd_callback = _ZdfTrendAccumulator(_trd_w)
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None

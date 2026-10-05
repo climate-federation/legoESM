@@ -123,6 +123,18 @@ def test_accumulator_mean_empty_window_and_never_fed():
     assert acc.drain(_DT) == {}
 
 
+def test_box_series_is_the_weighted_profile_per_step():
+    w = np.zeros((3, 4)); w[1, 1:3] = [1.0, 3.0]
+    acc = _core2()._ZdfTrendAccumulator(w)
+    x = np.arange(3 * 4 * 32, dtype=float).reshape(3, 4, 32); k = x[..., :31] * 2.0
+    acc(x, k); acc(x + 1.0, k)
+    out = acc.drain(_DT)
+    want = 0.25 * x[1, 1, :30] + 0.75 * x[1, 2, :30]
+    np.testing.assert_allclose(out["ttrd_series"], [want, want + 1.0])
+    np.testing.assert_allclose(out["K_series"][0], 2.0 * want[:29])
+    assert out["ttrd_series"].shape == (2, 30)
+
+
 def test_non_tripole_grid_is_refused(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "mpas", "--trd-accumulate"])
     with pytest.raises(SystemExit, match="tripole only"):
