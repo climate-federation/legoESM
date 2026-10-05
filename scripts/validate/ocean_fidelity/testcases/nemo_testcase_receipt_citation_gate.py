@@ -5576,12 +5576,12 @@ CITATION_MAP = {
         'IF(lwm) WRITE( numond, namtra_ldf )', 3],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:261-283': [
         'nldf_tra = np_ERROR',
-        'IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 23],
+        ('IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 1), 23],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldftra.f90:354-390': [
         'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
-        "CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 37],
+        ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
-        'SELECT CASE ( nldf_tra )', 'END SELECT', 18],
+        ('SELECT CASE ( nldf_tra )', 2), 'END SELECT', 18],
 }
 
 
