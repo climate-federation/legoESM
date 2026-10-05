@@ -5581,7 +5581,7 @@ CITATION_MAP = {
         'IF(     ln_traldf_lap ) THEN   ;   zUfac = r1_2 *rn_Ud',
         ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
-        ('SELECT CASE ( nldf_tra )', 2), 'END SELECT', 18],
+        ('SELECT CASE ( nldf_tra )', 2), ('END SELECT', 2), 18],
 }
 
 
