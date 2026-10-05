@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
+from legoesm.land.snow_column import SnowColumnConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -169,6 +170,12 @@ class MultiLayerLandConfig(NamedTuple):
     # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
     # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
     elev_bands: ElevationSnowBandConfig | None = None
+    # Snowpack model: "bulk" (one SWE reservoir, energy-limited melt at the soil
+    # skin) or "layered" (``legoesm.land.snow_column``: an equal-mass multi-layer
+    # pack solved implicitly together with the soil column, with phase change,
+    # percolation and rain-on-snow).  Validated in ``step_multilayer_land``.
+    snow_scheme: str = "bulk"
+    snow_column: SnowColumnConfig = SnowColumnConfig()
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     # ``theta_wp`` is the SOIL wilting point [m3/m3] — the moisture reference for
@@ -213,10 +220,11 @@ class MultiLayerLandConfig(NamedTuple):
     surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
-    # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
-    # ``W_canopy`` store, drips the excess as throughfall, and evaporates the wet
-    # leaf — reducing soil infiltration and re-partitioning the canopy latent
-    # flux.  The CLM-ML canopy has its OWN internal interception and ignores this.
+    # When set, the two-leaf path intercepts rain into a prognostic ``W_canopy``
+    # store, drips the excess as throughfall, and evaporates the wet leaf —
+    # reducing soil infiltration and re-partitioning the canopy latent flux.
+    # SimpleSEB has no canopy latent stream and ignores it; the CLM-ML canopy
+    # has its OWN internal interception and ignores it too.
     interception: Any | None = None
 
 
@@ -234,6 +242,18 @@ def resolve_land_config(land_mode: str, land_config=None):
     if land_mode == "none":
         return LandConfig()
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
+
+
+def inactive_land_param_names(config: MultiLayerLandConfig) -> frozenset:
+    """Registry-qualified land tunables that carry no gradient in ``config``.
+
+    A trainable-parameter collector over the multilayer land must drop these
+    (no inert parameters): the ice impedance exponent is read only when soil
+    freeze/thaw is on.
+    """
+    if config.thermal.enable_freeze_thaw:
+        return frozenset()
+    return frozenset({"land.richards.ice_impedance_exponent"})
 
 
 LAND_MODELS = ("none", "slab", "multilayer")

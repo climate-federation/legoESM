@@ -1,0 +1,42 @@
+--- traadv_fct.F90.r148
++++ traadv_fct.F90
+@@ -26,0 +27,4 @@
++   USE l2_r153_fct, ONLY : r153_begin, r153_first_flux, r153_midpoint, &
++      & r153_average_flux, r153_upstream, r153_limiter_begin, &
++      & r153_coef_u, r153_coef_v, r153_coef_w, r153_limiter_end, &
++      & r153_final, lr153_active
+@@ -92,0 +97 @@
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: zr153, zr153_divisor
+@@ -157,0 +163,2 @@
++         IF( cdtype == 'TRA' ) CALL r153_begin( kt,Kbb,Kmm,Kaa,Krhs,jn,p2dt, &
++            & pt(:,:,:,jn,Kbb),pt(:,:,:,jn,Kmm),pU,pV,pW,pt(:,:,:,jn,Krhs) )
+@@ -312,0 +320 @@
++         CALL r153_limiter_begin( ztFu, ztFv, ztFw )
+@@ -314,0 +323 @@
++         CALL r153_limiter_end( ztFu, ztFv, ztFw )
+@@ -323,0 +333 @@
++            zr153(ji,jj,jk) = ztra
+@@ -324,0 +335 @@
++            zr153_divisor(ji,jj,jk) = e3t(ji,jj,jk,Kmm)
+@@ -329,0 +341 @@
++         CALL r153_final( zr153, zr153_divisor, pt(:,:,:,jn,Krhs) )
+@@ -486,0 +499 @@
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: zr153
+@@ -524,0 +538 @@
++      CALL r153_first_flux( ptFu, ptFv, ptFw )
+@@ -533,0 +548 @@
++         zr153(ji,jj,jk) = ztra
+@@ -539,0 +555 @@
++      CALL r153_midpoint( zr153, pt_up1 )
+@@ -594,0 +611 @@
++      CALL r153_average_flux( ptFu, ptFv, ptFw )
+@@ -603,0 +621 @@
++         zr153(ji,jj,jk) = ztra
+@@ -608,0 +629 @@
++      CALL r153_upstream( zr153, pt_rhs )
+@@ -905,0 +925 @@
++            IF( lr153_active ) CALL r153_coef_u( ji,jj,jk,zcoef )
+@@ -910,0 +931 @@
++            IF( lr153_active ) CALL r153_coef_v( ji,jj,jk,zcoef )
+@@ -928,0 +950 @@
++               IF( lr153_active ) CALL r153_coef_w( ji,jj,jk,zcoef )

@@ -120,9 +120,12 @@ def test_woa_synthetic_sst_in_realistic_range():
     assert 285.0 < sst_K.mean() < 297.0
 
 
-def test_load_woa_sst_synthetic_fallback():
+def test_load_woa_sst_synthetic_fallback(tmp_path):
     from legoesm.ocean.forcing import load_woa_sst
-    sst_K, lat, lon = load_woa_sst(nlon=72, nlat=36)
+    with pytest.raises(FileNotFoundError):           # fail-loud by default
+        load_woa_sst(cache_dir=tmp_path, nlon=72, nlat=36)
+    sst_K, lat, lon = load_woa_sst(cache_dir=tmp_path, nlon=72, nlat=36,
+                                   allow_synthetic=True)
     assert sst_K.shape == (36, 72)
     # Sanity: equator is warmer than poles.
     eq_band = sst_K[16:20, :].mean()
@@ -136,11 +139,12 @@ def test_load_woa_sst_raises_when_synthetic_disabled(tmp_path):
         load_woa_sst(cache_dir=tmp_path, allow_synthetic=False)
 
 
-def test_woa_into_sst_climatology_bias():
+def test_woa_into_sst_climatology_bias(tmp_path):
     """Plug WOA loader into the climate-bias diagnostic."""
     from legoesm.ocean.forcing import load_woa_sst
     from legoesm.ocean.diagnostics_climate import sst_climatology_bias
-    sst_ref, _, _ = load_woa_sst(nlon=36, nlat=18)
+    sst_ref, _, _ = load_woa_sst(cache_dir=tmp_path, nlon=36, nlat=18,
+                                 allow_synthetic=True)
     # Model = WOA + uniform 1 K warm bias.
     sst_model = sst_ref + 1.0
     area = np.ones_like(sst_ref)
@@ -379,11 +383,12 @@ def test_compute_omip2_freshwater_forcing_emp():
     # evap and lh are mutually consistent through L_vap at the POTENTIAL
     # SST (NEMO BULK_FORMULA pTs = zsspt; ~0.1% below L_vap(SST_abs)).
     from legoesm.ocean.bulk_flux_omip import (
-        exner_potential_temperature, latent_heat_vaporization_sst,
+        exner_potential_temperature,
+        latent_heat_vaporization_sst as latent_heat_vaporization,
     )
     theta_sst = exner_potential_temperature(
         jnp.asarray(T_sfc_K), jnp.asarray(float(constants.p_atm_std)))
-    L_vap = np.asarray(latent_heat_vaporization_sst(theta_sst))
+    L_vap = np.asarray(latent_heat_vaporization(theta_sst))
     assert np.allclose(np.asarray(evap_ref), -np.asarray(lh) / L_vap,
                        rtol=1e-9, atol=1e-15)
 
@@ -916,3 +921,15 @@ def test_conservative_regrid_rejects_partial_longitude_source():
         field, src_lat, _uniform_centres(n_src_lon, 0.0, 360.0), dst_lat, dst_lon,
     )
     assert np.all(np.isfinite(out))
+
+
+def test_legacy_applicator_warns_it_is_known_defective():
+    """The legacy per-step applicator must say it applies no albedo and
+    leaves cube stress unrotated (review decision item 14 guard)."""
+    import inspect
+    from legoesm.ocean.coupler import omip2_applicator as A
+    src = inspect.getsource(A.apply_omip2_surface_fluxes)
+    body = src.split('"""', 2)[2]
+    assert body.lstrip().startswith("warnings.warn(")
+    assert "no shortwave albedo" in body and "unrotated" in body
+    assert "FutureWarning" in body

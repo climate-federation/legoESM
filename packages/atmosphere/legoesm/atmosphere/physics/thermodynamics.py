@@ -255,42 +255,6 @@ def bolton_lcl_temperature(
     return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
 
 
-def latent_heat_vaporization(
-    T: jax.Array,
-    c_liquid: float = constants.c_pw,
-) -> jax.Array:
-    """Kirchhoff temperature-dependent latent heat of vaporization [J/kg].
-
-    ``L(T) = L_v − (c_liquid − c_pv) · (T − T_freeze)``
-
-    with ``L_v`` the vaporization latent heat at 0 °C and the slope set by
-    the specific-heat difference between liquid water and water vapor
-    (Kirchhoff's relation).  Default ``c_liquid = constants.c_pw``
-    (4218 J/kg/K) gives a slope of ``−(c_pw − c_pv) ≈ −2372 J/kg/K``.
-    Emanuel's CONVECT passes its own tunable liquid heat capacity
-    ``c_l_emanuel`` in place of ``c_pw`` (same base formula).
-
-    Distinct from :func:`legoesm.thermo.latent_heat_vaporization_sst`,
-    which is the NEMO/AeroBulk *air-sea empirical* convention
-    (slope ``constants.L_v_sst_slope`` ≈ 2370 J/kg/K, applied to SST);
-    this helper is the thermodynamic Kirchhoff form used inside moist
-    parcel/entropy budgets.
-
-    Parameters
-    ----------
-    T : jax.Array
-        Air/parcel temperature [K].
-    c_liquid : float
-        Liquid-water specific heat [J/kg/K] (default ``constants.c_pw``).
-
-    Returns
-    -------
-    jax.Array
-        Latent heat of vaporization at ``T`` [J/kg].
-    """
-    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
-
-
 def compute_moist_adiabat(
     T_base: jax.Array,
     p_levels: jax.Array,

@@ -303,7 +303,8 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
             zhang_mcfarlane_convection,
         )
         out, _prof = zhang_mcfarlane_convection(
-            T, q_v, p_full, p_half, u, v, carry, _DT, ZhangMcFarlaneConfig(),
+            T, q_v, p_full, p_half, u, v, carry, _DT,
+            ZhangMcFarlaneConfig(land_fraction="none"),  # landless test columns
         )
         return out
     raise ValueError(f"unknown convection scheme {scheme!r}")

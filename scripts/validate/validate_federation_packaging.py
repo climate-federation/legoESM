@@ -79,7 +79,7 @@ LOOSE_MEMBER = {
     "surface_albedo": "legoesm-core", "_version": "legoesm-core",
     "tuning": "legoesm-ml",
     "cli": "legoesm", "config": "legoesm", "dycore_factory": "legoesm",
-    "supported_matrix": "legoesm", "taxonomy": "legoesm",
+    "supported_matrix": "legoesm",
 }
 
 

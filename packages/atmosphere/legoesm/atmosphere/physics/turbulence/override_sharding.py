@@ -41,7 +41,6 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     mismatch), never silently.
     """
     import jax.numpy as jnp
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     if getattr(override, "scheme", None) != "clubb_lite":
         return override  # only clubb_lite carries per-column coefficient fields
@@ -70,8 +69,10 @@ def localize_turbulence_override(override: Any, layout: Any) -> Any:
     if lengths == {ncol}:
         sliced = {f: slice_to_local(a.reshape(global_shape)).reshape(-1)
                   for f, a in per_column.items()}
-        return TurbulenceConfig(
-            scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))
+        # _replace, not a rebuild: every other field of the override (e.g.
+        # liquid_partition, update_interval_steps) must survive localization,
+        # or the factory's guards see defaults instead of what was selected.
+        return override._replace(clubb_lite=clubb._replace(**sliced))
     if ncol in lengths:
         raise ValueError(
             f"per-column override fields have inconsistent column counts {lengths} "

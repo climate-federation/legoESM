@@ -82,7 +82,7 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     """
     deficit = jnp.maximum(-q_v_raw, 0.0)
     q_v_out = q_v_raw + deficit
-    T_out = T - (constants.L_v / constants.c_pd) * deficit
+    T_out = T - (constants.L_v / constants.c_pd) * deficit  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     return q_v_out, T_out
 
 
@@ -120,9 +120,9 @@ def is_borrow_eligible_tracer(name: str) -> bool:
 #: HARD-floor certificate only; the BORROW is h-neutral for every species with
 #: no T change (it conserves each column integral), so it needs none of this.
 _FLOOR_LATENT_COEF = {
-    "q_v": constants.L_v,
+    "q_v": constants.L_v,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     "q_c": 0.0, "q_r": 0.0,
-    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,
+    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
 }
 
 
@@ -163,7 +163,7 @@ def energy_consistent_water_floor(tracers, T):
 
 
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           sum_fn=None):
+                           area, sum_fn=None):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -171,7 +171,10 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       per-mass species (:func:`conservative_positive_clip_global` with the
       ``dp`` layer-mass weight), plain floor for anything not borrow-eligible.
       ``T`` is returned untouched — the borrow is frozen-MSE-neutral for every
-      species (it preserves each column integral).  ``sum_fn`` defaults to
+      species (it preserves each column integral).  ``area`` is the
+      horizontal cell area (``dp`` minus its trailing level axis); the global
+      net-negative-column residual is conserved in ``sum(area*dp*q)``, the
+      physical mass.  ``sum_fn`` defaults to
       serial ``jnp.sum``; the MPI lane passes an allreduce-SUM reduction so the
       redistribution factor is decomposition-independent.  Iterates SORTED so
       every rank issues the per-tracer collectives in the same order.
@@ -188,7 +191,7 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
             data = f.data if hasattr(f, "data") else f
             if is_borrow_eligible_tracer(name):
                 clipped = conservative_positive_clip_global(
-                    data, dp, axis=-1, sum_fn=sum_fn)[0]
+                    data, dp, axis=-1, sum_fn=sum_fn, area=area)[0]
             else:
                 clipped = jnp.maximum(data, 0.0)
             out[name] = (f.replace(data=clipped) if hasattr(f, "replace")
@@ -311,7 +314,7 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
 
 
 def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
-                                      sum_fn=None):
+                                      sum_fn=None, area=None):
     """Column-local borrow PLUS global residual redistribution.
 
     :func:`conservative_positive_clip` zeroes a net-negative column (nothing
@@ -332,9 +335,15 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     factor is identical on every rank (decomposition-independent, and
     allreduce-SUM is the one AD-safe collective).  AD: one extra guarded
     quotient, same double-``where`` pattern as the column fixer.
+
+    ``area`` (horizontal cell area, ``q``'s shape minus the trailing axis)
+    weights the global sums so the conserved total is the physical mass on a
+    non-equal-area grid; ``None`` means equal-area columns.
     """
     q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
     w = jnp.asarray(weight, dtype=q.dtype)
+    if area is not None:
+        w = w * jnp.asarray(area, dtype=q.dtype)[..., None]
     s = sum_fn if sum_fn is not None else jnp.sum
     eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
     # ONE reduction per quantity (two total): pos_total reused for the
@@ -498,7 +507,7 @@ def global_area_sum(
     differentiable_broadcast : bool, optional
         VJP semantics of the MPI reduction.  ``False`` (default) uses
         ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
-        established callers.  ``True`` uses :func:`_broadcast_allreduce_sum`
+        established callers.  ``True`` uses :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
         (allreduce forward AND backward), REQUIRED when the reduced value is
         broadcast back and reused on every rank — e.g. a mass-fixer additive
         ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
@@ -537,9 +546,11 @@ def global_area_sum(
     if spmd_sums is not None:
         return spmd_sums[0]
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            broadcast_allreduce_sum, global_sum_mpi,
+        )
         if differentiable_broadcast:
-            return _broadcast_allreduce_sum(local_sum)
-        from legoesm.parallel.reductions import global_sum_mpi
+            return broadcast_allreduce_sum(local_sum)
         return global_sum_mpi(local_sum)
     # Cube GSPMD / single-device: use the shard-count-invariant per-face
     # fixed-order reduction (issue #852) so a face-sharded mass integral is
@@ -648,7 +659,7 @@ def batch_global_area_sums(
     Falls back to individual ``jnp.sum`` when not distributed.
 
     ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
-    — ``True`` routes the batched reduction through :func:`_broadcast_allreduce_sum`
+    — ``True`` routes the batched reduction through :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
     (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
     (identity VJP), for reduced values that scale every rank (the non-anchor p_s
     mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
@@ -681,13 +692,15 @@ def batch_global_area_sums(
         return spmd_sums
 
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            batch_allreduce_mpi, broadcast_allreduce_sum,
+        )
         if differentiable_broadcast:
             # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
             # single-message batching as batch_allreduce_mpi, but the correct
             # transpose for a reused/broadcast reduced value.
-            reduced = _broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
+            reduced = broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
             return [reduced[i] for i in range(len(local_sums))]
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     # Cube whole-face GSPMD / single-device: shard-count-invariant per-array
     # reduction (issue #852), matching the single-array global_area_sum fix so
@@ -700,53 +713,6 @@ def batch_global_area_sums(
             stacked * weight[..., None], reduce_axes=(1, 2))
         return [inv[i] for i in range(len(arrays))]
     return local_sums
-
-
-@jax.custom_vjp
-def _broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
-    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
-    transpose for a reduced value that is BROADCAST and reused on every rank.
-
-    ``global_sum_mpi`` (mpi4jax ``allreduce``) has an IDENTITY VJP: each rank
-    keeps its LOCAL cotangent (``test_grad_nonzero``: "gradient 2*x, no
-    scaling").  That is right for a TOP-LEVEL loss reduction ``L =
-    global_sum_mpi(local)`` (each rank contributes 1:1 to ``L``), but WRONG for
-    an INTERMEDIATE global that is broadcast back and reused multiplicatively on
-    every face/rank — e.g. the flux-form ``scale = mass_in / mass_pos`` that
-    rescales EVERY owned face (#811).  There, ``field_in`` on rank ``r`` affects
-    the output on EVERY rank ``r'`` through the shared ``scale``, so the true
-    ``dL/d(mass)`` is the GLOBAL sum of every rank's local cotangent — i.e. the
-    reduction's transpose is ``allreduce(SUM)``, not identity.  Dropping it left
-    a UNIFORM ~1e-3 absolute cotangent error on every owned face (rel 1.1 on
-    faces far from the transported blob) in the scattered-vs-replicated gradient
-    gate.  Forward is byte-identical to ``global_sum_mpi`` (both are the same
-    ``allreduce(SUM)``); only the backward differs.
-    """
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum)
-
-
-def _broadcast_allreduce_sum_fwd(local_sum):
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum), None
-
-
-def _broadcast_allreduce_sum_bwd(_res, g):
-    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
-    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
-    from legoesm.parallel.reductions import global_sum_mpi
-    return (global_sum_mpi(g),)
-
-
-_broadcast_allreduce_sum.defvjp(
-    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
-
-#: Public name for the broadcast-correct allreduce(SUM) (VJP also allreduces
-#: the cotangent) — the ``sum_fn`` to pass to
-#: :func:`conservative_positive_clip_global` under MPI, where the summed
-#: scalar is broadcast into every rank's rescale factor.  Cross-module
-#: imports must use this name (no-private-cross-imports ratchet).
-broadcast_allreduce_sum = _broadcast_allreduce_sum
 
 
 def global_face_sum_if_scattered(
@@ -783,7 +749,7 @@ def global_face_sum_if_scattered(
     the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
     ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
     established mass-fixer callers (kept byte-identical).  ``True`` uses
-    :func:`_broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
+    :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
     when the reduced value is broadcast back and reused multiplicatively on every
     rank, so the cross-rank cotangents are not silently dropped (the flux-form
     ``scale`` — #811).  Forward is identical either way; only the gradient differs.
@@ -800,10 +766,11 @@ def global_face_sum_if_scattered(
         if (topo is not None and area is not None
                 and hasattr(topo, "local_face_ids")
                 and area.shape[0] == len(topo.local_face_ids) < 6):
+            from legoesm.parallel.reductions import (
+                broadcast_allreduce_sum, global_sum_mpi,
+            )
             if differentiable_broadcast:
-                return _broadcast_allreduce_sum(local_sum)
-            from legoesm.parallel.reductions import global_sum_mpi
-
+                return broadcast_allreduce_sum(local_sum)
             return global_sum_mpi(local_sum)
     return local_sum
 
@@ -1169,6 +1136,136 @@ def diagnose_moisture_correction(
         "correction_mass": target_moisture - current,
         "scale": scale,
     }
+
+
+#: Water species whose physics tendency carries MASS in or out of the
+#: column (vapour, warm-rain and ice-phase condensate).  Number
+#: concentrations and passengers are per-mass tracers that ride the layer
+#: mass but add none.
+WATER_MASS_SPECIES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
+
+
+def _d(x):
+    """Field payload or the array itself (a bare jax Array's ``.data`` is
+    its buffer, so no ``getattr(x, "data", x)``)."""
+    return x.data if hasattr(x, "replace") and hasattr(x, "data") else x
+
+
+def dry_surface_pressure(p_s, tracers, sigma_coord, *,
+                         water_names=WATER_MASS_SPECIES):
+    """Surface pressure of the DRY air alone [Pa]:
+    ``p_top + sum_k dp_k (1 - Q_k)`` on sigma or hybrid layer masses
+    (the coordinate's own top pressure ``p_top = p_half[0]`` -- sigma_top
+    * p_s on sigma, ak[0] on hybrid -- is dry: no tracer lives above the
+    top layer).  Equals ``p_s - g * column water`` since ``p_top + sum_k
+    dp_k == p_s`` for every coordinate; written as the layer sum so it is
+    exact in floating point against the layer masses the tests and the
+    water tendencies use.
+
+    The p_s-coordinate lanes' mass fixer conserves THIS (user decision
+    2026-09-28, the FV3/IFS/CAM convention: dry air is conserved, water
+    comes and goes through precipitation and evaporation).  A fixer on
+    the total ``p_s`` would put every step's precipitated mass straight
+    back as dry air, undoing :func:`apply_physics_water_mass`.
+    ``tracers`` may be ``None`` (dry run): returns ``p_s``.
+    """
+    if tracers is None:
+        return p_s
+    Q = None
+    for name in water_names:
+        if name in tracers:
+            q = _d(tracers[name])
+            Q = q if Q is None else Q + q
+    if Q is None:
+        return p_s
+    dp = sigma_coord.layer_thickness_dp(p_s)
+    p_top = sigma_coord.pressure_at_half(p_s)[..., 0]
+    return p_top + jnp.sum(dp * (1.0 - Q), axis=-1)
+
+
+def apply_physics_water_mass(tracers, tracer_tendencies, p_s, sigma_coord,
+                             dt, *, water_names=WATER_MASS_SPECIES):
+    """Apply physics tracer tendencies WITH their mass (the FV3
+    ``fv_update_phys`` nwat block on a p_s-coordinate column).
+
+    Convention: every tracer is a SPECIFIC quantity on TOTAL air mass
+    (``q_x = m_x / m_total``, the FV3/CAM/IFS convention this driver's
+    column-water diagnostic ``sum(q p_s dsigma)/g`` already assumes).  A
+    water tendency ``dq_x`` [1/s] from physics therefore means
+    ``dt*dq_x*dp_k/g`` kg/m^2 of water added to layer k (negative for
+    precipitation leaving it).  Applying it as ``q += dt*dq`` at fixed
+    ``p_s`` (the previous behaviour) keeps the column's total mass: the
+    precipitated water stays behind as DRY AIR.  Here the layer masses
+    carry the water in and out:
+
+        D_k     = dt * sum_x dq_x,k                       (water species only)
+        dp_k    = layer mass of the coordinate at p_s      (sigma OR hybrid)
+        p_s'    = p_s + sum_k dp_k * D_k                   (column water change)
+        dp_k'   = layer mass of the coordinate at p_s'
+        q_t,k'  = (q_t,k + dt*dq_t,k) * dp_k / dp_k'       for EVERY tracer t
+
+    i.e. each tracer's layer MASS after the increment,
+    ``(q + dt*dq)*dp_k``, is placed on the coordinate's new layer mass.
+    Column totals of every tracer (water and passengers) and the column
+    dry mass ``sum_k dp_k (1 - Q_k)`` are exact; the per-layer
+    redistribution is the coordinate's own response to the column
+    mass change (GLM/codex 2026-09-28: the unweighted form
+    ``q' = (q + dq)/(1 + D_k)`` is first-order wrong on sigma).
+
+    Returns ``(tracers_new, p_s_new)``.  Tracers with no tendency entry
+    are re-weighted too (their mass is unchanged, their layer mass is
+    not).  ``tracer_tendencies`` values may be Field-like (``.data``) or
+    arrays; the tracers dict is returned in the same wrapping as given.
+    """
+    dp = sigma_coord.layer_thickness_dp(p_s)                  # (..., nlev)
+    D = None
+    for name in water_names:
+        # a tendency for a species the state does not carry adds no mass:
+        # its increment is dropped below, so it must not move p_s either
+        # (codex 2026-09-28 r2)
+        if name in tracer_tendencies and name in tracers:
+            inc = dt * _d(tracer_tendencies[name])
+            D = inc if D is None else D + inc
+    if D is None:
+        # no water tendency: layer masses unchanged, passengers still
+        # take their own tendencies (codex 2026-09-28)
+        p_s_new, ratio = p_s, None
+    else:
+        p_s_new = p_s + jnp.sum(dp * D, axis=-1)
+        ratio = dp / sigma_coord.layer_thickness_dp(p_s_new)
+    out = {}
+    for name, tr in tracers.items():
+        q = _d(tr)
+        if name in tracer_tendencies:
+            q = q + dt * _d(tracer_tendencies[name])
+        elif ratio is None:
+            out[name] = tr
+            continue
+        q_new = q if ratio is None else (q * ratio).astype(q.dtype)
+        out[name] = tr.replace(data=q_new) if hasattr(tr, "replace") else q_new
+    return out, p_s_new
+
+
+def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
+    """Uniform ``p_s += correction`` (a mass fixer's move) with every
+    tracer re-weighted onto the new layer masses so each tracer's column
+    mass is untouched: ``q' = q * dp_k / dp_k'``.  The added or removed
+    mass is then entirely DRY air, so the fixer's correction is exact
+    for the dry integral (``dry' = dry + correction`` per column; the
+    unweighted shift changes dry pressure by only ``correction * (1 -
+    sum_k dB_k Q_k)`` and moves water by ``Q_bar * correction`` -- codex
+    and GLM 2026-09-28).  Returns ``(p_s_new, tracers_new)``.
+    """
+    p_s_new = p_s + correction
+    if tracers is None:
+        return p_s_new, tracers
+    ratio = sigma_coord.layer_thickness_dp(p_s) / sigma_coord.layer_thickness_dp(p_s_new)
+    out = {}
+    for name, tr in tracers.items():
+        q = _d(tr)
+        q_new = (q * ratio).astype(q.dtype)
+        out[name] = tr.replace(data=q_new) if hasattr(tr, "replace") else q_new
+    return p_s_new, out
 
 
 def fix_total_water(

@@ -1196,7 +1196,7 @@ def test_wall_default_surface_is_frozen():
 # 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
 # loop never evaluates (the cloud_scheme allow-list entry's own argument);
 # non-default values stay refused, so the allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "71129e0044383074ff9fb65d9eddef903a21419dbba9a7941fbd90adcf0796a0"
+_WALL_SURFACE_SHA256 = "95569efd839eee0287c4980fdff33981403573022936c7ccc6e4067d808ed709"
 
 
 def test_wall_leaf_types_are_scalar():

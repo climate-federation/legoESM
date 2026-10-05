@@ -559,13 +559,22 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     seed._land_ml_state = _stamp_columns(
         seed._land_ml_state, np.asarray(seed.state.T.data).shape[0])
     if MPI.COMM_WORLD.Get_rank() == 0:
-        from legoesm.land.restart import save_land_restart
+        from legoesm.land.clm_surface_map import download_clm_surfdata
+        from legoesm.land.restart import (
+            HYDRAULICS_SOURCE_CLM_MAP, save_land_restart,
+            soil_hydraulics_stamp)
         from legoesm.land.soil_grid import make_soil_grid
+        # Stamped with the run's own hydraulics, so the file is loaded verbatim
+        # and the comparison below stays bit-exact.
         save_land_restart(
             ic_path, seed._land_ml_state, land_mode="multilayer",
             t_end_s=0.0, n_steps_completed=0,
             soil_dz=np.asarray(
-                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz))
+                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz),
+            soil_hydraulics=soil_hydraulics_stamp(
+                seed.physics.land_ml_cfg.hydraulics.retention_curve,
+                HYDRAULICS_SOURCE_CLM_MAP, download_clm_surfdata()),
+            hydraulics=seed.physics.land_ml_cfg.hydraulics)
     MPI.COMM_WORLD.Barrier()
     assert os.path.exists(ic_path), "the spun-up land state was never written"
 

@@ -303,10 +303,12 @@ class MPASOceanConfig(NamedTuple):
     # area-weighted dots (docs/ocean_experiments/distributed_barotropic_pcg
     # .md).  ``fixed_iters`` targets 1e-10 residual on the diagonally-
     # dominant Voronoi Helmholtz.  ``pcg_variant`` selects the reduction
-    # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
-    # with one batched allreduce per iteration — validated at solver entry,
-    # ValueError on unknown).
+    # strategy ("standard" 2-dot PCG, "single_reduce" Chronopoulos–Gear
+    # with one batched allreduce per iteration, or "single_reduce_deep", the
+    # same with the halo exchanged every few iterations — validated at solver
+    # entry, ValueError on unknown).
     #
+    # History (superseded 2026-10-02 by gpoly@15, see the end of this block):
     # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
     # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
     # Jacobi at 30, same residual).  The Jacobi history that set 30:
@@ -346,11 +348,47 @@ class MPASOceanConfig(NamedTuple):
     # 1e-10 residual has to set the count back up explicitly.
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
-    barotropic_implicit_pcg_fixed_iters: int = 20
+    #
+    # 15 with the GLOBAL polynomial ("gpoly", below) since 2026-10-02 (owner
+    # decision). Saved L9 systems, 128 emulated devices: gpoly@15 beats the
+    # block-local poly@20 it replaces (f64 rel_res 6.4e-8 vs 8.9e-8; f32
+    # surface error vs converged 1.1e-7 m vs 2.4e-7 m). GPU weak ladder
+    # (20480 cells/GPU, f32, two repeats): step -6% / -8.5% / -10.4% at
+    # 8 / 32 / 128 GPUs. Single-device runs are unaffected (stock CG).
+    # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
+    # reaches the 1e-10 relative residual in 27-30 iterations on real s7
+    # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
+    barotropic_implicit_pcg_fixed_iters: int = 15
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    # "standard" (two allreduces per iteration) is the default since
+    # 2026-10-02 (owner decision): it is the recurrence gpoly x 15 was
+    # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
+    # GPUs); gpoly x 15 with "single_reduce" has not been measured.
+    # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
+    # iteration instead of two) was the default 2026-09-26..2026-10-02. It
+    # had been owner-approved after two checks: convergence on the REAL captured systems is identical (s7 L40,
+    # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
+    # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
+    # Derecho CPU with the butterfly global sum, s7 16 ranks/node, 313 vs 315
+    # ms/step at 1 node, 167 vs 171 at 2, 110 vs 118 at 4, 86.9 vs 97.2 at 8.
+    # float32 checked too (same systems): both recurrences reach the f32
+    # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
+    # GPU (NCCL) was not re-measured with it.
+    # "single_reduce_deep" (opt-in): the same recurrence with the cell halo
+    # of (r, s) exchanged once every `complete_cell_rings` iterations instead
+    # of every iteration; the halo is recomputed redundantly.  Owned results
+    # equal the per-iteration exchange bit for bit (x64 test).  Needs precond
+    # "jacobi" and fixed_iters=30.  Cadence = rings the layout certifies: 3 on
+    # the SPMD layout, 1 on the MPI-per-rank layout (its halo has no closure
+    # passes, so there it is the per-iteration exchange of two vectors).
+    # Derecho CPU s7 L40 f64, 3 repeats, ms/step: 8 nodes 82.8 (poly4 x 20)
+    # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
+    # with per-iteration exchange 92.7 / 165.3.  Not the default: owner
+    # decision 2026-10-02 keeps gpoly x 15 (no head-to-head measurement).
     barotropic_implicit_pcg_variant: str = "standard"
-    # Distributed-only preconditioner for the fixed-iteration PCG.
-    # "jacobi" (default) or "poly": a communication-free Neumann-series
+    # Distributed-only preconditioner for the fixed-iteration PCG
+    # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
+    # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no
     # halo exchange, so it costs nothing in ppermute rounds and buys
     # iterations back).  Measured on the real subdivision-9 systems,
@@ -362,10 +400,18 @@ class MPASOceanConfig(NamedTuple):
     # Each PCG iteration still costs one cell-halo exchange plus two
     # allreduces; the win is reaching the target residual at a smaller
     # ``fixed_iters`` (30 -> 20 at poly4).
-    # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
-    # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
-    # residual.
-    barotropic_implicit_pcg_precond: str = "poly"
+    # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above);
+    # "jacobi" is the pre-2026-09-20 solver and needs fixed_iters=30 for the
+    # same residual (and is what "single_reduce_deep" requires).
+    # Default "gpoly" since 2026-10-02 (owner decision; see fixed_iters for
+    # the A/B): the same polynomial on the GLOBAL operator, evaluated
+    # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
+    # historical 2 satisfies at 4 sweeps); one exchange per iteration as
+    # before, and the answer no longer depends on the device count. Same
+    # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
+    # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
+    # (select "poly" there) and a single device keeps the stock CG solve.
+    barotropic_implicit_pcg_precond: str = "gpoly"
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
@@ -515,7 +561,7 @@ class MPASOceanConfig(NamedTuple):
     # The same mesh at Lloyd 0 measures 120324.32 m, which the cubed law turns
     # into 0.3 % on the coefficient.
     K_zeta_bih_ref: float = 1.0e14                 # [m⁴/s] at the reference spacing
-    K_zeta_bih_ref_dx_m: float = 120194.609375     # [m] ico6 mean dcEdge, Lloyd 50
+    K_zeta_bih_ref_dx_m: float = 120194.60581296285  # [m] ico6 mean dcEdge, Lloyd 50
     # Provenance of a DERIVED coefficient, stamped by the model constructor:
     # the mesh spacing it was derived from (0.0 = pinned, not derived), so a
     # saved configuration records WHICH mesh its coefficient belongs to and a

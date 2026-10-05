@@ -226,7 +226,7 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "zhang_mcfarlane":
-        cfg = ZhangMcFarlaneConfig(enable_cmt=False)
+        cfg = ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none")
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
@@ -544,7 +544,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
             rho_low * constants.L_v * C_H * wind * (q_sat_sfc - q_v[..., -1]),
             0.0,
         )
-        evap = lhflx / constants.L_v
+        evap = lhflx / constants.L_v   # latent-ok: this script's own bulk pair, charged and inverted with the same constant
         dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
         dq_BL = constants.g * evap / dp_low
 

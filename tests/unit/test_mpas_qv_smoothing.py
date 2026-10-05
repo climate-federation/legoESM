@@ -405,7 +405,7 @@ class TestBiharmonic:
         the filter with the refresh again at the biharmonic midpoint), traced
         once and reused."""
         from legoesm.driver.model_driver import (
-            _mpas_qv_smooth_step, make_mpas_qv_smoother,
+            _mpas_qv_smooth_step, make_mpas_qv_smooth_fn,
         )
         dt = 100.0
         g_max = float(scalar_del2_cell_cfl_factor(mesh))
@@ -422,7 +422,7 @@ class TestBiharmonic:
         def eager_refresh(x):
             return x * 0.5 + 1.0e-4
 
-        smooth = make_mpas_qv_smoother(mesh, nu2, dt, nu4=nu4,
+        smooth = make_mpas_qv_smooth_fn(mesh, nu2, dt, nu4=nu4,
                                        halo_refresh=jit_refresh)
         for seed in (7, 8):
             q = _rand_q(mesh, seed=seed)
@@ -593,6 +593,51 @@ class TestConservingFloor:
         np.testing.assert_allclose(
             np.asarray(jnp.sum(area[:, None] * out, axis=0)),
             np.asarray(jnp.sum(area[:, None] * q, axis=0)), rtol=1e-6, atol=0.0)
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_built_smoother_matches_eager_composition(self, mesh, dtype):
+        """``make_mpas_qv_smooth_fn`` (the driver's compiled per-step call)
+        equals the eager halo refresh + step on a rank-local mesh, traces
+        once across calls, and its halo refresh is load-bearing."""
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_step, make_mpas_qv_smooth_fn,
+        )
+        from legoesm.parallel.voronoi_partition import (
+            build_local_mesh, partition_voronoi_mesh, scatter_to_local,
+        )
+        part = partition_voronoi_mesh(mesh, 2, 0)
+        lm = build_local_mesh(mesh, part)
+        own = part.n_owned_cells
+        q_global = _rand_q(mesh, seed=5, nlev=4).at[7, :].set(0.05)
+        q_true = jnp.asarray(scatter_to_local(q_global, part, "cell"), dtype=dtype)
+        poisoned = q_true.at[own:].set(9.99)
+        n_calls = [0]
+
+        def refresh(q):  # stands in for the MPI cell-halo exchange
+            n_calls[0] += 1
+            return q.at[own:].set(q_true[own:])
+
+        owned = jnp.arange(lm.nCells) < own
+        dt = 100.0
+        g = float(scalar_del2_cell_cfl_factor(lm))
+        nu, nu4 = 0.2 / (dt * g), 0.2 / (dt * g ** 2)
+        fn = make_mpas_qv_smooth_fn(lm, nu, dt, nu4=nu4, halo_refresh=refresh,
+                                    owned_mask=owned)
+        got = fn(poisoned)
+        got2 = fn(poisoned * 1.0)
+        assert n_calls[0] == 2, "pre + mid refresh traced once, no retrace"
+        want = _mpas_qv_smooth_step(refresh(poisoned), lm, nu, dt, nu4=nu4,
+                                    mid_refresh=refresh, owned_mask=owned)
+        assert got.dtype == want.dtype
+        rtol = 1e-6 if dtype == jnp.float32 else 1e-13
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want),
+                                   rtol=rtol, atol=rtol * 0.05)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(got2))
+        stale = make_mpas_qv_smooth_fn(lm, nu, dt, nu4=nu4,
+                                       owned_mask=owned)(poisoned)
+        assert not np.allclose(np.asarray(stale[:own]), np.asarray(want[:own]),
+                               rtol=rtol, atol=rtol * 0.05), (
+            "skipping the refresh changed nothing -- the test cannot fail")
 
     def test_floor_is_differentiable(self, mesh):
         from legoesm.driver.model_driver import _qv_level_conserving_floor

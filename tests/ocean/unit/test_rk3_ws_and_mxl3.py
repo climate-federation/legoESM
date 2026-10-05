@@ -82,7 +82,8 @@ def test_rk3_ws_differs_from_rk3_and_is_finite():
 
     r, m_ws = _gyre_model()
     assert r.model_config.momentum_time_integrator == "rk3_ws"
-    _, m_ssp = _gyre_model(momentum_time_integrator="rk3")
+    _, m_ssp = _gyre_model(
+        momentum_time_integrator="rk3", tracer_time_integrator="rk3")
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
     sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
@@ -116,7 +117,7 @@ def test_nn_mxl3_scans_match_direct_loop():
     l_k=min, l_eps=sqrt(lup*ldown), and the ln_mxl0 anchor at the surface."""
     from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
     from legoesm.ocean.physics.vertical_mixing.tke import (
-        compute_mixing_lengths,
+        _mixing_length_floor, compute_mixing_lengths,
     )
 
     rng = np.random.default_rng(3)
@@ -127,6 +128,7 @@ def test_nn_mxl3_scans_match_direct_loop():
     dz_cell = jnp.asarray(10.0 + np.abs(rng.standard_normal((2, 2, n))))
     anchor = jnp.asarray(np.abs(rng.standard_normal((2, 2))) * 0.5 + 0.04)
     cfg = TKEConfig(tke_mxl_choice=3)
+    mxl_min = _mixing_length_floor(cfg)
     l_k, l_eps = compute_mixing_lengths(
         e, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         l_surface_anchor=anchor)
@@ -134,7 +136,7 @@ def test_nn_mxl3_scans_match_direct_loop():
     # direct loop reference
     sqrt2e = np.sqrt(2.0) * np.sqrt(np.maximum(np.asarray(e), 0.0))
     l_int = np.maximum(sqrt2e / np.sqrt(np.maximum(np.asarray(N2), 1e-12)),
-                       cfg.mxl_min)
+                       mxl_min)
     l_w = np.concatenate([np.asarray(anchor)[..., None], l_int], axis=-1)
     e3 = np.asarray(dz_cell)
     lup = l_w.copy()
@@ -146,13 +148,13 @@ def test_nn_mxl3_scans_match_direct_loop():
     # row is itself BOUNDED, seeded from NEMO's untouched zmxlm(jpk) =
     # rmxl_min; under the legacy (+1-row) dz_cell contract the e3t paired
     # with that seed step is dz_cell's own last row (the e3t(jpk) proxy).
-    ldn[..., n - 1] = np.minimum(cfg.mxl_min + e3[..., n - 1],
+    ldn[..., n - 1] = np.minimum(mxl_min + e3[..., n - 1],
                                  l_w[..., n - 1])
     for k in range(n - 2, 0, -1):
         ldn[..., k] = np.minimum(ldn[..., k + 1] + e3[..., k + 1],
                                  l_w[..., k])
-    ref_k = np.maximum(np.minimum(lup, ldn), cfg.mxl_min)[..., 1:]
-    ref_e = np.maximum(np.sqrt(lup * ldn), cfg.mxl_min)[..., 1:]
+    ref_k = np.maximum(np.minimum(lup, ldn), mxl_min)[..., 1:]
+    ref_e = np.maximum(np.sqrt(lup * ldn), mxl_min)[..., 1:]
     np.testing.assert_allclose(np.asarray(l_k), ref_k, rtol=0, atol=1e-14)
     np.testing.assert_allclose(np.asarray(l_eps), ref_e, rtol=0, atol=1e-14)
 
@@ -202,7 +204,8 @@ def test_dissipation_discretization_dispatch_and_forms():
         dz_ref=dz_ref, jacobian=jnp.ones((1, 1)),
         eos_fn=lambda TT, SS, pp: nemo_roquet_eos(TT, SS, pp, rho0=1026.0),
         z_interface=jnp.asarray(-0.5 * (z[:-1] + z[1:]))[: NL - 1],
-        dz_surface=jnp.asarray([[z[0]]]))
+        dz_surface=jnp.asarray([[z[0]]]),
+        surface_tmask=jnp.ones((1, 1)))
     zeros = jnp.zeros((1, 1, NL - 1))
 
     u3 = jnp.zeros((1, 1, NL))
@@ -528,4 +531,3 @@ def test_evd_nemo_arms_extrapolate_nbb_below_seafloor(monkeypatch):
     # (d) active cells are untouched by either extrapolation.
     act = ~dry
     np.testing.assert_array_equal(T_bb_seen[act], np.asarray(bb[0])[act])
-

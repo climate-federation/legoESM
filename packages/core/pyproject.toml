@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-core"
-version = "0.1.0"
+version = "1.0.0"
 description = "legoESM core substrate: grids, operators, state, runtime, parallel, io, time integration, and component scaffolding (the shared base every Earth-system component depends on)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,8 +25,8 @@ classifiers = [
 # contract "legoesm-core member imports nothing above it"), so it has no
 # inter-member dependency — this is the root of the federation DAG.
 dependencies = [
-    "jax>=0.4.35",
-    "jaxlib>=0.4.35",
+    "jax>=0.5.3",
+    "jaxlib>=0.5.3",
     "equinox>=0.11",
     "numpy>=1.26",
     "scipy>=1.10",

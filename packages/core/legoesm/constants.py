@@ -35,12 +35,12 @@ c_pv = 1846.0                   # Specific heat of water vapor [J/(kg*K)]
 c_pw = 4218.0                   # Specific heat of liquid water [J/(kg*K)]
 c_pi = 2106.0                   # Specific heat of ice [J/(kg*K)]
 L_v = 2.501e6                   # Latent heat of vaporization at 0C [J/kg]
-# SST slope of L_v in the NEMO/AeroBulk air-sea convention (sbc_phy
-# L_vap: L = (2.501 - 0.00237 (T - T_freeze)) 1e6) — equals L_v at 0 degC
-# by construction.  Used by thermo.latent_heat_vaporization_sst (#762).
-L_v_sst_slope = 2.370e3         # [J/(kg*K)] dL_v/dT, NEMO sbc_phy / Fairall
-L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
+# Temperature dependence of L_v/L_s/L_f is Kirchhoff's relation from the
+# specific heats above: see legoesm.thermo.latent_heat_vaporization.
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
+# Sublimation is DERIVED so the three latent heats close identically
+# (L_s - L_v - L_f == 0); the former independent 2.834e6 disagreed by 700 J/kg.
+L_s = L_v + L_f                 # Latent heat of sublimation at 0C [J/kg] (2.8347e6)
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
 rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE default)
@@ -175,6 +175,55 @@ c_p_seawater_isomip = 3974.0     # [J/(kg*K)] Jenkins 1991 / ISOMIP+
 # CORE-II/OMIP faithful flux path, not legoESM's atmospheric thermodynamics.
 c_p_dry_air_nemo = 1005.0       # [J/(kg*K)] NEMO sbc_phy rCp_dry
 c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
+
+# NEMO 5.0.2 SI3 air--ice bulk-flux constants.  These are deliberately
+# separate from the atmosphere-wide constants above: sbc_phy.F90:37-62 uses
+# this historical set in blk_ice_1/2, and the selectable ``nemo_si3_constant``
+# path must not silently mix it with modern CODATA values.
+c_p_air_ice_nemo = 1000.5       # [J/(kg*K)] sbc_phy.F90:37 rCp_air
+albedo_ocean_nemo = 0.066       # [-] sbc_phy.F90:38 albo
+emissivity_ice_nemo = 0.996     # [-] sbc_phy.F90:56 emiss_i
+wind_floor_ice_nemo = 0.2       # [m/s] sbc_phy.F90:58
+T_triple_nemo = 273.16          # [K] sbc_phy.F90:62 rtt0
+sigma_sb_nemo = 5.67e-8         # [W/(m2*K4)] phycst.F90 stefan
+L_sub_nemo = 2.8344e6           # [J/kg] phycst.F90 rLsub
+
+# Goff saturation over ice, sbc_phy.F90:74-79,665-711.
+goff_ice_A_nemo = -9.09718
+goff_ice_B_nemo = -3.56654
+goff_ice_C_nemo = 0.876793
+goff_ice_D_pressure_hpa_nemo = 6.1071
+T_goff_floor_nemo = 180.0       # [K]
+
+# ORCA1-resolved SI3 surface/bulk selections used by C1D_OMIP_L3.
+bulk_transfer_ice_default = 1.5e-3
+bulk_transfer_ice_orca1 = 1.0e-3
+ice_ocean_drag_orca1 = 5.0e-3
+snow_cover_depth_nemo = 0.02    # [m] icevar.F90:1583
+snow_blow_exponent_orca1 = 0.66
+ice_sw_clear_nemo = 0.18
+ice_sw_cloudy_nemo = 0.35
+ice_sw_thin_threshold_nemo = 0.1  # [m]
+ice_sw_thin_inverse_nemo = 10.0   # [m-1]
+ice_ocean_heat_transfer_nemo = 0.0057
+ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
+ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
+ice_full_cover_margin_nemo = 1.0e-3
+ice_growth_thickness_stop_nemo = 3.0  # [m]
+
+# Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
+albedo_snow_dry_orca1 = 0.85
+albedo_snow_melt_orca1 = 0.75
+albedo_ice_dry_orca1 = 0.64
+albedo_ice_melt_orca1 = 0.53
+albedo_ice_thin_nemo = 0.18
+albedo_ice_pivot_orca1 = 1.0    # [m]
+albedo_ice_thin_break_nemo = 0.05  # [m]
+albedo_snow_decay_dry_nemo = 0.02  # [m]
+albedo_snow_decay_melt_nemo = 0.03  # [m]
+albedo_cloud_quad_nemo = -0.1010
+albedo_cloud_linear_nemo = 0.1933
+albedo_cloud_offset_nemo = -0.0148
 
 # Remaining NEMO-parity constants of the CORE-II/OMIP faithful flux path
 # (values verbatim from NEMO 5.0.1 phycst.F90 / sbc_phy.F90).  They differ

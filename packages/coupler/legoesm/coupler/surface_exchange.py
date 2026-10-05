@@ -11,12 +11,13 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig
 from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
-from legoesm.core.state import HydrostaticState, NonHydrostaticState
+from legoesm.core.state import HydrostaticState
 from legoesm.grids.vertical import SigmaCoordinate
-from legoesm.atmosphere.physics.thermodynamics import (
-    pressure_from_eos,
-    temperature_from_theta,
-)
+# Unused since extract_atm_to_surface_nh was deleted, but KEPT for its import
+# side effect: it loads legoesm.atmosphere, whose __init__ registers the "fv3sw"
+# shallow-water barotropic provider; dropping it would change what
+# `import legoesm.coupler` registers (behaviour-preserving cleanup).
+import legoesm.atmosphere.physics.thermodynamics  # noqa: F401
 
 
 def extract_atm_to_surface(
@@ -109,78 +110,3 @@ def extract_atm_to_surface(
     )
 
 
-def extract_atm_to_surface_nh(
-    state: NonHydrostaticState,
-    height_coord,
-    terrain_metric,
-    config: CouplerConfig,
-    sw_down: jnp.ndarray | None = None,
-    lw_down: jnp.ndarray | None = None,
-    precip_total: jnp.ndarray | None = None,
-    precip_snow: jnp.ndarray | None = None,
-    cos_zenith: jnp.ndarray | None = None,
-) -> AtmToSurface:
-    """Extract coupling fields from non-hydrostatic atmospheric state.
-
-    Reads only the lowest model level (index -1) plus surface fields.
-    """
-    shape = state.phis.data.shape  # (6, n, n)
-
-    # Lowest-level fields
-    theta_prime_low = state.theta_prime.data[..., -1]
-    rho_prime_low = state.rho_prime.data[..., -1]
-
-    theta_0_low = height_coord.theta_ref[-1]
-    rho_0_low = height_coord.rho_ref[-1]
-
-    theta_low = theta_prime_low + theta_0_low
-    rho_low = rho_prime_low + rho_0_low
-
-    p_lowest = pressure_from_eos(rho_low, theta_low)
-    T_lowest = temperature_from_theta(theta_low, p_lowest)
-
-    u_lowest = state.u.data[..., -1]
-    v_lowest = state.v.data[..., -1]
-
-    # Humidity from tracers if available.  Use a Python ``if`` rather
-    # than ``jnp.where`` because the latter still traces both branches,
-    # and ``state.tracers.data[..., -1, 0]`` crashes at trace time when
-    # the n_tracers axis is empty (dry NH simulations have shape
-    # ``(..., nlev, 0)`` and indexing axis-0 position 0 is out of
-    # bounds).  Mirrors the hydrostatic branch's static-shape check
-    # (lines 69-74).
-    if state.tracers.data.shape[-1] > 0:
-        q_lowest = state.tracers.data[..., -1, 0]
-    else:
-        q_lowest = jnp.zeros_like(T_lowest)
-
-    rho_lowest = rho_low
-
-    # Surface pressure: approximate from lowest-level via hydrostatic correction
-    dz_sfc = height_coord.z_half[-1] - height_coord.z_half[-2]
-    p_surface = p_lowest + constants.g * rho_low * jnp.abs(dz_sfc) * 0.5
-
-    # Pin to the state precision (T_lowest is derived from theta_prime + theta_0).
-    zero = jnp.zeros(shape, dtype=T_lowest.dtype)
-    has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
-    has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
-
-    return AtmToSurface(
-        z_lowest=(terrain_metric.z_full_3d[..., -1]
-                  - terrain_metric.z_half_3d[..., -1]),
-        sw_down=sw_down if sw_down is not None else zero,
-        lw_down=lw_down if lw_down is not None else zero,
-        precip_total=precip_total if precip_total is not None else zero,
-        precip_snow=precip_snow if precip_snow is not None else zero,
-        T_lowest=T_lowest,
-        q_lowest=q_lowest,
-        u_lowest=u_lowest,
-        v_lowest=v_lowest,
-        p_lowest=p_lowest,
-        p_surface=p_surface,
-        rho_lowest=rho_lowest,
-        cos_zenith=cos_zenith if cos_zenith is not None else zero,
-        co2_ppmv=jnp.array(config.co2_ppmv_default),
-        has_radiation=has_rad,
-        has_precipitation=has_precip,
-    )

@@ -374,7 +374,9 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return jnp.pad(f, tuple(pad), mode="wrap")
 
 
-def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_uface(
+    f: jnp.ndarray, *, source_round: bool = False,
+) -> jnp.ndarray:
     """Interpolate a cell-center field to u-face (lon interface) positions.
 
     Simple average of the two cells sharing each lon face.
@@ -394,6 +396,11 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     # spans lon partition cuts under a 2-D split.  Output face j = mean of
     # the two cells sharing it; n_lon+1 faces (the last the periodic closure).
     f_pad = pad_lon_cgrid(f, halo=1)
+    if source_round:
+        from legoesm.core.source_rounding import nemo_source_round
+
+        neighbour_sum = nemo_source_round(f_pad[:, :-1] + f_pad[:, 1:])
+        return nemo_source_round(0.5 * neighbour_sum)
     return 0.5 * (f_pad[:, :-1] + f_pad[:, 1:])
 
 
@@ -556,11 +563,12 @@ def interp_cell_to_vface_halo(
             # SPMD: restore the legacy pole edge-copy at the south / north pole
             # bands only (interior cuts keep the cross-cut average). south then
             # north, sequenced so a single band reproduces serial at both ends.
+            # Row-index selects (not a where over a concatenated copy):
+            # they fuse into the average instead of two extra passes.
             south_m, north_m = spmd_pm
-            f_v = jnp.where(
-                south_m, jnp.concatenate([f[0:1], f_v[1:]], axis=0), f_v)
-            f_v = jnp.where(
-                north_m, jnp.concatenate([f_v[:-1], f[-1:]], axis=0), f_v)
+            i = jnp.arange(f_v.shape[0]).reshape((-1,) + (1,) * (f_v.ndim - 1))
+            f_v = jnp.where(south_m & (i == 0), f[0:1], f_v)
+            f_v = jnp.where(north_m & (i == f_v.shape[0] - 1), f[-1:], f_v)
         else:
             # MPI: static per-rank pole answer (None ⟺ this rank owns the pole).
             if band.south_rank is None:

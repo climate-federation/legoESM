@@ -4,12 +4,17 @@ The NEMO counterpart of :mod:`mitgcm_io`. NEMO writes plain NetCDF (via the
 native ``iom_nf90`` path — no XIOS needed), so this is a thin xarray reader; the
 only conventions it reconciles are:
 
-* **Halo strip.** ``nn_hls`` here is the FILE's halo, not the run's: NEMO
-  <= 4.0 wrote global arrays WITH an ``nn_hls``-cell halo per side
-  (``nn_hls=1`` for GYRE: 30x20 stored 32x22); NEMO 4.2+/5.x writes the
-  COMPUTE domain WITHOUT halos (pass ``nn_hls=0`` — DINO 5.0.2 files are
-  52x199 all-real; stripping a phantom halo discards the land-wall and
-  ridge columns, #1226 root cause). Interior is ``[h:-h, h:-h]`` for h>0.
+* **Halo strip.** ``nn_hls`` here is the FILE's halo, NOT the run's, and the
+  two are routinely different: this campaign's GYRE is NEMO 5.0.2 with a
+  RUNTIME ``nn_hls = 2`` (its own ``ocean.output``), and its files still carry
+  NO halo, so the value to pass is ``0``.  Only NEMO <= 4.0 wrote global
+  arrays WITH an ``nn_hls``-cell halo per side, and ``nn_hls=1`` is that
+  ERA's value (a 30x20 domain stored 32x22) -- it is not GYRE's.  NEMO
+  4.2+/5.x writes the COMPUTE domain without halos (DINO 5.0.2 files are
+  52x199 all-real; stripping a phantom halo discards the land-wall and ridge
+  columns, #1226 root cause).  Interior is ``[h:-h, h:-h]`` for h>0, and the
+  ``nn_hls: int = 1`` defaults below are the <=4.0 era's, kept for those
+  readers: every 5.x call site passes 0 explicitly.
 * **Axis order.** NEMO 3-D fields are ``(z, y, x)`` on disk; legoESM wants the
   vertical LAST — ``(y=lat, x=lon, z=lev)`` — a single ``moveaxis(0, -1)``.
 * **Vertical order.** NEMO ``k=1`` is the surface, ``k`` increasing downward —
@@ -113,7 +118,9 @@ class NemoState(NamedTuple):
     u: np.ndarray            # zonal velocity at NEMO U-points (east face)
     v: np.ndarray            # meridional velocity at NEMO V-points (north face)
     ssh: np.ndarray          # sea-surface height [m]
-    rhd: np.ndarray | None   # in-situ density anomaly (rho-rho0)/rho0, if dumped
+    rhd: np.ndarray | None = None  # in-situ density anomaly, if dumped
+    uu_b: np.ndarray | None = None  # restart uu_n = depth-mean U at Kbb
+    vv_b: np.ndarray | None = None  # restart vv_n = depth-mean V at Kbb
 
 
 def _check_hls(nn_hls: int) -> None:
@@ -233,10 +240,20 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
     def m3(name: str) -> np.ndarray:
         return _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
 
+    has_uu_b = "uu_n" in r
+    has_vv_b = "vv_n" in r
+    if has_uu_b != has_vv_b:
+        raise ValueError(
+            "NEMO restart must carry both uu_n and vv_n or neither; found "
+            f"uu_n={has_uu_b}, vv_n={has_vv_b} in {path}")
     return NemoState(
         T=m3("tn"), S=m3("sn"), u=m3("un"), v=m3("vn"),
         ssh=_strip_halo_2d(np.asarray(r["sshn"].values).squeeze(), nn_hls),
         rhd=(m3("rhd") if "rhd" in r else None),
+        uu_b=(_strip_halo_2d(np.asarray(r["uu_n"].values).squeeze(), nn_hls)
+              if has_uu_b else None),
+        vv_b=(_strip_halo_2d(np.asarray(r["vv_n"].values).squeeze(), nn_hls)
+              if has_vv_b else None),
     )
 
 

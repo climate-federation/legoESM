@@ -92,34 +92,40 @@ class PrecisionPolicy(NamedTuple):
     control : jnp.dtype
         Dtype for solvers, implicit systems, and diagnostics that
         require tight tolerances (semi-implicit, barotropic, EOS).
+    transcendentals : str
+        ``"native"`` uses JAX/XLA math intrinsics. ``"libm"`` selects the
+        CPU-only scalar system-libm callbacks used by NEMO certification.
     """
     storage: jnp.dtype = jnp.float32
     compute: jnp.dtype = jnp.float32
     accumulate: jnp.dtype = jnp.float32
     control: jnp.dtype = jnp.float32
+    transcendentals: str = "native"
 
     @staticmethod
-    def fp32() -> PrecisionPolicy:
+    def fp32(*, transcendentals: str = "native") -> PrecisionPolicy:
         """All-float32 mode. Fastest, GPU-optimal."""
         return PrecisionPolicy(
             storage=jnp.float32,
             compute=jnp.float32,
             accumulate=jnp.float32,
             control=jnp.float32,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def fp64() -> PrecisionPolicy:
+    def fp64(*, transcendentals: str = "native") -> PrecisionPolicy:
         """All-float64 mode. Full scientific reference."""
         return PrecisionPolicy(
             storage=jnp.float64,
             compute=jnp.float64,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def mixed() -> PrecisionPolicy:
+    def mixed(*, transcendentals: str = "native") -> PrecisionPolicy:
         """Mixed-precision mode.
 
         Storage and compute in float32 for GPU bandwidth.
@@ -130,10 +136,11 @@ class PrecisionPolicy(NamedTuple):
             compute=jnp.float32,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
     @staticmethod
-    def mixed_fp64_storage() -> PrecisionPolicy:
+    def mixed_fp64_storage(*, transcendentals: str = "native") -> PrecisionPolicy:
         """Mixed mode with float64 storage, float32 compute.
 
         State arrays are stored in float64 for maximum precision in
@@ -146,6 +153,7 @@ class PrecisionPolicy(NamedTuple):
             compute=jnp.float32,
             accumulate=jnp.float64,
             control=jnp.float64,
+            transcendentals=transcendentals,
         )
 
 
@@ -171,6 +179,11 @@ def set_policy(policy: PrecisionPolicy) -> None:
     there.  ``resolve_dtype`` handles clamping float64 → float32 for
     non-spectral code that runs on the default (Metal) device.
     """
+    if policy.transcendentals not in {"native", "libm"}:
+        raise ValueError(
+            "PrecisionPolicy.transcendentals must be 'native' or 'libm', got "
+            f"{policy.transcendentals!r}"
+        )
     _ACTIVE_POLICY[0] = policy
     if jnp.float64 in (policy.storage, policy.compute,
                         policy.accumulate, policy.control):
@@ -198,6 +211,11 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """
     if policy is None:
         policy = get_policy()
+    if policy.transcendentals not in {"native", "libm"}:
+        raise ValueError(
+            "PrecisionPolicy.transcendentals must be 'native' or 'libm', got "
+            f"{policy.transcendentals!r}"
+        )
     needs_x64 = jnp.float64 in (
         policy.storage, policy.compute, policy.accumulate, policy.control,
     )
@@ -604,41 +622,29 @@ def with_precision(module: str):
 # ---------------------------------------------------------------------------
 
 # These are applied via set_recommended_overrides() — they encode domain
-# knowledge about which ESM kernels are precision-sensitive.
+# knowledge about which ESM kernels are precision-sensitive.  Every non-empty
+# entry must name a module some kernel actually passes to this API (gated by
+# tests/unit/test_precision.py); an unconsumed name promises fp64 it never
+# delivers.
 
 _OCEAN_OVERRIDES = {
     # Barotropic solver: iterative, very sensitive to rounding in SSH
     "barotropic_solver": {"compute": jnp.float64, "control": jnp.float64},
-    # Pressure gradient: hydrostatic cancellation is catastrophic in fp32
-    "pressure_gradient": {"compute": jnp.float64},
     # EOS: density differences O(0.01 kg/m³) require > 7 sig figs
     "equation_of_state": {"compute": jnp.float64},
-    # Coriolis: f*u difference sensitive at high latitudes
-    "coriolis": {"compute": jnp.float64},
     # Tracer advection: safe in fp32 with flux limiters
     "tracer_advection": {},
     # Tracer diffusion: safe in fp32
     "tracer_diffusion": {},
     # Vertical mixing: safe in fp32
     "vertical_mixing": {},
-    # Time stepping: accumulation in fp64 for long runs
-    "ocean_timestepping": {"accumulate": jnp.float64},
     # Global budgets: always fp64
     "ocean_diagnostics": {"accumulate": jnp.float64, "control": jnp.float64},
 }
 
 _ATMOSPHERE_OVERRIDES = {
-    # Spectral transforms: require fp64 (complex128 FFTs)
-    "spectral_transform": {
-        "storage": jnp.float64, "compute": jnp.float64,
-        "accumulate": jnp.float64, "control": jnp.float64,
-    },
     # Pressure gradient: hydrostatic balance subtraction
     "atm_pressure_gradient": {"compute": jnp.float64},
-    # Semi-implicit solver: matrix inversion needs fp64
-    "semi_implicit": {"compute": jnp.float64, "control": jnp.float64},
-    # Gravity wave propagation: vertical eigenvalue problem
-    "gravity_wave": {"control": jnp.float64},
     # Radiation: safe in fp32 (optical depths are O(1))
     "radiation": {},
     # Convection: safe in fp32
@@ -656,8 +662,6 @@ _LAND_OVERRIDES = {
     "soil_moisture": {},
     # Soil thermal: diffusion — safe in fp32
     "soil_thermal": {},
-    # Carbon pools: century timescale, small fluxes → fp64 accumulation
-    "carbon_pools": {"accumulate": jnp.float64},
     # Runoff: safe in fp32
     "runoff": {},
     # ET: safe in fp32
@@ -665,14 +669,8 @@ _LAND_OVERRIDES = {
 }
 
 _ICE_OVERRIDES = {
-    # EVP stress solver: subcycled, sensitive to convergence
-    "evp_solver": {"compute": jnp.float64, "control": jnp.float64},
-    # Ice thickness: conservation-critical, small increments
-    "ice_thickness": {"accumulate": jnp.float64},
     # Energy balance: safe in fp32
     "ice_energy": {},
-    # Mass balance: fp64 accumulation for century runs
-    "ice_mass_balance": {"accumulate": jnp.float64},
 }
 
 

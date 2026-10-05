@@ -130,6 +130,7 @@ def probe_latlon_cgrid(
     sponge=None,
     dt: float = 300.0,
     dt_tracer: float | None = None,
+    tke_rn_dt: float | None = None,
     gm_redi_tracer_state: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> LatLonProbeResult:
     """Compute per-process tendencies on a frozen ocean state.
@@ -150,6 +151,12 @@ def probe_latlon_cgrid(
     dt : float
         Timestep [s] — needed for the CFL-aware advection-flux build
         even though no time integration is performed.
+    tke_rn_dt : float or None
+        NEMO's base ``rn_Dt`` for the TKE matrix.  Required when the active
+        TKE card selects ``tke_matrix_evaluation="nemo_literal"`` because a
+        leapfrog momentum ``dt`` may be ``2 * rn_Dt``.  This mirrors the
+        production resolution at
+        ``ocean_model_latlon_cgrid.py:_apply_implicit_vertical_mixing``.
     gm_redi_tracer_state : (T, S) or None
         Tracer fields fed to the GM/Redi (iso) tendency + implicit-K33
         solve ONLY — an oracle-fidelity override for models whose iso
@@ -200,6 +207,11 @@ def probe_latlon_cgrid(
         eos_linear=getattr(config, "eos_linear", None),
         eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+        # NEMO's simplified-EOS coefficients are a per-run &nameos block, not a
+        # library constant: a card whose block differs from the shared defaults
+        # (VORTEX) would otherwise be probed against a different fluid from the
+        # one it integrates.  None keeps every existing probe bit-identical.
+        eos_nemo_seos=getattr(config, "eos_nemo_seos", None),
         **_eos_mk_kw,
     )
     # The recipe's gravity, read the same way the two GM/Redi calls below it
@@ -315,10 +327,28 @@ def probe_latlon_cgrid(
             implicit_vertical_diffusion_ocean,
         )
         _dt_tr = dt_tracer if dt_tracer is not None else dt
+        _nemo_literal_tke = (
+            getattr(_vm_cfg, "scheme", "none") == "tke"
+            and getattr(
+                getattr(_vm_cfg, "tke", None),
+                "tke_matrix_evaluation",
+                "factored",
+            ) == "nemo_literal"
+        )
+        if _nemo_literal_tke and tke_rn_dt is None:
+            raise ValueError(
+                "probe_latlon_cgrid requires tke_rn_dt for "
+                "tke_matrix_evaluation='nemo_literal'; momentum dt can be "
+                "NEMO's leapfrog rDt and is not a safe rn_Dt substitute"
+            )
+        # Production resolves this identically at
+        # ocean_model_latlon_cgrid.py:10018-10022: literal NEMO TKE consumes
+        # its dedicated base rn_Dt; all other closures consume momentum dt.
+        _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call
         # the production implicit solve makes).
         _K_v, _A_v = compute_vertical_K_profiles(
-            state, z_coord, surface_forcing, config.physics,
+            state, z_coord, surface_forcing, config.physics, dt_tke=_dt_tke,
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)

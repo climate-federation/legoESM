@@ -35,7 +35,7 @@ def update_snow(
     Q_net: jnp.ndarray | None = None,
     snow_melt_rate: float = _SNOW_MELT_RATE_DEFAULT,
     T_snow_melt: float = constants.T_freeze,
-    snow_age_activation_K: float = 0.0,
+    snow_age_activation_K: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Update snow depth and age, returning the melt amount.
 
@@ -65,6 +65,10 @@ def update_snow(
         Only used when ``Q_net is None``.
     T_snow_melt : float
         Temperature above which snow melts [K].
+    snow_age_activation_K : float
+        Snow-age metamorphism activation temperature [K], from
+        ``LandAlbedoConfig.snow_age_activation_K``; 0.0 = calendar clock.
+        Required so no call site carries its own default.
 
     Returns
     -------
@@ -83,7 +87,7 @@ def update_snow(
         # --- Energy-limited melt (scientific guide, eq. for M) ---
         # Only melt when T_sfc >= T_snow_melt AND Q_net > 0
         above_freezing = T_sfc >= T_snow_melt
-        energy_melt = jnp.maximum(Q_net * dt / constants.L_f, 0.0)  # kg/m2
+        energy_melt = jnp.maximum(Q_net * dt / constants.L_f, 0.0)  # kg/m2  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
         snow_melt = jnp.where(above_freezing, energy_melt, 0.0)
         snow_melt = jnp.minimum(snow_melt, snow_available)
     else:
@@ -127,7 +131,7 @@ def update_snow_age(
     dt: float,
     *,
     T_snow: jnp.ndarray | None = None,
-    age_activation_K: float = 0.0,
+    age_activation_K: float,
 ) -> jnp.ndarray:
     """Snow-age clock: mass-weighted grain-age mixing of fresh + existing snow.
 
@@ -163,7 +167,7 @@ def update_snow_age(
     # months, while melting snow darkens on the same timescale as before.  The
     # state stays in SECONDS of melting-point-equivalent age, so restarts and
     # every downstream albedo consumer are unchanged in meaning.
-    # ``age_activation_K = 0`` (default) gives rate 1 => byte-identical.
+    # ``age_activation_K = 0`` gives rate 1 (the calendar clock).
     _rate = (1.0 if (T_snow is None or age_activation_K == 0.0)
              else metamorphism_rate(T_snow, age_activation_K))
     aged = snow_age + dt * _rate                             # existing snow ages

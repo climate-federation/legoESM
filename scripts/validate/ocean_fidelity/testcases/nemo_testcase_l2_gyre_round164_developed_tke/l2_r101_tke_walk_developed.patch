@@ -1,0 +1,18 @@
+--- l2_r101_tke_walk.F90.round101
++++ l2_r101_tke_walk.F90
+@@ -27,13 +27,13 @@
+    SUBROUTINE r101_tke_begin(kt,Kbb,Kmm)
+       INTEGER, INTENT(in) :: kt,Kbb,Kmm
+       INTEGER :: ios
+-      r101_active = lwp .AND. kt == nit000+1
++      r101_active = lwp .AND. kt == 1081
+       IF(.NOT.r101_active) RETURN
+       IF(r101_unit /= -1) CALL ctl_stop('round101: nested TKE statement record')
+       IF(l_istiled) CALL ctl_stop('round101: whole-array writer refuses tiling')
+       IF(STORAGE_SIZE(1) /= 32) CALL ctl_stop('round101: writer requires 32-bit default integer')
+       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round101: writer requires binary64 wp')
+-      OPEN(NEWUNIT=r101_unit,FILE='oracle_tke_statement_walk_kt00000002.bin', &
++      OPEN(NEWUNIT=r101_unit,FILE='oracle_tke_statement_walk_kt00001081.bin', &
+          & ACCESS='STREAM',FORM='UNFORMATTED',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
+       IF(ios /= 0) CALL ctl_stop('round101: cannot open TKE statement record')
+       ALLOCATE(r101_entry_field(ntsi:ntei,ntsj:ntej,jpk), &

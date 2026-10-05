@@ -1,4 +1,4 @@
-# legoESM
+# legoESM 1.0
 
 **A differentiable Earth System Model in JAX.**
 
@@ -14,7 +14,7 @@ independently — so the same codebase runs anything from a single-column RCE co
 a fully coupled centennial spin-up.
 
 ```{note}
-**Requirements:** Python ≥ 3.11 and JAX ≥ 0.4.35. The whole model is JIT-compiled,
+**Requirements:** Python ≥ 3.11 and JAX ≥ 0.5.3. The whole model is JIT-compiled,
 so the same code runs on CPU, GPU, TPU, and Apple Silicon, and scales to MPI clusters
 via `mpi4jax`. Apple Silicon users who want the spectral solver must set
 `JAX_PLATFORMS=cpu` (the Metal backend has no `float64`).
@@ -22,23 +22,23 @@ via `mpi4jax`. Apple Silicon users who want the spectral solver must set
 
 ## Installation
 
-Install from a clone (development install — the supported path today):
+Install from a clone. legoESM is a uv workspace of independently-installable
+members that are not published on PyPI, so a bare `pip install -e .` cannot
+resolve them; use `uv` or the bundled helper:
 
 ```bash
 git clone https://github.com/climate-federation/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev                                                  # with uv
+# ...or pip-only:
+python scripts/experiment/install_federation.py --all --extras dev
 ```
 
-Optional extras:
-
-```bash
-pip install -e ".[ml,mesh,viz,data]"               # neural cores, MPAS meshes, plotting, data IO
-pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"   # multi-node MPI runs
-pip install -e ".[docs]"                           # build this documentation site
-```
+Optional extras (`ml`, `mesh`, `viz`, `data`, `mpi`, `docs`, `all`) go through the
+same route, e.g. `uv sync --extra ml --extra mesh`. For a working MPI stack use the
+pinned combination in `requirements_mpi.txt`.
 
 Sanity check:
 
@@ -69,20 +69,19 @@ mpas = create_grid("mpas", 4, density_fn=lambda lat, lon: 1.0 + 5.0 * np.exp(-(l
 From the command line:
 
 ```bash
-legoesm run    config/examples/<experiment>.yaml   # run a simulation from a config
-legoesm test   --case held_suarez                  # standard validation cases
+legoesm run    config/williamson_test2.yaml        # run a simulation from a config
+legoesm test   williamson --case 2                 # standard validation cases
 legoesm reproduce <manifest> --check               # bit-identical reproducibility gate
 ```
 
 ## The three Lego axes
 
-Everything is assembled from interchangeable bricks along three independent axes —
-inspect the full capability map via [`legoesm.taxonomy`](#capability-taxonomy):
+Everything is assembled from interchangeable bricks along three independent axes:
 
 | Axis | What varies | Where it lives |
 |------|-------------|----------------|
 | **Complexity** | fixed-SST → slab → multilayer → full-3-D ocean; shallow-water → hydrostatic → nonhydrostatic atmosphere; … | `legoesm.components.complexity` |
-| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (Dycore/Forced/Surface/Prescribed bricks) |
+| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (component protocols); `legoesm.driver.component_factory` builds the components |
 | **Extent** | global, regional (limited-area), or idealized; uniform or **refined** | `legoesm.grids.factory` |
 
 Grids are shared between components: lat-lon FV, spectral Gaussian, cubed-sphere
@@ -93,15 +92,6 @@ See [Composability & architecture](architecture/composability.md) for how to ins
 axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity
 ladder), a high-level tour of the packages, and the research → operational
 (AMIP/OMIP/CMIP) progression.
-
-(capability-taxonomy)=
-## Capability taxonomy
-
-```python
-from legoesm import taxonomy
-taxonomy.capability_report()   # the full complexity × extent × grid/core map
-taxonomy.grid_capability("mpas").variable_resolution   # True
-```
 
 ## Reproducibility
 

@@ -404,8 +404,13 @@ def mpi4jax_array_result(result):
 def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
-    **Differentiable**: uses ``allreduce(SUM)`` which has full JVP and
-    VJP support in mpi4jax.  Safe to use inside ``jax.grad``.
+    **Gradient: IDENTITY VJP** (mpi4jax ``allreduce`` transpose returns the
+    local cotangent unchanged). Correct ONLY when the result is the final loss
+    that every rank seeds with the same cotangent. For an intermediate global
+    that is broadcast back and reused on every rank (fixer factors,
+    normalisations, inner products), use :func:`broadcast_allreduce_sum`;
+    this function drops the cross-rank cotangents there (#811). PARTIAL FIX:
+    most existing intermediate-sum call sites still use it (open issue).
 
     Parameters
     ----------
@@ -426,6 +431,44 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
             mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
         )
     return global_val
+
+
+@jax.custom_vjp
+def broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
+    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
+    transpose for a reduced value that is BROADCAST and reused on every rank.
+
+    :func:`global_sum_mpi` has an IDENTITY VJP: each rank keeps its LOCAL
+    cotangent (``test_grad_nonzero``: "gradient 2*x, no scaling"). That is right
+    for a TOP-LEVEL loss reduction ``L = global_sum_mpi(local)`` (each rank
+    contributes 1:1 to ``L``), but WRONG for an INTERMEDIATE global that is
+    broadcast back and reused on every face/rank — e.g. the flux-form ``scale =
+    mass_in / mass_pos`` that rescales EVERY owned face (#811). There,
+    ``field_in`` on rank ``r`` affects the output on EVERY rank ``r'`` through
+    the shared ``scale``, so the true cotangent is the GLOBAL sum of every
+    rank's local cotangent — the reduction's transpose is ``allreduce(SUM)``.
+    Dropping it left a UNIFORM ~1e-3 absolute cotangent error on every owned
+    face (rel 1.1) in the scattered-vs-replicated gradient gate. Forward is
+    byte-identical to :func:`global_sum_mpi`; only the backward differs. Do NOT
+    use it for the final loss: every rank seeds that cotangent, so the
+    allreduce would scale the gradient by the rank count. PARTIAL FIX: most
+    existing intermediate-sum call sites do not use this yet (open issue).
+    """
+    return global_sum_mpi(local_sum)
+
+
+def _broadcast_allreduce_sum_fwd(local_sum):
+    return global_sum_mpi(local_sum), None
+
+
+def _broadcast_allreduce_sum_bwd(_res, g):
+    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
+    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
+    return (global_sum_mpi(g),)
+
+
+broadcast_allreduce_sum.defvjp(
+    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
 
 
 def is_multi_process() -> bool:
@@ -519,9 +562,11 @@ def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
     MPI/sharded distribution flag (see :func:`is_multi_process`); otherwise
     returns ``local_value`` unchanged so single-rank runs pay no reduction.
 
-    **Differentiable**: built on ``global_sum_mpi`` (allreduce SUM) which carries
-    a full VJP — safe inside ``jax.grad`` (cf. the halo-exchange ``custom_vjp``
-    notes).  Single canonical MPI-aware reduction (#177) shared by
+    **Gradient**: inherits the IDENTITY VJP of :func:`global_sum_mpi` — correct
+    only for a final-loss reduction; an intermediate global reused on every rank
+    needs :func:`broadcast_allreduce_sum`. PARTIAL FIX: most existing
+    intermediate-sum call sites still use it (open issue). Single canonical
+    MPI-aware reduction (#177) shared by
     ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
     """
     if is_multi_process():
@@ -629,6 +674,11 @@ def batch_allreduce_mpi(
     MPI latency), this function packs all values into a single flat
     buffer, performs one ``allreduce``, and unpacks the results.
 
+    Gradient (``op="sum"``): IDENTITY VJP, as :func:`global_sum_mpi` — correct
+    only for final-loss reductions, not for values reused on every rank.
+    PARTIAL FIX: most existing intermediate-sum call sites still use it
+    (open issue).
+
     Parameters
     ----------
     values : list[jax.Array]
@@ -728,6 +778,59 @@ def spmd_reduce_axis() -> str | None:
     return None
 
 
+def _resolve_tree_psum(env_value: str, backend: str) -> bool:
+    """LEGOESM_SPMD_TREE_PSUM: unset/``''`` = butterfly on CPU, psum
+    elsewhere (owner-approved default 2026-09-25); ``'1'`` butterfly on any
+    backend; ``'0'`` psum everywhere. Anything else raises."""
+    if env_value == "":
+        return backend == "cpu"
+    if env_value == "0":
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_SPMD_TREE_PSUM must be '', '0' or '1'; got {env_value!r}")
+
+
+def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
+    """Sum ``x`` over the shard_map axis ``axis_name``.
+
+    On the CPU backend (default, ``LEGOESM_SPMD_TREE_PSUM`` unset) and for a
+    single axis of power-of-two size: a recursive-doubling butterfly of
+    ``log2(n)`` ppermute rounds. XLA's gloo allreduce is a ring whose cost
+    grows with the rank count (measured on Derecho across nodes: 1.14 ms at
+    8 ranks, 4.4 ms at 32, 9.05 ms at 64; one neighbour exchange ~70 us);
+    MPAS ocean s7 at 16 ranks/node, psum -> butterfly: 335 -> 315 ms/step
+    at 1 node, 216 -> 171 at 2, 231 -> 118 at 4, 399 -> 97 at 8. Other
+    backends keep ``jax.lax.psum`` (NCCL's allreduce is not a ring of
+    latencies); ``=1`` / ``=0`` force either path. The choice keys on the
+    PROCESS default backend (``jax.default_backend()``), not the mesh
+    devices' platform.
+    Every rank adds the same two operands in each round (a + b == b + a), so
+    all ranks hold bit-identical sums; the summation ORDER differs from
+    psum's, so results differ from the psum path in the last bit. Linear in
+    ``x`` (ppermute transposes to its inverse), so it is AD-safe like psum.
+
+    Scope: meant for the small packed PCG scalars (each round ships the
+    whole buffer, so a large buffer would pay log2(n) times its bytes). The
+    flag is read at trace time, so it is fixed per compiled program; compare
+    the two paths in separate processes. Non-power-of-two axis sizes and
+    multi-axis names always take psum.
+    """
+    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""),
+                              jax.default_backend())
+    if not tree or isinstance(axis_name, (tuple, list)):
+        return jax.lax.psum(x, axis_name)
+    n = int(jax.lax.axis_size(axis_name))
+    if n & (n - 1):
+        return jax.lax.psum(x, axis_name)
+    k = 1
+    while k < n:
+        x = x + jax.lax.ppermute(x, axis_name, [(i, i ^ k) for i in range(n)])
+        k *= 2
+    return x
+
+
 def batch_psum_spmd(
     values: list[jax.Array],
     axis_name: str | tuple[str, ...],
@@ -783,7 +886,7 @@ def batch_psum_spmd(
     flat_parts = [v.reshape(-1) for v in promoted]
     packed = jnp.concatenate(flat_parts, axis=0)
 
-    global_packed = jax.lax.psum(packed, axis_name)
+    global_packed = _spmd_sum(packed, axis_name)
 
     results = []
     offset = 0

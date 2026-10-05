@@ -221,7 +221,12 @@ class OceanSurfaceForcing(NamedTuple):
     q_net : array or None
         Net surface heat flux (positive into ocean) [W/m²].
     tau_x, tau_y : array or None
-        Surface wind stress components [Pa].
+        Geographic east/north atmospheric surface wind stress components [Pa].
+    tau_i_native, tau_j_native : array or None
+        Optional grid-native, on-ocean stress at T points [Pa].  This pair is
+        for source-defined ocean forcing that already lives in the model
+        referential (for example NEMO ``usrdef_sbc``); when present it avoids a
+        lossy native→geographic→native round trip.  Both must be supplied.
     freshwater : array or None
         Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
     salt_flux : array or None
@@ -231,7 +236,8 @@ class OceanSurfaceForcing(NamedTuple):
         ``freshwater`` (virtual-salt dilution) channel.
     chl : array or None
         Surface chlorophyll [mg/m³] for the RGB shortwave-penetration scheme
-        (``ShortwavePenetrationConfig.scheme == "rgb_chl"``).  2D horizontal
+        (``ShortwavePenetrationConfig.scheme`` is ``"rgb_chl"`` or the
+        source-named ``"nemo_qsr_rgb"``).  2D horizontal
         field; ``None`` when the two-band Jerlov scheme is in use.
     q_prescribed : array or None
         Prescribed part of the surface heat flux [W/m², positive into ocean]
@@ -321,6 +327,8 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
+    tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
 
 
 class OceanConfig(NamedTuple):
@@ -520,6 +528,11 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
     w : Field
         Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
+    uu_b, vv_b : Field or None
+        NEMO's prognostic depth-mean velocity at U/V faces [m/s].  These are
+        the current whole-step ``Kbb`` values and are populated only by cards
+        selecting the NEMO WS-RK3 identity.  ``None`` on every other recipe
+        means the pair contributes no array leaves to its pytree.
     T_som : Field or None
         SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
         Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
@@ -538,6 +551,14 @@ class LatLonCGridOceanState(NamedTuple):
     u_mask: Field
     v_mask: Field
     w: Field
+    # NEMO key_RK3 carries the external mode as prognostic state, independently
+    # of the 3-D velocity: oce.F90:39,99 declares uu_b/vv_b; dynspg_ts.F90:
+    # 484-500 reads Kmm/Kbb to seed the window and :857-897 writes Kaa; the
+    # final stprk3.F90:213 Naa/Nbb swap promotes that pair to the next step.
+    # Both members are present or absent together.  None is deliberately the
+    # default so non-NEMO recipes gain no array pytree leaf.
+    uu_b: object = None
+    vv_b: object = None
     T_som: object = None
     S_som: object = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
@@ -626,15 +647,11 @@ class LatLonCGridOceanState(NamedTuple):
     dpsin_prev: object = None
     # Cross-window barotropic AB3/AM4 substep histories for
     # barotropic_time_filter == "nemo_ab3am4" (NEMO dynspg_ts nn_bt_flt=3):
-    # 6-tuple of 2-D arrays in DEVIATION form — (U_f-U_b, U_f-U_bb, V_f-V_b,
-    # V_f-V_bb, eta_f-eta_b, eta_f-eta_bb), the last two substep values of
-    # the previous window relative to its final value (NEMO's persistent
-    # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e, written to NEMO's restart).
-    # Deviation form because NEMO re-imposes the stp2d barotropic mean on the
-    # 3D velocity after every stage (stprk3_stg.F90:440) so its raw histories
-    # never see a window-boundary jump; legoESM's post-solve implicit vmix
-    # shifts the depth mean, and raw carried values would feed that jump into
-    # the AB3 extrapolation each window (see _run_substep_loop).
+    # 6-tuple of absolute 2-D arrays — (ub_e, ubb_e, vb_e, vbb_e, sshb_e,
+    # sshbb_e), the last two substep values of the previous window.  These are
+    # NEMO's persistent nn_bt_flt=3 histories, including its restart state;
+    # storing them directly is required because reconstructing them as a
+    # subtraction from the next window's now-value changes the last bits.
     # None (default) ⇒ cold start: the barotropic solver applies NEMO's
     # ll_init ramp and POPULATES this field; afterwards each window continues
     # the AB3 series across the window boundary (dynspg_ts.F90:200-226).
@@ -1146,6 +1163,16 @@ class BarotropicConfig(NamedTuple):
     # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
     # thickness and its separately associated reciprocal describe one state.
     barotropic_seed_evaluation: str = "generic"
+    # Does this card CARRY NEMO's prognostic external mode (``uu_b``/``vv_b``,
+    # NEMO ``oce.F90:39,99``) as model state, so the barotropic window seeds
+    # from it (``dynspg_ts.F90:484-500``) instead of re-reducing the 3-D
+    # velocity?  ``False`` (DEFAULT, main's behaviour): the window always
+    # seeds from the depth reduction and no prognostic pair is allocated.
+    # ``True``: the card allocates the pair and the window reads it; the pair
+    # then being absent is a hard error, never a silent reduction.  This is a
+    # CONFIG predicate on purpose — reading it off the presence of
+    # ``state.uu_b`` would let a state-allocation detail pick the scheme.
+    nemo_prognostic_barotropic_state: bool = False
     # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
     # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
     barotropic_pgf_evaluation: str = "generic"
@@ -1959,14 +1986,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # construction, exactly like ``metric_convention`` above.
     #   "cell_average"  (default, BIT-IDENTICAL to every prior release)
     #                   f_v is the mean of the two adjacent tracer rows' f.
-    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face
-    #                   latitude -- NEMO's own ff_f convention, and what any
-    #                   C-grid model defining its Coriolis at the F-point does.
-    # f_v is the single array every C-grid Coriolis path reads, through one of
-    # two helpers: latlon_cgrid_operators.vertex_coriolis (barotropic EEN
-    # pre-block, 3-D EEN/ENE vorticity flux) and
-    # barotropic_common.coriolis_at_faces (semi-implicit / explicit_ab2
-    # face-f Coriolis).
+    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face;
+    #                   an analytic F-point fallback only where V and F share
+    #                   latitude.
+    # Generic paths read f_v. File-backed NEMO EEN/ENE arms carry and read a
+    # separate native grid.ff_f because V and F differ on a curvilinear grid.
     # NB a grid that ARRIVES as a pre-built LatLonCGridGeometry (the NEMO
     # bridge builds one) is passed through ensure_geometry unchanged, so the
     # convention must be selected where THAT geometry is built.  The model
@@ -2025,6 +2049,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
+    # Coefficients for eos="nemo_seos" (NEMO's simplified/linear law, the
+    # ``ln_seos`` branch of ``eosbn2.F90``).  ``None`` keeps
+    # ``NemoSEOSConfig()``'s DINO defaults, which is what every card that
+    # selected this EOS before relied on; a card whose ``&nameos`` block
+    # differs from DINO's (VORTEX) MUST pass its own here, because a defaulted
+    # physical coefficient is a hidden choice.
+    eos_nemo_seos: object = None  # NemoSEOSConfig when eos="nemo_seos"
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
@@ -2217,6 +2248,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # removed RK3 micro-selectors, this is an actual NEMO namelist switch.
     bbl_adv_option: int = 0
     bbl_gamma_s: float = 0.0
+    # NEMO trabbl diffusive arm.  0 disables it; 1 selects nn_bbl_ldf=1.
+    # Kept beside the advective selector because NEMO permits the two arms
+    # independently, even though the certified ORCA2 deck selects only ldf=1.
+    bbl_diffusive_option: int = 0
+    bbl_aht_m2_s: float = 0.0
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
@@ -2359,6 +2395,32 @@ class LatLonCGridOceanConfig(NamedTuple):
     # second Kmm hdiv with actual barotropic Kaa r3t; depends on the coupled
     # call-1 QCO operands above. Generic default is byte-compatible.
     wzv_call2_evaluation: str = "generic"
+    # Round 163 (Decision 55, note AT): NEMO's SECOND per-stage continuity
+    # solve for the momentum vertical advection (stprk3_stg.f90:360), only
+    # meaningful when ``wzv_call2_evaluation == "nemo_literal"``. This is an
+    # EXPLICIT per-card choice, not inferred from any other field (EOS
+    # included) -- every card whose resolved configuration reaches the
+    # nemo_literal branch MUST set it, ``True`` or ``False``, or the model
+    # raises rather than guessing. GYRE-zco sets ``True`` (measured, landed,
+    # round-163 receipt); ORCA2-zps sets ``False`` (resolves the same
+    # program, never measured under it). ``None`` here is a construction
+    # default only, refused by the model at STEP-TIME if the card also
+    # resolves ``nemo_literal`` without overriding it.
+    nemo_stage_momentum_wzv_split: bool | None = None
+    # Which NEMO time-stepping program's after-SSH slot the FIRST wzv call
+    # reads, and therefore what its scale-factor term is built from:
+    #   "rk3_extrapolated"   -- NEMO's RK3 leaves the previous step's linear
+    #       extrapolation there (stprk3.F90:225), which stp_2D turns into
+    #       r3t(:,:,Kaa) (stp2d.F90:149) just before CALL wzv (stp2d.F90:153).
+    #   "leapfrog_continuity" -- NEMO's modified leapfrog fills the same slot
+    #       from the barotropic continuity in ssh_nxt before wzv_MLF reads it.
+    # This is an EXPLICIT per-card choice and is NOT inferred from the time
+    # integrator or from any other field: keying it on a sibling selector is
+    # the hidden coupling decision 75 bans and round 163 rejected once
+    # already.  Every card whose resolved configuration reaches the
+    # nemo_literal ZAD branch MUST state one of the two, or the model raises
+    # rather than guessing.  "" here is a construction default only.
+    nemo_first_wzv_after_ssh: str = ""
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian

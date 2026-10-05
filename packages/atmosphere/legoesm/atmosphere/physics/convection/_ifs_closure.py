@@ -108,7 +108,6 @@ def _f(x) -> jnp.ndarray:
 
 class IFSClosureConfig(NamedTuple):
     """Tunables and switches of the cumastrn closure (sucumf.F90)."""
-    lmfwstar: bool = False       # sucumf.F90:232  LMFWSTAR=.FALSE. (Grant w*)
     rcapdcycl: float = RCAPDCYCL  # sucumf.F90:234  land/PBL diurnal-cycle corr.
     rcapqadv: float = RCAPQADV    # sucumf.F90:237  moisture advection term
     rmincape: float = RMINCAPE    # sucumf.F90:239

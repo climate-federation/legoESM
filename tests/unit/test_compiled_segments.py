@@ -24,6 +24,7 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
+    _segment_water_flux,
     SegmentCarry,
     pack_carry,
     unpack_carry,
@@ -290,6 +291,32 @@ class TestComputeSegmentLength:
 # ===========================================================================
 # 2. SegmentCarry pack/unpack
 # ===========================================================================
+
+class TestSegmentWaterFlux:
+    """The water the segment accumulator sees: the fed evap_sfc, zeros for a
+    fluxless step, and a loud refusal for heat without water."""
+
+    @staticmethod
+    def _out(**kw):
+        base = PhysicsOutput(*([None] * len(PhysicsOutput._fields)))
+        return base._replace(**kw)
+
+    def test_fed_water_is_returned(self):
+        z = jnp.zeros((2, 2))
+        e = jnp.full((2, 2), 3.0e-5)
+        out = _segment_water_flux(self._out(lhflx=jnp.full((2, 2), 80.0),
+                                            evap_sfc=e), z)
+        assert out is e
+
+    def test_fluxless_step_accumulates_zero(self):
+        z = jnp.zeros((2, 2))
+        assert _segment_water_flux(self._out(), z) is z
+
+    def test_heat_without_water_is_refused(self):
+        z = jnp.zeros((2, 2))
+        with pytest.raises(ValueError, match="never derive it as lhflx / L_v"):
+            _segment_water_flux(self._out(lhflx=jnp.full((2, 2), 80.0)), z)
+
 
 class TestSegmentCarryRoundtrip:
     """Pack/unpack preserves all values exactly."""
@@ -832,6 +859,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            evap_accum=carry.evap_accum,
             sw_up_toa_accum=sw_up_toa_accum,
             lw_up_toa_accum=lw_up_toa_accum,
             sw_up_toa_clr_accum=sw_up_toa_clr_accum,
@@ -1000,6 +1028,29 @@ class TestSegmentMeanAccumulators:
             np.asarray(result.sw_up_toa_accum) / (n_steps * dt),
             self._SW_UP, rtol=1e-6,
         )
+
+    def test_water_accumulator_is_the_fed_flux(self):
+        """evap_accum after n steps == n * dt * evap_sfc: the water the
+        physics publishes, not lhflx / L_v (the mock's lhflx implies a
+        different E on purpose)."""
+        e_fed, lh = 3.0e-5, 100.0
+
+        def _step_with_water(*a, **kw):
+            out, held, t_land = _mock_step_unified(*a, **kw)
+            shape_2d = out.precip.shape
+            return (out._replace(lhflx=jnp.full(shape_2d, lh),
+                                 evap_sfc=jnp.full(shape_2d, e_fed)),
+                    held, t_land)
+
+        args = _make_segment_fn_args()
+        args["step_unified"] = _step_with_water
+        run_segment = build_segment_fn(**args)
+        n_steps, dt = 5, args["dt"]
+        result = run_segment(self._make_carry_with_fluxes(), n_steps, _FORCING)
+        np.testing.assert_allclose(
+            np.asarray(result.evap_accum),
+            np.full((N_FACES, N, N), n_steps * dt * e_fed), rtol=1e-6)
+        assert abs(e_fed / (lh / constants.L_v) - 1.0) > 0.05
 
     def test_t_low_accumulator_is_temperature_like(self):
         """t_low_accum / duration must sit near the actual lowest-level T

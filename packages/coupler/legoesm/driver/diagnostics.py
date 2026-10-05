@@ -45,17 +45,46 @@ def _frozen_condensate(state):
     return total
 
 
-class _StructuredRegridWeights:
-    """Precomputed bilinear interpolation weights for structured grids."""
-    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
+# Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
+_SIDECAR_SAMPLING_KEY = "meta.lat_sampling"
 
-    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon):
-        self.i_lo = i_lo
-        self.j_lo = j_lo
-        self.wi = wi
-        self.wj = wj
-        self.src_nlat = src_nlat
-        self.src_nlon = src_nlon
+
+class _StructuredRegridWeights:
+    """Precomputed bilinear interpolation weights for structured grids.
+
+    ``i_lo``/``i_hi`` index the native latitude axis and ``j_lo``/``j_hi``
+    the native longitude axis in the field's OWN order; ``j_hi`` wraps
+    periodically."""
+    __slots__ = ('i_lo', 'i_hi', 'j_lo', 'j_hi', 'wi', 'wj')
+
+    def __init__(self, i_lo, i_hi, j_lo, j_hi, wi, wj):
+        self.i_lo, self.i_hi = i_lo, i_hi
+        self.j_lo, self.j_hi = j_lo, j_hi
+        self.wi, self.wj = wi, wj
+
+
+def _bracket(src: np.ndarray, tgt: np.ndarray, period: float | None):
+    """Indices (into ``src`` as given) bracketing each ``tgt`` value, and the
+    linear weight of the upper one.  ``period`` wraps the axis (longitude);
+    otherwise targets outside the source range take the edge value."""
+    if period is not None:
+        src = np.mod(src, period)
+        tgt = np.mod(tgt, period)
+    order = np.argsort(src, kind="stable")
+    s = src[order]
+    n = s.size
+    k = np.searchsorted(s, tgt, side="right") - 1
+    if period is None:
+        k = np.clip(k, 0, n - 2)
+        s_lo, s_hi = s[k], s[k + 1]
+        lo, hi = k, k + 1
+    else:
+        lo, hi = np.mod(k, n), np.mod(k + 1, n)
+        s_lo = np.where(k < 0, s[-1] - period, s[lo])
+        s_hi = np.where(k + 1 >= n, s[0] + period, s[hi])
+    w = np.clip((tgt - s_lo) / np.where(s_hi == s_lo, 1.0, s_hi - s_lo),
+                0.0, 1.0)
+    return order[lo], order[hi], w
 
 
 def _build_structured_regrid_weights(
@@ -63,42 +92,25 @@ def _build_structured_regrid_weights(
     src_lon_rad: np.ndarray,
     tgt_nlat: int,
     tgt_nlon: int,
+    tgt_lat_deg: np.ndarray | None = None,
+    tgt_lon_deg: np.ndarray | None = None,
 ) -> _StructuredRegridWeights:
-    """Build bilinear interpolation weights from a native structured grid
-    to a regular CMIP lat-lon grid.
+    """Bilinear weights from a native structured grid (either latitude order)
+    to the CMIP lat-lon target, periodic in longitude.
 
-    Parameters
-    ----------
-    src_lat_rad : (n_lat_src,) — source latitudes in radians, S→N
-    src_lon_rad : (n_lon_src,) — source longitudes in radians, [0, 2π)
-    tgt_nlat, tgt_nlon : target CMIP grid dimensions
+    Targets default to the regular cell centres the CMOR files are labelled
+    with (``-90+dlat/2 ..``, ``dlon/2 ..``); callers pass the labels so the
+    two cannot drift.
     """
-    src_lat = np.degrees(src_lat_rad)  # S→N
-    src_lon = np.degrees(src_lon_rad)  # [0, 360)
-
     dlat = 180.0 / tgt_nlat
     dlon = 360.0 / tgt_nlon
-    tgt_lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
-    tgt_lon = np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
-
-    # For each target lat, find bracketing source lat indices + weight
-    i_lo = np.searchsorted(src_lat, tgt_lat) - 1
-    i_lo = np.clip(i_lo, 0, len(src_lat) - 2)
-    denom_i = src_lat[i_lo + 1] - src_lat[i_lo]
-    denom_i = np.where(denom_i == 0, 1.0, denom_i)
-    wi = np.clip((tgt_lat - src_lat[i_lo]) / denom_i, 0.0, 1.0)
-
-    # For each target lon, find bracketing source lon indices + weight
-    j_lo = np.searchsorted(src_lon, tgt_lon) - 1
-    j_lo = np.clip(j_lo, 0, len(src_lon) - 2)
-    denom_j = src_lon[j_lo + 1] - src_lon[j_lo]
-    denom_j = np.where(denom_j == 0, 1.0, denom_j)
-    wj = np.clip((tgt_lon - src_lon[j_lo]) / denom_j, 0.0, 1.0)
-
-    return _StructuredRegridWeights(
-        i_lo=i_lo, j_lo=j_lo, wi=wi, wj=wj,
-        src_nlat=len(src_lat), src_nlon=len(src_lon),
-    )
+    tgt_lat = (np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
+               if tgt_lat_deg is None else np.asarray(tgt_lat_deg, np.float64))
+    tgt_lon = (np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
+               if tgt_lon_deg is None else np.asarray(tgt_lon_deg, np.float64))
+    i_lo, i_hi, wi = _bracket(np.degrees(src_lat_rad), tgt_lat, None)
+    j_lo, j_hi, wj = _bracket(np.degrees(src_lon_rad), tgt_lon, 360.0)
+    return _StructuredRegridWeights(i_lo, i_hi, j_lo, j_hi, wi, wj)
 
 
 def _apply_structured_regrid_2d(
@@ -107,21 +119,12 @@ def _apply_structured_regrid_2d(
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 2-D field (nlat_src, nlon_src)
     → (nlat_tgt, nlon_tgt)."""
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi
-    wj = w.wj
-    # Bilinear: f = (1-wi)(1-wj)*f00 + wi*(1-wj)*f10 + (1-wi)*wj*f01 + wi*wj*f11
-    f00 = field[np.ix_(i0, j0)]
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return ((1 - wi[:, None]) * (1 - wj[None, :]) * f00
-            + wi[:, None] * (1 - wj[None, :]) * f10
-            + (1 - wi[:, None]) * wj[None, :] * f01
-            + wi[:, None] * wj[None, :] * f11)
+    wi = w.wi[:, None]
+    wj = w.wj[None, :]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 def _apply_structured_regrid_3d(
@@ -129,29 +132,13 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev).
-
-    Vectorised over the level axis — gather the four bilinear
-    neighbours once and apply the per-cell weights with NumPy
-    broadcasting instead of looping ``nlev`` times.  At T63L49 with
-    ~50 levels this turns 50 separate per-level NumPy calls into one.
-    """
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
-    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
-    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return (
-        (1 - wi) * (1 - wj) * f00
-        + wi * (1 - wj) * f10
-        + (1 - wi) * wj * f01
-        + wi * wj * f11
-    )
+    → (nlat_tgt, nlon_tgt, nlev), vectorised over levels."""
+    wi = w.wi[:, None, None]
+    wj = w.wj[None, :, None]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 # --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
@@ -244,6 +231,18 @@ def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
         )
     return None
 
+
+
+def _refuse_heat_without_water(where: str, lhflx, evspsbl) -> None:
+    """Heat without water is refused before any series grows: deriving E as
+    lhflx / L_v was the hidden 2-3 % fallback the water channel removes."""
+    if evspsbl is None and lhflx is not None:
+        raise ValueError(
+            f"DiagnosticCollector.{where}: lhflx was fed without evspsbl; "
+            "the moisture closure and CMOR evspsbl need the water the column "
+            "actually received -- feed evspsbl from the lane's water channel "
+            "(the segment carry's evap accumulator, the MPAS evap_sfc slot, "
+            "or the turbulence output's evap_sfc), never lhflx / L_v.")
 
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
@@ -354,6 +353,7 @@ class DiagnosticCollector:
         self.rsdt: list[float] = []
         self.hfss: list[float] = []
         self.hfls: list[float] = []
+        self.evspsbl: list[float] = []   # surface water flux [kg/m2/s], the evap_sfc feed
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
 
@@ -477,6 +477,10 @@ class DiagnosticCollector:
         if self._spatial_monthly is None:
             return
 
+        # Sample at the SAME row latitudes the files are labelled with
+        # (cell centres); the regridders' default is pole-to-pole, which put
+        # every row up to half a cell off its label.
+        _lat_labels, _lon_labels = self._cmip_target_latlon()
         if grid_type == "cubed_sphere" and grid is not None:
             from legoesm.grids.regridding import (
                 get_cubedsphere_to_latlon_weights,
@@ -484,25 +488,38 @@ class DiagnosticCollector:
             n = grid.n
             self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
                 n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
         elif grid_type in ("latlon", "gaussian") and grid is not None:
-            # For structured grids, store native 1-D coordinates (degrees)
-            # for bilinear regridding when native shape != CMIP target.
+            # Structured grids: native 1-D coordinates are radians.
             native_lat = np.asarray(grid.lat)  # radians, 1-D
             native_lon = np.asarray(grid.lon)  # radians, 1-D
             n_lat_native = native_lat.shape[0]
             n_lon_native = native_lon.shape[0]
-            if (n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon):
-                # Native grid matches CMIP target — no regridding needed.
+            if ((n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon)
+                    and np.allclose(np.degrees(native_lat), _lat_labels,
+                                    rtol=0.0, atol=1e-6)
+                    and np.allclose(np.degrees(native_lon) % 360.0,
+                                    _lon_labels, rtol=0.0, atol=1e-6)):
+                # Native grid IS the labelled CMIP target — no regridding.
                 self._structured_regrid = None
             else:
-                # Precompute regridding from native → CMIP lat-lon.
+                # Interpolate to the labelled cell centres.  A same-SHAPE
+                # grid is not enough: the lat-lon grid's lon 0..355 sits half
+                # a cell off the 2.5..357.5 labels, a Gaussian grid's rows
+                # off the regular ones.
                 self._structured_regrid = _build_structured_regrid_weights(
                     src_lat_rad=native_lat,
                     src_lon_rad=native_lon,
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
+                    tgt_lat_deg=_lat_labels,
+                    tgt_lon_deg=_lon_labels,
                 )
+                if self.cf_writer is not None:
+                    self.cf_writer.require_centre_sampling_on_append = True
         elif grid_type in ("mpas", "voronoi") and grid is not None:
             # SCVT/Voronoi unstructured cells → regular lat-lon via IDW
             # k-nearest weights (the AMIP forcing path does the inverse,
@@ -514,7 +531,10 @@ class DiagnosticCollector:
             self._voronoi_regrid_weights = compute_voronoi_to_latlon_weights(
                 np.asarray(grid.latCell), np.asarray(grid.lonCell),
                 n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
 
     def set_fixed_fields(
         self,
@@ -938,6 +958,7 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
         sw_up_toa_clr=None,
         lw_up_toa_clr=None,
         q_i=None,
@@ -988,6 +1009,7 @@ class DiagnosticCollector:
         # GPU pipeline at every diagnostic interval.  The model step
         # following ``collect()`` cannot launch until all 12 have
         # round-tripped — fusing them collapses the stall to one.
+        _refuse_heat_without_water("collect", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1015,6 +1037,7 @@ class DiagnosticCollector:
             area_weighted_mean(sw_down_toa, _aw) if sw_down_toa is not None else _zero,
             area_weighted_mean(shflx, _aw) if shflx is not None else _zero,
             area_weighted_mean(lhflx, _aw) if lhflx is not None else _zero,
+            area_weighted_mean(evspsbl, _aw) if evspsbl is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -1032,6 +1055,7 @@ class DiagnosticCollector:
         mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
         mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
         mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
+        mean_evspsbl = float(_stats_host[15]) if evspsbl is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -1049,6 +1073,7 @@ class DiagnosticCollector:
         self.rsdt.append(mean_rsdt)
         self.hfss.append(mean_hfss)
         self.hfls.append(mean_hfls)
+        self.evspsbl.append(mean_evspsbl)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
@@ -1082,6 +1107,8 @@ class DiagnosticCollector:
                 ),
                 'hfls': (np.asarray(lhflx) if lhflx is not None
                          else np.zeros_like(np.asarray(sst))),
+                'evspsbl': (np.asarray(evspsbl) if evspsbl is not None
+                            else np.zeros_like(np.asarray(sst))),
                 'hfss': (np.asarray(shflx) if shflx is not None
                          else np.zeros_like(np.asarray(sst))),
             }
@@ -1100,14 +1127,16 @@ class DiagnosticCollector:
             q_frozen=_frozen_condensate(state),
         )
 
-        # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
-        # (positive-up evaporation source) so the E − P − dW/dt closure
-        # residual shares one flux definition with the output diagnostics;
-        # a fluxless config (lhflx None) closes against E = 0.
+        # Moisture budget.  evspsbl is the SAME water flux reported as CMOR
+        # evspsbl (positive-up evaporation source, PhysicsOutput.evap_sfc) so
+        # the E − P − dW/dt closure shares one definition with the output; a
+        # fluxless config (no surface exchange at all) closes against E = 0.
+        # Heat without water was refused at entry (before any series grew).
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total,
-            lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
+            evap=(evspsbl if evspsbl is not None
+                  else jnp.zeros_like(state.p_s.data)),
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
@@ -1134,6 +1163,8 @@ class DiagnosticCollector:
                 fields_2d['hfss'] = np.asarray(shflx)
             if lhflx is not None:
                 fields_2d['hfls'] = np.asarray(lhflx)
+            if evspsbl is not None:
+                fields_2d['evspsbl'] = np.asarray(evspsbl)
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
             # Reuse the T_low array already materialised above.
@@ -1182,6 +1213,7 @@ class DiagnosticCollector:
                 'rsdt': mean_rsdt,
                 'hfss': mean_hfss,
                 'hfls': mean_hfls,
+                'evspsbl': mean_evspsbl,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -1367,6 +1399,11 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(lhflx)
                 if r is not None:
                     fields_2d['hfls'] = r
+            # evspsbl: surface water flux [kg/m2/s] the column received
+            if evspsbl is not None:
+                r = self._regrid_to_latlon_2d(evspsbl)
+                if r is not None:
+                    fields_2d['evspsbl'] = r
 
             if fields_2d:
                 self._spatial_monthly.add_2d(doy, year, fields_2d)
@@ -1447,6 +1484,7 @@ class DiagnosticCollector:
         sw_down_toa=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1468,6 +1506,7 @@ class DiagnosticCollector:
         # overhead, but the previous per-scalar ``float(...)`` chain
         # serialised 12 GPU stalls per diagnostic step — exactly the
         # sin the long ``collect`` path was already corrected for.
+        _refuse_heat_without_water("collect_lightweight", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1526,9 +1565,12 @@ class DiagnosticCollector:
                  if shflx is not None else float('nan'))
         _hfls = (float(area_weighted_mean(lhflx, _aw))
                  if lhflx is not None else float('nan'))
+        _evspsbl = (float(area_weighted_mean(evspsbl, _aw))
+                    if evspsbl is not None else float('nan'))
         self.rsdt.append(_rsdt)
         self.hfss.append(_hfss)
         self.hfls.append(_hfls)
+        self.evspsbl.append(_evspsbl)
 
         # Energy-budget tracker on the lightweight path too (#1354/#1515): the
         # tracker is grid-agnostic (column integral over the trailing level
@@ -1603,6 +1645,7 @@ class DiagnosticCollector:
         rsdt=None,
         hfss=None,
         hfls=None,
+        evspsbl=None,
         rsutcs=None,
         rlutcs=None,
         wap=None,
@@ -1808,6 +1851,7 @@ class DiagnosticCollector:
         rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
+        evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
 
@@ -1830,6 +1874,7 @@ class DiagnosticCollector:
             ("rsdt", rsdt_np, (_ncol,)),
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
+            ("evspsbl", evspsbl_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
@@ -1864,14 +1909,9 @@ class DiagnosticCollector:
         fields_3d: dict[str, np.ndarray] = {}
         daily_2d: dict[str, np.ndarray] = {}
         if have_spatial:
-            # evspsbl [kg/m2/s] = latent heat flux / L_v. PRE-EXISTING
-            # documented approximation for this lane: no sublimation split
-            # (L_s over ice-covered cells => ~13% undercount there; see
-            # coupling_fields.surface_mass_flux for the phase-aware form),
-            # matching the bulk-flux scheme's own L_v-only partition of
-            # lhflx.  Wiring the phase-aware flux needs the ice fraction in
-            # this feed — tracked as a follow-up, unchanged by #1353.
-            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
+            # evspsbl [kg/m2/s]: the water the column received (the evap_sfc
+            # feed), fed by every lane beside hfls; never rebuilt from
+            # hfls / L_v here.
             for _name, _src in (
                 ('tas', tas_field),
                 ('ts', ts_field),
@@ -2149,6 +2189,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -2178,6 +2219,7 @@ class DiagnosticCollector:
         self.rsdt.clear()
         self.hfss.clear()
         self.hfls.clear()
+        self.evspsbl.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -2301,6 +2343,9 @@ class DiagnosticCollector:
                 merged[prefix + key] = arr
         if not merged:
             return
+        if getattr(self.cf_writer, "require_centre_sampling_on_append", False):
+            from legoesm.io.cmor_output import LAT_SAMPLING_CENTRES
+            merged[_SIDECAR_SAMPLING_KEY] = np.array(LAT_SAMPLING_CENTRES)
         path = Path(path)
         tmp_path = path.parent / (path.name + ".tmp")
         try:
@@ -2333,6 +2378,18 @@ class DiagnosticCollector:
         }
         substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
         with np.load(str(path), allow_pickle=False) as npz:
+            stamp = (str(npz[_SIDECAR_SAMPLING_KEY])
+                     if _SIDECAR_SAMPLING_KEY in npz.files else None)
+            from legoesm.io.cmor_output import (
+                LAT_SAMPLING_CENTRES, LatSamplingMismatchError)
+            if (stamp != LAT_SAMPLING_CENTRES and getattr(
+                    self.cf_writer, "require_centre_sampling_on_append", False)):
+                raise LatSamplingMismatchError(
+                    f"{path}: CMOR accumulators written before lat-lon output "
+                    "was sampled at its labelled cell centres (rows were "
+                    "pole-to-pole). Resuming would mix both grids in the open "
+                    "month. Resume with the code that wrote it, or delete the "
+                    "sidecar to drop the partial month.")
             for full_key in npz.files:
                 for prefix in namespaced:
                     if full_key.startswith(prefix):
@@ -2371,6 +2428,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),

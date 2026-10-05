@@ -127,7 +127,9 @@ class TestCoupledPresets:
 
     def test_full_coupled_config(self):
         cfg = PRESETS["full_coupled"]()
-        assert cfg.carbon_ocean is True
+        assert cfg.land_mode == "multilayer"
+        assert cfg.carbon_land == "differland"
+        assert not hasattr(cfg, "carbon_ocean")
 
 
 # ======================================================================

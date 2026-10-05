@@ -191,7 +191,8 @@ def barotropic_substeps_mpas(
     # gradient_edge sees smooth fields at coastlines instead of the
     # sharp ocean-to-zero jump from masking.
     def _fill_land_cells_mpas(field_cell, mask_cell):
-        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
+        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2,
+                                    mesh.edgesOnCell, mesh.nEdgesOnCell)
 
     # --- Fix 2: Barotropic Laplacian diffusion ---
     baro_alpha_val = config.barotropic_diffusion_alpha
@@ -258,7 +259,11 @@ def barotropic_substeps_mpas(
     )
 
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
-    Hu_sum = jnp.zeros_like(u_bar)
+    # The substep body deliberately returns transport in eta precision (the
+    # continuity equation's dtype).  Seed the scan carry in that same dtype;
+    # under split precision u_bar can be f64 while eta is f32, and a
+    # zeros_like(u_bar) seed makes lax.scan reject the f64 -> f32 transition.
+    Hu_sum = jnp.zeros_like(u_bar, dtype=eta.dtype)
     eta_sum = jnp.zeros_like(eta)
     ubar_sum = jnp.zeros_like(u_bar)
 

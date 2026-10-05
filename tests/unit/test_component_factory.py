@@ -1161,3 +1161,12 @@ class TestEnergyConsistentMoistureClipWiring:
         assert CDGridPrimitiveEquationConfig().energy_consistent_moisture_clip is False
         assert MPASPrimitiveEquationConfig(
             energy_consistent_moisture_clip=True).energy_consistent_moisture_clip is True
+
+
+def test_spectral_pe_hyperdiff_is_half_hour_efold():
+    """Shared e-fold helper reproduces the PE factory's former inline formula."""
+    from legoesm.grids.gaussian import create_gaussian_grid, hyperdiff_coeff_for_efold
+    g = create_gaussian_grid(42)
+    eig_max = 42 * 43 / (g.radius * g.radius)
+    expected = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+    assert hyperdiff_coeff_for_efold(g, 0.5 * 3600.0) == pytest.approx(expected, rel=1e-14)

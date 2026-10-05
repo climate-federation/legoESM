@@ -337,36 +337,6 @@ def dgrid_to_center_geographic(u_d, v_d, cdgrid):
     return u_east, v_north
 
 
-def cubed_to_latlon(u_d, v_d, cdgrid):
-    """FV3_3D iter 607: alias for ``dgrid_to_center_geographic``.
-
-    Matches FV3 ``cubed_to_latlon`` (fv_grid_utils.F90:2386) naming
-    so users porting FV3 code find the expected entry point.
-
-    Faithful to FV3 c2l_ord2 (line 2547) semantics: D-grid (u, v)
-    on edges → cell-center (ua, va) in geographic (east, north)
-    frame.  FV3's ``c2l_ord=2`` (2nd order) is the default; ord=4
-    (covariant-to-latlon via a11/a12/a21/a22 matrix) is the more
-    accurate variant per ``c2l_ord4`` at fv_grid_utils.F90:2407 —
-    legoESM's iter-326 ``cos_angle_corner``/``sin_angle_corner``
-    rotation matches the c2l_ord4 metric semantics for the
-    cubed-sphere grid_type<4 branch.
-
-    Parameters
-    ----------
-    u_d, v_d : jax.Array
-        D-grid winds (shape (6, n+1, n+1) or (6, n+1, n+1, nlev)).
-    cdgrid : CubedSphereCDGrid
-        Provides cos_angle_corner / sin_angle_corner.
-
-    Returns
-    -------
-    ua, va : jax.Array
-        Cell-centered geographic winds (east, north).
-    """
-    return dgrid_to_center_geographic(u_d, v_d, cdgrid)
-
-
 # ==============================================================================
 # D-grid -> C-grid interpolation (d2a2c)
 # ==============================================================================

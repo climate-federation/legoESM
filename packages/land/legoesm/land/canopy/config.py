@@ -223,10 +223,6 @@ class CanopyConfig(NamedTuple):
     # value 0.01 — see DifferBESS aa6e8b9.  Paired with kB^-1 = 0 in MOST.
     cv: float = 0.0135
 
-    # Soil moisture stress thresholds (when no Richards state available)
-    wilting_point: float = 0.15   # theta_wp [m3/m3]
-    field_capacity: float = 0.30  # theta_fc [m3/m3]
-
     # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
     # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
     # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
@@ -341,20 +337,6 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "aerodynamics",
                 "reference": "leaf boundary-layer forced-convection coefficient "
                              "(Campbell & Norman 1998 / CLM5)",
-                "shape": None,
-            },
-            "wilting_point": {
-                "units": "m^3/m^3", "bounds": (0.05, 0.25), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress wilting point theta_wp "
-                             "(CLM5 / DifferBESS fallback)",
-                "shape": None,
-            },
-            "field_capacity": {
-                "units": "m^3/m^3", "bounds": (0.20, 0.50), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress field capacity theta_fc "
-                             "(CLM5 / DifferBESS fallback)",
                 "shape": None,
             },
         },

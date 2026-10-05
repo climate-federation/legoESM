@@ -275,41 +275,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         notes=(
             "Sets cloud shortwave optical thickness (tau ~ LWP / r_eff). "
             "Smaller droplets => optically thicker, brighter clouds => "
-            "higher OSR. Genuinely uncertain (depends on CCN / aerosol). "
-            "Phase 3 (2026-05-26) replaces this in _AMIP_ACTIVE with "
-            "cloud_r_eff_liq_ocean / cloud_r_eff_liq_land; kept here as "
-            "backward-compat for no-land runs."
-        ),
-    ),
-    "cloud_r_eff_liq_ocean": TuningParameter(
-        name="cloud_r_eff_liq_ocean",
-        default=10.0e-6,
-        min_val=6.0e-6,
-        max_val=15.0e-6,
-        units="m",
-        description="Cloud liquid droplet effective radius over ocean",
-        category="radiation",
-        sensitivity="high",
-        notes=(
-            "Ocean has lower CDNC than land (cleaner air, fewer aerosol "
-            "CCN). Realistic value 10-14 um. Calibrated independently of "
-            "cloud_r_eff_liq_land via per-column blend in "
-            "compute_radiation_core (Phase 3 of cloud-micro plan)."
-        ),
-    ),
-    "cloud_r_eff_liq_land": TuningParameter(
-        name="cloud_r_eff_liq_land",
-        default=7.0e-6,
-        min_val=4.0e-6,
-        max_val=10.0e-6,
-        units="m",
-        description="Cloud liquid droplet effective radius over land",
-        category="radiation",
-        sensitivity="high",
-        notes=(
-            "Land has 3x higher CDNC than ocean -> ~30% smaller r_eff -> "
-            "brighter clouds. Realistic value 6-9 um. Calibrated "
-            "independently of cloud_r_eff_liq_ocean."
+            "higher OSR. Genuinely uncertain (depends on CCN / aerosol)."
         ),
     ),
     "sundqvist_evap_coeff": TuningParameter(
@@ -363,20 +329,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "critical RH. Higher = sharper (more step-like) cloud onset."
         ),
     ),
-    "sbm_T_min_convect": TuningParameter(
-        name="sbm_T_min_convect",
-        default=200.0,
-        min_val=180.0,
-        max_val=260.0,
-        units="K",
-        description="SBM minimum temperature for convective activity",
-        category="convection",
-        sensitivity="medium",
-        notes=(
-            "Layers colder than this are excluded from the SBM convective "
-            "column; caps how high convection can reach."
-        ),
-    ),
     "louis_l_mix_max": TuningParameter(
         name="louis_l_mix_max",
         default=100.0,
@@ -390,17 +342,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "Asymptotic (free-troposphere) mixing length for the Louis "
             "boundary-layer scheme. Higher = stronger vertical mixing."
         ),
-    ),
-    "louis_Ck": TuningParameter(
-        name="louis_Ck",
-        default=0.4,
-        min_val=0.1,
-        max_val=0.6,
-        units="1",
-        description="Louis turbulence eddy-diffusivity coefficient",
-        category="turbulence",
-        sensitivity="medium",
-        notes="Scales the Louis eddy diffusivity. Higher = more BL mixing.",
     ),
     "louis_Ri_crit": TuningParameter(
         name="louis_Ri_crit",
@@ -449,45 +390,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="low",
         notes="Coefficient d in the Louis stability functions.",
     ),
-    "louis_z0": TuningParameter(
-        name="louis_z0",
-        default=1.0e-4,
-        min_val=1.0e-5,
-        max_val=1.0e-2,
-        units="m",
-        description="Surface-layer aerodynamic roughness length",
-        category="surface",
-        sensitivity="medium",
-        notes=(
-            "Roughness length z0 of the Louis surface layer; sets surface "
-            "drag and exchange. Tuned in log space (spans decades)."
-        ),
-    ),
-    "louis_Ch_neutral": TuningParameter(
-        name="louis_Ch_neutral",
-        default=1.5e-3,
-        min_val=5.0e-4,
-        max_val=5.0e-3,
-        units="1",
-        description="Louis surface-layer neutral scalar-exchange coefficient",
-        category="surface",
-        sensitivity="high",
-        notes=(
-            "Constant-scheme Ch: sets both sensible and latent (evaporation) "
-            "surface flux. Higher = stronger surface heat/moisture fluxes."
-        ),
-    ),
-    "louis_Cd_neutral": TuningParameter(
-        name="louis_Cd_neutral",
-        default=1.5e-3,
-        min_val=5.0e-4,
-        max_val=5.0e-3,
-        units="1",
-        description="Louis surface-layer neutral momentum drag coefficient",
-        category="surface",
-        sensitivity="medium",
-        notes="Constant-scheme Cd: sets surface wind stress and friction velocity.",
-    ),
     "mcfarlane_k_wave": TuningParameter(
         name="mcfarlane_k_wave",
         default=6.283185307e-5,
@@ -506,8 +408,8 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     # advertised a "reference stratification used in the orographic
     # launch-stress closure" that does not exist: McFarlaneConfig has no
     # ``N_ref`` field and mcfarlane_gwd derives N from the column state, so
-    # tuning it changed nothing.  The ExperimentConfig scalar stays (positional
-    # ABI + serialized configs) but is marked INERT there.  Re-add only if a
+    # tuning it changed nothing; the ExperimentConfig scalar was deleted
+    # 2026-09-26.  Re-add only if a
     # real reference-stratification closure parameter is introduced.
     "mcfarlane_directional_spread": TuningParameter(
         name="mcfarlane_directional_spread",
@@ -607,22 +509,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         category="surface",
         sensitivity="medium",
         notes="Affects net surface SW absorption over land.",
-    ),
-    "beta_land": TuningParameter(
-        name="beta_land",
-        default=1.0,
-        min_val=0.1,
-        max_val=1.0,
-        units="1",
-        description="Land soil-moisture evaporation factor (slab land)",
-        category="surface",
-        sensitivity="high",
-        notes=(
-            "Multiplies the bulk latent-heat flux from the land "
-            "surface.  1.0 = wet (saturated) surface; smaller values "
-            "starve evaporation and shift the surface energy budget "
-            "into sensible heat (drier, hotter land)."
-        ),
     ),
     "C_land": TuningParameter(
         name="C_land",
@@ -769,24 +655,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "Drains q_c to q_r in warm/mixed columns. Higher = lower LWP "
             "via warm-rain channel (independent of the ice path). Useful "
             "when LWP is too high (Morrison runs liquid-rich)."
-        ),
-    ),
-    "sbm_precip_efficiency": TuningParameter(
-        name="sbm_precip_efficiency",
-        default=0.5,
-        min_val=0.2,
-        max_val=0.9,
-        units="1",
-        description="SBM convective precipitation efficiency (fraction direct-to-rain)",
-        category="convection",
-        sensitivity="high",
-        notes=(
-            "Fraction of column-net SBM drying routed directly to the q_r "
-            "tracer; remainder is detrained as condensate (q_c warm, q_i "
-            "cold via the anvil split).  Observed convective precip "
-            "efficiency is environment-dependent (~0.2-0.9); 0.5 is the "
-            "mid-range physical default.  Dominant LWP lever (validated: "
-            "LWP 0.18->0.06 at eps=0.5 in probe 25237929)."
         ),
     ),
     # (cloud_rh_ice_crit / cloud_rh_ice_sat catalog entries DELETED

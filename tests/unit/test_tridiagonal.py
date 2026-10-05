@@ -109,6 +109,57 @@ def test_thomas_solve_grad_safe():
     np.testing.assert_allclose(g, fd, rtol=1e-4, atol=1e-6)
 
 
+def _thomas_loop_np(a, b, c, d):
+    """Reference sequential Thomas sweep in NumPy (same recurrence)."""
+    n = b.shape[-1]
+    cs = np.zeros(np.broadcast_shapes(a.shape, b.shape, c.shape, d.shape))
+    ds = np.zeros_like(cs)
+    cs[..., 0] = c[..., 0] / b[..., 0]
+    ds[..., 0] = d[..., 0] / b[..., 0]
+    for k in range(1, n):
+        den = b[..., k] - a[..., k] * cs[..., k - 1]
+        cs[..., k] = c[..., k] / den
+        ds[..., k] = (d[..., k] - a[..., k] * ds[..., k - 1]) / den
+    x = np.zeros_like(ds)
+    x[..., -1] = ds[..., -1]
+    for k in range(n - 2, -1, -1):
+        x[..., k] = ds[..., k] - cs[..., k] * x[..., k + 1]
+    return x
+
+
+def test_thomas_solve_short_systems_and_broadcast_shapes():
+    """n in {1, 2}, and a/b/c/d of different broadcast-compatible shapes
+    (one operator, many right-hand sides; one RHS, many diagonals): the
+    output is the full broadcast shape and matches the sequential sweep."""
+    rng = np.random.default_rng(3)
+    for n in (1, 2, 5):
+        a, b, c, d = _random_dd_system(n, rng)
+        x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, d))))
+        np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, d), rtol=1e-13, atol=1e-15)
+    a, b, c, _ = _random_dd_system(6, rng)
+    D = rng.uniform(-1, 1, (4, 6))
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, D))))
+    assert x.shape == (4, 6)
+    np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, D), rtol=1e-13, atol=1e-15)
+    B = 3.0 + rng.uniform(0, 1, (3, 6))
+    d = rng.uniform(-1, 1, 6)
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, B, c, d))))
+    assert x.shape == (3, 6)
+    np.testing.assert_allclose(x, _thomas_loop_np(a, B, c, d), rtol=1e-13, atol=1e-15)
+
+
+def test_thomas_solve_batched_matches_sequential_sweep_bitwise_close():
+    """A (cells, levels) batch -- the ocean's implicit-mixing shape -- against
+    the sequential NumPy sweep, float64."""
+    rng = np.random.default_rng(4)
+    shp = (257, 40)
+    a = rng.uniform(-1, 0, shp); a[:, 0] = 0
+    c = rng.uniform(-1, 0, shp); c[:, -1] = 0
+    b = 2.5 + rng.uniform(0, 1, shp); d = rng.normal(size=shp)
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, d))))
+    np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, d), rtol=1e-13, atol=1e-15)
+
+
 def test_thomas_sweeps_emit_levels_instead_of_writing_into_a_buffer():
     """Each sweep scans over the level axis and stacks its outputs; a per-level
     ``x.at[..., k].set`` inside a loop lowers to a scatter that XLA's CPU

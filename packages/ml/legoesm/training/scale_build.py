@@ -554,6 +554,7 @@ def _build_mode_components_spectral(cfg, yml):
         if _tier:
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
             )
@@ -586,6 +587,8 @@ def _build_mode_components_spectral(cfg, yml):
                 exclude=tuple(sorted(
                     set(aimip_legacy_owned_fields(
                         cloud_scheme=_schemes["cloud_scheme"]))
+                    | aimip_inactive_fields(
+                        cloud_scheme=_schemes["cloud_scheme"])
                     | _pinned_trainable_names(_param_fixed))),
             )
             params = AIMIPTrainableBundle(
@@ -880,10 +883,21 @@ def build_mode_components(cfg, yml):
         params = TrainablePhysicsParams.from_defaults()
         step_unified = physics_pipeline.build_step_unified()
 
+        # The configured physics, exactly as the production compiled segment
+        # passes it; the builder's defaults (no microphysics -> an extra
+        # saturation adjustment, no fixers, radiation every step) would tune a
+        # different model from the configured one.
+        _configured = dict(
+            microphysics=config.microphysics,
+            fix_moisture=config.fix_moisture,
+            fix_mass=config.dycore.fix_mass,
+            rad_update_steps=int(config.rad_update_steps),
+        )
+
         def make_run_seg(trainable):
             return build_training_segment(
                 model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
-                **trainable.to_segment_kwargs())
+                **{**_configured, **trainable.to_segment_kwargs()})
 
     elif cfg.mode == "neural_gcm":
         from legoesm.atmosphere.physics.neural_physics import (
