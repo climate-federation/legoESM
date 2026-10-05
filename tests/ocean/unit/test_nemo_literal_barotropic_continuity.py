@@ -9,9 +9,11 @@ import numpy as np
 
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_external_mode_boundary_association,
+    _nemo_ssh_avg_apply,
     nemo_literal_continuity_divergence,
     nemo_literal_metric_transports,
 )
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.tripole import (
     create_synthetic_tripole,
     create_synthetic_tripole_pivot,
@@ -133,3 +135,39 @@ def test_external_mode_u_fold_is_compiled_half_row_map():
                                   np.asarray(u[-1, 1:5]))
     np.testing.assert_array_equal(np.asarray(got[-1, 5:]),
                                   np.asarray(-u[-1, 4:0:-1]))
+
+
+def test_t_pivot_v_depth_uses_associated_row_below_as_north_neighbor():
+    grid = create_synthetic_tripole_pivot(4, 8, dtype=jnp.float64)
+    u_mask = jnp.ones((4, 9), dtype=jnp.float64)
+    v_mask = jnp.ones((5, 8), dtype=jnp.float64)
+    eta = jnp.arange(32, dtype=jnp.float64).reshape(4, 8) * 0.013
+    prep = (
+        jnp.full((4, 9), 1000.0, dtype=jnp.float64),
+        jnp.full((5, 8), 1000.0, dtype=jnp.float64),
+        jnp.full((4, 9), 1.0e-9, dtype=jnp.float64),
+        jnp.full((5, 8), 1.0e-9, dtype=jnp.float64),
+        None,
+    )
+
+    def evaluate(use_row_below):
+        return _nemo_ssh_avg_apply(
+            eta, u_mask, v_mask, grid, grid.area, prep,
+            nemo_t_pivot_north_neighbor=use_row_below)[1]
+
+    old = evaluate(False)
+    got = evaluate(True)
+    got_jit = jax.jit(evaluate, static_argnums=0)(True)
+
+    fold = grid.fold
+    b = nemo_source_round
+    local = b(grid.area[-1] * eta[-1])
+    north = b(
+        grid.area[-2, fold.perm_T] * eta[-2, fold.perm_T])
+    scale = b(0.5 * prep[3][-1])
+    ssh_avg = b(b(scale * b(local + north)) * v_mask[-1])
+    expected = b(prep[1][-1] + ssh_avg)
+
+    np.testing.assert_array_equal(np.asarray(got[-1]), np.asarray(expected))
+    np.testing.assert_array_equal(np.asarray(got_jit), np.asarray(got))
+    assert not np.array_equal(np.asarray(old[-1]), np.asarray(expected))

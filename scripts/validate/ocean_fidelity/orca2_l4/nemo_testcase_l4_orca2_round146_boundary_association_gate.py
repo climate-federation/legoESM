@@ -37,7 +37,7 @@ from scripts.validate.ocean_fidelity.testcases import (
 
 
 PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
-          "u-fold-sign")
+          "u-fold-sign", "stored-pivot-source", "v-depth-bit")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -154,7 +154,8 @@ def _state_arrays(state) -> dict[str, np.ndarray]:
     return arrays
 
 
-def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm):
+def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
+         t_pivot_north_neighbor=False):
     import jax
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -172,6 +173,7 @@ def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm):
             barotropic_slow_forcing_override=slow,
             barotropic_raw_history_override=raw_history,
             barotropic_external_mode_association=arm,
+            barotropic_t_pivot_north_neighbor=t_pivot_north_neighbor,
         ),
     )
     return jax.device_get(model.step(
@@ -237,9 +239,13 @@ def measure(
     observed = _run(
         card, state, freshwater, surface, slow, raw_history,
         expose=True, arm=False)
+    control = _run(
+        card, state, freshwater, surface, slow, raw_history,
+        expose=True, arm=True, t_pivot_north_neighbor=False)
     arm = _run(
         card, state, freshwater, surface, slow, raw_history,
-        expose=True, arm=True)
+        expose=True, arm=True,
+        t_pivot_north_neighbor=(plant != "stored-pivot-source"))
 
     observed_state = _state_arrays(observed.state_after)
     ordinary_state = _state_arrays(ordinary)
@@ -251,7 +257,14 @@ def measure(
             "WRITE-only observer moved the ordinary production state")
 
     trace = observed.substeps
+    control_trace = control.substeps
     arm_trace = arm.substeps
+    if plant == "v-depth-bit":
+        arm_trace = dict(arm_trace)
+        planted = np.array(arm_trace["transport_face_depth_v"], copy=True)
+        planted[1, -1, 0] = np.nextafter(
+            planted[1, -1, 0], np.float64(np.inf))
+        arm_trace["transport_face_depth_v"] = planted
     require(trace["eta_entry"].shape[0] == 65,
             "production trace does not contain 65 substeps")
 
@@ -293,16 +306,19 @@ def measure(
 
     area = np.asarray(card.recipe.grid.area)
     baseline_rows = []
+    control_rows = []
     arm_rows = []
     for index in range(2):
         baseline_rows.extend(r129._score_substep(
             trace, oracle, active, area, index, plant="none"))
+        control_rows.extend(r129._score_substep(
+            control_trace, oracle, active, area, index, plant="none"))
         arm_rows.extend(r129._score_substep(
             arm_trace, oracle, active, area, index, plant="none"))
     baseline_first = r129.first_nonbit(baseline_rows)
     arm_first = r129.first_nonbit(arm_rows)
-    require(baseline_first is not None and arm_first is not None,
-            "source-order discriminator unexpectedly has no debt")
+    require(baseline_first is not None,
+            "source-order baseline unexpectedly has no debt")
 
     baseline_target = {
         row["boundary"]: row for row in baseline_rows
@@ -314,6 +330,21 @@ def measure(
         if row["substep"] == 2
         and row["boundary"] in ("continuity_du", "after_ssh")
     }
+    control_substep2 = {
+        row["boundary"]: row for row in control_rows if row["substep"] == 2
+    }
+    arm_substep2 = {
+        row["boundary"]: row for row in arm_rows if row["substep"] == 2
+    }
+    p148_control = (
+        control_substep2["mid_depth_v"]["operand_differing_cells"] == 30
+        and control_substep2["transport_v"]["operand_differing_cells"] == 68
+    )
+    p148_depth = arm_substep2["mid_depth_v"]["operand_bit_exact"]
+    p148_chain = all(
+        arm_substep2[name]["operand_bit_exact"]
+        for name in ("transport_v", "continuity_dv", "after_ssh")
+    )
     p2 = (
         sum(row["changed_cells"] for row in scope_rows.values()) > 0
         and all(row["outside_allowed_cells"] == 0
@@ -325,6 +356,13 @@ def measure(
         require(not post_rows["u"]["bit_exact"],
                 "u-fold-sign plant stayed green")
         raise GateError("u-fold-sign plant fired")
+    if plant == "stored-pivot-source":
+        require(not p148_depth and p148_control,
+                "stored-pivot-source plant stayed green")
+        raise GateError("stored-pivot-source plant fired")
+    if plant == "v-depth-bit":
+        require(not p148_depth, "v-depth-bit plant stayed green")
+        raise GateError("v-depth-bit plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -337,6 +375,7 @@ def measure(
         "boundary_scope_rows": scope_rows,
         "baseline_first_non_bit": baseline_first,
         "arm_first_non_bit": arm_first,
+        "control_first_non_bit": r129.first_nonbit(control_rows),
         "baseline_target_rows": baseline_target,
         "arm_target_rows": arm_target,
         "predictions": {
@@ -348,8 +387,13 @@ def measure(
                 else "REFUTED" if p3
                 else "UNMEASURED_PREREQUISITE_R146-P3"
             ),
+            "R148-P1": "CONFIRMED" if p3 else "REFUTED",
+            "R148-P2": "CONFIRMED" if p148_control else "REFUTED",
+            "R148-P3": "CONFIRMED" if p148_depth else "REFUTED",
+            "R148-P4": "CONFIRMED" if p148_chain else "REFUTED",
         },
         "baseline_rows": baseline_rows,
+        "control_rows": control_rows,
         "arm_rows": arm_rows,
         "worktree": stamp,
     }

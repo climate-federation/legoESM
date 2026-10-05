@@ -1190,6 +1190,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private round-146 arm for the one seven-array external-mode boundary
     # association in dynspg_ts.  False leaves the production carry unchanged.
     barotropic_external_mode_association: bool = False
+    # Private round-148 one-variable arm: use the T-pivot row-below halo as
+    # the north T neighbour in the V-face SSH-average depth calculation.
+    barotropic_t_pivot_north_neighbor: bool = False
     # Return round-146's seven post-association arrays without expanding the
     # established shared substep trace for any other fidelity lane.
     expose_barotropic_boundary_association: bool = False
@@ -7169,6 +7172,13 @@ class LatLonCGridOceanModel:
                         _baro_seed = dict(
                             _baro_seed,
                             _nemo_external_mode_association_test_override=True)
+                    if (
+                        self._nemo_ws_test_hooks
+                        .barotropic_t_pivot_north_neighbor
+                    ):
+                        _baro_seed = dict(
+                            _baro_seed,
+                            _nemo_t_pivot_north_neighbor_test_override=True)
                 _cor_sub_override = (
                     self._nemo_ws_test_hooks
                     .barotropic_substep_coriolis_override)

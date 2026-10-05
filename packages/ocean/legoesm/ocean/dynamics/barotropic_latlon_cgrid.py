@@ -552,7 +552,8 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
 def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
                         return_literal_inverse=False,
                         return_ssh_average=False,
-                        return_entry_inverse=False):
+                        return_entry_inverse=False,
+                        nemo_t_pivot_north_neighbor=False):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
@@ -594,8 +595,19 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     ssh_avg_v = nemo_source_round(ssh_avg_v * v_mask)
     ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
     if fold_is_local(grid) or _nfold_mask is not None:
-        area_fold = fold_vface_row(area, grid)
-        eta_fold = fold_vface_row(eta_dyn, grid)
+        fold = grid.fold
+        if (nemo_t_pivot_north_neighbor
+                and bool(getattr(fold, "pivot_row_stored", False))):
+            # NEMO's T-pivot T halo is sourced from the row below the stored
+            # pivot (lbcnfd.f90:584-617).  dynspg_ts.f90:542-545 then reads
+            # that associated halo as the north T neighbour of the top V
+            # face.  The round-148 arm keeps this private until the recorded
+            # depth/transport/difference chain proves the association.
+            area_fold = fold_ghost_source_T(area, fold)[:, fold.perm_T]
+            eta_fold = fold_ghost_source_T(eta_dyn, fold)[:, fold.perm_T]
+        else:
+            area_fold = fold_vface_row(area, grid)
+            eta_fold = fold_vface_row(eta_dyn, grid)
         ssh_n_local = nemo_source_round(area[-1:] * eta_dyn[-1:])
         ssh_n_fold = nemo_source_round(area_fold * eta_fold)
         ssh_n_sum = nemo_source_round(ssh_n_local + ssh_n_fold)
@@ -1663,6 +1675,7 @@ def _run_substep_loop(
     nemo_substep_coriolis_override=None,
     nemo_substep_pgf_override=None,
     nemo_external_mode_association_test_override=False,
+    nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
@@ -1753,13 +1766,17 @@ def _run_substep_loop(
         ``_nemo_ssh_avg_apply`` against the hoisted ``_ssh_avg_prep``,
         reused verbatim — see ``nemo_ssh_avg_face_depth``'s docstring);
         byte-identical to the prior inline closure."""
-        return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
-                                   _ssh_avg_prep)
+        return _nemo_ssh_avg_apply(
+            eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
+            nemo_t_pivot_north_neighbor=(
+                nemo_t_pivot_north_neighbor_test_override))
 
     def _ssh_avg_entry_inverse(eta_dyn):
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
-            return_entry_inverse=True)[2:]
+            return_entry_inverse=True,
+            nemo_t_pivot_north_neighbor=(
+                nemo_t_pivot_north_neighbor_test_override))[2:]
 
     _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
@@ -1841,7 +1858,9 @@ def _run_substep_loop(
         if _face_depth_mode == "nemo_ssh_avg":
             H_u, H_v, r1_H_u, r1_H_v = _nemo_ssh_avg_apply(
                 eta_c, u_mask, v_mask, grid, area, _ssh_avg_prep,
-                return_literal_inverse=True)
+                return_literal_inverse=True,
+                nemo_t_pivot_north_neighbor=(
+                    nemo_t_pivot_north_neighbor_test_override))
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
             if nemo_external_mode_association_test_override:
@@ -2209,7 +2228,9 @@ def _run_substep_loop(
             if _face_depth_mode == "nemo_ssh_avg":
                 association_depths = _nemo_ssh_avg_apply(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
-                    return_literal_inverse=True)
+                    return_literal_inverse=True,
+                    nemo_t_pivot_north_neighbor=(
+                        nemo_t_pivot_north_neighbor_test_override))
             else:
                 association_depths = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -2282,7 +2303,9 @@ def _run_substep_loop(
                  trace_face_ssh_u_exit,
                  trace_face_ssh_v_exit) = _nemo_ssh_avg_apply(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
-                    return_literal_inverse=True, return_ssh_average=True)
+                    return_literal_inverse=True, return_ssh_average=True,
+                    nemo_t_pivot_north_neighbor=(
+                        nemo_t_pivot_north_neighbor_test_override))
             else:
                 trace_depth_u_exit, trace_depth_v_exit = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -2757,6 +2780,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_raw_history_test_override=None,
     _nemo_drag_rate_test_override=None,
     _nemo_external_mode_association_test_override=False,
+    _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
@@ -3244,6 +3268,8 @@ def barotropic_substeps_latlon_cgrid(
         nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
+        nemo_t_pivot_north_neighbor_test_override=(
+            _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
             _nemo_boundary_association_trace_test_hook),
     )
