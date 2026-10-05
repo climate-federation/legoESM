@@ -5672,6 +5672,10 @@ CITATION_MAP = {
         ('zA11 = e2_e1u(ji,jj) * (e3u_3d(ji,jj,jk)', 1),
         ('&                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )', 1),
         17],
+    'VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:254-259': [
+        ('zfu(ji,jj) =  ahtu(ji,jj,jk)', 1),
+        ('&                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )', 1),
+        6],
     'VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:260-266': [
         ('IF( r227_iso_active .AND. jn == jp_tem ) THEN', 2),
         ('END DO   ;   END DO', 7), 7],
