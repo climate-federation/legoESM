@@ -85,14 +85,30 @@ PREFLIGHT_OK  variant smt3vecint: instrument and deck patches apply to the shipp
 ROUND227_LDF_INTERNAL_PREFLIGHT_PASS .../round227/oracle_vortex_smt3_ldf_internal
 ```
 
-The focused CPU/fp64 parser and acquisition-control suite reported:
+The final focused CPU/fp64 parser, acquisition-control and receipt-citation
+suite reported:
 
 ```text
-17 passed in 0.24s
+34 passed in 3.56s
 ```
 
-The citation gate and shifted-citation plant results, plus the separate Codex
-review verdict, are recorded in the final committed revision of this receipt.
+The receipt citation gate reports five citations, zero failures, zero
+unmapped citations and zero audit failures.  Its planted shift of the compiled
+A33/MSC span exits 1 and reports `SYMBOL-NOT-AT-LINE`; the control cannot pass
+against its planted source displacement.
+
+The required separate `codex exec --sandbox read-only` review was invoked on
+the clean committed diff.  It exited 1 before sampling and printed, verbatim:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+It produced no shipping verdict: **independent review unavailable
+in-sandbox**.  This environment failure is retained at
+`round227/independent_review.log`; it is not replaced by an author review.
 
 ## 5. Blast radius and choices
 
