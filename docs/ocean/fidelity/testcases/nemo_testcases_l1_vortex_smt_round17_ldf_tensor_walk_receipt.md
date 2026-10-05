@@ -158,3 +158,6 @@ the complete shared-statement landing gates named above.  Only after SMT-3 is
 closed does Decision 93 proceed to SMT-4 lateral momentum diffusion.
 
 No NEMO acquisition and no configuration decision is required.
+
+The external compact campaign state carries this HELD verdict and the same
+round-230 OPEN item.
