@@ -470,7 +470,10 @@ def compute_two_leaf_canopy_fluxes(
 
     def _fwd_one_col(xf, bun):
         return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
-                               cc.le_cap_mode, cc.use_ta_for_photosynthesis)
+                               cc.le_cap_mode, cc.use_ta_for_photosynthesis,
+                               cc.rh_cap_smoothing_width,
+                               cc.zeta_cap_smoothing_width,
+                               cc.most_n_iters)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal ----
     # See canopy_land.py module notes for the stability analysis.  The

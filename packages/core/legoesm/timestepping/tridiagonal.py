@@ -184,6 +184,9 @@ def _thomas_solve_impl(
                   for v in jnp.broadcast_arrays(a, b, c, d))
     c0_star = c[0] / (b[0] + _TINY)
     d0_star = d[0] / (b[0] + _TINY)
+    if n == 1:
+        # no sweep to run (and lax.scan refuses zero-length scans without jit)
+        return jax.lax.convert_element_type(d0_star[..., None], out_dtype)
 
     def forward_body(carry, xs):
         c_prev, d_prev = carry
@@ -467,52 +470,56 @@ def thomas_solve_shared(
     c = jnp.asarray(c, work_dtype)
     ds = tuple(jnp.asarray(d, work_dtype) for d in ds)
 
+    # Same scan form as _thomas_solve_impl (see the note there on why not
+    # fori_loop + .at[k].set).
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
-    c_star = jnp.zeros_like(c)
-    c_star = c_star.at[..., 0].set(c0_star)
-    d_stars = tuple(
-        jnp.zeros_like(d).at[..., 0].set(d[..., 0] / (b[..., 0] + _TINY))
-        for d in ds
-    )
+    d0_stars = tuple(d[..., 0] / (b[..., 0] + _TINY) for d in ds)
+    if n == 1:
+        return tuple(
+            jax.lax.convert_element_type(d0[..., None], out_dtype)
+            for d0 in d0_stars
+        )
+    am, bm, cm = (jnp.moveaxis(v, -1, 0) for v in (a, b, c))
+    dms = tuple(jnp.moveaxis(d, -1, 0) for d in ds)
 
-    def forward_body(k, carry):
-        c_star_c, d_stars_c = carry
-        ak = a[..., k]
-        bk = b[..., k]
-        ck = c[..., k]
-        c_prev = c_star_c[..., k - 1]
-
+    def forward_body(carry, k_inputs):
+        c_prev, d_prevs = carry
+        ak, bk, ck, dks = k_inputs
         denom = bk - ak * c_prev
         denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-
-        c_star_c = c_star_c.at[..., k].set(ck / denom)
-        d_stars_c = tuple(
-            d_star_c.at[..., k].set(
-                (d[..., k] - ak * d_star_c[..., k - 1]) / denom
-            )
-            for d, d_star_c in zip(ds, d_stars_c)
+        c_star_k = ck / denom
+        d_star_ks = tuple(
+            (dk - ak * d_prev) / denom for dk, d_prev in zip(dks, d_prevs)
         )
-        return (c_star_c, d_stars_c)
+        return (c_star_k, d_star_ks), (c_star_k, d_star_ks)
 
-    c_star, d_stars = jax.lax.fori_loop(
-        1, n, forward_body, (c_star, d_stars),
+    _, (c_rest, d_rests) = jax.lax.scan(
+        forward_body, (c0_star, d0_stars),
+        (am[1:], bm[1:], cm[1:], tuple(dm[1:] for dm in dms)),
+    )
+    c_star = jnp.concatenate([c0_star[None], c_rest], axis=0)
+    d_stars = tuple(
+        jnp.concatenate([d0[None], dr], axis=0)
+        for d0, dr in zip(d0_stars, d_rests)
     )
 
+    def backward_body(x_nexts, k_inputs):
+        c_star_k, d_star_ks = k_inputs
+        x_ks = tuple(
+            d_star_k - c_star_k * x_next
+            for d_star_k, x_next in zip(d_star_ks, x_nexts)
+        )
+        return x_ks, x_ks
+
+    x_lasts = tuple(ds_[-1] for ds_ in d_stars)
+    _, x_rests = jax.lax.scan(
+        backward_body, x_lasts,
+        (c_star[:-1], tuple(ds_[:-1] for ds_ in d_stars)), reverse=True,
+    )
     xs = tuple(
-        jnp.zeros_like(d).at[..., -1].set(d_star[..., -1])
-        for d, d_star in zip(ds, d_stars)
+        jnp.moveaxis(jnp.concatenate([xr, xl[None]], axis=0), 0, -1)
+        for xr, xl in zip(x_rests, x_lasts)
     )
-
-    def backward_body(k_rev, xs_c):
-        k = n - 2 - k_rev
-        return tuple(
-            x_c.at[..., k].set(
-                d_star[..., k] - c_star[..., k] * x_c[..., k + 1]
-            )
-            for x_c, d_star in zip(xs_c, d_stars)
-        )
-
-    xs = jax.lax.fori_loop(0, n - 1, backward_body, xs)
     return tuple(
         jax.lax.convert_element_type(x, out_dtype) for x in xs
     )

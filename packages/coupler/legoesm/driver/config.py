@@ -1894,6 +1894,18 @@ class ExperimentConfig(NamedTuple):
     clubb_gamma_coefb: float | None = None
     clubb_beta: float | None = None
     clubb_c_k10: float | None = None
+    # Two-leaf canopy solver smoothing widths (CanopyConfig.rh_cap_smoothing_
+    # width / zeta_cap_smoothing_width): the canopy-air RH <= 1 cap and the
+    # stable Monin-Obukhov zeta <= 0.5 cap are smooth mins of these widths so
+    # the canopy Newton solve has no kink.  Applied AFTER the land calibration
+    # (which rebuilds the canopy config), so a deck value always reaches the
+    # solve.  None keeps CanopyConfig's value; the production deck names both.
+    # Range: CanopyConfig.validate (one range, owned by the land package).
+    land_canopy_rh_cap_smoothing_width: float | None = None
+    land_canopy_zeta_cap_smoothing_width: float | None = None
+    # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
+    # Monin-Obukhov solve (same placement and None semantics as the widths).
+    land_canopy_most_n_iters: int | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3718,6 +3730,28 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
+        _rhw = self.land_canopy_rh_cap_smoothing_width
+        _zw = self.land_canopy_zeta_cap_smoothing_width
+        _mi = self.land_canopy_most_n_iters
+        if _rhw is not None or _zw is not None or _mi is not None:
+            if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
+                errors.append(
+                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
+                    f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
+                    "multilayer land reads them, so the value would be inert")
+            else:
+                from legoesm.land.canopy.config import CanopyConfig
+                _cc = CanopyConfig()
+                try:
+                    _cc._replace(**({} if _rhw is None else
+                                    {"rh_cap_smoothing_width": float(_rhw)}),
+                                 **({} if _zw is None else
+                                    {"zeta_cap_smoothing_width": float(_zw)}),
+                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 ).validate()
+                except ValueError as exc:
+                    errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud"):
             _v = getattr(self, _nm)

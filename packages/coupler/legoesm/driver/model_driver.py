@@ -2164,9 +2164,20 @@ class ModelDriver:
                 smoothing_passes=self.config.topo_smoothing,
                 edge_blend_strength=self.config.topo_edge_blend,
             )
+            # Under MPAS cell-partition MPI the topography smoothing is a
+            # neighbour stencil, and the rank's local mesh has no off-rank
+            # neighbours at its outer halo, so smoothing it locally gave a
+            # different surface near every partition boundary (up to 35 m at
+            # 16 ranks).  Build on the global mesh, then take this rank's cells.
+            _vl_topo = getattr(self, "_voronoi_layout", None)
             self._phis_data, self._f_land = load_real_topography(
-                self.grid, config=topo_config
+                self._grid_global if _vl_topo is not None else self.grid,
+                config=topo_config
             )
+            if _vl_topo is not None:
+                _lc = jnp.asarray(_vl_topo.partition.local_cells)
+                self._phis_data = self._phis_data[_lc]
+                self._f_land = self._f_land[_lc]
 
         # Real land-sea mask overrides the elevation-derived land fraction
         # (works with any ``topography`` setting, including "flat").
@@ -2898,10 +2909,23 @@ class ModelDriver:
                 # MPAS carries the wind as the edge-normal component on mesh
                 # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
                 # to cells/edges and projects the winds via angleEdge.
+                # Global mesh under cell-partition MPI, then this rank's cells
+                # and edges: the IC smooths phis with a neighbour stencil and
+                # adjusts p_s by the smoothing, which on the local mesh is
+                # wrong near partition boundaries (see the topography load).
+                _vl_ic0 = getattr(self, "_voronoi_layout", None)
                 carry = era5_to_mpas_carry(
-                    era5_slice, self.grid, self.sigma,
+                    era5_slice,
+                    self._grid_global if _vl_ic0 is not None else self.grid,
+                    self.sigma,
                     smoothing_passes=cfg.topo_smoothing,
                 )
+                if _vl_ic0 is not None:
+                    _lc = jnp.asarray(_vl_ic0.partition.local_cells)
+                    _le = jnp.asarray(_vl_ic0.partition.local_edges)
+                    carry = carry._replace(
+                        u=carry.u[_le], T=carry.T[_lc], p_s=carry.p_s[_lc],
+                        phis=carry.phis[_lc], q_v=carry.q_v[_lc])
             else:
                 raise NotImplementedError(
                     f"ERA5 IC not yet supported for "
@@ -3543,6 +3567,32 @@ class ModelDriver:
                 "land_soil_ice_impedance_exponent"]:
             logger.warning("  land soil ice impedance exponent set but soil "
                            "freeze/thaw is off: it has no effect")
+        # Canopy solver smoothing widths, same placement: the calibration above
+        # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
+        # value set any earlier would be discarded.
+        _w_over = {k: float(v) for k, v in (
+            ("rh_cap_smoothing_width",
+             getattr(self.config, "land_canopy_rh_cap_smoothing_width", None)),
+            ("zeta_cap_smoothing_width",
+             getattr(self.config, "land_canopy_zeta_cap_smoothing_width", None)),
+        ) if v is not None}
+        _mi = getattr(self.config, "land_canopy_most_n_iters", None)
+        if _mi is not None:
+            _w_over["most_n_iters"] = int(_mi)
+        if _w_over:
+            from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
+            if not isinstance(cfg.surface_scheme, _CanopyCfg):
+                raise ValueError(
+                    f"land canopy settings {sorted(_w_over)} set but the "
+                    f"surface scheme is {type(cfg.surface_scheme).__name__}")
+            cfg = cfg._replace(
+                surface_scheme=cfg.surface_scheme._replace(**_w_over).validate())
+        if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
+            logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
+                        "MOST iterations %d",
+                        cfg.surface_scheme.rh_cap_smoothing_width,
+                        cfg.surface_scheme.zeta_cap_smoothing_width,
+                        cfg.surface_scheme.most_n_iters)
         if _ft and getattr(self.config, "land_calibrated_physics", False):
             logger.warning("  land soil freeze/thaw ON with the calibrated land "
                            "tables, which were fitted with it OFF")
@@ -11133,6 +11183,12 @@ class ModelDriver:
             # never advance.
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            # Compiled once: eagerly it ran op-by-op every land-forcing call
+            # (~0.5 s/step at 16 ranks, res6).
+            _recon_grid = self.grid
+            _recon_cell_velocity_jit = jax.jit(
+                lambda u_edge: reconstruct_cell_velocity(u_edge, _recon_grid))
             _lml_cfg = self.physics.land_ml_cfg
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
@@ -11393,7 +11449,11 @@ class ModelDriver:
                 q_air = (_qv_tr.data[:, -1] if _qv_tr is not None
                          else jnp.zeros_like(T_air))
                 p_s = jnp.asarray(self.state.p_s.data).reshape(-1)
-                u_c, v_c = _cell_winds(self.state, self.grid, level=-1)
+                # Column model (cell winds carried): a slice.  Voronoi edge
+                # winds: the Perot reconstruction, compiled once above.
+                u_c, v_c = (_cell_winds(self.state, self.grid, level=-1)
+                            if self.state.v is not None
+                            else _recon_cell_velocity_jit(self.state.u.data[:, -1]))
                 # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
                 # ideal-gas rho at the lowest level, snow split at T_freeze.
                 # The zenith is the REAL per-cell sun (same doy/seconds the
