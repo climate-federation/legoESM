@@ -119,9 +119,19 @@ record source, state, or stabiliser choice was made.
 
 ## 5. Tests, citations, and review
 
-Verification results are added after the committed clean-tree citation and
-focused-test passes.  The required read-only Codex review was attempted and
-could not initialize in the sandbox.  Its complete verdict transcript is:
+The final focused suite reports:
+
+> 137 passed in 181.09s (0:03:01)
+
+It covers the complete receipt-citation suite, every SMT-card test, and the
+complete GM/Redi unit file.  The round citation gate finds four mapped
+compiled-source citations, zero failures, zero unmapped citations, and zero
+map-audit failures.  Shifting the horizontal-flux citation by two lines makes
+the gate print `SYMBOL-NOT-AT-LINE` and exit 1.  The independent U-face and
+V-face production plants also each print `STATUS PLANT-FIRED` and exit 1.
+
+The required read-only Codex review was attempted and could not initialize in
+the sandbox.  Its complete verdict transcript is:
 
 > WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
 >
