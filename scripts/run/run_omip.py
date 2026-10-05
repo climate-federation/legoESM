@@ -255,6 +255,8 @@ def build_iwm_config_from_args(args) -> "IWMConfig":
         power_sho_wm2=args.iwm_power_sho,
         scale_bot_m=args.iwm_scale_bot,
         scale_cri_m=args.iwm_scale_cri,
+        n2_mode=getattr(args, "iwm_n2_mode", None) or "insitu",
+        n2_eos_form=getattr(args, "iwm_n2_eos_form", None) or "seos",
     )
 
 
@@ -806,6 +808,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Enable internal wave-driven mixing (NEMO zdfiwm; "
                         "additive avt/avm through the implicit vertical "
                         "solve; requires implicit vertical mixing).")
+    p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
+                   help="N^2 the zdfiwm formula reads: insitu (legacy) or "
+                        "nemo_bn2 (NEMO rn2, zdfiwm.F90:185-211).")
+    p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
+                   help="alpha/beta for --iwm-n2-mode nemo_bn2 (ORCA1: teos10).")
     p.add_argument("--iwm-mevar", action="store_true",
                    help="zdfiwm ln_mevar: variable mixing efficiency "
                         "(ORCA1 oracle: off).")

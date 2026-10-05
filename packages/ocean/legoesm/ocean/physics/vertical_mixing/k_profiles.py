@@ -1294,10 +1294,26 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     depth_cell = depth_cell.astype(dtype)
     dz_w = dz_w.astype(dtype)
 
-    N2 = compute_N2(
-        rho, dz_w, constants_config.rho_0, g=constants_config.g,
-        n2_mode="insitu",
-    )
+    _iwm_n2 = getattr(iwm_cfg, "n2_mode", "insitu")
+    if _iwm_n2 == "insitu":
+        N2 = compute_N2(
+            rho, dz_w, constants_config.rho_0, g=constants_config.g,
+            n2_mode="insitu",
+        )
+    elif _iwm_n2 == "nemo_bn2":
+        from legoesm.ocean.eos import nemo_bn2_live_geometry
+        _t_d, _w_d, _e3w = nemo_bn2_live_geometry(
+            z_coord, state.eta.data, state.H_bathy.data)
+        N2 = compute_N2(
+            rho, dz_w, constants_config.rho_0, g=constants_config.g,
+            T_cell=T, S_cell=state.S.data, n2_mode="nemo_bn2",
+            t_depth=_t_d, w_depth=_w_d, e3w_int=_e3w,
+            n2_eos_form=iwm_cfg.n2_eos_form,
+        ).astype(dtype)
+    else:
+        raise ValueError(
+            f"Unknown IWMConfig.n2_mode={_iwm_n2!r}; expected 'insitu' or "
+            "'nemo_bn2'.")
 
     if iwm_fields is None:
         iwm_fields = uniform_iwm_forcing(iwm_cfg, H_col.shape, dtype=dtype)

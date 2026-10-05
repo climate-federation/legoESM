@@ -185,6 +185,11 @@ class IWMConfig(NamedTuple):
     power_sho_wm2: float = 1.0e-10   # uniform fallback [W/m²]
     scale_bot_m: float = 100.0       # uniform fallback [m]
     scale_cri_m: float = 100.0       # uniform fallback [m]
+    # N² fed to the wave formula: "insitu" (legacy; in-situ density contrast,
+    # carries compressibility so a neutral layer never reads N²<=0) or
+    # "nemo_bn2" (NEMO zdfiwm reads rn2 = eosbn2 bn2, zdfiwm.F90:185-211).
+    n2_mode: str = "insitu"
+    n2_eos_form: str = "seos"        # alpha/beta for nemo_bn2: seos | teos10
 
 
 class IWMForcing(NamedTuple):

@@ -7284,6 +7284,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--iwm-tsdiff", action="store_true",
                    help="zdfiwm ln_tsdiff differential T/S mixing (ORCA1: off; "
                         "raises — unsupported on the shared-K solve)")
+    p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
+                   help="N^2 the zdfiwm formula reads: insitu (legacy default; "
+                        "compressibility keeps neutral layers 'stable', so the "
+                        "1e-2 cap never engages) or nemo_bn2 (NEMO rn2, "
+                        "zdfiwm.F90:185-211).")
+    p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
+                   help="alpha/beta for --iwm-n2-mode nemo_bn2 (ORCA1: teos10).")
     p.add_argument("--iwm-forcing-file", type=str, default=None,
                    help="de Lavergne power/decay maps (zdfiwm_forcing_TRA.nc "
                         "layout; the ORCA1 INPUTS copy works).  Omit for the "
@@ -8405,6 +8412,10 @@ def main() -> int:
                          "Coriolis forward-Euler (unstable rotation).")
     if args.trd_series_box is not None and not args.trd_accumulate:
         raise SystemExit("--trd-series-box needs --trd-accumulate")
+    if (args.iwm_n2_mode is not None or args.iwm_n2_eos_form is not None) and not args.iwm:
+        raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
+    if args.iwm_n2_mode == "nemo_bn2" and args.iwm_n2_eos_form is None:
+        raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
     if args.trd_columns is not None and not args.trd_accumulate:
         raise SystemExit("--trd-columns needs --trd-accumulate")
     if args.trd_accumulate and args.grid != "tripole":
