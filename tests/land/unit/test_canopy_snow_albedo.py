@@ -542,9 +542,12 @@ def test_switch_with_layered_snow_raises():
     cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
                                surface_scheme=TwoLeafCanopyConfig(),
                                canopy_snow_masking=True, snow_scheme="layered")
-    state = init_multilayer_land_state(NCOL, cfg._replace(snow_scheme="bulk"), T_init=265.0)
+    # A consistent layered state, so the only raise path is the masking refusal
+    # (a bulk state would raise the unrelated missing-snow-layer error).
+    state = init_multilayer_land_state(NCOL, cfg, T_init=265.0)
     lp = bare_canopy_params(NCOL, canopy_structure=True)
-    with pytest.raises(ValueError, match="layered"):
+    with pytest.raises(ValueError,
+                       match="canopy_snow_masking is not supported with snow_scheme='layered'"):
         step_multilayer_land_with_diagnostics(
             state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
             land_params=lp)
