@@ -106,11 +106,13 @@ record source, state, or stabiliser choice was made.
 
 The final focused suite reports:
 
-> TEST_SUMMARY_PENDING
+> 138 passed in 172.53s (0:02:52)
 
-The round citation gate and its shifted-citation plant are recorded under the
-round evidence directory. The cumulative default receipt gate is also required
-to pass because the round edited a model file.
+The round citation gate finds four mapped citations, zero failures, zero
+unmapped citations and zero map-audit failures. The cumulative default receipt
+gate passes with 274 citations and zero unmapped citations. Shifting the
+regular divergence citation by two lines makes the round gate print
+`SYMBOL-NOT-AT-LINE` and exit 1.
 
 The required read-only Codex review was attempted after the diff and evidence
 were complete. Its complete verdict transcript is:
