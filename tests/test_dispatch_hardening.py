@@ -251,6 +251,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # raises) into step_land_with_diagnostics; step_land now only
         # delegates to it, so the guards live there.
         ("packages/land/legoesm/land/slab_land.py", "step_land_with_diagnostics"),
+        # The two-leaf canopy branch carries its own runoff_scheme raise.
+        ("packages/land/legoesm/land/slab_land.py", "_step_land_canopy"),
         # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
         ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
