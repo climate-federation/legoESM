@@ -193,8 +193,13 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
     require(raw is not None, "rung-0 card has no raw NEMO V operands")
     eta = jnp.asarray(trace["eta_mid"][1], dtype=jnp.float64)
     area = jnp.asarray(grid.area, dtype=jnp.float64)
-    u_mask = jnp.asarray(masks["u"][..., 0], dtype=jnp.float64)
-    v_mask = jnp.asarray(masks["v"][..., 0], dtype=jnp.float64)
+    # The shared helper consumes legoESM's compact faces, while the gate's
+    # scoring masks are NEMO-native.  Reuse the certified record converters;
+    # do not infer the redundant periodic/southern storage here.
+    u_mask = jnp.asarray(r97._to_model_u(
+        np.max(np.asarray(raw.umask), axis=-1)), dtype=jnp.float64)
+    v_mask = jnp.asarray(r97._to_model_v(
+        np.max(np.asarray(raw.vmask), axis=-1)), dtype=jnp.float64)
     prep = _nemo_ssh_avg_prep(
         jnp.asarray(state.H_bathy.data, dtype=jnp.float64),
         jnp.asarray(state.land_mask.data, dtype=jnp.float64),
