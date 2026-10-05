@@ -744,14 +744,16 @@ def main(argv=None) -> int:
                      != clean_arm["tendency_sha256"])
             print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
             return 1 if fired else 0
-        if args.plant.startswith(("arm.pair.", "arm.triple.")):
+        planted_arm = next((name for name in (
+            "pair", "triple", "pairwise_flux", "literal_flux")
+            if args.plant.startswith(f"arm.{name}.")), None)
+        if planted_arm is not None:
             require(report["same_stage_arms"] is not None,
                     "same-stage input plant requires --same-stage-set")
-            arm_name = "pair" if args.plant.startswith("arm.pair.") else "triple"
-            arm = report["same_stage_arms"][arm_name]
-            clean_arm = clean.get("same_stage_arms", {}).get(arm_name)
+            arm = report["same_stage_arms"][planted_arm]
+            clean_arm = clean.get("same_stage_arms", {}).get(planted_arm)
             require(arm is not None and clean_arm is not None,
-                    f"clean report has no {arm_name} arm")
+                    f"clean report has no {planted_arm} arm")
             fired = arm["tendency_sha256"] != clean_arm["tendency_sha256"]
             print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
             return 1 if fired else 0
