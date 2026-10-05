@@ -107,6 +107,7 @@ def _row(name, oracle, candidate, mask, *, plant: str | None):
 def run(root: Path, *, plant: str | None = None,
         corrected_factors: bool = False,
         divisor_arm: bool = False,
+        same_stage_set: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -375,9 +376,11 @@ def run(root: Path, *, plant: str | None = None,
                     int(np.argmax(magnitude)), magnitude.shape))
             divisor_input[divisor_plant_location] = np.nextafter(
                 divisor_input[divisor_plant_location], np.inf)
-        hook = _NEMOWSRK3TestHooks(tracer_ldf_diagnostics={
-            "divisor_thickness": jnp.asarray(divisor_input),
-        })
+        hook = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            tracer_ldf_diagnostics={
+                "divisor_thickness": jnp.asarray(divisor_input),
+            })
         arm_trace = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=hook).step(seed, dt=card.dt_s)
@@ -406,6 +409,122 @@ def run(root: Path, *, plant: str | None = None,
             "tendency_sha256": hashlib.sha256(
                 np.asarray(arm_diag["tendency"], dtype=np.float64)
                 .tobytes(order="C")).hexdigest(),
+        }
+
+    same_stage_arms = None
+    if same_stage_set:
+        baseline_rhs = next(
+            row for row in rows if row["name"] == "iso.rhs_increment")
+
+        def run_same_stage_arm(name: str, *, use_divisor: bool,
+                               use_faces: bool) -> dict:
+            divisor_input = np.asarray(nemo_thickness).copy()
+            face_u = np.asarray(iso["e3u_3d"])[..., :nlev].copy()
+            face_v = np.asarray(iso["e3v_3d"])[..., :nlev].copy()
+            plant_location = None
+            if plant == f"{name}.divisor_input":
+                support = np.asarray(masks["T"], dtype=bool)
+                magnitude = np.where(
+                    support,
+                    np.abs(np.asarray(iso["rhs_increment"])[..., :nlev]),
+                    -1.0)
+                plant_location = tuple(
+                    int(value) for value in np.unravel_index(
+                        int(np.argmax(magnitude)), magnitude.shape))
+                divisor_input[plant_location] = np.nextafter(
+                    divisor_input[plant_location], np.inf)
+            elif plant == f"{name}.face_u_input":
+                support = np.asarray(masks["u"], dtype=bool)
+                magnitude = np.where(
+                    support,
+                    np.abs(np.asarray(iso["A11"])[..., :nlev]
+                           * np.asarray(iso["dit"])[..., :nlev]), -1.0)
+                plant_location = tuple(
+                    int(value) for value in np.unravel_index(
+                        int(np.argmax(magnitude)), magnitude.shape))
+                face_u[plant_location] = np.nextafter(
+                    face_u[plant_location], np.inf)
+            elif plant == f"{name}.face_v_input":
+                support = np.asarray(masks["v"], dtype=bool)
+                magnitude = np.where(
+                    support,
+                    np.abs(np.asarray(iso["A22"])[..., :nlev]
+                           * np.asarray(iso["djt"])[..., :nlev]), -1.0)
+                plant_location = tuple(
+                    int(value) for value in np.unravel_index(
+                        int(np.argmax(magnitude)), magnitude.shape))
+                face_v[plant_location] = np.nextafter(
+                    face_v[plant_location], np.inf)
+
+            operands = {"closed_bottom_wmask": True}
+            if use_divisor:
+                operands["divisor_thickness"] = jnp.asarray(divisor_input)
+            if use_faces:
+                operands["face_thickness"] = (
+                    jnp.asarray(face_u), jnp.asarray(face_v))
+            hook = _NEMOWSRK3TestHooks(
+                stage_barotropic_output_override=external,
+                tracer_ldf_diagnostics=operands)
+            arm_trace = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord,
+                card.recipe.model_config,
+                _nemo_ws_test_hooks=hook).step(seed, dt=card.dt_s)
+            arm_diag = arm_trace.ldf_diagnostics
+            require(isinstance(arm_diag, dict),
+                    f"{name} returned no LDF diagnostics")
+            source_rows = []
+            for row_name, recorded, live, support in (
+                    ("hmsku", "hmsku", "hmsku", "u"),
+                    ("hmskv", "hmskv", "hmskv", "v"),
+                    ("A11", "A11", "A11", "u"),
+                    ("A22", "A22", "A22", "v"),
+                    ("A13", "A13", "A13", "u"),
+                    ("A23", "A23", "A23", "v"),
+                    ("zfu", "fu", "zfu", "u"),
+                    ("zfv", "fv", "zfv", "v")):
+                source_rows.append(_row(
+                    f"{name}.{row_name}", iso[recorded][..., :nlev],
+                    arm_diag[live][..., :nlev], masks[support], plant=None))
+            unchanged_rows = []
+            for row_name, support in (("dit", "u"), ("djt", "v"),
+                                      ("dkt", "T"), ("zfw_kp1", "T"),
+                                      ("zfw_top", "T")):
+                unchanged_rows.append(_row(
+                    f"{name}.unchanged.{row_name}",
+                    iso_diag[row_name][..., :nlev],
+                    arm_diag[row_name][..., :nlev], masks[support],
+                    plant=None))
+            rhs_row = _row(
+                f"{name}.rhs_increment",
+                iso["rhs_increment"][..., :nlev],
+                arm_diag["tendency"][..., :nlev], masks["T"], plant=None)
+            return {
+                "execution_regime": "production_step_jit",
+                "uses_live_divisor": use_divisor,
+                "uses_live_face_thickness": use_faces,
+                "source_rows": source_rows,
+                "unchanged_rows": unchanged_rows,
+                "rhs_row": rhs_row,
+                "fraction_of_baseline_rhs_max_removed": (
+                    1.0 - rhs_row["max_abs"] / baseline_rhs["max_abs"]),
+                "input_plant_location": plant_location,
+                "tendency_sha256": hashlib.sha256(
+                    np.asarray(arm_diag["tendency"], dtype=np.float64)
+                    .tobytes(order="C")).hexdigest(),
+            }
+
+        mask_only = run_same_stage_arm(
+            "arm.closed_bottom_wmask", use_divisor=False, use_faces=False)
+        pair = run_same_stage_arm(
+            "arm.pair", use_divisor=True, use_faces=False)
+        triple = None
+        if pair["fraction_of_baseline_rhs_max_removed"] < 0.9:
+            triple = run_same_stage_arm(
+                "arm.triple", use_divisor=True, use_faces=True)
+        same_stage_arms = {
+            "closed_bottom_wmask_control": mask_only,
+            "pair": pair,
+            "triple": triple,
         }
     oracle_fu = np.asarray(iso["fu"])[..., :nlev]
     oracle_fv = np.asarray(iso["fv"])[..., :nlev]
@@ -480,6 +599,7 @@ def run(root: Path, *, plant: str | None = None,
         "flux_family_reconstruction": flux_family_reconstruction,
         "divisor_rows": divisor_rows,
         "divisor_production_arm": divisor_production_arm,
+        "same_stage_arms": same_stage_arms,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -505,6 +625,7 @@ def main(argv=None) -> int:
     parser.add_argument("--plant")
     parser.add_argument("--corrected-factors", action="store_true")
     parser.add_argument("--divisor-arm", action="store_true")
+    parser.add_argument("--same-stage-set", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
@@ -512,6 +633,7 @@ def main(argv=None) -> int:
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
                      divisor_arm=args.divisor_arm,
+                     same_stage_set=args.same_stage_set,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
@@ -550,6 +672,18 @@ def main(argv=None) -> int:
                   f"max_abs={row['max_abs']:.16e}")
         print("live-divisor fraction removed:",
               f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
+    if report["same_stage_arms"] is not None:
+        for arm_name in ("closed_bottom_wmask_control", "pair", "triple"):
+            arm = report["same_stage_arms"][arm_name]
+            if arm is None:
+                continue
+            for row in [*arm["source_rows"], *arm["unchanged_rows"],
+                        arm["rhs_row"]]:
+                print(f"{row['name']:35s} bit={str(row['bit_exact']):5s} "
+                      f"cells={row['cells_unequal']:7d} "
+                      f"max_abs={row['max_abs']:.16e}")
+            print(f"{arm_name} fraction removed:",
+                  f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
     print(json.dumps(report["aggregate_reproduction"], sort_keys=True))
     print("first non-bit:", report["first_non_bit"])
     if args.output:
@@ -567,6 +701,17 @@ def main(argv=None) -> int:
                     "clean report has no divisor production arm")
             fired = (report["divisor_production_arm"]["tendency_sha256"]
                      != clean_arm["tendency_sha256"])
+            print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
+            return 1 if fired else 0
+        if args.plant.startswith(("arm.pair.", "arm.triple.")):
+            require(report["same_stage_arms"] is not None,
+                    "same-stage input plant requires --same-stage-set")
+            arm_name = "pair" if args.plant.startswith("arm.pair.") else "triple"
+            arm = report["same_stage_arms"][arm_name]
+            clean_arm = clean.get("same_stage_arms", {}).get(arm_name)
+            require(arm is not None and clean_arm is not None,
+                    f"clean report has no {arm_name} arm")
+            fired = arm["tendency_sha256"] != clean_arm["tendency_sha256"]
             print(f"STATUS {'PLANT-FIRED' if fired else 'PLANT-MISSED'}")
             return 1 if fired else 0
         before = {row["name"]: row for row in clean["rows"]}

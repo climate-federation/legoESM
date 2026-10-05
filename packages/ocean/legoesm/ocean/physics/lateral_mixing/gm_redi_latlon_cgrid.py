@@ -2360,6 +2360,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
     divisor_thickness: jnp.ndarray | None = None,
+    closed_bottom_wmask: bool = False,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2563,10 +2564,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # zmsku = 1/max(Σ4 wmask around the u-face vertical pair, 1)
     wm_ip1 = jnp.roll(wmask, -1, ax_x)
     wm_kp1 = jnp.roll(wmask, -1, ax_z)
-    wm_ip1_kp1 = jnp.roll(wm_ip1, -1, ax_z)
+    if closed_bottom_wmask:
+        # NEMO's deepest tracer level reads the closed jpk W level, not the
+        # surface W level.  This private discriminator prevents the periodic
+        # vertical roll from wrapping that surface mask onto the floor
+        # (traldf_iso.f90:246-249).
+        wm_kp1 = wm_kp1.at[:, :, -1].set(0.0)
+    wm_ip1_kp1 = jnp.roll(wm_kp1, -1, ax_x)
     zmsku_h = 1.0 / jnp.maximum(wm_ip1 + wm_kp1 + wm_ip1_kp1 + wmask, 1.0)
     wm_jp1 = jnp.roll(wmask, -1, ax_y)
-    wm_jp1_kp1 = jnp.roll(wm_jp1, -1, ax_z)
+    wm_jp1_kp1 = jnp.roll(wm_kp1, -1, ax_y)
     zmskv_h = 1.0 / jnp.maximum(wm_jp1 + wm_kp1 + wm_jp1_kp1 + wmask, 1.0)
 
     zA13 = -e2u[:, :, jnp.newaxis] * uslp * zmsku_h
@@ -4061,6 +4068,7 @@ def gm_redi_tracer_tendency_latlon(
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     redi_divisor_thickness_override: jnp.ndarray | None = None,
+    redi_closed_bottom_wmask_override: bool = False,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4535,7 +4543,8 @@ def gm_redi_tracer_tendency_latlon(
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
                 return_operand_diagnostics=return_redi_diagnostics,
-                divisor_thickness=redi_divisor_thickness_override)
+                divisor_thickness=redi_divisor_thickness_override,
+                closed_bottom_wmask=redi_closed_bottom_wmask_override)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
@@ -4554,7 +4563,8 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
-                divisor_thickness=redi_divisor_thickness_override)
+                divisor_thickness=redi_divisor_thickness_override,
+                closed_bottom_wmask=redi_closed_bottom_wmask_override)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             if return_redi_diagnostics:
@@ -4584,6 +4594,7 @@ def gm_redi_tracer_tendency_latlon(
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
             divisor_thickness=redi_divisor_thickness_override,
+            closed_bottom_wmask=redi_closed_bottom_wmask_override,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4598,6 +4609,7 @@ def gm_redi_tracer_tendency_latlon(
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
             divisor_thickness=redi_divisor_thickness_override,
+            closed_bottom_wmask=redi_closed_bottom_wmask_override,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus

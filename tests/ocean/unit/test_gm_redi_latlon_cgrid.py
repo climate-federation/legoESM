@@ -1590,6 +1590,33 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, divisor_thickness=divisor[..., 0])
 
+    def test_nemo_iso_lap_closed_bottom_wmask_is_exactly_scoped(self):
+        """The private discriminator closes only the deepest W-mask pair."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        _, before = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        _, after = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True, closed_bottom_wmask=True)
+        for name in ("A11", "A22", "dit", "djt", "dkt", "zfw_kp1"):
+            assert jnp.array_equal(after[name], before[name])
+        assert jnp.array_equal(after["hmsku"][..., :-1],
+                               before["hmsku"][..., :-1])
+        assert jnp.array_equal(after["hmskv"][..., :-1],
+                               before["hmskv"][..., :-1])
+        wet = np.asarray(act[..., -1], dtype=bool)
+        assert np.all(np.asarray(before["hmsku"])[..., -1][wet] == 0.25)
+        assert np.all(np.asarray(after["hmsku"])[..., -1][wet] == 0.5)
+        assert np.all(np.asarray(before["hmskv"])[..., -1][wet] == 0.25)
+        assert np.all(np.asarray(after["hmskv"])[..., -1][wet] == 0.5)
+
     def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
         """Round-88's source association is explicit and generic-safe."""
         setup = _stratified_with_meridional_tilt()
