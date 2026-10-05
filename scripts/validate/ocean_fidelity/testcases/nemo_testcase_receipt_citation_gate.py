@@ -1404,7 +1404,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
         'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16],
-    'ocean_model_latlon_cgrid.py:1468,1679': [
+    'ocean_model_latlon_cgrid.py:1468,1685': [
         'stage1_momentum_rhs_transform: object = None',
         ('tracer_zdf_trace: bool = False', 1), 2],
     'ocean_model_latlon_cgrid.py:8281-8285': [
@@ -1427,7 +1427,7 @@ CITATION_MAP = {
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
     'barotropic_latlon_cgrid.py:689-739': [
         ('def _nemo_external_mode_boundary_association(', 1),
-        ('inverse_u_post, inverse_v_post, eta,', 1), 42],
+        ('inverse_u_post, inverse_v_post, eta,', 1), 51],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
         ('!                             ! resulting flux at mid-step (not over the full domain)', 1),
         ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
