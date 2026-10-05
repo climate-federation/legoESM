@@ -12463,12 +12463,66 @@ class LatLonCGridOceanModel:
             # The zdf_baroclinic_only RHS correction below uses the identical
             # prefactor for the identical reason (dynzdf.F90:156-159).
             # Sign unchanged: raising r_eff raises the diagonal, which damps.
+            #
+            # THE DIVISOR (VORTEX_SMT round 11, lane round 223).  NEMO divides
+            # the implicit drag term by ITS OWN U/V scale factor at the bottom
+            # level, never by a two-cell average:
+            #   zwd(ji,iku) = zwd(ji,iku) - zDt_2*( rCdU_bot(ji+1,jj)
+            #      + rCdU_bot(ji,jj) )
+            #      / (e3u_3d(ji,jj,iku)*(1._wp+r3u(ji,jj,Kaa)*umask(ji,jj,iku)))
+            # (``dynzdf.f90:306``; the V twin with e3v_3d/r3v/vmask/mbkv at
+            # ``:473``; the ln_dynspg_ts barotropic re-add at ``:166``/``:168``
+            # -- all from the compiled ppsrc of the SMT-2 build
+            # VORTEX_SMT2_VEC_R8_OMIP_L1_P3).  This is the IMPLICIT form:
+            # ``dynzdf.f90:121`` calls ``zdf_drg_exp`` only under
+            # ``.NOT.ln_drgimp``, while these statements sit inside
+            # ``IF( ln_drgimp )`` / ``IF( ln_drgimp .AND. ln_dynspg_ts )``,
+            # which is the arm every card reaching this block selects.
+            #
+            # ``e3u_3d`` is the REFERENCE 3-D face thickness: ``domzgr.f90:186``
+            # and ``:201`` read it from the mesh variable ``e3u_0``, and over z
+            # partial steps that is the MIN of the two neighbouring reference T
+            # thicknesses, not their average.  ``interp_cell_to_uface(dz_cell)``
+            # (its own docstring: "simple average of the two cells sharing each
+            # lon face") therefore overstated the seamount's bottom-cell
+            # thickness by up to 134 % on 2484 of 3660 bottom U faces and
+            # under-damped the deepest cell by 2.3x (round-10 receipt S5b).
+            #
+            # TIME LEVEL: NEMO takes the stretch factor at Kaa, the AFTER level.
+            # ``state.eta`` is the operand ``dz_cell`` above is already built
+            # from (``J_cell = compute_ocean_jacobian(state.eta.data, ...)``),
+            # and on every call site that reaches this block it is the AFTER
+            # ssh -- which is exactly why ``eta_now`` exists separately for the
+            # Kmm divisors.  So the ONE variable this changes is the FACE RULE
+            # (NEMO's min-rule ``e3u_0`` with the e1e2t-weighted ``r3u`` of
+            # ``domqco.F90:219-222``), not the time level and not the operand.
+            #
+            # No new rule is written here: ``_nemo_ws_qco_stage_faces`` is the
+            # single shared assembler of ``e3u_0*(1+r3u*umask)`` that the WS-RK3
+            # stage geometry and the PE lane's wzv arm already call.
+            _drg_eta = state.eta.data
+            _drg_h_ref = compute_layer_thickness(
+                jnp.zeros_like(_drg_eta), state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            ).astype(dz_u_open.dtype)
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _drg_um3, _drg_vm3 = compute_face_masks_3d(
+                    _zc.is_active, _grid)
+                _drg_um3 = _drg_um3.astype(dz_u_open.dtype)
+                _drg_vm3 = _drg_vm3.astype(dz_v_open.dtype)
+            else:
+                _drg_um3 = jnp.asarray(u_mask_3d, dtype=dz_u_open.dtype)
+                _drg_vm3 = jnp.asarray(v_mask_3d, dtype=dz_v_open.dtype)
+            _drg_e3u, _drg_e3v, _, _ = _nemo_ws_qco_stage_faces(
+                _drg_eta, _drg_h_ref, _drg_um3, _drg_vm3, _grid)
+            _drg_e3u = _drg_e3u.astype(dz_u_open.dtype)
+            _drg_e3v = _drg_e3v.astype(dz_v_open.dtype)
             extra_diag_u = (
                 dt_mom * _r_eff_u[..., jnp.newaxis]
-                / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u)
+                / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u)
             extra_diag_v = (
                 dt_mom * _r_eff_v[..., jnp.newaxis]
-                / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v)
+                / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v)
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
                 # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
@@ -12479,13 +12533,15 @@ class LatLonCGridOceanModel:
                 # the barotropic-mode bottom cell loses ``dt_mom*r_eff
                 # /e3u * u_bt_mean`` before the solve, matching NEMO's
                 # damping direction.  Same prefactor as the diagonal above and
-                # for the same reason (zDt_2*sum == rDt*average, #1455).
+                # for the same reason (zDt_2*sum == rDt*average, #1455), and
+                # the SAME divisor: ``dynzdf.f90:166``/``:168`` write the same
+                # ``e3u_3d(iku)*(1+r3u(Kaa)*umask(iku))`` the diagonal uses.
                 u_solve_in = u_solve_in - (
                     dt_mom * _r_eff_u[..., jnp.newaxis]
-                    / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u * _u_bt_mean)
+                    / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u * _u_bt_mean)
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
-                    / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
+                    / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
         _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
