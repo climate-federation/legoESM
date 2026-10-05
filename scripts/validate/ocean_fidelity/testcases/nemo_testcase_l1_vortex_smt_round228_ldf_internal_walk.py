@@ -57,8 +57,12 @@ def _groups(path: Path) -> dict[str, np.ndarray]:
     for name, value in values.items():
         shape = tuple(parsed["groups"][name]["shape"])
         flat = np.asarray(value).reshape(-1, order="F")
-        out[name] = (_strip3(flat, *shape) if len(shape) == 3
-                     else _strip2(flat, *shape))
+        if len(shape) == 3:
+            out[name] = _strip3(flat, *shape)
+        elif len(shape) == 2:
+            out[name] = _strip2(flat, *shape)
+        else:
+            out[name] = flat.copy()
     return out
 
 
