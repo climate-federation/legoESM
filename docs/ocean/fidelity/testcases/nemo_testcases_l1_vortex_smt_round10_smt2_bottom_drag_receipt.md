@@ -292,7 +292,82 @@ only by naming it, a new configuration field, and the reference velocity
 threaded into five existing call sites without changing any existing scheme's
 result.  The registries are the measurement of that, not the argument for it.
 
-GATES_PLACEHOLDER
+**ELEVEN certified card registries: 0/50 ROWS MOVED EACH, TOTAL_MOVED_ROWS 0**,
+every first-over-bar unchanged, scored against the lane tip's own baseline
+(`phase3/round221/baseline`): VORTEX_SMT1_VEC-zps, VORTEX_SMT_VEC-zps,
+VORTEX_SMT-zps, VORTEX-zco, VORTEX_VEC-zco, VORTEX-15km-zco,
+VORTEX_VEC-15km-zco, VORTEX-10km-zco, VORTEX_VEC-10km-zco, LOCK_EXCHANGE-zco,
+OVERFLOW-zps.
+
+**GYRE certified ten-step ladder: 50 rows, 0 MOVED**, first over bar kt=3
+(T/S/u/v/ssh) unchanged against the round-221 clean run.  GYRE selects
+`ln_non_lin`, not `ln_lin`, so none of the new code executes on it — and the
+divisor statement held in section 5c is additionally inert on it by arithmetic
+(0 of 580 bottom faces differ).
+
+**GYRE from-rest certified year: NOT RE-RUN.**  This round's model change is
+additive only — a new drag law reachable only by naming it, a new
+configuration field, and a widened allow-list — and the ten-step ladder at 0
+moved rows is the measurement of that.  Per note BZ the year is required when
+PRODUCTION changes; nothing a GYRE path executes changed here.  Stated rather
+than silently skipped.  (A year run was launched and aborted on its own
+git-SHA stamp when this round's reviewer fixes were committed mid-run; it is
+not quoted as a result.)
+
+**DINO from-rest month gate**: run by `land.sh` as part of the landing, since
+the round touches `packages/`; its line is quoted with the push below.
+
+**Focused tests: 28 passed** (`tests/ocean/unit/test_nemo_vortex_smt_card.py`
+19, including the six new SMT-2 rows and the reviewer's R-3/R-4 additions;
+`tests/ocean/fidelity/test_nemo_round221_evd.py` 9, the EVD composition this
+card inherits).
+
+**Citation gate: PASS**, 0 unmapped citations, 0 failures, 0 map entries
+failing audit, after the committed diff-based re-anchor tool remapped the
+eleven files this round moved lines in.
+
+**ONE FRESH ADVERSARIAL REVIEWER: SHIP WITH FIXES.**  Codex is paused on this
+account, so DUAL review is a STATED GAP, not a silent one.  Nine findings,
+five REAL, all five taken, and three of them changed the artifact:
+
+* **R-3 (taken, real defect).**  The guard forbidding a drag law on a deck that
+  resolves `ln_drg_OFF` sat INSIDE the mini-ladder block, so it only ever
+  reached rungs SMT-1 and SMT-2; every other VORTEX card could have taken
+  `nemo_linear` with `bottom_drag_r = 0` and passed.  Hoisted one level, and a
+  test now proves it fires on VORTEX_SMT_VEC-zps and VORTEX_VEC-zco.
+* **R-5 (taken, and it was the right call).**  The measured ratios in section
+  5b had NO COMMITTED PROBE behind them — a throwaway number carrying the
+  section's whole non-vacuity argument.  The committed walk now reads the two
+  ladders' own residual files and emits them.
+* **R-6 (taken).**  Predicted-min against measured-min was an UNPAIRED
+  comparison of two extrema.  The probe now reports the measured argmin cell
+  and evaluates the prediction AT THAT CELL: (33, 16, 9), predicted 0.43278,
+  measured 0.42618 — and that face is also where the prediction is minimal, so
+  the pairing is real and the claim stands rather than being downgraded.
+* **R-8 (taken).**  Two citation line numbers were wrong in the round whose
+  headline is a citation correction: `zdfdrg.f90:259` is `SELECT CASE(ndrg)`,
+  the assignment is `:262`; `dynzdf.f90:117` is `zDt_4`, `zDt_2` is `:116`.
+  Both fixed and re-verified against the compiled source.
+* **R-4 (taken).**  Three more mutation rows in the validator test.
+* Reviewer verified sound and found NOT-REAL: the `np_lin` transcription
+  including the masking and the multiplication order (it reproduced
+  `1.0e-3*0.4 = 4.00000000000000019E-04` byte-equal to the run's echo); that
+  `bottom_drag_uc0`'s default is unreachable outside the linear branch; the
+  two-line deck diff and every namelist citation including this round's
+  correction of the brief; and that the probe's face-index convention is a
+  uniform relabelling that leaves every extremum correct.
+* One reviewer note NOT acted on and recorded instead: the round-10 NEMO
+  probe's `_bottom_level_map` docstring states the (i, i+1) convention over a
+  u-line that computes (i-1, i).  It is a comment defect in a counting
+  instrument whose histogram is convention-independent (both conventions give
+  the same multiset of face bottom levels); it is named here rather than
+  fixed in the same breath as the landing.
+
+**THREE GATES WERE ALREADY RED ON THE LANE TIP** and are untouched (none reads
+a file this round edits): `test_param_specs[shortwave_penetration.py]`,
+`test_no_inline_physics_coeffs[land/restart.py]`,
+`test_dispatch_hardening::test_no_dispatch_guard_removed`
+(`land/slab_land.py::step_land`).
 
 ## 7. ORCA2 pointer
 
