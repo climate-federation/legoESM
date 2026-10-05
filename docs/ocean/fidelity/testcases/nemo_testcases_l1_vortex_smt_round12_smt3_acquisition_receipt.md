@@ -85,6 +85,13 @@ PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:pac
 Result: **7 passed in 0.10s**.  `bash -n` on both drivers, Python bytecode
 compilation of the checker, and `git diff --check` also pass.
 
+After the citation map was committed, the combined focused suite reported
+**24 passed in 3.92s** (the seven SMT-3 controls plus all seventeen receipt-
+citation-gate tests).  The round receipt citation gate found 7 citations, 0
+unmapped, and 0 failures.  Shifting the compiled coefficient citation
+`ldftra.f90:354-390` by two lines exited **1** with
+`SYMBOL-NOT-AT-LINE`, so the control fires.
+
 ## 4. Rule-12 / Decision-43/45 table
 
 This is an acquisition-only round, so the scientific rows cannot be scored.
@@ -137,10 +144,26 @@ and quote its resolved `ocean.output` before making a physics claim.
 
 ## 7. Independent review
 
-PENDING at this draft stage.  A separate read-only `codex exec` review will
-try to refute the deck equivalence, acquisition passivity, self-describing
-format, controls, and the table above.  Its verbatim verdict and disposition
-will replace this paragraph before the receipt is final.
+The required separate command was attempted against the committed clean tree:
+
+```text
+codex exec --sandbox read-only -C <writable-clone> <adversarial review prompt>
+```
+
+It exited 1 before reading the diff.  The complete tool verdict was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+**Independent review unavailable in-sandbox.**  There is no `SHIP`, `HOLD`,
+or `DO NOT SHIP` verdict to quote, and none is invented.  Per operator note C,
+the round continues; the limitation is explicit.  Local adversarial checks
+did find and correct two fail-closed issues before finalisation: the malformed
+deck-patch extent stopped the first preflight, and the citation gate refused
+three ambiguous repeated symbols until their exact occurrences were pinned.
 
 ## 8. OPEN — round 225
 
