@@ -219,6 +219,31 @@ def run(root: Path, *, plant: str | None = None,
         add(name, iso[recorded], iso_diag[live], masks[support],
             skip_surface=name in ("iso.ah_wslp2", "iso.akz"))
 
+    # Post-hoc magnitude discriminator for the first genuine non-bit row.
+    # Replace only the A33 coefficient in the already-materialized production
+    # operands and rebuild the exact flux/divergence algebra below it.  This is
+    # deliberately labelled a reconstructed one-variable bound, not another
+    # production row.
+    ah_model = np.asarray(iso_diag["ah_wslp2_above"])
+    ah_oracle = np.asarray(iso["ah_wslp2"])[..., :nlev]
+    delta_ah_below = np.roll(ah_oracle - ah_model, -1, axis=2)
+    delta_flux_below = (
+        np.asarray(iso_diag["e1e2t"])[..., None]
+        / np.asarray(iso_diag["e3w_kp1"])
+        * delta_ah_below * np.asarray(iso_diag["qdiff_kp1"])
+        * np.asarray(iso_diag["act_below"])
+    )
+    delta_flux_above = np.roll(delta_flux_below, 1, axis=2)
+    delta_flux_above[..., 0] = 0.0
+    delta_rate = (
+        (delta_flux_above - delta_flux_below)
+        * np.asarray(iso_diag["e1e2t"])[..., None] ** -1
+        / np.asarray(iso_diag["e3t"])
+        * np.asarray(iso_diag["tmask"])
+    )
+    a33_rate_max = float(np.max(np.abs(delta_rate[masks["T"]])))
+    a33_stage_max = card.dt_s * a33_rate_max
+
     aggregate = run_stage_walk(
         root, "smt3", allow_dirty=allow_dirty, stage=3)
     aggregate_rows = {
@@ -234,6 +259,13 @@ def run(root: Path, *, plant: str | None = None,
                                "hmskv"],
             "reason": ("compiled writer lines 262-268 copy scalar "
                        "temporaries after their producing loop")},
+        "a33_one_variable_reconstruction": {
+            "execution_regime": "post_hoc_from_production_operands",
+            "max_abs_tendency_change": a33_rate_max,
+            "dt_scaled_upper_bound": a33_stage_max,
+            "fraction_of_additional_ldf_max": (
+                a33_stage_max
+                / (post["max_abs"] - pre["max_abs"]))},
         "first_non_bit": None if first is None else first["name"],
         "aggregate_reproduction": {
             "pre_ldf_max_abs": pre["max_abs"],
