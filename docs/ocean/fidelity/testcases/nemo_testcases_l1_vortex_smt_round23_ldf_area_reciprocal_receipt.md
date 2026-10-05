@@ -119,8 +119,30 @@ record source, state, or stabiliser choice was made.
 ## 4. Tests, citations, and review
 
 The direct source-boundary unit control reports `1 passed in 8.97s`. The final
-focused-suite, citation-gate, shifted-plant, and review results are recorded
-below after their fail-closed runs.
+focused suite reports:
+
+> 138 passed in 182.55s (0:03:02)
+
+The round citation gate finds four mapped citations, zero failures, zero
+unmapped citations and zero map-audit failures. The cumulative default receipt
+gate passes with 274 citations and the same three zero counts. Adding the four
+private hook lines shifted historical citations in
+`ocean_model_latlon_cgrid.py`; both the map and the default receipt were
+mechanically re-anchored by +4 below the insertion, while the one spanning
+range grew from 440 to 444 lines. Shifting the round's `domhgr.f90:155`
+citation by two lines makes the gate print `SYMBOL-NOT-AT-LINE` and exit `1`.
+
+The required read-only Codex review was attempted after the diff and evidence
+were complete. Its complete verdict transcript is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**; there is no reviewer
+`DO NOT SHIP` verdict. No physics candidate lands.
 
 ## 5. OPEN
 
