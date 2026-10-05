@@ -38,7 +38,8 @@ from scripts.validate.ocean_fidelity.testcases import (
 
 PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
           "u-fold-sign", "stored-pivot-source", "v-depth-bit",
-          "inverse-v-registry", "wrong-entry-frame", "entry-inverse-v-bit")
+          "inverse-v-registry", "wrong-entry-frame", "entry-inverse-v-bit",
+          "midpoint-v-registry", "midpoint-v-bit")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -156,6 +157,132 @@ def build_entry_inverse_v_override(oracle, *, plant: str):
         native[1][location] = np.nextafter(
             native[1][location], np.float64(np.inf))
     return np.stack([r97._to_model_v(value) for value in native])
+
+
+def midpoint_v_operand_names() -> tuple[str, ...]:
+    """Compiled dynspg_ts midpoint V-depth operand order."""
+
+    return (
+        "midpoint_ssh", "area_t", "local_area_ssh", "north_area_ssh",
+        "reference_depth_v", "reciprocal_area_v", "ssvmask",
+    )
+
+
+def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
+    """Replay and split dynspg_ts.f90:519,542-545 without a second solver."""
+
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.grids.operators_latlon_cgrid import fold_ghost_source_T
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_ssh_avg_apply,
+        _nemo_ssh_avg_prep,
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
+
+    names = list(midpoint_v_operand_names())
+    if plant == "midpoint-v-registry":
+        names[0], names[1] = names[1], names[0]
+    require(tuple(names) == midpoint_v_operand_names(),
+            "midpoint V operand registry reordered")
+
+    grid = card.recipe.grid
+    z_coord = card.recipe.z_coord
+    raw = z_coord.nemo_een_barotropic
+    require(raw is not None, "rung-0 card has no raw NEMO V operands")
+    eta = jnp.asarray(trace["eta_mid"][1], dtype=jnp.float64)
+    area = jnp.asarray(grid.area, dtype=jnp.float64)
+    u_mask = jnp.asarray(masks["u"][..., 0], dtype=jnp.float64)
+    v_mask = jnp.asarray(masks["v"][..., 0], dtype=jnp.float64)
+    prep = _nemo_ssh_avg_prep(
+        jnp.asarray(state.H_bathy.data, dtype=jnp.float64),
+        jnp.asarray(state.land_mask.data, dtype=jnp.float64),
+        grid, jnp.float64,
+    )
+    replay = _nemo_ssh_avg_apply(
+        eta, u_mask, v_mask, grid, area, prep,
+        return_literal_inverse=True, return_ssh_average=True,
+    )
+    model_depth_v = np.asarray(replay[1])
+    ssh_average_v = np.asarray(replay[5])
+    traced_depth_v = np.asarray(trace["transport_face_depth_v"][1])
+    replay_row = exact_row(model_depth_v, traced_depth_v)
+    require(replay_row["bit_exact"],
+            "midpoint V replay does not reproduce the production trace")
+
+    oracle_eta = np.asarray(oracle["j002_sshp2_mid"])
+    raw_area_t = np.asarray(
+        nemo_source_round(jnp.asarray(raw.e1t) * jnp.asarray(raw.e2t)))
+    raw_area_v = np.asarray(
+        nemo_source_round(jnp.asarray(raw.e1v) * jnp.asarray(raw.e2v)))
+    raw_hv = np.asarray(raw.hv_0)
+    raw_ssvmask = np.max(np.asarray(raw.vmask), axis=-1)
+
+    model_area_eta = np.asarray(nemo_source_round(area * eta))
+    oracle_area_eta = np.asarray(nemo_source_round(
+        jnp.asarray(raw_area_t) * jnp.asarray(oracle_eta)))
+    model_north = np.concatenate(
+        [model_area_eta[1:], np.asarray(fold_vface_row(
+            jnp.asarray(model_area_eta), grid))], axis=0)
+    fold = grid.fold
+    oracle_north = np.concatenate(
+        [oracle_area_eta[1:], np.asarray(nemo_source_round(
+            fold_ghost_source_T(jnp.asarray(raw_area_t), fold)[:, fold.perm_T]
+            * fold_ghost_source_T(jnp.asarray(oracle_eta), fold)[:, fold.perm_T]
+        ))], axis=0)
+
+    candidate = {
+        "midpoint_ssh": np.asarray(eta),
+        "area_t": np.asarray(area),
+        "local_area_ssh": model_area_eta,
+        "north_area_ssh": model_north,
+        "reference_depth_v": r97._native_v(np.asarray(prep[1])),
+        "reciprocal_area_v": r97._native_v(np.asarray(prep[3])),
+        "ssvmask": r97._native_v(np.asarray(v_mask)),
+    }
+    reference = {
+        "midpoint_ssh": oracle_eta,
+        "area_t": raw_area_t,
+        "local_area_ssh": oracle_area_eta,
+        "north_area_ssh": oracle_north,
+        "reference_depth_v": raw_hv,
+        "reciprocal_area_v": np.asarray(
+            nemo_source_round(1.0 / jnp.asarray(raw_area_v))),
+        "ssvmask": raw_ssvmask,
+    }
+    if plant == "midpoint-v-bit":
+        exact_locations = np.argwhere(
+            np.ascontiguousarray(candidate["local_area_ssh"]).view(np.uint64)
+            == np.ascontiguousarray(reference["local_area_ssh"]).view(np.uint64)
+        )
+        require(exact_locations.size > 0,
+                "midpoint-v-bit plant has no exact source cell")
+        location = tuple(map(int, exact_locations[0]))
+        planted = np.array(candidate["local_area_ssh"], copy=True)
+        planted[location] = np.nextafter(
+            planted[location], np.float64(np.inf))
+        candidate["local_area_ssh"] = planted
+
+    rows = {name: exact_row(candidate[name], reference[name]) for name in names}
+    if plant == "midpoint-v-bit":
+        require(rows["local_area_ssh"]["differing_cells"] == 1,
+                "midpoint-v-bit plant stayed green")
+        raise GateError("midpoint-v-bit plant fired")
+
+    raw_hv_model = r97._to_model_v(raw_hv)
+    reference_depth_arm = np.asarray(nemo_source_round(
+        jnp.asarray(raw_hv_model) + jnp.asarray(ssh_average_v)))
+    arm_row = exact_row(
+        r97._native_v(reference_depth_arm), oracle["j002_hvp2_e"])
+    control_row = exact_row(
+        r97._native_v(model_depth_v), oracle["j002_hvp2_e"])
+    return {
+        "operand_rows": rows,
+        "replay_passivity": replay_row,
+        "control_mid_depth_v": control_row,
+        "reference_depth_arm_mid_depth_v": arm_row,
+    }
 
 
 def run_known_answer_plant(plant: str) -> None:
@@ -331,6 +458,8 @@ def measure(
         "u": np.asarray(masks["u"][..., 0], dtype=bool),
         "v": np.asarray(masks["v"][..., 0], dtype=bool),
     }
+    midpoint_v_split = midpoint_v_operand_split(
+        card, state, control_trace, oracle, masks, plant=plant)
     coefficient_rows = {
         name: exact_row(np.asarray(trace[name][0]), oracle_coeff[name])
         for name in r98.COEFFICIENTS
@@ -462,6 +591,21 @@ def measure(
             "entry-inverse-v-bit plant stayed green",
         )
         raise GateError("entry-inverse-v-bit plant fired")
+    midpoint_rows = midpoint_v_split["operand_rows"]
+    p150_components = all(
+        midpoint_rows[name]["bit_exact"]
+        for name in (
+            "midpoint_ssh", "area_t", "local_area_ssh", "north_area_ssh",
+        )
+    )
+    p150_reference = (
+        midpoint_rows["reference_depth_v"]["differing_cells"] == 30
+        and midpoint_rows["reference_depth_v"]["maximum_absolute"] == 899.0
+        and midpoint_rows["reciprocal_area_v"]["bit_exact"]
+        and midpoint_rows["ssvmask"]["bit_exact"]
+    )
+    p150_arm = midpoint_v_split[
+        "reference_depth_arm_mid_depth_v"]["bit_exact"]
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -472,6 +616,7 @@ def measure(
         "coefficient_rows": coefficient_rows,
         "post_association_rows": post_rows,
         "boundary_scope_rows": scope_rows,
+        "midpoint_v_operand_split": midpoint_v_split,
         "baseline_first_non_bit": baseline_first,
         "arm_first_non_bit": arm_first,
         "control_first_non_bit": r129.first_nonbit(control_rows),
@@ -498,6 +643,15 @@ def measure(
                 else "UNMEASURED_PREREQUISITE_R149-P2"),
             "R149-P4": (
                 "CONFIRMED" if p149_chain_retained else "REFUTED"),
+            "R150-P1": (
+                "CONFIRMED" if p3 and p148_control_census
+                else "REFUTED"),
+            "R150-P2": "CONFIRMED" if p150_components else "REFUTED",
+            "R150-P3": "CONFIRMED" if p150_reference else "REFUTED",
+            "R150-P4": (
+                "CONFIRMED_DEPTH_ONLY" if p150_reference and p150_arm
+                else "REFUTED" if p150_reference
+                else "UNMEASURED_PREREQUISITE_R150-P3"),
         },
         "r148_control_census_reproduced": p148_control_census,
         "baseline_rows": baseline_rows,

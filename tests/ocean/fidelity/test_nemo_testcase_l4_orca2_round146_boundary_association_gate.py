@@ -75,6 +75,25 @@ def test_wrong_entry_frame_plant_refuses_vacuous_record():
             oracle, plant="wrong-entry-frame")
 
 
+def test_midpoint_v_operand_registry_is_compiled_order():
+    assert gate.midpoint_v_operand_names() == (
+        "midpoint_ssh",
+        "area_t",
+        "local_area_ssh",
+        "north_area_ssh",
+        "reference_depth_v",
+        "reciprocal_area_v",
+        "ssvmask",
+    )
+
+
+def test_midpoint_v_bit_control_is_nonvacuous():
+    reference = np.array([1.0], dtype=np.float64)
+    candidate = np.nextafter(reference, np.float64(np.inf))
+
+    assert gate.exact_row(candidate, reference)["differing_cells"] == 1
+
+
 @pytest.mark.parametrize("face,changed", [("u", (1, 0)), ("v", (0, 2))])
 def test_boundary_scope_accepts_only_registered_storage(face, changed):
     pre = np.zeros((4, 5), dtype=np.float64)
