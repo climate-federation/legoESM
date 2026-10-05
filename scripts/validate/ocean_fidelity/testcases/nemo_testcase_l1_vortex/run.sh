@@ -254,7 +254,7 @@ case "$variant" in
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
   smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
   smtflxtra | smtvectra | smt1vec | smt1vec100d | \
-  smt2vec | smt2vec100d | smt3vec | smt3vec100d | smt3vecint)
+  smt2vec | smt2vec100d | smt3vec | smt3vec100d | smt3vecint | smt3vecint2)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -477,6 +477,14 @@ case "$variant" in
         ref_name=VORTEX_SMT3_VEC_R15_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round227_smt3_ldf_internal
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round227/oracle_vortex_smt3_ldf_internal ;;
+      # Round 228 repairs only the scalar capture boundary: the six scalar
+      # tensor temporaries are copied inside the loop that produces them.
+      smt3vecint2)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R16_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round228_smt3_ldf_internal
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round228/oracle_vortex_smt3_ldf_internal ;;
     esac
     ;;
   *)
@@ -516,7 +524,7 @@ fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
-   || "$variant" == "smt3vecint" ]]; then
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
   # Round 224's stage-3 tracer boundary extends the round-218 writer by one
   # read-only post-tra_ldf dump.  Stages 1/2 keep the original 15 groups;
   # stage 3 declares and writes 17, including ldf_t/ldf_s.
@@ -574,10 +582,14 @@ else
 fi
 readonly STAGE_INSTRUMENT DYNADV_INSTRUMENT STAGE_MODULE STAGE_STUBS
 readonly STAGE_MODULE_NAME STAGE_SYMBOL STAGE_FLAG_NAME
-if [[ "$variant" == "smt3vecint" ]]; then
+if [[ "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
   LDF_SLOPE_INSTRUMENT=$here/ldfslp_r227_internal_record.patch
   LDF_ISO_INSTRUMENT=$here/traldf_iso_r227_internal_record.patch
-  LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r227_internal_record.patch
+  if [[ "$variant" == "smt3vecint2" ]]; then
+    LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r228_internal_record.patch
+  else
+    LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r227_internal_record.patch
+  fi
   LDF_MODULE=$here/vortex_r23_ldf_terms.F90
   LDF_STUBS=$here/vortex_r23_ldf_terms_syntax_stubs.F90
   LDF_FLAG_NAME=--ldf-internals
@@ -835,7 +847,7 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
            exit 67; }
   done
   if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
-     || "$variant" == "smt3vecint" ]]; then
+     || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
     grep -q "${STAGE_SYMBOL}_rhs( 'ldf'" "$dry/stprk3_stg.F90" \
       || { printf 'REFUSE: the SMT-3 tracer writer has no post-LDF boundary\n' >&2
            exit 67; }
@@ -936,7 +948,7 @@ if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
   rm -rf "$dry"; exit 67
 fi
 if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
-   || "$variant" == "smt3vecint" ]]; then
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
   for pattern in \
     '^ *ln_traldf_OFF *= *\.false\.' '^ *ln_traldf_lap *= *\.true\.' \
     '^ *ln_traldf_iso *= *\.true\.' '^ *ln_traldf_msc *= *\.true\.' \
@@ -970,7 +982,7 @@ case "$variant" in
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
   | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
   | smt1vec | smt1vec100d | smt2vec | smt2vec100d | smt3vec | smt3vec100d \
-  | smt3vecint)
+  | smt3vecint | smt3vecint2)
       want_vec='.true.'  ; want_up3='.false.' ;;
   *)  # Dispatch hardening: a variant added above but forgotten here used to
       # fall through to an unbound-variable abort.  Name it instead.
@@ -1200,7 +1212,7 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
 check_smt3_output() {  # $1 = run directory
   local dir=$1 pattern
   if [[ "$variant" != "smt3vec" && "$variant" != "smt3vec100d" \
-     && "$variant" != "smt3vecint" ]]; then
+     && "$variant" != "smt3vecint" && "$variant" != "smt3vecint2" ]]; then
     return
   fi
   grep -q 'STOP 0' "$dir/run.user.log" \
@@ -1361,7 +1373,7 @@ python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
 # guard; the record is only admissible if each guard the round relies on is
 # shown to be able to fail.
 if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
-   || "$variant" == "smt3vecint" ]]; then
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
   plants=(header field-name truncated)
 elif [[ -n "$SPGTS_INSTRUMENT" ]]; then
   plants=(header field-name truncated missing-frame)
