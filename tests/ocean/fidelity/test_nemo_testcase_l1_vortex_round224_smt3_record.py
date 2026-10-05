@@ -121,6 +121,7 @@ def _run_wrapper_with_stub_driver(tmp_path: Path, *args: str):
         """#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "$CALL_LOG"
+mkdir -p "$(dirname "$EVIDENCE")"
 if [[ " $* " == *" --run "* ]]; then
   mkdir -p "$EVIDENCE"
   case "$*" in
@@ -159,4 +160,5 @@ def test_explicit_preflight_keeps_both_arms_dry(tmp_path):
     assert result.returncode == 0, result.stderr
     assert calls == ["--variant smt3vec", "--variant smt3vec100d"]
     assert "ROUND224_SMT3_PREFLIGHT_PASS" in result.stdout
-    assert not evidence.exists()
+    assert evidence.is_dir()
+    assert list(evidence.iterdir()) == []

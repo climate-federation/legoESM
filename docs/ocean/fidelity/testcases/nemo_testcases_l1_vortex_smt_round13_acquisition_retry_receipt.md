@@ -18,9 +18,10 @@ log has only 85 lines.  Its two driver invocations end with `DRY RUN. Re-run
 with --run`, and its final line is
 `ROUND224_SMT3_PREFLIGHT_PASS .../oracle_vortex_smt3`.  There is no `makenemo`,
 `mpirun`, NEMO `STOP 0`, admission JSON, or
-`ROUND224_SMT3_RECORD_READY` line.  The round-224 evidence root also has no
-`oracle_vortex_smt3` directory: only the preregistered preflight and citation
-artifacts exist.
+`ROUND224_SMT3_RECORD_READY` line.  At the initial inspection, the round-224
+evidence root also had no `oracle_vortex_smt3` directory.  Round 225's explicit
+preflight subsequently created that empty parent, but neither `kt1_10` nor
+`day100` exists and no record or admission was produced.
 
 **RETRACTED:** “the round-224 SMT-3 acquisition ran successfully.”  What ran
 successfully was the dry source/deck preflight.  Round 224 predictions P2--P6
@@ -38,13 +39,15 @@ selection changed.
 | prediction | result | verdict |
 |---|---|---|
 | R13-P1 one-variable wrapper repair | diff changes only default/mode parsing; targets, decks, patches, admissions, formats and evidence roots are unchanged | CONFIRMED |
-| R13-P2 explicit preflight | both variants print `PREFLIGHT_OK`; final line is `ROUND224_SMT3_PREFLIGHT_PASS`; no NEMO record appears | CONFIRMED |
+| R13-P2 explicit preflight | both variants print `PREFLIGHT_OK`; final line is `ROUND224_SMT3_PREFLIGHT_PASS`; no arm/record appears, but the shared driver creates the empty parent evidence directory | **REFUTED as written**: its no-mutation falsifier fired |
 | R13-P3 acquisition still needed | no admitted record exists before or after preflight | CONFIRMED |
 | R13-P4 controls | shell syntax passes; 9 focused tests pass; citation control results are in section 5 | CONFIRMED |
 
-No failed prediction is hidden.  The first preflight attempt correctly refused
-the dirty tree before the wrapper/test commit; the clean committed-tree rerun
-is the result used above.
+R13-P2 is kept as a failed prediction.  The empty parent is harmless because
+the acquisition refuses only an existing `kt1_10` or `day100` arm without its
+admission; neither exists.  The first preflight attempt correctly refused the
+dirty tree before the wrapper/test commit; the clean committed-tree rerun is
+the result used above.
 
 ## 3. Executed control, including non-vacuity
 
@@ -53,10 +56,10 @@ executes it against a stub shared driver.  With no arguments the stub receives
 exactly `--variant smt3vec --run` followed by
 `--variant smt3vec100d --run`, produces two temporary admission markers, and
 the wrapper prints `ROUND224_SMT3_RECORD_READY`.  With `--preflight`, the stub
-receives the same variants without `--run`, creates no evidence directory, and
-the wrapper prints its preflight marker.  The no-argument assertion fails on
-the superseded wrapper, so it controls the defect rather than inspecting a
-source token.
+receives the same variants without `--run`, creates only the empty parent (the
+shared driver's measured behavior), and the wrapper prints its preflight
+marker.  The no-argument assertion fails on the superseded wrapper, so it
+controls the defect rather than inspecting a source token.
 
 The focused suite's decisive line is:
 
