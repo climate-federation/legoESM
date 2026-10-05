@@ -61,7 +61,7 @@ The pair is nevertheless not source-closed: A11/A22 are the first non-bit
 outputs in the compiled order.  NEMO multiplies its metric ratios by
 `e3u_3d*(1+r3u(Kmm)*umask)` and
 `e3v_3d*(1+r3v(Kmm)*vmask)` before it forms the now-exact mask cross terms in
-the cited `traldf_iso.f90:243-259` block.  The pair deliberately leaves those
+the cited `:243-259` block.  The pair deliberately leaves those
 face thicknesses on legoESM's ordinary path.  Therefore R19-P5 is not reached:
 90% magnitude removal alone is insufficient; the local row must also reach the
 compiled-rounding floor before any shared-card trajectory gate can run.
