@@ -40,7 +40,7 @@ dependencies = [
     "legoesm-land~=1.0.0",
     "legoesm-ice~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
-    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
     # (a uv-workspace cycle), unlike the four independent components above.
     "legoesm-coupler~=1.0.0",
@@ -235,7 +235,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N803", "N806"]
 "tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
 # ARM obs scoring: physical symbol T (temperature) locals read clearer than snake_case.
-"packages/atmosphere/legoesm/atmosphere/les_suite/arm_obs_score.py" = ["N806"]
+"packages/atmosphere/legoesm/atmosphere/_future/arm_obs_score.py" = ["N806"]
 "tests/atmosphere/les_suite/test_arm_obs_score.py" = ["N806"]
 # SCM forcing IO + ARM/SCCM loader: physical symbols T (temperature), divT (T
 # advective tendency) as args/locals read clearer than snake_case, matching the

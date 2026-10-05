@@ -723,6 +723,7 @@ def mpas_ocean_baroclinic_tendencies(
                 cd_max=float(config.bottom_drag_cdmax),
                 z0=float(config.bottom_drag_z0),
                 ke0=float(config.bottom_drag_ke0),
+                uc0=float(config.bottom_drag_uc0),
                 von_karman=constants.kappa_von_karman,
             )
             _c1 = mesh.cellsOnEdge[0]

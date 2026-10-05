@@ -1276,9 +1276,13 @@ def _block_align_edges(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
     ghost = np.ones(n_new, dtype=bool)
     ghost[pos] = False
     ghost_block = np.flatnonzero(ghost) // e_max
-    # Ghosts reference the block cell FARTHEST from the block boundary, so no
-    # other device's halo holds it (a ghost whose cell sits in a neighbour's
-    # halo becomes a halo edge there and rides every edge exchange).
+    # Ghosts reference the block cell FARTHEST from the block boundary, so on
+    # realistic blocks no other device's halo holds it (a ghost whose cell
+    # sits in a neighbour's halo becomes a halo edge there and rides every
+    # edge exchange).  Not a guarantee: when a block is shallower than the
+    # neighbours' halo depth (tiny meshes, e.g. ico2 over 4 devices) its
+    # deepest cell is still in a halo and the ghosts are exchanged — inert,
+    # only a little extra traffic.  Measured s7 @ 128: no ghost in any halo.
     coc = np.asarray(mesh.cellsOnCell)
     nb_blk = np.where(coc >= 0, np.maximum(coc, 0) // cp, -1)
     cell_blk = np.arange(n_cells) // cp

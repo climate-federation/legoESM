@@ -207,6 +207,7 @@ def compute_two_leaf_canopy_fluxes(
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
     canopy_seed: jnp.ndarray | None = None,  # (ncol, 6) warm start; see below
+    ground_emissivity: jnp.ndarray | None = None,  # (ncol,) overrides cc.epss
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -238,6 +239,9 @@ def compute_two_leaf_canopy_fluxes(
                     single-layer update; multilayer callers wrap
                     ``solve_soil_thermal``.
     dt          : time step [s].
+    ground_emissivity : optional per-column emissivity of the ground under the
+                    canopy (e.g. the snow-cover blend of snow and soil); ``None``
+                    uses the configured soil emissivity ``epss``.
 
     Returns
     -------
@@ -438,7 +442,8 @@ def compute_two_leaf_canopy_fluxes(
     def _build_bundle(Ts_bc):
         return CanopyForcingBundle(
             LAI=LAI, SZA=SZA, La=forcing.lw_down,
-            epsf=_bcast(cc.epsf), epss=_bcast(cc.epss),
+            epsf=_bcast(cc.epsf),
+            epss=_bcast(cc.epss if ground_emissivity is None else ground_emissivity),
             fSun=sw_rt.fSun,
             APAR_Sun=sw_rt.APAR_Sun, APAR_Sh=sw_rt.APAR_Sh,
             Vcmax25_Sun=sw_rt.Vcmax25_C3Sun, Vcmax25_Sh=sw_rt.Vcmax25_C3Sh,

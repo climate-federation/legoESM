@@ -85,3 +85,40 @@ def test_dtype_preserving_and_jit_parity():
         np.testing.assert_array_equal(np.asarray(jax.jit(fn)(T32)), np.asarray(out))
     f = jnp.asarray([0.0, 0.5], dtype=jnp.float32)
     assert surface_latent_heat(T32, f).dtype == jnp.float32
+
+
+def test_charged_latent_heat_dispatch():
+    """One lookup for every water-from-heat inverse: the oracle ports charge the
+    constants, everything else the Kirchhoff family; unknown schemes raise."""
+    from legoesm import constants
+    from legoesm.thermo import (
+        charged_latent_heat, latent_heat_sublimation, latent_heat_vaporization)
+    T = jnp.array([260.0, 300.0])
+    np.testing.assert_array_equal(
+        np.asarray(charged_latent_heat("large_yeager_cesm", T)), constants.L_v)
+    np.testing.assert_array_equal(
+        np.asarray(charged_latent_heat("large_yeager_cesm", T, ice=True)), constants.L_s)
+    # CLM-ML: hsub at/below freezing reference air, hvap above, either stream.
+    for ice in (False, True):
+        np.testing.assert_array_equal(
+            np.asarray(charged_latent_heat("clm_ml", T, ice=ice)),
+            np.array([constants.L_s, constants.L_v]))
+    for s in ("constant", "most", "coare3", "large_yeager", "simple_seb", "two_leaf"):
+        np.testing.assert_array_equal(np.asarray(charged_latent_heat(s, T)),
+                                      np.asarray(latent_heat_vaporization(T)))
+        np.testing.assert_array_equal(np.asarray(charged_latent_heat(s, T, ice=True)),
+                                      np.asarray(latent_heat_sublimation(T)))
+    with pytest.raises(ValueError, match="unknown surface scheme"):
+        charged_latent_heat("coare", T)
+
+
+def test_charged_latent_heat_covers_every_surface_scheme():
+    """The helper's two scheme sets are exactly the bulk laws plus the land
+    surface schemes, so a new scheme cannot reach a water inverse unclassified,
+    and no scheme is filed under both families."""
+    from legoesm.core import bulk_flux
+    from legoesm import thermo
+    land = {"simple_seb", "two_leaf", "clm_ml"}   # ExperimentConfig land_surface_scheme
+    oracle, kirchhoff = thermo._ORACLE_CONSTANT_LATENT_SCHEMES, thermo._KIRCHHOFF_LATENT_SCHEMES
+    assert not (oracle & kirchhoff)
+    assert oracle | kirchhoff == set(bulk_flux._VALID_BULK_SCHEMES) | land

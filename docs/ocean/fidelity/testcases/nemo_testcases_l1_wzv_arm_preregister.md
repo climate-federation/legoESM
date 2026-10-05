@@ -62,7 +62,7 @@ association, and (b) the SOURCE of the free-surface increment.
 
 `zad_qco_evaluation='nemo_literal'` is rejected by the model constructor
 unless `vertical_momentum_scheme='nemo_advective'`
-(`ocean_model_latlon_cgrid.py:2682-2686`), and `nemo_advective` is itself
+(`ocean_model_latlon_cgrid.py:2709-2713`), and `nemo_advective` is itself
 rejected together with `adaptive_implicit_vertadv=True` (`:2598-2606`). The
 certified L1 cards run `nemo_up3` + `adaptive_implicit_vertadv=True`
 (`nemo_testcase_recipe.py`), which is what NEMO's own RK3 flux-form lane runs

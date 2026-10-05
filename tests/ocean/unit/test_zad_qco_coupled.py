@@ -358,6 +358,6 @@ def test_the_vortex_and_gyre_cards_state_the_form_and_dino_states_the_other():
 
     for case in ("VORTEX_VEC-zco", "GYRE-zco"):
         cfg = build_nemo_testcase_card(case).recipe.model_config
-        assert cfg.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+        assert cfg.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
     assert (dino_config_for_recipe("nemo_dino_kamm_mlf")
             .nemo_first_wzv_after_ssh == "leapfrog_continuity")

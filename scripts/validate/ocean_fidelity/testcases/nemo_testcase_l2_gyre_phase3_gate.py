@@ -527,7 +527,10 @@ ORACLE_BT_SUBSTEP_NAMES = (
 )
 
 
-def read_bt_substeps(path: Path) -> dict:
+def read_bt_substeps(
+    path: Path, *, expected_dims: tuple[int, int] = DIMS[:2],
+    expected_ncycle: int = 50,
+) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=6i", handle.read(24))
@@ -545,7 +548,8 @@ def read_bt_substeps(path: Path) -> dict:
         _fields = (BT_PRE_MERGE_ORDER if version == 1
                    else ORACLE_BT_SUBSTEP_NAMES)
         require(
-            (version, kt, ncycle, nx, ny, bits) == (version, 1, 50, DIMS[0], DIMS[1], 64)
+            (version, kt, ncycle, nx, ny, bits)
+            == (version, 1, expected_ncycle, *expected_dims, 64)
             and version in (1, 2),
             f"{path}: bad header",
         )
@@ -854,6 +858,7 @@ def run(
     measure_stage3_completion=False,
     without_oracle_ene_coefficients=False,
     trajectory_only=False,
+    after_ssh_form=None,
 ) -> dict:
     scalar_math_root_identity = require_scalar_math_roots(
         root, stage2_root, stage3_root)
@@ -868,7 +873,10 @@ def run(
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+        with_first_wzv_after_ssh,
+    )
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(
@@ -909,7 +917,8 @@ def run(
     # usrdef_sbc.F90:138-145) with fix_eta_drift=False (decision 35: NEMO has
     # no global eta projection).  The gate no longer overrides it, so what it
     # certifies is what the card runs.
-    cfg = card.recipe.model_config
+    # Measurement arm only -- the card still STATES its own after-SSH form.
+    cfg = with_first_wzv_after_ssh(card.recipe.model_config, after_ssh_form)
     tke_cfg = cfg.physics.vertical_mixing.tke
     evd_cfg = cfg.physics.convection.enhanced_diffusion
     coverage_checks = {
@@ -1204,6 +1213,8 @@ def run(
         return {
             "worktree": worktree_stamp(),
             "format": "nemo-testcase-l2-gyre-phase3-trajectory-only-v2",
+            "after_ssh_form_arm": after_ssh_form,
+            "after_ssh_form_resolved": cfg.nemo_first_wzv_after_ssh,
             "case": CASE,
             "status": (
                 "AT-BAR" if first_over_bar is None
@@ -1504,6 +1515,7 @@ def run(
             card.recipe.z_coord,
             jnp.float64,
             scheme="ene",
+            grid=card.recipe.grid,
         ).items()
     }
     if ene_available:
@@ -2549,6 +2561,8 @@ def run(
     return {
         "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-phase3-v2",
+        "after_ssh_form_arm": after_ssh_form,
+        "after_ssh_form_resolved": cfg.nemo_first_wzv_after_ssh,
         "case": CASE,
         "scalar_math_root_identity": scalar_math_root_identity,
         "status": status,
@@ -2691,6 +2705,12 @@ def main(argv=None) -> int:
     parser.add_argument("--stage2-oracle-root", type=Path, default=STAGE2_ROOT)
     parser.add_argument("--stage3-oracle-root", type=Path, default=STAGE3_ROOT)
     parser.add_argument("--max-step", type=int, default=10)
+    parser.add_argument(
+        "--after-ssh-form", default=None,
+        help="measurement arm: run GYRE's certified ladder with NEMO's "
+             "first-wzv after-SSH form overridden (rk3_extrapolated | "
+             "rk3_extrapolated_carried). The card still states its own; "
+             "omitting this flag is the card.")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-state", action="store_true")
     parser.add_argument("--plant-registry", action="store_true")
@@ -2764,6 +2784,7 @@ def main(argv=None) -> int:
                 without_oracle_ene_coefficients=(
                     args.without_oracle_ene_coefficients),
                 trajectory_only=args.trajectory_only,
+                after_ssh_form=args.after_ssh_form,
             )
     except (GateError, OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

@@ -1,0 +1,34 @@
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+index c7fe59653..90a08ed11 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -1872,9 +1872,28 @@ def build_vortex_zco_card(momentum: str = "flux") -> NEMOTestcaseCard:
+     vmask_3d = np.broadcast_to(v_wet[..., None], native_3d)
+     area = np.full((_VORTEX_NJ, _VORTEX_NI), _VORTEX_DX_M * _VORTEX_DY_M)
+     metric = np.full((_VORTEX_NJ, _VORTEX_NI), _VORTEX_DX_M)
++    # dyn_cor_2D_init divides ff_f by ``e3f_0vor``, NOT by ``e3f_0``
++    # (dynspg_ts.f90:958-972 of VORTEX_VEC_R8_OMIP_L1_P3).  With the deck's
++    # resolved nn_e3f_typ = 0 (namelist_ref:1072, not overridden by
++    # namelist_cfg) that array is the four surrounding T cells' masked
++    # thickness divided by FOUR -- by four, not by the number of wet cells,
++    # which is the nn_e3f_typ = 1 branch -- so at a vertex with a dry
++    # neighbour it is a FRACTION of e3t, and the frozen barotropic Coriolis
++    # coefficient there is correspondingly larger
++    # (dynvor.f90:896-901).  The "insure e3f_0vor /= 0" sweep then restores
++    # e3t at a fully dry vertex (dynvor.f90:917-920).  Carrying the plain
++    # e3t here instead put the whole closed-box boundary ring's coefficients
++    # at 3/4 of NEMO's, which is round 197's measured owner.  NEMO's own
++    # ((a+b)+(c+d)) association is kept although every e3t on this flat zco
++    # card is the same number.
++    _e3f_0vor = 0.25 * (
++        (np.roll(tmask, -1, axis=0) * thickness
++         + np.roll(np.roll(tmask, -1, axis=0), -1, axis=1) * thickness)
++        + (tmask * thickness + np.roll(tmask, -1, axis=1) * thickness))
++    _e3f_0vor = np.where(_e3f_0vor == 0.0, thickness, _e3f_0vor)
+     operands = NemoEENBarotropicOperands(
+         ff_f=np.asarray(grid.ff_f),
+-        e3u_0=thickness, e3v_0=thickness, e3f_0=thickness,
++        e3u_0=thickness, e3v_0=thickness, e3f_0=_e3f_0vor,
+         umask=umask_3d, vmask=vmask_3d,
+         fmask=fmask, fe3mask=fe3mask,
+         hu_0=_VORTEX_H_M * u_wet,

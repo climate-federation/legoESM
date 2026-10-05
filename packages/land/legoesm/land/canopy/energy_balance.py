@@ -534,7 +534,7 @@ def soil_surface_evap_resistance(
 
 
 # ---------------------------------------------------------------------------
-# Soil energy balance — BT
+# Soil energy balance (shared by the BT and PM leaf pathways)
 # ---------------------------------------------------------------------------
 
 @functools.partial(jax.jit, static_argnames=("le_cap_mode",))
@@ -553,7 +553,11 @@ def soil_energy_balance_bt(
     ALW_soil: jax.Array,
     le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
-    """Soil energy balance with prescribed skin temperature (BT).
+    """Soil energy balance with prescribed skin temperature (BT and PM).
+
+    With ``Ts`` prescribed, the Penman-Monteith quadratic for ``Ts`` is not needed,
+    so PM and BT coincide at the soil level; the solver calls this for both
+    ``LE_module`` values (they still differ on the leaf pathway).
 
     The soil LE is also energy-capped (default soft).  With ``Ts`` PRESCRIBED the
     humidity-gradient soil evaporation is not energy-constrained — a hot prescribed
@@ -599,60 +603,6 @@ def soil_energy_balance_bt(
     LE = apply_le_cap(LE, Rn, le_cap_mode)
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     # G closes the surface energy budget as a residual — positive into soil.
-    G  = Rn - LE - H
-    return Rn, LE, H, G
-
-
-# ---------------------------------------------------------------------------
-# Soil energy balance — PM
-# ---------------------------------------------------------------------------
-
-@functools.partial(jax.jit, static_argnames=("le_cap_mode",))
-def soil_energy_balance_pm(
-    Ts: jax.Array,
-    Tc: jax.Array,
-    q_s: jax.Array,
-    q_c: jax.Array,
-    lam: jax.Array,
-    rhoa: jax.Array,
-    Cp: jax.Array,
-    rah_soil: jax.Array,
-    raw_soil: jax.Array,
-    fStress: jax.Array,
-    ASW_soil: jax.Array,
-    ALW_soil: jax.Array,
-    le_cap_mode: str = "soft",
-) -> tuple[jax.Array, ...]:
-    """Soil energy balance with prescribed skin temperature (PM).
-
-    With ``Ts`` prescribed by the caller, the second-order Penman-Monteith
-    quadratic that originally solved for ``Ts`` is no longer needed — LE
-    and H follow from explicit bulk-transfer formulas.  The PM variant is
-    therefore numerically identical to the BT variant at the soil level;
-    the dispatch is kept for API symmetry with the leaf pathway where PM
-    and BT still differ.
-
-    Returns
-    -------
-    Rn_soil, LE_soil, H_soil, G
-    """
-    Rn = ASW_soil + ALW_soil
-    # Soil evaporation — BETA form: ``fStress`` (soil-evaporation efficiency)
-    # times the below-canopy aerodynamic conductance, g_soil = fStress/raw_soil.
-    # Expressing fStress as a multiplier (not a 1/fStress dryness resistance)
-    # keeps the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0).
-    # NOTE on the stress variable: the caller supplies ``fStress`` = the soil
-    # pore RELATIVE HUMIDITY h_r = exp(psi_top g / (R_v T)) (Kelvin eq.) from the
-    # PROGNOSTIC top-layer matric potential — so soil evaporation is governed by
-    # the fast-drying SURFACE, not the root zone.  The beta form (vs the alpha
-    # sub-saturated-surface q_surf=h_r*q_s) is used deliberately: with legoESM's
-    # PROGNOSTIC skin T the alpha form drives excessive condensation (LE<0) onto a
-    # dry surface and destabilises the surface energy balance; beta bounds LE->0
-    # as h_r->0 (DifferBESS can use alpha because it PRESCRIBES Ts).
-    g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
-    LE = lam * rhoa * (q_s - q_c) * g_soil
-    LE = apply_le_cap(LE, Rn, le_cap_mode)
-    H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     G  = Rn - LE - H
     return Rn, LE, H, G
 

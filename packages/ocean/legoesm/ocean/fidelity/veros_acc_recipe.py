@@ -575,7 +575,7 @@ def build_acc_state(grid: LatLonGrid,
                 # (GeometricConfig, Torres et al. 2025 Appendix E), NOT the
                 # Eden-Greatbatch specific-energy floor e_min [m^2/s^2]. Flat-bottom
                 # ACC ⇒ H = H_max on wet columns. The step writes units "m^3/s^2"
-                # (ocean_model_latlon_cgrid.py:1950); Field.units is static pytree
+                # (ocean_model_latlon_cgrid.py:1976); Field.units is static pytree
                 # metadata, so a seed/step mismatch breaks the jax.lax.scan
                 # constant-carry on the FIRST step.
                 eke0 = eke_cfg.geometric.e0_per_depth * H_max * lm

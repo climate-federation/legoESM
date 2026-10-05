@@ -307,6 +307,59 @@ def test_een_pre_step_matches_substep_zero_live_term():
     assert float(np.max(np.abs(np.asarray(cu)))) > 0.0
 
 
+def test_een_pre_step_takes_the_carried_barotropic_velocity():
+    """``entry_barotropic_velocity=`` must REPLACE the reduction, not be ignored.
+
+    NEMO hands ``dyn_cor_2D`` the carried external mode ``puu_b(:,:,Kmm)``
+    at ``dynspg_ts.f90:292`` -- the same array the substep loop is seeded
+    from at ``dynspg_ts.F90:484-500`` -- and never re-reduces the 3-D
+    velocity there.  This pins both halves: the supplied pair IS what the
+    operator sees, and it is NOT the same answer as the reduction (so a
+    kwarg that were silently dropped would turn this test red).
+    """
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _build_een_barotropic_inputs,
+        barotropic_coriolis_een_pre_step,
+        een_barotropic_coriolis,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+    setup = build_silvestri_baroclinic_jet_setup(
+        n_lat=24, n_lon=16, scheme="W9V", nlev=4,
+        config=SilvestriJetConfig(), stabilize=False)
+    grid = ensure_geometry(setup.grid)
+    st = setup.initial_state
+    h_bathy = st.H_bathy.data.astype(jnp.float64)
+    mask = st.land_mask.data.astype(jnp.float64)
+    um = st.u_mask.data.astype(jnp.float64)
+    vm = st.v_mask.data.astype(jnp.float64)
+    h_k = compute_layer_thickness(
+        jnp.zeros_like(h_bathy), h_bathy, setup.z_coord,
+        min_water_column_m=setup.model_config.min_water_column_m)
+    nlat, nlon, nlev = h_k.shape
+    rng = np.random.default_rng(7)
+    u3 = jnp.asarray(rng.standard_normal((nlat, nlon + 1, nlev))) * um[..., None]
+    v3 = jnp.asarray(rng.standard_normal((nlat + 1, nlon, nlev))) * vm[..., None]
+    carried_u = jnp.asarray(rng.standard_normal((nlat, nlon + 1))) * um
+    carried_v = jnp.asarray(rng.standard_normal((nlat + 1, nlon))) * vm
+    mwc = jnp.asarray(setup.model_config.min_water_column_m, dtype=jnp.float64)
+    cu, cv = barotropic_coriolis_een_pre_step(
+        u3, v3, h_k, grid, mask, um, vm, mwc, jnp.float64,
+        entry_barotropic_velocity=(carried_u, carried_v))
+    pre = _build_een_barotropic_inputs(h_k, grid, mask, um, vm, jnp.float64)
+    cu_ref, cv_ref = een_barotropic_coriolis(carried_u, carried_v, pre)
+    np.testing.assert_allclose(np.asarray(cu), np.asarray(cu_ref),
+                               rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(cv), np.asarray(cv_ref),
+                               rtol=0, atol=0)
+    # NON-VACUITY: the carried pair gives a DIFFERENT answer from the
+    # reduction the old code used, so ignoring the kwarg could not pass.
+    cu_red, _ = barotropic_coriolis_een_pre_step(
+        u3, v3, h_k, grid, mask, um, vm, mwc, jnp.float64)
+    assert float(np.max(np.abs(np.asarray(cu) - np.asarray(cu_red)))) > 0.0
+    assert float(np.max(np.abs(np.asarray(cu)))) > 0.0
+
+
 def test_explicit_ab2_config_gates_in_substep_coriolis():
     """The §5 faithful stack wires coriolis_scheme=explicit_ab2 (=> term off)."""
     r = build_silvestri_baroclinic_jet_setup(
@@ -853,20 +906,29 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
         _nemo_literal_een_coefficients,
         een_barotropic_coriolis,
     )
-    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+    from legoesm.ocean.vertical import (
+        NemoEENBarotropicOperands,
+        nemo_e3f_0vor_from_tmask,
+    )
 
     rng = np.random.default_rng(122628)
     ny, nx, nz = 5, 8, 6
     shape2, shape3 = (ny, nx), (ny, nx, nz)
     e3u = 5.0 + rng.random(shape3)
     e3v = 6.0 + rng.random(shape3)
-    e3f = 7.0 + rng.random(shape3)
     ones3 = np.ones(shape3)
+    # dyn_cor_2D_init divides by dyn_vor_init's e3f_0vor, which the shared
+    # builder now derives from the mesh (dynvor.f90:897); hand it the mesh
+    # and take the frozen array it builds, so this test still pins the
+    # coefficient arithmetic and not a stand-in for that array.
+    e3t0 = 7.0 + rng.random(shape3)
+    e3f = np.asarray(nemo_e3f_0vor_from_tmask(
+        jnp.asarray(e3t0), jnp.asarray(ones3), jnp.asarray(e3t0)))
     metric = lambda offset: offset + rng.random(shape2)
     raw = NemoEENBarotropicOperands(
         ff_f=jnp.asarray(1.0e-4 * rng.normal(size=shape2)),
         e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
-        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        e3f_0=jnp.asarray(e3t0), umask=jnp.asarray(ones3),
         vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
         fe3mask=jnp.asarray(ones3),
         hu_0=jnp.asarray(e3u.sum(axis=-1)),
@@ -877,7 +939,9 @@ def test_nemo_literal_een_builder_jit_gradient_and_face_mapping():
         e1v=jnp.asarray(metric(50.0)), e2v=jnp.asarray(metric(60.0)),
         e1f=jnp.asarray(metric(70.0)), e2f=jnp.asarray(metric(80.0)),
     )
-    z = SimpleNamespace(nemo_een_barotropic=raw)
+    z = SimpleNamespace(nemo_een_barotropic=raw,
+                        nemo_e3t_0=jnp.asarray(e3t0),
+                        is_active=jnp.asarray(ones3))
     eta = jnp.asarray(0.1 * rng.normal(size=shape2))
     ua_native = jnp.asarray(rng.normal(size=shape2))
     va_native = jnp.asarray(rng.normal(size=shape2))
@@ -941,24 +1005,30 @@ def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         _nemo_literal_een_coefficients,
     )
-    from legoesm.ocean.vertical import NemoEENBarotropicOperands
+    from legoesm.ocean.vertical import (
+        NemoEENBarotropicOperands,
+        nemo_e3f_0vor_from_tmask,
+    )
 
     rng = np.random.default_rng(169902)
     ny, nx, nz = 4, 7, 5
     shape2, shape3 = (ny, nx), (ny, nx, nz)
     e3u = 2.0 + rng.random(shape3)
     e3v = 3.0 + rng.random(shape3)
-    e3f = 4.0 + rng.random(shape3)
+    ones3 = np.ones(shape3)
+    e3t0 = 4.0 + rng.random(shape3)
+    # Same as above: e3f here is dyn_vor_init's frozen e3f_0vor.
+    e3f = np.asarray(nemo_e3f_0vor_from_tmask(
+        jnp.asarray(e3t0), jnp.asarray(ones3), jnp.asarray(e3t0)))
     ff = 1.0e-4 * rng.normal(size=shape2)
     e1u = 10.0 + rng.random(shape2)
     e1v = 11.0 + rng.random(shape2)
     e2u = 12.0 + rng.random(shape2)
     e2v = 13.0 + rng.random(shape2)
-    ones3 = np.ones(shape3)
     raw = NemoEENBarotropicOperands(
         ff_f=jnp.asarray(ff),
         e3u_0=jnp.asarray(e3u), e3v_0=jnp.asarray(e3v),
-        e3f_0=jnp.asarray(e3f), umask=jnp.asarray(ones3),
+        e3f_0=jnp.asarray(e3t0), umask=jnp.asarray(ones3),
         vmask=jnp.asarray(ones3), fmask=jnp.asarray(ones3),
         fe3mask=jnp.asarray(ones3),
         hu_0=jnp.asarray(e3u.sum(axis=-1)),
@@ -969,7 +1039,9 @@ def test_nemo_literal_ene_coefficients_match_source_recurrence_and_red_scale():
         e1v=jnp.asarray(e1v), e2v=jnp.asarray(e2v),
         e1f=jnp.ones(shape2), e2f=jnp.ones(shape2),
     )
-    z = SimpleNamespace(nemo_een_barotropic=raw)
+    z = SimpleNamespace(nemo_een_barotropic=raw,
+                        nemo_e3t_0=jnp.asarray(e3t0),
+                        is_active=jnp.asarray(ones3))
     actual = {
         name: np.asarray(value)
         for name, value in _nemo_literal_een_coefficients(

@@ -16,7 +16,7 @@ physics and uses no new oracle stream.
 ## Ordered operand ladder
 
 The capture is at
-`ocean_model_latlon_cgrid.py:7582-7680`, immediately before
+`ocean_model_latlon_cgrid.py:7687-7785`, immediately before
 `implicit_vertical_diffusion_ocean_momentum_dispatch`. The reference follows
 the committed `zdf_chain_end.py:314-413` construction and NEMO
 `dynzdf.F90:137-214,305-371` in this order:

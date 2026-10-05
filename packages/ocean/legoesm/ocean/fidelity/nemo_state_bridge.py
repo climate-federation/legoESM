@@ -1032,7 +1032,7 @@ def bridge_before_state_topo(
     # NEMO-convention quantity ``dino.py``/``nemo_recipe.py`` negate before
     # storing.  Without the matching negation, ``_leapfrog_step``'s
     # ``barotropic_forcing_centred`` average (``0.5*(state.tau_x_prev +
-    # surface_forcing.tau_x)``, ocean_model_latlon_cgrid.py:2754) mixes
+    # surface_forcing.tau_x)``, ocean_model_latlon_cgrid.py:2780) mixes
     # opposite-sign-convention operands: measured corr(tau_x_prev, tau_x_now)
     # = -0.98 on the DINO y5 restart before this fix, collapsing the
     # centred average to near-zero at 2/3 of wet u-faces (own-RMS ratio

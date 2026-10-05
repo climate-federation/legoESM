@@ -176,6 +176,32 @@ def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
     assert bool(jnp.all(out.canopy_x[:, 0] < _COLD_MAX))
 
 
+def test_a_failed_pass_does_not_move_the_soil_boundary(monkeypatch):
+    """The soil callback returns a WARMER soil than the boundary (so a relaxation
+    step would move it); a pass that did not converge must leave the boundary
+    where it was, and the first converged pass must move it."""
+    import legoesm.land.surface_scheme.two_leaf_canopy as tl
+    seen_Ts = []
+
+    def fake(x0, bun):
+        ok = x0[0] < _COLD_MAX
+        z = jnp.zeros((), x0.dtype)
+        return (x0, jnp.array(1), ok, z, z, z, z)
+
+    def counted(*a, **k):
+        seen_Ts.append(a[1].Ts_bc)
+        return jax.vmap(fake)(*a)
+
+    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
+    seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
+    _canopy_call(seed_arr=seed, soil_offset=5.0)
+    assert len(seen_Ts) >= 3
+    # pass 0 (warm seed) failed everywhere: pass 1 sees the same boundary
+    assert float(jnp.max(jnp.abs(seen_Ts[1] - seen_Ts[0]))) == 0.0
+    # pass 1 (cold) converged: pass 2 sees a moved boundary
+    assert float(jnp.min(seen_Ts[2] - seen_Ts[1])) > 0.0
+
+
 def test_acceptance_is_the_last_pass(monkeypatch):
     """Converged on pass 0 only: cached, but the call reports NOT converged."""
     out, seen_G, _ = _stub_run(monkeypatch, None, converge_on_passes={0})

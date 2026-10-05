@@ -133,6 +133,7 @@ def compute_vertical_K_profiles(
     tke_bottom_level=None,
     n2_tracers_before=None,
     eta_now=None,
+    seos_cfg=None,
     tke_p_sh2=None,
     tke_n2_bundle=None,
     return_tke_statement_trace: bool = False,
@@ -426,13 +427,25 @@ def compute_vertical_K_profiles(
         K_conv, A_conv = _enhanced_diffusion_K(_evd_state, z_coord, conv,
                                                eos_fn=eos_fn,
                                                before_tracers=_evd_before,
-                                               cc=physics_config.constants)
+                                               cc=physics_config.constants,
+                                               seos_cfg=seos_cfg)
+        # NEMO zdfevd REPLACES the assembled coefficient where the trigger
+        # fires (zdfevd.f90:107-110, called at zdfphy.f90:359 AFTER the
+        # background/closure copy at :348-351); legoESM's historical
+        # composition ADDS.  The card states which (decision 94).
+        from legoesm.ocean.physics.convection.enhanced_diffusion import (
+            compose_evd_coefficient, resolve_evd_composition,
+        )
+        _evd_mode = resolve_evd_composition(_ed)
         # Convection enhances tracer diffusivity (convective_κz). Under
         # nemo_max_floor the EVD stable-branch background (K_bg) folds into
         # the SAME max as every other background (a no-op once K_v_total
         # already >= K_bg); the unstable branch's large K_conv still fires
         # via the max (unaffected — EVD only replaces where N²<0).
-        if _nemo_floor:
+        if _evd_mode == "nemo_replace":
+            K_v_total = compose_evd_coefficient(
+                K_v_total, K_conv, _evd_mode, convective=_ed.K_conv)
+        elif _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_conv)
         else:
             K_v_total = K_v_total + K_conv
@@ -443,7 +456,13 @@ def compute_vertical_K_profiles(
         # When KPP is off, apply A_conv so the explicit/implicit equivalence
         # holds for the constant + convection composition.
         if vmix.scheme != "kpp":
-            if _nemo_floor:
+            if _evd_mode == "nemo_replace":
+                # nn_evdm: nu_conv is 0.0 (zdfevd.f90:121 leaves avm alone)
+                # or exactly rn_evd (:133-135); resolve_evd_composition
+                # refuses anything between.
+                A_v_total = compose_evd_coefficient(
+                    A_v_total, A_conv, _evd_mode, convective=_ed.nu_conv)
+            elif _nemo_floor:
                 A_v_total = jnp.maximum(A_v_total, A_conv)
             else:
                 A_v_total = A_v_total + A_conv
@@ -1208,7 +1227,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
                           eos_fn=None, before_tracers=None,
-                          cc: ConstantsConfig = ConstantsConfig()):
+                          cc: ConstantsConfig = ConstantsConfig(),
+                          seos_cfg=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -1261,6 +1281,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
         t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
+        seos_cfg=seos_cfg,
         g=cc.g, rho_ref=cc.rho_0,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
@@ -1288,6 +1309,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
             t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
+            seos_cfg=seos_cfg,
             g=cc.g, rho_ref=cc.rho_0,
         )
         K = jnp.maximum(K, K_b)
@@ -1321,6 +1343,17 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     )
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
+    # Validated at routine entry on the STATIC config, before any operand is
+    # read: a configuration that loads real de Lavergne power maps must never
+    # fall through to the uniform constant-power defaults, which are different
+    # physics and would go unnoticed.
+    if iwm_fields is None and getattr(iwm_cfg, "require_forcing_maps", False):
+        raise ValueError(
+            "IWMConfig.require_forcing_maps=True but no IWMForcing maps "
+            "reached iwm_K_profile.  This configuration reads real "
+            "internal-wave power maps; the uniform constant-power fallback "
+            "is different physics, so it is refused.  Thread the maps "
+            "through the model's iwm_forcing argument.")
     constants_config = physics_config.constants
     T = state.T.data
     dtype = T.dtype
