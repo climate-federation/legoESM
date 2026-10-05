@@ -42,9 +42,10 @@ parser, operator, stage harness, record, or configuration field.
   If none reaches the floor, no statement or landing is claimed.
 * **R22-P4 — controlled production plants.** Every arm changes only the private
   evaluation selector. zfu/zfv and all upstream controls stay bit-exact. A
-  one-ULP change to the exact U flux and an independent change to the exact V
-  flux each alter the full-step tendency digest, print `STATUS PLANT-FIRED`,
-  and exit nonzero. A moved upstream row or missed plant invalidates the result.
+  one-ULP change to the U-face thickness input and an independent change to the
+  V-face thickness input each make its exact flux non-bit, alter the full-step
+  tendency digest, print `STATUS PLANT-FIRED`, and exit nonzero. A moved
+  upstream row or missed plant invalidates the result.
 * **R22-P5 — landing discipline.** Only an arm that closes the RHS and is
   NEMO's cited statement enters the complete shared-card gates: both SMT cards,
   all six flat VORTEX cards, LOCK_EXCHANGE, OVERFLOW, the certified 954-row GYRE
