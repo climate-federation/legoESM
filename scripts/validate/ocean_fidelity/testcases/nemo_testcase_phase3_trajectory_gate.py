@@ -77,6 +77,9 @@ DEFAULT_ORACLE_ROOTS = {
     "VORTEX_SMT2_VEC-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
         "round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10"),
+    "VORTEX_SMT3_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/"
+        "oracle_vortex_smt3/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate

@@ -229,11 +229,13 @@ def test_smt1_geometry_and_initial_state_are_the_smt0_ones():
 
 def test_smt1_is_vector_only_and_the_rung_dispatch_is_fail_closed():
     with pytest.raises(ValueError, match="mini-ladder rung"):
-        build_vortex_smt_zps_card("vector", "smt3")
+        build_vortex_smt_zps_card("vector", "smt4")
     with pytest.raises(ValueError, match="VECTOR deck only"):
         build_vortex_smt_zps_card("flux", "smt1")
     with pytest.raises(ValueError, match="VECTOR deck only"):
         build_vortex_smt_zps_card("flux", "smt2")
+    with pytest.raises(ValueError, match="VECTOR deck only"):
+        build_vortex_smt_zps_card("flux", "smt3")
 
 
 def test_smt1_validator_refuses_a_card_that_drops_a_rung0_value():
@@ -449,6 +451,48 @@ def test_smt2_geometry_and_initial_state_are_the_smt1_ones():
         np.testing.assert_array_equal(
             np.asarray(getattr(base.recipe.initial_state, name).data),
             np.asarray(getattr(card.recipe.initial_state, name).data))
+
+
+def test_smt3_card_adds_only_rung0_lateral_tracer_diffusion():
+    """Decision 93: SMT-3 is SMT-2 plus namtra_ldf, and nothing else."""
+    base = build_nemo_testcase_card("VORTEX_SMT2_VEC-zps")
+    card = build_nemo_testcase_card("VORTEX_SMT3_VEC-zps")
+    cfg, base_cfg = card.recipe.model_config, base.recipe.model_config
+
+    moved = {name for name in cfg._fields
+             if getattr(cfg, name) != getattr(base_cfg, name)}
+    assert moved == {"gm_redi"}, moved
+    gm = cfg.gm_redi
+    assert gm is not None
+    assert (gm.kappa_GM, gm.kappa_Redi, gm.S_max) == (0.0, 270.0, 0.01)
+    assert gm.slope_scheme == "nemo_iso_lap"
+    assert gm.slope_positions == "nemo_native"
+    assert gm.slope_limit == "nemo_cap"
+    assert gm.msc_stabilize is True
+    assert gm.implicit_K33 is True
+    assert gm.kappa_redi_horizontal_evaluation == "nemo_metric_literal"
+    assert gm.kappa_redi_diffusive_velocity == 0.018
+
+    z0, z1 = base.recipe.z_coord, card.recipe.z_coord
+    for name in ("h_partial", "bottom_level", "is_active"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(z0, name)), np.asarray(getattr(z1, name)))
+    for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(base.recipe.initial_state, name).data),
+            np.asarray(getattr(card.recipe.initial_state, name).data))
+
+
+def test_smt3_validator_refuses_a_dropped_rung0_ldf_value():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        validate_nemo_testcase_card,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT3_VEC-zps")
+    cfg = card.recipe.model_config
+    bad = cfg._replace(gm_redi=cfg.gm_redi._replace(msc_stabilize=False))
+    with pytest.raises(ValueError, match="msc_stabilize"):
+        validate_nemo_testcase_card(card._replace(
+            recipe=card.recipe._replace(model_config=bad)))
 
 
 def test_smt2_implicit_drag_divides_by_nemos_bottom_face_thickness():
