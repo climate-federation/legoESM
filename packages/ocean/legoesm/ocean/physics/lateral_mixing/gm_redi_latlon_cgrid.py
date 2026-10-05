@@ -2363,6 +2363,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     divisor_thickness: jnp.ndarray | None = None,
     closed_bottom_wmask: bool = False,
     horizontal_flux_evaluation: str = "vectorized",
+    area_reciprocal: jnp.ndarray | None = None,
+    area_reciprocal_evaluation: str = "vectorized",
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2467,6 +2469,15 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
             "'nemo_literal_differences', 'nemo_literal_horizontal_sum', "
             "'nemo_literal_flux_sum' or 'nemo_literal_divergence', got "
             f"{horizontal_flux_evaluation!r}")
+    if area_reciprocal_evaluation not in ("vectorized", "nemo_stored"):
+        raise ValueError(
+            "area_reciprocal_evaluation must be 'vectorized' or "
+            f"'nemo_stored', got {area_reciprocal_evaluation!r}")
+    if (area_reciprocal is not None
+            and area_reciprocal_evaluation != "vectorized"):
+        raise ValueError(
+            "area_reciprocal and a non-vectorized "
+            "area_reciprocal_evaluation are mutually exclusive")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2815,7 +2826,20 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
     zfw_top = jnp.roll(zfw_kp1, +1, ax_z)            # flux at interface ABOVE cell k
     zfw_top = zfw_top.at[:, :, 0].set(0.0)           # surface flux = 0
-    r1_e1e2t = 1.0 / (e1t * e2t)
+    if area_reciprocal is not None:
+        r1_e1e2t = jnp.asarray(area_reciprocal, dtype=dtype)
+        if r1_e1e2t.shape != e1t.shape:
+            raise ValueError(
+                "area_reciprocal must have the tracer-cell horizontal "
+                f"shape {e1t.shape}, got {r1_e1e2t.shape}")
+    elif area_reciprocal_evaluation == "nemo_stored":
+        # domhgr.f90:155 stores e1e2t first, then its reciprocal. Retain both
+        # assignments as compiled source-rounding boundaries for the private
+        # production-step discriminator.
+        r1_e1e2t = nemo_source_round(
+            1.0 / nemo_source_round(e1t * e2t))
+    else:
+        r1_e1e2t = 1.0 / (e1t * e2t)
     e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(
         divisor_thickness, dtype=dtype)
     if e3t_divisor.shape != q.shape:
@@ -2874,6 +2898,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "vmsku": zmsku_w, "vmskv": zmskv_w, "ahu_w": zahu_w,
                 "ahv_w": zahv_w, "A31": zA31, "A32": zA32,
                 "zfw_top": zfw_top, "tendency": tend,
+                "r1_e1e2t": r1_e1e2t,
             })
             diagnostics["zfu_operands"] = {
                 # NOTE: face-MASKED, as NEMO's own ahtu is (ldftra.f90:433).
@@ -4131,6 +4156,8 @@ def gm_redi_tracer_tendency_latlon(
     redi_divisor_thickness_override: jnp.ndarray | None = None,
     redi_closed_bottom_wmask_override: bool = False,
     redi_horizontal_flux_evaluation_override: str | None = None,
+    redi_area_reciprocal_override: jnp.ndarray | None = None,
+    redi_area_reciprocal_evaluation_override: str | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4610,6 +4637,11 @@ def gm_redi_tracer_tendency_latlon(
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
                     else "vectorized"))
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
@@ -4634,6 +4666,11 @@ def gm_redi_tracer_tendency_latlon(
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
                     else "vectorized"))
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus

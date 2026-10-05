@@ -1695,11 +1695,28 @@ class TestNemoIsoLapOperator:
         assert len(source_round_calls) == 17
         assert divergence.shape == pinned.shape
         assert divergence_diag["zfu"].shape == pinned_diag["zfu"].shape
+        source_round_calls.clear()
+        stored_area, stored_area_diag = (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_diagnostics=True,
+                return_operand_diagnostics=True,
+                horizontal_flux_evaluation="nemo_literal_divergence",
+                area_reciprocal_evaluation="nemo_stored"))
+        # The compiled stored-area product and reciprocal add two boundaries.
+        assert len(source_round_calls) == 19
+        assert stored_area.shape == pinned.shape
+        assert stored_area_diag["r1_e1e2t"].shape == mask.shape
         with pytest.raises(ValueError, match="horizontal_flux_evaluation"):
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act,
                 horizontal_flux_evaluation="unknown")
+        with pytest.raises(ValueError, match="area_reciprocal_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                area_reciprocal_evaluation="unknown")
 
     def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
         """The Kmm Redi slope carry must not move the earlier through-FCT
