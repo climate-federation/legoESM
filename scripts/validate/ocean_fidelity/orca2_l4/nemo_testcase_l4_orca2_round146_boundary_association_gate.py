@@ -37,7 +37,8 @@ from scripts.validate.ocean_fidelity.testcases import (
 
 
 PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
-          "u-fold-sign", "stored-pivot-source", "v-depth-bit")
+          "u-fold-sign", "stored-pivot-source", "v-depth-bit",
+          "inverse-v-registry", "wrong-entry-frame", "entry-inverse-v-bit")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -121,6 +122,34 @@ def validate_post_registry(registry) -> None:
             "seven-array post-association registry reordered")
 
 
+def entry_inverse_v_names() -> tuple[str, ...]:
+    """NEMO hvr_e consumed at each of the 65 external-substep entries."""
+
+    return ("i000_hvr_e",) + tuple(
+        f"j{step:03d}_hvr_e" for step in range(1, 65))
+
+
+def build_entry_inverse_v_override(oracle, *, plant: str):
+    """Build the rank-complete carried-hvr sequence from its named frames."""
+
+    names = list(entry_inverse_v_names())
+    if plant == "inverse-v-registry":
+        names[0], names[1] = names[1], names[0]
+    require(tuple(names) == entry_inverse_v_names(),
+            "entry inverse V override registry reordered")
+    native = [np.array(oracle[name], copy=True) for name in names]
+    if plant == "wrong-entry-frame":
+        native[1] = np.array(native[0], copy=True)
+    if plant == "entry-inverse-v-bit":
+        candidates = np.argwhere(native[1] != 0.0)
+        require(candidates.size > 0,
+                "entry-inverse-v-bit plant has no nonzero cell")
+        location = tuple(map(int, candidates[0]))
+        native[1][location] = np.nextafter(
+            native[1][location], np.float64(np.inf))
+    return np.stack([r97._to_model_v(value) for value in native])
+
+
 def run_known_answer_plant(plant: str) -> None:
     """Exercise one non-degenerate refusal before the expensive JIT run."""
 
@@ -155,7 +184,7 @@ def _state_arrays(state) -> dict[str, np.ndarray]:
 
 
 def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
-         t_pivot_north_neighbor=False):
+         t_pivot_north_neighbor=False, inverse_v_override=None):
     import jax
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -174,6 +203,7 @@ def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
             barotropic_raw_history_override=raw_history,
             barotropic_external_mode_association=arm,
             barotropic_t_pivot_north_neighbor=t_pivot_north_neighbor,
+            barotropic_substep_inverse_v_override=inverse_v_override,
         ),
     )
     return jax.device_get(model.step(
@@ -232,6 +262,8 @@ def measure(
         oracle["i000_sshb_e"],
         oracle["i000_sshbb_e"],
     )
+    inverse_v_override = build_entry_inverse_v_override(
+        oracle, plant=plant)
 
     ordinary = _run(
         card, state, freshwater, surface, slow, raw_history,
@@ -246,6 +278,10 @@ def measure(
         card, state, freshwater, surface, slow, raw_history,
         expose=True, arm=True,
         t_pivot_north_neighbor=(plant != "stored-pivot-source"))
+    inverse_arm = _run(
+        card, state, freshwater, surface, slow, raw_history,
+        expose=True, arm=True, t_pivot_north_neighbor=False,
+        inverse_v_override=inverse_v_override)
 
     observed_state = _state_arrays(observed.state_after)
     ordinary_state = _state_arrays(ordinary)
@@ -259,6 +295,7 @@ def measure(
     trace = observed.substeps
     control_trace = control.substeps
     arm_trace = arm.substeps
+    inverse_arm_trace = inverse_arm.substeps
     v_depth_plant_expected = None
     if plant == "v-depth-bit":
         arm_trace = dict(arm_trace)
@@ -320,6 +357,7 @@ def measure(
     baseline_rows = []
     control_rows = []
     arm_rows = []
+    inverse_arm_rows = []
     for index in range(2):
         baseline_rows.extend(r129._score_substep(
             trace, oracle, active, area, index, plant="none"))
@@ -327,6 +365,8 @@ def measure(
             control_trace, oracle, active, area, index, plant="none"))
         arm_rows.extend(r129._score_substep(
             arm_trace, oracle, active, area, index, plant="none"))
+        inverse_arm_rows.extend(r129._score_substep(
+            inverse_arm_trace, oracle, active, area, index, plant="none"))
     baseline_first = r129.first_nonbit(baseline_rows)
     arm_first = r129.first_nonbit(arm_rows)
     require(baseline_first is not None,
@@ -348,6 +388,10 @@ def measure(
     arm_substep2 = {
         row["boundary"]: row for row in arm_rows if row["substep"] == 2
     }
+    inverse_arm_substep2 = {
+        row["boundary"]: row for row in inverse_arm_rows
+        if row["substep"] == 2
+    }
     p148_control_census = (
         control_substep2["mid_depth_v"]["operand_differing_cells"] == 30
         and control_substep2["transport_v"]["operand_differing_cells"] == 68
@@ -364,6 +408,19 @@ def measure(
     p148_chain = all(
         arm_substep2[name]["operand_bit_exact"]
         for name in ("transport_v", "continuity_dv", "after_ssh")
+    )
+    p149_control = (
+        control_substep2["entry_inverse_v"]["operand_differing_cells"] == 68
+        and control_substep2["entry_inverse_v"]["operand_absolute_max"]
+        == 0.03332976059679253
+    )
+    p149_inverse = inverse_arm_substep2["entry_inverse_v"][
+        "operand_bit_exact"]
+    p149_chain_retained = (
+        inverse_arm_substep2["mid_depth_v"]["operand_differing_cells"] == 30
+        and inverse_arm_substep2["transport_v"]["operand_differing_cells"] == 68
+        and inverse_arm_substep2["continuity_dv"]["operand_differing_cells"] == 68
+        and inverse_arm_substep2["after_ssh"]["operand_differing_cells"] == 68
     )
     p2 = (
         sum(row["changed_cells"] for row in scope_rows.values()) > 0
@@ -387,6 +444,16 @@ def measure(
             "v-depth-bit plant stayed green",
         )
         raise GateError("v-depth-bit plant fired")
+    if plant == "wrong-entry-frame":
+        require(not p149_inverse, "wrong-entry-frame plant stayed green")
+        raise GateError("wrong-entry-frame plant fired")
+    if plant == "entry-inverse-v-bit":
+        require(
+            inverse_arm_substep2["entry_inverse_v"]
+            ["operand_differing_cells"] == 1,
+            "entry-inverse-v-bit plant stayed green",
+        )
+        raise GateError("entry-inverse-v-bit plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -415,11 +482,17 @@ def measure(
             "R148-P2": "CONFIRMED" if p148_control else "REFUTED",
             "R148-P3": "CONFIRMED" if p148_depth else "REFUTED",
             "R148-P4": "CONFIRMED" if p148_chain else "REFUTED",
+            "R149-P1": "CONFIRMED" if p3 else "REFUTED",
+            "R149-P2": "CONFIRMED" if p149_control else "REFUTED",
+            "R149-P3": "CONFIRMED" if p149_inverse else "REFUTED",
+            "R149-P4": (
+                "CONFIRMED" if p149_chain_retained else "REFUTED"),
         },
         "r148_control_census_reproduced": p148_control_census,
         "baseline_rows": baseline_rows,
         "control_rows": control_rows,
         "arm_rows": arm_rows,
+        "inverse_arm_rows": inverse_arm_rows,
         "worktree": stamp,
     }
 

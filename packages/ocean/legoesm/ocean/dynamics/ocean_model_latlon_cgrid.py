@@ -1139,6 +1139,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # (dynspg_ts.f90:498), so the two operands of the velocity update at
     # dynspg_ts.f90:535 can be substituted one at a time.
     barotropic_substep_pgf_override: object = None
+    # Private round-149 discriminator: substitute NEMO's recorded carried
+    # hvr_e at each external-substep entry.  None is the production value;
+    # no constructible model configuration can select this record arm.
+    barotropic_substep_inverse_v_override: object = None
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -7193,6 +7197,14 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_substep_pgf_test_override=_pgf_sub_override)
+                _inverse_v_sub_override = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_substep_inverse_v_override)
+                if _inverse_v_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_inverse_v_test_override=(
+                            _inverse_v_sub_override))
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,

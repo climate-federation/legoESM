@@ -34,6 +34,23 @@ def test_seven_array_registry_reorder_plant_fires():
         gate.validate_post_registry(registry)
 
 
+def test_entry_inverse_v_registry_is_complete_and_ordered():
+    names = gate.entry_inverse_v_names()
+    assert len(names) == 65
+    assert names[:3] == ("i000_hvr_e", "j001_hvr_e", "j002_hvr_e")
+    assert names[-1] == "j064_hvr_e"
+
+
+def test_entry_inverse_v_registry_reorder_plant_fires():
+    oracle = {
+        name: np.ones((3, 4), dtype=np.float64)
+        for name in gate.entry_inverse_v_names()
+    }
+    with pytest.raises(gate.GateError, match="registry reordered"):
+        gate.build_entry_inverse_v_override(
+            oracle, plant="inverse-v-registry")
+
+
 @pytest.mark.parametrize("face,changed", [("u", (1, 0)), ("v", (0, 2))])
 def test_boundary_scope_accepts_only_registered_storage(face, changed):
     pre = np.zeros((4, 5), dtype=np.float64)

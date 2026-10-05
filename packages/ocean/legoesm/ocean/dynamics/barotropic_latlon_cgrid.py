@@ -1674,6 +1674,7 @@ def _run_substep_loop(
     nemo_continuity_update_test_override=None,
     nemo_substep_coriolis_override=None,
     nemo_substep_pgf_override=None,
+    nemo_substep_inverse_v_override=None,
     nemo_external_mode_association_test_override=False,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
@@ -1875,6 +1876,17 @@ def _run_substep_loop(
                     substep_index == 0, r1_H_u, associated_entry[4])
                 r1_H_v = jnp.where(
                     substep_index == 0, r1_H_v, associated_entry[5])
+            if nemo_substep_inverse_v_override is not None:
+                # Round-149 one-variable record substitution.  NEMO carries
+                # the associated hvr_e produced at the end of one external
+                # substep into the next (dynspg_ts.f90:761-779) and consumes
+                # it in the explicit V drag product (:680-699).  This private
+                # arm substitutes that recorded entry operand at the scan's
+                # own index; ordinary production keeps the reconstructed
+                # compact reciprocal above.
+                r1_H_v = jnp.asarray(
+                    nemo_substep_inverse_v_override,
+                    dtype=dtype)[substep_index]
         else:
             H_u, H_v = _face_depths(H_total_c)
             r1_H_u = 1.0 / jnp.maximum(H_u, min_water_col)
@@ -2774,6 +2786,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_substep_trace_test_hook=False,
     _nemo_substep_coriolis_test_override=None,
     _nemo_substep_pgf_test_override=None,
+    _nemo_substep_inverse_v_test_override=None,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -3266,6 +3279,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_continuity_update_test_override),
         nemo_substep_coriolis_override=_nemo_substep_coriolis_test_override,
         nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
+        nemo_substep_inverse_v_override=(
+            _nemo_substep_inverse_v_test_override),
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
