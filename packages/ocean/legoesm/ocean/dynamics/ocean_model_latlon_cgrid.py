@@ -3790,23 +3790,15 @@ class LatLonCGridOceanModel:
         # NEMO S-EOS (``ln_seos``) coefficients are a per-run &nameos block, not
         # a library constant.  ``eos_nemo_seos=None`` keeps NemoSEOSConfig()'s
         # DINO values (every pre-existing caller).  When a card supplies its own
-        # set, refuse the two combinations that would SILENTLY read the DINO
-        # defaults instead: a different EOS selection, and the GM/Redi + EKE
-        # closures, whose density calls take eos/eos_linear only.
+        # set, refuse a different EOS selection rather than silently ignoring
+        # the coefficients.  GM/Redi receives the same explicit coefficient
+        # object through every density, bn2 and native-slope call below.
         if getattr(config, "eos_nemo_seos", None) is not None:
             if config.eos != "nemo_seos":
                 raise ValueError(
                     "eos_nemo_seos carries NEMO &nameos coefficients and is "
                     'only read when eos="nemo_seos"; got eos='
                     f"{config.eos!r}. Drop the coefficients or select the EOS.")
-            if config.gm_redi is not None:
-                raise ValueError(
-                    "eos_nemo_seos with gm_redi is refused: the GM/Redi and "
-                    "EKE density closures build their EOS from eos/eos_linear "
-                    "alone, so they would silently run NemoSEOSConfig()'s DINO "
-                    "coefficients while the dynamics ran this card's. Thread "
-                    "eos_nemo_seos through those closures before combining "
-                    "them.")
 
         # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
         # the source-augmentation flags are validated at construction). The EKE
@@ -9080,6 +9072,7 @@ class LatLonCGridOceanModel:
                     state_new.H_bathy.data,
                     _grid, _zc,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0,
                     g=_cfg_b.constants.g,
@@ -9097,6 +9090,7 @@ class LatLonCGridOceanModel:
                 _T_gm_in, _S_gm_in, _eta_gm_in, state_new.H_bathy.data,
                 _grid, _zc, gm_cfg,
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=_cfg_b.eos_nemo_seos,
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
@@ -9170,6 +9164,7 @@ class LatLonCGridOceanModel:
                     state_new.H_bathy.data,
                     _grid, _zc, gm_cfg,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     omega=_cfg_b.omega,
@@ -15165,13 +15160,15 @@ class LatLonCGridOceanModel:
                 _gm_dj = gm_redi_density_and_jacobian(
                     state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                     _grid, _zc, eos=_cfg_b.eos,
-                    eos_linear=_cfg_b.eos_linear, mask=cmask,
+                    eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     eos_depth=_eos_depth)
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(  # noqa: N806
                 state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                 _grid, _zc, gm_cfg, eos=_cfg_b.eos,
-                eos_linear=_cfg_b.eos_linear, mask=cmask,
+                eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                 omega=_cfg_b.omega,  # see the sibling call's comment above
@@ -15187,7 +15184,8 @@ class LatLonCGridOceanModel:
                 k33_iso = compute_isoneutral_K33_latlon(
                     state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                     _grid, _zc, gm_cfg, eos=_cfg_b.eos,
-                    eos_linear=_cfg_b.eos_linear, mask=cmask,
+                    eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     omega=_cfg_b.omega,
                     kappa_redi_override=_kri_static,

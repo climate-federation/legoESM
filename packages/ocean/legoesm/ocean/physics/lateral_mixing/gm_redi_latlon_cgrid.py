@@ -432,7 +432,8 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
 
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
                                active_3d=None, jacobian=None,
-                               n2_override=None, e3w_override=None):
+                               n2_override=None, e3w_override=None,
+                               eos_nemo_seos=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -533,7 +534,9 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # e3w slots before the recorded operand can replace it.
         if n2_override is None:
             n2_int = compute_buoyancy_frequency_nemo_bn2(
-                T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g,
+                T_filled, S_filled, _gdept, _gdepw_int,
+                (eos_nemo_seos if eos_nemo_seos is not None
+                 else NemoSEOSConfig()), g=g,
                 e3w_int=e3w)
     else:
         if n2_override is None:
@@ -667,7 +670,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
               g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None,
-              n2_override=None, e3w_override=None):
+              n2_override=None, e3w_override=None, eos_nemo_seos=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -682,7 +685,7 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
         return _nemo_mld_from_n2_integral(
             T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
             jacobian=jacobian, n2_override=n2_override,
-            e3w_override=e3w_override)
+            e3w_override=e3w_override, eos_nemo_seos=eos_nemo_seos)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -891,7 +894,9 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         else:
             _gdept_n2, _gdepw_n2 = gdept, _gdepw_int
         n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T, S, _gdept_n2, _gdepw_n2, NemoSEOSConfig(), g=g,
+            T, S, _gdept_n2, _gdepw_n2,
+            (eos_nemo_seos if eos_nemo_seos is not None
+             else NemoSEOSConfig()), g=g,
             e3w_int=e3w[..., 1:])                           # (...,nlev-1)
         # HISTORICAL (superseded 2026-07-28, kept for provenance):
         # this branch used to divide n2_int by the jacobian --
@@ -1042,7 +1047,8 @@ def compute_nemo_native_slopes(
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
     pn2_override: jnp.ndarray | None = None,
-    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False, nmln_override: jnp.ndarray | None = None,
+    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False,
+    nmln_override: jnp.ndarray | None = None, eos_nemo_seos=None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1230,7 +1236,8 @@ def compute_nemo_native_slopes(
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian,
-        n2_override=pn2_override, e3w_override=e3w_override)
+        n2_override=pn2_override, e3w_override=e3w_override,
+        eos_nemo_seos=eos_nemo_seos)
     first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
@@ -3790,6 +3797,7 @@ def gm_redi_density_and_jacobian(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
@@ -3831,7 +3839,8 @@ def gm_redi_density_and_jacobian(
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     # NEMO's eos_insitu evaluates at the LIVE gdept(Knn) = gdept_0*(1+r3t),
     # r3t = ssh/ht_0 (eosbn2.F90:541 `zh = gdept(ji,jj,jk,Knn)`), NOT the static
@@ -4015,6 +4024,7 @@ def gm_redi_tracer_tendency_latlon(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
@@ -4119,11 +4129,13 @@ def gm_redi_tracer_tendency_latlon(
     _native_eta = eta if native_slope_eta is None else native_slope_eta
     _kappa_native_eta = (
         eta if native_kappa_slope_eta is None else native_kappa_slope_eta)
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
             T, S, eta, H_bathy, grid, z_coord,
-            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+            eos=eos, eos_linear=eos_linear, eos_nemo_seos=eos_nemo_seos,
+            mask=mask, rho_0=rho_0, g=g,
             eos_depth=eos_depth,
         )
     else:
@@ -4454,7 +4466,10 @@ def gm_redi_tracer_tendency_latlon(
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w, return_diagnostics=return_redi_slope_diagnostics, nmln_override=native_slope_nmln_override)
+                e3w_override=native_slope_e3w,
+                return_diagnostics=return_redi_slope_diagnostics,
+                nmln_override=native_slope_nmln_override,
+                eos_nemo_seos=eos_nemo_seos)
             _slope_diagnostics = _nat[4] if return_redi_slope_diagnostics else None; _nat = _nat[:4]; _bolus_nat = None
             if native_bolus_slope_eta is not None:
                 _bolus_nat = compute_nemo_native_slopes(
@@ -4464,7 +4479,8 @@ def gm_redi_tracer_tendency_latlon(
                     H_bathy=H_bathy, prd_jacobian=_native_prd_J,
                     prd_TS_override=native_prd_TS,
                     pn2_override=native_slope_pn2,
-                    e3w_override=native_slope_e3w)
+                    e3w_override=native_slope_e3w,
+                    eos_nemo_seos=eos_nemo_seos)
             _w_stage = getattr(
                 cfg, "redi_w_slope_stage_evaluation", "redi_tuple")
             if _w_stage == "redi_tuple":
@@ -4588,6 +4604,7 @@ def compute_isoneutral_K33_latlon(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
@@ -4633,11 +4650,13 @@ def compute_isoneutral_K33_latlon(
     # so the expensive 3-D EOS coupling is not run twice; None => compute
     # inline, bit-identical (scaling review lever #3).
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
             T, S, eta, H_bathy, grid, z_coord,
-            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+            eos=eos, eos_linear=eos_linear, eos_nemo_seos=eos_nemo_seos,
+            mask=mask, rho_0=rho_0, g=g,
             eos_depth=eos_depth,
         )
     else:
@@ -4702,7 +4721,8 @@ def compute_isoneutral_K33_latlon(
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,
-            rho_0=rho_0, g=g, active_3d=_act)
+            rho_0=rho_0, g=g, active_3d=_act,
+            eos_nemo_seos=eos_nemo_seos)
         if cfg.redi_coefficient == "nemo21":
             _kgm = native_treguier_kappa_for_state(
                 _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
