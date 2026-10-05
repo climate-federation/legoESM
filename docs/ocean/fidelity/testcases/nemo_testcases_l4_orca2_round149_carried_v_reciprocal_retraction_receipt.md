@@ -92,6 +92,20 @@ No ORCA2 ladder was run: R149-P2 was refuted, the midpoint/continuity chain did
 not close, and the preregistration forbids a ladder under that condition. No
 production physics or card statement lands in this round.
 
+## Verification
+
+Focused gate, citation, and literal-continuity tests pass **36/36**. The one
+required `tests/ocean/fidelity -n 12` invocation reached 99% and repeated the
+registered xdist tail stall, so it is **INCOMPLETE**, not PASS: 2,568 passed,
+7 skipped, and four pre-existing failures (SI3 scalar-math provenance,
+round-35 escape scope, worktree-stamp scope, and the GYRE round-129
+spread-record stamp). Every test in the round-149 focused set passed.
+
+The canonical citation gate passes 274 citations and the round-149 receipt
+passes 6 citations, with zero unmapped citations or stale map entries. The
+rigid two-line shift of the carried-depth citation fails with
+`SYMBOL-NOT-AT-LINE`.
+
 ASKED choices: none. UNASKED choices: empty.
 
 ## OPEN
