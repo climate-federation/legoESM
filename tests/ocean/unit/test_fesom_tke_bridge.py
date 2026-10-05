@@ -180,3 +180,12 @@ def test_iwm_splices_additively_and_only_when_enabled(flat_mesh, z_shim):
     assert np.isfinite(np.asarray(Av1)).all()
     # the momentum viscosity gets the same addition (NEMO adds to avm and avt)
     assert float(np.asarray(Av1 - Av0).max()) > 0.0
+
+
+def test_iwm_bn2_mode_is_refused_on_fesom(flat_mesh, z_shim):
+    """FESOM's IWM splice reads in-situ N2; a nemo_bn2 request must fail loudly."""
+    from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
+    state = create_rest_state(flat_mesh, z_shim, stratified=True, vertical_coordinate="zstar")
+    prof = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(enabled=True, n2_mode="nemo_bn2")))
+    with pytest.raises(ValueError, match="not wired on the FESOM lane"):
+        prof(state, flat_mesh, fesom_zgeom(flat_mesh), _wind(flat_mesh), dt_tke=DT)

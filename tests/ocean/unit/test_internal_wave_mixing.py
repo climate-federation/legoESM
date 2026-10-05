@@ -597,3 +597,13 @@ def test_iwm_n2_cli_round_trip_and_guards(monkeypatch):
         monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole"] + argv)
         with pytest.raises(SystemExit, match=msg):
             core2.main()
+
+
+def test_iwm_n2_guards_in_run_omip(monkeypatch):
+    import sys
+    import scripts.run.run_omip as ro
+    for argv, msg in ((["--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "seos"], "need --iwm"),
+                      (["--iwm", "--iwm-n2-mode", "nemo_bn2"], "explicit --iwm-n2-eos-form")):
+        monkeypatch.setattr(sys, "argv", ["run_omip.py"] + argv)
+        with pytest.raises(SystemExit, match=msg):
+            ro.main()

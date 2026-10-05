@@ -7120,6 +7120,10 @@ def print_summary():
 
 def main():
     args = parse_args()
+    if (getattr(args, "iwm_n2_mode", None) or getattr(args, "iwm_n2_eos_form", None)) and not args.iwm:
+        raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
+    if getattr(args, "iwm_n2_mode", None) == "nemo_bn2" and not getattr(args, "iwm_n2_eos_form", None):
+        raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
 
     # Route-B multicontroller (jax.distributed cross-process NCCL): initialize
     # the federation BEFORE any device work (model build / device query), or

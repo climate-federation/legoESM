@@ -185,6 +185,11 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
             from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
                 compute_iwm_diffusivity, uniform_iwm_forcing,
             )
+            if getattr(_iwm_cfg, "n2_mode", "insitu") != "insitu":
+                raise ValueError(
+                    f"IWMConfig.n2_mode={_iwm_cfg.n2_mode!r} is not wired on the "
+                    "FESOM lane (it reads in-situ N2 here); it would be "
+                    "silently ignored.")
             depth_cell = jnp.cumsum(h_live, axis=-1) - 0.5 * h_live   # gdept
             H_col = jnp.sum(h_live, axis=-1)                          # ht
             N2_iwm = compute_N2(rho, dz_half, constants_config.rho_0,
