@@ -4794,6 +4794,7 @@ def test_land_canopy_smoothing_widths_round_trip_and_validate():
     assert cfg0.land_canopy_zeta_cap_smoothing_width is None
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
         "--land-surface-scheme", "two_leaf",
         "--land-canopy-rh-cap-smoothing-width", "0.02",
         "--land-canopy-zeta-cap-smoothing-width", "0.03"]), parser))
