@@ -40,15 +40,15 @@ _CKPT_LAND_FIELDS = (
 
 
 def cellwise_stats(a, b, mask):
-    """p99 and max of |b - a| and the signed mean of (b - a) over ``mask``."""
+    """p99, max and RMS of |b - a| and the signed mean of (b - a) over ``mask``."""
     a = np.asarray(a, dtype=float).ravel()
     b = np.asarray(b, dtype=float).ravel()
     m = np.asarray(mask, dtype=bool).ravel() & np.isfinite(a) & np.isfinite(b)
     if not m.any():
-        return float("nan"), float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
     d = b[m] - a[m]
     return (float(np.percentile(np.abs(d), 99)), float(np.abs(d).max()),
-            float(d.mean()))
+            float(np.sqrt(np.mean(d * d))), float(d.mean()))
 
 
 def parse_log(text):
@@ -96,7 +96,8 @@ def main() -> int:
               + ", ".join(f"{h}/{w} ({hl} land)" for h, w, hl in tail))
 
     print("== CMOR day/Amon means over LAND (area-weighted) and cell-wise |cap10-cap60|")
-    print(f"  {'field':<22}{'cap60':>9}{'cap10':>9}{'diff':>8}{'p99':>9}{'max':>9}{'bias':>9}")
+    print(f"  {'field':<22}{'cap60':>9}{'cap10':>9}{'diff':>8}"
+          f"{'p99':>9}{'max':>9}{'rms':>9}{'bias':>9}")
     for label, var, table, scale, unit in (
             ("latent heat", "hfls", "Amon", 1.0, "W/m2"),
             ("sensible heat", "hfss", "Amon", 1.0, "W/m2"),
@@ -108,10 +109,10 @@ def main() -> int:
             continue
         av = np.asarray(a.mean("time")) * scale
         bv = np.asarray(b.mean("time")) * scale
-        p99, mx, bias = cellwise_stats(av, bv, land)
+        p99, mx, rms, bias = cellwise_stats(av, bv, land)
         print(f"  {label:<22}{_mean(av, area, land):9.2f}{_mean(bv, area, land):9.2f}"
               f"{_mean(bv, area, land) - _mean(av, area, land):+8.2f}"
-              f"{p99:9.3f}{mx:9.3f}{bias:+9.3f}  {unit}")
+              f"{p99:9.3f}{mx:9.3f}{rms:9.3f}{bias:+9.3f}  {unit}")
     a, b = _open(root, ctl, "tas", "day"), _open(root, arm, "tas", "day")
     if a is not None and b is not None:
         av, bv = np.asarray(a.mean("time")), np.asarray(b.mean("time"))
@@ -129,10 +130,16 @@ def main() -> int:
             continue
         fa, fb = _top_layer(ca[key]), _top_layer(cb[key])
         if fa.shape[0] != land.size:
-            print(f"  {label:<26}(ncol {fa.shape[0]} != mask {land.size}; packed?)")
+            # the CMOR fx mask is the REGRIDDED output grid; the checkpoint is
+            # native. Without a native land mask only an all-cell statistic
+            # is honest (ocean cells carry the land model's discarded output).
+            p99, mx, rms, bias = cellwise_stats(fa, fb, np.ones(fa.shape[0], bool))
+            print(f"  {label:<26}p99 {p99:9.4f}  max {mx:9.4f}  rms {rms:9.4f}  "
+                  f"bias {bias:+9.4f}  {unit}  [ALL native cells, no land mask]")
             continue
-        p99, mx, bias = cellwise_stats(fa, fb, land)
-        print(f"  {label:<26}p99 {p99:9.4f}  max {mx:9.4f}  bias {bias:+9.4f}  {unit}")
+        p99, mx, rms, bias = cellwise_stats(fa, fb, land)
+        print(f"  {label:<26}p99 {p99:9.4f}  max {mx:9.4f}  rms {rms:9.4f}  "
+              f"bias {bias:+9.4f}  {unit}")
     print("\nA pass is DAY-1 equivalence only; a bias here accumulates in soil water "
           "over weeks (both decks must then carry the same cap).")
     return 0

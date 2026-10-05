@@ -11,8 +11,9 @@ def test_cellwise_stats_reports_p99_max_and_signed_bias_over_the_mask():
     b[0] = 5.0             # ... one outlier
     b[100:] = -50.0        # ocean cells must be ignored
     mask = np.arange(200) < 100
-    p99, mx, bias = cellwise_stats(a, b, mask)
+    p99, mx, rms, bias = cellwise_stats(a, b, mask)
     assert mx == 5.0
+    assert abs(rms - np.sqrt((99 + 25) / 100)) < 1e-12
     assert 1.0 <= p99 <= 5.0
     assert abs(bias - 1.04) < 1e-12
     # NaN cells drop out instead of poisoning the statistic
