@@ -1738,6 +1738,7 @@ def _run_substep_loop(
     nemo_unmasked_v_transport_test_override=False,
     nemo_materialize_v_transport_test_override=False,
     nemo_external_mode_association_test_override=False,
+    nemo_external_mode_association_field_test_override="",
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
@@ -1929,18 +1930,31 @@ def _run_substep_loop(
                     nemo_t_pivot_north_neighbor_test_override))
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
-            if nemo_external_mode_association_test_override:
+            if (nemo_external_mode_association_test_override
+                    or nemo_external_mode_association_field_test_override):
                 associated_entry = _nemo_external_mode_boundary_association(
                     U_bar_c, V_bar_c, H_u, H_v, r1_H_u, r1_H_v,
                     eta_c, grid)
-                H_u = jnp.where(
-                    substep_index == 0, H_u, associated_entry[2])
-                H_v = jnp.where(
-                    substep_index == 0, H_v, associated_entry[3])
-                r1_H_u = jnp.where(
-                    substep_index == 0, r1_H_u, associated_entry[4])
-                r1_H_v = jnp.where(
-                    substep_index == 0, r1_H_v, associated_entry[5])
+                if (nemo_external_mode_association_test_override
+                        or nemo_external_mode_association_field_test_override
+                        == "depth_u"):
+                    H_u = jnp.where(
+                        substep_index == 0, H_u, associated_entry[2])
+                if (nemo_external_mode_association_test_override
+                        or nemo_external_mode_association_field_test_override
+                        == "depth_v"):
+                    H_v = jnp.where(
+                        substep_index == 0, H_v, associated_entry[3])
+                if (nemo_external_mode_association_test_override
+                        or nemo_external_mode_association_field_test_override
+                        == "inverse_u"):
+                    r1_H_u = jnp.where(
+                        substep_index == 0, r1_H_u, associated_entry[4])
+                if (nemo_external_mode_association_test_override
+                        or nemo_external_mode_association_field_test_override
+                        == "inverse_v"):
+                    r1_H_v = jnp.where(
+                        substep_index == 0, r1_H_v, associated_entry[5])
             if nemo_substep_inverse_v_override is not None:
                 # Round-149 one-variable record substitution.  NEMO carries
                 # the associated hvr_e produced at the end of one external
@@ -2305,7 +2319,8 @@ def _run_substep_loop(
 
         association_post = None
         if (return_boundary_association_trace
-                or nemo_external_mode_association_test_override):
+                or nemo_external_mode_association_test_override
+                or nemo_external_mode_association_field_test_override):
             if _face_depth_mode == "nemo_ssh_avg":
                 association_depths = _nemo_ssh_avg_apply(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
@@ -2326,6 +2341,12 @@ def _run_substep_loop(
                 U_bar_new, V_bar_new, *association_depths, eta_new, grid)
         if nemo_external_mode_association_test_override:
             U_bar_new, V_bar_new = association_post[:2]
+        elif nemo_external_mode_association_field_test_override == "u":
+            U_bar_new = association_post[0]
+        elif nemo_external_mode_association_field_test_override == "v":
+            V_bar_new = association_post[1]
+        elif nemo_external_mode_association_field_test_override == "eta":
+            eta_new = association_post[6]
 
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
@@ -2338,6 +2359,12 @@ def _run_substep_loop(
                 H_u_primary, H_v_primary = _ssh_avg_face_depths(eta_new)
                 if nemo_external_mode_association_test_override:
                     H_u_primary, H_v_primary = association_post[2:4]
+                elif (nemo_external_mode_association_field_test_override
+                      == "depth_u"):
+                    H_u_primary = association_post[2]
+                elif (nemo_external_mode_association_field_test_override
+                      == "depth_v"):
+                    H_v_primary = association_post[3]
             else:
                 H_primary = jnp.maximum(
                     eta_new + H_bathy, min_water_col) * mask
@@ -2864,6 +2891,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_raw_history_test_override=None,
     _nemo_drag_rate_test_override=None,
     _nemo_external_mode_association_test_override=False,
+    _nemo_external_mode_association_field_test_override="",
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
 ) -> LatLonCGridOceanState:
@@ -3360,6 +3388,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_materialize_v_transport_test_override),
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
+        nemo_external_mode_association_field_test_override=(
+            _nemo_external_mode_association_field_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(

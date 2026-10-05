@@ -1087,6 +1087,9 @@ _STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
 # landed NEMO's depth, so the depth arm is now the LEGACY one.
 _STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean",
                                   "legacy_min_rule_depth")
+_BAROTROPIC_ASSOCIATION_FIELD_ARMS = (
+    "", "u", "v", "depth_u", "depth_v", "inverse_u", "inverse_v", "eta",
+)
 
 
 class _NEMOWSFCTInputTrace(NamedTuple):
@@ -1206,6 +1209,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private round-146 arm for the one seven-array external-mode boundary
     # association in dynspg_ts.  False leaves the production carry unchanged.
     barotropic_external_mode_association: bool = False
+    # Private round-156 split of that source unit.  A non-empty value applies
+    # the association to exactly one field, in the compiled call's order, so
+    # the first downstream carrier can be measured without turning a partial
+    # call into production physics.
+    barotropic_external_mode_association_field: str = ""
     # Private round-148 one-variable arm: use the T-pivot row-below halo as
     # the north T neighbour in the V-face SSH-average depth calculation.
     barotropic_t_pivot_north_neighbor: bool = False
@@ -7188,6 +7196,24 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_external_mode_association_test_override=True)
+                _association_field = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_external_mode_association_field)
+                if _association_field not in _BAROTROPIC_ASSOCIATION_FIELD_ARMS:
+                    raise ValueError(
+                        "unknown private barotropic association field arm: "
+                        f"{_association_field!r}")
+                if (_association_field
+                        and self._nemo_ws_test_hooks
+                        .barotropic_external_mode_association):
+                    raise ValueError(
+                        "complete and one-field barotropic association arms "
+                        "are mutually exclusive")
+                if _association_field:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_external_mode_association_field_test_override=(
+                            _association_field))
                 if (
                     self._nemo_ws_test_hooks
                     .barotropic_t_pivot_north_neighbor
