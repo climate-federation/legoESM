@@ -61,12 +61,18 @@ from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
     GateError, expected_masks, lego_fields, read_entry, require, score,
 )
 
-CARDS = {"vec": "VORTEX_SMT_VEC-zps", "flux": "VORTEX_SMT-zps"}
+CARDS = {
+    "vec": "VORTEX_SMT_VEC-zps",
+    "flux": "VORTEX_SMT-zps",
+    "smt3": "VORTEX_SMT3_VEC-zps",
+}
 DEFAULT_ROOTS = {
     "vec": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
                 "round7/VORTEX_SMT_R7_VEC_R8_OMIP_L1_P3/tracer"),
     "flux": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
                  "round7/VORTEX_SMT_R7_OMIP_L1_P3/tracer"),
+    "smt3": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/"
+                 "oracle_vortex_smt3/kt1_10"),
 }
 ORDER = ("zfu", "zfv", "zfw", "ww", "adv.T", "adv.S", "out.T", "out.S")
 # Stage 3 is the ONLY stage at which NEMO runs tra_adv_fct under key_RK3
@@ -326,6 +332,50 @@ def run(root: Path, card_key: str, *, plant: str | None = None,
                  "physics-Euler-then-stages order, which is inert on this "
                  "deck (rn_avt0=0, ln_traldf_OFF, usrdef_sbc all zero)",
                  plant == f"out.{tracer}")
+
+        # Round 226 reuses this stage harness for SMT-3.  Its admitted writer
+        # adds exactly one source-ordered boundary: Krhs immediately after
+        # tra_ldf.  The production process observer exposes the matching
+        # concentration boundaries.  Reconstruct NEMO's concentrations from
+        # its recorded Krhs and QCO weights, so pre_ldf is the inherited
+        # control and post_ldf is the operator boundary under test.
+        if card_key == "smt3":
+            post_state = model_step(_NEMOWSRK3TestHooks(
+                stage_barotropic_output_override=external,
+                expose_pre_implicit_state=True))
+            process_post = lego_fields(post_state)["T"]
+            zero_gm = cfg.gm_redi._replace(
+                kappa_GM=0.0, kappa_Redi=0.0,
+                kappa_redi_diffusive_velocity=0.0)
+            pre_model = LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord,
+                cfg._replace(gm_redi=zero_gm),
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    stage_barotropic_output_override=external,
+                    expose_pre_implicit_state=True))
+            process_pre = lego_fields(pre_model.step(
+                seed, dt=card.dt_s))["T"]
+            qbb = groups["r3t_kbb"][..., None]
+            qmm = groups["r3t_kmm"][..., None]
+            qaa = groups["r3t_kaa"][..., None]
+            # The write-only pre-implicit seam is scored for T here; salt is
+            # retained in the record for the next operator-internal walk.
+            oracle_pre = (
+                (1.0 + qbb) * groups["tsb_t"]
+                + card.dt_s * (1.0 + qmm) * groups["adv_t"]
+            ) / (1.0 + qaa)
+            oracle_post = (
+                (1.0 + qbb) * groups["tsb_t"]
+                + card.dt_s * (1.0 + qmm) * groups["ldf_t"]
+            ) / (1.0 + qaa)
+            _row("pre_ldf.T", oracle_pre[..., :nlev],
+                 np.asarray(process_pre)[..., :nlev], masks["T"],
+                 "Krhs immediately before tra_ldf, reconstructed from "
+                 "adv_t (stprk3_stg.f90:474-476,525-526)", False)
+            _row("post_ldf.T", oracle_post[..., :nlev],
+                 np.asarray(process_post)[..., :nlev], masks["T"],
+                 "Krhs immediately after tra_ldf "
+                 "(stprk3_stg.f90:525-526)", False)
 
     # ---- 5. THE ONE-VARIABLE ARM: NEMO's transports, everything else ours
     carrier_rows: list[dict] = []
