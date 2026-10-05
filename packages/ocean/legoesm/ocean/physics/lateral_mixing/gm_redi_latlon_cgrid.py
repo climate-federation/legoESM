@@ -803,7 +803,8 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 # =====================================================================
 
 def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
-                              slope_n2="adiabatic", jacobian=None):
+                              slope_n2="adiabatic", jacobian=None,
+                              eos_nemo_seos=None):
     """Shared W-point geometry + N² for the native ldfslp stencil.
 
     Factors the ``e3w``/``wmask3``/``pn2`` block common to
@@ -1172,8 +1173,10 @@ def compute_nemo_native_slopes(
         if _prd_stretch is not None:
             _gdept_prd = _gdept_prd * _prd_stretch[..., jnp.newaxis]
         _prd_T, _prd_S = (T, S) if prd_TS_override is None else prd_TS_override
+        _seos = (eos_nemo_seos if eos_nemo_seos is not None
+                 else NemoSEOSConfig(rho0=rho_0))
         prd = nemo_seos_prd_literal(
-            _prd_T, _prd_S, _gdept_prd, NemoSEOSConfig(rho0=rho_0)) * act
+            _prd_T, _prd_S, _gdept_prd, _seos) * act
     else:
         raise ValueError(
             "unknown GMRediConfig.slope_prd_evaluation "
@@ -1184,7 +1187,8 @@ def compute_nemo_native_slopes(
     # consistent with the slopes it is coupled to; no duplicate numerics).
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian,
+        eos_nemo_seos=eos_nemo_seos)
     _e3w_surface = e3w[..., :1]
     if pn2_override is not None:
         pn2 = jnp.asarray(pn2_override, dtype=dtype)
