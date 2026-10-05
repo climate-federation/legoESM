@@ -463,11 +463,16 @@ def test_smt2_implicit_drag_divides_by_nemos_bottom_face_thickness():
     AVERAGE of the live thicknesses.
 
     PLANT, so this test cannot pass vacuously: put the old average rule back
-    in place of the shared ``e3u_0*(1+r3u*umask)`` assembler the drag block
-    calls, and one step on the seamount card must MOVE the velocity.  On a
-    FLAT card the two rules coincide by construction (both neighbours carry
-    the same reference thickness), and the same plant must move nothing --
-    which is why every flat registry stays at 0 rows moved.
+    in place of the one the drag block now calls, and one step on the
+    seamount card must MOVE the velocity.
+
+    The SMT-1 arm pins a DIFFERENT fact, and the reason matters: SMT-1 is the
+    SAME seamount geometry (see
+    ``test_smt2_geometry_and_initial_state_are_the_smt1_ones``), so the two
+    divisor rules differ there just as much.  It resolves no bottom drag, so
+    the card validator forbids ``zdf_drag_in_matrix`` on it
+    (``nemo_testcase_recipe.py``) and the planted symbol is never reached --
+    which is why the eleven other certified registries are inert here.
     """
     import numpy as _np
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as _mod
@@ -508,9 +513,10 @@ def test_smt2_implicit_drag_divides_by_nemos_bottom_face_thickness():
     assert du > 1.0e-6, f"the plant is inert on the seamount: du={du!r}"
     assert dv > 1.0e-7, f"the plant is inert on the seamount: dv={dv!r}"
 
-    # SMT-1 resolves no bottom drag at all, so the block does not execute and
-    # the same plant changes nothing -- the inertness every other seamount
-    # card's registry measures, pinned here as a unit.
+    # SMT-1 resolves no bottom drag at all, so the block does not execute,
+    # the planted symbol is never called, and the step is unchanged.  This
+    # pins REACHABILITY, not the arithmetic: it is the unit-level form of the
+    # eleven inert registries.
     u1_a, v1_a = _one_step("VORTEX_SMT1_VEC-zps", plant=False)
     u1_b, v1_b = _one_step("VORTEX_SMT1_VEC-zps", plant=True)
     assert float(_np.max(_np.abs(u1_a - u1_b))) == 0.0

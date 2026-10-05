@@ -1713,7 +1713,7 @@ def _nemo_ws_qco_stage_faces(
 
 
 def _nemo_dynzdf_drag_face_thickness(
-    eta_after, h_bathy, z_coord, config, grid, u_mask_3d, v_mask_3d, dtype,
+    eta_after, h_bathy, z_coord, config, grid, dtype,
 ):
     """``e3u_3d(iku)*(1+r3u(Kaa)*umask)`` -- dyn_zdf's bottom-drag divisor.
 
@@ -1730,19 +1730,19 @@ def _nemo_dynzdf_drag_face_thickness(
     what lets a test plant the superseded two-cell-average rule into the
     drag path ALONE and show the seamount's velocity move.
     """
+    # No non-partial-cell branch: the drag rate this divisor pairs with,
+    # ``nemo_bottom_drag_rate_faces``, raises on anything but an
+    # ``OceanPartialCellCoordinate`` (ocean_pe_latlon_cgrid.py:4094-4097) and
+    # is evaluated FIRST, so a card that got here has one.  GYRE's flat box is
+    # a ``masked_zco`` partial-cell coordinate whose cells are all full, which
+    # is why the min rule and the average coincide there by construction.
     h_ref = compute_layer_thickness(
         jnp.zeros_like(eta_after), h_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
     ).astype(dtype)
-    if isinstance(z_coord, OceanPartialCellCoordinate):
-        um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
-        um3 = um3.astype(dtype)
-        vm3 = vm3.astype(dtype)
-    else:
-        um3 = jnp.asarray(u_mask_3d, dtype=dtype)
-        vm3 = jnp.asarray(v_mask_3d, dtype=dtype)
+    um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
     e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
-        jnp.asarray(eta_after, dtype=dtype), h_ref, um3, vm3, grid)
+        eta_after, h_ref, um3.astype(dtype), vm3.astype(dtype), grid)
     return e3u.astype(dtype), e3v.astype(dtype)
 
 def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
@@ -12249,9 +12249,10 @@ class LatLonCGridOceanModel:
             # control volume built below: the centre-to-centre gradient slot
             # ``dz_half_{u,v}`` (whose value at a closed interface is
             # irrelevant -- the viscosity there is already zero -- but which
-            # must not become 1/eps), and the ``zdf_drag_in_matrix`` diagonal,
-            # whose NEMO counterpart divides by ``e3u(ji,jj,iku,Kaa)``
-            # (dynzdf.F90:296), a scale factor NEMO never masks.
+            # must not become 1/eps).  It is NO LONGER the
+            # ``zdf_drag_in_matrix`` divisor: that one is NEMO's own
+            # ``e3u_3d(iku)*(1+r3u(Kaa)*umask(iku))``, built by
+            # ``_nemo_dynzdf_drag_face_thickness`` at the drag block below.
             dz_u_open, dz_v_open = dz_u, dz_v
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
@@ -12505,13 +12506,14 @@ class LatLonCGridOceanModel:
             #      + rCdU_bot(ji,jj) )
             #      / (e3u_3d(ji,jj,iku)*(1._wp+r3u(ji,jj,Kaa)*umask(ji,jj,iku)))
             # (``dynzdf.f90:306``; the V twin with e3v_3d/r3v/vmask/mbkv at
-            # ``:473``; the ln_dynspg_ts barotropic re-add at ``:166``/``:168``
-            # -- all from the compiled ppsrc of the SMT-2 build
-            # VORTEX_SMT2_VEC_R8_OMIP_L1_P3).  This is the IMPLICIT form:
-            # ``dynzdf.f90:121`` calls ``zdf_drg_exp`` only under
-            # ``.NOT.ln_drgimp``, while these statements sit inside
-            # ``IF( ln_drgimp )`` / ``IF( ln_drgimp .AND. ln_dynspg_ts )``,
-            # which is the arm every card reaching this block selects.
+            # ``:473-474``; the ln_dynspg_ts barotropic bottom-stress re-add at
+            # ``:166-167`` and ``:168-169`` -- all from the compiled ppsrc of
+            # the SMT-2 build VORTEX_SMT2_VEC_R8_OMIP_L1_P3).  This is the
+            # IMPLICIT form: ``dynzdf.f90:120`` calls ``zdf_drg_exp`` only
+            # under ``.NOT.ln_drgimp``, while these statements sit inside the
+            # ``IF( ln_drgimp )`` arms opened at ``:303`` and ``:470`` and the
+            # ``IF( ln_drgimp .AND. ln_dynspg_ts )`` arm opened at ``:158``,
+            # which is what every card reaching this block selects.
             #
             # ``e3u_3d`` is the REFERENCE 3-D face thickness: ``domzgr.f90:186``
             # and ``:201`` read it from the mesh variable ``e3u_0``, and over z
@@ -12522,21 +12524,27 @@ class LatLonCGridOceanModel:
             # thickness by up to 134 % on 2484 of 3660 bottom U faces and
             # under-damped the deepest cell by 2.3x (round-10 receipt S5b).
             #
-            # TIME LEVEL: NEMO takes the stretch factor at Kaa, the AFTER level.
-            # ``state.eta`` is the operand ``dz_cell`` above is already built
-            # from (``J_cell = compute_ocean_jacobian(state.eta.data, ...)``),
-            # and on every call site that reaches this block it is the AFTER
-            # ssh -- which is exactly why ``eta_now`` exists separately for the
-            # Kmm divisors.  So the ONE variable this changes is the FACE RULE
-            # (NEMO's min-rule ``e3u_0`` with the e1e2t-weighted ``r3u`` of
-            # ``domqco.F90:219-222``), not the time level and not the operand.
+            # TIME LEVEL: NEMO takes the stretch factor at Kaa, the AFTER
+            # level.  This divisor reads ``state.eta``, which is the SAME
+            # operand ``dz_cell`` above is already built from
+            # (``J_cell = compute_ocean_jacobian(state.eta.data, ...)``), so
+            # THE ONE VARIABLE THIS CHANGES IS THE FACE RULE -- NEMO's
+            # min-rule ``e3u_0`` with the e1e2t-weighted ``r3u`` of
+            # ``domqco.F90:219-222`` -- and neither the time level nor the ssh
+            # operand moves.  DISCLOSED, not claimed away: ``state.eta`` is the
+            # AFTER ssh on the certified cards' stepping path, but the
+            # momentum-only additive-friction call below passes the step-entry
+            # state with no ``eta_now``, so on THAT lane this divisor is a Kmm
+            # stretch, exactly as it was before this change (see the
+            # ``eta_now`` note above).  That lane is an open row, not a
+            # regression.
             #
             # No new rule is written here: ``_nemo_ws_qco_stage_faces`` is the
             # single shared assembler of ``e3u_0*(1+r3u*umask)`` that the WS-RK3
             # stage geometry and the PE lane's wzv arm already call.
             _drg_e3u, _drg_e3v = _nemo_dynzdf_drag_face_thickness(
                 state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
-                u_mask_3d, v_mask_3d, dz_u_open.dtype)
+                dz_u_open.dtype)
             extra_diag_u = (
                 dt_mom * _r_eff_u[..., jnp.newaxis]
                 / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u)
