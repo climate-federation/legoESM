@@ -582,13 +582,14 @@ def test_hold_last_valid_land_stress():
     pv = jnp.array([True, False, True, False])
     new = jnp.array([0.9, 0.8, jnp.nan, jnp.inf])
     held = jnp.array([0.0, 1.0, 0.0, 0.0])
-    mag, valid = hold_last_valid_land_stress(prev, pv, new, held)
+    mag, valid, fresh = hold_last_valid_land_stress(prev, pv, new, held)
     np.testing.assert_array_equal(mag, [0.9, 0.2, 0.3, 0.4])
     np.testing.assert_array_equal(valid, [True, False, True, False])
-    mag, valid = hold_last_valid_land_stress(mag, valid, jnp.full(4, 0.5),
-                                             jnp.zeros(4))
+    np.testing.assert_array_equal(fresh, [True, False, False, False])
+    mag, valid, fresh = hold_last_valid_land_stress(
+        mag, valid, jnp.full(4, 0.5), jnp.zeros(4))
     np.testing.assert_array_equal(mag, [0.5] * 4)
-    assert bool(valid.all())
+    assert bool(valid.all()) and bool(fresh.all())
 
 
 def test_land_stress_ustar_bulk_off_land_rebuilt_on_land():
