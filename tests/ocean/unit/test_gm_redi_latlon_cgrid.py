@@ -1648,6 +1648,48 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 kappa_u, act, vertical_skew_evaluation="unknown")
 
+    def test_horizontal_flux_literal_is_opt_in_and_default_is_byte_pinned(
+            self, monkeypatch):
+        """The Round-233 source boundaries are explicit and non-vacuous."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, None], T.shape)
+        default, default_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True)
+        pinned, pinned_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            horizontal_flux_evaluation="vectorized")
+        import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+        source_round_calls = []
+
+        def _record_source_round(value):
+            source_round_calls.append(value.shape)
+            return value
+
+        monkeypatch.setattr(gm, "nemo_source_round", _record_source_round)
+        literal, literal_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            horizontal_flux_evaluation="nemo_literal")
+        assert jnp.array_equal(default, pinned)
+        assert jnp.array_equal(default_diag["zfu"], pinned_diag["zfu"])
+        # This smooth fixture can be bit-identical on both arms.  Prove the
+        # literal arm executed instead of relying on a coincidental bit move;
+        # the developed-state production plants provide the numerical
+        # non-vacuity check.
+        assert len(source_round_calls) == 10
+        assert literal.shape == pinned.shape
+        assert literal_diag["zfu"].shape == pinned_diag["zfu"].shape
+        with pytest.raises(ValueError, match="horizontal_flux_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                horizontal_flux_evaluation="unknown")
+
     def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
         """The Kmm Redi slope carry must not move the earlier through-FCT
         bolus transport.  A distinct bolus slope tuple changes only the
