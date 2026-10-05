@@ -104,7 +104,7 @@ are registered.
 
 The compiled stage calls tracer advection and surface forcing before the
 stage-3 lateral diffusion, then vertical diffusion:
-`VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:455-488` and
+`VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:456-488` and
 `VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:501-546`.  The
 stage-3 `tra_ldf` call itself is
 `VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:532`;

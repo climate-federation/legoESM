@@ -3566,12 +3566,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:7588-7727': [
         '_stage3_T_rate = (',
         '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 140],
-    # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
-    # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
-    # two pinned endpoint statements are one line further apart than before.
+    # Extent 433 -> 434 at the 2026-09-25 merge, then 434 -> 437 in round 226:
+    # the explicit S-EOS operands add three lines inside this span.  The
+    # endpoint statements still identify the same program boundary.
     'ocean_model_latlon_cgrid.py:8771-9207': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 434],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 437],
     'ocean_model_latlon_cgrid.py:9401-9442': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 42],
@@ -5610,9 +5610,9 @@ CITATION_MAP = {
     'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:159-177': [
         'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
         'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )', 19],
-    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:455-488': [
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:456-488': [
         ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 2),
-        "CALL vortex_r18_tracer_rhs( 'adv', Krhs, ts )", 34],
+        "CALL vortex_r18_tracer_rhs( 'adv', Krhs, ts )", 33],
     'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:501-546': [
         ('SELECT CASE( kstg )', 4),
         'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 46],
