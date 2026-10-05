@@ -113,7 +113,7 @@ class TestValidation:
         cfg = MPASOceanConfig()
         assert cfg.barotropic_implicit_pcg_precond == "gpoly"
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 15
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
         assert cfg.barotropic_implicit_pcg_variant == "standard"
 
 
