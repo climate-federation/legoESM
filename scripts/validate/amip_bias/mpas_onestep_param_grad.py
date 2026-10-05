@@ -200,8 +200,15 @@ def main(argv=None):
 
     combined.make_physics = spy_make_physics
     MPASPrimitiveEquationModel.step = spy_step
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
+    # The driver script must come from the SAME checkout as the library on
+    # PYTHONPATH (the run's code), i.e. the working directory, not from the
+    # probe's own branch.
+    _ra = Path.cwd() / "scripts" / "run"
+    if not (_ra / "run_amip.py").exists():
+        raise SystemExit(f"run from the run's checkout: no {_ra}/run_amip.py")
+    sys.path.insert(0, str(_ra))
     import run_amip
+    print(f"run_amip from {run_amip.__file__}", flush=True)
     try:
         run_amip.main(argv_run)
     except _Captured:

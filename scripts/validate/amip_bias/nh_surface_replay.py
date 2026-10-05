@@ -57,6 +57,7 @@ LAND_KEYS = ("sw_down", "lw_down", "u_lowest", "v_lowest", "rho_lowest", "T_lowe
              "z_lowest")
 SURF_KEYS = ("sw_net", "lw_net", "lw_up", "shflx", "lhflx", "G_soil", "T_surface",
              "albedo", "z0", "tau_x", "tau_y", "held")
+SURF_OPT_KEYS = ("tau_mag", "converged", "n_iters")
 
 
 class _Captured(BaseException):
@@ -67,11 +68,15 @@ def capture(a):
     import mpas_onestep_param_grad as H
     t0 = time.time()
     out = Path(a.out)
-    scratch = out / f"_launch_{a.run}_d{a.day:04d}"
+    scratch = out / f"_launch_{a.run}_d{a.day:04d}{a.tag or ''}"
     scratch.mkdir(parents=True, exist_ok=True)
     argv = H.launch_argv(a.run, a.day, scratch)
     while "--distributed" in argv:          # single CPU process
         argv.remove("--distributed")
+    if a.config:
+        argv[argv.index("--config") + 1] = a.config
+    argv += list(a.extra or [])            # what-if flags, appended last
+    tag = getattr(a, "tag", "") or ""
 
     import jax
     import jax.numpy as jnp
@@ -90,7 +95,8 @@ def capture(a):
 
     def land_cb(*vals):
         if flags["land"] and "land" not in rec:
-            rec["land"] = {k: np.asarray(v) for k, v in zip(LAND_KEYS + SURF_KEYS, vals)}
+            rec["land"] = {k: np.asarray(v) for k, v in
+                           zip(LAND_KEYS + SURF_KEYS + SURF_OPT_KEYS, vals)}
 
     @functools.wraps(real_impl)
     def impl(state, forcing, *x, **k):
@@ -98,8 +104,13 @@ def capture(a):
         so = res[3]
         held = so.held if so.held is not None else jnp.zeros_like(so.shflx)
         z = forcing.z_lowest if forcing.z_lowest is not None else jnp.full_like(so.shflx, jnp.nan)
+        def _g(n):   # optional fields (older code / non-iterating schemes): NaN
+            v = getattr(so, n, None)
+            return (jnp.full_like(so.shflx, jnp.nan) if v is None
+                    else jnp.asarray(v, dtype=so.shflx.dtype).reshape(so.shflx.shape))
         vals = [getattr(forcing, n) for n in LAND_KEYS[:-1]] + [z] + \
-               [getattr(so, n) for n in SURF_KEYS[:-1]] + [held]
+               [getattr(so, n) for n in SURF_KEYS[:-1]] + [held] + \
+               [_g(n) for n in SURF_OPT_KEYS]
         jax.debug.callback(land_cb, *vals)
         return res
     mll._step_multilayer_land_impl = impl
@@ -166,8 +177,13 @@ def capture(a):
         raise _Captured()
     MPASPrimitiveEquationModel.step = step
 
-    sys.path.insert(0, str(HERE.parents[1] / "run"))
+    # run_amip from the RUN'S checkout (cwd), matching the library on PYTHONPATH.
+    _ra = Path.cwd() / "scripts" / "run"
+    if not (_ra / "run_amip.py").exists():
+        raise SystemExit(f"run from the run's checkout: no {_ra}/run_amip.py")
+    sys.path.insert(0, str(_ra))
     import run_amip
+    print(f"run_amip from {run_amip.__file__}; argv tail {argv[-8:]}", flush=True)
     try:
         run_amip.main(argv)
     except _Captured:
@@ -178,6 +194,19 @@ def capture(a):
     if "land" not in rec:
         raise SystemExit("FATAL: the land bootstrap call was never recorded")
     print(f"captured step 1 ({time.time() - t0:.0f}s)", flush=True)
+    if getattr(a, "land_only", False):
+        # Only the land bootstrap call's outputs (what-if comparisons of the
+        # land scheme on identical inputs); no turbulence / radiation replay.
+        _mesh = cap["model"].mesh
+        out_arr = {f"land_{k}": v for k, v in rec["land"].items()}
+        out_arr["lat"] = np.rad2deg(np.asarray(_mesh.latCell, dtype=np.float64))
+        out_arr["area"] = np.asarray(_mesh.areaCell, dtype=np.float64)
+        out_arr["f_land"] = np.asarray(drv["d"]._f_land, dtype=np.float64).reshape(-1)
+        f = out / f"cap_{a.run}_d{a.day:04d}{tag}.npz"
+        np.savez(f, meta=json.dumps({"run": a.run, "day": a.day, "argv": argv,
+                                     "land_only": True}), **out_arr)
+        print(f"wrote {f} ({time.time() - t0:.0f}s)")
+        return 0
 
     model, state = cap["model"], cap["state"]
     mesh, sig = model.mesh, model.sigma_coord
@@ -258,7 +287,51 @@ def capture(a):
     if d_ins > 2.0:
         raise SystemExit("FATAL: daily-mean insolation does not match the diurnal mean")
     dm = dict(cos_sza=None, insolation=ins, f_day=f_day, eccf=eccf)
-    arms = {"inst": {}, "inst_clr": clear, "dmean": dm, "dmean_clr": {**dm, **clear}}
+    arms = {"inst": {}, "inst_clr": clear, "dmean": dm, "dmean_clr": {**dm, **clear},
+            # cloud phase split at the 00Z instant: the same cloud fraction,
+            # with only ice (no liquid) or only liquid (no ice)
+            "inst_noliq": {"q_cloud": z0c(ra.get("q_cloud"))},
+            "inst_noice": {"q_ice": z0c(ra.get("q_ice")),
+                           "conv_icwmr": z0c(ra.get("conv_icwmr"))}}
+    # Column condensate handed to the radiation (grid-mean paths, kg/m2) and
+    # its cloud fraction: where the cloud water is, and how much the solver gets.
+    from legoesm import constants
+    radin = {}
+    _dp = np.abs(np.diff(np.asarray(ra["p_half"], dtype=np.float64), axis=1))
+    for _k in ("q_cloud", "q_ice", "conv_icwmr"):
+        if ra.get(_k) is not None:
+            radin[f"radin_{_k}_path"] = (
+                np.asarray(ra[_k], dtype=np.float64) * _dp).sum(1) / constants.g
+    if ra.get("cloud_fraction_override") is not None:
+        # The CLUBB (liquid) fraction carried in -- NOT the radiation's total
+        # cloud fraction, which compute_cloud_properties builds from it plus
+        # the CAM6 ice fraction and convective cloud (below).
+        _cf = np.asarray(ra["cloud_fraction_override"], dtype=np.float64)
+        radin["radin_cfclubb_max"] = _cf.max(1)
+    # The cloud field the solver actually got: the backend's own call.
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties)
+    from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
+    _cc = cfg.cloud_config if cfg.cloud_config is not None else CloudConfig(
+        scheme=cfg.cloud_scheme)
+    _ph = ra["p_half"]
+    _cp = compute_cloud_properties(
+        T=ra["T"], p_full=ra["p_full"], q_v=ra["q_v"],
+        dp=_ph[:, 1:] - _ph[:, :-1], config=_cc, q_cloud=ra.get("q_cloud"),
+        q_ice=ra.get("q_ice"), n_ice=ra.get("n_ice"), n_cloud=ra.get("n_cloud"),
+        conv_precip=ra.get("conv_precip"),
+        cloud_fraction_override=ra.get("cloud_fraction_override"),
+        lat=ra["lat"], conv_mass_flux_up=ra.get("conv_mass_flux_up"),
+        conv_icwmr=ra.get("conv_icwmr"), p_half=_ph)
+    _cfr = np.asarray(_cp.cloud_fraction, dtype=np.float64)
+    _p = np.asarray(ra["p_full"], dtype=np.float64)
+    radin["rad_cf_layer_max"] = _cfr.max(1)
+    radin["rad_cf_total_maxrand"] = np.asarray(maximum_random_overlap(_cp.cloud_fraction))
+    radin["rad_cf_low_maxrand"] = np.asarray(maximum_random_overlap(
+        jnp.where(jnp.asarray(_p) > 68000.0, _cp.cloud_fraction, 0.0)))
+    radin["rad_lwp"] = np.asarray(_cp.lwp, dtype=np.float64).sum(1)
+    radin["rad_iwp"] = np.asarray(_cp.iwp, dtype=np.float64).sum(1)
     out_arr = {}
     for n, o in arms.items():
         for k, v in solve(**o).items():
@@ -267,6 +340,7 @@ def capture(a):
     out_arr["rad_sfc_albedo"] = np.broadcast_to(
         np.asarray(ra["sfc_albedo_override"]), out_arr["rad_inst_olr"].shape).copy()
     out_arr["rad_cos_sza"] = np.asarray(ra["cos_sza"])
+    out_arr.update(radin)
     for k, v in rec["land"].items():
         out_arr[f"land_{k}"] = v
     for k, v in rec["bulk"].items():
@@ -279,7 +353,8 @@ def capture(a):
     meta = {"run": a.run, "day": a.day, "bulk_scheme": bc.bulk_scheme,
             "z_ref_model_level": bool(getattr(bc, "z_ref_model_level", False)),
             "argv": argv}
-    f = out / f"cap_{a.run}_d{a.day:04d}.npz"
+    f = out / f"cap_{a.run}_d{a.day:04d}{tag}.npz"
+    meta["argv_tail"] = argv[-8:]
     np.savez(f, meta=json.dumps(meta), **out_arr)
     print(f"wrote {f} ({time.time() - t0:.0f}s)")
     return 0
@@ -510,6 +585,12 @@ def main(argv=None):
     c.add_argument("run")
     c.add_argument("--day", type=int, required=True)
     c.add_argument("--out", required=True)
+    c.add_argument("--config", default=None, help="replace the logged --config deck")
+    c.add_argument("--tag", default="", help="suffix of the capture file name")
+    c.add_argument("--land-only", action="store_true",
+                   help="save only the land bootstrap outputs (no atmosphere replay)")
+    c.add_argument("--extra", nargs=argparse.REMAINDER,
+                   help="run_amip flags appended to the launch argv (what-if)")
     s = sp.add_parser("score")
     s.add_argument("run")
     s.add_argument("--days", type=int, nargs="+", required=True)

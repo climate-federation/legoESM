@@ -106,6 +106,12 @@ def main(argv=None):
     ap.add_argument("--jac-delta", type=float, default=1.0,
                     help="perturbation amplitude [K]; the response is reported per K "
                          "and is also run at half amplitude as a linearity check")
+    ap.add_argument("--config", default=None,
+                    help="replace the logged --config deck (e.g. the launch-commit copy)")
+    ap.add_argument("--save-columns", type=int, default=0, metavar="N",
+                    help="also save every process row for the lowest N model levels "
+                         "per COLUMN (plus T, p, z, lat, lon, area) to "
+                         "columns_<run>_d<day>.npz, for land/ocean regional budgets")
     ap.add_argument("--gwd-only", action="store_true",
                     help="only the gravity-wave-drag momentum tendency: deposition per layer, "
                          "global shares and the 5-degree-band profiles (saved to npz)")
@@ -116,6 +122,10 @@ def main(argv=None):
     scratch = out_dir / f"_launch_{args.run}"
     scratch.mkdir(exist_ok=True)
     argv_run = H.launch_argv(args.run, args.day, scratch)
+    if args.config:
+        # The logged --config path can point into a worktree whose deck has
+        # moved on since the launch; replay with the deck as it was.
+        argv_run[argv_run.index("--config") + 1] = args.config
 
     import jax
     import jax.numpy as jnp
@@ -136,7 +146,10 @@ def main(argv=None):
             def wrapped(*fa, **fkw):
                 res = fn(*fa, **fkw)
                 t = res if hasattr(res, "dT_dt") else res[0]   # tendencies are NamedTuples
-                rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
+                # Only concrete (eager) calls are recorded: the driver also
+                # traces the physics under jit (cache seed) before the capture.
+                if not isinstance(t.dT_dt.data, jax.core.Tracer):
+                    rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
                 return res
             fns[name] = wrapped
             return wrapped
@@ -149,6 +162,8 @@ def main(argv=None):
 
     def spy_backend(*a, **kw):
         out = real_backend(*a, **kw)
+        if isinstance(out.lw_heating_rate, jax.core.Tracer):
+            return out
         rad_calls.append((np.asarray(out.lw_heating_rate, dtype=np.float64),
                           np.asarray(out.sw_heating_rate, dtype=np.float64),
                           np.asarray(out.lw_flux_up[:, 0], dtype=np.float64),
@@ -169,8 +184,15 @@ def main(argv=None):
         raise H._Captured()
     combined.make_physics = spy_make_physics
     MPASPrimitiveEquationModel.step = spy_step
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
+    # The driver script must come from the SAME checkout as the library on
+    # PYTHONPATH (the run's code), i.e. the working directory, not from the
+    # probe's own branch.
+    _ra = Path.cwd() / "scripts" / "run"
+    if not (_ra / "run_amip.py").exists():
+        raise SystemExit(f"run from the run's checkout: no {_ra}/run_amip.py")
+    sys.path.insert(0, str(_ra))
     import run_amip
+    print(f"run_amip from {run_amip.__file__}", flush=True)
     try:
         run_amip.main(argv_run)
     except H._Captured:
@@ -232,7 +254,10 @@ def main(argv=None):
             print("  " + " ".join(f"{pp[k]:6.1f}:{prof[k]:+6.2f}" for k in range(min(14, prof.size))))
         return 0
     rec.clear()
-    pf_full(state, mesh, sig, phys_state=phys_state, forcing=forcing)
+    # The physics wrapper jits its sub-steps on newer code; the spies read
+    # concrete arrays, so the recording call runs with jit disabled.
+    with jax.disable_jit():
+        pf_full(state, mesh, sig, phys_state=phys_state, forcing=forcing)
     missing = [m for m in MODULES if m not in rec]
     if missing:
         raise SystemExit(f"modules never called: {missing}")
@@ -454,6 +479,18 @@ def main(argv=None):
         print(line)
     np.savez(out_dir / f"heating_budget_{args.run}_d{args.day:04d}.npz",
              bands=BANDS, month=month, dt=DT, **zm)
+    if args.save_columns > 0:
+        n = args.save_columns
+        # The coordinate's own half-level pressures (hybrid-aware: on cam_l32
+        # p_s * sigma_full above is NOT the layer pressure).
+        p_half = np.asarray(sig.pressure_at_half(state.p_s.data), dtype=np.float64)
+        p_mid = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+        np.savez(out_dir / f"columns_{args.run}_d{args.day:04d}.npz",
+                 lat_deg=lat_deg,
+                 lon_deg=np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64)),
+                 area=area, T=T0[:, -n:], p_mid=p_mid[:, -n:],
+                 p_s=np.asarray(state.p_s.data, dtype=np.float64),
+                 **{f"row_{k}": v[:, -n:] for k, v in rows.items()})
     # Per-cell descent rate and terrain, so a cap-mean descent can be checked
     # for whether it is cap-WIDE or concentrated near topography — a band mean
     # cannot tell those apart, and they implicate different causes.
