@@ -1451,10 +1451,6 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:2435-2439': [
         '# Preserve associated halo operands in the private trace.',
         '"inverse_depth_v": r1_H_v,', 5],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
-        ('IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)', 2),
-        "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
-        19],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
         '! Add bottom stresses:',
         ("& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')", 1),
