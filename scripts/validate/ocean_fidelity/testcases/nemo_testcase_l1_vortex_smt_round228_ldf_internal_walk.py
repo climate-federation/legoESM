@@ -108,6 +108,7 @@ def run(root: Path, *, plant: str | None = None,
         corrected_factors: bool = False,
         divisor_arm: bool = False,
         same_stage_set: bool = False,
+        include_live_faces: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -518,7 +519,8 @@ def run(root: Path, *, plant: str | None = None,
         pair = run_same_stage_arm(
             "arm.pair", use_divisor=True, use_faces=False)
         triple = None
-        if pair["fraction_of_baseline_rhs_max_removed"] < 0.9:
+        if (include_live_faces
+                or pair["fraction_of_baseline_rhs_max_removed"] < 0.9):
             triple = run_same_stage_arm(
                 "arm.triple", use_divisor=True, use_faces=True)
         same_stage_arms = {
@@ -626,14 +628,18 @@ def main(argv=None) -> int:
     parser.add_argument("--corrected-factors", action="store_true")
     parser.add_argument("--divisor-arm", action="store_true")
     parser.add_argument("--same-stage-set", action="store_true")
+    parser.add_argument("--include-live-faces", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
+        require(not args.include_live_faces or args.same_stage_set,
+                "--include-live-faces requires --same-stage-set")
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
                      divisor_arm=args.divisor_arm,
                      same_stage_set=args.same_stage_set,
+                     include_live_faces=args.include_live_faces,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
