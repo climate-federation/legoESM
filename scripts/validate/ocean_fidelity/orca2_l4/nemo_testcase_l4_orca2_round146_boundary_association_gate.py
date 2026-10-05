@@ -666,7 +666,8 @@ def measure(
             "R150-P2": "CONFIRMED" if p150_components else "REFUTED",
             "R150-P3": "CONFIRMED" if p150_reference else "REFUTED",
             "R150-P4": (
-                "CONFIRMED_DEPTH_ONLY" if p150_reference and p150_arm
+                "UNMEASURED_DESCENDANTS_DEPTH_CONFIRMED"
+                if p150_reference and p150_arm
                 else "REFUTED" if p150_reference
                 else "UNMEASURED_PREREQUISITE_R150-P3"),
         },
