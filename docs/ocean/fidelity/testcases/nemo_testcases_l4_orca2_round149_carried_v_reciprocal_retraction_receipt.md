@@ -21,8 +21,10 @@ passivity, all seven post-association arrays, and all eight literal-EEN
 coefficients remain bit-exact.
 
 NEMO computes `hvr_e` from the updated V depth and carries it through the
-seven-array association at compiled `dynspg_ts.f90:761-779`. The next substep
-uses it in the explicit V bottom-stress product at `dynspg_ts.f90:680-699`.
+seven-array association at compiled
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779`. The next
+substep uses it in the explicit V bottom-stress product at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699`.
 The corrected trace proves that operand is already bit-exact; the
 record-substitution arm therefore has no causal claim to test. R149-P2 is
 **REFUTED** and R149-P3 is **UNMEASURED_PREREQUISITE_R149-P2**, not a failed
@@ -39,16 +41,17 @@ production JIT, fp64/libm, and x64.
 With the carried reciprocal removed from the debt register, the first
 full-domain non-bit operand is again the substep-2 midpoint V-face depth:
 30 northern cells, maximum absolute difference **899 m**. NEMO extrapolates
-the midpoint sea surface at `dynspg_ts.f90:515-519`, then forms the V depth
-from the local and north T-cell area-weighted values at
-`dynspg_ts.f90:535-545`. legoESM's corresponding private, source-rounded
-builder is `barotropic_latlon_cgrid.py:588-629`.
+the midpoint sea surface, then forms the V depth from the local and north
+T-cell area-weighted values at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:519-545`.
+legoESM's corresponding private, source-rounded builder is
+`barotropic_latlon_cgrid.py:552-631`.
 
 The unchanged descendants remain 68 unequal cells in the V transport
 (`155776.5627856178` transport units), 68 in the V south difference (same
 maximum), and 68 in SSH (`0.003203816535399729` m). Their compiled order is
-the V transport at `dynspg_ts.f90:564-570`, the south difference at
-`dynspg_ts.f90:580-589`, then the SSH update at `dynspg_ts.f90:591`.
+the V transport, south difference, and SSH update at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591`.
 Round 148's row-below north-neighbour arm left all four censuses unchanged, so
 that candidate stays **REFUTED**.
 

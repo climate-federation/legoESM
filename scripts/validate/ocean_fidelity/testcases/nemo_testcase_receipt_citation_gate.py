@@ -1447,6 +1447,18 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:552-631': [
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
         'return H_u, H_v, r1_u_entry, r1_v_entry', 80],
+    # --- ORCA2 round 149: carried V reciprocal retraction ---------------
+    'barotropic_latlon_cgrid.py:2435-2439': [
+        '# Preserve associated halo operands in the private trace.',
+        '"inverse_depth_v": r1_H_v,', 5],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
+        ('IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)', 2),
+        "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
+        19],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
+        '! Add bottom stresses:',
+        "& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')",
+        20],
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
