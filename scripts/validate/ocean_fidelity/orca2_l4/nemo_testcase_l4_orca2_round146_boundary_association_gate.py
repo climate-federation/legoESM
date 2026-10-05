@@ -259,11 +259,23 @@ def measure(
     trace = observed.substeps
     control_trace = control.substeps
     arm_trace = arm.substeps
+    v_depth_plant_expected = None
     if plant == "v-depth-bit":
         arm_trace = dict(arm_trace)
         planted = np.array(arm_trace["transport_face_depth_v"], copy=True)
-        planted[1, -1, 0] = np.nextafter(
-            planted[1, -1, 0], np.float64(np.inf))
+        native = r97._native_v(planted[1])
+        oracle_depth = oracle["j002_hvp2_e"]
+        unequal = (
+            np.ascontiguousarray(native).view(np.uint64)
+            != np.ascontiguousarray(oracle_depth).view(np.uint64)
+        )
+        exact_top = np.flatnonzero(~unequal[-1])
+        require(exact_top.size > 0,
+                "v-depth-bit plant has no exact northern cell to perturb")
+        column = int(exact_top[0])
+        v_depth_plant_expected = int(np.count_nonzero(unequal)) + 1
+        planted[1, -1, column] = np.nextafter(
+            planted[1, -1, column], np.float64(np.inf))
         arm_trace["transport_face_depth_v"] = planted
     require(trace["eta_entry"].shape[0] == 65,
             "production trace does not contain 65 substeps")
@@ -369,7 +381,11 @@ def measure(
                 "stored-pivot-source plant stayed green")
         raise GateError("stored-pivot-source plant fired")
     if plant == "v-depth-bit":
-        require(not p148_depth, "v-depth-bit plant stayed green")
+        require(
+            arm_substep2["mid_depth_v"]["operand_differing_cells"]
+            == v_depth_plant_expected,
+            "v-depth-bit plant stayed green",
+        )
         raise GateError("v-depth-bit plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
