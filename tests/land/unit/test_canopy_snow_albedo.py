@@ -288,7 +288,7 @@ def test_land_step_switch_on_masks_forest_snow_only():
 def _pre_step_masked():
     from legoesm import constants
     from legoesm.land.multilayer_land import compute_land_albedo
-    from legoesm.surface_albedo import LandAlbedoConfig, snow_cover_fraction  # noqa: F401
+    from legoesm.surface_albedo import LandAlbedoConfig, snow_cover_fraction
     la = LandAlbedoConfig()
     swe = jnp.asarray([0.0, 200.0, 200.0, 5.0])
     age = jnp.full(NCOL, 2.0 * 86400.0)

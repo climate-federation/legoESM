@@ -275,8 +275,9 @@ def ground_snow_cover(
 ) -> jnp.ndarray:
     """Snow-covered fraction of the GROUND as the land albedo blend uses it:
     :func:`snow_cover_fraction` times the per-cell ``snow_cover_scale`` (when
-    set), clipped to [0, 1].  The one definition shared by :func:`land_albedo`
-    and the canopy snow burial, so the two can never disagree."""
+    set), clipped to [0, 1]: the cover the albedo BLEND uses.  The canopy snow
+    burial deliberately uses the unscaled :func:`snow_cover_fraction` instead
+    (the scale is a brightness calibration, not snow area; user 2026-10-03)."""
     f_snow = snow_cover_fraction(snow_depth, config)
     if config.snow_cover_scale is not None:
         f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)

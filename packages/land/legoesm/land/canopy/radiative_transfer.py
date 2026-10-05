@@ -594,6 +594,9 @@ def _clm5_pft_optics_cached():
     from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import inir, ivis
     with jax.ensure_compile_time_eval():
         pc = _pc.InitRead(_pc.InitAllocate())
+    from legoesm.land.surface_params import N_PFT_CLM5
+    if N_PFT_CLM5 != _N_CLM_PFT:
+        raise ValueError(f"surfdata PFT count {N_PFT_CLM5} != CLM5 optics rows {_N_CLM_PFT}")
     rows = slice(0, _N_CLM_PFT)
     two = lambda a: np.stack([np.asarray(a)[rows, ivis], np.asarray(a)[rows, inir]],
                              axis=-1)

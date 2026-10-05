@@ -118,7 +118,7 @@ program ts_oracle
              u2 = b - c1*albgrd(c,ib)
              u3 = f + c1*albgrd(c,ib)
           else
-             ! Snow Free (SF) only 
+             ! Snow Free (SF) only
              ! albsod instead of albgrd here:
              u1 = b - c1/albsod(c,ib)
              u2 = b - c1*albsod(c,ib)
@@ -148,7 +148,7 @@ program ts_oracle
           else
             albdSF(p,ib) = h1/sigma + h2 + h3
           end if
-          
+
 
           a1 = h1 / sigma * (1._r8 - s2*s2) / (2._r8 * twostext(p)) &
              + h2         * (1._r8 - s2*s1) / (twostext(p) + h) &
@@ -167,7 +167,7 @@ program ts_oracle
             u1 = b - c1/albgri(c,ib)
             u2 = b - c1*albgri(c,ib)
           else
-             ! Snow Free (SF) only 
+             ! Snow Free (SF) only
              ! albsoi instead of albgri here:
             u1 = b - c1/albsoi(c,ib)
             u2 = b - c1*albsoi(c,ib)
@@ -183,7 +183,7 @@ program ts_oracle
           h9 = tmp4 / (d2*s1)
           h10 = (-tmp5*s1) / d2
 
-  
+
           ! Final Snow Free albedo
           if ( lSFonly )then
             albiSF(p,ib) = h7 + h8
