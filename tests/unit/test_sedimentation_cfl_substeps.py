@@ -692,10 +692,10 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # 291 fields still hash to c023f86f71966a44.
             # 293 -> 294: land_canopy_most_n_iters END-appended (prefix still
             # b380eb4b2adef6b3).
-            # 294 -> 309 / AMIP re-hashed at the 2026-10-05 merge: main appended
+            # 294 -> 306 / AMIP re-hashed at the 2026-10-05 merge: main appended
             # Morrison warm-rain + ZM/CLUBB tunables (ExperimentConfig) and
             # zm_land_fraction (AMIP); the canopy trio stays last.
-            (ExperimentConfig, 309, "84c24671eba721a2"),
+            (ExperimentConfig, 306, "d8fbbb77e25837f5"),
             (AMIPExperimentConfig, 126, "8924f13ccbc6880f")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
