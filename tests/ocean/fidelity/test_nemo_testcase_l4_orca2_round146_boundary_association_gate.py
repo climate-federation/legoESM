@@ -114,6 +114,14 @@ def test_transport_v_causal_plant_is_registered():
     assert "transport-v-causal" in gate.PLANTS
 
 
+def test_transport_v_causal_arm_is_scored_after_reference_depth_prerequisite():
+    source = gate.Path(gate.__file__).read_text()
+    arm = source[source.index("transport_v_arm = _run("):
+                 source.index("observed_state =", source.index(
+                     "transport_v_arm = _run("))]
+    assert "reference_depth_override=reference_depth_override" in arm
+
+
 def test_reference_depth_override_none_returns_original_prep():
     prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
 

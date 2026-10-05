@@ -605,6 +605,7 @@ def measure(
     transport_v_arm = _run(
         card, state, freshwater, surface, slow, raw_history,
         expose=True, arm=True, t_pivot_north_neighbor=False,
+        reference_depth_override=reference_depth_override,
         unmasked_v_transport=(plant != "transport-v-causal"))
 
     observed_state = _state_arrays(observed.state_after)
@@ -876,7 +877,7 @@ def measure(
         for name in ("transport_v", "continuity_dv", "after_ssh")
     )
     p153_nonvacuous = all(
-        control_substep2[name]["operand_differing_cells"] == 68
+        reference_depth_arm_substep2[name]["operand_differing_cells"] == 68
         for name in ("transport_v", "continuity_dv", "after_ssh")
     )
     if plant == "transport-v-causal":
