@@ -73,6 +73,8 @@ _ORCA2_R141GROWTH_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo")
 _ORCA2_R143EARLY_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo")
+_ORCA2_R144INITIAL_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -208,6 +210,8 @@ FILES = {
         _ORCA2_R143EARLY_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R143EARLY_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R144INITIAL_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -5861,6 +5865,21 @@ CITATION_MAP = {
         ('sshn_e(:,:) =    pssh (:,:,Kmm)', 1),
         ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kbb)))', 1),
         17,
+    ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:357-375': [
+        ('IF( ln_bt_fw ) THEN', 1),
+        ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kbb)))', 1),
+        19,
+    ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:357-366': [
+        ('IF( ln_bt_fw ) THEN', 1),
+        ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 1),
+        10,
+    ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
+        ('hv_e (ji,jj) =    hv_0(ji,jj) + zsshv_a(ji,jj)', 1),
+        ("CALL lbc_lnk( 'dynspg_ts'", 1),
+        19,
     ],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-960': [
         ('un_adv(:,:) = un_adv(:,:) / r1_wgt2s', 1),
