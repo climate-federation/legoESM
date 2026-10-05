@@ -123,11 +123,28 @@ and write the ORCA2 merge pointer.  No card-specific scope is inferred here.
 
 The clean production walk and its production-JIT plant are recorded in
 `final_tensor_walk_v2.json` and `candidate_plant.log`.  The old-form unit
-non-vacuity failure is `nonvacuity_old_guard.log`.  Focused test and citation
-gate summaries are recorded below after the final clean-tree pass.
+non-vacuity failure is `nonvacuity_old_guard.log`.  The focused pytest battery
+reports:
 
-The required separate read-only Codex review result is recorded below after
-the final diff review.
+> 135 passed in 205.02s (0:03:25)
+
+It covers the complete receipt-citation suite, the SMT card tests, and the
+complete GM/Redi unit file.  The round citation gate passes four mapped
+compiled-source citations with zero failures, audit failures, or unmapped
+citations.  The default campaign receipt also passes all 274 citations.  The
+shifted final-divisor citation plant exits 1 with `SYMBOL-NOT-AT-LINE`.
+
+The required separate read-only Codex review could not initialize inside the
+sandbox.  Its complete verdict transcript is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**; there is no reviewer
+`DO NOT SHIP` verdict.  This round lands no physics candidate.
 
 ## 6. OPEN
 
