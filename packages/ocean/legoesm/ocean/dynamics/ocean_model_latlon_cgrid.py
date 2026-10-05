@@ -7181,20 +7181,20 @@ class LatLonCGridOceanModel:
                             _baro_seed,
                             _nemo_flux_form_update_test_override=(
                                 _flux_update_override))
-                    if (
-                        self._nemo_ws_test_hooks
-                        .barotropic_external_mode_association
-                    ):
-                        _baro_seed = dict(
-                            _baro_seed,
-                            _nemo_external_mode_association_test_override=True)
-                    if (
-                        self._nemo_ws_test_hooks
-                        .barotropic_t_pivot_north_neighbor
-                    ):
-                        _baro_seed = dict(
-                            _baro_seed,
-                            _nemo_t_pivot_north_neighbor_test_override=True)
+                if (
+                    self._nemo_ws_test_hooks
+                    .barotropic_external_mode_association
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_external_mode_association_test_override=True)
+                if (
+                    self._nemo_ws_test_hooks
+                    .barotropic_t_pivot_north_neighbor
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_t_pivot_north_neighbor_test_override=True)
                 _cor_sub_override = (
                     self._nemo_ws_test_hooks
                     .barotropic_substep_coriolis_override)

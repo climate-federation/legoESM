@@ -1447,9 +1447,6 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:570-599': [
         ('def _nemo_literal_reference_face_depths(z_coord, dtype):', 1),
         ('return hu_compact, hv_compact', 1), 30],
-    'barotropic_latlon_cgrid.py:3330-3390': [
-        ('# One source program, not four independently selectable behaviours.', 1),
-        ('_external_mode_association),', 1), 61],
     'barotropic_latlon_cgrid.py:842-874': [
         ('def nemo_literal_continuity_divergence(', 1),
         ('return (du + dv) * (1.0 / grid.area)', 1), 33],

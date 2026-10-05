@@ -3327,33 +3327,6 @@ def barotropic_substeps_latlon_cgrid(
             raise ValueError(
                 "raw barotropic-history substitution requires six arrays")
 
-    # One source program, not four independently selectable behaviours.
-    # The NEMO-literal identity reads raw hu_0/hv_0 (:538-545), associates
-    # the external carry in one lbc_lnk call (:761-779), stores the unmasked
-    # zhV statement (:568-570), and only then subtracts it (:584-591).  The
-    # private round-146..154 flags remain additive controls; explicitly
-    # enabling them on this path must now be an exact no-op.
-    _literal_transport_program = (
-        config.barotropic.barotropic_face_depth == "nemo_ssh_avg"
-        and config.barotropic.barotropic_continuity_evaluation
-        == "nemo_literal"
-        and getattr(
-            config.barotropic,
-            "barotropic_transport_accumulation_evaluation", "generic",
-        ) == "nemo_literal"
-    )
-    _reference_depth = _nemo_reference_face_depth_test_override
-    if _literal_transport_program and _reference_depth is None:
-        _reference_depth = _nemo_literal_reference_face_depths(z_coord, _dt)
-    _external_mode_association = (
-        _literal_transport_program
-        or _nemo_external_mode_association_test_override)
-    _unmasked_v_transport = (
-        _literal_transport_program
-        or _nemo_unmasked_v_transport_test_override)
-    _materialize_v_transport = (
-        _literal_transport_program
-        or _nemo_materialize_v_transport_test_override)
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
@@ -3381,13 +3354,13 @@ def barotropic_substeps_latlon_cgrid(
         nemo_substep_inverse_v_override=(
             _nemo_substep_inverse_v_test_override),
         nemo_reference_face_depth_override=(
-            _reference_depth),
+            _nemo_reference_face_depth_test_override),
         nemo_unmasked_v_transport_test_override=(
-            _unmasked_v_transport),
+            _nemo_unmasked_v_transport_test_override),
         nemo_materialize_v_transport_test_override=(
-            _materialize_v_transport),
+            _nemo_materialize_v_transport_test_override),
         nemo_external_mode_association_test_override=(
-            _external_mode_association),
+            _nemo_external_mode_association_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
