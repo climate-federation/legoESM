@@ -358,7 +358,14 @@ class MPASOceanConfig(NamedTuple):
     # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
     # reaches the 1e-10 relative residual in 27-30 iterations on real s7
     # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
-    barotropic_implicit_pcg_fixed_iters: int = 15
+    #
+    # None (the default since 2026-10-04, owner decision): the iteration count,
+    # recurrence (pcg_variant) and preconditioner are resolved TOGETHER per
+    # JAX backend by resolve_barotropic_pcg_defaults (table
+    # MPAS_BAROTROPIC_PCG_DEFAULTS below the class) when the model is built,
+    # and written back into model.config, so every run records the solver it
+    # used.  Set all three to pin a solver.
+    barotropic_implicit_pcg_fixed_iters: int | None = None
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # "standard" (two allreduces per iteration) is the default since
     # 2026-10-02 (owner decision): it is the recurrence gpoly x 15 was
@@ -385,7 +392,7 @@ class MPASOceanConfig(NamedTuple):
     # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
     # with per-iteration exchange 92.7 / 165.3.  Not the default: owner
     # decision 2026-10-02 keeps gpoly x 15 (no head-to-head measurement).
-    barotropic_implicit_pcg_variant: str = "standard"
+    barotropic_implicit_pcg_variant: str | None = None  # per backend, see fixed_iters
     # Distributed-only preconditioner for the fixed-iteration PCG
     # (default "gpoly" since 2026-10-02, see below; the MPI Voronoi lane
     # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
@@ -411,7 +418,7 @@ class MPASOceanConfig(NamedTuple):
     # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
     # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
     # (select "poly" there) and a single device keeps the stock CG solve.
-    barotropic_implicit_pcg_precond: str = "gpoly"
+    barotropic_implicit_pcg_precond: str | None = None  # per backend, see fixed_iters
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
@@ -639,6 +646,55 @@ class MPASSimpleOceanConfig(NamedTuple):
     # as LatLonCGridOceanConfig field additions).
     freezing: FreezingPointConfig = FreezingPointConfig()
 
+
+
+#: Distributed barotropic PCG bundle per JAX backend (owner decision
+#: 2026-10-04).  CPU, Derecho s7 L40 f64, 3 repeats, ms/step on main 87144e259
+#: with only these flags changed: 8 nodes gpoly x15 standard 67.7 vs deep-halo
+#: jacobi x30 61.0; 2 nodes 152.3 vs 144.4; 1 node 290.7 vs 280.5.  GPU:
+#: gpoly x15 standard (weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128 GPUs vs
+#: poly x20); deep-halo was never measured on GPU.
+MPAS_BAROTROPIC_PCG_DEFAULTS = {
+    "cpu": dict(barotropic_implicit_pcg_variant="single_reduce_deep",
+                barotropic_implicit_pcg_precond="jacobi",
+                barotropic_implicit_pcg_fixed_iters=30),
+    "gpu": dict(barotropic_implicit_pcg_variant="standard",
+                barotropic_implicit_pcg_precond="gpoly",
+                barotropic_implicit_pcg_fixed_iters=15),
+}
+
+
+def resolve_barotropic_pcg_defaults(config: "MPASOceanConfig",
+                                    backend: str | None = None) -> "MPASOceanConfig":
+    """Fill the unset (None) barotropic PCG fields from the bundle for
+    ``backend`` (default: ``jax.default_backend()``).  Idempotent.
+
+    Mixing bundles is refused: a preconditioner other than the backend's
+    needs its own iteration count and recurrence, so when the caller pins the
+    preconditioner to something else, the other two fields must be pinned too
+    (Jacobi at gpoly's 15 iterations would be silently under-converged).
+    """
+    keys = ("barotropic_implicit_pcg_variant", "barotropic_implicit_pcg_precond",
+            "barotropic_implicit_pcg_fixed_iters")
+    unset = [k for k in keys if getattr(config, k) is None]
+    if not unset:
+        return config
+    if backend is None:
+        import jax
+        backend = jax.default_backend()
+    if backend not in MPAS_BAROTROPIC_PCG_DEFAULTS:
+        raise ValueError(
+            f"no MPAS barotropic PCG default for JAX backend {backend!r}; pin "
+            f"{', '.join(keys)} explicitly")
+    bundle = MPAS_BAROTROPIC_PCG_DEFAULTS[backend]
+    precond = config.barotropic_implicit_pcg_precond
+    if precond is not None and precond != bundle["barotropic_implicit_pcg_precond"]:
+        raise ValueError(
+            f"barotropic_implicit_pcg_precond={precond!r} differs from the "
+            f"{backend} default ({bundle['barotropic_implicit_pcg_precond']!r}); "
+            f"also pin {', '.join(k for k in unset)} (a bundle's count and "
+            "recurrence belong to its preconditioner)")
+    return config._replace(**{k: bundle[k] for k in unset})
 
 
 def resolution_scaled_k_zeta_bih(dx_mean_m: float, config: "MPASOceanConfig") -> float:

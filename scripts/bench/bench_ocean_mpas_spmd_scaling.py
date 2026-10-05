@@ -127,19 +127,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_pcg_overrides(config, args):
-    """Config with the PCG flags applied; a flag left unset (None) keeps the
-    MPASOceanConfig default, so a ladder arm without flags measures the
-    production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py)."""
+    """Config with the PCG flags applied, then the backend's PCG bundle
+    resolved for every field still unset — so an arm without flags measures
+    the production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py), and
+    a preconditioner flag that leaves the bundle's count or recurrence to the
+    backend default fails HERE, before launch, not inside the solver."""
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    over = {}
     if args.pcg_fixed_iters is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+        over["barotropic_implicit_pcg_fixed_iters"] = int(args.pcg_fixed_iters)
     if args.pcg_precond is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_precond=str(args.pcg_precond))
+        over["barotropic_implicit_pcg_precond"] = str(args.pcg_precond)
     if args.pcg_poly_sweeps is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
-    return config
+        over["barotropic_implicit_pcg_poly_sweeps"] = int(args.pcg_poly_sweeps)
+    return resolve_barotropic_pcg_defaults(config._replace(**over))
 
 
 def main() -> int:

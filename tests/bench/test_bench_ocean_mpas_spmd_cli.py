@@ -25,24 +25,37 @@ PCG_FIELDS = ("barotropic_implicit_pcg_fixed_iters",
 
 def _resolved(argv):
     args = mod.build_parser().parse_args(["--n-devices", "1", *argv])
-    cfg = mod.apply_pcg_overrides(MPASOceanConfig(), args)
+    cfg = mod.apply_pcg_overrides(
+        MPASOceanConfig(barotropic_implicit_pcg_variant=args.pcg_variant), args)
     return {f: getattr(cfg, f) for f in PCG_FIELDS}
 
 
+def _bundle():
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    return resolve_barotropic_pcg_defaults(MPASOceanConfig())
+
+
 def test_no_flag_is_the_config_default():
-    defaults = {f: MPASOceanConfig._field_defaults[f] for f in PCG_FIELDS}
-    assert _resolved([]) == defaults
+    """No flag = the backend's resolved production bundle."""
+    d = _bundle()
+    assert _resolved([]) == {f: getattr(d, f) for f in PCG_FIELDS}
     args = mod.build_parser().parse_args(["--n-devices", "1"])
     assert (args.pcg_fixed_iters, args.pcg_precond, args.pcg_poly_sweeps) == (None, None, None)
 
 
 def test_each_flag_overrides_independently():
-    d = MPASOceanConfig._field_defaults
+    import pytest
+    b = _bundle()
+    d = {f: getattr(b, f) for f in PCG_FIELDS}
     other = "jacobi" if d["barotropic_implicit_pcg_precond"] == "poly" else "poly"
-    r = _resolved(["--pcg-precond", other])
+    # another preconditioner alone would mix bundles: refused before launch
+    with pytest.raises(ValueError, match="also pin"):
+        _resolved(["--pcg-precond", other])
+    r = _resolved(["--pcg-precond", other, "--pcg-fixed-iters", "20",
+                   "--pcg-variant", "standard"])
     assert r["barotropic_implicit_pcg_precond"] == other
+    assert r["barotropic_implicit_pcg_fixed_iters"] == 20
     assert r["barotropic_implicit_pcg_poly_sweeps"] == d["barotropic_implicit_pcg_poly_sweeps"]
-    assert r["barotropic_implicit_pcg_fixed_iters"] == d["barotropic_implicit_pcg_fixed_iters"]
     r = _resolved(["--pcg-poly-sweeps", "7", "--pcg-fixed-iters", "11"])
     assert r["barotropic_implicit_pcg_poly_sweeps"] == 7
     assert r["barotropic_implicit_pcg_fixed_iters"] == 11
@@ -109,7 +122,8 @@ def test_gpoly_flag_and_halo_depth_default():
     """--pcg-precond gpoly reaches the config; --halo-depth is unset by
     default so the layout depth comes from the config's own requirement."""
     from legoesm.parallel.voronoi_spmd_ocean import halo_depth_for_config
-    assert _resolved(["--pcg-precond", "gpoly"])[
+    assert _resolved(["--pcg-precond", "gpoly", "--pcg-variant", "standard",
+                      "--pcg-fixed-iters", "15"])[
         "barotropic_implicit_pcg_precond"] == "gpoly"
     args = mod.build_parser().parse_args(["--n-devices", "1"])
     assert args.halo_depth is None
