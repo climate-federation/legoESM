@@ -549,6 +549,24 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
     return H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask
 
 
+def _nemo_ssh_avg_reference_depth_override(prep, override, dtype):
+    """Replace only the frozen ``hu_0/hv_0`` slots for a private causal arm."""
+
+    if override is None:
+        return prep
+    if not isinstance(override, (tuple, list)) or len(override) != 2:
+        raise ValueError(
+            "NEMO reference face-depth override requires one (hu_0, hv_0) pair")
+    H_u_ref, H_v_ref, r1_e1e2u, r1_e1e2v, nfold_mask = prep
+    H_u_raw = jnp.asarray(override[0], dtype=dtype)
+    H_v_raw = jnp.asarray(override[1], dtype=dtype)
+    if H_u_raw.shape != H_u_ref.shape or H_v_raw.shape != H_v_ref.shape:
+        raise ValueError(
+            "NEMO reference face-depth override shape does not match the "
+            "barotropic compact faces")
+    return H_u_raw, H_v_raw, r1_e1e2u, r1_e1e2v, nfold_mask
+
+
 def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
                         return_literal_inverse=False,
                         return_ssh_average=False,
@@ -1675,6 +1693,7 @@ def _run_substep_loop(
     nemo_substep_coriolis_override=None,
     nemo_substep_pgf_override=None,
     nemo_substep_inverse_v_override=None,
+    nemo_reference_face_depth_override=None,
     nemo_external_mode_association_test_override=False,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
@@ -1761,6 +1780,9 @@ def _run_substep_loop(
     _ssh_avg_prep = (
         _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask)
         if _face_depth_mode == "nemo_ssh_avg" else None)
+    if _ssh_avg_prep is not None:
+        _ssh_avg_prep = _nemo_ssh_avg_reference_depth_override(
+            _ssh_avg_prep, nemo_reference_face_depth_override, dtype)
 
     def _ssh_avg_face_depths(eta_dyn):
         """NEMO zhup2_e/zhvp2_e-style face depth (module-level
@@ -2784,6 +2806,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_substep_coriolis_test_override=None,
     _nemo_substep_pgf_test_override=None,
     _nemo_substep_inverse_v_test_override=None,
+    _nemo_reference_face_depth_test_override=None,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -3278,6 +3301,8 @@ def barotropic_substeps_latlon_cgrid(
         nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
         nemo_substep_inverse_v_override=(
             _nemo_substep_inverse_v_test_override),
+        nemo_reference_face_depth_override=(
+            _nemo_reference_face_depth_test_override),
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
         nemo_t_pivot_north_neighbor_test_override=(

@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    _nemo_ssh_avg_reference_depth_override,
+)
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round146_boundary_association_gate as gate,
 )
@@ -92,6 +95,32 @@ def test_midpoint_v_bit_control_is_nonvacuous():
     candidate = np.nextafter(reference, np.float64(np.inf))
 
     assert gate.exact_row(candidate, reference)["differing_cells"] == 1
+
+
+def test_reference_depth_override_none_returns_original_prep():
+    prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
+
+    assert _nemo_ssh_avg_reference_depth_override(
+        prep, None, np.float64) is prep
+
+
+def test_reference_depth_override_changes_only_registered_slots():
+    prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
+    raw = (np.full((2, 3), 7.0), np.full((2, 3), 8.0))
+
+    result = _nemo_ssh_avg_reference_depth_override(prep, raw, np.float64)
+
+    assert np.array_equal(result[0], raw[0])
+    assert np.array_equal(result[1], raw[1])
+    assert all(result[index] is prep[index] for index in range(2, 5))
+
+
+def test_reference_depth_override_rejects_malformed_shape():
+    prep = tuple(np.zeros((2, 3), dtype=np.float64) for _ in range(5))
+
+    with pytest.raises(ValueError, match="shape does not match"):
+        _nemo_ssh_avg_reference_depth_override(
+            prep, (np.zeros((1, 3)), np.zeros((2, 3))), np.float64)
 
 
 @pytest.mark.parametrize("face,changed", [("u", (1, 0)), ("v", (0, 2))])

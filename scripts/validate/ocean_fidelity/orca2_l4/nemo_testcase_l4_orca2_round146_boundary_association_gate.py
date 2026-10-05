@@ -39,7 +39,8 @@ from scripts.validate.ocean_fidelity.testcases import (
 PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
           "u-fold-sign", "stored-pivot-source", "v-depth-bit",
           "inverse-v-registry", "wrong-entry-frame", "entry-inverse-v-bit",
-          "midpoint-v-registry", "midpoint-v-bit")
+          "midpoint-v-registry", "midpoint-v-bit",
+          "reference-depth-shape", "reference-depth-arm-bit")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -336,7 +337,8 @@ def _state_arrays(state) -> dict[str, np.ndarray]:
 
 
 def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
-         t_pivot_north_neighbor=False, inverse_v_override=None):
+         t_pivot_north_neighbor=False, inverse_v_override=None,
+         reference_depth_override=None):
     import jax
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -356,6 +358,8 @@ def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
             barotropic_external_mode_association=arm,
             barotropic_t_pivot_north_neighbor=t_pivot_north_neighbor,
             barotropic_substep_inverse_v_override=inverse_v_override,
+            barotropic_reference_face_depth_override=(
+                reference_depth_override),
         ),
     )
     return jax.device_get(model.step(
@@ -416,6 +420,15 @@ def measure(
     )
     inverse_v_override = build_entry_inverse_v_override(
         oracle, plant=plant)
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "rung-0 card has no raw NEMO reference depths")
+    reference_depth_override = (
+        r97._to_model_u(np.asarray(raw.hu_0)),
+        r97._to_model_v(np.asarray(raw.hv_0)),
+    )
+    if plant == "reference-depth-shape":
+        reference_depth_override = (
+            reference_depth_override[0][:-1], reference_depth_override[1])
 
     ordinary = _run(
         card, state, freshwater, surface, slow, raw_history,
@@ -434,6 +447,10 @@ def measure(
         card, state, freshwater, surface, slow, raw_history,
         expose=True, arm=True, t_pivot_north_neighbor=False,
         inverse_v_override=inverse_v_override)
+    reference_depth_arm = _run(
+        card, state, freshwater, surface, slow, raw_history,
+        expose=True, arm=True, t_pivot_north_neighbor=False,
+        reference_depth_override=reference_depth_override)
 
     observed_state = _state_arrays(observed.state_after)
     ordinary_state = _state_arrays(ordinary)
@@ -448,6 +465,7 @@ def measure(
     control_trace = control.substeps
     arm_trace = arm.substeps
     inverse_arm_trace = inverse_arm.substeps
+    reference_depth_arm_trace = reference_depth_arm.substeps
     v_depth_plant_expected = None
     if plant == "v-depth-bit":
         arm_trace = dict(arm_trace)
@@ -466,6 +484,22 @@ def measure(
         planted[1, -1, column] = np.nextafter(
             planted[1, -1, column], np.float64(np.inf))
         arm_trace["transport_face_depth_v"] = planted
+    if plant == "reference-depth-arm-bit":
+        reference_depth_arm_trace = dict(reference_depth_arm_trace)
+        planted = np.array(
+            reference_depth_arm_trace["transport_face_depth_v"], copy=True)
+        native = r97._native_v(planted[1])
+        oracle_depth = oracle["j002_hvp2_e"]
+        exact = np.argwhere(
+            np.ascontiguousarray(native).view(np.uint64)
+            == np.ascontiguousarray(oracle_depth).view(np.uint64))
+        require(exact.size > 0,
+                "reference-depth-arm-bit plant has no exact source cell")
+        native_location = tuple(map(int, exact[0]))
+        native[native_location] = np.nextafter(
+            native[native_location], np.float64(np.inf))
+        planted[1] = r97._to_model_v(native)
+        reference_depth_arm_trace["transport_face_depth_v"] = planted
     require(trace["eta_entry"].shape[0] == 65,
             "production trace does not contain 65 substeps")
 
@@ -512,6 +546,7 @@ def measure(
     control_rows = []
     arm_rows = []
     inverse_arm_rows = []
+    reference_depth_arm_rows = []
     for index in range(2):
         baseline_rows.extend(r129._score_substep(
             trace, oracle, active, area, index, plant="none"))
@@ -521,6 +556,9 @@ def measure(
             arm_trace, oracle, active, area, index, plant="none"))
         inverse_arm_rows.extend(r129._score_substep(
             inverse_arm_trace, oracle, active, area, index, plant="none"))
+        reference_depth_arm_rows.extend(r129._score_substep(
+            reference_depth_arm_trace, oracle, active, area, index,
+            plant="none"))
     baseline_first = r129.first_nonbit(baseline_rows)
     arm_first = r129.first_nonbit(arm_rows)
     require(baseline_first is not None,
@@ -544,6 +582,10 @@ def measure(
     }
     inverse_arm_substep2 = {
         row["boundary"]: row for row in inverse_arm_rows
+        if row["substep"] == 2
+    }
+    reference_depth_arm_substep2 = {
+        row["boundary"]: row for row in reference_depth_arm_rows
         if row["substep"] == 2
     }
     p148_control_census = (
@@ -623,6 +665,19 @@ def measure(
     )
     p150_arm = midpoint_v_split[
         "reference_depth_arm_mid_depth_v"]["bit_exact"]
+    p151_default = all(row["bit_exact"] for row in passivity.values())
+    p151_depth = reference_depth_arm_substep2[
+        "mid_depth_v"]["operand_bit_exact"]
+    p151_chain = all(
+        reference_depth_arm_substep2[name]["operand_bit_exact"]
+        for name in ("transport_v", "continuity_dv", "after_ssh")
+    )
+    if plant == "reference-depth-arm-bit":
+        require(
+            reference_depth_arm_substep2["mid_depth_v"]
+            ["operand_differing_cells"] == 1,
+            "reference-depth-arm-bit plant stayed green")
+        raise GateError("reference-depth-arm-bit plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -676,6 +731,18 @@ def measure(
         "control_rows": control_rows,
         "arm_rows": arm_rows,
         "inverse_arm_rows": inverse_arm_rows,
+        "reference_depth_arm_rows": reference_depth_arm_rows,
+        "reference_depth_arm_substep2": reference_depth_arm_substep2,
+        "predictions_round151": {
+            "R151-P1": (
+                "CONFIRMED" if p3 and p148_control_census else "REFUTED"),
+            "R151-P2": "CONFIRMED" if p151_default else "REFUTED",
+            "R151-P3": "CONFIRMED" if p151_depth else "REFUTED",
+            "R151-P4": (
+                "CONFIRMED" if p151_depth and p151_chain
+                else "REFUTED" if p151_depth
+                else "UNMEASURED_PREREQUISITE_R151-P3"),
+        },
         "worktree": stamp,
     }
 

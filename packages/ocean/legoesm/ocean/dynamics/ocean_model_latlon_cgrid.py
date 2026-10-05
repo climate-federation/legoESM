@@ -1143,6 +1143,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # hvr_e at each external-substep entry.  None is the production value;
     # no constructible model configuration can select this record arm.
     barotropic_substep_inverse_v_override: object = None
+    # Private round-151 discriminator: replace only the frozen hu_0/hv_0
+    # slots in the existing SSH-average prep with the card's raw NEMO pair.
+    # None is the production value; no model configuration can select it.
+    barotropic_reference_face_depth_override: object = None
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -7205,6 +7209,14 @@ class LatLonCGridOceanModel:
                         _baro_seed,
                         _nemo_substep_inverse_v_test_override=(
                             _inverse_v_sub_override))
+                _reference_depth_override = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_reference_face_depth_override)
+                if _reference_depth_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_reference_face_depth_test_override=(
+                            _reference_depth_override))
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,

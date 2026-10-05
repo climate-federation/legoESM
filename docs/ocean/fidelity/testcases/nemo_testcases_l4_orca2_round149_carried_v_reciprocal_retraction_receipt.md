@@ -13,7 +13,7 @@ forcing, initial state, carried-state form, stabiliser, sea-ice selector, or
 
 Round 148's statement that the substep-2 carried V reciprocal was the first
 non-bit operand is withdrawn. The private trace zeroed the reciprocal outside
-the active V mask at `barotropic_latlon_cgrid.py:2435-2439`, while NEMO's
+the active V mask at `barotropic_latlon_cgrid.py:2457-2461`, while NEMO's
 associated `hvr_e` retains boundary storage. Preserving the raw private trace
 changes the reported `entry_inverse_v` census from 68 unequal cells, maximum
 `0.03332976059679253`, to **0 unequal cells and 0.0 maximum**. Observer
@@ -45,7 +45,7 @@ the midpoint sea surface, then forms the V depth from the local and north
 T-cell area-weighted values at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:519-545`.
 legoESM's corresponding private, source-rounded builder is
-`barotropic_latlon_cgrid.py:552-631`.
+`barotropic_latlon_cgrid.py:570-649`.
 
 The unchanged descendants remain 68 unequal cells in the V transport
 (`155776.5627856178` transport units), 68 in the V south difference (same

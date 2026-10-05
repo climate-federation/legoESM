@@ -25,7 +25,7 @@ depth with the card's raw NEMO `hv_0`, preserving the already-measured dynamic
 SSH average. It makes `mid_depth_v` **bit-exact: 0/26,640 unequal**, from the
 30-cell/899-m control. The replay itself reproduces the production trace
 bit-for-bit before substitution. The shared builder whose operands were split
-is `barotropic_latlon_cgrid.py:552-631`.
+is `barotropic_latlon_cgrid.py:570-649`.
 
 This does not yet land physics. The substitution was an offline statement
 replay, not a production arm, so its descendants remain unmeasured. The frozen
