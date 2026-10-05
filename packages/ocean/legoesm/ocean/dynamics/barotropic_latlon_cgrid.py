@@ -3326,7 +3326,6 @@ def barotropic_substeps_latlon_cgrid(
         if len(_nemo_raw_history_test_override) != 6:
             raise ValueError(
                 "raw barotropic-history substitution requires six arrays")
-
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
