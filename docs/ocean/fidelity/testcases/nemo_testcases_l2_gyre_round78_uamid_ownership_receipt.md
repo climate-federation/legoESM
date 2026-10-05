@@ -54,7 +54,7 @@ source's `:783-795`. It reads and writes all six absolute before/twice-before
 arrays directly in restart I/O at `:991-1018`.
 
 legoesm instead defines `bt_hist` as six final-minus-history deviations at
-`state.py:648-666`, reconstructs the absolute inputs by subtracting those
+`state.py:648-681`, reconstructs the absolute inputs by subtracting those
 deviations from the new window's current value at
 `barotropic_latlon_cgrid.py:2063-2085`, and forms the next deviations by
 subtraction at `:2890-2901`. Those subtraction/reconstruction pairs cannot

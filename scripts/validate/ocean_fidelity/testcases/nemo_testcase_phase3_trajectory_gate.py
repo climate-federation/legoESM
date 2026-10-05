@@ -46,6 +46,40 @@ DEFAULT_ORACLE_ROOTS = {
     # (decision 73); its own NEMO run, beside the flux card's.
     "VORTEX_VEC-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round3"),
+    # Decision 74's resolution ladder (round 208, operator note BZ).  Each rung
+    # is the SAME certified executable reading a deck refined by NEMO's own
+    # rule (AGRIF_FixedGrids.in:2 ratio 3; 1_namelist_cfg:21-22,43), so a row
+    # that moves between rungs is a grid-size dependence in the transcription
+    # and nothing else.
+    "VORTEX-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/flx"),
+    "VORTEX_VEC-15km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/15km/vec"),
+    "VORTEX-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/flx"),
+    "VORTEX_VEC-10km-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_ladder/10km/vec"),
+    # Decision 88's seamount pair (round 211 acquired, round 212 scores): the
+    # same 30 km deck with a Gaussian seamount and z partial bottom cells,
+    # built through NEMO's own usrdef_zgr hook on key_vco_1d3d.
+    "VORTEX_SMT-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10"),
+    "VORTEX_SMT_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10"),
+    # Decision 93's seamount mini-ladder, rung 1 (round 220): the same deck
+    # with namzdf at ORCA2 rung 0's values.
+    "VORTEX_SMT1_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10"),
+    # Rung 2 (round 222): the same deck with namdrg's linear bottom drag.
+    "VORTEX_SMT2_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/"
+        "round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10"),
+    "VORTEX_SMT3_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/"
+        "oracle_vortex_smt3/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
@@ -260,6 +294,7 @@ def run(
     arm_legacy_seed_faces=False, arm_legacy_hadv_min_face_thickness=False,
     arm_legacy_2d_stage_face_mask=False,
     arm_legacy_live_stage_mean_weights=False,
+    after_ssh_form=None,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -269,6 +304,7 @@ def run(
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
+        with_first_wzv_after_ssh,
     )
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
@@ -278,8 +314,12 @@ def run(
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
+    # Measurement arm only -- the card still STATES its own form; this scores
+    # the same card under the other one so the pair is one run's numbers.
+    arm_config = with_first_wzv_after_ssh(
+        card.recipe.model_config, after_ssh_form)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        card.recipe.grid, card.recipe.z_coord, arm_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             disable_bbl=diagnostic_disable_bbl,
             literal_stage_wzv=arm_literal_stage_wzv,
@@ -507,6 +547,9 @@ def run(
         "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "legoesm_git_sha": legoesm_git_sha,
+        # Which after-SSH arm produced these rows; None = the card.
+        "after_ssh_form_arm": after_ssh_form,
+        "after_ssh_form_resolved": arm_config.nemo_first_wzv_after_ssh,
         "case": case,
         "status": "AT-BAR" if first_over_bar is None else "DEBT",
         "precision_policy": "fp64",
@@ -588,6 +631,12 @@ def main() -> int:
               "_NEMOWSRK3TestHooks control; NEMO has no such switch): restore "
               "the live h_u_pre/H_u_pre weighting instead of NEMO's reference "
               "SUM(e3u_0*uu)*r1_hu_0 (stprk3_stg.F90:440, domain.F90:145)"))
+    parser.add_argument(
+        "--after-ssh-form", default=None,
+        help="measurement arm: score this card with NEMO's first-wzv "
+             "after-SSH form overridden (rk3_extrapolated | "
+             "rk3_extrapolated_carried | leapfrog_continuity). The card "
+             "still states its own form; omitting this flag is the card.")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     from legoesm.ocean.fidelity.ulp_move_gate import (
@@ -609,7 +658,8 @@ def main() -> int:
             arm_legacy_seed_faces=args.arm_legacy_seed_faces,
             arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
             arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
-            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights,
+            after_ssh_form=args.after_ssh_form)
     if args.output:
         write_residual_artifact(report, args.output, residuals)
     elif args.compare_to:
