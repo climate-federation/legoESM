@@ -122,6 +122,18 @@ def test_transport_v_causal_arm_is_scored_after_reference_depth_prerequisite():
     assert "reference_depth_override=reference_depth_override" in arm
 
 
+def test_transport_v_materialization_plant_is_registered():
+    assert "transport-v-materialization" in gate.PLANTS
+
+
+def test_transport_v_materialization_arm_keeps_both_prerequisites():
+    source = gate.Path(gate.__file__).read_text()
+    start = source.index("materialized_v_arm = _run(")
+    arm = source[start:source.index("observed_state =", start)]
+    assert "reference_depth_override=reference_depth_override" in arm
+    assert "unmasked_v_transport=True" in arm
+
+
 def test_reference_depth_override_none_returns_original_prep():
     prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
 

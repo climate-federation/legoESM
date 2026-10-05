@@ -42,7 +42,7 @@ PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
           "midpoint-v-registry", "midpoint-v-bit",
           "reference-depth-shape", "reference-depth-arm-bit",
           "transport-v-registry", "transport-v-bit",
-          "transport-v-causal")
+          "transport-v-causal", "transport-v-materialization")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -495,7 +495,8 @@ def build_reference_depth_override(card, *, plant: str):
 
 def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
          t_pivot_north_neighbor=False, inverse_v_override=None,
-         reference_depth_override=None, unmasked_v_transport=False):
+         reference_depth_override=None, unmasked_v_transport=False,
+         materialize_v_transport=False):
     import jax
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -518,6 +519,7 @@ def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm,
             barotropic_reference_face_depth_override=(
                 reference_depth_override),
             barotropic_unmasked_v_transport=unmasked_v_transport,
+            barotropic_materialize_v_transport=materialize_v_transport,
         ),
     )
     return jax.device_get(model.step(
@@ -607,6 +609,12 @@ def measure(
         expose=True, arm=True, t_pivot_north_neighbor=False,
         reference_depth_override=reference_depth_override,
         unmasked_v_transport=(plant != "transport-v-causal"))
+    materialized_v_arm = _run(
+        card, state, freshwater, surface, slow, raw_history,
+        expose=True, arm=True, t_pivot_north_neighbor=False,
+        reference_depth_override=reference_depth_override,
+        unmasked_v_transport=True,
+        materialize_v_transport=(plant != "transport-v-materialization"))
 
     observed_state = _state_arrays(observed.state_after)
     ordinary_state = _state_arrays(ordinary)
@@ -623,6 +631,7 @@ def measure(
     inverse_arm_trace = inverse_arm.substeps
     reference_depth_arm_trace = reference_depth_arm.substeps
     transport_v_arm_trace = transport_v_arm.substeps
+    materialized_v_arm_trace = materialized_v_arm.substeps
     v_depth_plant_expected = None
     if plant == "v-depth-bit":
         arm_trace = dict(arm_trace)
@@ -707,6 +716,7 @@ def measure(
     inverse_arm_rows = []
     reference_depth_arm_rows = []
     transport_v_arm_rows = []
+    materialized_v_arm_rows = []
     for index in range(2):
         baseline_rows.extend(r129._score_substep(
             trace, oracle, active, area, index, plant="none"))
@@ -721,6 +731,9 @@ def measure(
             plant="none"))
         transport_v_arm_rows.extend(r129._score_substep(
             transport_v_arm_trace, oracle, active, area, index,
+            plant="none"))
+        materialized_v_arm_rows.extend(r129._score_substep(
+            materialized_v_arm_trace, oracle, active, area, index,
             plant="none"))
     baseline_first = r129.first_nonbit(baseline_rows)
     arm_first = r129.first_nonbit(arm_rows)
@@ -753,6 +766,10 @@ def measure(
     }
     transport_v_arm_substep2 = {
         row["boundary"]: row for row in transport_v_arm_rows
+        if row["substep"] == 2
+    }
+    materialized_v_arm_substep2 = {
+        row["boundary"]: row for row in materialized_v_arm_rows
         if row["substep"] == 2
     }
     p148_control_census = (
@@ -884,6 +901,22 @@ def measure(
         require(p153_nonvacuous and not p153_chain,
                 "transport-v-causal plant stayed green")
         raise GateError("transport-v-causal plant fired")
+    p154_prerequisites = (
+        p153_nonvacuous
+        and transport_v_arm_substep2["transport_v"]["operand_bit_exact"]
+        and not p153_chain
+    )
+    p154_chain = all(
+        materialized_v_arm_substep2[name]["operand_bit_exact"]
+        for name in (
+            "transport_v", "continuity_dv", "continuity_divergence",
+            "after_ssh",
+        )
+    )
+    if plant == "transport-v-materialization":
+        require(p154_prerequisites and not p154_chain,
+                "transport-v-materialization plant stayed green")
+        raise GateError("transport-v-materialization plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -942,6 +975,8 @@ def measure(
         "reference_depth_arm_substep2": reference_depth_arm_substep2,
         "transport_v_arm_rows": transport_v_arm_rows,
         "transport_v_arm_substep2": transport_v_arm_substep2,
+        "materialized_v_arm_rows": materialized_v_arm_rows,
+        "materialized_v_arm_substep2": materialized_v_arm_substep2,
         "predictions_round151": {
             "R151-P1": (
                 "CONFIRMED" if p3 and p148_control_census else "REFUTED"),
@@ -972,6 +1007,12 @@ def measure(
             "R153-P1": "CONFIRMED" if p151_default else "REFUTED",
             "R153-P2": (
                 "CONFIRMED" if p153_nonvacuous and p153_chain
+                else "REFUTED"),
+        },
+        "predictions_round154": {
+            "R154-P1": "CONFIRMED" if p151_default else "REFUTED",
+            "R154-P2": (
+                "CONFIRMED" if p154_prerequisites and p154_chain
                 else "REFUTED"),
         },
         "worktree": stamp,

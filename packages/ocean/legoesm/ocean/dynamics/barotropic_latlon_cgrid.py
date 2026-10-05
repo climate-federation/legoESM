@@ -744,6 +744,7 @@ def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
 
 def nemo_literal_metric_transports(
     H_u, H_v, U, V, u_mask, v_mask, grid, *, mask_v=True,
+    materialize_v=False,
 ):
     """Assemble NEMO DINO's literal ``zhU``/``zhV`` metric transports."""
     # Rich/fold-aware geometry carries the full 2-D u-face meridional metric.
@@ -759,12 +760,14 @@ def nemo_literal_metric_transports(
     zh_v = (e1v * V) * H_v
     if mask_v:
         zh_v = zh_v * v_mask
+    if materialize_v:
+        zh_v = nemo_source_round(zh_v)
     return zh_u, zh_v
 
 
 def nemo_literal_accumulate_transport(
     Hu_sum, Hv_sum, raw_weight, H_u, H_v, U, V, u_mask, v_mask, grid,
-    *, mask_v=True,
+    *, mask_v=True, materialize_v=False,
 ):
     """One source-ordered DINO ``un_adv/vn_adv`` accumulation row.
 
@@ -776,7 +779,8 @@ def nemo_literal_accumulate_transport(
     XLA fusion while retaining JIT/autodiff compatibility.
     """
     zh_u, zh_v = nemo_literal_metric_transports(
-        H_u, H_v, U, V, u_mask, v_mask, grid, mask_v=mask_v)
+        H_u, H_v, U, V, u_mask, v_mask, grid, mask_v=mask_v,
+        materialize_v=materialize_v)
     dtype = Hu_sum.dtype
     zh_u = zh_u.astype(dtype)
     zh_v = zh_v.astype(dtype)
@@ -805,6 +809,7 @@ def nemo_literal_accumulate_transport(
 
 def nemo_literal_continuity_divergence(
     H_u, H_v, U, V, u_mask, v_mask, grid, *, mask_v=True,
+    materialize_v=False,
 ):
     """NEMO DINO's literal QCO metric-transport continuity expression.
 
@@ -830,7 +835,8 @@ def nemo_literal_continuity_divergence(
     ``[1:]-[:-1]`` supplies its closed-wall V north-minus-south difference.
     """
     zh_u, zh_v = nemo_literal_metric_transports(
-        H_u, H_v, U, V, u_mask, v_mask, grid, mask_v=mask_v)
+        H_u, H_v, U, V, u_mask, v_mask, grid, mask_v=mask_v,
+        materialize_v=materialize_v)
     du = zh_u[:, 1:] - zh_u[:, :-1]
     dv = zh_v[1:] - zh_v[:-1]
     return (du + dv) * (1.0 / grid.area)
@@ -1698,6 +1704,7 @@ def _run_substep_loop(
     nemo_substep_inverse_v_override=None,
     nemo_reference_face_depth_override=None,
     nemo_unmasked_v_transport_test_override=False,
+    nemo_materialize_v_transport_test_override=False,
     nemo_external_mode_association_test_override=False,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
@@ -1972,7 +1979,8 @@ def _run_substep_loop(
                 Hu_sum_c, Hv_sum_c, w_tr_i,
                 H_u_flux, H_v_flux, U_mid, V_mid,
                 u_mask, v_mask, grid,
-                mask_v=not nemo_unmasked_v_transport_test_override)
+                mask_v=not nemo_unmasked_v_transport_test_override,
+                materialize_v=nemo_materialize_v_transport_test_override)
         else:
             Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
             Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
@@ -1986,6 +1994,7 @@ def _run_substep_loop(
             div_flux = nemo_literal_continuity_divergence(
                 H_u_flux, H_v_flux, U_mid, V_mid, u_mask, v_mask, grid,
                 mask_v=not nemo_unmasked_v_transport_test_override,
+                materialize_v=nemo_materialize_v_transport_test_override,
             ).astype(dtype)
         else:
             div_flux = divergence_cgrid(
@@ -2332,7 +2341,8 @@ def _run_substep_loop(
                 nemo_literal_metric_transports(
                     H_u_flux, H_v_flux, U_mid, V_mid,
                     u_mask, v_mask, grid,
-                    mask_v=not nemo_unmasked_v_transport_test_override)
+                    mask_v=not nemo_unmasked_v_transport_test_override,
+                    materialize_v=nemo_materialize_v_transport_test_override)
                 if _transport_evaluation == "nemo_literal"
                 else (flux_u, flux_v)
             )
@@ -2815,6 +2825,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_substep_inverse_v_test_override=None,
     _nemo_reference_face_depth_test_override=None,
     _nemo_unmasked_v_transport_test_override=False,
+    _nemo_materialize_v_transport_test_override=False,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -3313,6 +3324,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_reference_face_depth_test_override),
         nemo_unmasked_v_transport_test_override=(
             _nemo_unmasked_v_transport_test_override),
+        nemo_materialize_v_transport_test_override=(
+            _nemo_materialize_v_transport_test_override),
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
         nemo_t_pivot_north_neighbor_test_override=(

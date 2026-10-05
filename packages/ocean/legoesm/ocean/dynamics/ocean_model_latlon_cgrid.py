@@ -1151,6 +1151,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # from NEMO's literal ``zhV = e1v * va_e * zhvp2_e`` statement. False is
     # the unchanged production path; no constructible config can select it.
     barotropic_unmasked_v_transport: bool = False
+    # Private round-154 causal arm: retain NEMO's completed ``zhV`` binary64
+    # result before its later north-minus-south subtraction. False is the
+    # unchanged production path; no constructible config can select it.
+    barotropic_materialize_v_transport: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -7226,6 +7230,11 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_unmasked_v_transport_test_override=True)
+                if (self._nemo_ws_test_hooks
+                        .barotropic_materialize_v_transport):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_materialize_v_transport_test_override=True)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,

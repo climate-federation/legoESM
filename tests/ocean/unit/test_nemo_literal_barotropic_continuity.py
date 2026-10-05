@@ -74,6 +74,17 @@ def test_private_unmasked_v_transport_omits_only_final_v_mask():
     np.testing.assert_array_equal(changed, np.array([[0, 1]]))
 
 
+def test_private_v_materialization_is_an_ieee_identity():
+    h_u, h_v, u, v, um, vm, grid = _case()
+    ordinary_u, ordinary_v = nemo_literal_metric_transports(
+        h_u, h_v, u, v, um, vm, grid, mask_v=False)
+    materialized_u, materialized_v = nemo_literal_metric_transports(
+        h_u, h_v, u, v, um, vm, grid, mask_v=False, materialize_v=True)
+
+    np.testing.assert_array_equal(np.asarray(materialized_u), np.asarray(ordinary_u))
+    np.testing.assert_array_equal(np.asarray(materialized_v), np.asarray(ordinary_v))
+
+
 def test_gradient_is_finite():
     h_u, h_v, u, v, um, vm, grid = _case()
 
