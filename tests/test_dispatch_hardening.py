@@ -247,7 +247,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # the code.
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
-        ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # 642481601 moved step_land's body (surface_scheme + runoff_scheme
+        # raises) into step_land_with_diagnostics; step_land now only
+        # delegates to it, so the guards live there.
+        ("packages/land/legoesm/land/slab_land.py", "step_land_with_diagnostics"),
         # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
         ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
