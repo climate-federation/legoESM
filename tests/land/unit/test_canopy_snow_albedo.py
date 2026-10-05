@@ -548,3 +548,31 @@ def test_switch_with_layered_snow_raises():
         step_multilayer_land_with_diagnostics(
             state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
             land_params=lp)
+
+
+def test_zero_ground_albedo_keeps_gradients_finite():
+    """A zero ground albedo (also where no canopy exists) must not put an
+    infinite term into the two-stream: the inactive branch would NaN the VJP."""
+    def f(ag):
+        albd, albi = clm5_two_stream_albedo(
+            jnp.array([0.0, 2.0]), jnp.array([0.0, 0.8]), 0.07, 0.05, 0.16,
+            0.001, 0.01, jnp.array([0.5, 0.5]), ag)
+        return jnp.sum(albd + albi)
+    g = jax.grad(f)(jnp.zeros(2))
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert np.isfinite(float(f(jnp.zeros(2))))
+
+
+def test_switch_with_elevation_bands_raises():
+    from legoesm.land.snow_bands import ElevationSnowBandConfig
+    cfg = MultiLayerLandConfig(
+        snow_albedo_feedback=True, surface_scheme=TwoLeafCanopyConfig(),
+        canopy_snow_masking=True,
+        elev_bands=ElevationSnowBandConfig(band_dz=jnp.zeros((NCOL, 2))))
+    state = init_multilayer_land_state(NCOL, cfg._replace(elev_bands=None),
+                                       T_init=265.0)
+    lp = bare_canopy_params(NCOL, canopy_structure=True)
+    with pytest.raises(ValueError, match="no elevation bands"):
+        step_multilayer_land_with_diagnostics(
+            state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
+            land_params=lp)

@@ -549,7 +549,9 @@ def clm5_two_stream_albedo(vai, f_leaf, rhol, taul, rhos, taus, xl, cosz,
     s1 = jnp.exp(-jnp.minimum(h * vai_s, _CLM_EXP_MAX))
     s2 = jnp.exp(-jnp.minimum(ext * vai_s, _CLM_EXP_MAX))
     # Direct beam (1434-1462).
-    u1 = b - c1 / alb_ground
+    # Floored divisor: alb_ground = 0 would make u1 infinite and, through the
+    # jnp.where below, NaN the gradient even where the canopy is absent.
+    u1 = b - c1 / jnp.maximum(alb_ground, _CLM_MPE)
     tmp2 = u1 - avmu * h
     tmp3 = u1 + avmu * h
     d1 = p1 * tmp2 / s1 - p2 * tmp3 * s1
