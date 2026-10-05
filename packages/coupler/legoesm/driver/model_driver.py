@@ -678,18 +678,6 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
                                       owned_mask=owned_mask)
 
 
-def _spectral_micro_config(cfg):
-    """MicrophysicsConfig for the spectral standalone lane, with the flat
-    ``morrison_*`` ExperimentConfig scalars threaded exactly as the FV and MPAS
-    lanes do (untouched config -> the default leaf, unchanged)."""
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-    from legoesm.driver.physics_pipeline import thread_morrison_scalars
-    mc = MicrophysicsConfig(scheme=cfg.microphysics)
-    leaf = getattr(mc, cfg.microphysics, None)
-    if leaf is None:   # 'none': no scheme leaf; validate_strict refuses morrison_* there
-        return mc
-    return mc._replace(**{cfg.microphysics: thread_morrison_scalars(
-        cfg, cfg.microphysics, leaf)})
 def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
                            owned_mask=None):
     """Build the per-step MPAS q_v smoother as ONE compiled call.
@@ -760,6 +748,8 @@ def mpas_land_forcing(sd_sw, sd_lw, sd_pr, T3, qv3, ps_in, u3, doy, sod,
         has_radiation=jnp.ones_like(T_air),
         has_precipitation=jnp.ones_like(T_air),
     )
+
+
 def _spectral_micro_config(cfg):
     """MicrophysicsConfig for the spectral standalone lane, with the flat
     ``morrison_*`` ExperimentConfig scalars threaded exactly as the FV and MPAS
@@ -11276,12 +11266,6 @@ class ModelDriver:
             # never advance.
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
-            from legoesm.grids.voronoi import reconstruct_cell_velocity
-            # Compiled once: eagerly it ran op-by-op every land-forcing call
-            # (~0.5 s/step at 16 ranks, res6).
-            _recon_grid = self.grid
-            _recon_cell_velocity_jit = jax.jit(
-                lambda u_edge: reconstruct_cell_velocity(u_edge, _recon_grid))
             _lml_cfg = self.physics.land_ml_cfg
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
