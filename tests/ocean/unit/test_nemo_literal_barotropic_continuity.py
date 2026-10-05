@@ -9,6 +9,7 @@ import numpy as np
 
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_external_mode_boundary_association,
+    _nemo_literal_reference_face_depths,
     _nemo_ssh_avg_apply,
     nemo_literal_continuity_divergence,
     nemo_literal_metric_transports,
@@ -83,6 +84,27 @@ def test_private_v_materialization_is_an_ieee_identity():
 
     np.testing.assert_array_equal(np.asarray(materialized_u), np.asarray(ordinary_u))
     np.testing.assert_array_equal(np.asarray(materialized_v), np.asarray(ordinary_v))
+
+
+def test_literal_reference_depths_map_native_faces_without_reconstruction():
+    hu = jnp.arange(12, dtype=jnp.float64).reshape(3, 4) + 1.25
+    hv = jnp.arange(12, dtype=jnp.float64).reshape(3, 4) + 101.5
+    compact_u, compact_v = _nemo_literal_reference_face_depths(
+        SimpleNamespace(nemo_hu_0=hu, nemo_hv_0=hv), jnp.float64)
+
+    np.testing.assert_array_equal(
+        np.asarray(compact_u[:, 0]), np.asarray(hu[:, -1]))
+    np.testing.assert_array_equal(np.asarray(compact_u[:, 1:]), np.asarray(hu))
+    np.testing.assert_array_equal(np.asarray(compact_v[0]), np.zeros(4))
+    np.testing.assert_array_equal(np.asarray(compact_v[1:]), np.asarray(hv))
+
+
+def test_literal_reference_depths_refuse_a_missing_oracle_operand():
+    with np.testing.assert_raises_regex(ValueError, "missing nemo_hv_0"):
+        _nemo_literal_reference_face_depths(
+            SimpleNamespace(nemo_hu_0=jnp.ones((2, 3)), nemo_hv_0=None),
+            jnp.float64,
+        )
 
 
 def test_gradient_is_finite():
