@@ -92,8 +92,14 @@ ladder are unchanged by construction; no scientific row can move. The new
 work is a committed measurement adapter, NEMO acquisition instrument, tests,
 citation routing, and this receipt.
 
-Focused round-143/144 tests pass 31/31. The full `tests/ocean/fidelity -n 12`
-battery result is recorded below after its single permitted launch.
+Focused round-143/144 and citation tests pass 42/42. The full
+`tests/ocean/fidelity -n 12` battery was launched once. It reached 99% and
+reported 2,552 passes, then its controller stopped producing output without a
+terminal summary; the battery is **INCOMPLETE**, not PASS. Its four reported
+failures were re-run one process at a time and reproduce the round-143 known
+reds exactly: SI3 scalar-math MY_SRC provenance; nine stamp-scope offenders;
+eleven worktree-stamp offenders; and the round-129 certified-year harness
+membership ratchet. No round-144 test failed.
 
 The required separate `codex exec --sandbox read-only` review could not
 initialize its in-process app-server client because the read-only filesystem
