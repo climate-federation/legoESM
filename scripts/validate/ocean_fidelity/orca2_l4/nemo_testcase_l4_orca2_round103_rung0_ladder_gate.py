@@ -95,6 +95,7 @@ def run(
     record_root: Path,
     *,
     plant: str = "none",
+    raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
 ) -> dict[str, object]:
@@ -107,8 +108,9 @@ def run(
     )
 
     require(plant in PLANTS, f"unknown plant {plant}")
-    require(not materialize_v_transport or unmasked_v_transport,
-            "V materialization arm requires the unmasked V transport")
+    require(not materialize_v_transport
+            or (raw_reference_depth and unmasked_v_transport),
+            "V materialization arm requires raw depth and unmasked transport")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -122,6 +124,10 @@ def run(
             "rung-0 record did not admit exactly 80 shards")
     card = rung0.build_rung0_card(deck_root)
     rung0.validate_rung0_card(card)
+    reference_depth_override = (
+        rung0.ladder.build_reference_depth_override(card)
+        if raw_reference_depth else None
+    )
     require(card.unmeasured_features == ("linear_implicit_bottom_drag",),
             "rung-0 exact-input debt changed")
 
@@ -145,12 +151,14 @@ def run(
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
             expose_tracer_stage=stage,
+            barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport),
     ) for stage in (1, 2))
     final_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport))
 
@@ -209,6 +217,7 @@ def run(
         "card_case": card.case,
         "unmeasured_features": list(card.unmeasured_features),
         "private_arm": {
+            "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
         },
@@ -226,6 +235,7 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--record-root", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
     parser.add_argument("--json-out", type=Path)
@@ -235,6 +245,7 @@ def main() -> int:
             args.deck_root,
             args.record_root,
             plant=args.plant,
+            raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,
         )

@@ -47,4 +47,4 @@ def test_source_statement_is_the_measured_round94_boundary() -> None:
 
 def test_materialization_arm_requires_unmasked_transport() -> None:
     source = gate.Path(gate.__file__).read_text()
-    assert "not materialize_v_transport or unmasked_v_transport" in source
+    assert "raw_reference_depth and unmasked_v_transport" in source

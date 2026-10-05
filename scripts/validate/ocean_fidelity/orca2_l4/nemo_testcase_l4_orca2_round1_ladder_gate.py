@@ -948,6 +948,19 @@ def unaltered_initial_ts(deck_root: Path, card) -> dict[str, np.ndarray]:
     return {"T": temperature, "S": salinity}
 
 
+def build_reference_depth_override(card) -> tuple[np.ndarray, np.ndarray]:
+    """Map the card's raw NEMO ``hu_0/hv_0`` into compact face storage."""
+
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "ORCA2 card has no raw NEMO reference depths")
+    raw_u = np.pad(
+        np.asarray(raw.hu_0, dtype=np.float64), ((0, 0), (1, 0)))
+    raw_u[:, 0] = raw_u[:, -1]
+    raw_v = np.pad(
+        np.asarray(raw.hv_0, dtype=np.float64), ((1, 0), (0, 0)))
+    return raw_u, raw_v
+
+
 def candidate_trajectory(
     deck_root: Path,
     root: Path,
@@ -955,6 +968,7 @@ def candidate_trajectory(
     *,
     max_step: int = 10,
     bridge_ssh: bool = True,
+    raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
 ) -> dict[str, object]:
@@ -969,8 +983,9 @@ def candidate_trajectory(
     )
 
     require(1 <= max_step <= 10, "candidate max_step must be in 1..10")
-    require(not materialize_v_transport or unmasked_v_transport,
-            "V materialization arm requires the unmasked V transport")
+    require(not materialize_v_transport
+            or (raw_reference_depth and unmasked_v_transport),
+            "V materialization arm requires raw depth and unmasked transport")
     entry1 = assemble_state_fields(root, 1, stage=None)
     state = card.recipe.initial_state
     independent = compare_fields(_candidate_fields(state), entry1)
@@ -1018,6 +1033,9 @@ def candidate_trajectory(
         iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_live_stage_operands=True,
+            barotropic_reference_face_depth_override=(
+                build_reference_depth_override(card)
+                if raw_reference_depth else None),
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport),
     )
@@ -1110,6 +1128,7 @@ def candidate_trajectory(
     return {
         "claim_label": claim_label,
         "private_arm": {
+            "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
         },
@@ -1162,6 +1181,7 @@ def run_gate(
     max_step: int = 10,
     initial_mode: str = "decision52-bridge",
     plant: str | None = None,
+    raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
 ) -> dict[str, object]:
@@ -1227,6 +1247,7 @@ def run_gate(
             card,
             max_step=max_step,
             bridge_ssh=initial_mode == "decision52-bridge",
+            raw_reference_depth=raw_reference_depth,
             unmasked_v_transport=unmasked_v_transport,
             materialize_v_transport=materialize_v_transport,
         )
@@ -1287,6 +1308,7 @@ def main() -> int:
         default="decision52-bridge",
     )
     parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
     parser.add_argument(
@@ -1302,6 +1324,7 @@ def main() -> int:
             max_step=args.max_step,
             initial_mode=args.initial_mode,
             plant=args.plant,
+            raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,
         )
