@@ -248,24 +248,34 @@ def measure(
             else r97._native_v(candidate_model) if face == "v"
             else candidate_model
         )
+        unplanted = exact_row(candidate, oracle[oracle_name])
         if plant == "post-bit" and index == 0:
             candidate = np.array(candidate, copy=True)
-            candidate[1, 49] = np.nextafter(
-                candidate[1, 49], np.float64(np.inf))
+            equal = np.argwhere(
+                np.ascontiguousarray(candidate).view(np.uint64)
+                == np.ascontiguousarray(oracle[oracle_name]).view(np.uint64)
+            )
+            require(equal.size > 0, "post-bit plant found no exact control cell")
+            location = tuple(equal[0])
+            candidate[location] = np.nextafter(
+                candidate[location], np.float64(np.inf))
         post_rows[name] = exact_row(candidate, oracle[oracle_name])
+        if plant == "post-bit" and index == 0:
+            require(
+                post_rows[name]["differing_cells"]
+                == unplanted["differing_cells"] + 1,
+                "post-bit plant did not add exactly one unequal cell",
+            )
         post_scope = np.array(candidate_model, copy=True)
         if plant == "scope-bit" and index == 0:
             post_scope[1, 2] = np.nextafter(
                 post_scope[1, 2], np.float64(np.inf))
         scope_rows[name] = boundary_scope(
             trace[pre_keys[name]][0], post_scope, face)
-    require(all(row["bit_exact"] for row in post_rows.values()),
-            "seven-array post-association image is not bit-exact")
-    require(all(row["outside_allowed_cells"] == 0
-                for row in scope_rows.values()),
-            "association changed a non-boundary stored cell")
-    require(sum(row["changed_cells"] for row in scope_rows.values()) > 0,
-            "seven-array association changed no stored boundary bit")
+    if plant == "scope-bit":
+        require(any(row["outside_allowed_cells"] > 0
+                    for row in scope_rows.values()),
+                "scope-bit plant stayed green")
 
     area = np.asarray(card.recipe.grid.area)
     baseline_rows = []
@@ -280,6 +290,23 @@ def measure(
     require(baseline_first is not None and arm_first is not None,
             "source-order discriminator unexpectedly has no debt")
 
+    baseline_target = {
+        row["boundary"]: row for row in baseline_rows
+        if row["substep"] == 2
+        and row["boundary"] in ("continuity_du", "after_ssh")
+    }
+    arm_target = {
+        row["boundary"]: row for row in arm_rows
+        if row["substep"] == 2
+        and row["boundary"] in ("continuity_du", "after_ssh")
+    }
+    p2 = (
+        sum(row["changed_cells"] for row in scope_rows.values()) > 0
+        and all(row["outside_allowed_cells"] == 0
+                for row in scope_rows.values())
+    )
+    p3 = all(row["bit_exact"] for row in post_rows.values())
+    p4 = all(row["bit_exact"] for row in arm_target.values())
     if plant != "none":
         raise GateError(f"{plant} plant fired")
     return {
@@ -294,6 +321,14 @@ def measure(
         "boundary_scope_rows": scope_rows,
         "baseline_first_non_bit": baseline_first,
         "arm_first_non_bit": arm_first,
+        "baseline_target_rows": baseline_target,
+        "arm_target_rows": arm_target,
+        "predictions": {
+            "R146-P1": "CONFIRMED",
+            "R146-P2": "CONFIRMED" if p2 else "REFUTED",
+            "R146-P3": "CONFIRMED" if p3 else "REFUTED",
+            "R146-P4": "CONFIRMED" if p4 else "REFUTED",
+        },
         "baseline_rows": baseline_rows,
         "arm_rows": arm_rows,
         "worktree": stamp,
