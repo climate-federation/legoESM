@@ -14,6 +14,7 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 
 jax.config.update("jax_enable_x64", True)
@@ -365,10 +366,10 @@ class TestRootZoneMoisture(unittest.TestCase):
 
 
 class TestRichardsNiter(unittest.TestCase):
-    """Richards solver n_iter should always equal max_iter (fixed iteration)."""
+    """Richards n_iter counts the Picard iterations each column applied."""
 
-    def test_n_iter_equals_max_iter(self):
-        """n_iter diagnostic always equals max_iter."""
+    def test_n_iter_counts_applied_iterations(self):
+        """n_iter never exceeds max_iter; converged columns stop counting."""
         from legoesm.land.richards import RichardsConfig, solve_richards
         from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
         from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
@@ -378,16 +379,19 @@ class TestRichardsNiter(unittest.TestCase):
         grid = make_soil_grid(SoilGridConfig(n_layers=nlayers))
         theta = jnp.full((ncol, nlayers), 0.25)
         psi = psi_from_theta(theta, hconfig)
-        rconfig = RichardsConfig(max_iter=7)
-
         flux_top = jnp.full(ncol, 1e-5)
         sink = jnp.zeros((ncol, nlayers))
 
-        out = solve_richards(psi, theta, grid, hconfig, rconfig,
+        out = solve_richards(psi, theta, grid, hconfig, RichardsConfig(max_iter=60),
                              flux_top, sink, dt=1800.0)
-
-        npt.assert_array_equal(out.n_iter, 7.0,
-                               err_msg="n_iter should always equal max_iter")
+        n = np.asarray(out.n_iter)
+        self.assertTrue(np.all(np.asarray(out.converged)))
+        self.assertTrue(np.all((n >= 1) & (n < 60)), n)
+        capped = solve_richards(psi, theta, grid, hconfig,
+                                RichardsConfig(max_iter=int(n.min()) - 1),
+                                flux_top, sink, dt=1800.0)
+        npt.assert_array_equal(capped.n_iter, n.min() - 1)
+        self.assertFalse(np.any(np.asarray(capped.converged)))
 
 
 # =========================================================================

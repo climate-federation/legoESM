@@ -10893,6 +10893,12 @@ class ModelDriver:
                 str(getattr(cfg, "land_surface_scheme", "")) != "clm_ml"
                 and 0 < _land_pack_idx_np.size < _f_land_cols.shape[0])
             _land_ncol_full = int(_f_land_cols.shape[0])
+            # Owned (non-halo) columns: under MPAS MPI local cells are owned
+            # first, then halo copies, which must not be counted twice.
+            _vl_land = getattr(self, "_voronoi_layout", None)
+            _owned_cols = jnp.arange(_land_ncol_full) < (
+                int(_vl_land.partition.n_owned_cells) if _vl_land is not None
+                else _land_ncol_full)
             _land_pack_idx = jnp.asarray(_land_pack_idx_np)
 
             from legoesm.land.multilayer_land import (
@@ -10913,11 +10919,13 @@ class ModelDriver:
                 _lml_carbon_p = (_land_pack(_lml_carbon)
                                  if _lml_carbon is not None else None)
                 _f_land_cols_p = _f_land_cols[_land_pack_idx]
+                _owned_cols_p = _owned_cols[_land_pack_idx]
             else:
                 _lml_cfg_p = _lml_cfg
                 _lml_params_p, _lml_lat_p = _lml_params, _lml_lat
                 _lml_carbon_p = _lml_carbon
                 _f_land_cols_p = _f_land_cols
+                _owned_cols_p = _owned_cols
 
             # --- Land cadence: call the tile every _LAND_K host steps with
             # the forcing MEANED over the interval (a mean rate times the
@@ -10982,6 +10990,16 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # Owned columns with any land whose soil-water solve kept an
+                # unconverged iterate (their water budget does not close).
+                _unconv_mask = getattr(_sfc, "soil_unconverged", None)
+                _n_unconv_land = (
+                    jnp.sum((jnp.asarray(_unconv_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.0)
+                             & _owned_cols_p)
+                            .astype(jnp.int32))
+                    if _unconv_mask is not None
+                    else jnp.zeros((), jnp.int32))
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -10997,9 +11015,10 @@ class ModelDriver:
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx))
-                            + (_n_held, _n_held_land))
+                            + (_n_held, _n_held_land, _n_unconv_land))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx, _n_held, _n_held_land)
+                        resp.shflx, resp.lhflx, _n_held, _n_held_land,
+                        _n_unconv_land)
               return _land_step
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -11050,6 +11069,8 @@ class ModelDriver:
             _land_n_held_accum = jnp.zeros((), jnp.int32)
             _land_n_held_land_accum = jnp.zeros((), jnp.int32)
             _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            _land_n_unconv_accum = jnp.zeros((), jnp.int32)
+            self._land_n_unconv_total = 0
             self._land_n_held_total = 0
             self._land_n_held_steps = 0
 
@@ -11961,7 +11982,8 @@ class ModelDriver:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step,
-                     _land_n_held_step, _land_n_held_land_step) = _land_fn(
+                     _land_n_held_step, _land_n_held_land_step,
+                     _land_n_unconv_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     # Mirror the land tile's skin and surface humidity onto
@@ -11977,6 +11999,7 @@ class ModelDriver:
                     # would stall the accelerator once per step for a number
                     # that is almost always zero.
                     _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    _land_n_unconv_accum = _land_n_unconv_accum + _land_n_unconv_step
                     _land_n_held_land_accum = (
                         _land_n_held_land_accum + _land_n_held_land_step)
                     _land_n_held_steps_accum = (
@@ -12001,6 +12024,18 @@ class ModelDriver:
                     _land_n_held_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_land_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                    _window_unconv = int(_land_n_unconv_accum)
+                    _land_n_unconv_accum = jnp.zeros((), jnp.int32)
+                    if _window_unconv:
+                        self._land_n_unconv_total += _window_unconv
+                        logger.warning(
+                            "land (rank %s): %d owned land column-steps in "
+                            "the last %d steps kept an unconverged soil-water "
+                            "iterate (their water budget does not close); %d "
+                            "since the run began — at step %d",
+                            getattr(self, "_mpi_rank", 0), _window_unconv,
+                            _HARD_SAT_LOG_CADENCE_STEPS,
+                            self._land_n_unconv_total, step)
                     if _window_cols:
                         self._land_n_held_total += _window_cols
                         self._land_n_held_steps += _window_steps

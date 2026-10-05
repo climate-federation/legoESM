@@ -175,4 +175,8 @@ class SurfaceFluxOutput(NamedTuple):
     # ignore.
     held: jax.Array | None = None
     n_held: jax.Array | None = None
+    # Columns whose soil-water (Richards) solve kept an unconverged last
+    # iterate this step; their water budget does not close.  Filled in by the
+    # land step.
+    soil_unconverged: jax.Array | None = None
 

@@ -1368,7 +1368,9 @@ def _step_multilayer_land_impl(
                                forcing, config, ncol,
                                carbon_old=carbon_state,
                                carbon_new=carbon_state_new))
-    surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+    surface_out = surface_out._replace(
+        held=_held_mask, n_held=_n_held,
+        soil_unconverged=~richards_out.converged)
 
     return new_state, response, carbon_state_new, surface_out
 
