@@ -95,6 +95,7 @@ def run(
     record_root: Path,
     *,
     plant: str = "none",
+    external_mode_association: bool = False,
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
@@ -109,8 +110,10 @@ def run(
 
     require(plant in PLANTS, f"unknown plant {plant}")
     require(not materialize_v_transport
-            or (raw_reference_depth and unmasked_v_transport),
-            "V materialization arm requires raw depth and unmasked transport")
+            or (external_mode_association and raw_reference_depth
+                and unmasked_v_transport),
+            "V materialization arm requires boundary association, raw depth, "
+            "and unmasked transport")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -151,6 +154,7 @@ def run(
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
             expose_tracer_stage=stage,
+            barotropic_external_mode_association=external_mode_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport),
@@ -158,6 +162,7 @@ def run(
     final_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            barotropic_external_mode_association=external_mode_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport))
@@ -217,6 +222,7 @@ def run(
         "card_case": card.case,
         "unmeasured_features": list(card.unmeasured_features),
         "private_arm": {
+            "external_mode_association": external_mode_association,
             "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
@@ -235,6 +241,7 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--record-root", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--external-mode-association", action="store_true")
     parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
@@ -245,6 +252,7 @@ def main() -> int:
             args.deck_root,
             args.record_root,
             plant=args.plant,
+            external_mode_association=args.external_mode_association,
             raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,
