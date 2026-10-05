@@ -254,7 +254,7 @@ case "$variant" in
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
   smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
   smtflxtra | smtvectra | smt1vec | smt1vec100d | \
-  smt2vec | smt2vec100d | smt3vec | smt3vec100d)
+  smt2vec | smt2vec100d | smt3vec | smt3vec100d | smt3vecint)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -468,6 +468,15 @@ case "$variant" in
         ref_name=VORTEX_SMT3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round224_smt3_vec_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/oracle_vortex_smt3/day100 ;;
+      # ---- ROUND 227 / VORTEX_SMT round 15.  Same SMT-3 deck and cpp
+      # keys, but a NEW pair of targets because the read-only writer now
+      # records the internal ldf_slp/traldf_iso seams as named groups.
+      smt3vecint)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R15_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round227_smt3_ldf_internal
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round227/oracle_vortex_smt3_ldf_internal ;;
     esac
     ;;
   *)
@@ -506,7 +515,8 @@ else
 fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
-if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" ]]; then
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" ]]; then
   # Round 224's stage-3 tracer boundary extends the round-218 writer by one
   # read-only post-tra_ldf dump.  Stages 1/2 keep the original 15 groups;
   # stage 3 declares and writes 17, including ldf_t/ldf_s.
@@ -564,6 +574,26 @@ else
 fi
 readonly STAGE_INSTRUMENT DYNADV_INSTRUMENT STAGE_MODULE STAGE_STUBS
 readonly STAGE_MODULE_NAME STAGE_SYMBOL STAGE_FLAG_NAME
+if [[ "$variant" == "smt3vecint" ]]; then
+  LDF_SLOPE_INSTRUMENT=$here/ldfslp_r227_internal_record.patch
+  LDF_ISO_INSTRUMENT=$here/traldf_iso_r227_internal_record.patch
+  LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r227_internal_record.patch
+  LDF_MODULE=$here/vortex_r23_ldf_terms.F90
+  LDF_STUBS=$here/vortex_r23_ldf_terms_syntax_stubs.F90
+  LDF_FLAG_NAME=--ldf-internals
+else
+  LDF_SLOPE_INSTRUMENT=
+  LDF_ISO_INSTRUMENT=
+  LDF_SCHEME_INSTRUMENT=
+  LDF_MODULE=
+  LDF_STUBS=
+  LDF_FLAG_NAME=
+fi
+readonly LDF_SLOPE_INSTRUMENT LDF_ISO_INSTRUMENT LDF_SCHEME_INSTRUMENT
+readonly LDF_MODULE LDF_STUBS LDF_FLAG_NAME
+readonly SHIPPED_LDFSLP=$NEMO_ROOT/src/OCE/LDF/ldfslp.F90
+readonly SHIPPED_LDFISO=$NEMO_ROOT/src/OCE/TRA/traldf_iso.F90
+readonly SHIPPED_LDFSCHEME=$NEMO_ROOT/src/OCE/TRA/traldf_iso_scheme.h90
 readonly SHIPPED_STG=$NEMO_ROOT/src/OCE/stprk3_stg.F90
 readonly SHIPPED_DYNADV=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly DECK=$here/$deck_basename
@@ -628,6 +658,28 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
       printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
         "$TEST_CASE" "$override" >&2
       exit 66
+    fi
+  done
+fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  for path in "$LDF_SLOPE_INSTRUMENT" "$LDF_ISO_INSTRUMENT" \
+              "$LDF_SCHEME_INSTRUMENT" "$LDF_MODULE" "$LDF_STUBS" \
+              "$SHIPPED_LDFSLP" "$SHIPPED_LDFISO" "$SHIPPED_LDFSCHEME"; do
+    [[ -f "$path" ]] \
+      || { printf 'REFUSE: missing internal-LDF record input %s\n' "$path" >&2; exit 66; }
+  done
+  for override in ldfslp.F90 traldf_iso.F90 traldf_iso_scheme.h90 vortex_r23_ldf_terms.F90; do
+    if [[ -e "$SRC_CASE/MY_SRC/$override" ]]; then
+      printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
+        "$TEST_CASE" "$override" >&2
+      exit 66
+    fi
+  done
+  for patch_file in "$LDF_SLOPE_INSTRUMENT" "$LDF_ISO_INSTRUMENT" "$LDF_SCHEME_INSTRUMENT"; do
+    if [[ $(grep -c '^-' "$patch_file") -ne $(grep -c '^---' "$patch_file") ]]; then
+      printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+        "$patch_file" >&2
+      exit 67
     fi
   done
 fi
@@ -782,7 +834,8 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
       || { printf 'REFUSE: patched sources do not call %s\n' "$symbol" >&2
            exit 67; }
   done
-  if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" ]]; then
+  if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+     || "$variant" == "smt3vecint" ]]; then
     grep -q "${STAGE_SYMBOL}_rhs( 'ldf'" "$dry/stprk3_stg.F90" \
       || { printf 'REFUSE: the SMT-3 tracer writer has no post-LDF boundary\n' >&2
            exit 67; }
@@ -810,6 +863,33 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
   "$round192_fc" -I "$syntax_dir" -J "$syntax_dir" -fsyntax-only "$STAGE_MODULE"
   printf 'GFORTRAN_SYNTAX_PASS %s\n' "$STAGE_MODULE"
 fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  cp "$SHIPPED_LDFSLP" "$dry/ldfslp.F90"
+  cp "$SHIPPED_LDFISO" "$dry/traldf_iso.F90"
+  cp "$SHIPPED_LDFSCHEME" "$dry/traldf_iso_scheme.h90"
+  patch -s --fuzz=0 "$dry/ldfslp.F90" <"$LDF_SLOPE_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 ldfslp patch does not apply\n' >&2; exit 67; }
+  patch -s --fuzz=0 "$dry/traldf_iso.F90" <"$LDF_ISO_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 traldf_iso patch does not apply\n' >&2; exit 67; }
+  patch -s --fuzz=0 "$dry/traldf_iso_scheme.h90" <"$LDF_SCHEME_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 ISO-scheme patch does not apply\n' >&2; exit 67; }
+  for symbol in r227_slope_begin r227_slope_finish r227_iso_begin r227_iso_finish; do
+    grep -q "$symbol" "$dry/ldfslp.F90" "$dry/traldf_iso.F90" \
+      || { printf 'REFUSE: internal-LDF source lacks %s\n' "$symbol" >&2; exit 67; }
+  done
+  for symbol in r227_dit r227_A11 r227_fu r227_A31 r227_fw_upper; do
+    grep -q "$symbol" "$dry/traldf_iso_scheme.h90" \
+      || { printf 'REFUSE: internal-LDF scheme lacks %s\n' "$symbol" >&2; exit 67; }
+  done
+  ldf_syntax_dir=$dry/ldf_syntax
+  mkdir -p "$ldf_syntax_dir"
+  round227_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
+  "$round227_fc" -ffree-line-length-none -J "$ldf_syntax_dir" -c "$LDF_STUBS" \
+    -o "$ldf_syntax_dir/stubs.o"
+  "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_dir" -J "$ldf_syntax_dir" \
+    -fsyntax-only "$LDF_MODULE"
+  printf 'GFORTRAN_SYNTAX_PASS %s\n' "$LDF_MODULE"
+fi
 # Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
 # of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
 # temperature is defined by inverting this law (usrdef_istate.F90:83-88), so a
@@ -833,7 +913,8 @@ if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
   printf 'REFUSE: the deck now sets ln_zad_Aimp; the card transcribes the unset default\n' >&2
   rm -rf "$dry"; exit 67
 fi
-if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" ]]; then
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" ]]; then
   for pattern in \
     '^ *ln_traldf_OFF *= *\.false\.' '^ *ln_traldf_lap *= *\.true\.' \
     '^ *ln_traldf_iso *= *\.true\.' '^ *ln_traldf_msc *= *\.true\.' \
@@ -866,7 +947,8 @@ case "$variant" in
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
   | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
-  | smt1vec | smt1vec100d | smt2vec | smt2vec100d | smt3vec | smt3vec100d)
+  | smt1vec | smt1vec100d | smt2vec | smt2vec100d | smt3vec | smt3vec100d \
+  | smt3vecint)
       want_vec='.true.'  ; want_up3='.false.' ;;
   *)  # Dispatch hardening: a variant added above but forgotten here used to
       # fall through to an unbound-variable abort.  Name it instead.
@@ -957,7 +1039,14 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   ${DYNADV_INSTRUMENT:+"$DYNADV_INSTRUMENT"} \
   ${STAGE_MODULE:+"$STAGE_MODULE"} ${STAGE_STUBS:+"$STAGE_STUBS"} \
   ${STAGE_INSTRUMENT:+"$SHIPPED_STG"} \
-  ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"} >"$manifest/toolchain.sha256"
+  ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"} \
+  ${LDF_SLOPE_INSTRUMENT:+"$LDF_SLOPE_INSTRUMENT"} \
+  ${LDF_ISO_INSTRUMENT:+"$LDF_ISO_INSTRUMENT"} \
+  ${LDF_SCHEME_INSTRUMENT:+"$LDF_SCHEME_INSTRUMENT"} \
+  ${LDF_MODULE:+"$LDF_MODULE"} ${LDF_STUBS:+"$LDF_STUBS"} \
+  ${LDF_SLOPE_INSTRUMENT:+"$SHIPPED_LDFSLP"} \
+  ${LDF_ISO_INSTRUMENT:+"$SHIPPED_LDFISO"} \
+  ${LDF_SCHEME_INSTRUMENT:+"$SHIPPED_LDFSCHEME"} >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 build_one() {          # $1 = config name, $2 = 1 to apply the instrument
@@ -1020,6 +1109,15 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
         patch "$cfg/MY_SRC/dynadv.F90" <"$DYNADV_INSTRUMENT"
       fi
     fi
+    if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+      cp "$SHIPPED_LDFSLP" "$cfg/MY_SRC/ldfslp.F90"
+      cp "$SHIPPED_LDFISO" "$cfg/MY_SRC/traldf_iso.F90"
+      cp "$SHIPPED_LDFSCHEME" "$cfg/MY_SRC/traldf_iso_scheme.h90"
+      cp "$LDF_MODULE" "$cfg/MY_SRC/vortex_r23_ldf_terms.F90"
+      patch "$cfg/MY_SRC/ldfslp.F90" <"$LDF_SLOPE_INSTRUMENT"
+      patch "$cfg/MY_SRC/traldf_iso.F90" <"$LDF_ISO_INSTRUMENT"
+      patch "$cfg/MY_SRC/traldf_iso_scheme.h90" <"$LDF_SCHEME_INSTRUMENT"
+    fi
   fi
   touch "$cfg/MY_SRC/"*.F90
   ./makenemo -n "$name" -m conda-scalarmath
@@ -1058,6 +1156,14 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
         || { printf 'REFUSE: stage-term calls are absent from compiled dynadv\n' >&2; exit 69; }
     fi
   fi
+  if [[ -n "$LDF_SLOPE_INSTRUMENT" && "$instrumented" -eq 1 ]]; then
+    grep -q 'r227_slope_begin' "$cfg/BLD/ppsrc/nemo/ldfslp.f90" \
+      || { printf 'REFUSE: slope calls are absent from compiled ldfslp\n' >&2; exit 69; }
+    grep -q 'r227_iso_finish' "$cfg/BLD/ppsrc/nemo/traldf_iso.f90" \
+      || { printf 'REFUSE: ISO calls are absent from compiled traldf_iso\n' >&2; exit 69; }
+    grep -q 'r227_fw_upper' "$cfg/BLD/ppsrc/nemo/traldf_iso.f90" \
+      || { printf 'REFUSE: internal ISO seams are absent from compiled source\n' >&2; exit 69; }
+  fi
   # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
   # and require nm to have succeeded before believing the grep.
   local symbols
@@ -1071,7 +1177,8 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
 
 check_smt3_output() {  # $1 = run directory
   local dir=$1 pattern
-  if [[ "$variant" != "smt3vec" && "$variant" != "smt3vec100d" ]]; then
+  if [[ "$variant" != "smt3vec" && "$variant" != "smt3vec100d" \
+     && "$variant" != "smt3vecint" ]]; then
     return
   fi
   grep -q 'STOP 0' "$dir/run.user.log" \
@@ -1223,14 +1330,16 @@ cp "$manifest/legoesm_git_sha.txt" "$EVIDENCE/"
 if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=$STAGE_FLAG_NAME; else STAGE_FLAG=; fi
 if [[ -n "$SPGTS_INSTRUMENT" ]]; then SPGTS_FLAG=--spgts-terms; else SPGTS_FLAG=; fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then LDF_FLAG=$LDF_FLAG_NAME; else LDF_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
-  ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
+  ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} ${LDF_FLAG:+$LDF_FLAG} \
   --output "$EVIDENCE/vortex_${TAG}_admission.json"
 # Every plant the checker offers must turn it red.  One plant proves one
 # guard; the record is only admissible if each guard the round relies on is
 # shown to be able to fail.
-if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" ]]; then
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" ]]; then
   plants=(header field-name truncated)
 elif [[ -n "$SPGTS_INSTRUMENT" ]]; then
   plants=(header field-name truncated missing-frame)
@@ -1240,16 +1349,32 @@ fi
 for plant in "${plants[@]}"; do
   if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
        --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
-       ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} --plant "$plant" \
+       ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
+       ${LDF_FLAG:+$LDF_FLAG} --plant "$plant" \
        >"$EVIDENCE/vortex_${TAG}_admission_plant_${plant}.json" 2>&1; then
     printf 'REFUSE: the %s plant did not turn the checker red\n' "$plant" >&2
     exit 70
   fi
   printf 'PLANT_FIRED %s\n' "$plant"
 done
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  for record in oracle_ldf_slope_kt00000001.bin oracle_ldf_iso_kt00000001.bin; do
+    [[ -f "$EVIDENCE/$record" ]] \
+      || { printf 'REFUSE: cannot stamp missing internal record %s\n' "$record" >&2; exit 70; }
+    digest=$(sha256sum "$EVIDENCE/$record" | awk '{print $1}')
+    printf '%s %s %s\n' "$digest" "$round192_git_sha" "$record" \
+      >"$EVIDENCE/$record.stamp"
+    read -r stamped_digest stamped_commit stamped_name <"$EVIDENCE/$record.stamp"
+    [[ "$stamped_digest" == "$digest" && "$stamped_commit" == "$round192_git_sha" \
+       && "$stamped_name" == "$record" ]] \
+      || { printf 'REFUSE: fail-closed commit stamp disagrees for %s\n' "$record" >&2; exit 70; }
+  done
+  printf 'COMMIT_STAMP_PASS %s\n' "$round192_git_sha"
+fi
 (
   cd "$EVIDENCE"
   sha256sum oracle_*.bin vortex_${TAG}_admission.json "$RESTART" mesh_mask.nc \
-    legoesm_git_sha.txt >vortex_${TAG}_outputs.sha256
+    legoesm_git_sha.txt ${LDF_SLOPE_INSTRUMENT:+oracle_ldf_*.bin.stamp} \
+    >vortex_${TAG}_outputs.sha256
 )
 printf 'VORTEX_%s_KT1_10_ORACLE_READY %s\n' "$TAG" "$EVIDENCE"
