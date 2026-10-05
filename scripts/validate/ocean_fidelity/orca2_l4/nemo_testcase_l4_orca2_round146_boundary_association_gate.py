@@ -179,8 +179,10 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.grids.operators_latlon_cgrid import fold_ghost_source_T
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_reference_face_depths,
         _nemo_ssh_avg_apply,
         _nemo_ssh_avg_prep,
+        _nemo_ssh_avg_reference_depth_override,
     )
     from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
 
@@ -208,14 +210,24 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
         jnp.asarray(state.land_mask.data, dtype=jnp.float64),
         grid, jnp.float64,
     )
-    replay = _nemo_ssh_avg_apply(
+    # Keep the reconstructed legacy replay for the frozen round-150 operand
+    # split, but compare the live production trace against the raw-depth replay
+    # that the round-155 NEMO-literal path now executes.
+    legacy_replay = _nemo_ssh_avg_apply(
         eta, u_mask, v_mask, grid, area, prep,
         return_literal_inverse=True, return_ssh_average=True,
     )
-    model_depth_v = np.asarray(replay[1])
-    ssh_average_v = np.asarray(replay[5])
+    production_prep = _nemo_ssh_avg_reference_depth_override(
+        prep, _nemo_literal_reference_face_depths(z_coord, jnp.float64),
+        jnp.float64)
+    production_replay = _nemo_ssh_avg_apply(
+        eta, u_mask, v_mask, grid, area, production_prep,
+        return_literal_inverse=True, return_ssh_average=True,
+    )
+    model_depth_v = np.asarray(legacy_replay[1])
+    ssh_average_v = np.asarray(legacy_replay[5])
     traced_depth_v = np.asarray(trace["transport_face_depth_v"][1])
-    replay_row = exact_row(model_depth_v, traced_depth_v)
+    replay_row = exact_row(np.asarray(production_replay[1]), traced_depth_v)
     require(replay_row["bit_exact"],
             "midpoint V replay does not reproduce the production trace")
 
@@ -625,6 +637,17 @@ def measure(
     reference_depth_arm_trace = reference_depth_arm.substeps
     transport_v_arm_trace = transport_v_arm.substeps
     materialized_v_arm_trace = materialized_v_arm.substeps
+    if plant == "transport-v-materialization":
+        # The production path now always materializes NEMO's completed zhV,
+        # so the former "disable the arm" plant is no longer constructible.
+        # Perturb one exact stored V-transport result instead; the same scored
+        # boundary must refuse, proving the landing predicate is non-vacuous.
+        materialized_v_arm_trace = dict(materialized_v_arm_trace)
+        planted = np.array(
+            materialized_v_arm_trace["transport_metric_v"], copy=True)
+        planted[1, 1, 1] = np.nextafter(
+            planted[1, 1, 1], np.float64(np.inf))
+        materialized_v_arm_trace["transport_metric_v"] = planted
     v_depth_plant_expected = None
     if plant == "v-depth-bit":
         arm_trace = dict(arm_trace)
@@ -765,6 +788,22 @@ def measure(
         row["boundary"]: row for row in materialized_v_arm_rows
         if row["substep"] == 2
     }
+    p155_chain = all(
+        baseline_target_row["operand_bit_exact"]
+        for baseline_target_row in (
+            next(row for row in baseline_rows
+                 if row["substep"] == 2 and row["boundary"] == name)
+            for name in (
+                "transport_v", "continuity_dv", "continuity_divergence",
+                "after_ssh",
+            )
+        )
+    )
+    p155_armed_noop = all(
+        np.array_equal(np.asarray(trace[name]),
+                       np.asarray(materialized_v_arm_trace[name]))
+        for name in trace
+    )
     p148_control_census = (
         control_substep2["mid_depth_v"]["operand_differing_cells"] == 30
         and control_substep2["transport_v"]["operand_differing_cells"] == 68
@@ -907,7 +946,7 @@ def measure(
         )
     )
     if plant == "transport-v-materialization":
-        require(p154_prerequisites and not p154_chain,
+        require(not p155_chain or not p155_armed_noop,
                 "transport-v-materialization plant stayed green")
         raise GateError("transport-v-materialization plant fired")
     return {
@@ -1007,6 +1046,12 @@ def measure(
             "R154-P2": (
                 "CONFIRMED" if p154_prerequisites and p154_chain
                 else "REFUTED"),
+        },
+        "predictions_round155": {
+            "R155-P1-production-chain": (
+                "CONFIRMED" if p155_chain else "REFUTED"),
+            "R155-P1-explicit-arm-noop": (
+                "CONFIRMED" if p155_armed_noop else "REFUTED"),
         },
         "worktree": stamp,
     }
