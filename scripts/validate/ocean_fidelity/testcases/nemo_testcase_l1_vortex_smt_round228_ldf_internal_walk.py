@@ -207,6 +207,16 @@ def run(root: Path, *, plant: str | None = None,
     iso_rows = (
         ("iso.ah_wslp2", "ah_wslp2", "ah_wslp2_above", "T"),
         ("iso.akz", "akz", "akz_above", "T"),
+        *((
+            ("iso.tmask", "tmask", "tmask", "T"),
+            ("iso.umask", "umask", "umask", "u"),
+            ("iso.vmask", "vmask", "vmask", "v"),
+            ("iso.wmask", "wmask", "wmask", "T"),
+            ("iso.ahtu", "ahtu", "ahtu", "u"),
+            ("iso.ahtv", "ahtv", "ahtv", "v"),
+            ("iso.e3u_flux", "e3u_3d", "e3u_flux", "u"),
+            ("iso.e3v_flux", "e3v_3d", "e3v_flux", "v"),
+        ) if corrected_factors else ()),
         ("iso.dit", "dit", "dit", "u"),
         ("iso.djt", "djt", "djt", "v"),
         ("iso.dkt", "dkt", "dkt", "T"),
@@ -276,6 +286,47 @@ def run(root: Path, *, plant: str | None = None,
                 f"record.{name}", iso[name][..., :nlev],
                 stripped[..., :nlev], masks[supports[name]], plant=None))
 
+    face_thickness_arm = None
+    if corrected_factors:
+        # One-variable production-step arm through the existing fidelity hook:
+        # replace only the two horizontal face-thickness arrays consumed by
+        # zA11/zA22.  The ordinary full step still executes under _step_jitted;
+        # this is not an isolated replay of the flux statement.
+        override_hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=external,
+            tracer_ldf_diagnostics=(
+                jnp.asarray(iso["e3u_3d"][..., :nlev]),
+                jnp.asarray(iso["e3v_3d"][..., :nlev])))
+        override_trace = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=override_hooks).step(seed, dt=card.dt_s)
+        override_diag = override_trace.ldf_diagnostics
+        require(isinstance(override_diag, dict),
+                "face-thickness production arm returned no LDF diagnostics")
+        rhs_row = _row(
+            "arm.face_thickness.rhs_increment",
+            iso["rhs_increment"][..., :nlev],
+            override_diag["tendency"][..., :nlev], masks["T"], plant=None)
+        unchanged = []
+        for name, support in (("A13", "u"), ("A23", "v"),
+                              ("dit", "u"), ("djt", "v"),
+                              ("dkt", "T")):
+            unchanged.append(_row(
+                f"arm.face_thickness.upstream.{name}", iso_diag[name],
+                override_diag[name], masks[support], plant=None))
+        baseline_rhs = next(
+            row for row in rows if row["name"] == "iso.rhs_increment")
+        face_thickness_arm = {
+            "execution_regime": "production_step_jit",
+            "rhs_row": rhs_row,
+            "unchanged_rows": unchanged,
+            "fraction_of_baseline_rhs_max_removed": (
+                1.0 - rhs_row["max_abs"] / baseline_rhs["max_abs"]),
+            "dt_scaled_residual_max": card.dt_s * rhs_row["max_abs"],
+            "fraction_of_additional_ldf_max_remaining": (
+                rhs_row["max_abs"] / baseline_rhs["max_abs"]),
+        }
+
     # Post-hoc magnitude discriminator for the first genuine non-bit row.
     # Replace only the A33 coefficient in the already-materialized production
     # operands and rebuild the exact flux/divergence algebra below it.  This is
@@ -320,6 +371,7 @@ def run(root: Path, *, plant: str | None = None,
             "reason": ("compiled writer lines 262-268 copy scalar "
                        "temporaries after their producing loop")}),
         "factor_reconstruction": factor_reconstruction,
+        "face_thickness_arm": face_thickness_arm,
         "a33_one_variable_reconstruction": {
             "execution_regime": "post_hoc_from_production_operands",
             "max_abs_tendency_change": a33_rate_max,
@@ -362,6 +414,16 @@ def main(argv=None) -> int:
         print(f"{row['name']:22s} bit={str(row['bit_exact']):5s} "
               f"cells={row['cells_unequal']:7d} "
               f"max_abs={row['max_abs']:.16e}")
+    if report["face_thickness_arm"] is not None:
+        arm = report["face_thickness_arm"]
+        row = arm["rhs_row"]
+        print(f"{row['name']:22s} bit={str(row['bit_exact']):5s} "
+              f"cells={row['cells_unequal']:7d} "
+              f"max_abs={row['max_abs']:.16e}")
+        print("face-thickness fraction removed:",
+              f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
+        print("face-thickness remaining LDF fraction:",
+              f"{arm['fraction_of_additional_ldf_max_remaining']:.16e}")
     print(json.dumps(report["aggregate_reproduction"], sort_keys=True))
     print("first non-bit:", report["first_non_bit"])
     if args.output:
