@@ -223,7 +223,19 @@ failure.  Because this round edited already-cited Python files, the historical
 default receipt and citation map were re-anchored together by the repository's
 sequence-mapped re-anchor tool; the default-receipt audit is clean.
 
-FINAL_REVIEW_PLACEHOLDER
+The required separate command was invoked on the clean committed diff as
+`codex exec --sandbox read-only`.  It exited 1 before sampling and printed,
+verbatim:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+It produced no shipping verdict: **independent review unavailable
+in-sandbox**.  This is an environment failure, not a substituted author
+review; the attempted pass is preserved in `round226/independent_review.log`.
 
 ## 10. Choices and OPEN
 
