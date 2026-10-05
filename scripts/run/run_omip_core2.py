@@ -1706,6 +1706,48 @@ def assert_slow_forcing_pair_resolved(bt_cfg) -> None:
                          "(nemo_prognostic_barotropic_state), not wired in this driver")
 
 
+def attach_nemo_carried_pair(state, config, *, balanced_init=False, n_gpus=1):
+    """Allocate NEMO's carried external mode when the RESOLVED config selects it.
+
+    NEMO initialises uu_b/vv_b as the reference-thickness depth mean of the
+    initial velocity (istate.F90:149-152); every OMIP card starts from rest,
+    so that mean is exactly zero.  A non-rest start would need the reduction
+    and is refused rather than seeded wrong.  A restart then fills the pair
+    from its archive (the loader refuses an archive that never carried it).
+    """
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        nemo_carried_barotropic_state_active)
+    if config is None or not nemo_carried_barotropic_state_active(config):
+        return state
+    # Checked on the RESOLVED config so a --config YAML cannot bypass them.
+    _solver = config.barotropic.barotropic_solver
+    if _solver != "explicit_substep":
+        raise SystemExit(f"carried external mode needs the split-explicit barotropic "
+                         f"solver; barotropic_solver={_solver!r} never rewrites uu_b/vv_b")
+    if balanced_init or (n_gpus or 1) > 1:
+        # ponytail: balanced init moves u/v after the zero pair is attached, and
+        # the latitude-sharded step has no v-face rule for vv_b; seed-after-init
+        # and a v-staggered vv_b entry are the upgrades if either is needed.
+        raise SystemExit("carried external mode is refused with --balanced-init "
+                         "or --n-gpus > 1")
+    _have = (getattr(state, "uu_b", None) is not None,
+             getattr(state, "vv_b", None) is not None)
+    if all(_have):
+        return state
+    if any(_have):
+        raise SystemExit("--nemo-carried-external-mode: the state carries only half "
+                         "of the uu_b/vv_b pair")
+    if bool(np.any(np.asarray(state.u.data) != 0)) or bool(np.any(np.asarray(state.v.data) != 0)):
+        raise SystemExit("--nemo-carried-external-mode: the initial velocity is not "
+                         "at rest, so a zero uu_b/vv_b would not be its depth mean")
+    from legoesm.core.field import Field
+    return state._replace(
+        uu_b=Field(data=jnp.zeros(state.u.data.shape[:-1], dtype=state.u.data.dtype),
+                   name="uu_b", dims=state.u.dims[:-1], units="m/s", staggering="edge"),
+        vv_b=Field(data=jnp.zeros(state.v.data.shape[:-1], dtype=state.v.data.dtype),
+                   name="vv_b", dims=state.v.dims[:-1], units="m/s", staggering="edge"))
+
+
 def assert_tke_surface_pair_resolved(vmix_cfg) -> None:
     """Refuse a z=0 surface-TKE placement without a held Dirichlet value.
 
@@ -1847,6 +1889,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   barotropic_slow_forcing_depth_evaluation=None,
+                  nemo_carried_external_mode=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
@@ -1966,6 +2009,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("barotropic_slow_forcing_depth_evaluation",
                                barotropic_slow_forcing_depth_evaluation),
+                              ("nemo_prognostic_barotropic_state",
+                               nemo_carried_external_mode),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_scheme", bottom_drag_scheme),
                               ("bottom_drag_cd0", bottom_drag_cd0),
@@ -2404,6 +2449,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   barotropic_slow_forcing_depth_evaluation=None,
+                  nemo_carried_external_mode=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
@@ -2464,6 +2510,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("barotropic_slow_forcing_depth_evaluation",
                                barotropic_slow_forcing_depth_evaluation),
+                              ("nemo_prognostic_barotropic_state",
+                               nemo_carried_external_mode),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_scheme", bottom_drag_scheme),
                               ("bottom_drag_cd0", bottom_drag_cd0),
@@ -7407,6 +7455,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "card must state it (decision 90). nemo_literal = NEMO's "
                         "reference e3u_0 / hu_0; min_rule_live = per-level min of the "
                         "two live thicknesses (legoESM before 2026-10-03).")
+    p.add_argument("--nemo-carried-external-mode", action="store_true",
+                   help="Carry NEMO's prognostic external mode uu_b/vv_b (oce.F90:39,99) "
+                        "as model state: the barotropic window seeds from it "
+                        "(dynspg_ts.F90:484-500) and the loop-entry Coriolis "
+                        "subtraction reads it (:292). Cold start from rest only "
+                        "(zero pair = the reference depth mean of zero velocity); "
+                        "tripole/latlon with --momentum-rk3.")
     p.add_argument("--barotropic-pcg-variant", default=None,
                    choices=[None, "standard", "single_reduce"],
                    help="Implicit-CN barotropic PCG reduction strategy "
@@ -8505,6 +8560,11 @@ def main() -> int:
         raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
     if args.iwm_n2_mode == "nemo_bn2" and args.iwm_n2_eos_form is None:
         raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
+    if args.nemo_carried_external_mode and (args.grid not in ("tripole", "latlon_bathy")
+                                            or not args.momentum_rk3):
+        raise SystemExit("--nemo-carried-external-mode is wired on --grid tripole/"
+                         "latlon with --momentum-rk3 only; elsewhere it would be "
+                         "silently ignored")
     if args.trd_columns is not None and not args.trd_accumulate:
         raise SystemExit("--trd-columns needs --trd-accumulate")
     if args.trd_accumulate and args.grid != "tripole":
@@ -9148,6 +9208,7 @@ def main() -> int:
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
             barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,
+            nemo_carried_external_mode=(True if args.nemo_carried_external_mode else None),
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
@@ -9387,6 +9448,7 @@ def main() -> int:
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
             barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,
+            nemo_carried_external_mode=(True if args.nemo_carried_external_mode else None),
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
@@ -9526,6 +9588,9 @@ def main() -> int:
 
     assert_slow_forcing_pair_resolved(
         getattr(getattr(model, "config", None), "barotropic", None))
+    state = attach_nemo_carried_pair(state, getattr(model, "config", None),
+                                     balanced_init=args.balanced_init,
+                                     n_gpus=args.n_gpus)
 
     # OMIP-2 weak SSS restoring toward the WOA surface-salinity climatology (the
     # protocol NEMO ORCA1 uses).  Bounds the multi-year surface-freshwater drift

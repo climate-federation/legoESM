@@ -61,3 +61,72 @@ def test_nemo_literal_without_carried_mode_is_refused():
     i_yaml = src.index("ocean override: {sorted(_ovr)}")
     i_chk = src.index("assert_slow_forcing_pair_resolved(")
     assert i_chk > i_yaml
+
+
+def _tiny(carried):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=3, H_max=300.0)
+    return rest_state_latlon_cgrid_ocean(
+        grid, z, T_water_init_C=10.0, T_deep=10.0, H_max=300.0,
+        land_lat_threshold=70.0, nemo_prognostic_barotropic_velocity=carried)
+
+
+def test_carried_flag_parses_and_routes_into_the_barotropic_subconfig():
+    import inspect
+    import scripts.run.run_omip_core2 as core2
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    p = _parser()
+    assert p.parse_args(["--grid", "tripole"]).nemo_carried_external_mode is False
+    assert p.parse_args(["--grid", "tripole", "--nemo-carried-external-mode"]).nemo_carried_external_mode
+    c = LatLonCGridOceanConfig().replace_flat(nemo_prognostic_barotropic_state=True)
+    assert c.barotropic.nemo_prognostic_barotropic_state is True
+    src = inspect.getsource(core2)
+    assert src.count('("nemo_prognostic_barotropic_state",\n                               nemo_carried_external_mode)') == 2
+    assert src.count("nemo_carried_external_mode=(True if args.nemo_carried_external_mode else None)") == 2
+
+
+def test_attach_allocates_the_rest_pair_only_when_the_config_carries_it():
+    import numpy as np
+    import scripts.run.run_omip_core2 as core2
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    plain, ref = _tiny(False), _tiny(True)
+    off = LatLonCGridOceanConfig()
+    on = off.replace_flat(nemo_prognostic_barotropic_state=True)
+    assert core2.attach_nemo_carried_pair(plain, off).uu_b is None
+    got = core2.attach_nemo_carried_pair(plain, on)
+    for a, b in ((got.uu_b, ref.uu_b), (got.vv_b, ref.vv_b)):
+        assert a.data.shape == b.data.shape and a.data.dtype == b.data.dtype
+        assert a.dims == b.dims and a.staggering == b.staggering
+        assert np.count_nonzero(np.asarray(a.data)) == 0
+    with pytest.raises(SystemExit, match="half"):
+        core2.attach_nemo_carried_pair(plain._replace(uu_b=ref.uu_b), on)
+    assert core2.attach_nemo_carried_pair(ref, on) is ref
+    for kw in ({"balanced_init": True}, {"n_gpus": 2}):
+        with pytest.raises(SystemExit, match="refused"):
+            core2.attach_nemo_carried_pair(plain, on, **kw)
+    for solver in ("implicit_cn", "rigid_lid", "implicit_unsplit"):
+        with pytest.raises(SystemExit, match="split-explicit"):
+            core2.attach_nemo_carried_pair(
+                plain, on.replace_flat(barotropic_solver=solver))
+    moving = plain._replace(u=plain.u.replace(data=plain.u.data.at[2, 3, 0].set(0.1)))
+    with pytest.raises(SystemExit, match="not at rest"):
+        core2.attach_nemo_carried_pair(moving, on)
+    # main attaches on the RESOLVED config, before the restart loader uses the template
+    import inspect
+    src = inspect.getsource(core2.main)
+    assert src.index("state = attach_nemo_carried_pair(state,") < src.index("load_run_restart(")
+
+
+@pytest.mark.parametrize("argv", [
+    ["--grid", "mpas", "--nemo-carried-external-mode"],
+    ["--grid", "tripole", "--nemo-carried-external-mode"],          # no --momentum-rk3
+])
+def test_carried_flag_refused_where_nothing_consumes_it(argv, monkeypatch):
+    import sys
+    import scripts.run.run_omip_core2 as core2
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
+    with pytest.raises(SystemExit, match="nemo-carried-external-mode is (wired|refused)"):
+        core2.main()
