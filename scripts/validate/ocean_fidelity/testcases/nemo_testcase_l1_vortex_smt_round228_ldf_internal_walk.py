@@ -135,7 +135,7 @@ def run(root: Path, *, plant: str | None = None,
     seed = _seed_from_record(card.recipe.initial_state, entry1, nlev)
     hooks = _NEMOWSRK3TestHooks(
         stage_barotropic_output_override=external,
-        tracer_process_trace=(), tracer_ldf_diagnostics="slope")
+        tracer_ldf_diagnostics="slope")
     trace = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks).step(seed, dt=card.dt_s)
