@@ -1404,7 +1404,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
         'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16],
-    'ocean_model_latlon_cgrid.py:1442,1655': [
+    'ocean_model_latlon_cgrid.py:1442,1659': [
         'stage1_momentum_rhs_transform: object = None',
         ('tracer_zdf_trace: bool = False', 1), 2],
     'ocean_model_latlon_cgrid.py:8199-8203': [
@@ -1441,7 +1441,7 @@ CITATION_MAP = {
         '&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)',
         27],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:584-615': [
-        "CASE ( 'T' , 'W' )                         ! T-, W-point",
+        ("CASE ( 'T' , 'W' )                         ! T-, W-point", 5),
         'ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)',
         32],
     'barotropic_latlon_cgrid.py:552-631': [
