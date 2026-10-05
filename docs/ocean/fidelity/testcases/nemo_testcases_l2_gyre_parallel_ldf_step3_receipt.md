@@ -35,7 +35,7 @@ content plus Kmm thickness times that `Krhs` at
 `GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565`.
 
 At the requested tip, the private one-variable route is declared at
-`ocean_model_latlon_cgrid.py:1349-1352`
+`ocean_model_latlon_cgrid.py:1376-1379`
 and adds the already-computed signed `dT_gm/dS_gm` arrays to the WS helper's
 stage-3 source tuple at `:7723-7731`. The candidate removes that private
 selector and executes the identical route when the already selected `rk3_ws`

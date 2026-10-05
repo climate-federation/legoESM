@@ -1,0 +1,41 @@
+--- traadv.F90
++++ traadv.F90
+@@ -224,6 +224,7 @@
+          ! stencil is restricted to the source-defined one-cell support of
+          ! every rank-zero owned T cell; the remaining fields use zero-first
+          ! canonical T views.  No model array is assigned by this block.
++         IF( ln_rnf ) THEN
+          IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN
+             ALLOCATE( l4_e3t_kmm(jpi,jpj,jpk) )
+             l4_e3t_kmm(:,:,:) = 0._wp
+@@ -241,6 +242,7 @@
+                &       l4_canon_2d(rnf,'T')
+             DEALLOCATE( l4_e3t_kmm )
+          ENDIF
++         ENDIF
+          IF( lwp .AND. kt == kit000 .AND. kstg == 3 ) THEN
+             OPEN( UNIT=992, FILE='oracle_rkstage3_wzv_kt00000001.bin', ACCESS='STREAM', &
+                &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
+@@ -248,7 +250,9 @@
+             WRITE(992) 1, kt, kstg, Kmm, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
+          ENDIF
+          CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )
++         IF( ln_rnf ) THEN
+          IF( lwp .AND. kt == kit000 .AND. kstg == 1 )   WRITE(993) l4_canon_3d(ww,'T')
++         ENDIF
+          IF( lwp .AND. kt == kit000 .AND. kstg == 3 )   WRITE(992) l4_canon_3d(ww,'T')
+          !                                              ! Partition ww/wwi at stage 3 only
+          IF( ln_zad_Aimp .AND. kstg == 3 ) CALL wAimp( kt, Kmm, pFu, pFv, ww, wi, np_transport )
+@@ -264,10 +268,12 @@
+          DO_3D( 1, 1, 1, 1, 1, jpkm1 )
+             pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)
+          END_3D
++         IF( ln_rnf ) THEN
+          IF( lwp .AND. kt == kit000 .AND. kstg == 1 ) THEN
+             WRITE(993) l4_canon_3d(pFw,'T')
+             CLOSE(993)
+          ENDIF
++         ENDIF
+          ! Lane-2 WRITE-only diagnostic: split the first over-bar stage-3
+          ! tracer vertical transport at wzv -> wAimp -> e1e2t*ww.  The
+          ! ordinary arrays above are never read from or changed by this block.

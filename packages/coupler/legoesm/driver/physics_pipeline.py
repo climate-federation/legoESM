@@ -1839,8 +1839,10 @@ class PhysicsPipeline:
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
-        from legoesm.thermo import latent_heat_vaporization as _lv_T
-        lhflx = rho_low * _lv_T(T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        from legoesm.thermo import charged_latent_heat
+        # The constant-coefficient law: charged (and inverted below) through the
+        # one lookup.
+        lhflx = rho_low * charged_latent_heat("constant", T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
         evap_sfc = None   # the water flux actually applied to the column (set below)
 
         turb_owns_surface = (
@@ -1941,8 +1943,8 @@ class PhysicsPipeline:
             if sfc_evap_override is not None:
                 evap_rate = sfc_evap_override
             else:
-                from legoesm.thermo import latent_heat_vaporization
-                evap_rate = lhflx / latent_heat_vaporization(T_sfc)
+                from legoesm.thermo import charged_latent_heat
+                evap_rate = lhflx / charged_latent_heat("constant", T_sfc)
             evap_sfc = evap_rate
             # Heat kick carries the latent enthalpy correction (surface_layer
             # .latent_enthalpy_correction): water credited at L_v by the column

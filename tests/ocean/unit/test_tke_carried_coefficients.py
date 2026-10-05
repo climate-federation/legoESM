@@ -23,6 +23,7 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
 
 def _step_entry_helper_fixture(tke_cfg):
+    from legoesm.ocean.eos import NemoSEOSConfig
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate, create_z_star_from_thicknesses,
     )
@@ -51,8 +52,17 @@ def _step_entry_helper_fixture(tke_cfg):
     cfg = SimpleNamespace(
         physics=SimpleNamespace(vertical_mixing=
             SimpleNamespace(scheme="tke", tke=tke_cfg)),
-        constants=SimpleNamespace(g=constants.g))
-    model = SimpleNamespace(config=cfg, z_coord=z_coord)
+        constants=SimpleNamespace(g=constants.g),
+        eos_nemo_seos=NemoSEOSConfig())
+    model = SimpleNamespace(
+        config=cfg,
+        z_coord=z_coord,
+        _nemo_ws_test_hooks=SimpleNamespace(
+            bn2_tracer_override=None,
+            bn2_intermediate=None,
+            bn2_alpha_beta_override=None,
+        ),
+    )
     dims3 = ("lat", "lon", "level")
     dims2 = ("lat", "lon")
     u_now = jnp.asarray([

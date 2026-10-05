@@ -304,7 +304,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     mass_flux_v = h_v * state.v.data * v_mask_3d
 
     # Base (momentum/continuity) vertical transport — same call production
-    # uses (ocean_model_latlon_cgrid.py:3475-3478) — needed regardless of
+    # uses (ocean_model_latlon_cgrid.py:3537-3540) — needed regardless of
     # GM/Redi so the no-GM/Redi branch still has a valid w_baro.
     flux_div_k = divergence_cgrid(mass_flux_u, mass_flux_v, grid)
     w_baro = diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
@@ -333,7 +333,7 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
             # #1226: the DINO nemo_paper card sets eos_depth="geometric"
             # (dino.py:909,933 -> dino_lat_lon_model_config, dino.py:2874) and
             # production threads it into every GM/Redi + K33 call
-            # (ocean_model_latlon_cgrid.py:3885,3921). Omitting it silently
+            # (ocean_model_latlon_cgrid.py:3947,3921). Omitting it silently
             # takes the "insitu" default -- a DIFFERENT density convention
             # from NEMO's, which is exactly the omission that invalidated an
             # earlier probe measurement (fidelity_bar_gate.py:363 retraction).

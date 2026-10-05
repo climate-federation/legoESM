@@ -11,14 +11,6 @@ experiment to a CMIP-class coupled spin-up:
 | **Composable physics** | any subset of process parameterizations, summed | per-process `scheme=` config |
 | **Fidelity** | research-idealized → intermediate → operational (AMIP/OMIP/CMIP) | test tier + forcing |
 
-The full capability map is introspectable at runtime:
-
-```python
-from legoesm import taxonomy
-taxonomy.capability_report()              # complexity × extent × grids, as a dict
-taxonomy.grid_capability("mpas").variable_resolution   # True
-```
-
 ---
 
 ## Axis 1 — Extent & grid

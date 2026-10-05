@@ -1502,8 +1502,11 @@ def nemo_ldf_lap_viscosity_cgrid(
     ----------
     u, v : face velocities (2-D or 3-D).
     grid : LatLonGrid.
-    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
-    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    ahmt : (n_lat,) or (n_lat, n_lon, nlev)
+        T-point viscosity coefficient [m²/s].  The full three-dimensional form
+        is NEMO's READ coefficient (nn_ahm_ijk_t=-30) and is used as given.
+    ahmf : (n_lat+1,) or (n_lat+1, n_lon+1, nlev)
+        F-point viscosity coefficient [m²/s], on the vertex layout.
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
     Returns
     -------
@@ -1520,7 +1523,15 @@ def nemo_ldf_lap_viscosity_cgrid(
         return m
 
     def _bc(c):
-        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev]
+        # broadcast a (n_lat,) or (n_lat+1,) latitude coefficient over lon [, lev].
+        # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
+        # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
+        if c.ndim == 3:
+            if not is_3d:
+                raise ValueError(
+                    "a full (lat, lon, lev) viscosity coefficient needs 3-D "
+                    "velocities; got 2-D")
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)
@@ -1620,6 +1631,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                                       jnp.ndarray, jnp.ndarray,
                                       jnp.ndarray] | None = None,
+    coefficient_fmask_already_applied: bool = False,
     return_intermediates: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
@@ -1692,8 +1704,11 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     ----------
     u, v : face velocities (2-D or 3-D).
     grid : LatLonGrid.
-    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
-    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    ahmt : (n_lat,) or (n_lat, n_lon, nlev)
+        T-point viscosity coefficient [m²/s].  The full three-dimensional form
+        is NEMO's READ coefficient (nn_ahm_ijk_t=-30) and is used as given.
+    ahmf : (n_lat+1,) or (n_lat+1, n_lon+1, nlev)
+        F-point viscosity coefficient [m²/s], on the vertex layout.
     h_k : cell-centre layer thickness (NEMO e3t), same shape as ``u``'s
         cell-centre analogue (2-D or 3-D matching ``u``/``v``).
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
@@ -1702,6 +1717,11 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
         these as dynamic given inputs so XLA cannot replace the compiled
         multiply-then-divide statements with reciprocal multiplication.
+    coefficient_fmask_already_applied : bool, default False
+        The ``nn_ahm_ijk_t=-30`` read path stores ``ahmf*fmask`` before
+        ``dyn_ldf`` runs (``ldfdyn.f90:387-393``).  Do not apply legoESM's
+        binary four-cell vertex mask a second time on that path.  Computed
+        coefficients keep the historical mask application.
 
     Returns
     -------
@@ -1715,6 +1735,14 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         return m
 
     def _bc(c):
+        # A coefficient that is already full (lat, lon, lev) -- NEMO's READ
+        # ahmt_3d/ahmf_3d, nn_ahm_ijk_t=-30 -- passes through unchanged.
+        if c.ndim == 3:
+            if not is_3d:
+                raise ValueError(
+                    "a full (lat, lon, lev) viscosity coefficient needs 3-D "
+                    "velocities; got 2-D")
+            return c
         return c[:, None, None] if is_3d else c[:, None]
 
     u_eff = u if u_mask is None else u * _bm(u_mask)
@@ -1781,7 +1809,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
 
         curl_bracket = _nemo_vor_curl_bracket_cgrid(u_eff, v_eff, grid)
         ahmf_live = _bc(ahmf)
-        if mask is not None:
+        if mask is not None and not coefficient_fmask_already_applied:
             fmask = (vertex_mask if vertex_mask is not None
                      else compute_vertex_mask(mask, grid=grid))
             ahmf_live = sr(ahmf_live * _bm(fmask))
@@ -1846,7 +1874,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # 2. e3-weighted vorticity at F-points: curl_vertex_cgrid is NEMO's
     #    e3-free circulation bracket; ahmf*e3f is the outer scale (h90:22-25).
     zeta = curl_vertex_cgrid(u_eff, v_eff, grid)
-    if mask is not None:
+    if mask is not None and not coefficient_fmask_already_applied:
         vmask = (vertex_mask if vertex_mask is not None
                  else compute_vertex_mask(mask, grid=grid))
         zeta = zeta * _bm(vmask)

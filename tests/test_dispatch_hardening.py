@@ -189,6 +189,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Latent heat a surface scheme charged (thermo.charged_latent_heat):
+        # an unknown scheme must raise, never fall back to one family.
+        ("packages/core/legoesm/thermo.py", "charged_latent_heat"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the shared stable-branch dispatch twins (grow-only
         # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
@@ -245,6 +248,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
         ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
+        ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
         # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
         # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early

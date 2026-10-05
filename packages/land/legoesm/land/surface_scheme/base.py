@@ -111,6 +111,14 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # SimpleSEB over a layered pack (fractional cover f): the pack's share of
+    # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
+    # flux.  ``None`` on the binary snow path and for the canopy schemes.
+    LE_snow: jax.Array | None = None
+    # SimpleSEB over a layered pack: cell vapour conductance [kg m-2 s-1 per
+    # kg/kg] (> 0), so the caller can export the humidity q_air + E / g that
+    # implies the REALISED vapour flux E.  ``None`` elsewhere.
+    vapour_conductance: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None
     Rn_canopy: jax.Array | None = None
@@ -175,4 +183,19 @@ class SurfaceFluxOutput(NamedTuple):
     # ignore.
     held: jax.Array | None = None
     n_held: jax.Array | None = None
-
+    # Layered snowpack only (``snow_scheme == "layered"``): excess of the pack-top
+    # temperature over T_freeze after the implicit solve and BEFORE the enthalpy
+    # re-equilibration [K], (ncol,).  The solve carries sensible heat only, so this
+    # measures how far one step overshoots the melting point (an accuracy, not a
+    # conservation, diagnostic).  None for the bulk snowpack.
+    snow_T_top_excess: jax.Array | None = None
+    # Layered snowpack only, for the column energy budget: enthalpy carried into
+    # the pack by mass (snowfall, frost, rain) minus that leaving it (sublimated
+    # ice, drainage incl. any liquid above T_freeze) [J/m^2, relative to ice at
+    # T_freeze]; and the ground heat flux the pack+soil column received, Robin
+    # term included [W/m^2, positive into the ground].  Pack enthalpy + soil
+    # sensible energy change by dt*(snow_ground_heat_applied + geothermal) +
+    # snow_advected_heat.  Melt water enters the soil carrying no heat (same
+    # convention as rain infiltration), so the drainage enthalpy leaves the column.
+    snow_advected_heat: jax.Array | None = None
+    snow_ground_heat_applied: jax.Array | None = None

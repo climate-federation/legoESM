@@ -797,6 +797,49 @@ def surface_latent_heat(T_sfc: jax.Array, frozen_fraction: jax.Array | float) ->
     return (1.0 - f) * latent_heat_vaporization(T_sfc) + f * latent_heat_sublimation(T_sfc)
 
 
+# Surface schemes whose ported oracle charges CONSTANT latent heats rather than
+# the Kirchhoff family above: the CESM shr_flux_atmOcn air-sea law
+# (core.bulk_flux.compute_sam_oceflx_fluxes: L_v, or L_s with ``ice``) and the
+# CLM-ML canopy, whose LatVap charges ALL its water (leaf and soil) at
+# clm_varcon hvap (== constants.L_v) when its reference air temperature is above
+# freezing and hsub (== constants.L_s) otherwise (MLWaterVaporMod.LatVap at
+# tref_forcing, MLLeafFluxesMod / MLSoilFluxesMod).
+_ORACLE_CONSTANT_LATENT_SCHEMES = frozenset({"large_yeager_cesm", "clm_ml"})
+# Schemes that charge the Kirchhoff latent heat at the surface temperature: the
+# bulk laws (core.bulk_flux; "nemo_si3_constant" reaches the atmosphere surface
+# layer only through its constant-coefficient law) and the land surface schemes.
+_KIRCHHOFF_LATENT_SCHEMES = frozenset({
+    "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    "simple_seb", "two_leaf",
+})
+
+
+def charged_latent_heat(scheme: str, T: jax.Array, *, ice: bool = False) -> jax.Array:
+    """Latent heat [J/kg] the surface scheme ``scheme`` charged for the water it
+    moved, given the temperature ``T`` the scheme evaluates its latent heat at
+    (the surface temperature for every scheme except CLM-ML, whose ``T`` is its
+    reference AIR temperature and which ignores ``ice``; ``ice``: the
+    sublimation stream).
+
+    Dividing that scheme's latent heat flux by this returns exactly its water
+    flux -- the ONE place every water-from-heat inverse looks up the scheme, so
+    an inverse cannot disagree with the charge (a call that overrides the law's
+    latent heat with an explicit ``L_latent`` must invert with that value
+    instead).  Raises on an unknown scheme.
+    """
+    T = jnp.asarray(T)
+    if scheme == "clm_ml":
+        return jnp.where(T > constants.T_freeze, constants.L_v, constants.L_s).astype(T.dtype)
+    if scheme in _ORACLE_CONSTANT_LATENT_SCHEMES:
+        L = constants.L_s if ice else constants.L_v
+        return jnp.full(jnp.shape(T), L, dtype=T.dtype)
+    if scheme in _KIRCHHOFF_LATENT_SCHEMES:
+        return latent_heat_sublimation(T) if ice else latent_heat_vaporization(T)
+    raise ValueError(
+        f"charged_latent_heat: unknown surface scheme {scheme!r}; expected one of "
+        f"{sorted(_ORACLE_CONSTANT_LATENT_SCHEMES | _KIRCHHOFF_LATENT_SCHEMES)}.")
+
+
 def moist_air_cp(q_air: jax.Array) -> jax.Array:
     """Moist-air specific heat [J/(kg K)], NEMO/AeroBulk convention.
 

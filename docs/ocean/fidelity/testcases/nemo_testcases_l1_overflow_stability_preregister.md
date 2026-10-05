@@ -41,7 +41,7 @@ the tracer tridiagonal solve (`traadv_fct.F90:141-167,286-330`;
 
 The pre-implementation search found legoESM's only active implementation in
 `vertical.py:1716-1909` and its only testcase call in
-`ocean_model_latlon_cgrid.py:5101-5159`.  It uses the older local vertical-only
+`ocean_model_latlon_cgrid.py:5197-5255`.  It uses the older local vertical-only
 fraction, applies it to momentum after the completed RK3 program, and passes
 unpartitioned vertical transport to all tracer FCT stages.  No second faithful
 Wicker partition or implicit tracer-advection implementation exists.  Existing

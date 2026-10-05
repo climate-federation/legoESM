@@ -173,7 +173,7 @@ fp32 15.7 ms/step (3.8× faster** — consumer Blackwell throttles fp64). fp32 p
 WENO common-shift fix (phase-2a). Bench script `/tmp/gpu_bench.py` (throwaway).
 
 ## Phase 2 (c) MPI — distributed Poisson DONE + parity (2026-06-19)
-`pseudo_incompressible_poisson_mpi.py`: y-slab decomposition (each rank owns
+`pseudo_incompressible_poisson_mpi.py` (parked in `atmosphere/_future/` 2026-10-02, not wired): y-slab decomposition (each rank owns
 (ny_local,nx,nz); ny_global=ny_local·n_ranks). x periodic-local, z local, y via a
 periodic ring `_halo_y` (mpi4jax.sendrecv: send top→up/recv←down, send bot→down/recv←up
 — no tags, call-order pairing; correct incl. nranks==2). Custom matrix-free `_bicgstab_mpi`

@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm.land.snow_bands import ElevationSnowBandConfig
+from legoesm.land.snow_column import SnowColumnConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -173,6 +174,12 @@ class MultiLayerLandConfig(NamedTuple):
     # snow-buried leaf + stem area; snow-free albedo unchanged).  Two-leaf canopy
     # only.  Off = the unmasked snow blend.
     canopy_snow_masking: bool = False
+    # Snowpack model: "bulk" (one SWE reservoir, energy-limited melt at the soil
+    # skin) or "layered" (``legoesm.land.snow_column``: an equal-mass multi-layer
+    # pack solved implicitly together with the soil column, with phase change,
+    # percolation and rain-on-snow).  Validated in ``step_multilayer_land``.
+    snow_scheme: str = "bulk"
+    snow_column: SnowColumnConfig = SnowColumnConfig()
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     # ``theta_wp`` is the SOIL wilting point [m3/m3] — the moisture reference for

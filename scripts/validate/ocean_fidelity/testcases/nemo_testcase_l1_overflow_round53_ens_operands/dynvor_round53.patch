@@ -1,0 +1,53 @@
+--- dynvor.F90.shipped
++++ dynvor.F90
+@@ -47,3 +47,5 @@
+    USE in_out_manager ! I/O manager
+    USE lib_mpp        ! MPP library
++   USE l1_r53_ens, ONLY : r53_ens_begin, r53_ens_zwz, r53_ens_before, &
++      & r53_ens_after, r53_ens_finish
+    USE timing         ! Timing
+@@ -568,6 +570,7 @@
+       REAL(wp), DIMENSION(ntsi-(1):ntei+(1),ntsj-(1):ntej+(1)) ::   zwx, zwy, zwz   ! 2D workspace
+       !!----------------------------------------------------------------------
+       !
++      CALL r53_ens_begin(kt,Kmm,kvor,kvor == np_CME)
+       IF( .NOT. l_istiled .OR. ntile == 1 )  THEN                       ! Do only on the first tile
+          IF( kt == nit000 ) THEN
+             IF(lwp) WRITE(numout,*)
+@@ -616,6 +619,9 @@
+             CALL ctl_stop('STOP','dyn_vor: wrong value for kvor'  )
+          END SELECT
+          !
++         DO_2D( 1, 0, 1, 0 )
++            CALL r53_ens_zwz(1,ji,jj,jk,zwz(ji,jj))
++         END_2D
+          !
+ #if defined key_qco   ||   defined key_linssh
+          DO_2D( 1, 0, 1, 0 )                 !==  potential vorticity  ==!   (key_qco)
+@@ -648,5 +654,8 @@
+          END SELECT
+ #endif
++         DO_2D( 1, 0, 1, 0 )
++            CALL r53_ens_zwz(2,ji,jj,jk,zwz(ji,jj))
++         END_2D
+          !                                   !==  horizontal fluxes  ==!
+          DO_2D( 1, 1, 1, 1 )
+             zwx(ji,jj) = e2u(ji,jj) * e3u(ji,jj,jk,Kmm) * pu(ji,jj,jk)
+@@ -660,10 +669,17 @@
+                &                           + ( zwy(ji  ,jj  ) + zwy(ji+1,jj  ) )  )   ! reproducibility around NP
+             zvau =-r1_8 * r1_e2v(ji,jj) * (  ( zwx(ji-1,jj  ) + zwx(ji-1,jj+1) )  &
+                &                           + ( zwx(ji  ,jj  ) + zwx(ji  ,jj+1) )  )
++            CALL r53_ens_before(ji,jj,jk,zuav, &
++               & zwz(ji,jj-1)+zwz(ji,jj), &
++               & zuav*(zwz(ji,jj-1)+zwz(ji,jj)),pu_rhs(ji,jj,jk),zvau, &
++               & zwz(ji-1,jj)+zwz(ji,jj), &
++               & zvau*(zwz(ji-1,jj)+zwz(ji,jj)),pv_rhs(ji,jj,jk))
+             pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zuav * ( zwz(ji  ,jj-1) + zwz(ji,jj) )
+             pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zvau * ( zwz(ji-1,jj  ) + zwz(ji,jj) )
++            CALL r53_ens_after(ji,jj,jk,pu_rhs(ji,jj,jk),pv_rhs(ji,jj,jk))
+          END_2D
+          !                                             ! ===============
+       END DO                                           !   End of slab
+       !                                                ! ===============
++      CALL r53_ens_finish
+    END SUBROUTINE vor_ens
