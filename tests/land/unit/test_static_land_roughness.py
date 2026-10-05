@@ -88,3 +88,36 @@ def test_solved_stress_magnitude_fallback_keeps_nan():
     g = jax.grad(lambda x: jnp.sum(solved_stress_magnitude(
         None, SimpleNamespace(tau_x=x, tau_y=jnp.zeros(1)))))(jnp.zeros(1))
     assert np.isfinite(np.asarray(g)).all()
+
+
+def test_layered_pack_stress_magnitude_is_area_weighted():
+    """SimpleSEB with a fractional layered pack solves snow and soil exchange
+    separately; tau_mag must be rho*u*^2 of each, f-weighted like (tau_x,
+    tau_y), and consistent with the vector (bulk law floors the speed at
+    0.01 m/s only)."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.land.surface_scheme.simple_seb import compute_simple_seb_fluxes
+    f1 = lambda x: jnp.full(1, x)  # noqa: E731
+    fo = AtmToSurface(
+        sw_down=f1(200.), lw_down=f1(250.), precip_total=f1(0.),
+        precip_snow=f1(0.), T_lowest=f1(270.), q_lowest=f1(.0005),
+        u_lowest=f1(5.0), v_lowest=f1(0.), p_lowest=f1(98000.),
+        p_surface=f1(100000.), rho_lowest=f1(1.25), cos_zenith=f1(0.5),
+        co2_ppmv=f1(412.), has_radiation=f1(1.), has_precipitation=f1(1.))
+    cfg = MultiLayerLandConfig(bulk_scheme="most",
+                               surface_scheme=SimpleSEBConfig())
+    kw = dict(T_surface=f1(266.0), snow=f1(20.0), snow_age=f1(0.0),
+              beta_soil=f1(0.3), forcing=fo, land_config=cfg, U_min=1.0,
+              lat=None, carbon_state=None, dt=1800.0, land_params=None,
+              albedo_land=0.2, emissivity=0.97, z0=0.01)
+    out = {c: compute_simple_seb_fluxes(**kw, snow_cover=f1(c))
+           for c in (0.4, 1.0, 0.0)}
+    for o in out.values():
+        mag = np.asarray(o.tau_mag)
+        assert np.all(np.isfinite(mag)) and np.all(mag > 0.0)
+        vec = np.hypot(np.asarray(o.tau_x), np.asarray(o.tau_y))
+        np.testing.assert_allclose(vec / mag, 5.0 / np.sqrt(25.0 + 1e-4),
+                                   rtol=1e-6)
+    np.testing.assert_allclose(
+        out[0.4].tau_mag, 0.4 * out[1.0].tau_mag + 0.6 * out[0.0].tau_mag,
+        rtol=1e-12)

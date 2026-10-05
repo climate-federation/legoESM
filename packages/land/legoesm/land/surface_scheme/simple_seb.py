@@ -337,7 +337,7 @@ def compute_simple_seb_fluxes(
         _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
         q_sfc_lin = beta_limited_surface_humidity(
             _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
-        _, _, shflx_lin, lhflx_lin, _ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
+        _, _, shflx_lin, lhflx_lin, *_ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
     else:
         # Same per-component exchange as the flux above (latent heats held at
         # T_surface, as L_eff is on the binary path).
