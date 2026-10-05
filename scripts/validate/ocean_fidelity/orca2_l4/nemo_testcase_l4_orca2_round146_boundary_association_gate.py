@@ -139,7 +139,15 @@ def build_entry_inverse_v_override(oracle, *, plant: str):
             "entry inverse V override registry reordered")
     native = [np.array(oracle[name], copy=True) for name in names]
     if plant == "wrong-entry-frame":
-        native[1] = np.array(native[0], copy=True)
+        # i000 and j001 are bit-identical on the admitted record, so using
+        # i000 here would be a vacuous plant.  j002 is the first distinct
+        # recorded frame; fail closed if that precondition ever changes.
+        wrong = np.array(native[2], copy=True)
+        require(
+            not exact_row(wrong, native[1])["bit_exact"],
+            "wrong-entry-frame plant source is not distinct",
+        )
+        native[1] = wrong
     if plant == "entry-inverse-v-bit":
         candidates = np.argwhere(native[1] != 0.0)
         require(candidates.size > 0,

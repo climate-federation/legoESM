@@ -51,6 +51,30 @@ def test_entry_inverse_v_registry_reorder_plant_fires():
             oracle, plant="inverse-v-registry")
 
 
+def test_wrong_entry_frame_plant_is_nonvacuous():
+    oracle = {
+        name: np.full((3, 4), index, dtype=np.float64)
+        for index, name in enumerate(gate.entry_inverse_v_names())
+    }
+    override = gate.build_entry_inverse_v_override(
+        oracle, plant="wrong-entry-frame")
+
+    assert np.array_equal(
+        override[1], gate.r97._to_model_v(oracle["j002_hvr_e"]))
+    assert not np.array_equal(
+        override[1], gate.r97._to_model_v(oracle["j001_hvr_e"]))
+
+
+def test_wrong_entry_frame_plant_refuses_vacuous_record():
+    oracle = {
+        name: np.ones((3, 4), dtype=np.float64)
+        for name in gate.entry_inverse_v_names()
+    }
+    with pytest.raises(gate.GateError, match="source is not distinct"):
+        gate.build_entry_inverse_v_override(
+            oracle, plant="wrong-entry-frame")
+
+
 @pytest.mark.parametrize("face,changed", [("u", (1, 0)), ("v", (0, 2))])
 def test_boundary_scope_accepts_only_registered_storage(face, changed):
     pre = np.zeros((4, 5), dtype=np.float64)
