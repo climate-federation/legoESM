@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm"
-version = "0.1.0"
+version = "1.0.0"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
@@ -30,24 +30,24 @@ dependencies = [
     # shipped independently on top of the same core (see FEDERATION.md).  Pinned
     # to the matching minor (single-sourced version; members bump in lock-step)
     # so a non-workspace ``pip install legoesm`` cannot resolve a mismatched core.
-    "legoesm-core~=0.1.0",
+    "legoesm-core~=1.0.0",
     # The four Earth-system components, each its own installable member on top of
     # legoesm-core (mutually independent — import-linter contract #2).  The meta
     # ``legoesm`` pulls them all; ``pip install legoesm-ocean`` alone is enough to
     # run the ocean standalone.
-    "legoesm-atmosphere~=0.1.0",
-    "legoesm-ocean~=0.1.0",
-    "legoesm-land~=0.1.0",
-    "legoesm-ice~=0.1.0",
+    "legoesm-atmosphere~=1.0.0",
+    "legoesm-ocean~=1.0.0",
+    "legoesm-land~=1.0.0",
+    "legoesm-ice~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
-    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
     # (a uv-workspace cycle), unlike the four independent components above.
-    "legoesm-coupler~=0.1.0",
-    "legoesm-ml~=0.1.0",
-    "legoesm-tools~=0.1.0",
-    "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
-    "jaxlib>=0.4.35",           # must match jax
+    "legoesm-coupler~=1.0.0",
+    "legoesm-ml~=1.0.0",
+    "legoesm-tools~=1.0.0",
+    "jax>=0.5.3",              # install minimum; tested with 0.8–0.9
+    "jaxlib>=0.5.3",           # must match jax
     "equinox>=0.11",
     "optax>=0.2",
     "xarray>=2024.0",
@@ -146,7 +146,7 @@ members = ["packages/*"]
 
 # Every inter-member dependency resolves to the in-tree workspace member (never
 # PyPI).  All members must be listed here, or uv would try to fetch e.g.
-# legoesm-atmosphere~=0.1.0 from an index that does not publish it yet.
+# legoesm-atmosphere~=1.0.0 from an index that does not publish it yet.
 [tool.uv.sources]
 legoesm-core = { workspace = true }
 legoesm-atmosphere = { workspace = true }
@@ -235,7 +235,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N803", "N806"]
 "tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
 # ARM obs scoring: physical symbol T (temperature) locals read clearer than snake_case.
-"packages/atmosphere/legoesm/atmosphere/les_suite/arm_obs_score.py" = ["N806"]
+"packages/atmosphere/legoesm/atmosphere/_future/arm_obs_score.py" = ["N806"]
 "tests/atmosphere/les_suite/test_arm_obs_score.py" = ["N806"]
 # SCM forcing IO + ARM/SCCM loader: physical symbols T (temperature), divT (T
 # advective tendency) as args/locals read clearer than snake_case, matching the
@@ -415,8 +415,6 @@ ignore_imports = [
     # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
     # component (the root inversion above); baseline the core->grids hop.
@@ -574,8 +572,6 @@ ignore_imports = [
     # baselined in contract #1 (runtime/__init__ <-> core init cycle).
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
     # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).

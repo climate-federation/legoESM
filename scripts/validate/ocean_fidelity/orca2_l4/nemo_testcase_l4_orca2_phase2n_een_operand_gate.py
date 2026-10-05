@@ -274,6 +274,265 @@ def _coefficient_complete_masks(u_source, v_source):
     return (*u, *v)
 
 
+# ---------------------------------------------------------------------------
+# Round 8: the vertex thickness on the tripolar fold row.
+#
+# NEMO gives that row no formula of its own.  ``dyn_vor_init`` evaluates the
+# masked four-cell average over the OWNED domain (dynvor.f90:913-919), then
+# completes the field with the ordinary F-point north-fold exchange, sign +1
+# (dynvor.f90:935), and only then substitutes the reference thickness for any
+# remaining zero (dynvor.f90:937).  Under a T pivot that exchange rewrites the
+# LAST OWNED row from the row immediately below it at the mirrored longitude:
+# the compiled row loop runs to ``ipj - ihls`` with source ``ipj - ihls - 1``
+# and the compiled longitude loop pairs ``ii1 + ii2 = ipi + 1``
+# (lbcnfd.f90:722-746).
+# ---------------------------------------------------------------------------
+
+# Local (haloed) extent of the recorded rank-zero array, and the owned block
+# inside it.  The instrumented writer fills owned cells only -- its halo slots
+# are left at zero -- so ``_assert_record_is_owned_only`` makes that coverage
+# limit mechanical instead of assumed.
+FOLD_ROW = GLOBAL_NY - 1
+
+
+def _read_local_with_halo(path: Path, magic: str) -> np.ndarray:
+    """The recorded rank-zero array WITHOUT stripping its halo slots."""
+    with path.open("rb") as handle:
+        got_magic = handle.read(16).decode("ascii").rstrip()
+        handle.read(40)
+        values = np.fromfile(handle, np.float64)
+    require(got_magic == magic, f"{path.name}: bad magic {got_magic!r}")
+    require(values.size == LOCAL_NX * LOCAL_NY * NZ,
+            f"{path.name}: bad payload size")
+    return values.reshape((LOCAL_NX, LOCAL_NY, NZ), order="F").transpose(1, 0, 2)
+
+
+def _assert_record_is_owned_only(path: Path, magic: str) -> dict[str, object]:
+    """Prove the record carries NO value outside rank zero's owned block.
+
+    The writer copies ``DO_3D( 0, 0, 0, 0, ... )`` into a zero-initialised
+    buffer, so every halo slot is an absence, not a NEMO number.  Asserting it
+    here is what stops a later round from reading those zeros as the other
+    rank's half of the fold.
+    """
+    local = _read_local_with_halo(path, magic)
+    halo_slots = np.concatenate([
+        local[:, :HALO, :].ravel(), local[:, -HALO:, :].ravel(),
+        local[:HALO, HALO:-HALO, :].ravel(),
+        local[-HALO:, HALO:-HALO, :].ravel(),
+    ])
+    require(np.all(halo_slots == 0.0),
+            f"{path.name}: a halo slot is non-zero; the record's coverage is "
+            "not the owned block the writer claims")
+    # The two writers differ in vertical reach -- the frozen operand is copied
+    # over ``1, jpk`` and the live one over ``1, jpkm1`` -- so the occupancy
+    # assertion covers the active levels every comparison here uses.
+    owned = local[HALO:-HALO, HALO:-HALO, :]
+    require(np.all(owned[:, :, :ACTIVE_NZ] != 0.0),
+            f"{path.name}: an owned cell is zero; the writer did not fill the "
+            "owned block")
+    return {
+        "recorded_longitudes_owned": int(owned.shape[1]),
+        "recorded_longitudes_total": GLOBAL_NX,
+        "halo_slots_all_zero": True,
+        "unrecorded_fold_row_longitudes": GLOBAL_NX - owned.shape[1],
+    }
+
+
+def _fold_arm(primitives, *, perm: str, source_row: str, z_coord, grid, eta):
+    """The frozen vertex thickness with a DELIBERATELY WRONG fold rule.
+
+    ``perm='f'`` / ``source_row='below'`` is NEMO's rule; the other
+    combinations are the controls that must not pass.
+    """
+    e3f0 = primitives[0]
+    n_lon = e3f0.shape[1]
+    if perm == "f":                       # lbcnfd.f90:722-746, ii1+ii2 = ipi+1
+        index = jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32)
+    else:                                 # the T-origin mirror, ii1+ii2 = ipi+2
+        index = (-jnp.arange(n_lon, dtype=jnp.int32)) % n_lon
+    source = e3f0[-2] if source_row == "below" else e3f0[-1]
+    return e3f0.at[-1].set(source[index])
+
+
+MAGICS = (("e3f_0vor", "NEMO_L4_E3F0_1"), ("live_e3f_vor", "NEMO_L4_E3FV_1"))
+
+
+def _stitch_per_rank(per_rank_root: Path) -> tuple[dict, dict]:
+    """Both ranks' owned halves of the fold row, joined into the full domain.
+
+    The round-8 acquisition removed the writer's rank guard and tagged each
+    file with its rank, so the two owned blocks together cover all 180
+    longitudes.  Rank zero owns i = 0..89 and rank one i = 90..179, the
+    longitude-only split the run prints (``ocean.output:196-202``).
+    """
+
+    recorded, coverage = {}, {}
+    for name, magic in MAGICS:
+        halves = []
+        for rank in (0, 1):
+            path = per_rank_root / (
+                ("oracle_een_e3f0vor" if name == "e3f_0vor"
+                 else "oracle_een_e3fvor")
+                + f"_kt00000001_r{rank:04d}.bin")
+            coverage[f"{name}_rank{rank}"] = _assert_record_is_owned_only(
+                path, magic)
+            halves.append(_read_local_with_halo(path, magic)[
+                HALO:-HALO, HALO:-HALO, :ACTIVE_NZ])
+        joined = np.concatenate(halves, axis=1)
+        require(joined.shape[1] == GLOBAL_NX,
+                f"{name}: the two ranks join to {joined.shape[1]} longitudes, "
+                f"not {GLOBAL_NX}")
+        recorded[name] = joined
+    return recorded, coverage
+
+
+def _fold_row_rows(card, oracle_paths, per_rank_root=None) -> dict[str, object]:
+    """Score the fold row alone, with its ablation and its two wrong rules.
+
+    With ``per_rank_root`` the record covers ALL 180 fold-row longitudes, so
+    the exchange is certified in BOTH directions; without it the record is
+    rank zero's 90 owned destinations only.
+    """
+    z_coord = card.recipe.z_coord
+    grid = card.recipe.grid
+    coverage = {
+        name: _assert_record_is_owned_only(oracle_paths[name], magic)
+        for name, magic in MAGICS
+    }
+    recorded = {
+        name: _read_local_with_halo(oracle_paths[name], magic)[
+            HALO:-HALO, HALO:-HALO, :ACTIVE_NZ]
+        for name, magic in MAGICS
+    }
+    n_cols = GLOBAL_NX // 2
+    rank0_agreement = None
+    if per_rank_root is not None:
+        full, per_rank_coverage = _stitch_per_rank(Path(per_rank_root))
+        # The new acquisition is a different build, so its rank-zero half must
+        # reproduce the admitted record before its rank-one half is believed.
+        rank0_agreement = {
+            name: int(np.sum(
+                full[name][:, :n_cols].view(np.uint64)
+                != recorded[name].view(np.uint64)))
+            for name in full
+        }
+        for name, unequal in rank0_agreement.items():
+            require(unequal == 0,
+                    f"{name}: the per-rank record's rank-zero half disagrees "
+                    f"with the admitted record in {unequal} cells")
+        coverage = {"rank_zero_only_record": coverage,
+                    "per_rank_record": per_rank_coverage}
+        recorded = full
+        n_cols = GLOBAL_NX
+    own_eta = jnp.asarray(card.recipe.initial_state.eta.data, jnp.float64)
+    # eta = 0 makes r3f exactly zero, so the live builder returns its own
+    # FROZEN e3f_0vor bit for bit (x * 1.0 is exact).  That is how the frozen
+    # operand is read out of the one shared builder instead of re-derived.
+    zero_eta = jnp.zeros_like(own_eta)
+    built = {
+        "e3f_0vor": np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+            zero_eta, z_coord, jnp.float64, nn_e3f_typ=0, grid=grid)[1:, 1:]),
+        "live_e3f_vor": np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+            own_eta, z_coord, jnp.float64, nn_e3f_typ=0, grid=grid)[1:, 1:]),
+    }
+
+    def _unequal(candidate: np.ndarray, expected: np.ndarray) -> dict[str, object]:
+        actual = np.asarray(candidate, np.float64)[:, :n_cols, :ACTIVE_NZ]
+        rows = {}
+        for label, sl in (("owned_block", slice(None)),
+                          ("north_fold_row", slice(FOLD_ROW, FOLD_ROW + 1))):
+            a, b = actual[sl], expected[sl]
+            unequal = a.view(np.uint64) != b.view(np.uint64)
+            rows[label] = {
+                "status": "AT_BAR" if not unequal.any() else "DEBT",
+                "unequal": int(unequal.sum()),
+                "count": int(unequal.size),
+                "max_abs": float(np.abs(a - b).max(initial=0.0)),
+            }
+        return rows
+
+    scored = {name: _unequal(built[name], recorded[name]) for name in built}
+
+    # Controls.  Each rebuilds the SAME arm with one rule changed and must
+    # leave the fold row unequal; a control that passes means the gate cannot
+    # tell the rules apart and is refused here rather than reported.
+    zero_arm = jax.jit(lambda value: _round21_live_divisor_primitives(
+        value, z_coord))(zero_eta)
+    controls = {}
+    for label, kwargs in (
+        ("no_fold", None),
+        ("t_origin_mirror", {"perm": "t", "source_row": "below"}),
+        ("fold_row_as_its_own_source", {"perm": "f", "source_row": "self"}),
+    ):
+        candidate = (zero_arm[0] if kwargs is None else
+                     _fold_arm(zero_arm, z_coord=z_coord, grid=grid,
+                               eta=zero_eta, **kwargs))
+        row = _unequal(np.asarray(candidate), recorded["e3f_0vor"])
+        require(row["north_fold_row"]["unequal"] > 0,
+                f"fold control {label!r} is vacuous: it reproduces NEMO's "
+                "recorded fold row even though its rule is wrong")
+        controls[label] = row["north_fold_row"]
+
+    # The rule as NEMO states it, applied by the production vertex-thickness
+    # helper that used to refuse this row.  The pairing is restated from the
+    # compiled longitude loop, so an inverted shift in that helper fails here.
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
+    h_k = (jnp.asarray(z_coord.dz_ref, jnp.float64)
+           * jnp.asarray(z_coord.is_active, jnp.float64))
+    h_vtx = np.asarray(jax.jit(lambda value: een_e3f_h_vtx(
+        value, None, None, grid, card.recipe.model_config.een_e3f_scheme,
+        dz_ref=z_coord.dz_ref)[0])(h_k))
+    n_lon = GLOBAL_NX
+    pairing = np.asarray([(n_lon + 1 - c) % n_lon for c in range(n_lon)])
+    helper_row = h_vtx[-1, :n_lon]
+    helper_source = h_vtx[-2, :n_lon][pairing]
+    require(np.array_equal(helper_row.view(np.uint64),
+                           helper_source.view(np.uint64)),
+            "the production vertex-thickness helper's fold row is not the "
+            "row below it at the mirrored longitude")
+
+    return {
+        "claim_label": "INDEPENDENT",
+        "record_coverage": coverage,
+        "scored": scored,
+        "controls": controls,
+        "production_helper_fold_row": {
+            "refused": False,
+            "matches_compiled_pairing": True,
+            "pairing": "destination + source = Ni0glo + 1 (one-based)",
+        },
+        "source": {
+            "owned_average": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/"
+                "dynvor.f90:913-919"),
+            "fold_exchange": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/"
+                "dynvor.f90:935"),
+            "zero_substitution": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/"
+                "dynvor.f90:937"),
+            "t_pivot_f_point_rule": (
+                "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/"
+                "lbcnfd.f90:722-746"),
+        },
+        "recorded_fold_row_longitudes": n_cols,
+        "per_rank_rank_zero_agreement": rank0_agreement,
+        "unmeasured": {
+            "other_half_of_the_fold_row": (
+                "rank one owns the remaining 90 fold-row longitudes and the "
+                "instrumented writer is rank-zero only, so those destinations "
+                "are UNRECORDED; every recorded destination's SOURCE does lie "
+                "in rank one's half, so the exchange across the rank boundary "
+                "is exercised in one direction only"
+            ) if per_rank_root is None else (
+                "NOTHING: the per-rank record covers all 180 fold-row "
+                "longitudes, so both directions of the exchange are certified"
+            ),
+        },
+    }
+
+
 def _rule12_rows():
     rows = {}
     gyre = build_gyre_zco_card()
@@ -338,7 +597,8 @@ def _rule12_rows():
     return rows
 
 
-def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, object]:
+def validate(deck_root: Path, oracle_root: Path, plant: bool,
+             per_rank_root: Path | None = None) -> dict[str, object]:
     jax.config.update("jax_enable_x64", True)
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -430,6 +690,7 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             ],
         },
         "cross_card_rule12": _rule12_rows(),
+        "north_fold_row": _fold_row_rows(card, paths, per_rank_root),
         "source": {
             "e3f_0vor": "dynvor.F90:918-950",
             "live_e3f_vor": "domqco.F90:233-246; domzgr_substitute.h90:130",
@@ -452,9 +713,14 @@ def main() -> int:
     parser.add_argument("--oracle-root", type=Path, required=True)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--per-rank-root", type=Path,
+        help="round-8 per-rank EEN record; certifies BOTH directions of "
+             "the tripolar fold instead of rank zero's half alone")
     args = parser.parse_args()
     try:
-        result = validate(args.deck_root, args.oracle_root, args.plant)
+        result = validate(args.deck_root, args.oracle_root, args.plant,
+                          args.per_rank_root)
     except (GateError, OSError, ValueError, IndexError, struct.error) as exc:
         print(f"FAIL: {exc}")
         return 1

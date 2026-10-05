@@ -221,7 +221,9 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, diagnostic_cfg,
-        _nemo_ws_test_hooks=hooks)
+        _nemo_ws_test_hooks=hooks,
+        iwm_forcing=card.recipe.iwm_forcing,
+    )
     result = model.step(
         card.recipe.initial_state, card.dt_s, freshwater=freshwater)
 

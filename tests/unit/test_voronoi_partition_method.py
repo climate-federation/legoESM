@@ -454,3 +454,41 @@ def test_reorder_commutes_with_trisk_operators(mesh):
         ("tangential", tangential_velocity(u, mesh), tangential_velocity(u[pe], r), pe),
     ]:
         assert np.array_equal(np.asarray(f_new), np.asarray(f_old)[p]), name
+
+
+@pytest.mark.parametrize("n_dev", [3, 4, 7])
+def test_reorder_block_edge_order_aligns_edge_shards_with_cell_shards(mesh, n_dev):
+    """edge_order="block": every real edge in device d's contiguous edge shard
+    has its smaller cell in d's cell shard, padding edges reference a cell of
+    their own shard, the real edge set is unchanged, and the TRiSK connectivity
+    still round-trips (edge -> cells -> edgesOnCell finds the edge)."""
+    r = reorder_voronoi_for_sharding(mesh, n_dev, method="sfc", edge_order="block")
+    assert r.nCells % n_dev == 0 and r.nEdges % n_dev == 0
+    cp, ep = r.nCells // n_dev, r.nEdges // n_dev
+    coe = np.asarray(r.cellsOnEdge)
+    real = np.asarray(r.dvEdge) > 0
+    shard = np.arange(r.nEdges) // ep
+    assert np.array_equal(coe.min(axis=0) // cp, shard), "edge outside its shard"
+    assert np.all(coe[0, ~real] == coe[1, ~real])
+    assert real.sum() == mesh.nEdges
+    a = np.sort(np.asarray(r.dvEdge)[real]); b = np.sort(np.asarray(mesh.dvEdge))
+    np.testing.assert_array_equal(a, b)
+    eoc, neoc = np.asarray(r.edgesOnCell), np.asarray(r.nEdgesOnCell)
+    for e in np.flatnonzero(real)[:: max(1, real.sum() // 500)]:
+        for c in coe[:, e]:
+            assert e in eoc[: neoc[c], c]
+    eoe = np.asarray(r.edgesOnEdge)
+    assert np.all(real[eoe[eoe >= 0]]), "edgesOnEdge points at a padding edge"
+
+
+def test_reorder_block_edge_order_shrinks_the_halo():
+    """The point of "block": fewer local cells per device than "owner" (on a
+    mesh large enough that the halo does not already cover every rank)."""
+    from legoesm.parallel.sharded_dynamics import build_voronoi_partition_infra
+    big = create_voronoi_mesh(subdivision_level=4, lloyd_iterations=0)
+    n_dev = 16
+    lc = {}
+    for order in ("owner", "block"):
+        r = reorder_voronoi_for_sharding(big, n_dev, method="sfc", edge_order=order)
+        lc[order] = build_voronoi_partition_infra(r, n_dev, halo_depth=2)[5]
+    assert lc["block"] < lc["owner"], lc

@@ -89,11 +89,6 @@ def preload_rrtmgp_optics(config: RRTMGPConfig) -> None:
     RRTMGP.preload(config)
 
 
-def preload_rrtmgp_optics_mpi(config: RRTMGPConfig) -> None:
-    """MPI-aware preload: rank 0 reads NetCDF files, broadcasts to others."""
-    RRTMGP.preload_mpi(config)
-
-
 def rrtmgp_radiation(
     T: jnp.ndarray,
     p_full: jnp.ndarray,

@@ -1,10 +1,10 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.9
+## legoESM 1.0 Technical Specification
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-25 (updated from v3.8, 2026-03-23)
+**Version**: legoESM 1.0 (2026-10-01); body last revised 2026-03-25 (spec v3.9, updated from v3.8, 2026-03-23)
 
 ---
 
@@ -532,8 +532,6 @@ gradient_y(field, grid)           # d/dy via centered differences
 divergence(u_field, v_field, grid) # div(u,v) with vector halo exchange
 curl_z(u_field, v_field, grid)    # vorticity: dv/dx − du/dy
 laplacian(field, grid)            # 2nd-order ∇²
-advect_upwind(q, u, v, grid)     # 1st-order upwind advection
-advect_centered(q, u, v, grid)   # 2nd-order centered advection
 hyperdiffusion(field, grid, coeff) # 4th-order ∇⁴ damping (two Laplacians)
 global_integral(field, grid)      # Area-weighted integral (MPI-aware via allreduce)
 global_mean(field, grid)          # Area-weighted mean
@@ -1874,9 +1872,9 @@ ml_dtype = jnp.bfloat16
 conservation_dtype = jnp.float64
 ```
 
-### 6.4 Apple Silicon Support (`parallel/metal.py`, `core/hardware.py`)
+### 6.4 Apple Silicon Support (`parallel/metal.py`, `runtime/backend.py`)
 
-**Backend detection**: `detect_devices()` returns backend, n_devices, supports_f64, distributed status.
+**Backend detection**: `legoesm.runtime.detect_hardware()` returns a `HardwareConfig` (backend, device count, float64 support, hosts).
 Backend priority: METAL → GPU → TPU → CPU.
 
 **Metal limitations**:
@@ -2007,7 +2005,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm"
-version = "0.1.0"
+version = "1.0.0"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
@@ -2369,8 +2367,7 @@ legoESM/
 │   │   ├── operators_voronoi.py            # MPAS/Voronoi mesh operators
 │   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
-│   │   ├── smooth.py                       # Smooth approximations
-│   │   └── hardware.py                     # Device detection, backend info
+│   │   └── smooth.py                       # Smooth approximations
 │   │
 │   ├── grids/                              # Grid implementations
 │   │   ├── cubed_sphere.py                 # CubedSphereGrid (6-face gnomonic)

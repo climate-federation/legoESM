@@ -207,6 +207,11 @@ def probe_latlon_cgrid(
         eos_linear=getattr(config, "eos_linear", None),
         eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+        # NEMO's simplified-EOS coefficients are a per-run &nameos block, not a
+        # library constant: a card whose block differs from the shared defaults
+        # (VORTEX) would otherwise be probed against a different fluid from the
+        # one it integrates.  None keeps every existing probe bit-identical.
+        eos_nemo_seos=getattr(config, "eos_nemo_seos", None),
         **_eos_mk_kw,
     )
     # The recipe's gravity, read the same way the two GM/Redi calls below it
@@ -337,7 +342,7 @@ def probe_latlon_cgrid(
                 "NEMO's leapfrog rDt and is not a safe rn_Dt substitute"
             )
         # Production resolves this identically at
-        # ocean_model_latlon_cgrid.py:10018-10022: literal NEMO TKE consumes
+        # ocean_model_latlon_cgrid.py:10101-10105: literal NEMO TKE consumes
         # its dedicated base rn_Dt; all other closures consume momentum dt.
         _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call

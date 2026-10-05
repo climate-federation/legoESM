@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 6131)
+Table of contents (sections, in order; flag reference table at line 6822)
 -----------------------------------------------------------------------------
-  1. [line  328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  411] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  345] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  466] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  641] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  768] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  972] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1099] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1026] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1153] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1200] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1327] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1635] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1763] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1775] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1903] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  1944] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2084] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2130] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2211] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2270] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2351] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2533] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2673] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  2777] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3034] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3602] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3920] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  3663] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  3981] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4321] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4651] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4601] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4931] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  4975] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5305] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  5497] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  5960] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -126,12 +126,15 @@ from jax import lax
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
+    half_to_full,
     virtual_temperature,
 )
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -660,47 +663,6 @@ class CLUBBConfig(NamedTuple):
         isolating CLUBB's PDF-cloud advantage from its higher-order closure. Static
         dispatch: validated at ``diagnose_cloud_and_buoyancy`` entry (raises on
         unknown), never a traced branch.
-    liquid_partition : bool
-        Whether the host exchanges CLOUD LIQUID with the closure, as CAM does.
-        ``False`` (default) reproduces the historical bridge: the advanced total
-        water ``rtm`` is handed back WHOLLY as vapour and ``thlm`` wholly as
-        temperature, so the closure's own ``rcm`` — the liquid its PDF diagnoses
-        — never reaches the host. The host then takes its cloud FRACTION from
-        this closure and its cloud WATER from a tracer the closure never wrote,
-        and the two disagree; since in-cloud water is grid-mean water over
-        fraction, that inflates in-cloud optical depth and the sub-grid
-        inhomogeneity correction then removes most of it.
-
-        ``True`` ports ``clubb_intr.F90``'s two-sided exchange:
-
-        * IN (``clubb_intr.F90:1546,1550``) — ``rt = q_v + q_c`` and
-          ``thl = (T − (L_v/c_pd)·q_c)/Π``, so the host's existing cloud liquid
-          is part of the conserved variable the closure advances and can
-          EVAPORATE back;
-        * OUT (``clubb_intr.F90:2159,2160``) — ``q_v = rt − rcm``,
-          ``T = Π·thl + (L_v/c_pd)·rcm`` and the host cloud liquid is REPLACED
-          by ``rcm`` (``ptend q(ixcldliq) = (rcm − q_cldliq)/dt``), not added to.
-
-        Replace-semantics REQUIRE the input seeding: without it the closure never
-        sees the liquid already present, so a repeated one-way condensation
-        ratchet replaces a reversible partition. The two halves ship together and
-        are not separately selectable.
-
-        Note the ``thl`` convention here is this port's own (``tl = thl·Π``,
-        i.e. ``T = Π·thl + (L_v/c_pd)·rcm``; see
-        :func:`calc_pdf_liquid_cloud_frac_components`, which forms ``tl_i =
-        thl_i·exner``), NOT CAM's ``T = Π·(thl + (L_v/c_pd)·rcm)``. The inverse
-        used here is the one this closure's own saturation calculation assumes,
-        so the round trip is exact; adopting CAM's would be inconsistent with
-        every ``rsatl`` in the PDF.
-
-        Total water is conserved either way — the historical path simply keeps
-        all of it in the vapour slot. Turning this on therefore MOVES water
-        between two host tracers and changes the cloud radiative state; it is a
-        prognostic change, not a diagnostic one. A static Python feature gate, so
-        runs that leave it off are byte-identical. The consuming lane must accept
-        ``TurbulenceOutput.dq_c_dt``; lanes that cannot are refused at
-        integration entry rather than silently dropping the liquid.
     trop_cloud_top_press : float
         Pressure [Pa] above which the scheme's mixing is tapered to zero —
         CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
@@ -737,7 +699,6 @@ class CLUBBConfig(NamedTuple):
     prognostic: bool = False
     cloud_buoyancy: bool = True
     cloud_source: str = "native"
-    liquid_partition: bool = False
     trop_cloud_top_press: float = 0.0
     trop_cloud_taper_lnp_width: float = 0.15
     # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
@@ -6164,11 +6125,7 @@ def clubb_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    def _half_to_full(field_half):
-        mid = 0.5 * (field_half[:, :-1] + field_half[:, 1:])
-        return jnp.concatenate([field_half[:, :1], mid, field_half[:, -1:]], axis=1)
-
-    S2 = _half_to_full(S2_half)
+    S2 = half_to_full(S2_half)
 
     # ---- wp2 budget (production - dissipation + diffusion); tau = Lscale/sqrt(wp2) ----
     # Production carries the troposphere-top taper (Km_full already does, and
@@ -6197,8 +6154,9 @@ def clubb_turbulence(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     sflx_u, sflx_v = tau_x, tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)   # [kg/m^2/s]
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # ---- Implicit vertical diffusion of the mean state ----
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
@@ -6219,7 +6177,7 @@ def clubb_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
         # Expose the CLUBB ADG1-PDF liquid cloud fraction so radiation can use
@@ -6326,10 +6284,10 @@ def clubb_step(
     the stress-squared magnitude, so prescribed-``u_*`` LES forcing reads the
     same. See test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector.
 
-    ``q_c`` is the host's CLOUD LIQUID [kg/kg], top-down, and is consumed only
-    when ``config.liquid_partition`` is set; see that field. Passing it with the
-    lever off is an error rather than a silent no-op, because the caller would
-    then believe the liquid was exchanged.
+    ``q_c`` is the host's CLOUD LIQUID [kg/kg], top-down.  Supplying it switches
+    on CAM's two-sided liquid exchange (``TurbulenceConfig.liquid_partition``
+    selects it at the factory, which then passes q_c); without it the closure
+    runs the historical vapour-only bridge.
 
     Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
     four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
@@ -6340,20 +6298,10 @@ def clubb_step(
     ncol, nlev = T.shape
     params = config.params
 
-    if config.liquid_partition:
-        if q_c is None:
-            raise ValueError(
-                "clubb_step: liquid_partition=True requires the host cloud "
-                "liquid q_c. Without it the closure cannot seed rt = q_v + q_c, "
-                "and replacing the host liquid with a closure that never saw it "
-                "is a one-way condensation ratchet (clubb_intr.F90:1546,2160)."
-            )
-    elif q_c is not None:
-        raise ValueError(
-            "clubb_step: q_c was supplied but liquid_partition=False, so the "
-            "cloud liquid would be silently ignored. Enable the partition or "
-            "stop passing q_c."
-        )
+    # The liquid exchange is keyed on the host supplying its cloud liquid: the
+    # factory passes q_c iff TurbulenceConfig.liquid_partition (a static Python
+    # switch, so the off path traces no liquid arithmetic at all).
+    liquid_partition = q_c is not None
 
     # ---- Thermodynamics (top-down) ----
     exner = exner_function(p_full)
@@ -6361,7 +6309,7 @@ def clubb_step(
     # variables the closure advances are TOTAL water and LIQUID-water potential
     # temperature, so the host's existing cloud liquid enters both. With the
     # lever off, q_c is absent and these reduce to the historical q_v / theta.
-    if config.liquid_partition:
+    if liquid_partition:
         q_t = q_v + q_c
         T_l = T - (constants.L_v / constants.c_pd) * q_c
         thv = virtual_potential_temperature_with_liquid(T, q_v, q_c, exner)
@@ -6422,8 +6370,10 @@ def clubb_step(
         tau_x, tau_y, shflx_b, lhflx_b, ustar_b = surface_fluxes_at_lowest_level(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
-        wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
-        wprtp_b = lhflx_b / (rho_sfc * constants.L_v)                # w'rt'  [kg/kg m/s]
+        wprtp_b = surface_moisture_flux(config.surface, lhflx_b, T_sfc) / rho_sfc   # w'rt'  [kg/kg m/s]
+        # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+        wpthlp_b = ((shflx_b + latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc))
+                    / (rho_sfc * constants.c_pd * exner_sfc))  # w'thl' [K m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
         # momentum transported downward / drag), NOT -tau_x/rho.
@@ -6492,12 +6442,26 @@ def clubb_step(
     v_new = flip_vertical(new_state.vm)
     du_dt = (u_new - u) / dt
     dv_dt = (v_new - v) / dt
-    if config.liquid_partition:
+    if liquid_partition:
         # CAM's outbound split (clubb_intr.F90:2159,2160): the post-advance PDF
         # closure's rcm IS the new cloud liquid, so vapour is the remainder of
         # total water and the temperature carries that liquid's latent heat.
         # rcm is clip_rcm'd against rtm inside the closure, so q_v stays >= 0.
         rcm_new = flip_vertical(diags["rcm_grid"])
+        if config.trop_cloud_top_press > 0.0:
+            # CAM never runs CLUBB above top_lev, so the host liquid there is
+            # left alone: blend back to q_c with the same log-pressure taper as
+            # the cloud fraction. Total water still closes (q_v takes the rest).
+            _w_top = jax.nn.sigmoid(
+                (jnp.log(jnp.clip(p_full, 1.0, None))
+                 - jnp.log(config.trop_cloud_top_press))
+                / config.trop_cloud_taper_lnp_width)
+            # Bounded by the updated total water: the untapered moment mixing
+            # can dry a layer below the retained host liquid, and q_v = rtm -
+            # rcm must stay >= 0 (the PDF branch is already clip_rcm'd).
+            rcm_new = jnp.minimum(
+                _w_top * rcm_new + (1.0 - _w_top) * q_c,
+                jnp.maximum(flip_vertical(new_state.rtm), 0.0))
         q_new = flip_vertical(new_state.rtm) - rcm_new
         T_new = (flip_vertical(new_state.thlm) * exner
                  + (constants.L_v / constants.c_pd) * rcm_new)
@@ -6639,24 +6603,19 @@ def clubb_turbulence_prognostic(
             return sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp
         tau_x_sf, tau_y_sf, shflx_sf, lhflx_sf, _ = surface_flux
         rho_s = rho_local[:, -1]
+        _E_sf = surface_moisture_flux(config.surface, lhflx_sf, T_sfc)
         return (
-            shflx_sf / (rho_s * constants.c_pd * exner_sfc),   # w'thl' [K m/s]
-            lhflx_sf / (rho_s * constants.L_v),                # w'rt'  [kg/kg m/s]
+            # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+            (shflx_sf + latent_enthalpy_correction(lhflx_sf, _E_sf))
+            / (rho_s * constants.c_pd * exner_sfc),           # w'thl' [K m/s]
+            _E_sf / rho_s,                                     # w'rt'  [kg/kg m/s]
             tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
         )
 
-    # Only forwarded when the partition is on; clubb_step rejects the mismatched
-    # pairing either way, so a lane that forgets q_c fails loudly at trace time.
-    # The off-with-q_c case has to be caught HERE as well, or this wrapper would
-    # drop the argument before clubb_step ever saw it and quietly break the
-    # promise that supplying liquid without the lever is an error (codex).
-    if q_c is not None and not config.liquid_partition:
-        raise ValueError(
-            "clubb_turbulence_prognostic: q_c was supplied but "
-            "liquid_partition=False, so the cloud liquid would be silently "
-            "ignored. Enable the partition or stop passing q_c.")
-    _liq_kw = {"q_c": q_c} if config.liquid_partition else {}
+    # The liquid exchange is on iff the factory supplied the host's q_c
+    # (TurbulenceConfig.liquid_partition); forwarded only then.
+    _liq_kw = {"q_c": q_c} if q_c is not None else {}
 
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
@@ -6675,7 +6634,7 @@ def clubb_turbulence_prognostic(
         # each sub-step REPLACES it, and the next must seed rt from the replaced
         # value, not from the host's original. Carrying a zero placeholder with
         # the lever off keeps one scan body for both paths without changing it.
-        _liq_on = config.liquid_partition
+        _liq_on = q_c is not None
         qc_init = q_c if _liq_on else jnp.zeros_like(q_v)
 
         def _sub(carry, _):
@@ -6745,7 +6704,12 @@ def clubb_turbulence_prognostic(
             / config.trop_cloud_taper_lnp_width)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
-        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
+        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx,
+        # The water beside the heat (T_sfc is fixed over the sub-cycle, so
+        # the mean flux inverts exactly); a consumer must never rebuild it
+        # as lhflx / L_v.
+        evap_sfc=surface_moisture_flux(config.surface, lhflx, T_sfc),
+        ustar=ustar,
         h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt)
     return output, pack_clubb_moments(new_moments)
 

@@ -336,6 +336,22 @@ def _mpas_physics(incloud, turb="clubb", n=2):
                         cld_macmic_num_steps=n), cfg
 
 
+def _mpas_physics_hydrostatic():
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.radiation import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    return make_physics(PhysicsConfig(
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=CloudConfig(scheme="cam6_clubb")),
+        turbulence=TurbulenceConfig(scheme="clubb"),
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=_cfg(warm_rain_scheme="kk2000_cam6",
+                                             warm_rain_incloud=True))),
+        model_type="hydrostatic", dt=600.0, cld_macmic_num_steps=2)
+
+
 def test_lane_guard_needs_clubb_and_the_subcycle():
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         _mpas_physics(True, turb="tke", n=2)
@@ -352,6 +368,14 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
                                 fromlist=["CloudConfig"]).CloudConfig(scheme="sundqvist")):
         with pytest.raises(ValueError, match="cam6_clubb"):
             make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc)
+    # the MPAS-only lane requirement fails at BUILD time, before any step
+    cc6 = __import__("legoesm.atmosphere.physics.clouds.config",
+                     fromlist=["CloudConfig"]).CloudConfig(scheme="cam6_clubb")
+    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6))
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6)
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        _mpas_physics_hydrostatic()
 
 
 def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypatch):

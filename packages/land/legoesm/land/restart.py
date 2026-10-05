@@ -66,12 +66,30 @@ _MULTILAYER_FIELDS = (
 # holds real mass, so it must round-trip or the warm start leaks it.  Serialised
 # like ``TgC``: written only when not None, grafted on merge only when both the
 # restart and the template carry it.
+# The layered pack's four fields: all present or none (_require_whole_snow_layer_set).
+_SNOW_LAYER_FIELDS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers",
+                      "snow_rho_layers")
 _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     "surface_water", "snow_bands", "snow_age_bands", "ice_bands",
     # Intercepted canopy-water store (present iff interception is enabled); real
     # mass, so it must round-trip or the warm start leaks it.
     "W_canopy",
+    # Layered snowpack (present iff snow_scheme == "layered"): the pack's water,
+    # enthalpy and density, which snow_depth alone cannot rebuild.
+    *_SNOW_LAYER_FIELDS,
 )
+
+
+def _require_whole_snow_layer_set(present, where):
+    """The layered pack is four fields or none: a partial set would be completed
+    from the template (cold-start ice, T, density) and the next step would rebuild
+    SWE from that mixed pack, silently losing or inventing water."""
+    got = [f for f in _SNOW_LAYER_FIELDS if f in present]
+    if got and len(got) != len(_SNOW_LAYER_FIELDS):
+        missing = [f for f in _SNOW_LAYER_FIELDS if f not in present]
+        raise ValueError(
+            f"{where}: carries snow-layer fields {got} but is missing {missing}; "
+            "refusing a partial layered snowpack (it would silently lose water).")
 
 
 def _is_default_soil_column(dz) -> bool:
@@ -438,6 +456,7 @@ def load_land_restart(
         for field in _MULTILAYER_OPTIONAL_ARRAY_FIELDS
         if field in data.files
     }
+    _require_whole_snow_layer_set(optional, str(path))
     state = MultiLayerLandState(
         T_soil=T,
         psi_soil=jnp.asarray(data["psi_soil"]),
@@ -511,6 +530,9 @@ def merge_land_restart_into_template(loaded, template):
                 f"land restart field '{name}' has shape {tuple(arr.shape)}, "
                 f"expected {tuple(ref.shape)} (resolution / soil-layer skew)")
         fields[name] = arr
+    _require_whole_snow_layer_set(
+        [f for f in _SNOW_LAYER_FIELDS if getattr(loaded, f, None) is not None],
+        "land restart state")
     if getattr(loaded, "TgC", None) is not None:
         fields["TgC"] = loaded.TgC
     for name in _MULTILAYER_OPTIONAL_ARRAY_FIELDS:

@@ -98,11 +98,23 @@ class TestValidation:
         with pytest.raises(ValueError, match="poly_sweeps"):
             barotropic_implicit_mpas(None, None, None, cfg, 1.0)
 
+    def test_default_gpoly_refused_on_the_mpi_voronoi_lane(self, monkeypatch):
+        """The MPI-per-rank lane has no deep halo: the default "gpoly" is a
+        loud refusal there (decks name their solver), never a fallback."""
+        import legoesm.parallel.voronoi_mpi as vm
+        monkeypatch.setattr(vm, "get_matching_voronoi_layout",
+                            lambda mesh: object())
+        with pytest.raises(ValueError, match="select 'poly' there"):
+            barotropic_implicit_mpas(
+                None, None, None,
+                MPASOceanConfig(barotropic_implicit_pcg_precond="gpoly"), 1.0)
+
     def test_defaults(self):
         cfg = MPASOceanConfig()
-        assert cfg.barotropic_implicit_pcg_precond == "poly"
+        assert cfg.barotropic_implicit_pcg_precond == "gpoly"
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_fixed_iters == 20
+        assert cfg.barotropic_implicit_pcg_variant == "standard"
 
 
 class TestPolynomial:
@@ -207,6 +219,9 @@ def _ocean():
 
 def _solve(ocean, **cfg_kw):
     mesh, z_coord, state, F_eta = ocean
+    # Jacobi vs poly on the SAME recurrence (explicit; the opt-in deep-halo
+    # variant refuses poly).
+    cfg_kw.setdefault("barotropic_implicit_pcg_variant", "single_reduce")
     # No floor clamp: its global reduction needs an MPI stack even on one
     # process, and the clamp is a no-op on this rest-state problem anyway.
     cfg = MPASOceanConfig(barotropic_solver="implicit_cn",

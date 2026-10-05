@@ -189,6 +189,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Latent heat a surface scheme charged (thermo.charged_latent_heat):
+        # an unknown scheme must raise, never fall back to one family.
+        ("packages/core/legoesm/thermo.py", "charged_latent_heat"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the shared stable-branch dispatch twins (grow-only
         # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
@@ -212,7 +215,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
         ("packages/core/legoesm/grids/factory.py", "create_regional_grid"),
         ("packages/core/legoesm/grids/halo.py", "set_halo_backend"),
-        ("packages/core/legoesm/parallel/device_config.py", "get_optimal_mesh"),
+        # parallel/device_config.py::get_optimal_mesh removed 2026-10 (ponytail
+        # #12): deleted with the function; it had zero non-test callers.
         ("packages/core/legoesm/parallel/halo_exchange_voronoi.py", "exchange_local_simulated"),
         ("packages/core/legoesm/parallel/runtime.py", "halo_exchange"),
         ("packages/core/legoesm/parallel/voronoi_mpi.py", "gather_voronoi_field"),
@@ -243,7 +247,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # the code.
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
-        ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # 642481601 moved step_land's body (surface_scheme + runoff_scheme
+        # raises) into step_land_with_diagnostics; step_land now only
+        # delegates to it, so the guards live there.
+        ("packages/land/legoesm/land/slab_land.py", "step_land_with_diagnostics"),
+        # The two-leaf canopy branch carries its own runoff_scheme raise.
+        ("packages/land/legoesm/land/slab_land.py", "_step_land_canopy"),
+        # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
+        ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
         # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
         # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
@@ -342,6 +353,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
         # shortwave_scheme guard of the external (JRA55 bulk) surface forcing
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_external_surface_forcing"),
+        # VORTEX round 5: after_ssh_form dispatch of the FIRST wzv call.  The
+        # RK3 and modified-leapfrog programs leave different things in NEMO's
+        # after-SSH slot when wzv reads it (stprk3.F90:225 against ssh_nxt),
+        # so an unknown form must raise rather than silently run one of them.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "nemo_qco_wzv_operands"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)

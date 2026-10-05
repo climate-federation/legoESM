@@ -112,6 +112,28 @@ def _run(col, rad_dT_dt=None, dt=300.0, coef=None):
     return out, packed, np.asarray(thlp2)
 
 
+def test_prognostic_entry_publishes_the_water_beside_the_heat():
+    """The production prognostic entry pairs lhflx with evap_sfc = the
+    moisture BC the column applied (surface_moisture_flux at the fixed
+    T_sfc), same sign, and NOT lhflx / L_v (L(T_sfc) differs from L_v)."""
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        surface_moisture_flux,
+    )
+    col = _column()
+    # A moist surface (the column helper's q_sfc equals the lowest-level q_v,
+    # which would make the latent flux exactly zero and the pin vacuous).
+    col["q_sfc"] = col["q_sfc"] * 1.5
+    out, _, _ = _run(col)
+    assert out.evap_sfc is not None
+    want = surface_moisture_flux(CLUBBConfig().surface, out.lhflx, col["T_sfc"])
+    np.testing.assert_allclose(np.asarray(out.evap_sfc), np.asarray(want),
+                               rtol=1e-6)
+    assert np.all(np.sign(np.asarray(out.evap_sfc)) == np.sign(np.asarray(out.lhflx)))
+    assert np.all(np.abs(np.asarray(out.lhflx)) > 1.0)   # a real flux, not a 0 == 0 pin
+    ratio = np.asarray(out.evap_sfc) / (np.asarray(out.lhflx) / constants.L_v)
+    assert np.all(np.abs(ratio - 1.0) > 1e-4)
+
+
 def test_radiative_source_raises_thlp2_where_cloudy():
     col = _column()
     out0, pack0, thl0 = _run(col, rad_dT_dt=None)

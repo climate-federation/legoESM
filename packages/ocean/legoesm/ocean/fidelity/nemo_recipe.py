@@ -28,7 +28,9 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.lateral_mixing.config import (
+    BiharmonicConfig,
     GMRediConfig,
+    HarmonicConfig,
     LateralMixingConfig,
     VisbeckConfig,
 )
@@ -65,6 +67,10 @@ class NEMORecipe(NamedTuple):
     z_coord: object
     land_mask: object
     initial_state: object
+    # Static internal-wave power / decay-scale maps for cards whose deck
+    # runs NEMO's wave-driven mixing.  None everywhere else, so every
+    # existing recipe is unchanged.
+    iwm_forcing: object = None
 
 
 @dataclass(frozen=True)
@@ -246,8 +252,14 @@ def _nemo_tke_config() -> TKEConfig:
         # mxl_min.  ORCA2 overrides this pair: its namelist_cfg:396 sets
         # ln_zdfiwm=.TRUE., which forces rmxl_min = 1e-3 (zdftke.F90:841-843).
         nemo_derived_mxl_min=True,
-        # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+        # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+        # :640-642 is the rn_mxl0 floor that follows it.
         nemo_mxl0_surface_tmask=True,
+        # ln_mxl0=.TRUE. here, so zdf_tke_init OVERWRITES the namelist rn_mxl0
+        # with rmxl_min (shipped zdftke.F90:859-862; GYRE ppsrc:828-831) and
+        # the anchor's floor is the mixing-length floor, not rn_mxl0.  This is
+        # the NEMO-literal arm; DECISION 72 keeps the ORCA1 OMIP card off it.
+        nemo_mxl0_rmxl_min_overwrite=True,
         # NEMO stp ordering: eosbn2 runs at step start (bn2(Nnow)), BEFORE
         # tra_adv. Sampling the diffusivity-stage N² on the before-advection
         # T/S stops the single-step fct2 bottom-cell drift from flipping the
@@ -311,7 +323,18 @@ def _nemo_physics_config(cfg: NEMOModelRecipeConfig) -> OceanPhysicsConfig:
             scheme="tke",
             tke=_nemo_tke_config(),
         ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
+        # DECISION 75 (operator note BL addendum): the card STATES the
+        # explicit-CFL cap for both lateral-mixing blocks that carry a field
+        # of that name, so its resolved value is the card's own and not
+        # whatever the library happens to default to.  Both values below are
+        # the ones main resolves to today; both are inert here because this
+        # card selects no lateral mixing at all.  A card's resolved
+        # configuration must not depend on a library default.
+        lateral_mixing=LateralMixingConfig(
+            scheme="none",
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
+        ),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
         # convection: default off on the shared card; build_nemo_gyre_recipe turns
@@ -440,6 +463,16 @@ def nemo_lat_lon_model_config(
         # from that carried pair.  The CONFIG says so, so the choice is not
         # read off whether the state happens to hold the arrays.
         nemo_prognostic_barotropic_state=True,
+        # DECISION 90 (user, 2026-10-04): the slow-forcing depth average has
+        # NO default and every card running NEMO's RK3 momentum program
+        # states it.  These are NEMO recipes, so they state NEMO's own
+        # statement, stp2d.F90:177-186: the REFERENCE face thickness times
+        # the stored reciprocal r1_hu_0, with no sea-surface stretching.
+        # These recipes resolve FULL-STEP z-star meshes, where that form and
+        # the per-level minimum of the two live thicknesses are algebraically
+        # the same -- one per-face scalar cancels -- so the STATEMENT is
+        # NEMO's and the arithmetic is unchanged.
+        barotropic_slow_forcing_depth_evaluation="nemo_literal",
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
         momentum_time_integrator=cfg.momentum_time_integrator,
@@ -1118,6 +1151,16 @@ def build_nemo_gyre_recipe(
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
             barotropic_diffusion_alpha=0.0,
+            # DECISION 90 (user, 2026-10-04): the slow-forcing depth average
+            # has NO default and every card states it.  This is the generic
+            # NEMO-GYRE recipe, so it states NEMO's own statement,
+            # stp2d.F90:177-186 -- the REFERENCE face thickness times the
+            # stored reciprocal r1_hu_0, with no sea-surface stretching.
+            # This recipe resolves a z-star FULL-STEP mesh, where that form
+            # and the per-level minimum of the two live thicknesses are
+            # algebraically the same (one per-face scalar cancels), so the
+            # statement is NEMO's and the arithmetic is unchanged.
+            barotropic_slow_forcing_depth_evaluation="nemo_literal",
             # Required by surface_stress_implicit (init-validated): the
             # implicit stress deposition shifts the depth mean after the
             # barotropic solve; NEMO re-imposes it every stage

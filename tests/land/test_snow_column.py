@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.land._future.snow_column import (
+from legoesm.land.snow_column import (
     SnowColumnConfig,
     SnowColumnState,
     _enthalpy,

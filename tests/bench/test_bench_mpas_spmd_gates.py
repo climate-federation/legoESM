@@ -137,6 +137,10 @@ def test_builder_passes_the_capped_coefficient(monkeypatch):
             < mod.hyperdiff_coeff(4, "icosahedral"))
 
 
+def test_timestep_halves_per_level():
+    mod = _load_bench()
+    assert mod.dt_for(4) == 300.0
+    assert [mod.dt_for(s) for s in (7, 8, 9, 10)] == [37.5, 18.75, 9.375, 4.6875]
 
 
 def test_gather_voronoi_state_spmd_round_trip():

@@ -576,6 +576,14 @@ class DINOConfig:
     # carries a genuine Nbb level) sets it. Default keeps every other recipe
     # BIT-IDENTICAL.
     convection_evd_n2_time_level: str = "solver_state"
+    # How zdfevd COMPOSES with the background and the closure.  NEMO
+    # REPLACES the assembled avt by rn_evd where the trigger fires
+    # (zdfevd.f90:107-110, run at zdfphy.f90:359 AFTER the closure copy at
+    # :348-351) and, with nn_evdm = 1 as DINO's deck sets, the assembled avm
+    # too (:121, :133-135).  legoESM's historical composition ADDS.  A card
+    # whose trigger is NEMO's own (convection_n2_mode="nemo_bn2") must state
+    # this -- unset raises (decision 94); every other recipe keeps "additive".
+    convection_evd_composition: str = ""
     # ----- Phase-2 #1317 Tier C: small faithful items -----
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
@@ -591,7 +599,9 @@ class DINOConfig:
     # rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m (:846).  Only the NEMO
     # DINO cards select it; a generic DINO recipe keeps its configured floor.
     tke_nemo_derived_mxl_min: bool = False
-    # zdftke.F90:640-642 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1).
+    tke_nemo_mxl0_rmxl_min_overwrite: bool = False
+    # zdftke.F90:602 evaluates the ln_mxl0 anchor on taum*tmask(:,:,1);
+    # :640-642 is the rn_mxl0 floor that follows it.
     # Only the NEMO DINO cards select the masked statement.
     tke_nemo_mxl0_surface_tmask: bool = False
     # T18b — DRY-w-point TKE: NEMO closes tke_tke with
@@ -991,6 +1001,10 @@ class DINOConfig:
     # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
     # Literal default keeps every non-DINO-fidelity recipe byte-identical.
     zad_qco_evaluation: str = "generic"
+    # Which NEMO program's after-SSH slot the first wzv call reads; stated
+    # per card, never inferred (decision 75).  Empty on a card that resolves
+    # the nemo_literal ZAD branch is a hard error at step time.
+    nemo_first_wzv_after_ssh: str = ""
     # Coupled post-barotropic WZV call-2 hdiv x Kaa-r3t evaluation.
     wzv_call2_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
@@ -1244,6 +1258,9 @@ DINO_RECIPES: dict[str, dict] = {
         # DINO runs ln_zdfiwm=.FALSE. (namelist_ref:1200), so the anchor floor
         # is the DERIVED 1e-6/(rn_ediff*SQRT(rn_emin)) = 1e-2 m, not 0.04.
         "tke_nemo_derived_mxl_min": True,
+        # ln_mxl0=.TRUE., so zdf_tke_init overwrites rn_mxl0 with rmxl_min
+        # (zdftke.F90:859-862): the anchor floor IS the mixing-length floor.
+        "tke_nemo_mxl0_rmxl_min_overwrite": True,
         "tke_nemo_mxl0_surface_tmask": True,
         "tke_n2_mode": "nemo_bn2",               # zdftke consumes eosbn2's rn2
         "tke_surface_bc": "nemo_dirichlet",      # en(1)=MAX(rn_emin0, rn_ebb·taum/rho0)
@@ -1332,6 +1349,11 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_smooth_transition": False,
         "convection_n2_mode": "nemo_bn2",
         "convection_n2_threshold": -1e-12,
+        # zdfevd.f90:107-110 REPLACES the assembled avt by rn_evd where the
+        # trigger fires (zdfphy.f90:359 runs it AFTER the closure copy at
+        # :348-351), and :121/:133-135 does the same to avm because DINO's
+        # deck sets nn_evdm = 1.  Decision 94; there is no default.
+        "convection_evd_composition": "nemo_replace",
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
         # -- dynzdf composition (#1226; namdrg ref default ln_drgimp=.true.,
@@ -1437,6 +1459,15 @@ DINO_RECIPES: dict[str, dict] = {
         # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
         # thickness alone worsens it, so expose only the coupled selector.
         "zad_qco_evaluation": "nemo_literal",
+        # Which program's after-SSH the FIRST wzv call reads.  Both
+        # nemo_dino_kamm cards state the leapfrog's ssh_nxt continuity
+        # prediction, which is what round 39 MEASURED on this card as the
+        # pair that closes ZAD, and what these cards have always resolved to.
+        # STATED, not inferred (decision 75).  See the VORTEX round-5 receipt
+        # for the open item: the non-MLF card's own NEMO build has not been
+        # re-read for which of the two it runs, so this records the measured
+        # value rather than a re-derivation.
+        "nemo_first_wzv_after_ssh": "leapfrog_continuity",
         "wzv_call2_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
@@ -1562,8 +1593,40 @@ DINO_RECIPES: dict[str, dict] = {
         # test_shelf_column_floor_breaks_inertness_at_production_default``.
         "barotropic_seed_face_depth": "nemo_ssh_avg",
         # dynspg_ts.F90:484-500 seeds the window from the CARRIED uu_b/vv_b
-        # (oce.F90:39,99); this card allocates that prognostic pair.
-        "nemo_prognostic_barotropic_state": True,
+        # (oce.F90:39,99) -- but NOT ON THIS CARD, and the reason is the
+        # stepper DINO compiles.  legoESM's carried pair has ONE slot: the
+        # substep loop commits the window-averaged external solution at the
+        # end of a step and reads it back at the start of the next one.  That
+        # is right under the RK3 stepper, whose end-of-step swap is
+        # "Nrhs = Nbb ; Nbb = Naa ; Naa = Nrhs" (src/OCE/stprk3.F90:213,
+        # compiled ppsrc line 216), so the committed pair IS the next step's
+        # Kbb.  It is WRONG under the modified leap-frog, whose rotation is
+        # "Nrhs = Nbb ; Nbb = Nnn ; Nnn = Naa ; Naa = Nrhs"
+        # (cfgs/DINO/BLD/ppsrc/nemo/stpmlf.f90:577-580), which puts a value
+        # committed at the end of step n at the NOW level on step n+1, not the
+        # BEFORE level.  DINO compiles no key_RK3 (cfgs/DINO/cpp_DINO.fcm
+        # declares only "key_qco key_vco_3d") and therefore runs stp_MLF
+        # (cfgs/DINO/BLD/ppsrc/nemo/nemogcm.f90:185).  DINO also sets
+        # ln_bt_fw = .false. (RUN_TRAJ/ocean.output:1074), so its window seed
+        # takes the CENTRED branch and reads puu_b(:,:,Kbb) -- the BEFORE
+        # level, one rotation older
+        # (cfgs/DINO/BLD/ppsrc/nemo/dynspg_ts.f90:489-491).  A one-slot carry
+        # cannot deliver that level, so selecting the RK3 arrangement here fed
+        # the seed a state one time level too new.  This is a rollback to the
+        # reduction-based seed that produced every certified DINO number, not
+        # the faithful end state: NEMO does carry the pair prognostically, and
+        # doing that on an MLF card needs a SECOND slot rotated with Nbb/Nnn.
+        # That is named follow-up work, not started here.  MEASURED COST on the
+        # certified from-rest month: day-30 wet 3-D temperature rms against
+        # NEMO's RUN_TRAJ kt=960 went 2.040e-03 K -> 6.982e-03 K, a factor
+        # 3.42, and stayed there for three weeks because no landing gate ran
+        # DINO from rest.  This dict is the shared NEMO-DINO base, so the
+        # forward-Euler card inherits the same value; only the MLF card was
+        # measured, because the Euler card has its own step-5 implicit-solve
+        # instability (round 184) and cannot complete the month.  See docs/ocean/fidelity/testcases/
+        # nemo_testcases_l2_gyre_dino_month_regression_receipt.md.  The GYRE
+        # testcase cards DO compile key_RK3 and keep the carried pair.
+        "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
@@ -3404,6 +3467,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
             nemo_derived_mxl_min=cfg.tke_nemo_derived_mxl_min,
+            nemo_mxl0_rmxl_min_overwrite=cfg.tke_nemo_mxl0_rmxl_min_overwrite,
             nemo_mxl0_surface_tmask=cfg.tke_nemo_mxl0_surface_tmask,
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
@@ -3808,6 +3872,8 @@ def dino_lat_lon_model_config(
             EnhancedDiffusionConfig, OceanConvectionConfig,
         )
         from legoesm.ocean.physics.lateral_mixing.config import (
+            BiharmonicConfig,
+            HarmonicConfig,
             LateralMixingConfig,
         )
         from legoesm.ocean.physics.shortwave_penetration import (
@@ -3825,6 +3891,12 @@ def dino_lat_lon_model_config(
             # scheme="none" means this copy remains behaviorally inert.
             lateral_mixing=LateralMixingConfig(
                 scheme="none",
+                # DECISION 75 (operator note BL addendum): stated, not
+                # defaulted.  Both values are the ones main resolves to today and
+                # both are inert on this card; a card's resolved configuration
+                # must not depend on a library default.
+                harmonic=HarmonicConfig(enforce_cfl=False),
+                biharmonic=BiharmonicConfig(enforce_cfl=True),
                 gm_redi=GMRediConfig(
                     slope_face_thickness_evaluation=(
                         cfg.gm_redi_slope_face_thickness_evaluation),
@@ -3866,6 +3938,9 @@ def dino_lat_lon_model_config(
                     # NEMO's rn2/rn2b time levels (stpmlf.F90:186-187) —
                     # both arms on the Nnn geometry.
                     evd_n2_time_level=cfg.convection_evd_n2_time_level,
+                    # zdfevd REPLACES avt/avm where it fires; see the config
+                    # field's note (decision 94).
+                    evd_composition=cfg.convection_evd_composition,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -3896,6 +3971,7 @@ def dino_lat_lon_model_config(
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
         zad_qco_evaluation=cfg.zad_qco_evaluation,
+        nemo_first_wzv_after_ssh=cfg.nemo_first_wzv_after_ssh,
         wzv_call2_evaluation=cfg.wzv_call2_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
@@ -4195,7 +4271,8 @@ def dino_mpas_model_config(
         EnhancedDiffusionConfig, OceanConvectionConfig,
     )
     from legoesm.ocean.physics.lateral_mixing.config import (
-        GMRediConfig, LateralMixingConfig, VisbeckConfig,
+        BiharmonicConfig, GMRediConfig, HarmonicConfig, LateralMixingConfig,
+        VisbeckConfig,
     )
     from legoesm.ocean.physics.shortwave_penetration import (
         ShortwavePenetrationConfig,
@@ -4220,6 +4297,12 @@ def dino_mpas_model_config(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
+            # DECISION 75 (operator note BL addendum): stated, not
+            # defaulted.  Both values are the ones main resolves to today and
+            # both are inert on this card; a card's resolved configuration
+            # must not depend on a library default.
+            harmonic=HarmonicConfig(enforce_cfl=False),
+            biharmonic=BiharmonicConfig(enforce_cfl=True),
             gm_redi=GMRediConfig(
                 # Placeholders; ignored at runtime because Visbeck is enabled.
                 # Anchored to visbeck_kappa_min so the static value is non-
@@ -4245,6 +4328,12 @@ def dino_mpas_model_config(
                 n2_mode=cfg.convection_n2_mode,
                 n2_threshold=cfg.convection_n2_threshold,
                 two_level_trigger=cfg.convection_two_level_trigger,
+                # STATED, not inherited: the MPAS path applies convection as
+                # an added tendency, so NEMO's zdfevd REPLACEMENT cannot be
+                # expressed on it at all (mpas_physics raises on it).  This
+                # mesh card runs legoESM's additive composition and says so,
+                # rather than copying a lat-lon statement it cannot execute.
+                evd_composition="additive",
             ),
         ),
         shortwave_penetration=ShortwavePenetrationConfig(
@@ -4262,20 +4351,6 @@ def dino_mpas_model_config(
     # mixing, no eddy parameterization, no convection).
     model_config = model_config._replace(physics=physics_config)
     return model_config, physics_config
-
-
-# Convenience: surface-layer restoring timescales derived from heat-flux
-# coefficients (eq 8 of paper). Useful for sanity printouts.
-def restoring_timescale_T_days(cfg: DINOConfig) -> float:
-    """τ_T = ρ₀ · c_p · Δz₀ / A_Θ, in days (≈ 11.85 d for default)."""
-    seconds = cfg.rho_0 * cfg.c_p * cfg.dz_min / cfg.A_theta
-    return seconds / 86400.0
-
-
-def restoring_timescale_S_days(cfg: DINOConfig) -> float:
-    """τ_S = ρ₀ · Δz₀ / A_S, in days (≈ 30.8 d for default)."""
-    seconds = cfg.rho_0 * cfg.dz_min / cfg.A_S
-    return seconds / 86400.0
 
 
 # ---------------------------------------------------------------------

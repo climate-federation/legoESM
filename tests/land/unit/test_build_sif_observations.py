@@ -3,7 +3,7 @@
 
 Exercises the PURE reduction/conversion offline on synthetic arrays -- the networked
 Caltech-FTP ``_fetch_caltech_sif740`` wrapper is NOT exercised -- and proves a NetCDF
-write -> read round-trip that ``legoesm.land.carbon.sif_observations.load_gridded_sif``
+write -> read round-trip that ``legoesm.land.carbon.soc_observations.load_gridded_obs``
 (the ``--sif-obs`` contract) actually accepts, plus a synthetic gridded-SIF ->
 per-archetype-target chain through ``per_archetype_observed_sif``.
 """
@@ -238,13 +238,14 @@ def test_reduce_validates_bad_aggregate_and_shape():
 
 
 # ---------------------------------------------------------------------------
-# NetCDF round-trip through load_gridded_sif + per-archetype target
+# NetCDF round-trip through load_gridded_obs + per-archetype target
 # ---------------------------------------------------------------------------
-def test_roundtrip_through_load_gridded_sif(tmp_path):
+def test_roundtrip_through_load_gridded_obs(tmp_path):
     from legoesm.land.carbon.sif_observations import (
-        load_gridded_sif,
+        SIF_VAR_CANDIDATES,
         per_archetype_observed_sif,
     )
+    from legoesm.land.carbon.soc_observations import load_gridded_obs
 
     m = _mod()
     monthly, src_lat, src_lon = _synthetic_source()
@@ -256,7 +257,7 @@ def test_roundtrip_through_load_gridded_sif(tmp_path):
     out = tmp_path / "sif.nc"
     ds.to_netcdf(out)
 
-    sif_cell = load_gridded_sif(str(out), ncell=ncell)
+    sif_cell = load_gridded_obs(str(out), SIF_VAR_CANDIDATES, "sif", ncell=ncell)
     assert sif_cell.shape == (ncell,)
     # matches the in-memory field reshaped row-major (i_lat, i_lon).
     np.testing.assert_allclose(
@@ -264,7 +265,7 @@ def test_roundtrip_through_load_gridded_sif(tmp_path):
 
     # wrong ncell is a hard error (never a silent misalignment).
     try:
-        load_gridded_sif(str(out), ncell=ncell + 1)
+        load_gridded_obs(str(out), SIF_VAR_CANDIDATES, "sif", ncell=ncell + 1)
         raise AssertionError("expected SystemExit on ncell mismatch")
     except SystemExit:
         pass

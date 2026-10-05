@@ -64,9 +64,11 @@ def test_fully_wet_is_the_upper_bound_bt():
 
 
 def _le_pm(fwet):
+    from legoesm.land.canopy.config import CanopyConfig
     from legoesm.land.canopy.energy_balance import canopy_met_variables
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        _ARGS["Ps"], _ARGS["Tc"], _ARGS["q_c"])
+        _ARGS["Ps"], _ARGS["Tc"], _ARGS["q_c"],
+        CanopyConfig().rh_cap_smoothing_width)
     _, LE, _, _, _, _ = leaf_energy_balance_pm(
         _ARGS["An"], _ARGS["ASW"], _ARGS["ALW"], _ARGS["Tf"], _ARGS["Ps"],
         _ARGS["Ca"], _ARGS["Tc"], VPD_c, RH_c, desTc, ddesTc, gamma_c,

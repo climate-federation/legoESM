@@ -58,6 +58,27 @@ class TestEnsembleCRPS:
         crps = ensemble_crps(ens, obs)
         assert crps.shape == ()
 
+    def test_two_member_exact_value(self):
+        """Members {0, 1}, y = 0.5: E|X-y| = 0.5, E|X-X'| = 0.5 (over the 4
+        ordered pairs), so CRPS = 0.5 - 0.5*0.5 = 0.25.  The old code
+        subtracted 0.25*E|X-X'| and returned 0.375."""
+        ens = jnp.asarray([[0.0], [1.0]])
+        obs = jnp.asarray([0.5])
+        np.testing.assert_allclose(float(ensemble_crps(ens, obs)), 0.25,
+                                   rtol=0, atol=1e-12)
+
+    def test_matches_pairwise_definition(self):
+        """Sorted O(n log n) path == brute-force E|X-y| - 0.5 E|X-X'|."""
+        rng = np.random.default_rng(0)
+        ens = rng.standard_normal((7, 3, 5))
+        obs = rng.standard_normal((3, 5))
+        mae = np.mean(np.abs(ens - obs[None]), axis=0)
+        pair = np.mean(np.abs(ens[:, None] - ens[None, :]), axis=(0, 1))
+        expected = np.mean(mae - 0.5 * pair)
+        np.testing.assert_allclose(
+            float(ensemble_crps(jnp.asarray(ens), jnp.asarray(obs))),
+            expected, rtol=1e-6, atol=1e-6)
+
 
 class TestRankHistogram:
     """Rank histogram (Talagrand diagram)."""
@@ -141,6 +162,7 @@ class TestEnsembleDiagnosticCollector:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            evap_accum=jnp.zeros(s2),
             sw_up_toa_accum=jnp.zeros(s2),
             lw_up_toa_accum=jnp.zeros(s2),
             sw_up_toa_clr_accum=jnp.zeros(s2),

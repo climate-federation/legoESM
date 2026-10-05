@@ -83,7 +83,7 @@ centralized drift convention in `legoesm.diagnostics.conservation_drift`
 tolerances in one `CONS_THRESH`:
 
 - `mass_gate` (ocean/sea-ice → volume), `energy_gate` (ocean → heat content),
-  `moisture_gate`, `aam_gate`, `heat_gate`, `salt_gate`
+  `heat_gate`, `salt_gate`
 - `benchmark_error_gate` (analytic L2/Linf), `finite_gate` (NaN/Inf crash check)
 
 Feed them the *scalar timeseries* you compute from

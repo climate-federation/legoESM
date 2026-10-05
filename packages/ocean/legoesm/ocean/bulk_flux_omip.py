@@ -196,15 +196,15 @@ def rho_air_moist(T_air_K, q_air, slp_Pa=None):
 
 
 def latent_heat_vaporization_sst(T_sfc_K):
-    """SST-dependent latent heat of vaporization [J/kg] (NEMO ``L_vap``).
+    """SST-dependent latent heat of vaporization [J/kg] at NEMO-parity float64.
 
-    ``L = (2.501 - 0.00237 (T - T_freeze)) 1e6``; equals ``constants.L_v``
-    at 0 degC by construction.  NEMO-parity float64 pin around the shared
-    :func:`legoesm.thermo.latent_heat_vaporization_sst` (#762 — one
-    formula, two dtype contracts).
+    Float64 pin around the shared Kirchhoff :func:`legoesm.thermo.latent_heat_vaporization`
+    (one formula, two dtype contracts, #762).  NEMO's own ``L_vap`` uses an
+    empirical slope of 2370 J/kg/K against this form's 2372; the ~2.5e-5
+    relative difference at 30 degC is below every parity tolerance here.
     """
-    from legoesm.thermo import latent_heat_vaporization_sst as _l_sst
-    return _l_sst(jnp.asarray(T_sfc_K, dtype=jnp.float64))
+    from legoesm.thermo import latent_heat_vaporization as _l
+    return _l(jnp.asarray(T_sfc_K, dtype=jnp.float64))
 
 
 def moist_air_cp(q_air):

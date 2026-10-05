@@ -35,7 +35,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
     checked_replicated_put, checked_shard_put,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -50,29 +50,6 @@ _MESH_ENTRY_FLAGS = (
     "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
     "has_tree", "tree_schema",
 )
-
-
-def _mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists for the mesh digests.
-
-    The SIZES are carried per axis (not just the axis count) because a mesh
-    reshaped ``(2, 4)`` on one rank and ``(4, 2)`` on another has the same
-    names, the same count, and the same total device count (codex round-4,
-    blocker 5 tail).  Never raises: an unreadable mesh degrades to a marker
-    term that still participates in the comparison.
-    """
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
 
 
 def _agree_mesh_entry(mesh, tree=None, *, where: str) -> None:
@@ -98,7 +75,7 @@ def _agree_mesh_entry(mesh, tree=None, *, where: str) -> None:
     loop), alongside a full-state gather that is orders of magnitude larger —
     and an exact no-op under a single process.
     """
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -779,7 +756,7 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
     cfg = getattr(model, "config", None)
     fold = getattr(grid, "fold", None)
     shape = dict(mesh.shape) if mesh is not None else {}
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     # Every user- or object-supplied value goes through a STRICT, NON-THROWING
     # encoder so building this payload cannot raise before the collective
     # (codex round-3 blocker 3, round-4 blockers 1-2). The mesh-derived sizes
@@ -920,7 +897,7 @@ def _agree_spmd_call(mesh, state, phys_state, *, where: str) -> None:
     and rejected: whether a call misses is itself rank-local, so a
     conditional gate can desynchronise exactly like the bug it guards.
     """
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_CALL_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),

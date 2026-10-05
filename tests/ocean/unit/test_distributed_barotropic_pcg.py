@@ -679,9 +679,9 @@ class TestSingleReducePCG:
         The loop body is traced ONCE by ``fori_loop``, so the counter
         sees call SITES, not runtime executions: standard = init(1) +
         TWO body sites + diagnostic tail(1) = 4; single_reduce =
-        init(1) + ONE body site + tail(1) = 3.  At runtime each body
-        site executes M times — so the body-site count IS the
-        reductions-per-iteration factor this lever halves (2 -> 1)."""
+        init(1) + ONE body site + final-update residual(1) + tail(1) = 4.
+        At runtime the body site executes M-1 times plus the final
+        update once — one reduction per iteration, vs two for standard."""
         import legoesm.ocean.dynamics.barotropic_common as bc
 
         counts = {"n": 0}
@@ -696,7 +696,7 @@ class TestSingleReducePCG:
         rhs = _random_rhs(mask, seed=18)
         x0 = jnp.zeros_like(rhs)
         for variant, expected_sites in (("standard", 4),
-                                        ("single_reduce", 3)):
+                                        ("single_reduce", 4)):
             counts["n"] = 0
             solve_helmholtz_implicit(
                 A_op, rhs, M_inv, x0,
@@ -709,6 +709,45 @@ class TestSingleReducePCG:
                 f"{variant}: {counts['n']} reduction sites, expected "
                 f"{expected_sites}"
             )
+
+    def test_single_reduce_skips_discarded_last_matvec(self):
+        """M iterations apply the operator M+1 times (r0, w0, then one per
+        iteration except the last, whose next direction would be thrown
+        away) and the preconditioner M times; 0 iterations return x0."""
+        import legoesm.ocean.dynamics.barotropic_common as bc
+
+        A_op, M_inv, area, _inv, mask, _grid = _build_helmholtz(seed=21)
+        rhs = _random_rhs(mask, seed=22)
+        x0 = jnp.zeros_like(rhs)
+        calls = {"A": 0, "M": 0}
+
+        def A_count(v):
+            calls["A"] += 1
+            return A_op(v)
+
+        def M_count(v):
+            calls["M"] += 1
+            return M_inv(v)
+
+        with jax.disable_jit():
+            x5, _ = bc._fixed_iteration_pcg_single_reduce(
+                A_count, rhs, M_count, x0, max_iter=5, dot_weight=area * mask)
+        assert calls == {"A": 5 + 1, "M": 5}
+        x0_out, _ = bc._fixed_iteration_pcg_single_reduce(
+            A_op, rhs, M_inv, x0, max_iter=0, dot_weight=area * mask)
+        np.testing.assert_array_equal(np.asarray(x0_out), np.asarray(x0))
+        x5_std, _ = bc._fixed_iteration_pcg(
+            A_op, rhs, M_inv, x0, max_iter=5, dot_weight=area * mask)
+        np.testing.assert_allclose(np.asarray(x5), np.asarray(x5_std),
+                                   rtol=1e-8, atol=1e-12)
+        x1, rr1 = bc._fixed_iteration_pcg_single_reduce(
+            A_op, rhs, M_inv, x0, max_iter=1, dot_weight=area * mask)
+        x1_std, rr1_std = bc._fixed_iteration_pcg(
+            A_op, rhs, M_inv, x0, max_iter=1, dot_weight=area * mask)
+        np.testing.assert_allclose(np.asarray(x1), np.asarray(x1_std),
+                                   rtol=1e-10, atol=1e-14)
+        assert rr1.dtype == rhs.dtype and float(rr1) >= 0.0
+        np.testing.assert_allclose(float(rr1), float(rr1_std), rtol=1e-8)
 
     def test_grad_finite_through_single_reduce(self):
         A_op, M_inv, area, _inv, mask, _grid = _build_helmholtz(seed=19)
@@ -779,16 +818,12 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        # single_reduce since 2026-09-26 (mpas_config.py records the
-        # convergence and timing evidence); the lat-lon default stays standard.
-        assert cfg.barotropic_implicit_pcg_variant == "single_reduce"
-        # 30 since the convergence measurement (scripts/validate/
-        # ocean_fidelity/barotropic_pcg_convergence.py): on the real
-        # captured systems at the production mesh, 30 iterations put
-        # float32 on its own precision floor, which no larger count
-        # improves.  See the MPASOceanConfig field comment for the table.
+        # standard + gpoly x 15 (owner decision 2026-10-02: the recurrence
+        # gpoly x 15 was measured with; deep-halo Jacobi is opt-in).
+        assert cfg.barotropic_implicit_pcg_variant == "standard"
+        # gpoly at 20 since 2026-10-05 (owner decision; A/B in mpas_config).
         assert cfg.barotropic_implicit_pcg_fixed_iters == 20
-        assert cfg.barotropic_implicit_pcg_precond == "poly"
+        assert cfg.barotropic_implicit_pcg_precond == "gpoly"
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10

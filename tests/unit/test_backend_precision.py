@@ -32,7 +32,7 @@ from legoesm.core.operators_fv import (
     fv_gradient_x,
     fv_gradient_y,
 )
-from legoesm.core.hardware import get_backend
+from legoesm.runtime import get_backend
 
 
 # =====================================================================
@@ -77,7 +77,7 @@ def _requires_x64():
 
 def _requires_metal():
     """Skip if not running on the Apple GPU (mps) backend."""
-    if get_backend() != "MPS":
+    if get_backend() != "mps":
         pytest.skip("Apple GPU (mps) backend not available")
 
 
@@ -375,7 +375,7 @@ class TestSpectralFloat32Guard:
 
     def test_check_spectral_backend_no_x64(self):
         """Without X64, spectral backend check should fail or warn."""
-        from legoesm.core.hardware import check_spectral_backend
+        from legoesm.runtime import check_spectral_backend
         if jax.config.jax_enable_x64:
             pytest.skip("X64 is enabled, guard won't trigger")
         with pytest.raises(ValueError, match="float64|x64|X64"):
@@ -396,7 +396,7 @@ class TestMetalBackend:
         assert hasattr(config, 'is_metal')
         assert hasattr(config, 'cpu_device')
         # Off the Apple GPU (mps) backend, is_metal is False.
-        if get_backend() != "MPS":
+        if get_backend() != "mps":
             assert config.is_metal is False
 
     def test_fv_would_work_on_metal(self):

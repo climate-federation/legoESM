@@ -746,18 +746,98 @@ def relative_humidity(
     return e / saturation_vapor_pressure(T)
 
 
-def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
-    """SST-dependent latent heat of vaporization [J/kg].
+def latent_heat_vaporization(
+    T: jax.Array,
+    c_liquid: float = constants.c_pw,
+) -> jax.Array:
+    """Latent heat of vaporization at ``T`` [J/kg], Kirchhoff form.
 
-    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
-    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
-    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
-    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
-    NEMO-parity path wraps this with its float64 pin.
+    ``L_v(T) = L_v - (c_liquid - c_pv) (T - T_freeze)``: equals ``constants.L_v``
+    at 0 degC and falls by ``c_pw - c_pv`` = 2372 J/kg per kelvin (about 3 %
+    lower at 30 degC).  The one latent-heat family of the codebase
+    (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``):
+    the NEMO/AeroBulk empirical slope (2370) was retired in its favour, and every
+    component-interface site still reading the bare constants (surface fluxes,
+    coupler tiles, land/ice/ocean exchange, budget ledgers) is tracked by
+    ``tests/test_no_bare_latent_heat.py`` for migration; the DifferBESS canopy
+    slope (2361) was retired for this formula too.
+    ``c_liquid`` exists for Emanuel's CONVECT port, which carries its own tunable
+    liquid heat capacity.  Dtype-preserving.
     """
-    return constants.L_v - constants.L_v_sst_slope * (
-        T_sfc_K - constants.T_freeze
-    )
+    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
+
+
+def latent_heat_sublimation(T: jax.Array) -> jax.Array:
+    """Latent heat of sublimation at ``T`` [J/kg], Kirchhoff form.
+
+    ``L_s(T) = L_s + (c_pv - c_pi) (T - T_freeze)``; ``c_pv < c_pi`` so it
+    DEcreases with temperature (2.8347e6 at 0 degC, larger in the cold).
+    """
+    return constants.L_s + (constants.c_pv - constants.c_pi) * (T - constants.T_freeze)
+
+
+def latent_heat_fusion(T: jax.Array) -> jax.Array:
+    """Latent heat of fusion at ``T`` [J/kg]: ``L_s(T) - L_v(T)`` identically,
+    i.e. ``L_f + (c_pw - c_pi) (T - T_freeze)``."""
+    return latent_heat_sublimation(T) - latent_heat_vaporization(T)
+
+
+def surface_latent_heat(T_sfc: jax.Array, frozen_fraction: jax.Array | float) -> jax.Array:
+    """Latent heat [J/kg] of the water leaving a surface at ``T_sfc``.
+
+    ``(1 - f) L_v(T) + f L_s(T)`` with ``f`` the frozen (snow / ice) fraction of
+    the evaporating surface -- a fractional weight, not a threshold switch, so
+    the flux is continuous and differentiable across melt-out.  A tile made of
+    several evaporating components (transpiring canopy under a sublimating
+    snowpack, ice categories) sums ``L * E`` per component instead of calling
+    this with an aggregate temperature.  ``frozen_fraction`` is the caller's
+    contract to keep in [0, 1]; it is not clamped here.
+    """
+    f = jnp.asarray(frozen_fraction, dtype=jnp.asarray(T_sfc).dtype)
+    return (1.0 - f) * latent_heat_vaporization(T_sfc) + f * latent_heat_sublimation(T_sfc)
+
+
+# Surface schemes whose ported oracle charges CONSTANT latent heats rather than
+# the Kirchhoff family above: the CESM shr_flux_atmOcn air-sea law
+# (core.bulk_flux.compute_sam_oceflx_fluxes: L_v, or L_s with ``ice``) and the
+# CLM-ML canopy, whose LatVap charges ALL its water (leaf and soil) at
+# clm_varcon hvap (== constants.L_v) when its reference air temperature is above
+# freezing and hsub (== constants.L_s) otherwise (MLWaterVaporMod.LatVap at
+# tref_forcing, MLLeafFluxesMod / MLSoilFluxesMod).
+_ORACLE_CONSTANT_LATENT_SCHEMES = frozenset({"large_yeager_cesm", "clm_ml"})
+# Schemes that charge the Kirchhoff latent heat at the surface temperature: the
+# bulk laws (core.bulk_flux; "nemo_si3_constant" reaches the atmosphere surface
+# layer only through its constant-coefficient law) and the land surface schemes.
+_KIRCHHOFF_LATENT_SCHEMES = frozenset({
+    "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    "simple_seb", "two_leaf",
+})
+
+
+def charged_latent_heat(scheme: str, T: jax.Array, *, ice: bool = False) -> jax.Array:
+    """Latent heat [J/kg] the surface scheme ``scheme`` charged for the water it
+    moved, given the temperature ``T`` the scheme evaluates its latent heat at
+    (the surface temperature for every scheme except CLM-ML, whose ``T`` is its
+    reference AIR temperature and which ignores ``ice``; ``ice``: the
+    sublimation stream).
+
+    Dividing that scheme's latent heat flux by this returns exactly its water
+    flux -- the ONE place every water-from-heat inverse looks up the scheme, so
+    an inverse cannot disagree with the charge (a call that overrides the law's
+    latent heat with an explicit ``L_latent`` must invert with that value
+    instead).  Raises on an unknown scheme.
+    """
+    T = jnp.asarray(T)
+    if scheme == "clm_ml":
+        return jnp.where(T > constants.T_freeze, constants.L_v, constants.L_s).astype(T.dtype)
+    if scheme in _ORACLE_CONSTANT_LATENT_SCHEMES:
+        L = constants.L_s if ice else constants.L_v
+        return jnp.full(jnp.shape(T), L, dtype=T.dtype)
+    if scheme in _KIRCHHOFF_LATENT_SCHEMES:
+        return latent_heat_sublimation(T) if ice else latent_heat_vaporization(T)
+    raise ValueError(
+        f"charged_latent_heat: unknown surface scheme {scheme!r}; expected one of "
+        f"{sorted(_ORACLE_CONSTANT_LATENT_SCHEMES | _KIRCHHOFF_LATENT_SCHEMES)}.")
 
 
 def moist_air_cp(q_air: jax.Array) -> jax.Array:

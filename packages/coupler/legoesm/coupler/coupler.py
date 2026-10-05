@@ -403,10 +403,15 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
-    # Ocean tile freshwater: P − E, where evap is back-derived from
-    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
-    # freshwater INTO ocean.
-    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    # Ocean tile freshwater: P − E, where evap is back-derived from lhflx
+    # with the SAME latent heat the flux used (ocean is liquid, never
+    # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
+    # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
+    # which charges its oracle's constant (thermo.charged_latent_heat).
+    # Positive = freshwater INTO ocean.
+    from legoesm.thermo import charged_latent_heat
+    # kg/m²/s, positive = up (ocean → atm)
+    evap_rate = lhflx / charged_latent_heat(config.bulk_scheme, ocean_sst)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,
@@ -432,8 +437,7 @@ def ocean_tile_response(
         # tau_x/tau_y) — back-reaction is the ice tile's job.
         ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
         ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
-        # Ocean evaporation: lhflx already used L_v, so evap_rate
-        # is the correct mass flux.
+        # Ocean evaporation: evap_rate is the mass flux of lhflx.
         surface_mass_flux=evap_rate,
         # Ocean tile is the salt-budget sink, not a source of salt
         # back to itself — zero flux on this channel.

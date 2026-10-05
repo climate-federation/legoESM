@@ -54,6 +54,7 @@ from legoesm.ocean.eos import (
     make_eos_fn,
     nemo_bn2_live_ladders,
     nemo_r3t_stretch,
+    nemo_roquet_density_anomaly_ratio,
     nemo_teos10_density_anomaly_ratio,
 )
 from legoesm.ocean.vertical import (
@@ -246,6 +247,13 @@ VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
 # weighting restored (nemo_ldf_lap_viscosity_e3_cgrid). Only valid when
 # lateral_viscosity_operator="nemo_div_curl" (validated at construction).
 VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
+# WHERE the "nemo_div_curl" coefficient comes from, mirroring NEMO's
+# namdyn_ldf nn_ahm_ijk_t: "nemo_ldf_c2d" (default, bit-identical) is the
+# nn_ahm_ijk_t=20 metric formula; "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30,
+# the whole 3-D field READ from eddy_viscosity_3D.nc and carried on the
+# vertical coordinate by the card (ldfdyn.f90:348-353).
+VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
+    {"nemo_ldf_c2d", "nemo_ahm_3d_file"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -1283,8 +1291,9 @@ def _bc_geometry_and_density(
     Pure substage extracted verbatim from
     ``latlon_cgrid_ocean_baroclinic_tendencies`` (Q8 decomposition; same
     operators + order -> bit-identical). Returns ``(J, h_k, rho_prime,
-    p_prime_filled)``; the in-situ ``rho`` and unfilled ``p_prime`` are not
-    consumed downstream.
+    p_prime_filled, nemo_hpg_rhd)``; the last value is the source-associated
+    EOS80 ratio for NEMO's literal HPG consumer and ``None`` otherwise.  The
+    in-situ ``rho`` and unfilled ``p_prime`` are not consumed downstream.
     """
     # --- 1. Layer thickness and Jacobian ---
     J = compute_ocean_jacobian(
@@ -1334,6 +1343,7 @@ def _bc_geometry_and_density(
     # exact gdept).  Default "insitu" -> no rho0 kwarg -> byte-identical.
     _eos_mk_kw = {"rho0": rho_0} if _eos_depth == "geometric" else {}
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None),
+                         eos_nemo_seos=getattr(config, 'eos_nemo_seos', None),
                          **_eos_mk_kw)
     _pgf_quadrature = getattr(config, "pgf_quadrature", "cell_integral")
     _eos_geometric_depth = (
@@ -1347,7 +1357,9 @@ def _bc_geometry_and_density(
         if isinstance(z_coord, OceanPartialCellCoordinate)
         else jnp.broadcast_to(jnp.asarray(mask, dtype=T.dtype)[..., None], T.shape)
     )
-    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+    _carry_nemo_hpg_rhd = (
+        config.eos == "nemo_eos80" and _eos_depth == "geometric")
+    _density_result = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: neumann_fill_cgrid(field, mask, grid=grid),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
@@ -1385,20 +1397,31 @@ def _bc_geometry_and_density(
         # the pre-existing behaviour for every non-NEMO-bridged recipe).
         eos_geometric_depth_1d=_eos_geometric_depth,
         density_anomaly_ratio_fn=(
-            (lambda t, s, p, **_kw: nemo_teos10_density_anomaly_ratio(
+            (lambda t, s, p, **_kw: (
+                nemo_teos10_density_anomaly_ratio
+                if config.eos == "nemo_teos10"
+                else nemo_roquet_density_anomaly_ratio
+            )(
                 t, s, p, rho0=rho_0,
                 geometric_depth_m=_eos_geometric_depth, tmask=_nemo_tmask3))
-            if (config.eos == "nemo_teos10" and _eos_depth == "geometric")
+            if (config.eos in ("nemo_eos80", "nemo_teos10")
+                and _eos_depth == "geometric")
             else None
         ),
+        return_density_anomaly_ratio=_carry_nemo_hpg_rhd,
     )
+    if _carry_nemo_hpg_rhd:
+        rho, rho_prime, p_prime, nemo_hpg_rhd = _density_result
+    else:
+        rho, rho_prime, p_prime = _density_result
+        nemo_hpg_rhd = None
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
-    return J, h_k, rho_prime, p_prime_filled
+    return J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd
 
 
 def compute_frozen_geom_density(state, grid, z_coord, config):
-    """``(J, h_k, rho_prime, p_prime_filled)`` from a state's eta/T/S.
+    """``(J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd)`` from eta/T/S.
 
     The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
     tendencies` stages 1-3 verbatim) + :func:`_bc_geometry_and_density`.  These
@@ -1606,11 +1629,46 @@ def nemo_qco_wzv_recurrence(
     return jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
 
 
+# The after-SSH forms NEMO's first ``wzv`` call can be handed.  One tuple, read
+# by the model's own raise, by the carried-slot predicate below and by every
+# card test and measurement arm -- a census computed from a re-derived
+# condition instead of this one is how a gate came to disagree with the code it
+# gated (operator note AR finding 2).
+NEMO_FIRST_WZV_AFTER_SSH_FORMS = (
+    "rk3_extrapolated",
+    "rk3_extrapolated_carried",
+    "leapfrog_continuity",
+)
+
+
+def nemo_rk3_after_ssh_is_carried(config) -> bool:
+    """Does this card CARRY NEMO's ``ssha`` after-SSH slot across steps?
+
+    True only for a card that both reaches NEMO's own first ``wzv`` call and
+    states the carried RK3 form.  The step writes the slot exactly when this
+    is true and the ``wzv`` call reads it exactly when this is true, so the
+    two can never disagree.
+    """
+    return (getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal"
+            and getattr(config, "nemo_first_wzv_after_ssh", "")
+            == "rk3_extrapolated_carried")
+
+
+def _carried_rk3_after_ssh(state):
+    """The carried ``ssha`` array, or ``None`` when the step has no previous
+    one (NEMO's ``rst_read_ssh`` fallback, restart.F90:370)."""
+    slot = getattr(state, "eta_rk3_after", None)
+    if slot is None:
+        return None
+    return getattr(slot, "data", slot)
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
+    after_ssh_form="", eta_after_carried=None,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1714,10 +1772,63 @@ def nemo_qco_wzv_operands(
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
     if eta_after_override is None:
-        eta_after = jax.lax.optimization_barrier(
-            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
-        eta_after = jax.lax.optimization_barrier(
-            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
+        if after_ssh_form == "rk3_extrapolated":
+            # NEMO's RK3 program does NOT predict the "after" SSH from
+            # continuity before the first wzv call.  It reuses the LINEAR
+            # EXTRAPOLATION the previous step left in the after slot,
+            # ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)``
+            # (stprk3.F90:217 of NEMO's RAW SOURCE tree, src/OCE -- not the
+            # preprocessed build, whose line numbers the receipts cite;
+            # commented there "linear extrapolation of
+            # ssh to compute ww at the beginning of the next time-step"),
+            # which ``stp_2D`` turns into
+            # ``r3t(:,:,Kaa) = ssh(:,:,Kaa) * r1_ht_0`` (stp2d.F90:149-153,
+            # raw source) immediately before ``CALL wzv`` (stp2d.F90:155, raw
+            # source; the compiled build's own lines are in the receipt).  In
+            # this array
+            # convention that guess is ``2*eta_now - eta_before``; at the
+            # first step the extrapolation has never run, ``eta_before`` is
+            # ``eta_now``, and the scale-factor term is exactly zero -- which
+            # is what NEMO's own recorded ``ww`` shows on the VORTEX
+            # vector-invariant card.
+            # NEMO's extrapolation is arithmetic on two heights and carries
+            # NO freshwater term: stprk3.F90:217 (raw) is the whole one.  The
+            # leapfrog branch below folds emp in because ``ssh_nxt`` does.
+            eta_after = jax.lax.optimization_barrier(
+                2.0 * eta_now - eta_before)
+        elif after_ssh_form == "rk3_extrapolated_carried":
+            # The SAME NEMO statement as above, but reading the slot the
+            # PREVIOUS step actually left rather than falling back to the
+            # step-entry height.  NEMO writes that slot at the end of every
+            # step, after the Nbb<==>Naa rotation:
+            #   ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
+            # (stprk3.F90:225 == 2*end-of-step - step-entry), carries it in
+            # its own restart file as 'ssha' (restart.F90:184), and reads it
+            # back here through r3t(:,:,Kaa) (stp2d.F90:149 -> :153).
+            # ``None`` is NEMO's own no-previous-step case: rst_read_ssh sets
+            # ssh(:,:,Kaa) = ssh(:,:,Kbb) when the archive carries no 'ssha'
+            # (restart.F90:370, "no ssh variation in ww computation"), and a
+            # from-rest run initialises all three slots from the user state.
+            eta_after = jax.lax.optimization_barrier(
+                eta_now if eta_after_carried is None
+                else jnp.asarray(eta_after_carried, dtype=eta_now.dtype))
+        elif after_ssh_form == "leapfrog_continuity":
+            # NEMO's modified-leapfrog program fills the after slot from the
+            # barotropic continuity in ``ssh_nxt`` BEFORE ``wzv_MLF`` reads
+            # ``r3t(:,:,Kaa)`` (sshwzv.F90:205-209), so there the prediction
+            # IS the statement.  DINO's round 39 measured this pair.
+            eta_after = jax.lax.optimization_barrier(
+                eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+            eta_after = jax.lax.optimization_barrier(
+                eta_after + jax.lax.optimization_barrier(dt * fw))
+        else:
+            raise ValueError(
+                "nemo_first_wzv_after_ssh must be one of "
+                f"{list(NEMO_FIRST_WZV_AFTER_SSH_FORMS)} -- it names the "
+                "NEMO time-stepping scheme whose after-SSH slot this call "
+                "reads, and a card that resolves this branch states it "
+                f"rather than having it inferred; got {after_ssh_form!r}")
+        eta_after = eta_after * tmask[..., 0]
     else:
         eta_after = jax.lax.optimization_barrier(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
@@ -1753,6 +1864,7 @@ def _nemo_qco_gdept_z0(t_depth, stretch, eta):
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask, legacy_hpg_algebraic=False,
+    nemo_hpg_rhd=None,
 ):
     """Stages 6 / 6-7 / 6b: kinetic-energy gradient (centered, Hollingsworth,
     or WENO), baroclinic pressure gradient (batched with KE), and the
@@ -2079,7 +2191,8 @@ def _bc_ke_and_pressure_gradients(
                 # in Krhs.  Preserve that association; the former collapsed
                 # pressure-gradient identity magnified roundoff through the
                 # long vertical sum on GYRE's rotating stage-2 state.
-                rhd = rho_m / config.rho_0
+                rhd = (nemo_hpg_rhd if nemo_hpg_rhd is not None
+                       else rho_m / config.rho_0)
                 e3w0 = nemo_e3w0_reference(z_coord)
                 if e3w0 is None:
                     raise ValueError(
@@ -2280,11 +2393,13 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     Parameters
     ----------
     dz_ref : array, shape (nlev,), or None
-        Per-level reference thickness [m] (``z_coord.dz_ref``), used ONLY by
-        the ``"nemo_avg"`` branch at FULLY-DRY vertices (``wet_count == 0``)
-        — see NEMO ``dynvor.F90`` lines quoted below.  ``None`` reproduces
-        the legacy ``BIG_H``-everywhere dry-vertex behaviour (``"min"``
-        branch is dz_ref-independent and always bit-identical).
+        Per-level reference thickness [m] (``z_coord.dz_ref``).  The
+        ``"nemo_avg"`` branch consults it at FULLY-DRY vertices
+        (``wet_count == 0``) — see NEMO ``dynvor.F90`` lines quoted below —
+        and ``None`` there reproduces the legacy ``BIG_H``-everywhere
+        dry-vertex behaviour.  The ``"nemo_avg4"`` branch REQUIRES it (it is
+        the frozen reference sum's own operand) and raises without it.  The
+        ``"min"`` branch is dz_ref-independent and always bit-identical.
 
     Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
     ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
@@ -2397,24 +2512,51 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
+        pivot_row_stored = bool(getattr(fold, "pivot_row_stored", False))
+        h_vtx_north = None
         if een_e3f_scheme == "nemo_avg4":
-            # Hoisted above BOTH fold branches: the lane declares nemo_avg4
-            # undefined on a tripolar fold, and main's pivot-row branch below
-            # is a tripolar fold too, so the guard must precede it rather than
-            # sit inside the nemo_avg body (where a pivot mesh would bypass it).
-            raise NotImplementedError(
-                "nemo_avg4 is not defined for a tripolar fold; its "
-                "certified NEMO GYRE use is a closed beta-plane box")
-        if bool(getattr(fold, "pivot_row_stored", False)):
+            # The GYRE lane refused this scheme on EVERY tripolar fold, because
+            # its fold row was not built there and main had just added a second
+            # fold branch that would have bypassed the refusal.  The ORCA2 lane
+            # has since transcribed that row from NEMO, below, and measured it
+            # against NEMO's own ten-step ORCA2 record, so the refusal is
+            # RETIRED rather than narrowed: ORCA2's mesh classifies as
+            # stored-pivot under the exact classifier main brought with it
+            # (its perm_f is exactly the reversed index this transcription
+            # uses), so a pivot-keyed refusal would fire on the one card the
+            # transcription was written for.  main's pivot-row branch keeps its
+            # precedence for every OTHER scheme, below.
+            #
+            # NEMO gives the fold row NO formula of its own.  ``dyn_vor_init``
+            # evaluates the same masked four-cell average over the owned
+            # domain (dynvor.F90:913-919) and then completes the field with
+            # the ORDINARY F-point north-fold exchange, sign +1
+            # (dynvor.F90:935), before the zero -> reference-thickness
+            # substitution (dynvor.F90:937).  Under a T pivot that exchange
+            # rewrites the LAST OWNED row from the row immediately below it
+            # at the mirrored longitude (lbcnfd.F90:722-746: the row loop
+            # ends at ``ipj - ihls``, its source row at ``ipj - ihls - 1``,
+            # and the longitude loop pairs ``ii1 + ii2 = ipi + 1``).
+            #
+            # That exchange is already written ONCE, for the live vorticity
+            # thickness (``ocean.vertical.nemo_t_fold_f_owned``); reuse it
+            # rather than re-derive the permutation here.  It reads NEMO's
+            # native F layout, whose column ``i`` is this vertex array's
+            # column ``i + 1``, so shift into that layout and back -- both
+            # are exact index moves that touch no arithmetic.
+            from legoesm.ocean.vertical import nemo_t_fold_f_owned
+            h_vtx = jnp.roll(
+                nemo_t_fold_f_owned(jnp.roll(h_vtx, -1, axis=1), grid),
+                1, axis=1,
+            )
+        elif pivot_row_stored:
             # Pivot layout (eORCA025): the top F/vertex row is the MIRROR of
             # the vertex row below (measured: F row J = perm_f(F row J-1)),
             # so the completed row below permuted with the F map IS the top
-            # row — no partner-cell construction from the (half-land) stored
+            # row -- no partner-cell construction from the (half-land) stored
             # pivot T row (codex fold-fix RED 6).
             from legoesm.grids.operators_latlon_cgrid import fold_perm_f
             h_vtx_north = h_vtx[-2:-1][:, fold_perm_f(fold), :]
-            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
-                                     north_mask=nmask)
         elif een_e3f_scheme == "nemo_avg":
             h_k_partner = h_k[-1:, fold.perm_T, :]
             h_sw_partner = h_sw[-1:, fold.perm_T, :]
@@ -2436,9 +2578,9 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
             )
-        if not bool(getattr(fold, "pivot_row_stored", False)):
-            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
-                                     north_mask=nmask)
+        if h_vtx_north is not None:
+            h_vtx = apply_north_fold(
+                h_vtx, h_vtx_north, grid, north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
@@ -2473,10 +2615,11 @@ def _bc_pv_flux(
     """
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
-    if vorticity_scheme not in ("al81", "ene", "ene_total", "een_total"):
+    if vorticity_scheme not in (
+            "al81", "ene", "ene_total", "een_total", "een_planetary"):
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
-            f"'al81', 'ene', 'ene_total', or 'een_total'"
+            f"'al81', 'ene', 'ene_total', 'een_total', or 'een_planetary'"
         )
     # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
     # config value) — see the h_vtx construction below for the two rules.
@@ -2510,7 +2653,19 @@ def _bc_pv_flux(
     # is replaced by WENO-Z reconstruction (Silvestri et al. 2024).
 
     # Vorticity from TOTAL velocity (not perturbation u')
-    if (een_metric_weighting == "nemo"
+    if vorticity_scheme == "een_planetary":
+        # NEMO dyn_vor's FLUX-FORM arm (dynvor.F90:891-893) selects
+        # ntot = np_CME, and vor_een's np_CME branch (dynvor.F90:780-783)
+        # forms zwz from ff_f PLUS a metric term built out of
+        # di_e2v_2e1e2f / dj_e1u_2e1e2f (dynvor.F90:905-908).  Those two
+        # gradients are differences of the grid's own scale factors, so on a
+        # Cartesian mesh whose e1/e2 are a single repeated constant they are
+        # EXACTLY zero and np_CME collapses onto np_COR (dynvor.F90:750-752):
+        # the triad carries the planetary vorticity alone.  The model config
+        # validator refuses this scheme on any grid where that is not true, so
+        # no relative vorticity is dropped silently here.
+        zeta = jnp.zeros_like(curl_vertex_cgrid(u, v, grid))
+    elif (een_metric_weighting == "nemo"
             and vorticity_scheme in ("ene", "ene_total")):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             nemo_vor_ene_vorticity_cgrid,
@@ -2730,7 +2885,7 @@ def _bc_pv_flux(
             from legoesm.grids.latlon import ensure_geometry
             _g = ensure_geometry(grid)
             _mw = (_g.dx_u, _g.dx_v, _g.dy_u, _g.dy_v)
-        if vorticity_scheme in ("al81", "een_total"):
+        if vorticity_scheme in ("al81", "een_total", "een_planetary"):
             # "een_total" = NEMO ln_dynvor_een (dyn_vor EEN, kvor=total): the
             # planetary Coriolis f rides the SAME 12-point Arakawa-Lamb-81 / EEN
             # triad as the relative vorticity, so the RHS carries the ABSOLUTE
@@ -2742,7 +2897,7 @@ def _bc_pv_flux(
             # "al81" (f_vtx=None) stays relative-only (planetary Coriolis handled
             # in the matsuno_split / explicit_ab2 face-f path).
             _f_vtx_al = None
-            if vorticity_scheme == "een_total":
+            if vorticity_scheme in ("een_total", "een_planetary"):
                 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                     nemo_een_ene_vertex_coriolis,
                 )
@@ -3295,6 +3450,24 @@ def _bc_horizontal_viscosity(
             f"e3-weighting of THAT operator's div/curl); got "
             f"lateral_viscosity_operator={_visc_op!r}"
         )
+    # Mirrors NEMO's nn_ahm_ijk_t.  Same defense-in-depth as the two selectors
+    # above: also validated at LatLonCGridOceanModel construction, but this
+    # function is called directly by unit tests and other call sites.
+    _ahm_source = getattr(
+        config, "lateral_viscosity_coefficient_source", "nemo_ldf_c2d")
+    if _ahm_source not in VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE:
+        raise ValueError(
+            "lateral_viscosity_coefficient_source must be one of "
+            f"{sorted(VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE)}, "
+            f"got {_ahm_source!r}"
+        )
+    if _ahm_source != "nemo_ldf_c2d" and _visc_op != "nemo_div_curl":
+        raise ValueError(
+            "lateral_viscosity_coefficient_source != 'nemo_ldf_c2d' requires "
+            "lateral_viscosity_operator='nemo_div_curl' (it selects where THAT "
+            f"operator's ahmt/ahmf come from); got "
+            f"lateral_viscosity_operator={_visc_op!r}"
+        )
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
@@ -3338,20 +3511,64 @@ def _bc_horizontal_viscosity(
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
                 "wired for this operator (DINO uses Laplacian only)."
             )
-        if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+        if _ahm_source == "nemo_ahm_3d_file" and _want_kdiss_flux:
             raise ValueError(
-                "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
-                "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                "supplies a full (lat, lon, lev) coefficient; the flux-form "
+                "K_diss_h diagnostic consumes a LATITUDE profile and would "
+                "silently broadcast it. Not wired."
             )
-        _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
-        _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
-        # 3-D staircase vertex mask (NEMO fmask analogue, rn_shlat=0 free-slip):
-        # a 2-D surface vertex mask broadcast over levels leaves zeta LIVE at
-        # submerged staircase side walls, where it is computed against the dry
-        # cells' zero velocities — an accidental NO-SLIP on every slope/sill
-        # face (ahmf·zeta stress) that NEMO's 3-D fmask zeroes (free-slip).
-        # Build per level from is_active; plain z-star coords (no is_active)
-        # keep the 2-D mask bit-identically.
+        if (_ahm_source == "nemo_ahm_3d_file"
+                and getattr(config, "lateral_side_bc", "free_slip") != "free_slip"):
+            raise ValueError(
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                "cannot be combined with lateral_side_bc='no_slip': the side "
+                "drag reads the SCALAR lateral_viscosity.A_h, which this "
+                "source does not define (NEMO carries its lateral momentum "
+                "boundary condition inside the read coefficient's fmask)."
+            )
+        if _ahm_source == "nemo_ahm_3d_file":
+            # NEMO nn_ahm_ijk_t=-30 (ldfdyn.f90:348-353): no coefficient is
+            # computed.  ahmt/ahmf are READ from eddy_viscosity_3D.nc, lateral-
+            # boundary-exchanged by the read path and then masked, and the card
+            # carries that result here.  rn_Uv is inert in NEMO's own -30 arm
+            # (zah0, ldfdyn.f90:314, is never referenced inside it), so A_h's
+            # MAGNITUDE is unused by this operator and only its positivity,
+            # tested above, still selects the operator.  The no-slip side drag
+            # does read the scalar A_h, which is why that combination is
+            # refused above rather than silently taking a stale number.
+            _ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
+            _ahmf = getattr(z_coord, "nemo_ldf_ahmf", None)
+            if _ahmt is None or _ahmf is None:
+                raise ValueError(
+                    "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
+                    "requires the card to carry NEMO's read coefficient on the "
+                    "vertical coordinate (z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf)."
+                )
+            _ahmt = jnp.asarray(_ahmt)
+            _ahmf = jnp.asarray(_ahmf)
+        else:
+            if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
+                raise ValueError(
+                    "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
+                    "with a scalar dlon (got dlon<=0; tripolar unsupported)."
+                )
+            _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+            _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
+        # 3-D staircase vertex mask: a 2-D surface vertex mask broadcast over
+        # levels leaves zeta LIVE at submerged staircase side walls, where it
+        # is computed against the dry cells' zero velocities — an accidental
+        # NO-SLIP on every slope/sill face (ahmf·zeta stress) that NEMO's 3-D
+        # fmask zeroes.  Build per level from is_active; plain z-star coords
+        # (no is_active) keep the 2-D mask bit-identically.
+        # THIS MASK IS NOT NEMO's fmask.  It is the four-T-cell product, 0 or
+        # 1.  NEMO's fmask carries the lateral momentum boundary condition in
+        # its VALUE (rn_shlat, and a per-strait override: 0, 0.5, 1 or 2), and
+        # ldf_dyn_init multiplies it into ahmf ONCE while dyn_ldf_lev then
+        # reads ahmf as stored.  Under the read-file coefficient source that
+        # boundary condition is therefore already inside ``_ahmf`` and this
+        # second masking is a documented, MEASURED deviation, not a match --
+        # see the round-9 receipt's OPEN item on downstream vertex masking.
         _visc_vmask = vertex_mask
         _act3 = getattr(z_coord, "is_active", None)
         if _act3 is not None:
@@ -3380,7 +3597,9 @@ def _bc_horizontal_viscosity(
                 mask=mask, u_mask=u_mask, v_mask=v_mask,
                 vertex_mask=_visc_vmask,
                 thickness_operands=ldf_thickness_operands,
-                metric_reciprocal_operands=ldf_metric_reciprocal_operands)
+                metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+                coefficient_fmask_already_applied=(
+                    _ahm_source == "nemo_ahm_3d_file"))
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
@@ -3904,6 +4123,7 @@ def nemo_bottom_drag_rate_faces(
         cd_max=float(config.bottom_drag.bottom_drag_cdmax),
         z0=float(config.bottom_drag.bottom_drag_z0),
         ke0=float(config.bottom_drag.bottom_drag_ke0),
+        uc0=float(config.bottom_drag.bottom_drag_uc0),
         von_karman=constants.kappa_von_karman,
     ))
     # t-point -> face 2-point averages (NEMO dynzdf:
@@ -3984,6 +4204,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
                     cd_max=float(config.bottom_drag.bottom_drag_cdmax),
                     z0=float(config.bottom_drag.bottom_drag_z0),
                     ke0=float(config.bottom_drag.bottom_drag_ke0),
+                    uc0=float(config.bottom_drag.bottom_drag_uc0),
                     von_karman=constants.kappa_von_karman,
                 )
                 r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
@@ -4480,33 +4701,40 @@ def _bc_external_surface_forcing(
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
-                from legoesm.ocean.physics.shortwave_penetration import (
-                    apply_shortwave_penetration,
-                    ShortwavePenetrationConfig,
-                )
-                # ``h_k`` is the live (z*/partial-cell) thickness; a dry cell
-                # carries h_k = 0, which is both the wet mask and the safe
-                # denominator guard inside the RGB kernel.
-                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
-                sw_tend = apply_shortwave_penetration(
-                    ShortwavePenetrationConfig(
-                        scheme=("nemo_qsr_rgb" if shortwave_scheme
-                                == "nemo_qsr_rgb" else "rgb_chl"),
-                        nemo_time_step_s=shortwave_time_step_s,
-                    ),
-                    sw_T,
-                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
-                    dz_live=h_k,
-                    wet_cell=wet_cell,
-                    gdepw_bottom_live=(
-                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
-                        * J[..., jnp.newaxis]
-                    ),
-                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=T.dtype),
-                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
-                    rho_0=float(rho_0),
-                )
-                dT_target = dT_target + sw_tend * mask_3d
+                if shortwave_scheme != "nemo_qsr_rgb":
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        apply_shortwave_penetration,
+                        ShortwavePenetrationConfig,
+                    )
+                    # ``h_k`` is the live (z*/partial-cell) thickness; a dry
+                    # cell carries h_k = 0, which is both the wet mask and the
+                    # safe denominator guard inside the RGB kernel.
+                    wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                    sw_tend = apply_shortwave_penetration(
+                        ShortwavePenetrationConfig(
+                            scheme="rgb_chl",
+                            nemo_time_step_s=shortwave_time_step_s,
+                        ),
+                        sw_T,
+                        chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                        dz_live=h_k,
+                        wet_cell=wet_cell,
+                        gdepw_bottom_live=(
+                            -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
+                            * J[..., jnp.newaxis]
+                        ),
+                        gdepw_ref=-jnp.asarray(
+                            z_coord.z_half_ref, dtype=T.dtype),
+                        e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
+                        rho_0=float(rho_0),
+                    )
+                    dT_target = dT_target + sw_tend * mask_3d
+                # On the NEMO RGB selector the shared physics pipeline owns
+                # the one and only qsr deposit, exactly as it owns the
+                # two-band one below: NEMO calls ``tra_qsr`` once per step
+                # (traqsr.f90:213).  Repeating the kernel here would
+                # double-count qsr while the column-integrated heat budget
+                # stayed misleadingly close through the qns subtraction.
             elif _sf_sw is not None:
                 # NEMO qsr_2BD consumes the complete qsr after sbcmod removes
                 # that same complete flux from qns (traqsr.F90:665-712;
@@ -4867,6 +5095,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_operator_association: bool = False,
     return_nemo_operator_components: bool = False,
     nemo_stage_zad_operands=None,
+    nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
@@ -4957,11 +5186,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # same frozen inputs (compute_frozen_geom_density mirrors the eta_safe
     # derivation above).
     if precomputed_geom_density is not None:
-        J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+        if len(precomputed_geom_density) == 5:
+            J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
+                precomputed_geom_density)
+        else:
+            J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+            nemo_hpg_rhd = None
     else:
-        J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-            eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-        )
+        J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
+            _bc_geometry_and_density(
+                eta_safe, H_bathy, z_coord, config, T, S, mask, grid,
+                rho_0, g_val,
+            ))
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
     # per-layer flux divergence, and perturbation velocities. ---
@@ -4985,6 +5221,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             qco_tmask_3d, qco_dt,
             freshwater_eta_tendency=zad_freshwater_eta_tendency,
             eta_after_override=nemo_stage_zad_eta_after_override,
+            # Which NEMO time-stepping program the card runs decides what is
+            # sitting in the after-SSH slot when the FIRST wzv call reads it:
+            # the RK3 program's own linear extrapolation (stprk3.F90:225 ->
+            # stp2d.F90:149 -> stp2d.F90:153) or the leapfrog's ssh_nxt
+            # continuity prediction.  This is NEMO's own relationship between
+            # the two sources, not an inference across unrelated choices, and
+            # it is read from the field the card already states.
+            # STATED by the card, never inferred from a sibling selector
+            # (decision 75).  Unset on a card that resolves this branch is a
+            # hard error, not a guess -- same contract as
+            # nemo_stage_momentum_wzv_split.
+            after_ssh_form=getattr(config, "nemo_first_wzv_after_ssh", ""),
+            # NEMO's 'ssha' slot, carried by the step that wrote it.  Only the
+            # carried form reads it; every other form ignores it, so the two
+            # existing arms are byte-identical whether or not it is present.
+            eta_after_carried=_carried_rk3_after_ssh(state),
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;
@@ -4993,6 +5245,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         zad_w = jax.lax.optimization_barrier(zad_w)
         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
         zad_h_v = jax.lax.optimization_barrier(zad_h_v)
+    if callable(nemo_stage_zad_operand_observer):
+        # WRITE-only operands dyn_zad is about to consume, before substitution;
+        # the callback cannot feed a value back into the compiled computation.
+        jax.debug.callback(nemo_stage_zad_operand_observer,
+                           {"w": zad_w, "h_u": zad_h_u, "h_v": zad_h_v,
+                            "u": u, "v": v},
+                           ordered=False)
     if nemo_stage_zad_operands is not None:
         # None preserves a live operand; Round 121 substitutes W alone.
         _ow, _ohu, _ohv = nemo_stage_zad_operands
@@ -5021,6 +5280,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
         legacy_hpg_algebraic=legacy_hpg_algebraic,
+        nemo_hpg_rhd=nemo_hpg_rhd,
     )
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
     # advection -div(transport(x)u), which already includes the kinetic-energy
@@ -5075,6 +5335,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _diag_zero_v = jnp.zeros_like(dv_dt)
     diag_vortcor_u = _diag_zero_u
     diag_vortcor_v = _diag_zero_v
+    # The flux-form horizontal advection shares ``diag_vortcor`` with the
+    # rotation terms (stage 7b writes it, the een_planetary / face-f branches
+    # then add Coriolis into the same slot), so the published decomposition
+    # cannot otherwise separate NEMO's ``dyn_vor`` from its ``dyn_adv`` on a
+    # flux-form card.  Kept here as its own array for the operator-component
+    # bundle only; nothing reads it in the tendency.
+    _flux_hadv_u = _diag_zero_u
+    _flux_hadv_v = _diag_zero_v
     diag_Dterm_u = _diag_zero_u    # WENO momentum-advection D-term;
     diag_Dterm_v = _diag_zero_v    # zero unless WENO + weno_d_term active.
     diag_vertadv_u = _diag_zero_u
@@ -5124,6 +5392,57 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 up3_upwind_selector=up3_upwind_selector,
             )
         )
+        # Captured BEFORE the rotation branches below add Coriolis into the
+        # same diagnostic slot.
+        _flux_hadv_u = diag_vortcor_u
+        _flux_hadv_v = diag_vortcor_v
+        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+            # NEMO runs dyn_vor and dyn_adv as two separate subroutines even in
+            # flux form: the energy-and-enstrophy triad supplies the ROTATION
+            # (dynvor.F90:711-814 under ln_dynvor_een), and dynadv_up3 supplies
+            # the advection.  legoESM's flux-form arm has only ever had the
+            # 4-point C-grid average for rotation; this branch gives it NEMO's
+            # operator instead.  The triad is the SAME one the vector-invariant
+            # cards already run -- it is fed a zero relative vorticity (see
+            # _bc_pv_flux) so what it transports is ff_f/e3f alone.  Stage 7b'
+            # below is gated off for this scheme, so f enters exactly once.
+            _h_vtx_ov = None
+            _f_vtx_ov = None
+            if config.een_e3f_scheme == "nemo_avg4":
+                from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                    nemo_een_ene_vertex_coriolis,
+                    vertex_coriolis,
+                )
+                from legoesm.ocean.vertical import (
+                    nemo_qco_live_vorticity_e3f_cgrid,
+                )
+                _h_vtx_ov = nemo_qco_live_vorticity_e3f_cgrid(
+                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
+                _f_vtx_ov = (
+                    vertex_coriolis(grid) if ene_generic_f_vtx
+                    else nemo_een_ene_vertex_coriolis(grid)
+                )
+            _h_vtx_operand = _h_vtx_ov
+            du_dt, dv_dt, _cor_u, _cor_v = _bc_pv_flux(
+                du_dt, dv_dt, u, v, _h_u_adv, _h_v_adv, h_k,
+                u_mask_3d, v_mask_3d, mask, grid, "vector_invariant",
+                config.weno_smoothness,
+                vertex_mask=vertex_mask,
+                enstrophy_metric=config.vortcor_enstrophy_metric,
+                reconstruct_zeta=config.vortcor_reconstruct_zeta,
+                vorticity_scheme="een_planetary",
+                een_q_boundary=getattr(config, "een_q_boundary",
+                                       "neumann_fill"),
+                een_e3f_scheme=config.een_e3f_scheme,
+                een_metric_weighting=getattr(
+                    config, "een_metric_weighting", "off"),
+                dz_ref=z_coord.dz_ref,
+                h_vtx_override=_h_vtx_ov,
+                f_vtx_override=_f_vtx_ov,
+                metric_reciprocals=ene_metric_reciprocals,
+            )
+            diag_vortcor_u = diag_vortcor_u + _cor_u
+            diag_vortcor_v = diag_vortcor_v + _cor_v
     else:
         # NEMO's vector-invariant ENE/EEN operators multiply velocity by the
         # same e3u/e3v(Kmm) face thickness as the stage transport
@@ -5186,7 +5505,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # is not traced at all.
     if (getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2"
             and getattr(config, "vorticity_scheme", "al81")
-            not in ("ene_total", "een_total")):
+            not in ("ene_total", "een_total", "een_planetary")):
         # (ene_total / een_total carry the planetary term INSIDE the vorticity
         # flux — NEMO np_CRV (ENE) / ln_dynvor_een (EEN) — so the separate
         # face-f add would double-count f.)
@@ -5843,6 +6162,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # In vector-invariant form NEMO dyn_adv owns KEG + ZAD.
             "advection_u": _mu(-dKE_dx + diag_Dterm_u + diag_vertadv_u),
             "advection_v": _mv(-dKE_dy + diag_Dterm_v + diag_vertadv_v),
+            # Flux form only: the -div(transport (x) velocity) horizontal
+            # trend NEMO's dyn_adv owns.  ``advection_u`` above cannot carry
+            # it because stage 7b writes it into the rotation slot, and the
+            # KE gradient it would otherwise hold is zeroed in flux form.
+            # Zero on every vector-invariant / WENO card.
+            "flux_form_hadv_u": _mu(_flux_hadv_u),
+            "flux_form_hadv_v": _mv(_flux_hadv_v),
             # Actual accumulator values at the production routine barriers.
             # The GYRE gate uses these directly for stages 2/3, whose compiled
             # order is HPG -> VOR -> ADV -> (stage-3 LDF).

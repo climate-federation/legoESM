@@ -965,6 +965,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
+    parser.add_argument("--land-soil-ice-impedance-exponent",
+                        dest="land_soil_ice_impedance_exponent", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
+                        help="Frozen-soil ice impedance exponent e (CLM5 e_ice): "
+                             "soil conductivity x 10**(-e * ice fraction). Active "
+                             "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
+                             "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
+                        help="Two-leaf canopy: soil-moisture stress also "
+                             "down-regulates the Ball-Berry intercept b0. "
+                             "Default on (library value); the FLUXNET EC-site "
+                             "setup uses --no-land-canopy-stress-b0. Requires "
+                             "--use-multilayer-land --land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-interception",
+                        dest="land_canopy_interception",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_interception,
+                        help="Two-leaf canopy rain interception (canopy water "
+                             "store, throughfall, wet-leaf evaporation). "
+                             "Default off. Requires --use-multilayer-land "
+                             "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-rh-cap-smoothing-width",
+                        dest="land_canopy_rh_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the canopy-air "
+                             "RH <= 1 cap. Default: the land CanopyConfig value.")
+    parser.add_argument("--land-canopy-zeta-cap-smoothing-width",
+                        dest="land_canopy_zeta_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_zeta_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the stable "
+                             "Monin-Obukhov zeta <= 0.5 cap. Default: the land "
+                             "CanopyConfig value.")
+    parser.add_argument("--land-canopy-most-n-iters",
+                        dest="land_canopy_most_n_iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_most_n_iters,
+                        help="Two-leaf canopy: fixed-point iterations of the "
+                             "above-canopy Monin-Obukhov solve. Default: the "
+                             "land CanopyConfig value.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1750,13 +1802,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hines-launch-p", type=float, default=None,
                         dest="hines_launch_p",
                         help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
-                             "(e.g. 70000 = 700 hPa). Unset/0 keeps the legacy "
-                             "SURFACE launch, where the wave is born "
-                             "supersaturated in the weakly stratified boundary "
-                             "layer (sigma_sat = N/m_star is smallest there) "
-                             "and breaks at its own launch level instead of "
-                             "aloft. No drag is deposited at or below the "
-                             "launch level.")
+                             "(default 70000 = 700 hPa; legal 30000-90000). "
+                             "No drag is deposited at or below the launch "
+                             "level.")
     parser.add_argument("--hines-fmax", type=float, default=None,
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
@@ -2526,6 +2574,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
+        land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_canopy_stress_b0=args.land_canopy_stress_b0,
+        land_canopy_interception=args.land_canopy_interception,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2602,13 +2655,17 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
+        land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
+        land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
+        land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
             else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
         hines_launch_p=(
             args.hines_launch_p
-            if args.hines_launch_p is not None else 0.0),
+            if args.hines_launch_p is not None
+            else _EXPERIMENT_DEFAULTS.hines_launch_p),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
         e3sm_cam_source=(args.e3sm_cam_source

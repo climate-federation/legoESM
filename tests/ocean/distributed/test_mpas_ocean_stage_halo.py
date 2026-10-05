@@ -105,6 +105,8 @@ def _all_frontier_config(base, barotropic_solver):
     div-damp/visc/diffusion, TVD advection, semi-implicit Coriolis)."""
     return base._replace(
         barotropic_solver=barotropic_solver,
+        # The MPI Voronoi lane refuses the default "gpoly" (no deep halo).
+        barotropic_implicit_pcg_precond="poly",
         A_h=1.0e3, B_h=1.0e9, C_smag=0.05, C_leith=1.0, K_bih=1.0e9,
         K_h=100.0,
         K_zeta_bih=1.0e9,          # T3 vertex-channel site (codex r1 #2)

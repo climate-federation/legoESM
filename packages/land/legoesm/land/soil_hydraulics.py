@@ -657,35 +657,24 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     return C
 
 
-def interblock_K(K_above: jnp.ndarray, K_below: jnp.ndarray) -> jnp.ndarray:
-    """Geometric mean of hydraulic conductivity between adjacent layers."""
-    return jnp.sqrt(jnp.clip(K_above, 1e-20, None) * jnp.clip(K_below, 1e-20, None))
+def interblock_K(
+    K_above: jnp.ndarray,
+    K_below: jnp.ndarray,
+    log_f_above: jnp.ndarray | None = None,
+    log_f_below: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Geometric mean of hydraulic conductivity between adjacent layers.
 
-
-# ==========================================================================
-# Per-column / per-layer parameter support
-# ==========================================================================
-
-def slice_layer(config: SoilHydraulicsConfig, k: int) -> SoilHydraulicsConfig:
-    """Return ``config`` with every per-(col,layer) field reduced to a single
-    layer ``k`` (so a ``(ncol, nlayer)`` or ``(ncol, 1)`` param becomes
-    ``(ncol,)``).  Scalars and 1-D fields are passed through unchanged.
-
-    Use this when a Richards step computes a quantity at a *single* layer
-    (e.g. top-layer ``K_top`` for the infiltration capacity, bottom-layer
-    ``K_bot`` for free-drainage runoff) and the soil state at that layer is
-    ``(ncol,)``: mixing ``(ncol,)`` with a ``(ncol, 1)`` param would otherwise
-    broadcast to ``(ncol, ncol)`` and silently corrupt the result.
+    Optional per-layer log multipliers (e.g. the frozen-soil ice impedance) are
+    folded in log space, ``exp(0.5*(ln Ka + ln Kb + log_fa + log_fb))``, so a
+    strongly impeded pair never forms the float32-subnormal product 1e-20*1e-20
+    and reverse mode never differentiates sqrt at 0.  Without them the original
+    sqrt(Ka*Kb) path runs unchanged.
     """
-    def pick(v):
-        # Strings (e.g. retention_curve) and Python scalars: passthrough.
-        if not hasattr(v, "ndim"):
-            return v
-        # 0-D / 1-D arrays already align with (ncol,).
-        if v.ndim < 2:
-            return v
-        # 2-D (ncol, n_layer_or_1): pick layer k.  Length-1 layer axis acts
-        # as a broadcast and the index folds to 0 automatically.
-        idx = k if v.shape[-1] > 1 else 0
-        return v[..., idx]
-    return type(config)(*(pick(getattr(config, f)) for f in config._fields))
+    Ka = jnp.clip(K_above, 1e-20, None)
+    Kb = jnp.clip(K_below, 1e-20, None)
+    if log_f_above is None and log_f_below is None:
+        return jnp.sqrt(Ka * Kb)
+    if log_f_above is None or log_f_below is None:
+        raise ValueError("interblock_K: pass both log multipliers or neither.")
+    return jnp.exp(0.5 * (jnp.log(Ka) + jnp.log(Kb) + log_f_above + log_f_below))

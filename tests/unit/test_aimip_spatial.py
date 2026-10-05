@@ -359,6 +359,7 @@ def test_spectral_rollout_rad_gating_one_step():
         precip_accum=zero_2d,
         shflx_accum=zero_2d,
         lhflx_accum=zero_2d,
+        evap_accum=zero_2d,
         # TOA/sfc flux + near-surface-T accumulators added to SegmentCarry by
         # the 2026-07 origin/main merge (CLAUDE.md: every direct SegmentCarry()
         # construction must gain new fields).

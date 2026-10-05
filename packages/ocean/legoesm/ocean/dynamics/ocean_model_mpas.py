@@ -15,6 +15,7 @@ import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import physics_with_constants
@@ -142,7 +143,7 @@ def _forward_backward_coriolis_mpas_3d(
     return u_prime_new + u_bar
 
 
-class MPASOceanModel:
+class MPASOceanModel(IntegrationMixin):
     """MPAS ocean model with split-explicit time stepping.
 
     Parameters
@@ -1236,8 +1237,12 @@ class MPASOceanModel:
         # but virtual_salt_flux is the standard Boussinesq approach.
         S_final = jnp.maximum(S_corrected, 0.0)
 
+        # Padding edges (dvEdge = 0) see wind stress and vertical mixing but
+        # nothing that balances them; zero them so they cannot grow without
+        # bound over a run (real edges: multiply by exactly 1).
+        _real_edge = (self.mesh.dvEdge > 0).astype(u_3d_new.dtype)[:, jnp.newaxis]
         state_new = MPASOceanState(
-            u=state.u.replace(data=u_3d_new),
+            u=state.u.replace(data=u_3d_new * _real_edge),
             T=state.T.replace(data=T_final),
             S=state.S.replace(data=S_final),
             eta=state.eta.replace(data=eta_new * mask),
@@ -1563,28 +1568,3 @@ class MPASOceanModel:
                 trajectory.append(state)
 
         return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: MPASOceanState,
-        n_steps: int,
-        dt: float,
-    ):
-        """Differentiable integration via jax.lax.scan.
-
-        Parameters
-        ----------
-        state : MPASOceanState
-        n_steps : int
-        dt : float
-
-        Returns
-        -------
-        (final_state, trajectory)
-        """
-        def scan_fn(carry, _):
-            s = self.step(carry, dt)
-            return s, s
-
-        final, trajectory = jax.lax.scan(scan_fn, state, None, length=n_steps)
-        return final, trajectory

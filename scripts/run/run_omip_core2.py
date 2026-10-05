@@ -772,10 +772,38 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # only on the ln_zdfiwm=.FALSE. arm (zdftke.F90:846), and ORCA1 runs
         # ln_zdfiwm=.TRUE., where :841-843 FORCES rmxl_min=1e-3.
         nemo_derived_mxl_min=False,
-        # ORCA1 runs ln_mxl0=.TRUE., and the compiled anchor statement
-        # multiplies the stress by tmask(:,:,1) (zdftke.F90:640-642).  The mask
-        # is 1 on every wet column, so this changes land columns only.
-        nemo_mxl0_surface_tmask=True,
+        # DECISION 72 (user, 2026-09-28): this ORCA1 card keeps MAIN's
+        # calm-column ln_mxl0 surface floor, the namelist rn_mxl0 = 0.04 m,
+        # stated here by value rather than left to a default.  NEMO itself
+        # OVERWRITES rn_mxl0 with the active mixing-length floor whenever
+        # ln_mxl0 is true -- 1.0e-3 m on this ORCA1 arm, because ln_zdfiwm
+        # forces rmxl_min = 1.0e-3 (shipped zdftke.F90:859-862 and :841-843;
+        # GYRE ppsrc:828-831 and :810-812) -- and that transcription stays
+        # available, but only to the NEMO-literal cards, which select it with
+        # nemo_mxl0_rmxl_min_overwrite=True.  The two arms differ ONLY where
+        # the wind anchor does not already exceed the floor, i.e. on calm and
+        # land columns; every windy column is identical.  Same principle as
+        # decisions 66 and 68: this card is not ours to switch, and the PR body
+        # states NEMO's own value so Pierre can decide.  False is also the
+        # library default, so both lines are a record of the choice, not a
+        # behaviour change.  Pinned by tests/ocean/unit/
+        # test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_mains_rn_mxl0_surface_floor.
+        mxl0_min_m=0.04,
+        nemo_mxl0_rmxl_min_overwrite=False,
+        # DECISION 66 (user, 2026-09-28): this ORCA1 card keeps its PREVIOUS,
+        # UNMASKED ln_mxl0 surface anchor.  NEMO's compiled statement does
+        # multiply the stress by tmask(:,:,1) (zdftke.F90:602), and that
+        # transcription stays available -- but only to the NEMO-literal cards,
+        # which select it with nemo_mxl0_surface_tmask=True.  tmask(:,:,1) is 1
+        # on every WET column, so the two arms differ on LAND columns only, and
+        # the user's instruction is to leave this card alone: "only switch it in
+        # the stuff that impacts our work, no need to touch his."  False is also
+        # the library default, so this line is a record of the choice, not a
+        # behaviour change.  Pinned by
+        # tests/ocean/unit/test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor.
+        nemo_mxl0_surface_tmask=False,
         tke_surface_min=1.0e-4,         # rn_emin0
         # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
@@ -1284,7 +1312,7 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 _EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
                       "convection_trigger", "convection_n2_threshold",
-                      "convection_two_level")
+                      "convection_two_level", "convection_evd_composition")
 # NEMO rn_evd / 2: the occupancy threshold when no convection scheme runs
 # (the control measurement "can the closure alone reach the EVD range?").
 _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
@@ -1333,6 +1361,8 @@ def build_enhanced_diffusion_config(args):
         fields["smooth_transition"] = args.convection_trigger == "smooth"
     if args.convection_n2_threshold is not None:
         fields["n2_threshold"] = args.convection_n2_threshold
+    if args.convection_evd_composition is not None:
+        fields["evd_composition"] = args.convection_evd_composition
     if args.convection_two_level:
         # NEMO's MIN(rn2, rn2b) needs the BEFORE tracers, which only the
         # leap-frog-family outer integrators carry; this driver builds the
@@ -4467,6 +4497,14 @@ def _restart_env_items(environ=None) -> list[tuple[str, str]]:
     )
 
 
+def _restart_reads_rk3_after_ssh(model_config) -> bool:
+    """Use the model's own predicate for the restart slot requirement."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_rk3_after_ssh_is_carried,
+    )
+    return nemo_rk3_after_ssh_is_carried(model_config)
+
+
 def _source_revision(start_dir=None) -> str:
     """Git revision of the checkout this driver is RUNNING FROM.
 
@@ -7131,6 +7169,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--convection-n2-threshold", type=float, default=None,
                    help="N^2 threshold [1/s^2] for the hard trigger "
                         "(NEMO zdfevd: -1e-12).")
+    p.add_argument("--convection-evd-composition", type=str, default=None,
+                   choices=["additive", "nemo_replace"],
+                   help="How the convective coefficient composes with the "
+                        "background and the closure. 'nemo_replace' is "
+                        "NEMO's zdfevd (it OVERWRITES avt with rn_evd where "
+                        "the trigger fires); 'additive' sums them. Selecting "
+                        "--convection-n2-mode nemo_bn2 REQUIRES one of the "
+                        "two: there is no default (decision 94).")
     p.add_argument("--convection-two-level", action="store_true",
                    help="NEMO MIN(rn2, rn2b): also fire on the BEFORE "
                         "tracers. Refused here: this driver has no "
@@ -9298,6 +9344,7 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec,
+            carries_rk3_after_ssh=_restart_reads_rk3_after_ssh(model.config),
             config_fingerprint=(None if args.restart_branch_from_different_config
                                 else _restart_cfg_fp))
         if args.restart_branch_from_different_config:

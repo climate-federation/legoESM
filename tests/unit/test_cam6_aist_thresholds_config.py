@@ -17,6 +17,20 @@ _DECK = (pathlib.Path(__file__).resolve().parents[2] / "config" / "amip"
          / "amip_production.yaml")
 
 
+def _cam6(**kw):
+    """A minimal valid cam6_clubb ExperimentConfig (MPAS lane)."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+    )
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(discretization="mpas"), microphysics="morrison",
+        turbulence="clubb", radiation="rrtmgp", cloud_scheme="cam6_clubb",
+        use_clubb_cloud_fraction=True, **kw)
+
+
 def _args(argv):
     from scripts.run.run_amip import (
         _postprocess_args,
@@ -40,9 +54,8 @@ def test_cli_round_trip_and_default_none():
 @pytest.mark.parametrize("name,bad", [("rhmini", 0.995), ("rhmaxi", 0.99),
                                       ("rhminis", 1.01), ("rhmaxis", 1.2)])
 def test_validate_strict_one_range(name, bad):
-    from legoesm.driver.config import ExperimentConfig
-    with pytest.raises(ValueError, match=f"cloud_cam6_{name}"):
-        ExperimentConfig(**{f"cloud_cam6_{name}": bad}).validate_strict()
+    with pytest.raises(ValueError, match=f"cloud_cam6_{name}.*out of range"):
+        _cam6(**{f"cloud_cam6_{name}": bad}).validate_strict()
 
 
 def test_rhmini_range_is_the_param_spec_range():
@@ -108,7 +121,7 @@ def test_production_deck_records_the_code_defaults_zero_physics_change():
     vals = {f"cloud_cam6_{n}": keys[f"cloud_cam6_{n}"] for n in _NAMES}
     assert vals == {"cloud_cam6_rhmini": 0.80, "cloud_cam6_rhmaxi": 1.0,
                     "cloud_cam6_rhminis": 1.0, "cloud_cam6_rhmaxis": 1.0}
-    ExperimentConfig(**vals).validate_strict()
+    _cam6(**vals).validate_strict()
     with_deck = _standalone_cloud_config(ExperimentConfig(**vals), "cam6_clubb",
                                          allow_convective_cloud=True)
     unset = _standalone_cloud_config(ExperimentConfig(), "cam6_clubb",
@@ -129,4 +142,18 @@ def test_all_four_reach_the_built_config_and_legal_bounds_pass():
     # inclusive bounds: CAM6 non-CLUBB namelist values must be legal
     for name, v in (("rhmini", 0.5), ("rhmini", 0.99), ("rhmaxi", 1.1),
                     ("rhminis", 0.85), ("rhmaxis", 1.1)):
-        ExperimentConfig(**{f"cloud_cam6_{name}": v}).validate_strict()
+        _cam6(**{f"cloud_cam6_{name}": v}).validate_strict()
+    ExperimentConfig().validate_strict()          # unset: no cam6 needed
+
+
+@pytest.mark.parametrize("name", _NAMES)
+def test_threshold_refused_unless_cam6_clubb(name):
+    """Any of the four on a non-cam6 cloud scheme would be silently inert:
+    refused at validation (user decision 2026-10-01)."""
+    from legoesm.driver.config import ExperimentConfig
+    for scheme in ("none", "sundqvist"):
+        with pytest.raises(ValueError, match="read only by"):
+            ExperimentConfig(cloud_scheme=scheme,
+                             **{f"cloud_cam6_{name}": 0.9 if name == "rhminis"
+                                else (0.8 if name == "rhmini" else 1.0)}
+                             ).validate_strict()

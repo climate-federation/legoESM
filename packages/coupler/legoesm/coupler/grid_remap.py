@@ -501,6 +501,9 @@ def rotate_tpoint_currents_to_geographic(u_c, v_c, cos_alpha_u, sin_alpha_u):
     return u_east, v_north
 
 
+_NN_CHUNK_ELEMS = 2 ** 26   # dot products per chunk (~0.5 GB float64)
+
+
 def nearest_column_map(
     src_lat, src_lon, dst_lat, dst_lon, *, src_valid=None,
 ) -> np.ndarray:
@@ -533,4 +536,12 @@ def nearest_column_map(
                          np.cos(lat) * np.sin(lon),
                          np.sin(lat)], axis=-1)
 
-    return np.argmax(unit(dst_lat, dst_lon) @ unit(src_lat, src_lon).T, axis=1)
+    # Chunked over targets: the dense (n_dst, n_src) product is ~52 GB for an
+    # ERA5 N320 source onto the res-6 mesh.  Row chunks give the identical argmax.
+    src_t = unit(src_lat, src_lon).T
+    dst = unit(dst_lat, dst_lon)
+    step = max(1, _NN_CHUNK_ELEMS // max(src_t.shape[1], 1))
+    return np.concatenate(
+        [np.argmax(dst[i:i + step] @ src_t, axis=1)
+         for i in range(0, dst.shape[0], step)]
+        or [np.zeros(0, dtype=np.intp)])

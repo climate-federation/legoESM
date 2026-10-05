@@ -1084,6 +1084,7 @@ def _fixed_iteration_pcg_single_reduce(
     *,
     max_iter: int,
     dot_weight: jnp.ndarray,
+    deep_halo: tuple | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-reduction fixed-M PCG (Chronopoulos & Gear 1989 recurrences).
 
@@ -1135,9 +1136,32 @@ def _fixed_iteration_pcg_single_reduce(
 
     Returns ``(x, rr)`` with ``rr`` = final global ``r·r``, same
     contract as :func:`_fixed_iteration_pcg`.
+
+    DEEP HALO (``deep_halo=(exchange, owned, rings)``): ``A_op`` is then
+    the LOCAL operator (no exchange inside) and ``M_inv`` must be
+    pointwise.  ``rings`` = number of halo rings around the owned block
+    whose cells have their full stencil locally (all incident edges local,
+    so ring ``rings + 1`` is local too); ``exchange(*fields)`` overwrites
+    every local halo row with its owner value.  Only ``r`` and ``s`` feed
+    ``A`` (through ``z``); after exchanging both, each body leaves ``s``
+    owner-exact one ring shallower (z exact to ``rings``, w and s to
+    ``rings - 1``, ...), so one packed ``(r, s)`` exchange every ``rings``
+    bodies keeps owned values exact; the init matvec counts as one body.
+    ``p`` feeds only ``x`` and is kept owned-only (zero halo), so halo
+    ``x`` stays ``x0`` and nothing unused accumulates.
     """
     W = dot_weight
-    r0 = b - A_op(x0)
+    if deep_halo is not None:
+        exchange, owned, rings = deep_halo
+        rings = int(rings)
+        if rings < 1:
+            raise ValueError(
+                f"deep-halo PCG needs >= 1 complete halo ring, got {rings}")
+        owned = owned.astype(b.dtype)
+        (xf,) = exchange(x0)
+        (r0,) = exchange(b - A_op(xf))
+    else:
+        r0 = b - A_op(x0)
     z0 = M_inv(r0)
     w0 = A_op(z0)
     # ONE batched init reduction: ρ0, μ0 in the W-inner product, plus
@@ -1184,6 +1208,8 @@ def _fixed_iteration_pcg_single_reduce(
         t_new = mu_new - beta * beta * st.t
         alpha_new = _safe_div(rho_new, t_new)
         p_new = z_new + beta * st.p
+        if deep_halo is not None:
+            p_new = p_new * owned
         s_new = w_new + beta * st.s
         return _CGSRState(
             x=x_new, r=r_new, p=p_new, s=s_new,
@@ -1193,16 +1219,48 @@ def _fixed_iteration_pcg_single_reduce(
     t0 = mu0
     alpha0 = _safe_div(rho0, t0)
     init = _CGSRState(
-        x=x0, r=r0, p=z0, s=w0, rho=rho0, t=t0, alpha=alpha0, rr=rr0,
+        x=x0, r=r0, p=z0 if deep_halo is None else z0 * owned, s=w0,
+        rho=rho0, t=t0, alpha=alpha0, rr=rr0,
     )
-    # Each body call applies one α-update then prepares the next α —
-    # ``max_iter`` calls ⇒ exactly ``max_iter`` x/r updates and
-    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter
-    # + 1`` for the standard body.  The final iteration's prepared
-    # (p, s, α) are discarded — its reduction still ran, keeping the
-    # collective schedule static.
-    final = jax.lax.fori_loop(0, int(max_iter), body, init)
-    return final.x, final.rr
+    # Each body call applies one α-update then prepares the next α.  The
+    # last update needs no next α, so it runs outside the loop without the
+    # preconditioner, the operator (a halo exchange on distributed paths)
+    # and the rho/mu dots it would discard: ``max_iter`` x/r updates and
+    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter + 1``
+    # for the standard body.
+    n_iter = int(max_iter)
+    if n_iter <= 0:
+        return init.x, init.rr
+    if deep_halo is None:
+        st = jax.lax.fori_loop(0, n_iter - 1, body, init)
+    else:
+        # Body k (1-based; the init matvec used the first ring) needs a
+        # fresh (r, s) when k % rings == 0.
+        def _refresh(st_):
+            r_, s_ = exchange(st_.r, st_.s)
+            return st_._replace(r=r_, s=s_)
+
+        def _block(_i, st_):
+            st_ = _refresh(st_)
+            for _ in range(rings):
+                st_ = body(0, st_)
+            return st_
+
+        n_body = n_iter - 1
+        n_pre = min(rings - 1, n_body)
+        n_blocks, n_rem = divmod(n_body - n_pre, rings)
+        st = init
+        for _ in range(n_pre):
+            st = body(0, st)
+        st = jax.lax.fori_loop(0, n_blocks, _block, st)
+        if n_rem:
+            st = _refresh(st)
+            for _ in range(n_rem):
+                st = body(0, st)
+    x_last = st.x + st.alpha * st.p
+    r_last = st.r - st.alpha * st.s
+    (rr_last,) = _global_dot_batch([(r_last * W, r_last)])
+    return x_last, rr_last
 
 
 def global_rel_residual(
@@ -1288,6 +1346,7 @@ def solve_helmholtz_implicit(
     stock_cg_maxiter: int,
     pcg_variant: str = "standard",
     dot_weight: jnp.ndarray | None = None,
+    deep_halo: tuple | None = None,
 ) -> tuple[jnp.ndarray, HelmholtzSolveDiagnostics]:
     """Solve ``A eta = rhs`` for the implicit free-surface step.
 
@@ -1337,6 +1396,13 @@ def solve_helmholtz_implicit(
         ``diagnostics`` is a :class:`HelmholtzSolveDiagnostics`; the
         caller logs / raises on ``rel_residual`` OUTSIDE the JIT.
     """
+    # Before ANY dispatch (incl. the single-rank stock CG): a LOCAL operator handed to a variant that never
+    # exchanges would silently drop the communication.
+    if (pcg_variant == "single_reduce_deep") != (deep_halo is not None):
+        raise ValueError(
+            "solve_helmholtz_implicit: pcg_variant='single_reduce_deep' "
+            "requires deep_halo=(exchange, owned, rings), and deep_halo "
+            f"is only valid with it (got variant {pcg_variant!r}).")
     if not distributed:
         eta_new, _info = jax.scipy.sparse.linalg.cg(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
@@ -1365,7 +1431,9 @@ def solve_helmholtz_implicit(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
             dot_weight=dot_weight,
         )
-    elif pcg_variant == "single_reduce":
+    elif pcg_variant in ("single_reduce", "single_reduce_deep"):
+        # "single_reduce_deep": same recurrence, A_op LOCAL, (r, s) halo
+        # refreshed every ``rings`` iterations (see the solver docstring).
         if dot_weight is None:
             # LOUD refusal — a Euclidean fallback would silently bias
             # the reconstructed p·Ap on any varying-area grid (the
@@ -1377,12 +1445,13 @@ def solve_helmholtz_implicit(
             )
         eta_new, rr = _fixed_iteration_pcg_single_reduce(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
-            dot_weight=dot_weight,
+            dot_weight=dot_weight, deep_halo=deep_halo,
         )
     else:
         raise ValueError(
             "solve_helmholtz_implicit: unknown pcg_variant "
-            f"{pcg_variant!r}; expected 'standard' or 'single_reduce'."
+            f"{pcg_variant!r}; expected 'standard', 'single_reduce' or "
+            "'single_reduce_deep'."
         )
     # rhs norm for the relative-residual diagnostic — same weighting as
     # the solver's rr (owned-masked on partitioned meshes; halo entries

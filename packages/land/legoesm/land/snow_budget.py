@@ -87,7 +87,7 @@ def update_snow(
         # --- Energy-limited melt (scientific guide, eq. for M) ---
         # Only melt when T_sfc >= T_snow_melt AND Q_net > 0
         above_freezing = T_sfc >= T_snow_melt
-        energy_melt = jnp.maximum(Q_net * dt / constants.L_f, 0.0)  # kg/m2
+        energy_melt = jnp.maximum(Q_net * dt / constants.L_f, 0.0)  # kg/m2  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
         snow_melt = jnp.where(above_freezing, energy_melt, 0.0)
         snow_melt = jnp.minimum(snow_melt, snow_available)
     else:

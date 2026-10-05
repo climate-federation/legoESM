@@ -41,8 +41,8 @@ from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
-    latent_heat_vaporization,
 )
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection.config import EmanuelConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
