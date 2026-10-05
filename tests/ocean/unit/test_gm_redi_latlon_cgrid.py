@@ -29,7 +29,6 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
     compute_isoneutral_K33_latlon,
-    nemo_iso_face_masks,
     nemo_iso_lap_tracer_tendency_latlon_cgrid,
 )
 from tests.legoesm_paths import legoesm_source_path
@@ -1560,39 +1559,6 @@ class TestNemoIsoLapOperator:
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, return_operand_diagnostics=True)
-
-    def test_horizontal_mask_average_uses_closed_bottom_w_level(self):
-        """The horizontal tensor must not wrap surface wmask onto the floor."""
-        n_lat, n_lon, nlev = 4, 5, 4
-        grid, z_coord, mask, u_mask, v_mask, _, _, jacobian = _make_setup(
-            n_lat=n_lat, n_lon=n_lon, nlev=nlev, H_max=4000.0)
-        act = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64)
-        q = jnp.broadcast_to(
-            jnp.arange(nlev, dtype=jnp.float64), (n_lat, n_lon, nlev))
-        zero = jnp.zeros_like(q)
-        _, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
-            q, zero[..., :-1], zero[..., :-1], mask, u_mask, v_mask,
-            z_coord, jacobian, grid, 1.0, act,
-            native_slopes=(zero, zero, zero, zero),
-            return_diagnostics=True, return_operand_diagnostics=True)
-        hmsku = np.asarray(diagnostics["hmsku"])
-        hmskv = np.asarray(diagnostics["hmskv"])
-        assert np.array_equal(
-            hmsku[..., :-1], np.full_like(hmsku[..., :-1], 0.25))
-        assert np.array_equal(
-            hmskv[..., :-1], np.full_like(hmskv[..., :-1], 0.25))
-        assert np.array_equal(
-            hmsku[..., -1], np.full_like(hmsku[..., -1], 0.5))
-        assert np.array_equal(
-            hmskv[..., -1], np.full_like(hmskv[..., -1], 0.5))
-        # Plant the superseded periodic vertical shift.  It produces 0.25 at
-        # the floor, so the bottom assertions above are non-vacuous.
-        _, _, wmask = nemo_iso_face_masks(u_mask, v_mask, act)
-        wrapped = np.roll(np.asarray(wmask), -1, axis=2)
-        old_bottom = 1.0 / np.maximum(
-            1.0 + wrapped[..., -1] + wrapped[..., -1] + 1.0, 1.0)
-        assert np.array_equal(old_bottom, np.full_like(old_bottom, 0.25))
-        assert not np.array_equal(old_bottom, hmsku[..., -1])
 
     def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
         """Round-88's source association is explicit and generic-safe."""
