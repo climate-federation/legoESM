@@ -116,8 +116,36 @@ with the hook unset take the pre-existing branch.
 
 ## 6. Tests, review, and citations
 
-The final test summaries, citation-gate result, shifted-citation plant, DINO
-month result and independent-review transcript are appended before closure.
+The clean production walk passes, while its one-ULP `iso.ah_wslp2` plant exits
+1 and reports `STATUS PLANT-FIRED`.  The private-work-directory DINO month
+gate exits 0 with:
+
+> DINO from-rest month day-30 wet 3-D T rms vs NEMO kt=960: 2.053801168e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS
+
+The focused pytest invocation reports:
+
+> 56 passed in 100.85s (0:01:40)
+
+This covers the Round-227 record/admission controls, the Round-224 SMT-3
+record controls, the receipt-citation gate, and the SMT card unit tests.  The
+clean citation gate passes all six mapped compiled-source citations with zero
+failures, audit failures, or unmapped citations.  Its shifted A33 citation
+plant exits 1 with `SYMBOL-NOT-AT-LINE` after moving the cited start to line
+824.  The default campaign receipt also remains fully mapped after the
+model-file citation re-anchor.
+
+The required separate read-only Codex review could not initialize inside the
+sandbox.  Its complete verdict transcript is:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**; there is no reviewer
+`DO NOT SHIP` verdict.  The round nevertheless lands no physics candidate,
+and the corrected acquisition is fail-closed behind admission and calibration.
 
 ## 7. OPEN
 
