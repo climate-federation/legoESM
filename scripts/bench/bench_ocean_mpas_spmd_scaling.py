@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
                    choices=["jacobi", "poly", "gpoly"],
-                   help="distributed PCG preconditioner (config default gpoly); "
+                   help="distributed PCG preconditioner (unset = the backend bundle: gpoly on GPU, jacobi on CPU); "
                         "'poly' is the communication-free local Neumann polynomial, "
                         "'gpoly' the same polynomial on the GLOBAL operator "
                         "(evaluated on a max(2, K-2)-ring halo, one exchange per "
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
                         "--pcg-variant single_reduce or standard)")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 15); "
+                   help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 30 on CPU); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
