@@ -449,3 +449,69 @@ def test_smt2_geometry_and_initial_state_are_the_smt1_ones():
         np.testing.assert_array_equal(
             np.asarray(getattr(base.recipe.initial_state, name).data),
             np.asarray(getattr(card.recipe.initial_state, name).data))
+
+
+def test_smt2_implicit_drag_divides_by_nemos_bottom_face_thickness():
+    """The divisor the step RUNS is NEMO's, and the old rule was not inert.
+
+    ``dynzdf.f90:306`` (and its V twin ``:473``, and the barotropic
+    bottom-stress re-add ``:166``/``:168``) divide the semi-implicit drag term
+    by ``e3u_3d(ji,jj,iku)*(1+r3u(ji,jj,Kaa)*umask(ji,jj,iku))`` -- the
+    REFERENCE face thickness, loaded from ``e3u_0`` at ``domzgr.f90:186``,
+    which over z partial steps is the MINIMUM of the two neighbouring
+    reference T thicknesses.  legoESM used to divide by the simple two-cell
+    AVERAGE of the live thicknesses.
+
+    PLANT, so this test cannot pass vacuously: put the old average rule back
+    in place of the shared ``e3u_0*(1+r3u*umask)`` assembler the drag block
+    calls, and one step on the seamount card must MOVE the velocity.  On a
+    FLAT card the two rules coincide by construction (both neighbours carry
+    the same reference thickness), and the same plant must move nothing --
+    which is why every flat registry stays at 0 rows moved.
+    """
+    import numpy as _np
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as _mod
+    from legoesm.grids.operators_latlon_cgrid import interp_cell_to_uface
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        interp_to_v_points,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    def _one_step(case, plant):
+        card = build_nemo_testcase_card(case)
+        cfg, zc, grid = (card.recipe.model_config, card.recipe.z_coord,
+                         card.recipe.grid)
+        st = card.recipe.initial_state
+        real = _mod._nemo_dynzdf_drag_face_thickness
+
+        def _old_average_rule(eta, hb, z, c, g, um3, vm3, dtype):
+            dz = compute_layer_thickness(
+                eta, hb, z, min_water_column_m=c.min_water_column_m)
+            return (interp_cell_to_uface(dz).astype(dtype),
+                    interp_to_v_points(dz, g).astype(dtype))
+
+        if plant:
+            _mod._nemo_dynzdf_drag_face_thickness = _old_average_rule
+        try:
+            model = _mod.LatLonCGridOceanModel(grid, zc, cfg)
+            out = model.step(st, dt=card.dt_s)
+        finally:
+            _mod._nemo_dynzdf_drag_face_thickness = real
+        return _np.asarray(out.u.data), _np.asarray(out.v.data)
+
+    # The drag block runs on SMT-2 (zdf_drag_in_matrix), and the seamount's
+    # bottom faces are partial, so the plant must be visible.
+    u_nemo, v_nemo = _one_step("VORTEX_SMT2_VEC-zps", plant=False)
+    u_old, v_old = _one_step("VORTEX_SMT2_VEC-zps", plant=True)
+    du = float(_np.max(_np.abs(u_nemo - u_old)))
+    dv = float(_np.max(_np.abs(v_nemo - v_old)))
+    assert du > 1.0e-6, f"the plant is inert on the seamount: du={du!r}"
+    assert dv > 1.0e-7, f"the plant is inert on the seamount: dv={dv!r}"
+
+    # SMT-1 resolves no bottom drag at all, so the block does not execute and
+    # the same plant changes nothing -- the inertness every other seamount
+    # card's registry measures, pinned here as a unit.
+    u1_a, v1_a = _one_step("VORTEX_SMT1_VEC-zps", plant=False)
+    u1_b, v1_b = _one_step("VORTEX_SMT1_VEC-zps", plant=True)
+    assert float(_np.max(_np.abs(u1_a - u1_b))) == 0.0
+    assert float(_np.max(_np.abs(v1_a - v1_b))) == 0.0

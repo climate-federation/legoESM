@@ -1711,6 +1711,40 @@ def _nemo_ws_qco_stage_faces(
     )
 
 
+
+def _nemo_dynzdf_drag_face_thickness(
+    eta_after, h_bathy, z_coord, config, grid, u_mask_3d, v_mask_3d, dtype,
+):
+    """``e3u_3d(iku)*(1+r3u(Kaa)*umask)`` -- dyn_zdf's bottom-drag divisor.
+
+    The scale factor NEMO's semi-implicit bottom friction divides by
+    (``dynzdf.f90:306``, the V twin ``:473``, and the ``ln_dynspg_ts``
+    bottom-stress re-add ``:166``/``:168``).  ``e3u_3d`` is the REFERENCE
+    three-dimensional face thickness, read from the mesh variable ``e3u_0``
+    (``domzgr.f90:186``, ``:201``): over z partial steps the MINIMUM of the
+    two neighbouring reference T thicknesses, never their average.
+
+    A named seam, not a second rule: the arithmetic is the one shared
+    ``_nemo_ws_qco_stage_faces`` assembler, which the WS-RK3 stage geometry
+    and the PE lane's wzv arm also call.  Having it under its own name is
+    what lets a test plant the superseded two-cell-average rule into the
+    drag path ALONE and show the seamount's velocity move.
+    """
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(eta_after), h_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    ).astype(dtype)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+        um3 = um3.astype(dtype)
+        vm3 = vm3.astype(dtype)
+    else:
+        um3 = jnp.asarray(u_mask_3d, dtype=dtype)
+        vm3 = jnp.asarray(v_mask_3d, dtype=dtype)
+    e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
+        jnp.asarray(eta_after, dtype=dtype), h_ref, um3, vm3, grid)
+    return e3u.astype(dtype), e3v.astype(dtype)
+
 def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
     """NEMO ``metric*e3*(velocity+barotropic correction)`` association."""
     return nemo_source_round(
@@ -12500,23 +12534,9 @@ class LatLonCGridOceanModel:
             # No new rule is written here: ``_nemo_ws_qco_stage_faces`` is the
             # single shared assembler of ``e3u_0*(1+r3u*umask)`` that the WS-RK3
             # stage geometry and the PE lane's wzv arm already call.
-            _drg_eta = state.eta.data
-            _drg_h_ref = compute_layer_thickness(
-                jnp.zeros_like(_drg_eta), state.H_bathy.data, _zc,
-                min_water_column_m=_cfg_b.min_water_column_m,
-            ).astype(dz_u_open.dtype)
-            if isinstance(_zc, OceanPartialCellCoordinate):
-                _drg_um3, _drg_vm3 = compute_face_masks_3d(
-                    _zc.is_active, _grid)
-                _drg_um3 = _drg_um3.astype(dz_u_open.dtype)
-                _drg_vm3 = _drg_vm3.astype(dz_v_open.dtype)
-            else:
-                _drg_um3 = jnp.asarray(u_mask_3d, dtype=dz_u_open.dtype)
-                _drg_vm3 = jnp.asarray(v_mask_3d, dtype=dz_v_open.dtype)
-            _drg_e3u, _drg_e3v, _, _ = _nemo_ws_qco_stage_faces(
-                _drg_eta, _drg_h_ref, _drg_um3, _drg_vm3, _grid)
-            _drg_e3u = _drg_e3u.astype(dz_u_open.dtype)
-            _drg_e3v = _drg_e3v.astype(dz_v_open.dtype)
+            _drg_e3u, _drg_e3v = _nemo_dynzdf_drag_face_thickness(
+                state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
+                u_mask_3d, v_mask_3d, dz_u_open.dtype)
             extra_diag_u = (
                 dt_mom * _r_eff_u[..., jnp.newaxis]
                 / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u)
