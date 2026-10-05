@@ -2,7 +2,10 @@
 
 Round 10 named the first non-bit statement of the SMT-2 rung, predicted its
 magnitude to 1.5 %, and HELD it because the exact operand was not threaded.
-This round threads it.  **ROUND STATUS: LANDED.**
+This round threads it.  **ROUND STATUS: LANDED, with ONE thing the operator
+must accept — the certified GYRE from-rest year is RE-PINNED** (section 8:
+every scored day moves by about one part in a million, six of eight toward
+NEMO).  Everything else is at or better than its bar.
 
 Preregistration (committed before any measurement):
 `docs/ocean/fidelity/PREREG_nemo_testcases_l1_vortex_smt_round11_drag_divisor.md`.
@@ -260,6 +263,17 @@ are offered as the replacement pin.  If the operator refuses the re-pin, the
 statement goes back to HELD and this commit is the thing to revert — nothing
 else in the round depends on it.
 
+## 8b. DINO from-rest month gate: PASS, moved in its last printed digit
+
+DINO is partial-cell and selects the implicit composition, so the statement is
+live on it and it had to be MEASURED, not predicted (R11-P8).
+
+**Day-30 wet 3-D T rms vs NEMO kt=960: 2.053801169e-03 K against the bar
+2.244317642e-03 K — PASS.**  Round 221's reference was 2.053801168e-03 K, so
+the row moved by +1e-12 K, one unit in its last printed digit, marginally
+FURTHER from NEMO.  Registered with its direction rather than rounded away.
+The certified value in the gate's own print (2.040288765e-03 K) is unchanged.
+
 ## 9. ORCA2 pointer
 
 ORCA2's rung 0 is this switch set, and its bottom is partial-cell EVERYWHERE,
@@ -344,6 +358,25 @@ findings; five were real and all five are taken in the diff.
 **UNASKED list: EMPTY.**  No configuration value, default, scheme selection,
 threshold or card field was changed this round.  The diff is one divisor, one
 named helper, one test, and the mechanical citation re-anchor.
+
+## 13. Gates
+
+| gate | result |
+|---|---|
+| SMT-2 registry (50 rows) | 37 moved, 0 left the bar, first over bar kt=2 unchanged; kt=2 u 2.193091e-04 -> 3.178975e-09 |
+| eleven certified card registries | **TOTAL_MOVED_ROWS 0**, every first-over-bar unchanged |
+| GYRE certified ten-step ladder (50 rows) | 16 moved in their last digits, 0 left the bar, first over bar kt=3 unchanged |
+| GYRE from-rest certified year, 8 scored days | **RE-PINNED**: max delta 4.7e-11 K, six of eight days closer to NEMO (section 8) |
+| DINO from-rest month | **PASS** 2.053801169e-03 K vs bar 2.244317642e-03 K (+1e-12 K vs round 221) |
+| focused tests | 29 passed (`test_nemo_vortex_smt_card.py` 20 incl. the new plant, `test_nemo_round221_evd.py` 9) |
+| citation gate | 0 stale map endpoints, 0 unmapped citations, 0 failures, after the committed diff-based re-anchor |
+| independent review | ONE fresh adversarial reviewer, SHIP WITH FIXES; five real findings, all taken (section 10). Codex paused on this account, so DUAL review is a STATED GAP |
+
+**THREE GATES WERE ALREADY RED ON THE LANE TIP** and are untouched (none reads
+a file this round edits): `test_param_specs[shortwave_penetration.py]`,
+`test_no_inline_physics_coeffs[land/restart.py]`,
+`test_dispatch_hardening::test_no_dispatch_guard_removed`
+(`land/slab_land.py::step_land`).
 
 ## 12. OPEN — for the next round
 
