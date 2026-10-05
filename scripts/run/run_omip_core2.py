@@ -6538,6 +6538,17 @@ class _ZdfTrendAccumulator:
         self._n += 1
         self._total += 1
 
+    def set_columns(self, mask):
+        """(ny, nx) bool: also keep every step's post-solve column at these cells."""
+        self._cj, self._ci = np.nonzero(mask)
+        self._col = {k: [] for k in ("col_T", "col_S", "col_u", "col_v", "col_K", "col_A")}
+
+    def col(self, T, S, u, v, K, A):
+        n = self._NSER   # float32: storage; profiles only need ~1e-7 relative
+        for key, x, m in (("col_T", T, n), ("col_S", S, n), ("col_u", u, n),
+                          ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1)):
+            self._col[key].append(np.asarray(x)[self._cj, self._ci, :m].astype(np.float32))
+
     def drain(self, dt=None):
         jax.effects_barrier()   # ordered callbacks are async: land them first
         if self._n == 0 and self._total > 0:
@@ -6554,6 +6565,10 @@ class _ZdfTrendAccumulator:
             out["ttrd_series"] = np.asarray(self._ser)
             out["K_series"] = np.asarray(self._kser)
             self._ser, self._kser = [], []
+        if getattr(self, "_col", None) is not None:
+            out.update({k: np.asarray(v) for k, v in self._col.items()})
+            out["col_j"], out["col_i"] = self._cj, self._ci
+            self._col = {k: [] for k in self._col}
         self._sum, self._ksum, self._n = None, None, 0
         return out
 
@@ -7873,6 +7888,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "area-mean profile (top 30 levels) of the trend and "
                         "diffusivity over the box LON0..LON1 (degE), |lat| <= "
                         "HALFLAT, as ttrd_series / K_series in each snapshot.")
+    p.add_argument("--trd-columns", type=float, nargs=3, default=None,
+                   metavar=("LON0", "LON1", "HALFLAT"),
+                   help="With --trd-accumulate: also store EVERY step's post-"
+                        "solve column (top 30 levels: T, S, u, v, closure K, "
+                        "viscosity A; float32) at each ocean cell in LON0..LON1 "
+                        "(degE), |lat| <= HALFLAT, as col_* in each snapshot.")
     p.add_argument("--flux-accumulate", action="store_true",
                    help="Accumulate the APPLIED ocean surface heat flux "
                         "(q_net, sw_down) and wind stress (tau_x, tau_y) at "
@@ -8384,6 +8405,8 @@ def main() -> int:
                          "Coriolis forward-Euler (unstable rotation).")
     if args.trd_series_box is not None and not args.trd_accumulate:
         raise SystemExit("--trd-series-box needs --trd-accumulate")
+    if args.trd_columns is not None and not args.trd_accumulate:
+        raise SystemExit("--trd-columns needs --trd-accumulate")
     if args.trd_accumulate and args.grid != "tripole":
         raise SystemExit("--trd-accumulate is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -10141,7 +10164,7 @@ def main() -> int:
         # forcing it is handed, so enabling it must not make a parent leg's
         # restart un-resumable.
         "flux_accumulate", "mld_accumulate", "state_accumulate",
-        "trd_accumulate",
+        "trd_accumulate", "trd_columns",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -11092,6 +11115,16 @@ def main() -> int:
             if _trd_w.sum() <= 0:
                 raise SystemExit("--trd-series-box selects no ocean cell")
         model._trd_callback = _ZdfTrendAccumulator(_trd_w)
+        if args.trd_columns is not None:
+            _c0, _c1, _chl = args.trd_columns
+            _lonc = np.asarray(lon2d) % 360.0
+            _cm = ((np.asarray(state.land_mask.data) > 0.5)
+                   & (np.abs(np.asarray(lat2d)) <= _chl)
+                   & (_lonc >= _c0) & (_lonc <= _c1))
+            if not _cm.any():
+                raise SystemExit("--trd-columns selects no ocean cell")
+            model._trd_callback.set_columns(_cm)
+            model._col_callback = model._trd_callback.col
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
@@ -11126,6 +11159,8 @@ def main() -> int:
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
                     model._trd_callback = _trd_keep
+                    if _trd_keep is not None and getattr(_trd_keep, "_col", None) is not None:
+                        model._col_callback = _trd_keep.col
                     # Free the previous segment's compiled step before the new
                     # one compiles: without this the old executable stays in
                     # JAX's compilation cache and the rebuild OOMs the GPU

@@ -6881,7 +6881,8 @@ class LatLonCGridOceanModel:
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields,
-                trd_callback=getattr(self, "_trd_callback", None))
+                trd_callback=getattr(self, "_trd_callback", None),
+                col_callback=getattr(self, "_col_callback", None))
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
@@ -8191,6 +8192,7 @@ class LatLonCGridOceanModel:
         nemo_aimp_momentum_w_v=None,
         z_coord=None, config=None, iwm_fields=None,
         trd_callback=None,
+        col_callback=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -9127,6 +9129,11 @@ class LatLonCGridOceanModel:
             _v_apply_mask = _vwet if _zdf_literal else v_mask_3d > 0.5
             u_new = jnp.where(_u_apply_mask, u_new, state.u.data)
             v_new = jnp.where(_v_apply_mask, v_new, state.v.data)
+            if col_callback is not None and do_tracers:
+                # Read-only diagnostic: post-solve column state + coefficients.
+                from jax.experimental import io_callback
+                io_callback(col_callback, None, T_new, S_new, u_new, v_new,
+                            _K_trd, A_v_cell, ordered=True)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros

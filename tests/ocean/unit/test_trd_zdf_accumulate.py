@@ -139,3 +139,46 @@ def test_non_tripole_grid_is_refused(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "mpas", "--trd-accumulate"])
     with pytest.raises(SystemExit, match="tripole only"):
         _core2().main()
+
+
+def test_column_callback_emits_the_returned_post_solve_state():
+    m, st, tke0, src, rate, lm, dz = _setup()
+    got = []
+    f = lambda s, cb: m._apply_implicit_vertical_mixing(
+        s, _DT, None, tke_old=tke0, return_tke=True, surface_tracer_forcing=src,
+        col_callback=cb)[0]
+    out = jax.jit(lambda s: f(s, lambda *a: got.append([np.asarray(x) for x in a])))(st)
+    ref = jax.jit(lambda s: f(s, None))(st)
+    np.testing.assert_array_equal(np.asarray(out.T.data), np.asarray(ref.T.data))
+    assert len(got) == 1
+    T, S, u, v, K, A = got[0]
+    np.testing.assert_array_equal(T, np.asarray(out.T.data))
+    np.testing.assert_array_equal(S, np.asarray(out.S.data))
+    np.testing.assert_array_equal(u, np.asarray(out.u.data))
+    np.testing.assert_array_equal(v, np.asarray(out.v.data))
+    assert K.shape == A.shape == T.shape[:-1] + (T.shape[-1] - 1,)
+    assert np.any(A > 0) and np.any(K > 0)
+    # non-vacuous: the solve changed T, so the emitted T is not the input
+    assert np.abs(T - np.asarray(st.T.data)).max() > 1e-6
+
+
+def test_accumulator_columns_keep_selected_cells_every_step():
+    acc = _core2()._ZdfTrendAccumulator()
+    mask = np.zeros((3, 4), bool); mask[0, 1] = mask[2, 3] = True
+    acc.set_columns(mask)
+    T = np.arange(3 * 4 * 32, dtype=float).reshape(3, 4, 32); K = T[..., :31]
+    for i in range(3):
+        acc(T, K); acc.col(T + i, T, T, T, K + i, K)
+    out = acc.drain(_DT)
+    assert out["col_T"].shape == (3, 2, 30) and out["col_K"].shape == (3, 2, 29)
+    np.testing.assert_array_equal(out["col_T"][2, 1], (T[2, 3, :30] + 2).astype(np.float32))
+    np.testing.assert_array_equal(out["col_K"][1, 0], (K[0, 1, :29] + 1).astype(np.float32))
+    np.testing.assert_array_equal(out["col_j"], [0, 2]); np.testing.assert_array_equal(out["col_i"], [1, 3])
+    assert acc.drain(_DT) == {}
+
+
+def test_columns_without_accumulate_is_refused(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole",
+                                      "--trd-columns", "225", "255", "2"])
+    with pytest.raises(SystemExit, match="needs --trd-accumulate"):
+        _core2().main()
