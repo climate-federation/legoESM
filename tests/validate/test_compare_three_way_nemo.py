@@ -364,7 +364,10 @@ def test_main_intersects_also_mask_sources_into_both_footprints():
     assert "for x, mx in zip(X, mldX_raw):" in src
     assert "mld_ok &= ocXm > 0.5" in src
     # and a mask-only source without MLD geometry is refused, not skipped
-    assert "an --also-mask snapshot lacks z_center_ref" in src
+    # the message names the field the selected mode needs (window means vs snapshot)
+    assert "FATAL: an --also-mask snapshot lacks " in src
+    assert "mld_mean (run it with --mld-accumulate)" in src
+    assert 'else "z_center_ref/H_bathy")\n                         + ", so the MLD footprint cannot be shared"' in src
 
 
 # --------------------------------------------------------------------------
@@ -560,7 +563,7 @@ def test_the_scorer_actually_calls_the_gate(tmp_path, monkeypatch):
         raise AssertionError(f"reached the loader for {path}: the gate did "
                              "not fire, so main no longer calls it")
 
-    monkeypatch.setattr(m, "_load_legoesm", lambda p: {"sst": np.zeros((2, 2))})
+    monkeypatch.setattr(m, "_load_legoesm", lambda p, use_mean=False: {"sst": np.zeros((2, 2))})
     monkeypatch.setattr(m, "_load_nemo",
                         lambda p, idx, month=None: {"n_time": 18,
                                                     "sst": np.zeros((2, 2))})

@@ -891,8 +891,14 @@ def main() -> int:
 
     # Row availability from the common OCEAN mask, before any per-field
     # finite dropout, so the zonal gate measures real loss of support.
+    if a.nemo_month:
+        when = f"month-{a.nemo_month} mean"
+    else:
+        rec = a.nemo_time_idx if a.nemo_time_idx >= 0 else N["n_time"] + a.nemo_time_idx
+        when = (f"days {rec * NEMO_RECORD_DAYS}-{(rec + 1) * NEMO_RECORD_DAYS} mean"
+                if a.use_mean_fields else f"day {(rec + 1) * NEMO_RECORD_DAYS}")
     _plot3(out, tgt_lat, tgt_lon, plot_fields, a.label_tripole,
-           a.label_mpas, ocean.sum(axis=1))
+           a.label_mpas, ocean.sum(axis=1), when)
 
     # allow_nan=False: bare NaN is not valid JSON and reads like a number to a
     # downstream parser.  _wstats returns a NaN correlation for a constant or
@@ -903,7 +909,13 @@ def main() -> int:
     return 0
 
 
-def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
+_LONG_NAME = {"SST": "Sea surface temperature", "SSS": "Sea surface salinity",
+              "MLD": "Mixed-layer depth (0.01 kg m$^{-3}$ from 10 m)"}
+_UNIT_TXT = {"degC": "°C", "psu": "psu", "m": "m"}
+_NEMO_LAB = "NEMO 5.0.1 eORCA1"
+
+
+def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row, when=""):
     """Per field: 5-panel maps (trp | MPAS | NEMO | trp-NEMO | MPAS-NEMO) and a
     combined 3-way zonal-mean + zonal-bias figure."""
     import matplotlib
@@ -922,20 +934,21 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
         dstack = np.concatenate([(Tm - Nm)[finite], (Mm - Nm)[finite]])
         dmax = float(np.percentile(np.abs(dstack), 99))
         fig, ax = plt.subplots(1, 5, figsize=(28, 4))
-        panels = [(Tm, f"{lab_t} {name}", "RdYlBu_r", vmin, vmax),
-                  (Mm, f"{lab_m} {name}", "RdYlBu_r", vmin, vmax),
-                  (Nm, f"NEMO {name}", "RdYlBu_r", vmin, vmax),
-                  (Tm - Nm, f"{lab_t} - NEMO", "RdBu_r", -dmax, dmax),
-                  (Mm - Nm, f"{lab_m} - NEMO", "RdBu_r", -dmax, dmax)]
+        longn, u = _LONG_NAME.get(name, name), _UNIT_TXT.get(unit, unit)
+        panels = [(Tm, f"(a) {lab_t}", "RdYlBu_r", vmin, vmax),
+                  (Mm, f"(b) {lab_m}", "RdYlBu_r", vmin, vmax),
+                  (Nm, f"(c) {_NEMO_LAB} (reference)", "RdYlBu_r", vmin, vmax),
+                  (Tm - Nm, f"(d) {lab_t} minus NEMO", "RdBu_r", -dmax, dmax),
+                  (Mm - Nm, f"(e) {lab_m} minus NEMO", "RdBu_r", -dmax, dmax)]
         for axi, (dat, ttl, cm, lo, hi) in zip(ax, panels):
             im = axi.pcolormesh(tgt_lon, tgt_lat, dat, vmin=lo, vmax=hi,
                                 cmap=cm, shading="auto")
-            axi.set_title(ttl, fontsize=10)
+            axi.set_title(ttl, fontsize=11)
+            axi.set_xlabel("longitude (°E)"); axi.set_ylabel("latitude (°N)")
             axi.axhline(_ARCTIC_LAT_N, color="k", lw=0.5, ls=":")
-            plt.colorbar(im, ax=axi, shrink=0.85)
-        fig.suptitle(f"{name} [{unit}] — {lab_t} / {lab_m} / NEMO "
-                     f"(colour limits = 1-99th pct of the common cells)",
-                     fontsize=13)
+            plt.colorbar(im, ax=axi, shrink=0.85, label=u)
+        fig.suptitle(f"{longn} ({u}), {when}: legoESM ocean on two grids vs {_NEMO_LAB}, "
+                     f"CORE-II normal-year forcing, from rest", fontsize=13)
         fig.tight_layout()
         fig.savefig(out / f"{name}_maps3.png", dpi=95)
         plt.close(fig)
@@ -966,18 +979,20 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
         a0 = ax[0][j]
         a0.plot(zT, tgt_lat, label=lab_t, lw=1.4)
         a0.plot(zM, tgt_lat, label=lab_m, lw=1.4, ls="--")
-        a0.plot(zN, tgt_lat, label="NEMO", lw=1.8, color="k")
-        a0.set_title(f"zonal-mean {name} [{unit}]")
-        a0.set_ylabel("latitude"); a0.legend(fontsize=8); a0.grid(alpha=0.3)
+        longn, u = _LONG_NAME.get(name, name), _UNIT_TXT.get(unit, unit)
+        a0.plot(zN, tgt_lat, label=_NEMO_LAB, lw=1.8, color="k")
+        a0.set_title(f"Zonal-mean {longn.lower()} ({u})")
+        a0.set_ylabel("latitude (°N)"); a0.set_xlabel(u); a0.legend(fontsize=8); a0.grid(alpha=0.3)
         a1 = ax[1][j]
-        a1.plot(zT - zN, tgt_lat, label=f"{lab_t} - NEMO", lw=1.4)
-        a1.plot(zM - zN, tgt_lat, label=f"{lab_m} - NEMO", lw=1.4, ls="--")
-        a1.plot(zT - zM, tgt_lat, label=f"{lab_t} - {lab_m}", lw=1.0, color="g")
+        a1.plot(zT - zN, tgt_lat, label=f"{lab_t} minus NEMO", lw=1.4)
+        a1.plot(zM - zN, tgt_lat, label=f"{lab_m} minus NEMO", lw=1.4, ls="--")
+        a1.plot(zT - zM, tgt_lat, label=f"{lab_t} minus {lab_m}", lw=1.0, color="g")
         a1.axvline(0.0, color="k", lw=0.8)
         a1.axhline(_ARCTIC_LAT_N, color="r", lw=0.6, ls=":")
-        a1.set_title(f"zonal-mean bias {name} [{unit}]")
-        a1.set_ylabel("latitude"); a1.legend(fontsize=8); a1.grid(alpha=0.3)
-    fig.suptitle("Three-way zonal means and biases (common cells only)", fontsize=14)
+        a1.set_title(f"Zonal-mean {longn.lower()} difference ({u})")
+        a1.set_ylabel("latitude (°N)"); a1.set_xlabel(u); a1.legend(fontsize=8); a1.grid(alpha=0.3)
+    fig.suptitle(f"Zonal means and differences, {when}: legoESM ({lab_t}, {lab_m}) vs {_NEMO_LAB}, "
+                 "CORE-II normal-year forcing (ocean cells common to all three)", fontsize=14)
     fig.tight_layout()
     fig.savefig(out / "zonal_3way.png", dpi=110)
     plt.close(fig)
