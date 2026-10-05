@@ -4799,10 +4799,7 @@ def test_land_canopy_smoothing_widths_round_trip_and_validate():
         "--land-canopy-zeta-cap-smoothing-width", "0.03"]), parser))
     assert cfg.land_canopy_rh_cap_smoothing_width == 0.02
     assert cfg.land_canopy_zeta_cap_smoothing_width == 0.03
-    try:
-        cfg.validate_strict()
-    except ValueError as exc:            # unrelated deck errors are not ours
-        assert "smoothing_width" not in str(exc), exc
+    cfg.validate_strict()
     for bad, match in (
             (cfg._replace(land_canopy_zeta_cap_smoothing_width=0.0),
              "zeta_cap_smoothing_width"),
