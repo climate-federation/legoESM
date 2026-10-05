@@ -214,9 +214,46 @@ maximum oracle-residual worsening `0.0` ULP.  The JSON comparisons are under
 `round226/inert/compare_*.json`; this is exact invariance, not merely a bar
 classification.
 
-FINAL_BATTERY_PLACEHOLDER
+The post-salvage focused suite, including the repaired step-entry-N2 fixture,
+reported:
 
-The real receipt citation gate reports 11 citations, zero unmapped citations,
+```text
+231 passed in 245.94s (0:04:05)
+```
+
+The whole fidelity tree was run in bounded serial shards because the combined
+JAX process exceeded the host compiler limit without printing a summary.  The
+valid shard summaries total **2,390 passed, 10 failed, 7 skipped, 23
+deselected**.  Four tests in the legacy phase-3 stage-sweep module remained
+unverified: its end-to-end planted-stage control, prediction plant,
+undetected-plant exit, and selector-prediction test each aborted in the JAX
+compiler even when isolated.  The ten deterministic reds are outside every
+file changed by this round: the already-red SI3 source-drift gate; stale
+round-200, round-201, round-215, round-129 and round-51 historical controls;
+the two grow-only worktree/stamp inventories; and the case-board inventory.
+Their exact node IDs and failure text are retained in
+`round226/fidelity_batch_*.log` and `round226/fidelity_remain_*.log`; no red is
+hidden behind an aggregate shell status.
+
+The required whole unit-tree command was also run with 12 workers.  It reached
+the honest pytest summary
+
+```text
+21 failed, 3521 passed, 31 skipped, 2 xfailed, 55 warnings in 641.73s
+```
+
+at 48% collection, then stopped on a worker `MemoryError` while formatting a
+failure.  Its 24 failed/crashed cache entries were rerun one per fresh process:
+12 passed and 12 reproduced.  The reproducing set is unrelated existing debt:
+four forward-mode checks reject a `custom_vjp`; three tests omit Decision 90's
+now-mandatory explicit barotropic depth-average field; and five stale MPAS,
+configuration-count, plotting, resolution-default and leapfrog expectations
+fail.  The round's own changed tests are green, including all 52 carried-N2
+tests.  The incomplete full-tree attempts and every valid per-process summary
+are preserved under `round226/`; this receipt does not call either incomplete
+tree green.
+
+The real receipt citation gate reports 10 citations, zero unmapped citations,
 zero failures and zero audit failures.  The shifted-citation plant moves the
 `VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:354-390` span by
 one line, exits nonzero and reports a source-anchor failure.  Because this
