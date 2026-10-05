@@ -336,9 +336,17 @@ def measure(
     arm_substep2 = {
         row["boundary"]: row for row in arm_rows if row["substep"] == 2
     }
-    p148_control = (
+    p148_control_census = (
         control_substep2["mid_depth_v"]["operand_differing_cells"] == 30
         and control_substep2["transport_v"]["operand_differing_cells"] == 68
+    )
+    source_order = [row["boundary"] for row in control_rows
+                    if row["substep"] == 2]
+    mid_depth_v_index = source_order.index("mid_depth_v")
+    p148_control = (
+        p148_control_census
+        and all(control_substep2[name]["operand_bit_exact"]
+                for name in source_order[:mid_depth_v_index])
     )
     p148_depth = arm_substep2["mid_depth_v"]["operand_bit_exact"]
     p148_chain = all(
@@ -357,7 +365,7 @@ def measure(
                 "u-fold-sign plant stayed green")
         raise GateError("u-fold-sign plant fired")
     if plant == "stored-pivot-source":
-        require(not p148_depth and p148_control,
+        require(not p148_depth and p148_control_census,
                 "stored-pivot-source plant stayed green")
         raise GateError("stored-pivot-source plant fired")
     if plant == "v-depth-bit":
@@ -392,6 +400,7 @@ def measure(
             "R148-P3": "CONFIRMED" if p148_depth else "REFUTED",
             "R148-P4": "CONFIRMED" if p148_chain else "REFUTED",
         },
+        "r148_control_census_reproduced": p148_control_census,
         "baseline_rows": baseline_rows,
         "control_rows": control_rows,
         "arm_rows": arm_rows,
