@@ -1,0 +1,20 @@
+--- namelist_cfg_smt2
++++ namelist_cfg_smt3
+@@ -155,7 +155,15 @@
+ !-----------------------------------------------------------------------
+ &namtra_ldf    !   lateral diffusion scheme for tracers                 (default: NO selection)
+ !-----------------------------------------------------------------------
+-   ln_traldf_OFF   =  .true.  !  No explicit diffusion
+-   ln_traldf_lap   =  .false.  !    laplacian operator
++   ln_traldf_OFF   =  .false.  !  SMT-3: ORCA2 rung-0 namelist_cfg:319 selects laplacian
++   ln_traldf_lap   =  .true.   !  SMT-3: ORCA2 rung-0 namelist_cfg:319
+    ln_traldf_blp   =  .false.  !  bilaplacian operator
++   ln_traldf_iso   =  .true.   !  SMT-3: ORCA2 rung-0 namelist_cfg:320
++   ln_traldf_msc   =  .true.   !  SMT-3: ORCA2 rung-0 namelist_cfg:321
++   !                       !  Coefficients:
++   nn_aht_ijk_t    = 20        !  SMT-3: ORCA2 rung-0 namelist_cfg:323
++      !                             !  =20 aht = 1/2 Ud max(e1,e2)
++      rn_Ud        = 0.018     !  SMT-3: ORCA2 rung-0 namelist_cfg:325 [m/s]
++      rn_Ld        = 200.e+3   !  SMT-3: ORCA2 rung-0 namelist_cfg:326 [m]
+ /
+ !!======================================================================

@@ -108,6 +108,11 @@ _TRACER_TERM_GROUPS = (
     "r3t_kbb", "r3t_kmm", "r3t_kaa",
     "adv_t", "adv_s", "out_t", "out_s",
 )
+_SMT3_TRACER_TERM_BY_STAGE = {
+    1: _TRACER_TERM_GROUPS,
+    2: _TRACER_TERM_GROUPS,
+    3: _TRACER_TERM_GROUPS + ("ldf_t", "ldf_s"),
+}
 
 
 # Round 196's per-substep barotropic record.  Three frame kinds: the
@@ -243,6 +248,9 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
              "group; the file does not end on a group boundary")
     if family == "oracle_spgts_kt":
         return _finish_spgts(path, magic, header, groups, plant)
+    if plant == "field-name":
+        victim = "ldf_t" if "ldf_t" in groups else next(iter(groups))
+        groups[f"{victim}_plant"] = groups.pop(victim)
     if family == "oracle_rhsterm_kt":
         required = _RHSTERM_GROUPS
         declared_index = 9
@@ -257,7 +265,10 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
         stage = header[2]
         _require(stage in (1, 2, 3),
                  f"{path.name}: unsupported stage {stage}")
-        required = _TRACER_TERM_GROUPS
+        if stage == 3 and header[10] == len(_SMT3_TRACER_TERM_BY_STAGE[3]):
+            required = _SMT3_TRACER_TERM_BY_STAGE[3]
+        else:
+            required = _TRACER_TERM_GROUPS
         declared_index = 10
     else:
         stage = header[2]
@@ -351,6 +362,9 @@ def main(argv=None) -> int:
     parser.add_argument("--tracer-terms", action="store_true",
                         help="also admit round 218's per-stage tracer-term "
                              "record")
+    parser.add_argument("--smt3-tracer-terms", action="store_true",
+                        help="also admit round 224's per-stage tracer record; "
+                             "stage 3 must include the post-LDF boundary")
     parser.add_argument("--spgts-terms", action="store_true",
                         help="also require round 196's per-substep "
                              "barotropic (dyn_spg_ts) records")
@@ -399,7 +413,7 @@ def main(argv=None) -> int:
             wanted += [args.run_dir /
                        f"oracle_stage_flux_terms_kt00000001_s{stage}.bin"
                        for stage in (1, 2, 3)]
-        if args.tracer_terms:
+        if args.tracer_terms or args.smt3_tracer_terms:
             wanted += [args.run_dir /
                        f"oracle_tracer_terms_kt00000001_s{stage}.bin"
                        for stage in (1, 2, 3)]
@@ -410,7 +424,7 @@ def main(argv=None) -> int:
             _require(path.is_file(), f"the run did not write {path.name}")
         if args.spgts_terms:
             corrupt_path = args.run_dir / "oracle_spgts_kt00000001.bin"
-        elif args.tracer_terms:
+        elif args.tracer_terms or args.smt3_tracer_terms:
             corrupt_path = (args.run_dir /
                             "oracle_tracer_terms_kt00000001_s1.bin")
         elif args.stage_flux_terms:
@@ -491,7 +505,7 @@ def main(argv=None) -> int:
                              f"rank {want}")
             report["stage_flux_term_groups"] = {
                 str(r["stage"]): sorted(r["groups"]) for r in flux_records}
-        if args.tracer_terms:
+        if args.tracer_terms or args.smt3_tracer_terms:
             tra_records = [r for r in report["records"]
                            if r["magic"] == "NEMO_L1_TRATRM1"]
             stages = {r["stage"] for r in tra_records}
@@ -500,6 +514,12 @@ def main(argv=None) -> int:
                      "expected [1, 2, 3]")
             _require(len(tra_records) == 3,
                      f"{len(tra_records)} tracer-term records, expected 3")
+            if args.smt3_tracer_terms:
+                for record in tra_records:
+                    required = _SMT3_TRACER_TERM_BY_STAGE[record["stage"]]
+                    _require(set(record["groups"]) == set(required),
+                             f"stage {record['stage']} SMT-3 tracer groups "
+                             f"differ: {sorted(record['groups'])}")
             for record in tra_records:
                 for name, meta in record["groups"].items():
                     want = 2 if name.startswith("r3t_") else 3

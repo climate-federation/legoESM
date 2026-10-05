@@ -45,11 +45,13 @@ MODULE vortex_r18_tracer_terms
 CONTAINS
 
    SUBROUTINE vortex_r18_tracer_begin( kstp, kstg, Kbb, Kmm, Kaa, Krhs, pts, &
-      &                                pFu, pFv, pFw )
+      &                                pFu, pFv, pFw, ldump_ldf )
       INTEGER, INTENT(in) :: kstp, kstg, Kbb, Kmm, Kaa, Krhs
       REAL(wp), DIMENSION(:,:,:,:,:), INTENT(in) :: pts
       REAL(wp), DIMENSION(:,:,:)    , INTENT(in) :: pFu, pFv, pFw
-      INTEGER :: ios
+      LOGICAL, OPTIONAL, INTENT(in) :: ldump_ldf
+      INTEGER :: ios, ingroups
+      LOGICAL :: ll_ldf
       CHARACTER(LEN=16) :: clmagic
       CHARACTER(LEN=128) :: clfile
 
@@ -68,9 +70,13 @@ CONTAINS
 
       nstage = kstg
       lopen = .TRUE.
+      ll_ldf = .FALSE.
+      IF( PRESENT(ldump_ldf) ) ll_ldf = ldump_ldf
+      ingroups = 15
+      IF( ll_ldf .AND. kstg == 3 ) ingroups = 17
       clmagic = 'NEMO_L1_TRATRM1'
       WRITE(nunit) clmagic, 1, kstp, kstg, Kbb, Kmm, Kaa, Krhs, &
-         &         jpi, jpj, jpk, 15, 0, 0, 0, STORAGE_SIZE(1._wp)
+         &         jpi, jpj, jpk, ingroups, 0, 0, 0, STORAGE_SIZE(1._wp)
       CALL write3( 'zfu', pFu )
       CALL write3( 'zfv', pFv )
       CALL write3( 'zfw', pFw )
