@@ -12832,10 +12832,16 @@ class LatLonCGridOceanModel:
             u_new = jnp.where(_u_apply_mask, u_new, state.u.data)
             v_new = jnp.where(_v_apply_mask, v_new, state.v.data)
             if col_callback is not None and do_tracers:
-                # Read-only diagnostic: post-solve column state + coefficients.
+                # Read-only diagnostic: post-solve column state, assembled
+                # solve coefficients, and the updated TKE (NaN in Mode B and in
+                # the post-mixing lane, whose TKE is solved after this point).
                 from jax.experimental import io_callback
+                _e_col = (tke_new.tke_new if hasattr(tke_new, "tke_new")
+                          else tke_new)
+                if _e_col is None:
+                    _e_col = jnp.full_like(A_v_cell, jnp.nan)
                 io_callback(col_callback, None, T_new, S_new, u_new, v_new,
-                            _K_trd, A_v_cell, ordered=True)
+                            _K_trd, A_v_cell, _e_col, ordered=True)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros

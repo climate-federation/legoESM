@@ -6590,12 +6590,16 @@ class _ZdfTrendAccumulator:
     def set_columns(self, mask):
         """(ny, nx) bool: also keep every step's post-solve column at these cells."""
         self._cj, self._ci = np.nonzero(mask)
-        self._col = {k: [] for k in ("col_T", "col_S", "col_u", "col_v", "col_K", "col_A")}
+        self._col = {k: [] for k in ("col_T", "col_S", "col_u", "col_v", "col_K", "col_A",
+                                     "col_e")}
 
-    def col(self, T, S, u, v, K, A):
+    def col(self, T, S, u, v, K, A, e):
+        """K/A: assembled solve coefficients (closure + IWM + backgrounds);
+        e: the updated TKE at the same interior interfaces (NEMO en(k+1))."""
         n = self._NSER   # float32: storage; profiles only need ~1e-7 relative
         for key, x, m in (("col_T", T, n), ("col_S", S, n), ("col_u", u, n),
-                          ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1)):
+                          ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1),
+                          ("col_e", e, n - 1)):
             self._col[key].append(np.asarray(x)[self._cj, self._ci, :m].astype(np.float32))
 
     def drain(self, dt=None):

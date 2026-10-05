@@ -146,12 +146,15 @@ def test_column_callback_emits_the_returned_post_solve_state():
     got = []
     f = lambda s, cb: m._apply_implicit_vertical_mixing(
         s, _DT, None, tke_old=tke0, return_tke=True, surface_tracer_forcing=src,
-        col_callback=cb)[0]
-    out = jax.jit(lambda s: f(s, lambda *a: got.append([np.asarray(x) for x in a])))(st)
-    ref = jax.jit(lambda s: f(s, None))(st)
+        col_callback=cb)
+    out, tke_out = jax.jit(lambda s: f(s, lambda *a: got.append([np.asarray(x) for x in a])))(st)
+    ref = jax.jit(lambda s: f(s, None)[0])(st)
     np.testing.assert_array_equal(np.asarray(out.T.data), np.asarray(ref.T.data))
     assert len(got) == 1
-    T, S, u, v, K, A = got[0]
+    T, S, u, v, K, A, e = got[0]
+    # e is the returned prognostic TKE, and it moved from the seed
+    np.testing.assert_array_equal(e, np.asarray(tke_out))
+    assert e.shape == K.shape and np.abs(e - np.asarray(tke0)).max() > 1e-8
     np.testing.assert_array_equal(T, np.asarray(out.T.data))
     np.testing.assert_array_equal(S, np.asarray(out.S.data))
     np.testing.assert_array_equal(u, np.asarray(out.u.data))
@@ -168,9 +171,11 @@ def test_accumulator_columns_keep_selected_cells_every_step():
     acc.set_columns(mask)
     T = np.arange(3 * 4 * 32, dtype=float).reshape(3, 4, 32); K = T[..., :31]
     for i in range(3):
-        acc(T, K); acc.col(T + i, T, T, T, K + i, K)
+        acc(T, K); acc.col(T + i, T, T, T, K + i, K, K + 2 * i)
     out = acc.drain(_DT)
     assert out["col_T"].shape == (3, 2, 30) and out["col_K"].shape == (3, 2, 29)
+    assert out["col_e"].shape == (3, 2, 29)
+    np.testing.assert_array_equal(out["col_e"][2, 1], (K[2, 3, :29] + 4).astype(np.float32))
     np.testing.assert_array_equal(out["col_T"][2, 1], (T[2, 3, :30] + 2).astype(np.float32))
     np.testing.assert_array_equal(out["col_K"][1, 0], (K[0, 1, :29] + 1).astype(np.float32))
     np.testing.assert_array_equal(out["col_j"], [0, 2]); np.testing.assert_array_equal(out["col_i"], [1, 3])
