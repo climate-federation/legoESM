@@ -35,7 +35,7 @@ ordinary states are array-identical at every step. The walk status is
 The current-tree round-94 replay makes depth averaging, drag, wind, final slow
 forcing, and SSH forcing bit-exact globally. Its first non-bit output is the
 split-explicit `ssh_after`; JSON SHA-256 is
-`c88f528fd93e9236a9b453c55d046a09a36cb8d531032865bc85a6f5b48b297`.
+`c88f528fd93e9236a9b453c55d046a09a36cb9cd10902f63ef1be661a5520411`.
 The round-97 replay, with NEMO's recorded slow forcing and carried external
 mode, makes every registered substep-1 boundary bit-exact; JSON SHA-256 is
 `3395b2b7b5bb576459fb159fb697702777bb2e8e6676568c9b1363793e3ab995`.
