@@ -12,7 +12,10 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     nemo_literal_continuity_divergence,
     nemo_literal_metric_transports,
 )
-from legoesm.grids.tripole import create_synthetic_tripole
+from legoesm.grids.tripole import (
+    create_synthetic_tripole,
+    create_synthetic_tripole_pivot,
+)
 
 
 def _case():
@@ -102,3 +105,31 @@ def test_external_mode_boundary_association_is_one_seven_field_map():
         np.testing.assert_array_equal(np.asarray(value[-1]),
                                       np.asarray(expected_north))
     np.testing.assert_array_equal(np.asarray(got[6]), np.asarray(eta))
+
+
+def test_external_mode_u_fold_preserves_signed_zero_semantics():
+    grid = create_synthetic_tripole_pivot(4, 8)
+    u = jnp.zeros((4, 9), dtype=jnp.float64).at[-1, 1:5].set(
+        jnp.array([0.0, -0.0, 0.0, -0.0], dtype=jnp.float64))
+    scalar_u = jnp.ones_like(u)
+    v = jnp.ones((5, 8), dtype=jnp.float64)
+    eta = jnp.ones((4, 8), dtype=jnp.float64)
+    got = _nemo_external_mode_boundary_association(
+        u, v, scalar_u, v, scalar_u, v, eta, grid)[0]
+    expected = -np.asarray(u[-1, 4:0:-1])
+    np.testing.assert_array_equal(
+        np.asarray(got[-1, 5:]).view(np.uint64), expected.view(np.uint64))
+
+
+def test_external_mode_u_fold_is_compiled_half_row_map():
+    grid = create_synthetic_tripole_pivot(4, 8)
+    u = jnp.arange(4 * 9, dtype=jnp.float64).reshape(4, 9)
+    scalar_u = jnp.ones_like(u)
+    v = jnp.ones((5, 8), dtype=jnp.float64)
+    eta = jnp.ones((4, 8), dtype=jnp.float64)
+    got = _nemo_external_mode_boundary_association(
+        u, v, scalar_u, v, scalar_u, v, eta, grid)[0]
+    np.testing.assert_array_equal(np.asarray(got[-1, 1:5]),
+                                  np.asarray(u[-1, 1:5]))
+    np.testing.assert_array_equal(np.asarray(got[-1, 5:]),
+                                  np.asarray(-u[-1, 4:0:-1]))

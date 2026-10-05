@@ -36,7 +36,8 @@ from scripts.validate.ocean_fidelity.testcases import (
 )
 
 
-PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit")
+PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
+          "u-fold-sign")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -277,6 +278,9 @@ def measure(
             else r97._native_v(candidate_model) if face == "v"
             else candidate_model
         )
+        if plant == "u-fold-sign" and name == "u":
+            candidate = np.array(candidate, copy=True)
+            candidate[-1, candidate.shape[1] // 2:] *= -1.0
         post_rows[name] = exact_row(candidate, oracle[oracle_name])
         post_scope = np.array(candidate_model, copy=True)
         scope_rows[name] = boundary_scope(
@@ -312,6 +316,10 @@ def measure(
     )
     p3 = all(row["bit_exact"] for row in post_rows.values())
     p4 = all(row["bit_exact"] for row in arm_target.values())
+    if plant == "u-fold-sign":
+        require(not post_rows["u"]["bit_exact"],
+                "u-fold-sign plant stayed green")
+        raise GateError("u-fold-sign plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",

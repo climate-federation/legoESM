@@ -637,12 +637,28 @@ def _nemo_external_mode_boundary_association(
     its associated image is the same array.
     """
     u_post = u.at[:, 0].set(u[:, -1])
+    fold = getattr(grid, "fold", None)
+    nmask = north_fold_mask(grid)
+    if ((fold_is_local(grid) or nmask is not None)
+            and bool(getattr(fold, "pivot_row_stored", False))):
+        # T-pivot U arm (lbcnfd.f90:639-683).  Compact U column zero is the
+        # periodic closure; columns 1: are NEMO's native U row.  The pivot
+        # branch leaves its left half in place and writes the right half from
+        # the sign-flipped U-stagger permutation of that same row.
+        n_lon = fold.perm_T.shape[0]
+        half = n_lon // 2
+        perm = fold_perm_u(fold)[half:]
+        folded = u_post.at[-1, half + 1:].set(
+            fold.vector_sign_u * u_post[-1, 1:][perm])
+        if fold_is_local(grid):
+            u_post = folded
+        else:
+            u_post = jnp.where(nmask, folded, u_post)
     depth_u_post = depth_u.at[:, 0].set(depth_u[:, -1])
     inverse_u_post = inverse_u.at[:, 0].set(inverse_u[:, -1])
     v_post = v
     depth_v_post = depth_v
     inverse_v_post = inverse_v
-    nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         v_post = pad_ns_vector_v(v[1:-1], grid)
         depth_v_post = pad_ns_scalar(depth_v[1:-1], grid)
