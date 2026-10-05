@@ -1647,6 +1647,7 @@ def _run_substep_loop(
     nemo_substep_coriolis_override=None,
     nemo_substep_pgf_override=None,
     nemo_external_mode_association_test_override=False,
+    return_boundary_association_trace=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -2187,7 +2188,8 @@ def _run_substep_loop(
                 eta_new = _clamp_redistribute(eta_new, eta_floor, mask, area)
 
         association_post = None
-        if return_trace or nemo_external_mode_association_test_override:
+        if (return_boundary_association_trace
+                or nemo_external_mode_association_test_override):
             if _face_depth_mode == "nemo_ssh_avg":
                 association_depths = _nemo_ssh_avg_apply(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
@@ -2394,19 +2396,23 @@ def _run_substep_loop(
                 "u_exit": U_bar_new,
                 "v_exit": V_bar_new,
                 "eta_exit": eta_new,
-                "boundary_post_u": association_post[0],
-                "boundary_post_v": association_post[1],
-                "boundary_post_depth_u": association_post[2],
-                "boundary_post_depth_v": association_post[3],
-                "boundary_post_inverse_u": association_post[4],
-                "boundary_post_inverse_v": association_post[5],
-                "boundary_post_eta": association_post[6],
                 # L2 GYRE live-ENE arm: dynspg_ts.F90:686-701 forms the
                 # Coriolis and bottom-drag contributions as ONE momentum trend
                 # operand; the GYRE ENE walk scores that sum, not drag alone.
                 "trd_u": _cor_u + _drag_u,
                 "trd_v": _cor_v + _drag_v,
             }
+            if return_boundary_association_trace:
+                trace = {
+                    **trace,
+                    "boundary_post_u": association_post[0],
+                    "boundary_post_v": association_post[1],
+                    "boundary_post_depth_u": association_post[2],
+                    "boundary_post_depth_v": association_post[3],
+                    "boundary_post_inverse_u": association_post[4],
+                    "boundary_post_inverse_v": association_post[5],
+                    "boundary_post_eta": association_post[6],
+                }
             return new_carry, trace
         return new_carry
 
@@ -2735,6 +2741,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_raw_history_test_override=None,
     _nemo_drag_rate_test_override=None,
     _nemo_external_mode_association_test_override=False,
+    _nemo_boundary_association_trace_test_hook=False,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -3221,6 +3228,8 @@ def barotropic_substeps_latlon_cgrid(
         nemo_substep_pgf_override=_nemo_substep_pgf_test_override,
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
+        return_boundary_association_trace=(
+            _nemo_boundary_association_trace_test_hook),
     )
     if _nemo_substep_trace_test_hook:
         _finals, _substep_trace = _loop_result

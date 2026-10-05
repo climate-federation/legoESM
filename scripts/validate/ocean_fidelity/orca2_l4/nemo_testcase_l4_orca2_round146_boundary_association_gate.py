@@ -162,6 +162,7 @@ def _run(card, state, freshwater, surface, slow, raw_history, *, expose, arm):
         card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_barotropic_substeps=expose,
+            expose_barotropic_boundary_association=expose,
             barotropic_slow_forcing_override=slow,
             barotropic_raw_history_override=raw_history,
             barotropic_external_mode_association=arm,

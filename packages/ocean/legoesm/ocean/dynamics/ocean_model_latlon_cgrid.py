@@ -1190,6 +1190,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private round-146 arm for the one seven-array external-mode boundary
     # association in dynspg_ts.  False leaves the production carry unchanged.
     barotropic_external_mode_association: bool = False
+    # Return round-146's seven post-association arrays without expanding the
+    # established shared substep trace for any other fidelity lane.
+    expose_barotropic_boundary_association: bool = False
 
     # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
     # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
@@ -2085,6 +2088,16 @@ def _nemo_ws_stage_transport(
 
 class _NEMOWSBarotropicTrace(NamedTuple):
     """Private WRITE-only equivalent returned by the GYRE boundary gate."""
+
+    state_after_barotropic: object
+    substeps: object
+    slow_forcing: object
+    slow_forcing_operands: object
+    transport_average: object
+
+
+class _NEMOWSBoundaryAssociationTrace(NamedTuple):
+    """Round-146 substep trace paired with an ordinary production state."""
 
     state_after_barotropic: object
     substeps: object
@@ -7136,6 +7149,11 @@ class LatLonCGridOceanModel:
                 if _return_barotropic_substeps:
                     _baro_seed = dict(
                         _baro_seed, _nemo_substep_trace_test_hook=True)
+                    if (self._nemo_ws_test_hooks
+                            .expose_barotropic_boundary_association):
+                        _baro_seed = dict(
+                            _baro_seed,
+                            _nemo_boundary_association_trace_test_hook=True)
                     _flux_update_override = (
                         self._nemo_ws_test_hooks
                         .barotropic_flux_form_update_override)
@@ -7213,7 +7231,7 @@ class LatLonCGridOceanModel:
             )
             if _return_barotropic_substeps:
                 state_new, (Hu_avg, Hv_avg), _substep_trace = _baro_result
-                return _NEMOWSBarotropicTrace(
+                _trace_args = (
                     state_new, _substep_trace,
                     (F_slow_eta, F_slow_u, F_slow_v),
                     {
@@ -7239,8 +7257,13 @@ class LatLonCGridOceanModel:
                         "pre_external_u": F_slow_u,
                         "pre_external_v": F_slow_v,
                     },
-                    (Hu_avg, Hv_avg), None,
+                    (Hu_avg, Hv_avg),
                 )
+                if (self._nemo_ws_test_hooks
+                        .expose_barotropic_boundary_association):
+                    return _NEMOWSBoundaryAssociationTrace(
+                        *_trace_args, None)
+                return _NEMOWSBarotropicTrace(*_trace_args)
             state_new, (Hu_avg, Hv_avg) = _baro_result
             _stage_baro_override = (
                 self._nemo_ws_test_hooks.stage_barotropic_output_override)
@@ -13158,7 +13181,9 @@ class LatLonCGridOceanModel:
                 _vertical_K_test_override=_vertical_K_test_override,
                 _nemo_stage1_zad_eta_after_override=(
                     _nemo_stage1_zad_eta_after_override))
-            if self._nemo_ws_test_hooks.expose_barotropic_substeps:
+            if (self._nemo_ws_test_hooks.expose_barotropic_substeps
+                    and self._nemo_ws_test_hooks
+                    .expose_barotropic_boundary_association):
                 # Returning the substep registry changes the compiled output
                 # graph.  Pair it with an independently compiled ordinary
                 # state, just as the live-stage and FCT observers below do,
