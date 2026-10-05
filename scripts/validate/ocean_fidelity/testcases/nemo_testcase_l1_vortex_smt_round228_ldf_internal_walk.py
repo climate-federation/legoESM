@@ -113,6 +113,7 @@ def run(root: Path, *, plant: str | None = None,
         literal_horizontal_flux: bool = False,
         literal_divergence_walk: bool = False,
         area_reciprocal_walk: bool = False,
+        final_seam_walk: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -432,11 +433,14 @@ def run(root: Path, *, plant: str | None = None,
         def run_same_stage_arm(name: str, *, use_divisor: bool,
                                use_faces: bool,
                                flux_evaluation: str | None = None,
-                               area_reciprocal: str | None = None) -> dict:
+                               area_reciprocal: str | None = None,
+                               final_update: str | None = None) -> dict:
             divisor_input = np.asarray(nemo_thickness).copy()
             face_u = recorded_face_u.copy()
             face_v = recorded_face_v.copy()
             area_input = np.asarray(iso["r1_e1e2t"]).copy()
+            rhs_input = np.asarray(
+                iso["rhs_before"])[..., :nlev].copy()
             plant_location = None
             if plant == f"{name}.divisor_input":
                 support = np.asarray(masks["T"], dtype=bool)
@@ -484,6 +488,17 @@ def run(root: Path, *, plant: str | None = None,
                         f"{name}: area reciprocal plant selected zero")
                 area_input[plant_location] = np.nextafter(
                     area_input[plant_location], np.inf)
+            elif plant == f"{name}.rhs_input":
+                support = np.asarray(masks["T"], dtype=bool)
+                magnitude = np.where(
+                    support,
+                    np.abs(np.asarray(iso["rhs_increment"])[..., :nlev]),
+                    -1.0)
+                plant_location = tuple(
+                    int(value) for value in np.unravel_index(
+                        int(np.argmax(magnitude)), magnitude.shape))
+                rhs_input[plant_location] = np.nextafter(
+                    rhs_input[plant_location], np.inf)
 
             operands = {"closed_bottom_wmask": True}
             if use_divisor:
@@ -500,6 +515,10 @@ def run(root: Path, *, plant: str | None = None,
             elif area_reciprocal is not None:
                 raise GateError(
                     f"{name}: unknown area reciprocal arm {area_reciprocal!r}")
+            if final_update is not None:
+                operands["final_update_evaluation"] = final_update
+                if final_update == "nemo_rhs_increment":
+                    operands["rhs_accumulator"] = jnp.asarray(rhs_input)
             hook = _NEMOWSRK3TestHooks(
                 stage_barotropic_output_override=external,
                 tracer_ldf_diagnostics=operands)
@@ -546,6 +565,7 @@ def run(root: Path, *, plant: str | None = None,
                 "uses_live_face_thickness": use_faces,
                 "horizontal_flux_evaluation": flux_evaluation,
                 "area_reciprocal": area_reciprocal,
+                "final_update": final_update,
                 "source_rows": source_rows,
                 "unchanged_rows": unchanged_rows,
                 "rhs_row": rhs_row,
@@ -559,7 +579,7 @@ def run(root: Path, *, plant: str | None = None,
 
         mask_only = pair = triple = pairwise = literal = None
         divergence_arms = {}
-        if area_reciprocal_walk:
+        if area_reciprocal_walk or final_seam_walk:
             # Round 235 needs only the frozen complete-divergence control and
             # its two one-variable area-reciprocal arms. Compiling every
             # historical cumulative arm again exhausted host memory without
@@ -600,6 +620,17 @@ def run(root: Path, *, plant: str | None = None,
                     name, use_divisor=True, use_faces=True,
                     flux_evaluation="nemo_literal_divergence",
                     area_reciprocal=source)
+        final_arms = {}
+        if final_seam_walk:
+            for suffix, evaluation in (
+                    ("unmasked", "unmasked"),
+                    ("rhs_increment", "nemo_rhs_increment")):
+                name = f"arm.final_{suffix}"
+                final_arms[suffix] = run_same_stage_arm(
+                    name, use_divisor=True, use_faces=True,
+                    flux_evaluation="nemo_literal_divergence",
+                    area_reciprocal="recorded",
+                    final_update=evaluation)
         same_stage_arms = {
             "closed_bottom_wmask_control": mask_only,
             "pair": pair,
@@ -609,6 +640,7 @@ def run(root: Path, *, plant: str | None = None,
             **{f"literal_{name}": arm
                for name, arm in divergence_arms.items()},
             **{f"area_{name}": arm for name, arm in area_arms.items()},
+            **{f"final_{name}": arm for name, arm in final_arms.items()},
         }
     oracle_fu = np.asarray(iso["fu"])[..., :nlev]
     oracle_fv = np.asarray(iso["fv"])[..., :nlev]
@@ -715,6 +747,7 @@ def main(argv=None) -> int:
     parser.add_argument("--literal-horizontal-flux", action="store_true")
     parser.add_argument("--literal-divergence-walk", action="store_true")
     parser.add_argument("--area-reciprocal-walk", action="store_true")
+    parser.add_argument("--final-seam-walk", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
@@ -729,11 +762,20 @@ def main(argv=None) -> int:
                 "--literal-divergence-walk requires --same-stage-set")
         require(not args.area_reciprocal_walk or args.same_stage_set,
                 "--area-reciprocal-walk requires --same-stage-set")
+        require(not args.final_seam_walk or args.same_stage_set,
+                "--final-seam-walk requires --same-stage-set")
         require(not args.area_reciprocal_walk or not any((
                     args.include_live_faces, args.pairwise_horizontal_flux,
                     args.literal_horizontal_flux,
                     args.literal_divergence_walk)),
                 "--area-reciprocal-walk is a complete frozen-control walk; "
+                "do not combine it with historical cumulative-arm flags")
+        require(not args.final_seam_walk or not any((
+                    args.include_live_faces, args.pairwise_horizontal_flux,
+                    args.literal_horizontal_flux,
+                    args.literal_divergence_walk,
+                    args.area_reciprocal_walk)),
+                "--final-seam-walk is a complete frozen-control walk; "
                 "do not combine it with historical cumulative-arm flags")
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
@@ -744,6 +786,7 @@ def main(argv=None) -> int:
                      literal_horizontal_flux=args.literal_horizontal_flux,
                      literal_divergence_walk=args.literal_divergence_walk,
                      area_reciprocal_walk=args.area_reciprocal_walk,
+                     final_seam_walk=args.final_seam_walk,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
@@ -787,7 +830,8 @@ def main(argv=None) -> int:
                          "pairwise_flux", "literal_flux",
                          "literal_differences", "literal_horizontal_sum",
                          "literal_flux_sum", "literal_divergence",
-                         "area_recorded", "area_nemo_stored"):
+                         "area_recorded", "area_nemo_stored",
+                         "final_unmasked", "final_rhs_increment"):
             arm = report["same_stage_arms"].get(arm_name)
             if arm is None:
                 continue
@@ -821,7 +865,7 @@ def main(argv=None) -> int:
             "pair", "triple", "pairwise_flux", "literal_flux",
             "literal_differences", "literal_horizontal_sum",
             "literal_flux_sum", "literal_divergence", "area_recorded",
-            "area_nemo_stored")
+            "area_nemo_stored", "final_unmasked", "final_rhs_increment")
             if args.plant.startswith(f"arm.{name}.")), None)
         if planted_arm is not None:
             require(report["same_stage_arms"] is not None,

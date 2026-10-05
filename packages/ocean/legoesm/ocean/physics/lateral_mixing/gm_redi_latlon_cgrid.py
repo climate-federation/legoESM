@@ -2365,6 +2365,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     horizontal_flux_evaluation: str = "vectorized",
     area_reciprocal: jnp.ndarray | None = None,
     area_reciprocal_evaluation: str = "vectorized",
+    final_update_evaluation: str = "masked",
+    rhs_accumulator: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2478,6 +2480,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "area_reciprocal and a non-vectorized "
             "area_reciprocal_evaluation are mutually exclusive")
+    if final_update_evaluation not in (
+            "masked", "unmasked", "nemo_rhs_increment"):
+        raise ValueError(
+            "final_update_evaluation must be 'masked', 'unmasked' or "
+            f"'nemo_rhs_increment', got {final_update_evaluation!r}")
+    if ((rhs_accumulator is None)
+            != (final_update_evaluation != "nemo_rhs_increment")):
+        raise ValueError(
+            "rhs_accumulator must be supplied exactly when "
+            "final_update_evaluation='nemo_rhs_increment'")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2879,7 +2891,20 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
-    tend = tend * act
+    if final_update_evaluation != "unmasked":
+        tend = tend * act
+    if final_update_evaluation == "nemo_rhs_increment":
+        rhs_before = jnp.asarray(rhs_accumulator, dtype=dtype)
+        if rhs_before.shape != q.shape:
+            raise ValueError(
+                "rhs_accumulator must have the full tracer shape "
+                f"{q.shape}, got {rhs_before.shape}")
+        # traldf_iso.f90:306-310/:327-331 updates Krhs in place.  The Round
+        # 235 private discriminator returns the exact increment subsequently
+        # written by the oracle (rhs_after-rhs_before), preserving both
+        # compiled assignment boundaries without changing any production arm.
+        tend = nemo_source_round(
+            nemo_source_round(rhs_before + tend) - rhs_before)
     if return_diagnostics:
         diagnostics = {
             "zfu": zfu,
@@ -4158,6 +4183,8 @@ def gm_redi_tracer_tendency_latlon(
     redi_horizontal_flux_evaluation_override: str | None = None,
     redi_area_reciprocal_override: jnp.ndarray | None = None,
     redi_area_reciprocal_evaluation_override: str | None = None,
+    redi_final_update_evaluation_override: str | None = None,
+    redi_rhs_accumulator_override: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4642,7 +4669,12 @@ def gm_redi_tracer_tendency_latlon(
                 area_reciprocal_evaluation=(
                     redi_area_reciprocal_evaluation_override
                     if redi_area_reciprocal_evaluation_override is not None
-                    else "vectorized"))
+                    else "vectorized"),
+                final_update_evaluation=(
+                    redi_final_update_evaluation_override
+                    if redi_final_update_evaluation_override is not None
+                    else "masked"),
+                rhs_accumulator=redi_rhs_accumulator_override)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:

@@ -1707,6 +1707,17 @@ class TestNemoIsoLapOperator:
         assert len(source_round_calls) == 19
         assert stored_area.shape == pinned.shape
         assert stored_area_diag["r1_e1e2t"].shape == mask.shape
+        source_round_calls.clear()
+        rhs_increment = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act,
+            horizontal_flux_evaluation="nemo_literal_divergence",
+            final_update_evaluation="nemo_rhs_increment",
+            rhs_accumulator=jnp.ones_like(T))
+        # The compiled Krhs add and the writer's increment subtraction add
+        # two boundaries after the seventeen complete-divergence boundaries.
+        assert len(source_round_calls) == 19
+        assert rhs_increment.shape == pinned.shape
         with pytest.raises(ValueError, match="horizontal_flux_evaluation"):
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
@@ -1717,6 +1728,16 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act,
                 area_reciprocal_evaluation="unknown")
+        with pytest.raises(ValueError, match="final_update_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                final_update_evaluation="unknown")
+        with pytest.raises(ValueError, match="rhs_accumulator"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                final_update_evaluation="nemo_rhs_increment")
 
     def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
         """The Kmm Redi slope carry must not move the earlier through-FCT
