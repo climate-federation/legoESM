@@ -312,6 +312,18 @@ def run_known_answer_plant(plant: str) -> None:
         require(boundary_scope(pre, post, "u")["outside_allowed_cells"] == 1,
                 "scope-bit plant stayed green")
         raise GateError("scope-bit plant fired")
+    if plant == "midpoint-v-registry":
+        names = list(midpoint_v_operand_names())
+        names[0], names[1] = names[1], names[0]
+        require(tuple(names) != midpoint_v_operand_names(),
+                "midpoint-v-registry plant stayed green")
+        raise GateError("midpoint-v-registry plant fired")
+    if plant == "midpoint-v-bit":
+        reference = np.array([1.0], dtype=np.float64)
+        candidate = np.nextafter(reference, np.float64(np.inf))
+        require(exact_row(candidate, reference)["differing_cells"] == 1,
+                "midpoint-v-bit plant stayed green")
+        raise GateError("midpoint-v-bit plant fired")
 
 
 def _state_arrays(state) -> dict[str, np.ndarray]:
