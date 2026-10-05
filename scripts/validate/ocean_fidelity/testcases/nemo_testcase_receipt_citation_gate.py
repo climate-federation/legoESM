@@ -1280,6 +1280,8 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90"),
     "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90"),
     "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
     "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -5624,6 +5626,13 @@ CITATION_MAP = {
         ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
         ('&                 * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2),
         151],
+    # --- round 227: internal SMT-3 LDF acquisition seams ---
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90:185-338': [
+        'zgru(ji,jj,iikm1) = umask(ji,jj,jpkm1)',
+        "CALL lbc_lnk( 'ldfslp', uslp", 154],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:780-830': [
+        'DO jk =    2,  jpkm1',
+        'pakz(ji,jj,jk) = MAX( zcoef0 - 0.5_wp , 0._wp )', 51],
 }
 
 
