@@ -1693,6 +1693,19 @@ def _checked_kappah_min(value):
         raise ValueError(f"--tke-kappah-min {value!r} must be >= 0")
     return v
 
+def assert_slow_forcing_pair_resolved(bt_cfg) -> None:
+    """Refuse NEMO's reference-thickness slow-forcing mean without the carried
+    external mode: NEMO pairs the two at the loop-entry Coriolis subtraction
+    (e487b3b42), and the half pair is a third hybrid over partial cells,
+    neither NEMO nor any prior run.  Checked on the RESOLVED config so a
+    --config YAML cannot bypass it."""
+    if (getattr(bt_cfg, "barotropic_slow_forcing_depth_evaluation", "") == "nemo_literal"
+            and not getattr(bt_cfg, "nemo_prognostic_barotropic_state", False)):
+        raise SystemExit("barotropic_slow_forcing_depth_evaluation=nemo_literal "
+                         "needs the carried external mode "
+                         "(nemo_prognostic_barotropic_state), not wired in this driver")
+
+
 def assert_tke_surface_pair_resolved(vmix_cfg) -> None:
     """Refuse a z=0 surface-TKE placement without a held Dirichlet value.
 
@@ -1833,6 +1846,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
+                  barotropic_slow_forcing_depth_evaluation=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
@@ -1950,6 +1964,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
+                              ("barotropic_slow_forcing_depth_evaluation",
+                               barotropic_slow_forcing_depth_evaluation),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_scheme", bottom_drag_scheme),
                               ("bottom_drag_cd0", bottom_drag_cd0),
@@ -2387,6 +2403,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
+                  barotropic_slow_forcing_depth_evaluation=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
@@ -2445,6 +2462,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
+                              ("barotropic_slow_forcing_depth_evaluation",
+                               barotropic_slow_forcing_depth_evaluation),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_scheme", bottom_drag_scheme),
                               ("bottom_drag_cd0", bottom_drag_cd0),
@@ -7381,6 +7400,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Number of barotropic substeps (explicit_substep).")
     p.add_argument("--barotropic-time-filter", default=None, choices=[None,"box","cosine"],
                    help="Barotropic time-average filter (cosine = more dissipative for fast modes).")
+    p.add_argument("--barotropic-slow-forcing-depth-evaluation", default=None,
+                   choices=["nemo_literal", "min_rule_live"],
+                   help="How the slow forcing is depth-averaged onto the barotropic "
+                        "faces (NEMO stp2d.F90:177-186). No default: an RK3 momentum "
+                        "card must state it (decision 90). nemo_literal = NEMO's "
+                        "reference e3u_0 / hu_0; min_rule_live = per-level min of the "
+                        "two live thicknesses (legoESM before 2026-10-03).")
     p.add_argument("--barotropic-pcg-variant", default=None,
                    choices=[None, "standard", "single_reduce"],
                    help="Implicit-CN barotropic PCG reduction strategy "
@@ -9121,6 +9147,7 @@ def main() -> int:
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
+            barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
@@ -9359,6 +9386,7 @@ def main() -> int:
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
+            barotropic_slow_forcing_depth_evaluation=args.barotropic_slow_forcing_depth_evaluation,
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
@@ -9495,6 +9523,9 @@ def main() -> int:
             assert_tke_surface_pair_resolved(
                 getattr(model.config.physics, "vertical_mixing", None))
             print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
+
+    assert_slow_forcing_pair_resolved(
+        getattr(getattr(model, "config", None), "barotropic", None))
 
     # OMIP-2 weak SSS restoring toward the WOA surface-salinity climatology (the
     # protocol NEMO ORCA1 uses).  Bounds the multi-year surface-freshwater drift
