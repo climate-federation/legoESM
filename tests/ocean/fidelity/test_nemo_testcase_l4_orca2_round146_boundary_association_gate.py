@@ -97,6 +97,19 @@ def test_midpoint_v_bit_control_is_nonvacuous():
     assert gate.exact_row(candidate, reference)["differing_cells"] == 1
 
 
+def test_transport_v_operand_registry_is_compiled_order():
+    assert gate.transport_v_operand_names() == ("e1v", "va_e", "zhvp2_e")
+
+
+def test_transport_v_bit_control_detects_one_ulp():
+    reference = np.array([3.0], dtype=np.float64)
+    candidate = np.nextafter(reference, np.float64(np.inf))
+
+    row = gate.exact_row(candidate, reference)
+    assert row["differing_cells"] == 1
+    assert not row["bit_exact"]
+
+
 def test_reference_depth_override_none_returns_original_prep():
     prep = tuple(np.full((2, 3), value, dtype=np.float64) for value in range(5))
 

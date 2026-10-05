@@ -40,7 +40,8 @@ PLANTS = ("none", "observer-bit", "post-bit", "registry", "scope-bit",
           "u-fold-sign", "stored-pivot-source", "v-depth-bit",
           "inverse-v-registry", "wrong-entry-frame", "entry-inverse-v-bit",
           "midpoint-v-registry", "midpoint-v-bit",
-          "reference-depth-shape", "reference-depth-arm-bit")
+          "reference-depth-shape", "reference-depth-arm-bit",
+          "transport-v-registry", "transport-v-bit")
 STATE_FIELDS = ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
 POST_FIELDS = (
     ("u", "boundary_post_u", "j001_ua_new", "u"),
@@ -291,6 +292,135 @@ def midpoint_v_operand_split(card, state, trace, oracle, masks, *, plant: str):
     }
 
 
+def transport_v_operand_names() -> tuple[str, ...]:
+    """Compiled ``zhV = e1v * va_e * zhvp2_e`` operand order."""
+
+    return ("e1v", "va_e", "zhvp2_e")
+
+
+def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
+    """Split and replay compiled ``dynspg_ts.f90:568-591`` at substep 2."""
+
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    names = list(transport_v_operand_names())
+    if plant == "transport-v-registry":
+        names[0], names[1] = names[1], names[0]
+    require(tuple(names) == transport_v_operand_names(),
+            "V metric-transport operand registry reordered")
+
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "rung-0 card has no raw NEMO V metrics")
+    grid = card.recipe.grid
+    index = 1
+    prefix = "j002"
+    candidate = {
+        "e1v": r97._native_v(np.asarray(grid.dx_v)),
+        "va_e": r97._native_v(np.asarray(
+            trace["transport_velocity_v"][index])),
+        "zhvp2_e": r97._native_v(np.asarray(
+            trace["transport_face_depth_v"][index])),
+    }
+    reference = {
+        "e1v": np.asarray(raw.e1v),
+        "va_e": np.asarray(oracle[f"{prefix}_va_ext"]),
+        "zhvp2_e": np.asarray(oracle[f"{prefix}_hvp2_e"]),
+    }
+    operand_rows = {
+        name: exact_row(candidate[name], reference[name]) for name in names
+    }
+
+    b = nemo_source_round
+    first_product = np.asarray(b(
+        b(jnp.asarray(candidate["e1v"]))
+        * b(jnp.asarray(candidate["va_e"]))))
+    unmasked = np.asarray(b(
+        b(jnp.asarray(first_product))
+        * b(jnp.asarray(candidate["zhvp2_e"]))))
+    oracle_transport = np.asarray(oracle[f"{prefix}_zhV"])
+    if plant == "transport-v-bit":
+        exact = np.argwhere(
+            np.ascontiguousarray(unmasked).view(np.uint64)
+            == np.ascontiguousarray(oracle_transport).view(np.uint64))
+        require(exact.size > 0,
+                "transport-v-bit plant has no exact source cell")
+        location = tuple(map(int, exact[0]))
+        unmasked = np.array(unmasked, copy=True)
+        unmasked[location] = np.nextafter(
+            unmasked[location], np.float64(np.inf))
+
+    production = r97._native_v(np.asarray(trace["transport_metric_v"][index]))
+    vmask = np.max(np.asarray(raw.vmask), axis=-1)
+    production_unequal = (
+        np.ascontiguousarray(production).view(np.uint64)
+        != np.ascontiguousarray(oracle_transport).view(np.uint64)
+    )
+    rows = {
+        "first_product": exact_row(
+            first_product,
+            np.asarray(b(b(jnp.asarray(reference["e1v"]))
+                         * b(jnp.asarray(reference["va_e"]))))),
+        "unmasked_transport_v": exact_row(unmasked, oracle_transport),
+        "production_transport_v": exact_row(production, oracle_transport),
+    }
+    if plant == "transport-v-bit":
+        require(rows["unmasked_transport_v"]["differing_cells"] == 1,
+                "transport-v-bit plant stayed green")
+        raise GateError("transport-v-bit plant fired")
+
+    oracle_south = np.concatenate(
+        [np.zeros_like(oracle_transport[:1]), oracle_transport[:-1]], axis=0)
+    candidate_south = np.concatenate(
+        [np.zeros_like(unmasked[:1]), unmasked[:-1]], axis=0)
+    candidate_dv = unmasked - candidate_south
+    oracle_dv = oracle_transport - oracle_south
+    dv_row = exact_row(candidate_dv, oracle_dv)
+
+    oracle_du = np.asarray(oracle[f"{prefix}_zhU"]) - np.roll(
+        np.asarray(oracle[f"{prefix}_zhU"]), 1, axis=1)
+    area = np.asarray(grid.area)
+    candidate_div = (oracle_du + candidate_dv) * (1.0 / area)
+    ssh_frc = np.asarray(trace["continuity_forcing"][index])
+    eta_entry = np.asarray(trace["eta_entry"][index])
+    mask = np.asarray(state.land_mask.data)
+    dt_fast = np.float64(
+        card.dt_s / card.recipe.model_config.barotropic.n_barotropic_substeps)
+    candidate_rhs = np.asarray(b(
+        b(jnp.asarray(ssh_frc)) + b(jnp.asarray(candidate_div))))
+    candidate_increment = np.asarray(b(dt_fast * jnp.asarray(candidate_rhs)))
+    candidate_after = np.asarray(b(
+        b(jnp.asarray(eta_entry) - jnp.asarray(candidate_increment))
+        * b(jnp.asarray(mask))))
+    control_rhs = np.asarray(b(
+        b(jnp.asarray(ssh_frc))
+        + b(jnp.asarray(trace["continuity_divergence"][index]))))
+    control_increment = np.asarray(b(dt_fast * jnp.asarray(control_rhs)))
+    control_after = np.asarray(b(
+        b(jnp.asarray(eta_entry) - jnp.asarray(control_increment))
+        * b(jnp.asarray(mask))))
+    control_replay = exact_row(
+        control_after, np.asarray(trace["eta_continuity"][index]))
+    require(control_replay["bit_exact"],
+            "V transport SSH replay does not reproduce production")
+
+    mismatch_locations = np.argwhere(production_unequal)
+    mismatch_rows = sorted(set(map(int, mismatch_locations[:, 0])))
+    return {
+        "operand_rows": operand_rows,
+        "rows": rows,
+        "continuity_dv": dv_row,
+        "after_ssh": exact_row(
+            candidate_after, np.asarray(oracle[f"{prefix}_ssha_e"])),
+        "control_after_ssh_replay": control_replay,
+        "production_mismatch_vmask_zero_cells": int(np.count_nonzero(
+            production_unequal & (vmask == 0.0))),
+        "production_mismatch_rows": mismatch_rows,
+        "dt_fast_s": float(dt_fast),
+    }
+
+
 def run_known_answer_plant(plant: str) -> None:
     """Exercise one non-degenerate refusal before the expensive JIT run."""
 
@@ -521,6 +651,8 @@ def measure(
     }
     midpoint_v_split = midpoint_v_operand_split(
         card, state, control_trace, oracle, masks, plant=plant)
+    transport_v_split = transport_v_operand_split(
+        card, state, reference_depth_arm_trace, oracle, plant=plant)
     coefficient_rows = {
         name: exact_row(np.asarray(trace[name][0]), oracle_coeff[name])
         for name in r98.COEFFICIENTS
@@ -688,6 +820,28 @@ def measure(
             ["operand_differing_cells"] == 1,
             "reference-depth-arm-bit plant stayed green")
         raise GateError("reference-depth-arm-bit plant fired")
+    p152_prerequisites = (
+        p3 and p148_control_census and p151_depth
+        and reference_depth_arm_substep2["transport_v"]
+        ["operand_differing_cells"] == 68
+        and reference_depth_arm_substep2["continuity_dv"]
+        ["operand_differing_cells"] == 68
+        and reference_depth_arm_substep2["after_ssh"]
+        ["operand_differing_cells"] == 68
+    )
+    p152_operands = all(
+        transport_v_split["operand_rows"][name]["bit_exact"]
+        for name in transport_v_operand_names())
+    p152_transport = (
+        transport_v_split["rows"]["unmasked_transport_v"]["bit_exact"]
+        and transport_v_split["rows"]["production_transport_v"]
+        ["differing_cells"] == 68
+        and transport_v_split["production_mismatch_vmask_zero_cells"] == 68
+    )
+    p152_chain = (
+        transport_v_split["continuity_dv"]["bit_exact"]
+        and transport_v_split["after_ssh"]["bit_exact"]
+    )
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
@@ -699,6 +853,7 @@ def measure(
         "post_association_rows": post_rows,
         "boundary_scope_rows": scope_rows,
         "midpoint_v_operand_split": midpoint_v_split,
+        "transport_v_operand_split": transport_v_split,
         "baseline_first_non_bit": baseline_first,
         "arm_first_non_bit": arm_first,
         "control_first_non_bit": r129.first_nonbit(control_rows),
@@ -752,6 +907,22 @@ def measure(
                 "CONFIRMED" if p151_depth and p151_chain
                 else "REFUTED" if p151_depth
                 else "UNMEASURED_PREREQUISITE_R151-P3"),
+        },
+        "predictions_round152": {
+            "R152-P1": "CONFIRMED" if p152_prerequisites else "REFUTED",
+            "R152-P2": (
+                "CONFIRMED" if p152_operands
+                else "REFUTED" if p152_prerequisites
+                else "UNMEASURED_PREREQUISITE_R152-P1"),
+            "R152-P3": (
+                "CONFIRMED" if p152_operands and p152_transport
+                else "REFUTED" if p152_operands
+                else "UNMEASURED_PREREQUISITE_R152-P2"),
+            "R152-P4": (
+                "CONFIRMED" if p152_transport and p152_chain
+                else "REFUTED" if p152_transport
+                else "UNMEASURED_PREREQUISITE_R152-P3"),
+            "R152-P5": "CONFIRMED",
         },
         "worktree": stamp,
     }
