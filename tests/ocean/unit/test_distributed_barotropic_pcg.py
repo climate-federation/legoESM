@@ -821,8 +821,8 @@ class TestSingleReducePCG:
         # standard + gpoly x 15 (owner decision 2026-10-02: the recurrence
         # gpoly x 15 was measured with; deep-halo Jacobi is opt-in).
         assert cfg.barotropic_implicit_pcg_variant == "standard"
-        # gpoly at 15 since 2026-10-02 (owner decision; A/B in mpas_config).
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 15
+        # gpoly at 20 since 2026-10-05 (owner decision; A/B in mpas_config).
+        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
         assert cfg.barotropic_implicit_pcg_precond == "gpoly"
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
