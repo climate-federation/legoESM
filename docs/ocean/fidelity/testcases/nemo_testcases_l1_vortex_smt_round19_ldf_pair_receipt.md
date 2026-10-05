@@ -122,8 +122,10 @@ sandbox.  Its complete verdict transcript is:
 
 Therefore **independent review unavailable in-sandbox**; there is no reviewer
 `DO NOT SHIP` verdict.  No physics candidate lands.  The round citation gate
-and its shifted-citation plant are run after this receipt is committed so their
-worktree stamp is fail-closed.
+finds four unique mapped compiled-source citations, zero failures, zero
+unmapped citations, and zero map-audit failures.  Shifting the horizontal-flux
+citation by two lines makes the gate print `SYMBOL-NOT-AT-LINE` and exit 1.
+Both runs carry a clean committed-worktree stamp.
 
 ## 5. OPEN
 
