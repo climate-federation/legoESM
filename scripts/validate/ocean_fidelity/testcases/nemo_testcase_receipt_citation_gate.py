@@ -1432,6 +1432,16 @@ CITATION_MAP = {
         ('!                             ! resulting flux at mid-step (not over the full domain)', 1),
         ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
         28],
+    # ORCA2 round 154: the separately materialized V-transport statement and
+    # its later continuity consumer.  These narrow anchors distinguish the
+    # source boundary proved by the private round-154 arm.
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:568-570': [
+        ('DO jj = ntsj-( 2), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)   ! not jpj-row', 2),
+        ('END DO   ;   END DO', 8), 3],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:584-591': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
+        8],
     'barotropic_latlon_cgrid.py:810-842': [
         ('def nemo_literal_continuity_divergence(', 1),
         ('return (du + dv) * (1.0 / grid.area)', 1), 33],
