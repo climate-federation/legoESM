@@ -212,6 +212,8 @@ FILES = {
         _ORCA2_R143EARLY_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R144INITIAL_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R144INITIAL_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -5881,6 +5883,12 @@ CITATION_MAP = {
         ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp", 2),
         19,
     ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
+        ("CASE ( 'U' )", 5),
+        ('END DO   ;   END DO', 5), 45],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:684-721': [
+        ("CASE ( 'V' )", 5),
+        ('END DO   ;   END DO', 6), 38],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-960': [
         ('un_adv(:,:) = un_adv(:,:) / r1_wgt2s', 1),
         ("CALL r95_spg_w2('ssh_aa', pssh(:,:,Kaa))", 1),
