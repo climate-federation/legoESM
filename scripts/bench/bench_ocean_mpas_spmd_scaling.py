@@ -104,9 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
                    help="unset = the backend's bundle (standard on GPU, single_reduce_deep on CPU); "
-                        "single_reduce_deep needs --pcg-precond jacobi and, for the "
-                        "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
-                        "--pcg-variant single_reduce or standard)")
+                        "single_reduce_deep runs with the jacobi preconditioner "
+                        "(30 iterations for the 1e-10 residual; the CPU bundle's "
+                        "values); poly/gpoly need standard or single_reduce")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
                    help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 30 on CPU); "
                         "a PROBE knob -- lowering it changes the solve")
