@@ -134,3 +134,21 @@ def test_snow_sublimation_cap_energy_goes_to_sensible_heat(monkeypatch):
         np.asarray(r.lhflx),
         np.asarray(1.0e-3 / 1800.0 * latent_heat_sublimation(st.T_soil[:, 0])),
         rtol=1e-9)
+
+
+def test_layered_snow_keeps_the_unmet_energy_in_the_column_not_in_sh():
+    """Layered snow books X into the pack+soil column (combined solve + top-soil
+    remainder), so the sensible-heat rule must NOT also apply there, or X is
+    counted twice.  Same dry bare-soil case as above, ``snow_scheme='layered'``."""
+    cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
+                               surface_scheme=SimpleSEBConfig(), snow_scheme="layered")
+    tfl = float(jnp.max(theta_from_psi(psi_dry_floor(cfg.hydraulics), cfg.hydraulics)))
+    st = ml.init_multilayer_land_state(2, cfg, T_init=305.0, theta_init=tfl + 5.0e-3)
+    assert st.snow_T_layers is not None
+    new, r, _c, so = jax.jit(lambda s: ml.step_multilayer_land_with_diagnostics(
+        s, _forcing(2), cfg, 1.0, 1800.0, lat=jnp.full(2, 0.3)))(st)
+    X = np.asarray(so.lhflx - r.lhflx)
+    assert np.all(X > _X_MIN), X                     # non-vacuity
+    np.testing.assert_allclose(np.asarray(r.shflx), np.asarray(so.shflx),
+                               rtol=0, atol=1e-9)
+    assert np.all(np.isfinite(np.asarray(new.T_soil)))
