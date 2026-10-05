@@ -206,11 +206,22 @@ The focused CPU/fp64 suite reported:
 179 passed in 237.89s (0:03:57)
 ```
 
-FINAL_REGISTRY_PLACEHOLDER
+The recipe-derived regression census reran SMT-2, SMT-1, the two base SMT
+cards, all six flat VORTEX cards, LOCK_EXCHANGE and OVERFLOW.  Each of the
+twelve 50-row cellwise comparisons is `PASS`: zero improved cells, zero
+worsened cells, zero row-status changes, zero first-over-bar changes and
+maximum oracle-residual worsening `0.0` ULP.  The JSON comparisons are under
+`round226/inert/compare_*.json`; this is exact invariance, not merely a bar
+classification.
 
 FINAL_BATTERY_PLACEHOLDER
 
-FINAL_CITATION_PLACEHOLDER
+The real receipt citation gate reports 10 citations, zero unmapped citations,
+zero failures and zero audit failures.  The shifted-citation plant moves the
+`ldftra.f90:354-390` span by one line, exits nonzero and reports a source-anchor
+failure.  Because this round edited already-cited Python files, the historical
+default receipt and citation map were re-anchored together by the repository's
+sequence-mapped re-anchor tool; the default-receipt audit is clean.
 
 FINAL_REVIEW_PLACEHOLDER
 
