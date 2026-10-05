@@ -91,7 +91,7 @@ The final focused CPU/fp64 parser, acquisition-control and receipt-citation
 suite reported:
 
 ```text
-34 passed in 3.56s
+34 passed in 3.58s
 ```
 
 The receipt citation gate reports five citations, zero failures, zero
