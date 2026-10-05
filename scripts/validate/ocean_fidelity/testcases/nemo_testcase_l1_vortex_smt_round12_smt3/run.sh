@@ -23,14 +23,15 @@ year_admission=$year_dir/vortex_round224_smt3_vec_100d_admission.json
 [[ -x "$driver" ]] \
   || { printf 'REFUSE: shared VORTEX acquisition driver is missing: %s\n' "$driver" >&2; exit 66; }
 
-do_run=0
+do_run=1
 case "${1:-}" in
   '') ;;
   --run) do_run=1 ;;
-  *) printf 'REFUSE: usage: %s [--run]\n' "$0" >&2; exit 64 ;;
+  --preflight) do_run=0 ;;
+  *) printf 'REFUSE: usage: %s [--run|--preflight]\n' "$0" >&2; exit 64 ;;
 esac
 [[ $# -le 1 ]] \
-  || { printf 'REFUSE: usage: %s [--run]\n' "$0" >&2; exit 64; }
+  || { printf 'REFUSE: usage: %s [--run|--preflight]\n' "$0" >&2; exit 64; }
 
 if [[ "$do_run" -eq 0 ]]; then
   EVIDENCE=$kt_dir "$driver" --variant smt3vec

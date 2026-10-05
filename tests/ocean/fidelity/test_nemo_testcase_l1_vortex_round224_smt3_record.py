@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import struct
 from pathlib import Path
 
@@ -93,3 +95,68 @@ def test_writer_declares_the_extra_groups_only_for_stage_three():
               "vortex_r18_tracer_terms.F90").read_text()
     assert "IF( ll_ldf .AND. kstg == 3 ) ingroups = 17" in source
     assert "jpi, jpj, jpk, ingroups" in source
+
+
+def _run_wrapper_with_stub_driver(tmp_path: Path, *args: str):
+    repo = tmp_path / "repo"
+    wrapper_dir = (repo / "scripts/validate/ocean_fidelity/testcases/"
+                   "nemo_testcase_l1_vortex_smt_round12_smt3")
+    driver_dir = (repo / "scripts/validate/ocean_fidelity/testcases/"
+                  "nemo_testcase_l1_vortex")
+    wrapper_dir.mkdir(parents=True)
+    driver_dir.mkdir(parents=True)
+    evidence = tmp_path / "evidence"
+    source = (ROOT / "scripts/validate/ocean_fidelity/testcases/"
+              "nemo_testcase_l1_vortex_smt_round12_smt3/run.sh").read_text()
+    source = source.replace(
+        "root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/"
+        "oracle_vortex_smt3",
+        f"root={evidence}",
+    )
+    wrapper = wrapper_dir / "run.sh"
+    wrapper.write_text(source)
+    wrapper.chmod(0o755)
+    driver = driver_dir / "run.sh"
+    driver.write_text(
+        """#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "$*" >> "$CALL_LOG"
+if [[ " $* " == *" --run "* ]]; then
+  mkdir -p "$EVIDENCE"
+  case "$*" in
+    *smt3vec100d*)
+      printf '{"status": "ADMITTED"}\\n' > "$EVIDENCE/vortex_round224_smt3_vec_100d_admission.json" ;;
+    *smt3vec*)
+      printf '{"status": "ADMITTED"}\\n' > "$EVIDENCE/vortex_round224_smt3_vec_admission.json"
+      : > "$EVIDENCE/binaries.sha256" ;;
+  esac
+fi
+"""
+    )
+    driver.chmod(0o755)
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    call_log = tmp_path / "calls.log"
+    env = os.environ.copy()
+    env["CALL_LOG"] = str(call_log)
+    result = subprocess.run(
+        [wrapper, *args], check=False, text=True, capture_output=True, env=env,
+    )
+    return result, call_log.read_text().splitlines(), evidence
+
+
+def test_operator_default_executes_both_acquisition_arms(tmp_path):
+    result, calls, evidence = _run_wrapper_with_stub_driver(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert calls == ["--variant smt3vec --run",
+                     "--variant smt3vec100d --run"]
+    assert "ROUND224_SMT3_RECORD_READY" in result.stdout
+    assert (evidence / "kt1_10/binaries.sha256").exists()
+
+
+def test_explicit_preflight_keeps_both_arms_dry(tmp_path):
+    result, calls, evidence = _run_wrapper_with_stub_driver(
+        tmp_path, "--preflight")
+    assert result.returncode == 0, result.stderr
+    assert calls == ["--variant smt3vec", "--variant smt3vec100d"]
+    assert "ROUND224_SMT3_PREFLIGHT_PASS" in result.stdout
+    assert not evidence.exists()
