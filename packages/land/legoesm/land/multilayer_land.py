@@ -518,6 +518,14 @@ def _step_multilayer_land_impl(
             "canopy_snow_masking is implemented only for the two-leaf canopy with "
             "snow_albedo_feedback on, a latitude field, canopy land_params and no "
             "elevation bands; anywhere else it would be silently inert")
+    if config.canopy_snow_masking and config.snow_scheme == "layered":
+        # Majority review decision 2026-10-05 (codex + Claude; GLM dissent):
+        # the masking reads the start-of-step bulk SWE and buries with a fixed
+        # bulk density, while the layered pack carries its own SWE, density and
+        # cover; until the masking reads the pack, refuse the combination.
+        raise ValueError(
+            "canopy_snow_masking is not supported with snow_scheme='layered' yet: "
+            "the masking's snow cover and burial depth would not match the pack's")
     if bands is not None:
         if isinstance(config.surface_scheme,
                       (TwoLeafCanopyConfig, CLMMLCanopyConfig)):

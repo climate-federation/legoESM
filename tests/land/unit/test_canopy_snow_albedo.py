@@ -535,3 +535,16 @@ def test_burial_uses_physical_snow_cover_not_the_albedo_scale():
     f = _canopy_masked_band(snowy, lp, None, swe, cfg, 0, _forcing())
     out = np.asarray(f(jnp.full(NCOL, 0.1)))
     np.testing.assert_array_equal(out, np.full(NCOL, 0.7))
+
+
+
+def test_switch_with_layered_snow_raises():
+    cfg = MultiLayerLandConfig(snow_albedo_feedback=True,
+                               surface_scheme=TwoLeafCanopyConfig(),
+                               canopy_snow_masking=True, snow_scheme="layered")
+    state = init_multilayer_land_state(NCOL, cfg._replace(snow_scheme="bulk"), T_init=265.0)
+    lp = bare_canopy_params(NCOL, canopy_structure=True)
+    with pytest.raises(ValueError, match="layered"):
+        step_multilayer_land_with_diagnostics(
+            state, _forcing(), cfg, 1.0, 600.0, lat=jnp.full(NCOL, 1.1),
+            land_params=lp)

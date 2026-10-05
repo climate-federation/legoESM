@@ -2273,6 +2273,10 @@ class ExperimentConfig(NamedTuple):
                 "land_canopy_snow_masking requires use_multilayer_land, "
                 "snow_albedo_feedback and land_surface_scheme='two_leaf': it is "
                 "implemented only there and would be silently inert elsewhere.")
+        if self.land_canopy_snow_masking and self.land_snow_scheme == "layered":
+            errors.append(
+                "land_canopy_snow_masking is not supported with land_snow_scheme="
+                "'layered' yet (the masking would not read the pack's snow).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
