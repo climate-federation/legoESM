@@ -17,10 +17,9 @@ compiled live-face operand repair: `391c5afb0`.  Evidence:
 ## 1. Compiled order and frozen controls
 
 NEMO forms A11/A22 from the reference face thickness and Kmm free-surface
-ratio at
-`VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:243-244`,
-then the closed-bottom mask factors and A13/A23 at `:246-252`, and then the
-parenthesised U/V horizontal fluxes at
+ratio, then the closed-bottom mask factors and A13/A23, in
+`VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:243-259`.
+The parenthesised U/V horizontal fluxes occupy
 `VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:254-259`.
 The operator finally adds the flux divergence with its live Kmm T thickness at
 `:306-310` and `:327-331`.
