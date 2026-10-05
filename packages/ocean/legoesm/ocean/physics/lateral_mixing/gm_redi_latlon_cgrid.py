@@ -24,6 +24,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
@@ -2456,9 +2457,11 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
             f"got {a33_evaluation!r}")
-    if horizontal_flux_evaluation not in ("vectorized", "nemo_literal"):
+    if horizontal_flux_evaluation not in (
+            "vectorized", "nemo_pairwise", "nemo_literal"):
         raise ValueError(
-            "horizontal_flux_evaluation must be 'vectorized' or "
+            "horizontal_flux_evaluation must be 'vectorized', "
+            "'nemo_pairwise' or "
             f"'nemo_literal', got {horizontal_flux_evaluation!r}")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
@@ -2586,7 +2589,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     # 4-pt vertical-gradient average around the u-face / v-face
     zdkt_kp1 = jnp.roll(zdkt, -1, ax_z)
-    if horizontal_flux_evaluation == "nemo_literal":
+    if horizontal_flux_evaluation in ("nemo_pairwise", "nemo_literal"):
         # traldf_iso.f90:254-259: NEMO requires the two explicit pairs for
         # halo/fold compatibility.  Keep this private selector until the
         # production-step discriminator closes the complete statement.
@@ -2600,8 +2603,21 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
                   + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
 
-    zfu = aht * (zA11 * zdit + zA13 * avg4_u)
-    zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
+    if horizontal_flux_evaluation == "nemo_literal":
+        # Materialize every source operation in traldf_iso.f90:254-259.  Bare
+        # parentheses are reassociated by the production XLA closure; the
+        # shared identity helper retains each gfortran rounding boundary.
+        diag_u = nemo_source_round(zA11 * zdit)
+        cross_u = nemo_source_round(zA13 * nemo_source_round(avg4_u))
+        diag_v = nemo_source_round(zA22 * zdjt)
+        cross_v = nemo_source_round(zA23 * nemo_source_round(avg4_v))
+        zfu = nemo_source_round(
+            aht * nemo_source_round(diag_u + cross_u))
+        zfv = nemo_source_round(
+            aht_v * nemo_source_round(diag_v + cross_v))
+    else:
+        zfu = aht * (zA11 * zdit + zA13 * avg4_u)
+        zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
 
     # ================= VERTICAL flux zfw at w-level jk+1 (A31 + A32) ========
     # Shared a33 kappa sums (#1226): faces (k,k+1) here = the "above"
