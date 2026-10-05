@@ -34,9 +34,9 @@ def _bounds(c):
                            [c[-1] + (c[-1] - mid[-1])]])
 
 
-def era5_on_model(era5_file, lat, lon):
+def era5_on_model(era5_file, lat, lon, var="tas"):
     ds = xr.open_dataset(era5_file)
-    t = ds["tas"].squeeze(drop=True)
+    t = ds[var].squeeze(drop=True)
     la = t[[d for d in t.dims if "lat" in d][0]].values
     lo = t[[d for d in t.dims if "lon" in d][0]].values % 360.0
     v = t.values
