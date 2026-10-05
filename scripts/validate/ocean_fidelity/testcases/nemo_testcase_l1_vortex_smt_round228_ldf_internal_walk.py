@@ -109,6 +109,7 @@ def run(root: Path, *, plant: str | None = None,
         divisor_arm: bool = False,
         same_stage_set: bool = False,
         include_live_faces: bool = False,
+        pairwise_horizontal_flux: bool = False,
         allow_dirty: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
@@ -426,7 +427,8 @@ def run(root: Path, *, plant: str | None = None,
             row for row in rows if row["name"] == "iso.rhs_increment")
 
         def run_same_stage_arm(name: str, *, use_divisor: bool,
-                               use_faces: bool) -> dict:
+                               use_faces: bool,
+                               pairwise_flux: bool = False) -> dict:
             divisor_input = np.asarray(nemo_thickness).copy()
             face_u = recorded_face_u.copy()
             face_v = recorded_face_v.copy()
@@ -471,6 +473,8 @@ def run(root: Path, *, plant: str | None = None,
             if use_faces:
                 operands["face_thickness"] = (
                     jnp.asarray(face_u), jnp.asarray(face_v))
+            if pairwise_flux:
+                operands["horizontal_flux_evaluation"] = "nemo_literal"
             hook = _NEMOWSRK3TestHooks(
                 stage_barotropic_output_override=external,
                 tracer_ldf_diagnostics=operands)
@@ -511,6 +515,7 @@ def run(root: Path, *, plant: str | None = None,
                 "execution_regime": "production_step_jit",
                 "uses_live_divisor": use_divisor,
                 "uses_live_face_thickness": use_faces,
+                "uses_pairwise_horizontal_flux": pairwise_flux,
                 "source_rows": source_rows,
                 "unchanged_rows": unchanged_rows,
                 "rhs_row": rhs_row,
@@ -531,10 +536,16 @@ def run(root: Path, *, plant: str | None = None,
                 or pair["fraction_of_baseline_rhs_max_removed"] < 0.9):
             triple = run_same_stage_arm(
                 "arm.triple", use_divisor=True, use_faces=True)
+        pairwise = None
+        if pairwise_horizontal_flux:
+            pairwise = run_same_stage_arm(
+                "arm.pairwise_flux", use_divisor=True, use_faces=True,
+                pairwise_flux=True)
         same_stage_arms = {
             "closed_bottom_wmask_control": mask_only,
             "pair": pair,
             "triple": triple,
+            "pairwise_flux": pairwise,
         }
     oracle_fu = np.asarray(iso["fu"])[..., :nlev]
     oracle_fv = np.asarray(iso["fv"])[..., :nlev]
@@ -637,17 +648,21 @@ def main(argv=None) -> int:
     parser.add_argument("--divisor-arm", action="store_true")
     parser.add_argument("--same-stage-set", action="store_true")
     parser.add_argument("--include-live-faces", action="store_true")
+    parser.add_argument("--pairwise-horizontal-flux", action="store_true")
     parser.add_argument("--clean-report", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
         require(not args.include_live_faces or args.same_stage_set,
                 "--include-live-faces requires --same-stage-set")
+        require(not args.pairwise_horizontal_flux or args.same_stage_set,
+                "--pairwise-horizontal-flux requires --same-stage-set")
         report = run(args.oracle_dir, plant=args.plant,
                      corrected_factors=args.corrected_factors,
                      divisor_arm=args.divisor_arm,
                      same_stage_set=args.same_stage_set,
                      include_live_faces=args.include_live_faces,
+                     pairwise_horizontal_flux=args.pairwise_horizontal_flux,
                      allow_dirty=args.allow_dirty)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
@@ -687,7 +702,8 @@ def main(argv=None) -> int:
         print("live-divisor fraction removed:",
               f"{arm['fraction_of_baseline_rhs_max_removed']:.16e}")
     if report["same_stage_arms"] is not None:
-        for arm_name in ("closed_bottom_wmask_control", "pair", "triple"):
+        for arm_name in ("closed_bottom_wmask_control", "pair", "triple",
+                         "pairwise_flux"):
             arm = report["same_stage_arms"][arm_name]
             if arm is None:
                 continue

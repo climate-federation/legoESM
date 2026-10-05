@@ -2361,6 +2361,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_operand_diagnostics: bool = False,
     divisor_thickness: jnp.ndarray | None = None,
     closed_bottom_wmask: bool = False,
+    horizontal_flux_evaluation: str = "vectorized",
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2455,6 +2456,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
             f"got {a33_evaluation!r}")
+    if horizontal_flux_evaluation not in ("vectorized", "nemo_literal"):
+        raise ValueError(
+            "horizontal_flux_evaluation must be 'vectorized' or "
+            f"'nemo_literal', got {horizontal_flux_evaluation!r}")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2581,10 +2586,19 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     # 4-pt vertical-gradient average around the u-face / v-face
     zdkt_kp1 = jnp.roll(zdkt, -1, ax_z)
-    avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
-    avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
+    if horizontal_flux_evaluation == "nemo_literal":
+        # traldf_iso.f90:254-259: NEMO requires the two explicit pairs for
+        # halo/fold compatibility.  Keep this private selector until the
+        # production-step discriminator closes the complete statement.
+        avg4_u = ((jnp.roll(zdkt, -1, ax_x) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_x) + zdkt))
+        avg4_v = ((jnp.roll(zdkt, -1, ax_y) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_y) + zdkt))
+    else:
+        avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
+        avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
 
     zfu = aht * (zA11 * zdit + zA13 * avg4_u)
     zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
@@ -4069,6 +4083,7 @@ def gm_redi_tracer_tendency_latlon(
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     redi_divisor_thickness_override: jnp.ndarray | None = None,
     redi_closed_bottom_wmask_override: bool = False,
+    redi_horizontal_flux_evaluation_override: str | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4544,7 +4559,11 @@ def gm_redi_tracer_tendency_latlon(
                 return_diagnostics=return_redi_diagnostics,
                 return_operand_diagnostics=return_redi_diagnostics,
                 divisor_thickness=redi_divisor_thickness_override,
-                closed_bottom_wmask=redi_closed_bottom_wmask_override)
+                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"))
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
@@ -4564,7 +4583,11 @@ def gm_redi_tracer_tendency_latlon(
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 divisor_thickness=redi_divisor_thickness_override,
-                closed_bottom_wmask=redi_closed_bottom_wmask_override)
+                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"))
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             if return_redi_diagnostics:

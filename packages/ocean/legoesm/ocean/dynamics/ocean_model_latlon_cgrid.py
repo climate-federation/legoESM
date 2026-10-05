@@ -9140,6 +9140,7 @@ class LatLonCGridOceanModel:
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
                 redi_divisor_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("divisor_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask", False) if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else False),
+                redi_horizontal_flux_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("horizontal_flux_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
             )
