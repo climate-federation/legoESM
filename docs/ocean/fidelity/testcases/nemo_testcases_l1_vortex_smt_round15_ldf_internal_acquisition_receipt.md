@@ -25,7 +25,7 @@ The resolved tracer-diffusion selector calls `traldf_iso_lap` in
 `VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf.f90:105-110`.
 Inside that program, the slope walk forms and bounds the U/V gradients, applies
 the mixed-layer and Shapiro operations, and produces the W slopes in
-`VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90:185-338`.
+`VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfslp.f90:186-338`.
 The LDF operator computes A33/MSC in
 `VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:780-830`, then
 the tracer gradients, tensor factors, horizontal and vertical fluxes, and the
