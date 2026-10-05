@@ -1428,6 +1428,13 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:627-668': [
         ('def _nemo_external_mode_boundary_association(', 1),
         ('inverse_u_post, inverse_v_post, eta,', 1), 42],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
+        ('!                             ! resulting flux at mid-step (not over the full domain)', 1),
+        ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
+        28],
+    'barotropic_latlon_cgrid.py:773-803': [
+        ('def nemo_literal_continuity_divergence(', 1),
+        ('return (du + dv) * (1.0 / grid.area)', 1), 31],
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
