@@ -58,8 +58,8 @@ def era5_on_model(era5_file, lat, lon, var="tas"):
     return (s / n).reshape(lat.size, lon.size)
 
 
-def load_run(d):
-    t = xr.open_dataset(_one(f"{d}/Amon/tas_*.nc"))["tas"].squeeze(drop=True)
+def load_run(d, var="tas"):
+    t = xr.open_dataset(_one(f"{d}/Amon/{var}_*.nc"))[var].squeeze(drop=True)
     f = xr.open_dataset(_one(f"{d}/fx/sftlf_*.nc"))["sftlf"].squeeze(drop=True)
     return t["lat"].values, t["lon"].values, t.values, f.values
 
@@ -74,9 +74,9 @@ def metrics(m, r, wgt, mask):
     return bias, rmse, 1.0 - np.average(b ** 2, weights=w) / sst
 
 
-def main(era5_file, runs):
-    lat, lon, m0, lf = load_run(runs[0])
-    ref = era5_on_model(era5_file, lat, lon)
+def main(era5_file, runs, var="tas", era5_var="tas"):
+    lat, lon, m0, lf = load_run(runs[0], var)
+    ref = era5_on_model(era5_file, lat, lon, era5_var)
     wgt = np.cos(np.deg2rad(lat))[:, None] * np.ones((1, lon.size))
     LA = lat[:, None] * np.ones((1, lon.size))
     land = lf >= 50.0
@@ -87,12 +87,12 @@ def main(era5_file, runs):
     first = None
     print(f"ERA5 window: {era5_file}")
     for d in runs:
-        la2, lo2, m, lf2 = load_run(d)
+        la2, lo2, m, lf2 = load_run(d, var)
         if not (np.array_equal(la2, lat) and np.array_equal(lo2, lon)
                 and np.array_equal(lf2, lf)):
             raise SystemExit(f"{d}: grid or land fraction differs from {runs[0]}")
         if not np.isfinite(m).all():
-            raise SystemExit(f"{d}: non-finite model tas")
+            raise SystemExit(f"{d}: non-finite model {var}")
         print(f"\n{d}")
         print(f"  {'region':16s} {'bias K':>8s} {'RMSE K':>8s} {'R2':>6s}"
               + ("  d(bias) d(RMSE) vs first" if first is not None else ""))
@@ -108,6 +108,14 @@ def main(era5_file, runs):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
+    # optional: --var <cmor name> --era5-var <name in the ERA5 file> (default tas/tas)
+    a = sys.argv[1:]
+    kw = {}
+    for flag, key in (("--var", "var"), ("--era5-var", "era5_var")):
+        if flag in a:
+            i = a.index(flag)
+            kw[key] = a[i + 1]
+            del a[i:i + 2]
+    if len(a) < 2:
         raise SystemExit(__doc__)
-    main(sys.argv[1], sys.argv[2:])
+    main(a[0], a[1:], **kw)
