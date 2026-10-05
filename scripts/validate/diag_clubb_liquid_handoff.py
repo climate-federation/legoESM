@@ -39,9 +39,9 @@ def _load_run_amip():
     return mod
 
 
-def closure_liquid(clubb_cfg, q_c):
+def closure_liquid(turb_cfg, q_c):
     """Host liquid to hand the closure: ``q_c`` with the partition on, else None."""
-    if not clubb_cfg.liquid_partition:
+    if not turb_cfg.liquid_partition:   # a TurbulenceConfig selector
         return None
     if q_c is None:
         raise SystemExit("deck turns the CLUBB liquid partition on but the "
@@ -169,7 +169,7 @@ def main():
         _T = T; _q = q_v; _m = moments; _rho = rho
         # Call the closure the way the deck runs it: with the partition on,
         # the host liquid seeds rt and each sub-step replaces it.
-        _ql = closure_liquid(clubb_cfg, q_c)
+        _ql = closure_liquid(turb, q_c)
         from legoesm.atmosphere.physics._shared import virtual_temperature
         print(f"[{a.label}] closure call: {_ns} sub-step(s) of {_dts:.1f} s "
               f"(the run's physics step is {dt_phys:.1f} s)")

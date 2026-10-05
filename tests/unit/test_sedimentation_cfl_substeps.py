@@ -639,13 +639,19 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # The sedimentation trio is no longer LAST: the in-run cloud-water budget
     # appended ``publish_qc_budget`` after it, which is the correct end-append,
     # so the trio is pinned where it now sits rather than at the tail.
-    assert MorrisonConfig._fields[-5:-2] == (
+    assert MorrisonConfig._fields[-9:-6] == (
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
-    assert MorrisonConfig._fields[-2:] == ("publish_qc_budget", "liquid_from_closure")
+    assert MorrisonConfig._fields[-6] == "publish_qc_budget"
+    # main end-appended its four warm-rain fields after it; the branch then
+    # moved liquid_from_closure from mid-tuple to the very end.
+    assert MorrisonConfig._fields[-5:] == (
+        "autocon_fact", "accre_enhan_fact", "kk2000_cam6_relvar",
+        "warm_rain_incloud", "liquid_from_closure")
     # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
     # ExperimentConfig then end-appended the two land canopy smoothing widths
-    # (2026-09-30), so its block sits two further from the tail.
-    for cls, tail in ((ExperimentConfig, 3), (AMIPExperimentConfig, 0)):
+    # (2026-09-30); main appended Morrison warm-rain + ZM/CLUBB tunables
+    # (ExperimentConfig) and zm_land_fraction (AMIP) after the block.
+    for cls, tail in ((ExperimentConfig, 21), (AMIPExperimentConfig, 1)):
         f = cls._fields[:len(cls._fields) - tail]
         assert f[-5:-1] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
@@ -657,9 +663,9 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
-    assert MorrisonConfig._fields[-6] == "homogeneous_ice_supersaturation"
-    assert ExperimentConfig._fields[-9] == "bechtold_rhebc_land_deep"
-    assert AMIPExperimentConfig._fields[-6] == "physics_parameterization_seed"
+    assert MorrisonConfig._fields[-10] == "homogeneous_ice_supersaturation"
+    assert ExperimentConfig._fields[-27] == "bechtold_rhebc_land_deep"
+    assert AMIPExperimentConfig._fields[-7] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
     # tail) re-binds every stored positional value, so pin the whole tuple
     # (recompute deliberately when a field is added AT THE END)
@@ -671,7 +677,9 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # 117 -> 118: liquid_from_closure END-appended (main had inserted
             # it mid-tuple; moved so the first 117 fields hash to the
             # pre-insertion 22176757db31d564 again).
-            (MorrisonConfig, 118, "28f2f62643d45e23"),
+            # 118 -> 122 at the 2026-10-05 merge of main: main END-appended
+            # four warm-rain fields; liquid_from_closure stays last.
+            (MorrisonConfig, 122, "90ebac6169c628f6"),
             # 283 -> 288 at the 2026-09-23 merge of main: main inserted five
             # cloud_cap_floor_* fields MID-tuple (idx ~65-69), which is exactly
             # what this guard is for.  Recomputed, not relaxed -- the audit
@@ -684,8 +692,11 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # 291 fields still hash to c023f86f71966a44.
             # 293 -> 294: land_canopy_most_n_iters END-appended (prefix still
             # b380eb4b2adef6b3).
-            (ExperimentConfig, 294, "826ab14331fb1c62"),
-            (AMIPExperimentConfig, 126, "4a3eca6eda2a76ed")):
+            # 294 -> 309 / AMIP re-hashed at the 2026-10-05 merge: main appended
+            # Morrison warm-rain + ZM/CLUBB tunables (ExperimentConfig) and
+            # zm_land_fraction (AMIP); the canopy trio stays last.
+            (ExperimentConfig, 309, "84c24671eba721a2"),
+            (AMIPExperimentConfig, 126, "8924f13ccbc6880f")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
             == digest, f"{cls.__name__} field ORDER changed (positional ABI)"
