@@ -93,9 +93,18 @@ choices: empty.
 3. A production landing still requires the complete shared GYRE, DINO, tank,
    generic-card, citation, and push gates. The default path remains unchanged.
 
-## Verification pending at receipt commit
+## Verification
 
-Focused tests, the canonical and round citation gates (including a shifted
-citation plant), and the one required full fidelity battery run after this
-measurement receipt is committed. Their exact outcomes are appended rather
-than predicted.
+Focused unit, gate, and canonical citation tests pass **47/47**. The canonical
+citation gate and this receipt's gate both pass with zero unmapped citations,
+zero failures, and zero failing map entries. Shifting the receipt's compiled
+source span by two lines makes the gate fail as `SYMBOL-NOT-AT-LINE`.
+
+The one required `tests/ocean/fidelity -n 12` invocation is **INCOMPLETE**, not
+PASS. It collected 2,606 items and reached 99% with 2,584 observed passes,
+7 skips, and exactly the four registered pre-existing failures: the SI3
+scalar-math provenance gate, GYRE round-129 spread-record stamp, round-35
+escape scope, and worktree-stamp scope. The log then stopped advancing with
+11 items unaccounted and no terminal summary; the stale controller was
+interrupted. No round-153 test failed, and the corrected process census found
+no remaining pytest process.
