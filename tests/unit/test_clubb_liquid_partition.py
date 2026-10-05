@@ -959,7 +959,7 @@ def test_host_liquid_above_the_cloud_top_cutoff_is_left_alone():
     col["q_c"] = jnp.asarray(q_c)
     dt = 300.0
     cfg = _ON._replace(trop_cloud_top_press=5000.0)
-    out, _ = _run(cfg, col, dt=dt)
+    out, _ = _run(cfg, col, dt=dt, on=True)   # a _replace()d _ON is not in _ON_IDS
     kept = float(jnp.max(jnp.abs(out.dq_c_dt[:, 0]))) * dt
     assert kept < 1.0e-3 * 1.0e-6
     out_nocut, _ = _run(_ON, col, dt=dt)
@@ -975,7 +975,7 @@ def test_retained_liquid_above_the_cutoff_never_drives_vapour_negative():
     q_c[:, 0] = 1.0e-4                       # rt(top) >> rt(below): mixing dries it
     col["q_c"] = jnp.asarray(q_c)
     dt = 300.0
-    out, _ = _run(_ON._replace(trop_cloud_top_press=5000.0), col, dt=dt)
+    out, _ = _run(_ON._replace(trop_cloud_top_press=5000.0), col, dt=dt, on=True)
     q_v_new = col["q_v"] + dt * out.dq_v_dt
     q_c_new = col["q_c"] + dt * out.dq_c_dt
     assert float(jnp.min(q_v_new[:, 0])) >= -1e-18
