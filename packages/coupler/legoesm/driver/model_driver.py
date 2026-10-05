@@ -11082,6 +11082,9 @@ class ModelDriver:
         _land_lhflx_cells = None       # (nCells,) land's own latent flux
         _land_taumag_cells = None      # (nCells,) land's last valid |stress| [Pa]
         _land_taumag_valid = None      # (nCells,) a land step has succeeded
+        _land_taumag_fresh = None      # (nCells,) value from the LAST land step
+        _land_stress_landcell = None   # (nCells,) f_land > 0
+        _land_stress_logged = (0, 0)   # (seed, reused) column-steps logged
         _land_z0m_cells = None         # (nCells,) static land roughness [m]
         _land_d_cells = None           # (nCells,) static displacement [m]
         from legoesm.driver.config import resolve_mpas_land_stress_from_land
@@ -11859,6 +11862,15 @@ class ModelDriver:
                     )
                     _land_taumag_cells = jnp.zeros_like(_q_air0)
                     _land_taumag_valid = jnp.zeros(_q_air0.shape, dtype=bool)
+                    _land_taumag_fresh = _land_taumag_valid
+                    _land_stress_landcell = (
+                        jnp.asarray(_f_land_cols).reshape(-1) > 0.0)
+                    # Diagnostics (cumulative over this run, on device):
+                    # land column-steps whose drag was the neutral seed (no
+                    # valid land solve yet) and that reused an older valid
+                    # land drag (the latest solve held or was non-finite).
+                    self._land_stress_seed_total = jnp.zeros((), jnp.int32)
+                    self._land_stress_reused_total = jnp.zeros((), jnp.int32)
                     _land_z0m_cells, _land_d_cells = (
                         jnp.asarray(a, dtype=_q_air0.dtype).reshape(-1)
                         for a in static_land_roughness(
@@ -12159,6 +12171,14 @@ class ModelDriver:
                     _forcing["taumag_land_valid"] = _land_taumag_valid
                     _forcing["z0m_land"] = _land_z0m_cells
                     _forcing["d_land"] = _land_d_cells
+                    self._land_stress_seed_total = (
+                        self._land_stress_seed_total + jnp.sum(
+                            _land_stress_landcell & ~_land_taumag_valid,
+                            dtype=jnp.int32))
+                    self._land_stress_reused_total = (
+                        self._land_stress_reused_total + jnp.sum(
+                            _land_stress_landcell & _land_taumag_valid
+                            & ~_land_taumag_fresh, dtype=jnp.int32))
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -12341,8 +12361,8 @@ class ModelDriver:
                         if _land_stress_on:
                             # Last valid land stress per column: a held or
                             # non-finite solve keeps the previous value.
-                            (_land_taumag_cells,
-                             _land_taumag_valid) = hold_last_valid_land_stress(
+                            (_land_taumag_cells, _land_taumag_valid,
+                             _land_taumag_fresh) = hold_last_valid_land_stress(
                                 _land_taumag_cells, _land_taumag_valid,
                                 _land_taumag_step, _land_held_step)
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
@@ -12350,6 +12370,21 @@ class ModelDriver:
                         # live (or when the scheme solves none).
                         _land_beta_cells = _land_beta_fn(self._land_ml_state)
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                    if _land_taumag_cells is not None:
+                        _s_tot = int(self._land_stress_seed_total)
+                        _r_tot = int(self._land_stress_reused_total)
+                        _ds = _s_tot - _land_stress_logged[0]
+                        _dr = _r_tot - _land_stress_logged[1]
+                        _land_stress_logged = (_s_tot, _r_tot)
+                        if _ds or _dr:
+                            (logger.warning if _dr else logger.info)(
+                                "land drag: %d land column-steps on the "
+                                "neutral seed of the static roughness (no "
+                                "valid land solve yet: start or restart) and "
+                                "%d reusing the last valid land drag (latest "
+                                "solve held or non-finite) up to step %d; "
+                                "run totals %d / %d", _ds, _dr, step,
+                                _s_tot, _r_tot)
                     _window_cols = int(_land_n_held_accum)
                     _window_land = int(_land_n_held_land_accum)
                     _window_steps = int(_land_n_held_steps_accum)

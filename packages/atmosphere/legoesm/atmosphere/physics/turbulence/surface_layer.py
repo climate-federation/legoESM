@@ -313,9 +313,11 @@ def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
 def hold_last_valid_land_stress(prev_mag, prev_valid, new_mag, held):
     """Per-column land stress magnitude carried between land steps: a column
     whose new solve is held (``held`` > 0.5) or non-finite keeps its previous
-    value; ``valid`` becomes True once any solve has succeeded."""
+    value; ``valid`` becomes True once any solve has succeeded.  Returns
+    ``(mag, valid, fresh)``; ``fresh`` marks the columns whose value came from
+    this solve (the rest reuse an older one, or are still on the seed)."""
     ok = (held < 0.5) & jnp.isfinite(new_mag)
-    return jnp.where(ok, new_mag, prev_mag), prev_valid | ok
+    return jnp.where(ok, new_mag, prev_mag), prev_valid | ok, ok
 
 
 def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,

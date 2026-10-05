@@ -280,3 +280,75 @@ def test_land_step_rebuilds_params_every_call(monkeypatch, tmp_path):
     for a, y in seen:
         assert abs(y - (2001.0 + a / 365.0)) < 1e-6, (a, y)
     assert len(traced) <= 2, len(traced)   # step + bootstrap variants only
+
+
+_LS_KW = dict(turbulence="louis", beta_soil=True,
+              land_surface_scheme="simple_seb", mpas_land_params_refresh=False)
+ONE_STEP_DAYS = 301.0 / 86400.0
+
+
+def _n_land_cells(d):
+    return int(np.sum(np.asarray(d._f_land).reshape(-1) > 0.0))
+
+
+def test_land_stress_first_step_is_the_seed(monkeypatch, tmp_path):
+    """The land model steps AFTER the atmosphere, so the first host step's land
+    drag can only be the neutral seed of the static roughness: it must reach
+    the winds (differ from the bulk-stress run) and be counted as one seeded
+    step for every land column, none reused."""
+    _patch_land_loaders(monkeypatch)
+    u = {}
+    for name, on in (("off", False), ("on", True)):
+        d = _build_driver(str(tmp_path / name), ONE_STEP_DAYS, **_LS_KW,
+                          mpas_land_stress_from_land=on)
+        assert d.run() == "COMPLETED"
+        u[name] = np.asarray(d.state.u.data)
+    assert np.max(np.abs(u["on"] - u["off"])) > 0.0
+    assert int(d._land_stress_seed_total) == _n_land_cells(d)
+    assert int(d._land_stress_reused_total) == 0
+
+
+def test_land_stress_restart_reseeds_once(monkeypatch, tmp_path):
+    """After a restart the land drag is not in the checkpoint: the first host
+    step uses the seed (one seeded step per land column), then the land's own
+    solve; nothing is reused."""
+    _patch_land_loaders(monkeypatch)
+    dA = _build_driver(str(tmp_path / "a"), TWO_STEPS_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    assert dA.run() == "COMPLETED"
+    assert int(dA._land_stress_seed_total) == _n_land_cells(dA)
+    ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
+                                         "checkpoint_day_*.npz")))[-1]
+    dB = _build_driver(str(tmp_path / "b"), FOUR_STEPS_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    step, day = dB.load_checkpoint(ckpt)
+    assert step > 0
+    assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    assert int(dB._land_stress_seed_total) == _n_land_cells(dB)
+    assert int(dB._land_stress_reused_total) == 0
+
+
+def test_land_stress_held_column_reuses_its_last_valid_drag(monkeypatch,
+                                                            tmp_path):
+    """A column the land step holds from its second call on keeps the drag of
+    its first solve: one land column, reused on host steps 2 and 3."""
+    import legoesm.land.multilayer_land as ml
+    _patch_land_loaders(monkeypatch)
+    d = _build_driver(str(tmp_path / "h"), FOUR_STEPS_DAYS, **_LS_KW,
+                      mpas_land_stress_from_land=True)
+    j = int(np.flatnonzero(np.asarray(d._f_land).reshape(-1) > 0.0)[0])
+    t0 = float(np.asarray(d._land_ml_state.T_soil)[j, 0])
+    orig = ml.step_multilayer_land_with_diagnostics
+
+    def held_after_first(state, *a, **k):
+        new_state, resp, carbon, sfc = orig(state, *a, **k)
+        # The first (packed) land column is held once its soil has moved
+        # off the initial value, i.e. on every call after the first.
+        held = jnp.zeros(resp.tau_x.shape, bool).at[0].set(
+            state.T_soil[0, 0] != t0)
+        return new_state, resp, carbon, sfc._replace(held=held)
+    monkeypatch.setattr(ml, "step_multilayer_land_with_diagnostics",
+                        held_after_first)
+    assert d.run() == "COMPLETED"
+    assert int(d._land_stress_seed_total) == _n_land_cells(d)
+    assert int(d._land_stress_reused_total) == 2
