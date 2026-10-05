@@ -115,6 +115,30 @@ def validate_post_registry(registry) -> None:
             "seven-array post-association registry reordered")
 
 
+def run_known_answer_plant(plant: str) -> None:
+    """Exercise one non-degenerate refusal before the expensive JIT run."""
+
+    if plant == "observer-bit":
+        reference = np.array([0.25], dtype=np.float64)
+        candidate = np.nextafter(reference, np.float64(np.inf))
+        require(not exact_row(candidate, reference)["bit_exact"],
+                "observer-bit plant stayed green")
+        raise GateError("observer-bit plant fired")
+    if plant == "post-bit":
+        reference = np.array([1.0], dtype=np.float64)
+        candidate = np.nextafter(reference, np.float64(np.inf))
+        require(exact_row(candidate, reference)["differing_cells"] == 1,
+                "post-bit plant stayed green")
+        raise GateError("post-bit plant fired")
+    if plant == "scope-bit":
+        pre = np.zeros((3, 4), dtype=np.float64)
+        post = pre.copy()
+        post[1, 2] = 1.0
+        require(boundary_scope(pre, post, "u")["outside_allowed_cells"] == 1,
+                "scope-bit plant stayed green")
+        raise GateError("scope-bit plant fired")
+
+
 def _state_arrays(state) -> dict[str, np.ndarray]:
     arrays = {}
     for name in STATE_FIELDS:
@@ -178,6 +202,7 @@ def measure(
     if plant == "registry":
         post_registry[0], post_registry[1] = post_registry[1], post_registry[0]
     validate_post_registry(post_registry)
+    run_known_answer_plant(plant)
 
     oracle, record_census = r97.assemble_record(spg_root)
     oracle_coeff, coefficient_census = r98.assemble_oracle_coefficients(
@@ -211,10 +236,6 @@ def measure(
 
     observed_state = _state_arrays(observed.state_after)
     ordinary_state = _state_arrays(ordinary)
-    if plant == "observer-bit":
-        observed_state["eta"] = np.array(observed_state["eta"], copy=True)
-        observed_state["eta"][1, 49] = np.nextafter(
-            observed_state["eta"][1, 49], np.float64(np.inf))
     passivity = {
         name: exact_row(observed_state[name], ordinary_state[name])
         for name in STATE_FIELDS
@@ -255,34 +276,10 @@ def measure(
             else r97._native_v(candidate_model) if face == "v"
             else candidate_model
         )
-        unplanted = exact_row(candidate, oracle[oracle_name])
-        if plant == "post-bit" and index == 0:
-            candidate = np.array(candidate, copy=True)
-            equal = np.argwhere(
-                np.ascontiguousarray(candidate).view(np.uint64)
-                == np.ascontiguousarray(oracle[oracle_name]).view(np.uint64)
-            )
-            require(equal.size > 0, "post-bit plant found no exact control cell")
-            location = tuple(equal[0])
-            candidate[location] = np.nextafter(
-                candidate[location], np.float64(np.inf))
         post_rows[name] = exact_row(candidate, oracle[oracle_name])
-        if plant == "post-bit" and index == 0:
-            require(
-                post_rows[name]["differing_cells"]
-                == unplanted["differing_cells"] + 1,
-                "post-bit plant did not add exactly one unequal cell",
-            )
         post_scope = np.array(candidate_model, copy=True)
-        if plant == "scope-bit" and index == 0:
-            post_scope[1, 2] = np.nextafter(
-                post_scope[1, 2], np.float64(np.inf))
         scope_rows[name] = boundary_scope(
             trace[pre_keys[name]][0], post_scope, face)
-    if plant == "scope-bit":
-        require(any(row["outside_allowed_cells"] > 0
-                    for row in scope_rows.values()),
-                "scope-bit plant stayed green")
 
     area = np.asarray(card.recipe.grid.area)
     baseline_rows = []
@@ -314,8 +311,6 @@ def measure(
     )
     p3 = all(row["bit_exact"] for row in post_rows.values())
     p4 = all(row["bit_exact"] for row in arm_target.values())
-    if plant != "none":
-        raise GateError(f"{plant} plant fired")
     return {
         "status": "MEASURED_R146_BOUNDARY_ASSOCIATION",
         "claim_label": "independent",
