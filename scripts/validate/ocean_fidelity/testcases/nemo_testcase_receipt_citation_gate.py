@@ -1425,13 +1425,6 @@ CITATION_MAP = {
         ("CASE ( 'V' )                               ! V-point", 5),
         ('END DO   ;   END DO', 6), 38],
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
-        ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)', 1),
-        ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 1),
-        19],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
-        ("CASE ( 'U' )                               ! U-point", 5),
-        ('END DO   ;   END DO', 5), 45],
     'barotropic_latlon_cgrid.py:627-668': [
         ('def _nemo_external_mode_boundary_association(', 1),
         ('inverse_u_post, inverse_v_post, eta,', 1), 42],
