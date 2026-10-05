@@ -1688,7 +1688,9 @@ def _step_multilayer_land_impl(
                                forcing, config, ncol,
                                carbon_old=carbon_state,
                                carbon_new=carbon_state_new))
-    surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+    surface_out = surface_out._replace(
+        held=_held_mask, n_held=_n_held,
+        soil_unconverged=~richards_out.converged)
     if layered:
         surface_out = surface_out._replace(
             snow_T_top_excess=snow_T_top_excess,

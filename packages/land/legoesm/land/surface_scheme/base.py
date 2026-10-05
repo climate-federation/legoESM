@@ -199,3 +199,8 @@ class SurfaceFluxOutput(NamedTuple):
     # convention as rain infiltration), so the drainage enthalpy leaves the column.
     snow_advected_heat: jax.Array | None = None
     snow_ground_heat_applied: jax.Array | None = None
+    # Columns whose soil-water (Richards) solve kept an unconverged last
+    # iterate this step; their water budget does not close.  Filled in by the
+    # land step.
+    soil_unconverged: jax.Array | None = None
+
