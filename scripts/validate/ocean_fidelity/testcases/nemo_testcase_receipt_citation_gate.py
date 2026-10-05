@@ -1457,7 +1457,7 @@ CITATION_MAP = {
         19],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
         '! Add bottom stresses:',
-        "& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')",
+        ("& l4_canon_2d(zu_trd,'U'), l4_canon_2d(zv_trd,'V')", 1),
         20],
     # --- ORCA2 round 128: complete literal-EEN source program ------------
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
