@@ -43,3 +43,8 @@ def test_source_statement_is_the_measured_round94_boundary() -> None:
     statement = gate.FIRST_SOURCE_STATEMENT
     assert statement["nemo_source"].endswith("stp2d.f90:206-219")
     assert statement["status"] == "HELD_BY_GYRE_2ULP_GATE"
+
+
+def test_materialization_arm_requires_unmasked_transport() -> None:
+    source = gate.Path(gate.__file__).read_text()
+    assert "not materialize_v_transport or unmasked_v_transport" in source

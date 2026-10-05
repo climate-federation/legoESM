@@ -95,6 +95,8 @@ def run(
     record_root: Path,
     *,
     plant: str = "none",
+    unmasked_v_transport: bool = False,
+    materialize_v_transport: bool = False,
 ) -> dict[str, object]:
     import jax
 
@@ -105,6 +107,8 @@ def run(
     )
 
     require(plant in PLANTS, f"unknown plant {plant}")
+    require(not materialize_v_transport or unmasked_v_transport,
+            "V materialization arm requires the unmasked V transport")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -140,10 +144,15 @@ def run(
         card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
-            expose_tracer_stage=stage),
+            expose_tracer_stage=stage,
+            barotropic_unmasked_v_transport=unmasked_v_transport,
+            barotropic_materialize_v_transport=materialize_v_transport),
     ) for stage in (1, 2))
     final_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            barotropic_unmasked_v_transport=unmasked_v_transport,
+            barotropic_materialize_v_transport=materialize_v_transport))
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit: dict[str, object] | None = None
@@ -199,6 +208,10 @@ def run(
         },
         "card_case": card.case,
         "unmeasured_features": list(card.unmeasured_features),
+        "private_arm": {
+            "unmasked_v_transport": unmasked_v_transport,
+            "materialize_v_transport": materialize_v_transport,
+        },
         "entry_identity": entry_row,
         "checkpoint_count": len(checkpoints),
         "row_count": len(rows),
@@ -213,10 +226,18 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path, required=True)
     parser.add_argument("--record-root", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--unmasked-v-transport", action="store_true")
+    parser.add_argument("--materialize-v-transport", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
-        result = run(args.deck_root, args.record_root, plant=args.plant)
+        result = run(
+            args.deck_root,
+            args.record_root,
+            plant=args.plant,
+            unmasked_v_transport=args.unmasked_v_transport,
+            materialize_v_transport=args.materialize_v_transport,
+        )
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, frames.GateError, OSError, ValueError) as error:
         if args.plant != "none":

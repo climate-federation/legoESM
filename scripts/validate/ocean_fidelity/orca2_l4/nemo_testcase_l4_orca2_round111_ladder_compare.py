@@ -83,6 +83,25 @@ def compare(base: dict, candidate: dict) -> dict:
     }
 
 
+def require_salinity_veto(base: dict, candidate: dict) -> dict:
+    """Require the kt=10 stage-3 salinity error not to increase."""
+
+    base_rows, _ = _rows(base)
+    candidate_rows, _ = _rows(candidate)
+    key = lambda row: (row["kt"], row["checkpoint"], row["field"])
+    before = {key(row): row for row in base_rows}
+    after = {key(row): row for row in candidate_rows}
+    target = (10, "stage3", "S")
+    require(target in before and target in after,
+            "kt=10 stage-3 salinity row is missing")
+    base_max = float(before[target]["max_abs"])
+    candidate_max = float(after[target]["max_abs"])
+    require(candidate_max <= base_max,
+            "kt=10 stage-3 salinity maximum increased: "
+            f"{base_max} -> {candidate_max}")
+    return {"before_max_abs": base_max, "after_max_abs": candidate_max}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rung0-base", type=Path, required=True)
@@ -90,6 +109,7 @@ def main() -> int:
     parser.add_argument("--rung7-base", type=Path, required=True)
     parser.add_argument("--rung7-candidate", type=Path, required=True)
     parser.add_argument("--plant", choices=("none", "bit-loss", "first-earlier"), default="none")
+    parser.add_argument("--salinity-veto", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     documents = [json.loads(path.read_text(encoding="utf-8")) for path in (
@@ -107,6 +127,11 @@ def main() -> int:
             "rung0": compare(documents[0], documents[1]),
             "rung7": compare(documents[2], documents[3]),
         }
+        if args.salinity_veto:
+            result["salinity_veto"] = {
+                "rung0": require_salinity_veto(documents[0], documents[1]),
+                "rung7": require_salinity_veto(documents[2], documents[3]),
+            }
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, KeyError, TypeError, ValueError) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant != 'none' else 'REFUSE'}: {error}")

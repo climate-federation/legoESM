@@ -51,3 +51,14 @@ def test_refuses_first_statement_move():
     candidate["first_non_bit_checkpoint"] = {"kt": 0}
     with pytest.raises(gate.GateError, match="first non-bit"):
         gate.compare(base, candidate)
+
+
+def test_salinity_veto_rejects_larger_kt10_stage3_error():
+    base = _flat()
+    candidate = copy.deepcopy(base)
+    target = next(row for row in candidate["rows"]
+                  if (row["kt"], row["checkpoint"], row["field"])
+                  == (10, "stage3", "S"))
+    target["max_abs"] += 1.0
+    with pytest.raises(gate.GateError, match="salinity maximum increased"):
+        gate.require_salinity_veto(base, candidate)
