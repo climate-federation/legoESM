@@ -3587,12 +3587,13 @@ CITATION_MAP = {
         '_stage3_T_rate = (',
         '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 140],
     # Extent 433 -> 434 at the 2026-09-25 merge, 434 -> 437 in round 226,
-    # then 437 -> 438 in round 230, 438 -> 439 in round 231, and 439 -> 440
-    # in round 233: the private operand diagnostics each add one line inside
-    # this span.  The endpoints still identify the same program boundary.
+    # then 437 -> 438 in round 230, 438 -> 439 in round 231, 439 -> 440 in
+    # round 233, and 440 -> 444 in round 235: the private operand diagnostics
+    # add lines inside this span. The endpoints still identify the same
+    # program boundary.
     'ocean_model_latlon_cgrid.py:8779-9222': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 440],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 444],
     'ocean_model_latlon_cgrid.py:9416-9457': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 42],
