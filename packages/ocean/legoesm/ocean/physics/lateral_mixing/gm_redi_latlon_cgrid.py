@@ -2829,6 +2829,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "wmask": wmask,
                     "ah_wslp2": ah_wslp2,
                     "akz": akz,
+                    "ah_wslp2_above": _ahw_ab, "akz_above": _akz_ab,
                     "e1e2t": e1t * e2t,
                     "e3w_kp1": e3w_kp1,
                     "qdiff_kp1": q - jnp.roll(q, -1, axis=2),

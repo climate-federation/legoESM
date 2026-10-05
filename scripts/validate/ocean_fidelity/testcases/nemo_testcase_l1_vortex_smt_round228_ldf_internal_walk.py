@@ -161,7 +161,10 @@ def run(root: Path, *, plant: str | None = None,
                   f"dtype={groups[name].dtype}")
 
     rows = []
-    def add(name, reference, candidate, support):
+    def add(name, reference, candidate, support, *, skip_surface=False):
+        support = np.asarray(support, dtype=bool).copy()
+        if skip_surface:
+            support[..., 0] = False
         rows.append(_row(name, np.asarray(reference)[..., :nlev],
                          np.asarray(candidate)[..., :nlev], support,
                          plant=plant))
@@ -185,21 +188,21 @@ def run(root: Path, *, plant: str | None = None,
         ("slope.wslpj", "wslpj", "wslpj", "T"),
     )
     for name, recorded, live, support in slope_rows:
-        add(name, slope[recorded], slope_diag[live], masks[support])
+        # ldfslp.f90's backward loop is jk=jpkm1..2.  The writer correctly
+        # leaves its intermediate surface plane zero; it is not an executed
+        # statement and therefore is excluded.  The final four arrays have a
+        # defined zero surface and remain scored on the complete wet support.
+        add(name, slope[recorded], slope_diag[live], masks[support],
+            skip_surface=name not in ("slope.uslp", "slope.vslp",
+                                      "slope.wslpi", "slope.wslpj"))
 
     # traldf_iso's compiled source order after its once-per-call A33 build.
     iso_rows = (
-        ("iso.ah_wslp2", "ah_wslp2", "ah_wslp2", "T"),
-        ("iso.akz", "akz", "akz", "T"),
+        ("iso.ah_wslp2", "ah_wslp2", "ah_wslp2_above", "T"),
+        ("iso.akz", "akz", "akz_above", "T"),
         ("iso.dit", "dit", "dit", "u"),
         ("iso.djt", "djt", "djt", "v"),
         ("iso.dkt", "dkt", "dkt", "T"),
-        ("iso.A11", "A11", "A11", "u"),
-        ("iso.A22", "A22", "A22", "v"),
-        ("iso.A13", "A13", "A13", "u"),
-        ("iso.A23", "A23", "A23", "v"),
-        ("iso.hmsku", "hmsku", "hmsku", "u"),
-        ("iso.hmskv", "hmskv", "hmskv", "v"),
         ("iso.fu", "fu", "zfu", "u"),
         ("iso.fv", "fv", "zfv", "v"),
         ("iso.vmsku", "vmsku", "vmsku", "T"),
@@ -213,7 +216,8 @@ def run(root: Path, *, plant: str | None = None,
         ("iso.rhs_increment", "rhs_increment", "tendency", "T"),
     )
     for name, recorded, live, support in iso_rows:
-        add(name, iso[recorded], iso_diag[live], masks[support])
+        add(name, iso[recorded], iso_diag[live], masks[support],
+            skip_surface=name in ("iso.ah_wslp2", "iso.akz"))
 
     aggregate = run_stage_walk(
         root, "smt3", allow_dirty=allow_dirty, stage=3)
@@ -225,6 +229,11 @@ def run(root: Path, *, plant: str | None = None,
     report = {
         "case": CASE, "legoesm_git_sha": sha, "oracle_root": str(root),
         "plant": plant, "rows": rows,
+        "record_defect": {
+            "invalid_groups": ["A11", "A22", "A13", "A23", "hmsku",
+                               "hmskv"],
+            "reason": ("compiled writer lines 262-268 copy scalar "
+                       "temporaries after their producing loop")},
         "first_non_bit": None if first is None else first["name"],
         "aggregate_reproduction": {
             "pre_ldf_max_abs": pre["max_abs"],
