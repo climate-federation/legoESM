@@ -131,7 +131,16 @@ NEMO face depth is the live source instead of assuming the source name.
 
 Verification is CPU-only in fp64/x64. The canonical citation map was
 mechanically re-anchored with `difflib.SequenceMatcher` when the model helper
-was inserted; the default receipt and this receipt must both report zero
-unmapped citations and failures. Each of this receipt's four compiled spans
-must fail under a two-line shift. Focused tests and the single required
-`tests/ocean/fidelity -n 12` battery are recorded after this receipt is frozen.
+was inserted; the default receipt and this receipt both report zero unmapped
+citations, zero failures, and zero failing map entries. The planted two-line
+shift exits nonzero with the named span at `SYMBOL-NOT-AT-LINE`. Focused unit,
+instrument, ladder, and receipt tests pass **46/46**.
+
+The one required `tests/ocean/fidelity -n 12` invocation is **INCOMPLETE**, not
+PASS. It collected 2,617 items and reached 99%, showing seven skips and exactly
+four failures before its remaining workers stopped reporting. Those four are
+the registered pre-existing SI3 scalar-math provenance, GYRE round-129
+spread-record stamp, round-35 escape-scope, and worktree-stamp failures already
+recorded by round 154. After prolonged quiescence at 99% the invocation was
+interrupted once; it produced no terminal summary. No round-155 test failed,
+and the battery was not rerun.
