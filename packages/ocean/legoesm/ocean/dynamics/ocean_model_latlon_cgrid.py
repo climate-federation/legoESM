@@ -1090,6 +1090,9 @@ _STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean",
 _BAROTROPIC_ASSOCIATION_FIELD_ARMS = (
     "", "u", "v", "depth_u", "depth_v", "inverse_u", "inverse_v", "eta",
 )
+_BAROTROPIC_ASSOCIATION_COMPONENT_ARMS = (
+    "", "u_cyclic", "u_fold", "v_cyclic", "v_fold",
+)
 
 
 class _NEMOWSFCTInputTrace(NamedTuple):
@@ -1214,6 +1217,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the first downstream carrier can be measured without turning a partial
     # call into production physics.
     barotropic_external_mode_association_field: str = ""
+    # Private round-157 split of the U/V field arms into the compiled
+    # east/west exchange followed by the T-pivot north-fold exchange.
+    barotropic_external_mode_association_component: str = ""
     # Private round-148 one-variable arm: use the T-pivot row-below halo as
     # the north T neighbour in the V-face SSH-average depth calculation.
     barotropic_t_pivot_north_neighbor: bool = False
@@ -7214,6 +7220,26 @@ class LatLonCGridOceanModel:
                         _baro_seed,
                         _nemo_external_mode_association_field_test_override=(
                             _association_field))
+                _association_component = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_external_mode_association_component)
+                if (_association_component not in
+                        _BAROTROPIC_ASSOCIATION_COMPONENT_ARMS):
+                    raise ValueError(
+                        "unknown private barotropic association component arm: "
+                        f"{_association_component!r}")
+                if (_association_component and (
+                        _association_field
+                        or self._nemo_ws_test_hooks
+                        .barotropic_external_mode_association)):
+                    raise ValueError(
+                        "complete, one-field, and component barotropic "
+                        "association arms are mutually exclusive")
+                if _association_component:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_external_mode_association_component_test_override=(
+                            _association_component))
                 if (
                     self._nemo_ws_test_hooks
                     .barotropic_t_pivot_north_neighbor

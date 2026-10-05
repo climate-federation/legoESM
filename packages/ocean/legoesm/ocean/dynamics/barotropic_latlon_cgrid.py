@@ -687,7 +687,7 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
 
 
 def _nemo_external_mode_boundary_association(
-    u, v, depth_u, depth_v, inverse_u, inverse_v, eta, grid,
+    u, v, depth_u, depth_v, inverse_u, inverse_v, eta, grid, *, component="",
 ):
     """Compact-grid image of NEMO's one seven-field ``lbc_lnk`` call.
 
@@ -698,10 +698,19 @@ def _nemo_external_mode_boundary_association(
     Cell-centred SSH has no explicit halo in the compact representation, so
     its associated image is the same array.
     """
-    u_post = u.at[:, 0].set(u[:, -1])
+    legal_components = ("", "u_cyclic", "u_fold", "v_cyclic", "v_fold")
+    if component not in legal_components:
+        raise ValueError(
+            f"unknown private external-mode association component: {component!r}")
+    do_u_cyclic = component in ("", "u_cyclic")
+    do_u_fold = component in ("", "u_fold")
+    do_v_fold = component in ("", "v_fold")
+    # Compact V has no redundant zonal halo: its east/west MPI exchange is
+    # represented by periodic indexing, so the ``v_cyclic`` image is a no-op.
+    u_post = u.at[:, 0].set(u[:, -1]) if do_u_cyclic else u
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
-    if ((fold_is_local(grid) or nmask is not None)
+    if (do_u_fold and (fold_is_local(grid) or nmask is not None)
             and bool(getattr(fold, "pivot_row_stored", False))):
         # T-pivot U arm (lbcnfd.f90:639-683).  Compact U column zero is the
         # periodic closure; columns 1: are NEMO's native U row.  The pivot
@@ -721,7 +730,7 @@ def _nemo_external_mode_boundary_association(
     v_post = v
     depth_v_post = depth_v
     inverse_v_post = inverse_v
-    if fold_is_local(grid) or nmask is not None:
+    if do_v_fold and (fold_is_local(grid) or nmask is not None):
         v_post = pad_ns_vector_v(v[1:-1], grid)
         depth_v_post = pad_ns_scalar(depth_v[1:-1], grid)
         inverse_v_post = pad_ns_scalar(inverse_v[1:-1], grid)
@@ -1739,6 +1748,7 @@ def _run_substep_loop(
     nemo_materialize_v_transport_test_override=False,
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
+    nemo_external_mode_association_component_test_override="",
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
@@ -1931,10 +1941,13 @@ def _run_substep_loop(
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
             if (nemo_external_mode_association_test_override
-                    or nemo_external_mode_association_field_test_override):
+                    or nemo_external_mode_association_field_test_override
+                    or nemo_external_mode_association_component_test_override):
                 associated_entry = _nemo_external_mode_boundary_association(
                     U_bar_c, V_bar_c, H_u, H_v, r1_H_u, r1_H_v,
-                    eta_c, grid)
+                    eta_c, grid,
+                    component=(
+                        nemo_external_mode_association_component_test_override))
                 if (nemo_external_mode_association_test_override
                         or nemo_external_mode_association_field_test_override
                         == "depth_u"):
@@ -2320,7 +2333,8 @@ def _run_substep_loop(
         association_post = None
         if (return_boundary_association_trace
                 or nemo_external_mode_association_test_override
-                or nemo_external_mode_association_field_test_override):
+                or nemo_external_mode_association_field_test_override
+                or nemo_external_mode_association_component_test_override):
             if _face_depth_mode == "nemo_ssh_avg":
                 association_depths = _nemo_ssh_avg_apply(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
@@ -2338,7 +2352,9 @@ def _run_substep_loop(
                         association_depths[1], min_water_col), 0.0),
                 )
             association_post = _nemo_external_mode_boundary_association(
-                U_bar_new, V_bar_new, *association_depths, eta_new, grid)
+                U_bar_new, V_bar_new, *association_depths, eta_new, grid,
+                component=(
+                    nemo_external_mode_association_component_test_override))
         if nemo_external_mode_association_test_override:
             U_bar_new, V_bar_new = association_post[:2]
         elif nemo_external_mode_association_field_test_override == "u":
@@ -2347,6 +2363,12 @@ def _run_substep_loop(
             V_bar_new = association_post[1]
         elif nemo_external_mode_association_field_test_override == "eta":
             eta_new = association_post[6]
+        elif nemo_external_mode_association_component_test_override.startswith(
+                "u_"):
+            U_bar_new = association_post[0]
+        elif nemo_external_mode_association_component_test_override.startswith(
+                "v_"):
+            V_bar_new = association_post[1]
 
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
@@ -2892,6 +2914,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_drag_rate_test_override=None,
     _nemo_external_mode_association_test_override=False,
     _nemo_external_mode_association_field_test_override="",
+    _nemo_external_mode_association_component_test_override="",
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
 ) -> LatLonCGridOceanState:
@@ -3390,6 +3413,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_external_mode_association_test_override),
         nemo_external_mode_association_field_test_override=(
             _nemo_external_mode_association_field_test_override),
+        nemo_external_mode_association_component_test_override=(
+            _nemo_external_mode_association_component_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
