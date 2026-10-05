@@ -554,9 +554,11 @@ class RRTMGP:
       aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
-      mcica_cloud_fraction: jnp.ndarray | None = None,
       sw_optical_field_only: bool = False,
       lw_optical_field_only: bool = False,
+      *,
+      mcica_cloud_fraction: jnp.ndarray | None = None,
+      clear_sky: bool = False,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -876,6 +878,11 @@ class RRTMGP:
                   "mcica_cloud_fraction takes in-cloud paths and its own "
                   "sampling; it cannot be combined with cloud_fraction "
                   "optical-depth scaling or separate longwave paths")
+          if sw_optical_field_only or lw_optical_field_only:
+              raise ValueError(
+                  "mcica_cloud_fraction samples clouds per g-point inside the "
+                  "flux solve; the optical-field-only outputs would return "
+                  "unsampled in-cloud optics")
           from legoesm.atmosphere.physics.clouds.subcolumns import (
               generate_subcolumns)
 
@@ -937,6 +944,11 @@ class RRTMGP:
       # Reuses the EXACT state above (no duplicated numerics); returns the
       # per-g-point shortwave optical field instead of solving transport. The
       # default path (sw_optical_field_only=False) is byte-identical.
+      if clear_sky and (sw_optical_field_only or lw_optical_field_only):
+          raise ValueError(
+              "clear_sky adds clear-sky TOA fluxes to the RadiationOutput "
+              "path; the optical-field-only outputs have no fluxes.")
+
       if sw_optical_field_only:
           sw_props = two_stream.compute_sw_optical_field(
               p_3d, T_3d, molecules, optics_lib, vmr_fields,
@@ -1024,6 +1036,7 @@ class RRTMGP:
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
           cloud_path_fn=lw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 5. Solve SW ---
@@ -1047,6 +1060,7 @@ class RRTMGP:
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
           cloud_path_fn=sw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
@@ -1075,6 +1089,11 @@ class RRTMGP:
           heating_rate=lw_hr + sw_hr,
           lw_heating_rate=lw_hr,
           sw_heating_rate=sw_hr,
+          # internal index -1 is the TOA face (== *_flux_up[:, 0] above)
+          lw_flux_up_toa_clr=(lw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
+          sw_flux_up_toa_clr=(sw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
       )
 
   def solve_columns_chunked(
