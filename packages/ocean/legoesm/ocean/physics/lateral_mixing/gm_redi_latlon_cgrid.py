@@ -2562,10 +2562,14 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # zmsku = 1/max(Σ4 wmask around the u-face vertical pair, 1)
     wm_ip1 = jnp.roll(wmask, -1, ax_x)
     wm_kp1 = jnp.roll(wmask, -1, ax_z)
-    wm_ip1_kp1 = jnp.roll(wm_ip1, -1, ax_z)
+    # NEMO's deepest tracer level reads the closed jpk W level, not the
+    # surface W level.  A bare vertical roll is periodic and would wrap the
+    # surface mask onto that bottom pair (traldf_iso.f90:246-249).
+    wm_kp1 = wm_kp1.at[:, :, -1].set(0.0)
+    wm_ip1_kp1 = jnp.roll(wm_kp1, -1, ax_x)
     zmsku_h = 1.0 / jnp.maximum(wm_ip1 + wm_kp1 + wm_ip1_kp1 + wmask, 1.0)
     wm_jp1 = jnp.roll(wmask, -1, ax_y)
-    wm_jp1_kp1 = jnp.roll(wm_jp1, -1, ax_z)
+    wm_jp1_kp1 = jnp.roll(wm_kp1, -1, ax_y)
     zmskv_h = 1.0 / jnp.maximum(wm_jp1 + wm_kp1 + wm_jp1_kp1 + wmask, 1.0)
 
     zA13 = -e2u[:, :, jnp.newaxis] * uslp * zmsku_h
