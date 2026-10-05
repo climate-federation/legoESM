@@ -63,6 +63,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
+    pad_ns_scalar,
 )
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -613,6 +614,12 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v))
     r1_v_entry = nemo_source_round(
         r1_v0 / nemo_source_round(1.0 + r3_v))
+    # NEMO constructs the reference reciprocal from its already-associated
+    # V mask and reference depth before dyn_spg_ts initializes hvr_e
+    # (domain.f90:198-214; dynspg_ts.f90:357-366).  Preserve that scalar
+    # V-grid fold row in the compact representation used by this solver.
+    if fold_is_local(grid) or _nfold_mask is not None:
+        r1_v_entry = pad_ns_scalar(r1_v_entry[1:-1], grid)
     if return_entry_inverse:
         return H_u, H_v, r1_u_entry, r1_v_entry
     if return_literal_inverse:
