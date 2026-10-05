@@ -93,7 +93,18 @@ JIT. The clean baseline walk took 461.5127155780792 s; the live-depth arm took
 The final net model/card/deck diff is empty, so the certified GYRE, DINO,
 tanks, rung-0, and rung-7 trajectories cannot move. The citation gate checks
 the record build itself; shifting the cited span by two lines is a planted
-failure. ASKED choices: none. UNASKED choices: empty.
+failure. Focused round-145 and citation tests pass 23/23. The one required
+`tests/ocean/fidelity -n 12` invocation collected 2,585 tests and reached 99%
+before reproducing the registered xdist-controller tail stall; it is
+**INCOMPLETE**, not PASS. It recorded 2,553 passes and four pre-existing reds:
+SI3 scalar-math provenance, round-35 escape scope, worktree-stamp scope, and
+the GYRE round-129 spread-record stamp. No round-145 test failed.
+
+The required separate `codex exec --sandbox read-only` review could not
+initialize its in-process app-server client because the read-only filesystem
+prevented setup. Verdict: **independent review unavailable in-sandbox**.
+
+ASKED choices: none. UNASKED choices: empty.
 
 ## OPEN
 
