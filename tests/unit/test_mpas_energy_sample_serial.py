@@ -79,3 +79,14 @@ def test_serial_sample_without_toa_flux_is_nan_and_unstamped(drv):
         drv.model._sfc_diag = tuple(sd)
     assert set(out) == set(drv._ENERGY_SERIES_KEYS)
     assert all(np.isnan(v) for v in out.values())
+
+
+def test_serial_mpas_run_writes_its_timeseries():
+    """A single-process run (rank None) is its own writer: the end-of-run
+    timeseries.npz and results.txt must exist and carry the energy series."""
+    d = mpi_case._build(False)
+    d.run()
+    out = Path(d._output_dir)
+    assert (out / "results.txt").exists()
+    ts = np.load(out / "timeseries.npz")
+    assert "energy_toa_net" in ts.files

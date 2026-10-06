@@ -13449,7 +13449,7 @@ class ModelDriver:
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
         # One writer: ranks must not race on the shared timeseries.npz /
         # results.txt.  The published series are rank 0's.
-        if getattr(self, "_mpi_rank", 0) == 0:
+        if getattr(self, "_mpi_rank", None) in (None, 0):
             self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
