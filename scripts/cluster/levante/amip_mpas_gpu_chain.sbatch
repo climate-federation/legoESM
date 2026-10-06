@@ -352,6 +352,11 @@ _GPU_MAP=$(seq -s, 0 $((AMIP_N_GPUS - 1)))
 LAUNCH=( srun --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}"
          --gpus-per-node="${AMIP_N_GPUS}" --gpu-bind="map_gpu:${_GPU_MAP}"
          --cpus-per-task=8 --kill-on-bad-exit=1 )
+# Several arms sharing one multi-node allocation (one job slot) each pin their
+# step to their own node, so concurrent steps never land on the same GPUs.
+if [[ -n "${AMIP_STEP_NODE:-}" ]]; then
+    LAUNCH+=( --nodes=1 --nodelist="${AMIP_STEP_NODE}" --exact )
+fi
 echo "[chain] launching on ${AMIP_N_GPUS} GPU(s): ${LAUNCH[*]} ${CMD[*]}"
 "${LAUNCH[@]}" "${CMD[@]}"
 RC=$?
@@ -361,14 +366,19 @@ if (( RC == 0 )); then
     NEW_CKPT=$(ls -1 "${OUTDIR}"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1 || true)
     NEW_DAY=0
     [[ -n "${NEW_CKPT}" ]] && NEW_DAY=$(basename "${NEW_CKPT}" | sed -E 's/checkpoint_day_0*([0-9]+)\.npz/\1/')
-    if (( NEW_DAY < TARGET_DAYS )) && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    if (( NEW_DAY < TARGET_DAYS )) && [[ -n "${AMIP_STEP_NODE:-}" ]]; then
+        # A bundled arm never queues a lone continuation: that would leave the
+        # pack and take a job slot on its own.  The bundle reports it instead.
+        echo "[chain] bundled arm stopped at ${NEW_DAY}/${TARGET_DAYS} d; not resubmitting." >&2
+        RC=75
+    elif (( NEW_DAY < TARGET_DAYS )) && [[ -n "${SLURM_JOB_ID:-}" ]]; then
         NEXT=$(sbatch --account=bb1596 \
                  --dependency="afterok:${SLURM_JOB_ID}" \
                  --job-name="${SLURM_JOB_NAME:-amip_mpas}" \
                  --time=12:00:00 --constraint=a100_80 --mem=0 \
                  --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${AMIP_N_GPUS}" \
                  --gpus-per-node="${AMIP_N_GPUS}" \
-                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML}" \
+                 --export="ALL,NAME=${NAME},ROOT=${ROOT},TARGET_DAYS=${TARGET_DAYS},MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS},EXTRA=${EXTRA:-},AMIP_N_GPUS=${AMIP_N_GPUS},AMIP_PAIR_DIR=${AMIP_PAIR_DIR:-},CONFIG_YAML=${CONFIG_YAML},AMIP_STEP_NODE=" \
                  "$0" | awk '{print $NF}')
         echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link: ${NEXT}"
     else

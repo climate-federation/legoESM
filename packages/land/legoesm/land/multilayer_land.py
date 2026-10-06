@@ -47,15 +47,19 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import (
+    compute_apparent_heat_capacity,
     compute_heat_capacity,
+    invert_soil_layer_enthalpy,
     liquid_water_content,
     moisture_fusion_heat_source,
+    soil_layer_enthalpy,
     solve_snow_soil_thermal,
     solve_soil_thermal,
 )
 from legoesm.land.snow_budget import update_snow_age
 from legoesm.land.snow_column import (
     SnowColumnState,
+    new_snow_bulk_density,
     seed_snow_state,
     snow_add_mass,
     snow_phase_and_percolate,
@@ -549,11 +553,11 @@ def _step_multilayer_land_impl(
     # --- Layered snowpack (``snow_scheme == "layered"``, snow_column.py) ---
     # Snowfall enters the pack at the START of the step, the pack is remapped and
     # compacted, and the surface schemes see a skin temperature and a ground
-    # emissivity blended by the snow-covered fraction f (the albedo's snow cover,
-    # land_snow_cover).
+    # emissivity blended by the PHYSICAL snow-covered fraction f (unscaled
+    # snow_cover_fraction; only the albedo blend applies snow_cover_scale).
     # The pack and the soil are then solved as ONE implicit column (the canopy
     # Picard callback below and the final solve), with f*G entering the pack top
-    # and (1-f)*G the soil top.
+    # and (1-f)*G the soil top; the pack's thickness lies on the covered area.
     if config.snow_scheme not in ("bulk", "layered"):
         raise ValueError(
             f"Unknown MultiLayerLandConfig.snow_scheme {config.snow_scheme!r}; "
@@ -572,20 +576,6 @@ def _step_multilayer_land_impl(
             raise ValueError(
                 "snow_scheme='layered' needs the snow-layer state; build the state "
                 "with init_multilayer_land_state(config=...) or seed_snow_layers().")
-        if config.thermal.enable_freeze_thaw:
-            # The bulk branch charges the fusion heat of the ice change the
-            # hydrology step makes at fixed T (moisture_fusion_heat_source, with
-            # sub-steps) on its POST-hydrology thermal solve.  This branch solves
-            # soil heat BEFORE hydrology (the pack's drainage feeds the Richards
-            # top flux), so that term has no place to be charged yet; running
-            # without it would silently reopen the enthalpy leak main closed.
-            raise ValueError(
-                "snow_scheme='layered' is not supported with "
-                "thermal.enable_freeze_thaw=True yet: the layered branch solves "
-                "soil heat before the hydrology step and cannot charge the "
-                "fusion heat of the hydrology-driven ice change "
-                "(moisture_fusion_heat_source). Use snow_scheme='bulk' with "
-                "freeze/thaw, or layered snow with freeze/thaw off.")
         scc = config.snow_column
         pack = SnowColumnState(swe_ice=state.snow_ice_layers,
                                swe_liq=state.snow_liq_layers,
@@ -596,12 +586,20 @@ def _step_multilayer_land_impl(
         snow_advected_heat = (precip_snow_eff * dt * constants.c_pi
                               * (jnp.minimum(forcing.T_lowest, constants.T_freeze)
                                  - constants.T_freeze))
-        pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest, config=scc)
-        pack = snow_remap_compact(pack, dt, scc)
+        # CLM5 fresh-snow density and wind-drift compaction use the lowest-level
+        # wind speed (CTSM forc_wind), not the floored exchange wind below.
+        _wind_air = jnp.sqrt(jnp.maximum(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2, 1e-12))   # AD-safe at calm
+        pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest,
+                             rho_fresh=new_snow_bulk_density(forcing.T_lowest, _wind_air))
+        pack = snow_remap_compact(pack, dt, _wind_air)
         # Pack-top temperature the surface fluxes are evaluated at (the Robin
         # linearisation point; sublimation and rain modify the pack afterwards).
         T_pack_top_ref = pack.T[:, 0]
-        f_snow = land_snow_cover(total_water(pack), config.land_albedo)
+        # PHYSICAL snow cover (CTSM frac_sno): the unscaled cover fraction.  The
+        # per-PFT snow_cover_scale is an albedo brightness calibration and stays
+        # in the albedo blend only (user 2026-10-03 / 2026-10-06).
+        f_snow = snow_cover_fraction(total_water(pack), config.land_albedo)
         T_surface = _snow_skin(pack, T_soil[:, 0], f_snow)
 
     # Smooth wind speed floor.
@@ -686,7 +684,7 @@ def _step_multilayer_land_impl(
             if layered:
                 # Tentative combined pack+soil solve; the SEB boundary is the
                 # snow-blended skin of the tentative column.
-                C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
+                C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow, config.land_albedo.snow_depth_crit)
                 T_s, T_g = solve_snow_soil_thermal(
                     pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
                     config.hydraulics, config.thermal, G, dt_)
@@ -1196,7 +1194,7 @@ def _step_multilayer_land_impl(
                               - constants.T_freeze)
             + constants.L_f)  # latent-ok: pack enthalpy is referenced to ice at T_freeze, where L_f(T_freeze) == L_f
         pack = snow_add_mass(pack, 0.0, forcing.T_lowest, rain=rain_pack,
-                             T_rain=forcing.T_lowest, config=scc)
+                             T_rain=forcing.T_lowest)
         infil_rain = infil_rain - rain_pack / dt
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / _L_v_T
@@ -1309,7 +1307,7 @@ def _step_multilayer_land_impl(
         # The post-hydrology remainder is charged to the top soil layer below.
         evap_excess_energy_pre = lhflx - (sublim_actual * _L_s_T
                                           + soil_evap * _L_v_T)
-        C_s, coeff_s, rb_s = snow_thermal_props(pack, scc)
+        C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow, config.land_albedo.snow_depth_crit)
         T_pack_solved, T_soil_new = solve_snow_soil_thermal(
             pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
             config.hydraulics, config.thermal,
@@ -1328,6 +1326,7 @@ def _step_multilayer_land_impl(
                    + (1.0 - f_snow) * (T_soil_new[:, 0] - T_soil[:, 0])))
         pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
+        snow_drain_sensible = None   # handed to the soil only with freeze/thaw (below)
         # Meltwater leaves the pack base into the soil top (no sensible heat,
         # the same convention as rain infiltration).
         melt_rate = snow_drainage / dt
@@ -1396,14 +1395,54 @@ def _step_multilayer_land_impl(
         # The snow terms (sublim_actual at L_s) are identical in the pre and final
         # excess and cancel here, so a negative snow sublimation cost is booked
         # exactly once, by the combined solve above.
-        # Charged as a sensible increment of the top soil layer at the heat
-        # capacity the combined solve used (start-of-step theta; freeze/thaw is
-        # refused on this branch), so pack + soil energy closes against the
-        # realised latent flux (in - out - dStorage = 0).
         evap_excess_energy_post = evap_excess_energy - evap_excess_energy_pre
-        C_top = compute_heat_capacity(
-            theta, config.hydraulics, config.thermal)[:, 0] * dz[0]   # J/m2/K
-        T_soil_new = T_soil_new.at[:, 0].add(evap_excess_energy_post * dt / C_top)
+        if config.thermal.enable_freeze_thaw:
+            # Soil freeze/thaw (CLM5 order: one combined solve, then an
+            # energy-exact phase correction, SoilTemperatureMod Phasechange_beta).
+            # Every soil layer is re-equilibrated on its freezing curve at the
+            # post-Richards water: its enthalpy (ice at T_freeze = 0) is the
+            # start-of-step value plus the energy the linear solve deposited in
+            # it (row identity, C_app at start-of-step T and water, as the solve
+            # used), plus the water Richards moved, booked as LIQUID AT T_freeze
+            # (rho_w*L_f per m3; meltwater from the pack arrives so; water
+            # leaving a frozen layer melts its ice there), plus the unmet-
+            # evaporation remainder on the top layer.  The solve's overshoot
+            # across the 0 C curtain becomes phase change, so pack + soil energy
+            # closes exactly (to float64 roundoff in tests); the surface flux
+            # stays the one booked by the solve.  The bulk lane instead charges
+            # moisture_fusion_heat_source in a sub-stepped solve (water at the
+            # layer temperature): the two lanes book moving water differently.
+            # Row identity of ONE backward-Euler step at C_app(T0, theta0): valid
+            # only while the combined solve above is not sub-stepped.
+            Q_solve = compute_apparent_heat_capacity(
+                T_soil, theta, config.hydraulics, config.thermal) * dz * (
+                    T_soil_new - T_soil)                               # J/m2
+            W_moved = (constants.rho_water * constants.L_f  # latent-ok: T_freeze reference
+                       * dz * (richards_out.theta_new - theta))        # J/m2
+            # The pack's drainage leaves it with c_liq (T - T_freeze) + L_f per
+            # kg; W_moved books the L_f of what the soil takes in.  The sensible
+            # part (nonzero only from an all-liquid layer above T_freeze) goes to
+            # the top soil layer for the share of the surface water the soil
+            # accepts; the surface runoff carries its own share away.
+            snow_drain_sensible = drainage_heat_to_soil(
+                snow_drainage_heat - constants.L_f * snow_drainage,  # latent-ok: T_freeze reference
+                richards_out.runoff_surface, infil_rain + melt_rate)
+            E_target = (soil_layer_enthalpy(T_soil, theta, dz, config.hydraulics,
+                                            config.thermal)
+                        + Q_solve + W_moved)
+            E_target = E_target.at[:, 0].add(evap_excess_energy_post * dt
+                                             + snow_drain_sensible)
+            T_soil_new = invert_soil_layer_enthalpy(
+                E_target, T_soil_new, richards_out.theta_new, dz,
+                config.hydraulics, config.thermal)
+        else:
+            # Charged as a sensible increment of the top soil layer at the heat
+            # capacity the combined solve used (start-of-step theta), so pack +
+            # soil energy closes against the realised latent flux
+            # (in - out - dStorage = 0).
+            C_top = compute_heat_capacity(
+                theta, config.hydraulics, config.thermal)[:, 0] * dz[0]   # J/m2/K
+            T_soil_new = T_soil_new.at[:, 0].add(evap_excess_energy_post * dt / C_top)
         snow_ground_heat_applied = snow_ground_heat_applied + evap_excess_energy_post
 
     # --- Soil thermal diffusion (final, with converged G) ---
@@ -1504,7 +1543,7 @@ def _step_multilayer_land_impl(
     # (post-step cover), the top soil layer otherwise.  The carbon cycle keeps
     # the soil-top temperature.
     T_skin_new = (_snow_skin(pack, T_surface_new,
-                             land_snow_cover(snow_new, config.land_albedo))
+                             snow_cover_fraction(snow_new, config.land_albedo))
                   if layered else T_surface_new)
     # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
     # handed to the coupler (drives the next radiation step) is consistent with the updated
@@ -1733,21 +1772,21 @@ def _step_multilayer_land_impl(
     if layered:
         surface_out = surface_out._replace(
             snow_T_top_excess=snow_T_top_excess,
-            snow_advected_heat=snow_advected_heat - snow_drainage_heat,
+            snow_advected_heat=(snow_advected_heat - snow_drainage_heat
+                                if snow_drain_sensible is None else
+                                snow_advected_heat - snow_drainage_heat + snow_drain_sensible),
             snow_ground_heat_applied=snow_ground_heat_applied)
 
     return new_state, response, carbon_state_new, surface_out
 
 
-def land_snow_cover(swe, land_albedo):
-    """Snow-covered fraction of the land column: the SAME cover the snow albedo
-    uses (``snow_cover_fraction`` times the per-cell canopy snow-mask scale when
-    set, clipped to 1), so radiation, the ground-flux split and the latent split
-    see one snow cover."""
-    f = snow_cover_fraction(swe, land_albedo)
-    if land_albedo.snow_cover_scale is None:
-        return f
-    return jnp.clip(f * jnp.asarray(land_albedo.snow_cover_scale), 0.0, 1.0)
+def drainage_heat_to_soil(drain_sensible, runoff_surface, water_in):
+    """Share [J/m2] of the pack drainage's sensible heat ``drain_sensible`` that
+    stays with the surface water the soil (or its pond) accepts: the surface
+    runoff ``runoff_surface`` [kg/m2/s] takes its proportional share of the
+    well-mixed surface input ``water_in`` [kg/m2/s] (rain + meltwater)."""
+    accepted = jnp.clip(1.0 - runoff_surface / jnp.maximum(water_in, 1e-30), 0.0, 1.0)
+    return accepted * drain_sensible
 
 
 def _snow_skin(pack, T_soil_top, f_snow):
