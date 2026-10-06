@@ -267,16 +267,18 @@ def test_moisture_budget_gets_the_gathered_global_fields_on_rank0_only(
     fake = _fake_driver(dc, layout, _local_with_poisoned_halo(gf, layout.partition))
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=DAY)
 
+    # Judged collectively: a one-rank assertion would strand the others.
+    calls = fake.moisture_calls
     if layout.rank != 0:
-        assert fake.moisture_calls == []
+        err = None if calls == [] else f"rank {layout.rank} fed the closure"
+    elif len(calls) != 1 or calls[0][2] is not True:
+        err = f"rank 0 calls: {[(r, g) for r, _, g in calls]}"
     else:
-        assert len(fake.moisture_calls) == 1
-        rank, kw, global_fields = fake.moisture_calls[0]
-        assert rank == 0 and global_fields is True
-        for k in ("q_v", "p_s", "precip"):
-            np.testing.assert_array_equal(np.asarray(kw[k]), gf[k],
-                                          err_msg=f"gathered {k} != global")
-    MPI.COMM_WORLD.Barrier()
+        bad = [k for k in ("q_v", "p_s", "precip")
+               if not np.array_equal(np.asarray(calls[0][1][k]), gf[k])]
+        err = f"gathered fields differ from global: {bad}" if bad else None
+    errors = [e for e in MPI.COMM_WORLD.allgather(err) if e is not None]
+    assert not errors, errors
 
 
 def test_multirank_zonal_matches_serial_exactly(mesh, layout):
