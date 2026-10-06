@@ -38,8 +38,7 @@ def test_clm5_rates_match_hand_values():
 
 
 def test_run_layered_runs_a_short_trajectory():
-    """The diagnostic's land run must be a configuration the layered pack accepts
-    (it used to switch soil freeze/thaw on, which the land step refuses)."""
+    """The diagnostic's land run (freeze/thaw off, as the demo) runs."""
     m = _load()
     cfg, rec = m.run_layered(days=2.0 * m.demo.DT / 86400.0)
     assert not cfg.thermal.enable_freeze_thaw

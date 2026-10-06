@@ -33,6 +33,7 @@ from legoesm import constants
 from legoesm.land.boundary_data.gap_fill import bare_canopy_params
 from legoesm.land.multilayer_land import (
     MultiLayerLandConfig, init_multilayer_land_state, step_multilayer_land_with_diagnostics)
+from legoesm.land.snow_column import SnowColumnState, clm5_compaction_rate
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -72,7 +73,7 @@ def clm5_rates(rho, T, burden, w, liq, dz):
 def run_layered(days=demo.DAYS):
     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(), snow_scheme="layered",
                                snow_albedo_feedback=True)
-    # Freeze/thaw off: the layered pack refuses it (the demo runs it off too).
+    # Freeze/thaw off, as the demo runs it.
     cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=False))
     st = init_multilayer_land_state(1, cfg, T_init=278.0, theta_init=0.25)
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([1.0]))
@@ -90,13 +91,16 @@ def main():
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                          text=True).stdout.strip()
     cfg, rec = run_layered()
-    scc = cfg.snow_column
     ice, liq, T, rho = rec[:, 0], rec[:, 1], rec[:, 2], rec[:, 3]
     w = ice + liq
     burden = np.cumsum(w, axis=1) - w                     # mass above each layer
     dz = w / np.maximum(rho, 1e-9)
     spd = int(86400 / demo.DT)
-    ours = (scc.rho_snow_max - rho) / scc.compaction_timescale_s   # drho/dt [kg/m3/s]
+    # The pack's own rate (CLM5 port, wind drift included) along the same history.
+    wind = np.array([float(np.hypot(f.u_lowest[0], f.v_lowest[0]))
+                     for f in (demo.forcing_at(k) for k in range(rec.shape[0]))])
+    ours = -rho * np.asarray(clm5_compaction_rate(
+        SnowColumnState(ice, liq, T, rho), wind))                   # drho/dt [kg/m3/s]
     cr1, cr2 = clm5_rates(rho, T, burden, w, liq, dz)
     print(f"git {sha}  demo forcing, layered column, CLM5 constants (Vionnet 2012 overburden)")
     print("day layer |  rho    T    burden |  ours drho/dt | CLM5 metamorph  overburden  "
@@ -110,7 +114,7 @@ def main():
                   f" {ours[i, j] * 86400:9.2f}    | {-rho[i, j] * cr1[i, j] * 86400:9.2f}"
                   f"   {-rho[i, j] * cr2[i, j] * 86400:9.3f}")
     # Passive CLM5 density along each layer's T / overburden history.
-    rc = np.full(rho.shape[1], scc.rho_snow_fresh)
+    rc = np.array(rho[0])
     had = np.zeros(rho.shape[1], bool)
     for i in range(rho.shape[0]):
         new = (w[i] > 0.0) & ~had

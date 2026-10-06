@@ -59,6 +59,7 @@ from legoesm.land.soil_thermal import (
 from legoesm.land.snow_budget import update_snow_age
 from legoesm.land.snow_column import (
     SnowColumnState,
+    new_snow_bulk_density,
     seed_snow_state,
     snow_add_mass,
     snow_phase_and_percolate,
@@ -585,8 +586,13 @@ def _step_multilayer_land_impl(
         snow_advected_heat = (precip_snow_eff * dt * constants.c_pi
                               * (jnp.minimum(forcing.T_lowest, constants.T_freeze)
                                  - constants.T_freeze))
-        pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest, config=scc)
-        pack = snow_remap_compact(pack, dt, scc)
+        # CLM5 fresh-snow density and wind-drift compaction use the lowest-level
+        # wind speed (CTSM forc_wind), not the floored exchange wind below.
+        _wind_air = jnp.sqrt(jnp.maximum(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2, 1e-12))   # AD-safe at calm
+        pack = snow_add_mass(pack, precip_snow_eff * dt, forcing.T_lowest,
+                             rho_fresh=new_snow_bulk_density(forcing.T_lowest, _wind_air))
+        pack = snow_remap_compact(pack, dt, _wind_air)
         # Pack-top temperature the surface fluxes are evaluated at (the Robin
         # linearisation point; sublimation and rain modify the pack afterwards).
         T_pack_top_ref = pack.T[:, 0]
@@ -1185,7 +1191,7 @@ def _step_multilayer_land_impl(
                               - constants.T_freeze)
             + constants.L_f)  # latent-ok: pack enthalpy is referenced to ice at T_freeze, where L_f(T_freeze) == L_f
         pack = snow_add_mass(pack, 0.0, forcing.T_lowest, rain=rain_pack,
-                             T_rain=forcing.T_lowest, config=scc)
+                             T_rain=forcing.T_lowest)
         infil_rain = infil_rain - rain_pack / dt
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / _L_v_T

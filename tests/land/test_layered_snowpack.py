@@ -22,7 +22,7 @@ from legoesm.land.multilayer_land import (
     step_multilayer_land_with_diagnostics)
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.snow_column import (
-    SnowColumnState, column_enthalpy, seed_snow_state, snow_add_mass,
+    SnowColumnState, column_enthalpy, new_snow_bulk_density, seed_snow_state, snow_add_mass,
     snow_phase_and_percolate, snow_remap_compact, snow_thermal_props,
     total_water)
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
@@ -169,8 +169,8 @@ def test_column_step_closes_energy_with_rain_sublimation_and_melt():
     rain = jnp.array([3.0, 0.0, 0.0, 6.0])
     sub = jnp.array([0.2, -0.05, 0.1, 0.1])            # kg/m2 (negative = frost)
     G = jnp.array([1500.0, -40.0, -20.0, 300.0])      # col 0: f*G melts through the cold content
-    p = snow_add_mass(pack0, snowfall, T_air)
-    p = snow_remap_compact(p, dt)
+    p = snow_add_mass(pack0, snowfall, T_air, rho_fresh=new_snow_bulk_density(T_air, 4.0))
+    p = snow_remap_compact(p, dt, 4.0)
     sub = jnp.minimum(sub, p.swe_ice[:, 0])
     H_sub = sub * constants.c_pi * (p.T[:, 0] - TF)
     p = p._replace(swe_ice=p.swe_ice.at[:, 0].add(-sub))
@@ -363,7 +363,7 @@ def test_sublimation_clamped_to_top_layer_and_water_closes():
     W0 = st.snow_depth + _soil_water(cfg, st)
     st1, out = _run(cfg, st, f, 1, dt)
     _, resp, sfc = out[0]
-    p = snow_remap_compact(snow_add_mass(_pack(st), 0.0, 271.0), dt)
+    p = snow_remap_compact(snow_add_mass(_pack(st), 0.0, 271.0), dt, 12.0)
     frac = float(land_snow_cover(total_water(p), cfg.land_albedo)[0])
     demand = frac * float(sfc.lhflx[0]) / constants.L_s * dt
     assert demand > float(p.swe_ice[0, 0]), (demand, float(p.swe_ice[0, 0]))  # clamp binds
