@@ -1240,6 +1240,12 @@ class ExperimentConfig(NamedTuple):
     # InterceptionConfig()): a prognostic canopy water store, throughfall and
     # wet-leaf evaporation. Default off; decks set it explicitly.
     land_canopy_interception: bool = False
+    # Trees hide ground snow in the land column albedo: CLM5 two-stream over the
+    # snow-buried leaf + stem area of the dominant plant type, applied to the
+    # snow increment only (snow-free albedo unchanged), no canopy snow (a
+    # bare-branch bound). Two-leaf canopy on the multilayer land only. Off by
+    # default pending the A/B (user 2026-10-03).
+    land_canopy_snow_masking: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -2272,6 +2278,17 @@ class ExperimentConfig(NamedTuple):
                 "require use_multilayer_land with land_surface_scheme="
                 "'two_leaf': only the two-leaf canopy reads them — the knob "
                 "would be silently inert.")
+        if self.land_canopy_snow_masking and not (
+                self.use_multilayer_land and self.snow_albedo_feedback
+                and self.land_surface_scheme == "two_leaf"):
+            errors.append(
+                "land_canopy_snow_masking requires use_multilayer_land, "
+                "snow_albedo_feedback and land_surface_scheme='two_leaf': it is "
+                "implemented only there and would be silently inert elsewhere.")
+        if self.land_canopy_snow_masking and self.land_snow_scheme == "layered":
+            errors.append(
+                "land_canopy_snow_masking is not supported with land_snow_scheme="
+                "'layered' yet (the masking would not read the pack's snow).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "

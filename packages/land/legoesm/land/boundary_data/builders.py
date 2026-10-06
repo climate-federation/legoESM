@@ -135,14 +135,18 @@ def build_canopy_params(
     # LAI / canopy height of the dominant PFT at this day-of-year.
     lai_m = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year))))
     htop_m = np.asarray(interp_monthly(gsd.htop_monthly, jnp.asarray(float(day_of_year))))
+    sai_m = np.asarray(interp_monthly(gsd.sai_monthly, jnp.asarray(float(day_of_year))))
+    hbot_m = np.asarray(interp_monthly(gsd.hbot_monthly, jnp.asarray(float(day_of_year))))
     cols = np.arange(ncol)
     LAI = lai_m[cols, dom]
+    SAI = sai_m[cols, dom]
     hc_surf = htop_m[cols, dom]
     hc_default = lut["hc"][dom]
     hc = np.where(np.isfinite(hc_surf) & (hc_surf > 0.0), hc_surf, hc_default)
 
     is_veg = lut["is_veg"][dom]
     LAI = np.where(is_veg > 0.0, np.nan_to_num(LAI, nan=0.0), 0.0)
+    SAI = np.where(is_veg > 0.0, np.nan_to_num(SAI, nan=0.0), 0.0)
 
     # Per-column dry/saturated soil-colour bounds; the land step re-evaluates the
     # band albedos from the live top-layer water (soil_albedo.rewet_soil_bands).
@@ -152,6 +156,9 @@ def build_canopy_params(
     ice = glacier_mask(gsd)
     is_veg = np.where(ice, 0.0, is_veg)
     LAI = np.where(ice, 0.0, LAI)
+    SAI = np.where(ice, 0.0, SAI)
+    hc_col = np.maximum(hc, HC_MIN_M)
+    hbot = np.clip(np.nan_to_num(hbot_m[cols, dom], nan=0.0), 0.0, hc_col)
     bounds = [np.asarray(b) for b in
               soil_albedo_bounds(jnp.asarray(np.asarray(gsd.soil_color)))]
     dry_vis, dry_nir, sat_vis, sat_nir = (
@@ -172,7 +179,7 @@ def build_canopy_params(
     full = lambda v: jnp.full(ncol, v)
     return CanopyLandParams(
         LAI=jnp.asarray(LAI),
-        hc=jnp.asarray(np.maximum(hc, HC_MIN_M)),
+        hc=jnp.asarray(hc_col),
         fC4=jnp.asarray(lut["fc4"][dom]),
         FNonVeg=jnp.asarray(1.0 - is_veg),       # bare-dominant columns -> non-veg
         CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
@@ -186,6 +193,8 @@ def build_canopy_params(
         rd=jnp.asarray(np.where(is_veg > 0.0, lut["rd"][dom], 0.0)),
         ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
         ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
+        SAI_dom=jnp.asarray(SAI), hbot_dom=jnp.asarray(hbot),
+        pft_dom=jnp.asarray(dom.astype(np.float64)),
         **_root_kw,
     )
 

@@ -44,6 +44,8 @@ L_s = L_v + L_f                 # Latent heat of sublimation at 0C [J/kg] (2.834
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
 rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE default)
+rho_snow_land = 250.0           # Bulk density of seasonal LAND snow [kg/m^3]: SWE -> depth for
+                                # the CLM5 burial of short plants (user-chosen 2026-10-03)
 rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
 rho_ocean_nemo = 1026.0         # NEMO rau0 [kg/m^3] (phycst.F90; GYRE/DINO/ORCA all use 1026)
