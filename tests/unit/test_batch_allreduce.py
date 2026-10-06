@@ -279,17 +279,79 @@ class TestMPI4JAXArrayResult:
 
 
 # ---------------------------------------------------------------------------
-# broadcast_allreduce_sum VJP (emulated ranks: vmap axis + psum)
+# global_sum_mpi VJP (emulated ranks: vmap axis + psum)
 # ---------------------------------------------------------------------------
+
+@jax.custom_vjp
+def _mpi4jax_like_sum(v):
+    """Emulates mpi4jax allreduce(SUM) over the vmap axis "rank": forward sums
+    across ranks, backward is the IDENTITY (mpi4jax's transpose).  A bare psum
+    would not do: its own transpose already sums, hiding the #1814 defect."""
+    return jax.lax.psum(v, "rank")
+
+
+_mpi4jax_like_sum.defvjp(lambda v: (jax.lax.psum(v, "rank"), None),
+                         lambda _res, g: (g,))
+
+
+def _emulate_ranks(monkeypatch):
+    import legoesm.parallel.reductions as red
+    monkeypatch.setattr(red, "_allreduce_sum",
+                        lambda v, comm, timer: _mpi4jax_like_sum(v))
+    return red
+
+
+def test_global_sum_mpi_vjp_sums_cross_rank_cotangents(monkeypatch):
+    """Each emulated rank r computes y_r = x_r * S with S = sum over ALL ranks
+    (reused on every rank) and seeds its own local loss sum(y_r).  True
+    dL/dx_r = S + sum_all x = 2 S.  An identity VJP gives S + sum(x_r)."""
+    red = _emulate_ranks(monkeypatch)
+    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)  # 3 ranks
+
+    def local_loss(x_r):
+        return jnp.sum(x_r * red.global_sum_mpi(jnp.sum(x_r)))
+
+    g = jax.vmap(jax.grad(local_loss), axis_name="rank")(x)
+    np.testing.assert_allclose(np.asarray(g), 2.0 * float(jnp.sum(x)),
+                               rtol=1e-12)
+
+
+def test_batch_allreduce_sum_vjp_sums_cross_rank_cotangents(monkeypatch):
+    """Same contract through the packed batch reduction."""
+    red = _emulate_ranks(monkeypatch)
+    monkeypatch.setattr(red, "require_mpi_stack",
+                        lambda: (None, type("M", (), {"SUM": 0, "MAX": 1,
+                                                      "MIN": 2})))
+    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)
+
+    def local_loss(x_r):
+        s, s2 = red.batch_allreduce_mpi([jnp.sum(x_r), jnp.sum(2.0 * x_r)])
+        return jnp.sum(x_r * s) + jnp.sum(x_r * s2)
+
+    g = jax.vmap(jax.grad(local_loss), axis_name="rank")(x)
+    # d/dx_r [x_r*S + x_r*2S] summed over ranks: 3S + 3*sum_all x = 6S.
+    np.testing.assert_allclose(np.asarray(g), 6.0 * float(jnp.sum(x)),
+                               rtol=1e-12)
+
+
+def test_global_sum_mpi_final_loss_keeps_identity_vjp(monkeypatch):
+    """final_loss=True: L = sum over ranks of x^2, seeded 1 on every rank, so
+    the per-rank gradient is 2 x_r (no rank-count factor)."""
+    red = _emulate_ranks(monkeypatch)
+    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)
+
+    def loss(x_r):
+        return red.global_sum_mpi(jnp.sum(x_r ** 2), final_loss=True)
+
+    g = jax.vmap(jax.grad(loss), axis_name="rank")(x)
+    np.testing.assert_allclose(np.asarray(g), 2.0 * np.asarray(x), rtol=1e-12)
+
 
 def test_broadcast_allreduce_sum_vjp_sums_cross_rank_cotangents(monkeypatch):
     """Each emulated rank r computes y_r = x_r * S with S = Σ_all x (broadcast)
     and seeds its own local loss sum(y_r). True dL/dx_r = S + Σ_all x = 2 S.
     The identity-VJP reduction would give S + Σ_local x_r instead."""
-    import legoesm.parallel.reductions as red
-
-    monkeypatch.setattr(red, "global_sum_mpi",
-                        lambda v: jax.lax.psum(v, "rank"))
+    red = _emulate_ranks(monkeypatch)
     x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)  # 3 ranks
 
     def local_loss(x_r):
