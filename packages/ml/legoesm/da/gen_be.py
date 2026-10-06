@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 _MPAS_HELMHOLTZ_POISSON_ITER = 240
 _MPAS_HELMHOLTZ_RELAX = 0.70
+# Implicit (Matern) horizontal correlation U_h = (I - sL)^{-n}, n = 2 (#1819).
+_MATERN_ORDER = 2
+# Relative error of the fixed-count Chebyshev solve of (I - sL) y = b.
+_MATERN_CHEB_RTOL = 1.0e-13
+_HORIZONTAL_SCHEMES = ("explicit", "implicit_matern")
 
 
 # ---------------------------------------------------------------------------
@@ -730,9 +735,29 @@ class GenBETransform:
     n_diffusion_iter : int
         Number of Laplacian diffusion iterations for horizontal correlation.
         More iterations → smoother kernel, closer to Gaussian.
+    horizontal_scheme : {"explicit", "implicit_matern"}
+        MPAS meshes only.  "explicit" (default): ``n_diffusion_iter`` steps of
+        x + sLx, which has no usable inverse (#1819).  "implicit_matern":
+        U_h = (I - sL)^{-2} with s = L^2 / 4, so B_h = (I - sL)^{-4} (Matern,
+        nu = 3 in 2-D) and U_h^{-1} = (I - sL)^2 is exact.  The length scales
+        and ``horiz_norm`` were fitted for the explicit kernel; refitting them
+        for this kernel is future work, so the correlation is not the same.
     """
 
-    def __init__(self, params: GenBEParams, spec, grid, n_diffusion_iter: int = 20):
+    def __init__(
+        self,
+        params: GenBEParams,
+        spec,
+        grid,
+        n_diffusion_iter: int = 20,
+        horizontal_scheme: str = "explicit",
+    ):
+        if horizontal_scheme not in _HORIZONTAL_SCHEMES:
+            raise ValueError(
+                f"GenBETransform: unknown horizontal_scheme {horizontal_scheme!r}; "
+                f"expected one of {_HORIZONTAL_SCHEMES}"
+            )
+        self.horizontal_scheme = horizontal_scheme
         self.params = params
         self.spec = spec
         self.grid = grid
@@ -806,6 +831,26 @@ class GenBETransform:
             self._neighbor_mask = None
             self._laplacian_weights = None
             self._diffusion_step_m2 = None
+        if horizontal_scheme == "implicit_matern":
+            if self._laplacian_weights is None:
+                raise ValueError(
+                    "GenBETransform: horizontal_scheme='implicit_matern' needs an MPAS "
+                    "mesh (cell/edge geometry for the finite-volume Laplacian)"
+                )
+            # Gershgorin: spec(L) in [-2 max_diag, 0], so spec(I - sL) in
+            # [1, 1 + 2 s max_diag] (L is self-adjoint in the areaCell inner
+            # product, so the spectrum is real).
+            self._matern_step_m2 = params.len_scale**2 / (2.0 * _MATERN_ORDER)
+            lam_hi = 1.0 + 2.0 * self._matern_step_m2 * max_diag
+            self._cheb_theta = 0.5 * (lam_hi + 1.0)
+            # floor: a zero length scale gives A = I and a 0/0 in the recurrence
+            self._cheb_delta = jnp.maximum(0.5 * (lam_hi - 1.0), 1.0e-30)
+            sqrt_k = float(jnp.sqrt(jnp.max(lam_hi)))
+            rate = (sqrt_k - 1.0) / (sqrt_k + 1.0)
+            self._n_cheb = (
+                1 if rate <= 0.0
+                else int(np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate)))
+            )
 
         self._use_mpas_helmholtz = (
             getattr(params, "wind_transform", "mpas_helmholtz") == "mpas_helmholtz"
@@ -1021,10 +1066,14 @@ class GenBETransform:
             weights = self._laplacian_weights[..., None]
             step_m2 = self._diffusion_step_m2
 
+            def fv_lap(x):
+                return jnp.sum(weights * (x[neighbors, :] - x[None, :, :]), axis=0)
+
+            if self.horizontal_scheme == "implicit_matern":
+                return self._matern_smooth(all_ch, fv_lap, inverse)
+
             def step(x, _):
-                neighbor_vals = x[neighbors, :]
-                lap = jnp.sum(weights * (neighbor_vals - x[None, :, :]), axis=0)
-                return x + sign * step_m2[None, :] * lap, None
+                return x + sign * step_m2[None, :] * fv_lap(x), None
 
             result, _ = jax.lax.scan(step, all_ch, None, length=self.n_iter)
             return result
@@ -1045,6 +1094,42 @@ class GenBETransform:
         # vmap over channels: each channel gets its own kappa
         smooth_vmapped = jax.vmap(smooth_one_channel, in_axes=(1, 0), out_axes=1)
         return smooth_vmapped(all_ch, kappa)
+
+    def _matern_smooth(self, all_ch, fv_lap, inverse: bool) -> jax.Array:
+        """(I - sL)^{-n} x, or its exact inverse (I - sL)^n x.
+
+        The solve is Chebyshev iteration with a fixed count from the Gershgorin
+        interval, so U stays linear (finite CG would not be)."""
+        s = self._matern_step_m2[None, :]
+
+        def apply_a(x):
+            return x - s * fv_lap(x)
+
+        if inverse:
+            for _ in range(_MATERN_ORDER):
+                all_ch = apply_a(all_ch)
+            return all_ch
+
+        theta = self._cheb_theta[None, :]
+        delta = self._cheb_delta[None, :]
+        sigma = theta / delta
+
+        def solve(b):
+            # Saad, Iterative Methods for Sparse Linear Systems, Alg. 12.1.
+            def body(carry, _):
+                x, r, d, rho = carry
+                x = x + d
+                r = r - apply_a(d)
+                rho_new = 1.0 / (2.0 * sigma - rho)
+                d = rho_new * rho * d + (2.0 * rho_new / delta) * r
+                return (x, r, d, rho_new), None
+
+            init = (jnp.zeros_like(b), b, b / theta, 1.0 / sigma)
+            return jax.lax.scan(body, init, None, length=self._n_cheb)[0][0]
+
+        for _ in range(_MATERN_ORDER):
+            all_ch = solve(all_ch)
+        return all_ch
 
     def _assemble_channels(
         self,
@@ -1140,7 +1225,9 @@ class GenBETransform:
         Applies the operators in reverse order:
           U_wind^{-1} → U_sigma^{-1} → U_vert^{-1} → U_bal^{-1} → U_horiz^{-1}
         """
-        if self._laplacian_weights is not None or self._use_mpas_helmholtz:
+        if self._use_mpas_helmholtz or (
+            self._laplacian_weights is not None and self.horizontal_scheme != "implicit_matern"
+        ):
             # Not implemented, and at production settings not implementable: the
             # forward diffusion (I + sL)^n multiplies the most negative
             # eigenmode of L by (1 + s lam_min)^n.  While the step is unclipped
