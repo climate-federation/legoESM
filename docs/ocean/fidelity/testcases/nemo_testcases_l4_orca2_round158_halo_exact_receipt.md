@@ -96,8 +96,8 @@ gates belong to the next round's combined landing attempt.
 
 ## Tests, citations, and review
 
-Focused round-157/158 and boundary-association tests pass 22/22 before the
-receipt. The one required `tests/ocean/fidelity -n 12` invocation is
+The final focused round-157/158, receipt-citation, and boundary-association
+tests pass 25/25. The one required `tests/ocean/fidelity -n 12` invocation is
 **INCOMPLETE**, not PASS: it collected 2,637 tests, reached 99%, and showed
 only the four already registered failures (SI3 scalar-math provenance, GYRE
 round-129 spread-record stamp, round-35 escape scope, and worktree stamp).
