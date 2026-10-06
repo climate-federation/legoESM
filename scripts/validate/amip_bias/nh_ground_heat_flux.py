@@ -41,6 +41,11 @@ def main():
     ap.add_argument("run")
     ap.add_argument("scratch")
     ap.add_argument("--days", nargs=2, type=int, required=True)
+    ap.add_argument("--series", action="store_true",
+                    help="also print, per day and region: soil enthalpy (relative to "
+                         "liquid water at 0 degC, with the latent heat of the ice the "
+                         "land's own freezing curve implies), its change, the conductive "
+                         "fluxes, SWE and soil T at the top node and ~0.175 m")
     a = ap.parse_args()
     import jax.numpy as jnp
     from legoesm.land.clm_surface_map import load_clm_surface
@@ -67,6 +72,40 @@ def main():
           f"{c.thermal.enable_freeze_thaw}")
     acc = {}
     days = range(a.days[0], a.days[1] + 1)
+    if a.series:
+        from legoesm import constants
+        from legoesm.land.soil_thermal import compute_heat_capacity, liquid_water_content
+        i_175 = int(np.argmin(np.abs(z - 0.175)))
+        dz = np.asarray(g.dz) if hasattr(g, "dz") else None
+        if dz is None or dz.shape != z.shape:
+            raise SystemExit("FATAL: soil grid has no layer thickness matching its nodes")
+        wts = {name: area * f_land * ((f_land > 0.5) & (glac < 0.5) & (lat >= a0) & (lat <= a1)
+                                      & (lon >= b0) & (lon <= b1))
+               for name, (a0, a1, b0, b1) in REGIONS.items()}
+        prev = None
+        print(f"series: node depths top {z[0]:.4f} m, ~0.175 m -> {z[i_175]:.3f} m; "
+              f"column depth {dz.sum():.2f} m")
+        print("day region H_soil[MJ/m2] dH/dt[W/m2] F_top[W/m2] F_02[W/m2] SWE[kg/m2] T_top[C] T_0.175[C]")
+        for day in days:
+            ck = np.load(f"{ROOT}/{a.run}/checkpoint_day_{day:04d}.npz")
+            T = np.asarray(ck["land_ml_T_soil"]); th = np.asarray(ck["land_ml_theta_soil"])
+            C = np.asarray(compute_heat_capacity(jnp.asarray(th), c.hydraulics, c.thermal))
+            th_liq, _ = liquid_water_content(jnp.asarray(T), jnp.asarray(th), c.thermal)
+            ice = th - np.asarray(th_liq)
+            H = ((C * (T - constants.T_freeze)
+                  - constants.rho_water * constants.L_f * ice) * dz[None, :]).sum(1)
+            k = np.asarray(compute_thermal_conductivity(jnp.asarray(th), c.hydraulics, c.thermal))
+            kh = 2.0 * k[:, :-1] * k[:, 1:] / (k[:, :-1] + k[:, 1:] + 1e-20)
+            F = kh * (T[:, 1:] - T[:, :-1]) / dzi
+            swe = np.asarray(ck["land_ml_snow_depth"])
+            for name, w in wts.items():
+                h = wmean(H, w)
+                dh = "" if prev is None else f"{(h - prev[name]) / 86400.0:+.2f}"
+                print(f"{day} {name} {h / 1e6:+.3f} {dh} {wmean(F[:, 0], w):+.2f} "
+                      f"{wmean(F[:, i_02], w):+.2f} {wmean(swe, w):.1f} "
+                      f"{wmean(T[:, 0], w) - constants.T_freeze:+.2f} "
+                      f"{wmean(T[:, i_175], w) - constants.T_freeze:+.2f}")
+            prev = {name: wmean(H, w) for name, w in wts.items()}
     for day in days:
         ck = np.load(f"{ROOT}/{a.run}/checkpoint_day_{day:04d}.npz")
         T, th = np.asarray(ck["land_ml_T_soil"]), np.asarray(ck["land_ml_theta_soil"])
