@@ -21,6 +21,8 @@ import struct
 import sys
 from pathlib import Path
 
+import numpy as np
+
 # (magic, number of header integers after the magic, number of 3-D arrays,
 #  number of extra 2-D arrays).  Everything else is read from the header.
 _FAMILIES = {
@@ -61,6 +63,16 @@ _FAMILIES = {
     # stream, but it opens at EVERY stage and carries the advective
     # transports the flux-form advection call consumes.
     "oracle_stage_flux_terms_kt": ("NEMO_L1_STGFLX1", 15, "groups", 0),
+    # Round 218's TRACER-term record (VORTEX_SMT round 7).  Same header
+    # shape and the same self-describing group stream; it opens at every
+    # stage and carries the tracer path's operands and outputs.
+    "oracle_tracer_terms_kt": ("NEMO_L1_TRATRM1", 15, "groups", 0),
+    # Round 227's internal isoneutral-LDF records.  Both use the same
+    # self-describing group stream.  Their only fixed contract is this magic
+    # plus the required names below; extents and total bytes come from each
+    # group in the file (operator note BD).
+    "oracle_ldf_slope_kt": ("NEMO_L1_LDFSLP1", 15, "groups", 0),
+    "oracle_ldf_iso_kt": ("NEMO_L1_LDFISO1", 15, "groups", 0),
 }
 # The groups every per-term record must carry, by name.  This list, the magic
 # and the format version are the ONLY hard-coded expectations.
@@ -92,6 +104,39 @@ _STAGE_FLUX_BY_STAGE = {
     3: _STAGE_FLUX_COMMON + ("hpg_u", "hpg_v", "vor_u", "vor_v",
                              "ldf_u", "ldf_v", "zdf_u", "zdf_v"),
 }
+
+# Round 218's tracer-term record.  The same fifteen groups at every stage:
+# the three advective transports as tra_adv receives them, the cross-level
+# velocity, the before/now tracer fields, the three surface-ratio time
+# levels, the tracer right-hand side after advection + the surface boundary
+# condition, and the after-tracer at the end of the stage.
+_TRACER_TERM_GROUPS = (
+    "zfu", "zfv", "zfw", "ww",
+    "tsb_t", "tsb_s", "tsm_t", "tsm_s",
+    "r3t_kbb", "r3t_kmm", "r3t_kaa",
+    "adv_t", "adv_s", "out_t", "out_s",
+)
+_SMT3_TRACER_TERM_BY_STAGE = {
+    1: _TRACER_TERM_GROUPS,
+    2: _TRACER_TERM_GROUPS,
+    3: _TRACER_TERM_GROUPS + ("ldf_t", "ldf_s"),
+}
+
+_LDF_SLOPE_GROUPS = (
+    "prd", "pn2", "e3u_kmm", "e3v_kmm", "raw_u", "raw_v",
+    "bound_u", "bound_v", "hraw_u", "hraw_v", "wraw_i", "wraw_j",
+    "uslp", "vslp", "wslpi", "wslpj",
+)
+_LDF_ISO_GROUPS = (
+    "t_kbb", "rhs_before", "rhs_after", "rhs_increment",
+    "e3t_3d", "e3u_3d", "e3v_3d", "tmask", "umask", "vmask", "wmask",
+    "ahtu", "ahtv", "uslp", "vslp", "wslpi", "wslpj", "ah_wslp2", "akz",
+    "dit", "djt", "dkt", "A11", "A22", "A13", "A23", "hmsku", "hmskv",
+    "fu", "fv", "vmsku", "vmskv", "ahu_w", "ahv_w", "A31", "A32",
+    "fw_lower", "fw_upper", "r3t_kmm", "r3u_kmm", "r3v_kmm",
+    "e2_e1u", "e1_e2v", "e2u", "e1v", "e1t", "e2t", "e1e2t",
+    "r1_e1e2t", "e3w_1d",
+)
 
 
 # Round 196's per-substep barotropic record.  Three frame kinds: the
@@ -208,7 +253,8 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
         # carries the two time-filter weight vectors and the per-substep
         # coefficients; the older families are 2-D and 3-D only, and
         # accepting a rank they never write would weaken their guard.
-        allowed = (1, 2, 3) if family == "oracle_spgts_kt" else (2, 3)
+        allowed = ((1, 2, 3) if family in
+                   ("oracle_spgts_kt", "oracle_ldf_iso_kt") else (2, 3))
         _require(rank in allowed,
                  f"{path.name}: group {name!r} has rank {rank}")
         _require(min(n1, n2, n3) > 0,
@@ -227,7 +273,18 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
              "group; the file does not end on a group boundary")
     if family == "oracle_spgts_kt":
         return _finish_spgts(path, magic, header, groups, plant)
-    if family == "oracle_rhsterm_kt":
+    if plant == "field-name":
+        victim = "ldf_t" if "ldf_t" in groups else next(iter(groups))
+        groups[f"{victim}_plant"] = groups.pop(victim)
+    if family == "oracle_ldf_slope_kt":
+        required = _LDF_SLOPE_GROUPS
+        declared_index = 10
+        stage = header[2]
+    elif family == "oracle_ldf_iso_kt":
+        required = _LDF_ISO_GROUPS
+        declared_index = 10
+        stage = header[2]
+    elif family == "oracle_rhsterm_kt":
         required = _RHSTERM_GROUPS
         declared_index = 9
         stage = None
@@ -236,6 +293,15 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
         _require(stage in _STAGE_FLUX_BY_STAGE,
                  f"{path.name}: unsupported stage {stage}")
         required = _STAGE_FLUX_BY_STAGE[stage]
+        declared_index = 10
+    elif family == "oracle_tracer_terms_kt":
+        stage = header[2]
+        _require(stage in (1, 2, 3),
+                 f"{path.name}: unsupported stage {stage}")
+        if stage == 3 and header[10] == len(_SMT3_TRACER_TERM_BY_STAGE[3]):
+            required = _SMT3_TRACER_TERM_BY_STAGE[3]
+        else:
+            required = _TRACER_TERM_GROUPS
         declared_index = 10
     else:
         stage = header[2]
@@ -260,6 +326,25 @@ def _parse_groups(path: Path, raw: bytes, magic: str, header: list,
             "stage": stage,
             "groups": groups,
             "doubles": sum(g["doubles"] for g in groups.values())}
+
+
+def _read_group_values(path: Path) -> dict[str, np.ndarray]:
+    """Read values using only the rank/extents carried by each group."""
+    raw = path.read_bytes()
+    offset = 16 + 15 * 4
+    values = {}
+    while offset < len(raw):
+        name = raw[offset:offset + 16].decode("ascii", "replace").rstrip()
+        rank, n1, n2, n3 = struct.unpack("=4i", raw[offset + 16:offset + 32])
+        offset += 32
+        shape = (n1, n2, n3)[:rank]
+        count = int(np.prod(shape))
+        values[name] = np.frombuffer(
+            raw, dtype="=f8", count=count, offset=offset).reshape(
+                shape, order="F")
+        offset += 8 * count
+    _require(offset == len(raw), f"{path.name}: value reader did not reach EOF")
+    return values
 
 
 def _finish_spgts(path: Path, magic: str, header: list, groups: dict,
@@ -326,6 +411,15 @@ def main(argv=None) -> int:
     parser.add_argument("--stage-flux-terms", action="store_true",
                         help="also require round 200's flux-card stage-1, "
                              "stage-2 and stage-3 momentum term records")
+    parser.add_argument("--tracer-terms", action="store_true",
+                        help="also admit round 218's per-stage tracer-term "
+                             "record")
+    parser.add_argument("--smt3-tracer-terms", action="store_true",
+                        help="also admit round 224's per-stage tracer record; "
+                             "stage 3 must include the post-LDF boundary")
+    parser.add_argument("--ldf-internals", action="store_true",
+                        help="also admit round 227's ldf_slp and "
+                             "traldf_iso internal records")
     parser.add_argument("--spgts-terms", action="store_true",
                         help="also require round 196's per-substep "
                              "barotropic (dyn_spg_ts) records")
@@ -374,6 +468,13 @@ def main(argv=None) -> int:
             wanted += [args.run_dir /
                        f"oracle_stage_flux_terms_kt00000001_s{stage}.bin"
                        for stage in (1, 2, 3)]
+        if args.tracer_terms or args.smt3_tracer_terms:
+            wanted += [args.run_dir /
+                       f"oracle_tracer_terms_kt00000001_s{stage}.bin"
+                       for stage in (1, 2, 3)]
+        if args.ldf_internals:
+            wanted += [args.run_dir / "oracle_ldf_slope_kt00000001.bin",
+                       args.run_dir / "oracle_ldf_iso_kt00000001.bin"]
         if args.spgts_terms:
             wanted += [args.run_dir / f"oracle_spgts_kt{kt:08d}.bin"
                        for kt in range(1, args.steps + 1)]
@@ -381,6 +482,12 @@ def main(argv=None) -> int:
             _require(path.is_file(), f"the run did not write {path.name}")
         if args.spgts_terms:
             corrupt_path = args.run_dir / "oracle_spgts_kt00000001.bin"
+        elif args.ldf_internals:
+            corrupt_path = (args.run_dir /
+                            "oracle_ldf_iso_kt00000001.bin")
+        elif args.tracer_terms or args.smt3_tracer_terms:
+            corrupt_path = (args.run_dir /
+                            "oracle_tracer_terms_kt00000001_s1.bin")
         elif args.stage_flux_terms:
             corrupt_path = (args.run_dir /
                             "oracle_stage_flux_terms_kt00000001_s1.bin")
@@ -459,6 +566,52 @@ def main(argv=None) -> int:
                              f"rank {want}")
             report["stage_flux_term_groups"] = {
                 str(r["stage"]): sorted(r["groups"]) for r in flux_records}
+        if args.tracer_terms or args.smt3_tracer_terms:
+            tra_records = [r for r in report["records"]
+                           if r["magic"] == "NEMO_L1_TRATRM1"]
+            stages = {r["stage"] for r in tra_records}
+            _require(stages == {1, 2, 3},
+                     f"tracer-term records cover {sorted(stages)}, "
+                     "expected [1, 2, 3]")
+            _require(len(tra_records) == 3,
+                     f"{len(tra_records)} tracer-term records, expected 3")
+            if args.smt3_tracer_terms:
+                for record in tra_records:
+                    required = _SMT3_TRACER_TERM_BY_STAGE[record["stage"]]
+                    _require(set(record["groups"]) == set(required),
+                             f"stage {record['stage']} SMT-3 tracer groups "
+                             f"differ: {sorted(record['groups'])}")
+            for record in tra_records:
+                for name, meta in record["groups"].items():
+                    want = 2 if name.startswith("r3t_") else 3
+                    _require(meta["rank"] == want,
+                             f"stage {record['stage']} {name} is not "
+                             f"rank {want}")
+            report["tracer_term_groups"] = {
+                str(r["stage"]): sorted(r["groups"]) for r in tra_records}
+        if args.ldf_internals:
+            slope = [r for r in report["records"]
+                     if r["magic"] == "NEMO_L1_LDFSLP1"]
+            iso = [r for r in report["records"]
+                   if r["magic"] == "NEMO_L1_LDFISO1"]
+            _require(len(slope) == 1 and len(iso) == 1,
+                     f"internal LDF records: {len(slope)} slope, {len(iso)} ISO")
+            _require(set(slope[0]["groups"]) == set(_LDF_SLOPE_GROUPS),
+                     "slope record's named groups moved")
+            _require(set(iso[0]["groups"]) == set(_LDF_ISO_GROUPS),
+                     "ISO record's named groups moved")
+            arrays = _read_group_values(
+                args.run_dir / "oracle_ldf_iso_kt00000001.bin")
+            rebuilt = arrays["rhs_after"] - arrays["rhs_before"]
+            _require(np.array_equal(rebuilt, arrays["rhs_increment"]),
+                     "stored ISO RHS increment is not exactly after-before")
+            _require(all(np.isfinite(value).all() for value in arrays.values()),
+                     "internal ISO record contains a non-finite value")
+            report["ldf_internal_groups"] = {
+                "slope": sorted(slope[0]["groups"]),
+                "iso": sorted(iso[0]["groups"]),
+                "rhs_increment_rebuild_cells_unequal": 0,
+            }
         if args.spgts_terms:
             spgts = [r for r in report["records"]
                      if r["magic"] == "NEMO_L1_SPGTS1"]

@@ -24,6 +24,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
@@ -432,7 +433,8 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
 
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
                                active_3d=None, jacobian=None,
-                               n2_override=None, e3w_override=None):
+                               n2_override=None, e3w_override=None,
+                               eos_nemo_seos=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -533,7 +535,9 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # e3w slots before the recorded operand can replace it.
         if n2_override is None:
             n2_int = compute_buoyancy_frequency_nemo_bn2(
-                T_filled, S_filled, _gdept, _gdepw_int, NemoSEOSConfig(), g=g,
+                T_filled, S_filled, _gdept, _gdepw_int,
+                (eos_nemo_seos if eos_nemo_seos is not None
+                 else NemoSEOSConfig()), g=g,
                 e3w_int=e3w)
     else:
         if n2_override is None:
@@ -667,7 +671,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
               g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None,
-              n2_override=None, e3w_override=None):
+              n2_override=None, e3w_override=None, eos_nemo_seos=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -682,7 +686,7 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
         return _nemo_mld_from_n2_integral(
             T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
             jacobian=jacobian, n2_override=n2_override,
-            e3w_override=e3w_override)
+            e3w_override=e3w_override, eos_nemo_seos=eos_nemo_seos)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -800,7 +804,8 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 # =====================================================================
 
 def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
-                              slope_n2="adiabatic", jacobian=None):
+                              slope_n2="adiabatic", jacobian=None,
+                              eos_nemo_seos=None):
     """Shared W-point geometry + N² for the native ldfslp stencil.
 
     Factors the ``e3w``/``wmask3``/``pn2`` block common to
@@ -891,7 +896,9 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         else:
             _gdept_n2, _gdepw_n2 = gdept, _gdepw_int
         n2_int = compute_buoyancy_frequency_nemo_bn2(
-            T, S, _gdept_n2, _gdepw_n2, NemoSEOSConfig(), g=g,
+            T, S, _gdept_n2, _gdepw_n2,
+            (eos_nemo_seos if eos_nemo_seos is not None
+             else NemoSEOSConfig()), g=g,
             e3w_int=e3w[..., 1:])                           # (...,nlev-1)
         # HISTORICAL (superseded 2026-07-28, kept for provenance):
         # this branch used to divide n2_int by the jacobian --
@@ -1042,7 +1049,8 @@ def compute_nemo_native_slopes(
     prd_TS_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     prd_override: jnp.ndarray | None = None,
     pn2_override: jnp.ndarray | None = None,
-    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False, nmln_override: jnp.ndarray | None = None,
+    e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False,
+    nmln_override: jnp.ndarray | None = None, eos_nemo_seos=None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1166,8 +1174,10 @@ def compute_nemo_native_slopes(
         if _prd_stretch is not None:
             _gdept_prd = _gdept_prd * _prd_stretch[..., jnp.newaxis]
         _prd_T, _prd_S = (T, S) if prd_TS_override is None else prd_TS_override
+        _seos = (eos_nemo_seos if eos_nemo_seos is not None
+                 else NemoSEOSConfig(rho0=rho_0))
         prd = nemo_seos_prd_literal(
-            _prd_T, _prd_S, _gdept_prd, NemoSEOSConfig(rho0=rho_0)) * act
+            _prd_T, _prd_S, _gdept_prd, _seos) * act
     else:
         raise ValueError(
             "unknown GMRediConfig.slope_prd_evaluation "
@@ -1178,7 +1188,8 @@ def compute_nemo_native_slopes(
     # consistent with the slopes it is coupled to; no duplicate numerics).
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian)
+        slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian,
+        eos_nemo_seos=eos_nemo_seos)
     _e3w_surface = e3w[..., :1]
     if pn2_override is not None:
         pn2 = jnp.asarray(pn2_override, dtype=dtype)
@@ -1230,7 +1241,8 @@ def compute_nemo_native_slopes(
     hml, m_base = _nemo_mld(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian,
-        n2_override=pn2_override, e3w_override=e3w_override)
+        n2_override=pn2_override, e3w_override=e3w_override,
+        eos_nemo_seos=eos_nemo_seos)
     first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
@@ -2348,6 +2360,13 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     a33_evaluation: str = "normalized_square",
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
+    divisor_thickness: jnp.ndarray | None = None,
+    closed_bottom_wmask: bool = False,
+    horizontal_flux_evaluation: str = "vectorized",
+    area_reciprocal: jnp.ndarray | None = None,
+    area_reciprocal_evaluation: str = "vectorized",
+    final_update_evaluation: str = "masked",
+    rhs_accumulator: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2442,6 +2461,35 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
             f"got {a33_evaluation!r}")
+    if horizontal_flux_evaluation not in (
+            "vectorized", "nemo_pairwise", "nemo_literal",
+            "nemo_literal_differences", "nemo_literal_horizontal_sum",
+            "nemo_literal_flux_sum", "nemo_literal_divergence"):
+        raise ValueError(
+            "horizontal_flux_evaluation must be 'vectorized', "
+            "'nemo_pairwise', 'nemo_literal', "
+            "'nemo_literal_differences', 'nemo_literal_horizontal_sum', "
+            "'nemo_literal_flux_sum' or 'nemo_literal_divergence', got "
+            f"{horizontal_flux_evaluation!r}")
+    if area_reciprocal_evaluation not in ("vectorized", "nemo_stored"):
+        raise ValueError(
+            "area_reciprocal_evaluation must be 'vectorized' or "
+            f"'nemo_stored', got {area_reciprocal_evaluation!r}")
+    if (area_reciprocal is not None
+            and area_reciprocal_evaluation != "vectorized"):
+        raise ValueError(
+            "area_reciprocal and a non-vectorized "
+            "area_reciprocal_evaluation are mutually exclusive")
+    if final_update_evaluation not in (
+            "masked", "unmasked", "nemo_rhs_increment"):
+        raise ValueError(
+            "final_update_evaluation must be 'masked', 'unmasked' or "
+            f"'nemo_rhs_increment', got {final_update_evaluation!r}")
+    if ((rhs_accumulator is None)
+            != (final_update_evaluation != "nemo_rhs_increment")):
+        raise ValueError(
+            "rhs_accumulator must be supplied exactly when "
+            "final_update_evaluation='nemo_rhs_increment'")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2551,10 +2599,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # zmsku = 1/max(Σ4 wmask around the u-face vertical pair, 1)
     wm_ip1 = jnp.roll(wmask, -1, ax_x)
     wm_kp1 = jnp.roll(wmask, -1, ax_z)
-    wm_ip1_kp1 = jnp.roll(wm_ip1, -1, ax_z)
+    if closed_bottom_wmask:
+        # NEMO's deepest tracer level reads the closed jpk W level, not the
+        # surface W level.  This private discriminator prevents the periodic
+        # vertical roll from wrapping that surface mask onto the floor
+        # (traldf_iso.f90:246-249).
+        wm_kp1 = wm_kp1.at[:, :, -1].set(0.0)
+    wm_ip1_kp1 = jnp.roll(wm_kp1, -1, ax_x)
     zmsku_h = 1.0 / jnp.maximum(wm_ip1 + wm_kp1 + wm_ip1_kp1 + wmask, 1.0)
     wm_jp1 = jnp.roll(wmask, -1, ax_y)
-    wm_jp1_kp1 = jnp.roll(wm_jp1, -1, ax_z)
+    wm_jp1_kp1 = jnp.roll(wm_kp1, -1, ax_y)
     zmskv_h = 1.0 / jnp.maximum(wm_jp1 + wm_kp1 + wm_jp1_kp1 + wmask, 1.0)
 
     zA13 = -e2u[:, :, jnp.newaxis] * uslp * zmsku_h
@@ -2562,13 +2616,36 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     # 4-pt vertical-gradient average around the u-face / v-face
     zdkt_kp1 = jnp.roll(zdkt, -1, ax_z)
-    avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
-    avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
+    literal_flux = horizontal_flux_evaluation.startswith("nemo_literal")
+    if horizontal_flux_evaluation == "nemo_pairwise" or literal_flux:
+        # traldf_iso.f90:254-259: NEMO requires the two explicit pairs for
+        # halo/fold compatibility.  Keep this private selector until the
+        # production-step discriminator closes the complete statement.
+        avg4_u = ((jnp.roll(zdkt, -1, ax_x) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_x) + zdkt))
+        avg4_v = ((jnp.roll(zdkt, -1, ax_y) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_y) + zdkt))
+    else:
+        avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
+        avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
 
-    zfu = aht * (zA11 * zdit + zA13 * avg4_u)
-    zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
+    if literal_flux:
+        # Materialize every source operation in traldf_iso.f90:254-259.  Bare
+        # parentheses are reassociated by the production XLA closure; the
+        # shared identity helper retains each gfortran rounding boundary.
+        diag_u = nemo_source_round(zA11 * zdit)
+        cross_u = nemo_source_round(zA13 * nemo_source_round(avg4_u))
+        diag_v = nemo_source_round(zA22 * zdjt)
+        cross_v = nemo_source_round(zA23 * nemo_source_round(avg4_v))
+        zfu = nemo_source_round(
+            aht * nemo_source_round(diag_u + cross_u))
+        zfv = nemo_source_round(
+            aht_v * nemo_source_round(diag_v + cross_v))
+    else:
+        zfu = aht * (zA11 * zdit + zA13 * avg4_u)
+        zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
 
     # ================= VERTICAL flux zfw at w-level jk+1 (A31 + A32) ========
     # Shared a33 kappa sums (#1226): faces (k,k+1) here = the "above"
@@ -2759,17 +2836,75 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "'centred' or 'through_fct'.")
 
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
-    hdiv = (zfu - jnp.roll(zfu, +1, ax_x)) + (zfv - jnp.roll(zfv, +1, ax_y))
     zfw_top = jnp.roll(zfw_kp1, +1, ax_z)            # flux at interface ABOVE cell k
     zfw_top = zfw_top.at[:, :, 0].set(0.0)           # surface flux = 0
-    vdiv = zfw_top - zfw_kp1
-
-    r1_e1e2t = 1.0 / (e1t * e2t)
-    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t
+    if area_reciprocal is not None:
+        r1_e1e2t = jnp.asarray(area_reciprocal, dtype=dtype)
+        if r1_e1e2t.shape != e1t.shape:
+            raise ValueError(
+                "area_reciprocal must have the tracer-cell horizontal "
+                f"shape {e1t.shape}, got {r1_e1e2t.shape}")
+    elif area_reciprocal_evaluation == "nemo_stored":
+        # domhgr.f90:155 stores e1e2t first, then its reciprocal. Retain both
+        # assignments as compiled source-rounding boundaries for the private
+        # production-step discriminator.
+        r1_e1e2t = nemo_source_round(
+            1.0 / nemo_source_round(e1t * e2t))
+    else:
+        r1_e1e2t = 1.0 / (e1t * e2t)
+    e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(
+        divisor_thickness, dtype=dtype)
+    if e3t_divisor.shape != q.shape:
+        raise ValueError(
+            "divisor_thickness must have the full tracer shape "
+            f"{q.shape}, got {e3t_divisor.shape}")
+    divergence_mode = horizontal_flux_evaluation.removeprefix(
+        "nemo_literal_")
+    if divergence_mode in (
+            "differences", "horizontal_sum", "flux_sum", "divergence"):
+        # traldf_iso.f90:306-310/:327-331.  These cumulative private modes
+        # retain one more compiled boundary at a time after the horizontal
+        # fluxes have become exact.  The deepest level uses zfw alone rather
+        # than subtracting the identically-zero flux below the model floor.
+        du = nemo_source_round(zfu - jnp.roll(zfu, +1, ax_x))
+        dv = nemo_source_round(zfv - jnp.roll(zfv, +1, ax_y))
+        dw = nemo_source_round(zfw_top - zfw_kp1)
+        dw = dw.at[:, :, -1].set(zfw_top[:, :, -1])
+        hdiv = du + dv
+        if divergence_mode in ("horizontal_sum", "flux_sum", "divergence"):
+            hdiv = nemo_source_round(hdiv)
+        total_div = hdiv + dw
+        if divergence_mode in ("flux_sum", "divergence"):
+            total_div = nemo_source_round(total_div)
+        scaled_div = total_div * r1_e1e2t[:, :, jnp.newaxis]
+        if divergence_mode == "divergence":
+            scaled_div = nemo_source_round(scaled_div)
+            tend = nemo_source_round(scaled_div / e3t_divisor)
+        else:
+            tend = scaled_div / e3t_divisor
+    else:
+        hdiv = ((zfu - jnp.roll(zfu, +1, ax_x))
+                + (zfv - jnp.roll(zfv, +1, ax_y)))
+        vdiv = zfw_top - zfw_kp1
+        tend = ((hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis]
+                / e3t_divisor)
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
-    tend = tend * act
+    if final_update_evaluation != "unmasked":
+        tend = tend * act
+    if final_update_evaluation == "nemo_rhs_increment":
+        rhs_before = jnp.asarray(rhs_accumulator, dtype=dtype)
+        if rhs_before.shape != q.shape:
+            raise ValueError(
+                "rhs_accumulator must have the full tracer shape "
+                f"{q.shape}, got {rhs_before.shape}")
+        # traldf_iso.f90:306-310/:327-331 updates Krhs in place.  The Round
+        # 235 private discriminator returns the exact increment subsequently
+        # written by the oracle (rhs_after-rhs_before), preserving both
+        # compiled assignment boundaries without changing any production arm.
+        tend = nemo_source_round(
+            nemo_source_round(rhs_before + tend) - rhs_before)
     if return_diagnostics:
         diagnostics = {
             "zfu": zfu,
@@ -2781,13 +2916,14 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "q": q, "tmask": act, "umask": umask, "vmask": vmask,
                 "wmask": wmask, "ahtu": aht, "ahtv": aht_v,
                 "uslp": uslp, "vslp": vslp, "wslpi": wslpi,
-                "wslpj": wslpj, "e3t": e3t, "e3u_flux": e3u_flux,
+                "wslpj": wslpj, "e3t": e3t_divisor, "e3u_flux": e3u_flux,
                 "e3v_flux": e3v_flux, "dit": zdit, "djt": zdjt,
                 "dkt": zdkt, "A11": zA11, "A22": zA22, "A13": zA13,
                 "A23": zA23, "hmsku": zmsku_h, "hmskv": zmskv_h,
                 "vmsku": zmsku_w, "vmskv": zmskv_w, "ahu_w": zahu_w,
                 "ahv_w": zahv_w, "A31": zA31, "A32": zA32,
                 "zfw_top": zfw_top, "tendency": tend,
+                "r1_e1e2t": r1_e1e2t,
             })
             diagnostics["zfu_operands"] = {
                 # NOTE: face-MASKED, as NEMO's own ahtu is (ldftra.f90:433).
@@ -2818,6 +2954,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "wmask": wmask,
                     "ah_wslp2": ah_wslp2,
                     "akz": akz,
+                    "ah_wslp2_above": _ahw_ab, "akz_above": _akz_ab,
                     "e1e2t": e1t * e2t,
                     "e3w_kp1": e3w_kp1,
                     "qdiff_kp1": q - jnp.roll(q, -1, axis=2),
@@ -3790,6 +3927,7 @@ def gm_redi_density_and_jacobian(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
@@ -3831,7 +3969,8 @@ def gm_redi_density_and_jacobian(
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     # NEMO's eos_insitu evaluates at the LIVE gdept(Knn) = gdept_0*(1+r3t),
     # r3t = ssh/ht_0 (eosbn2.F90:541 `zh = gdept(ji,jj,jk,Knn)`), NOT the static
@@ -4015,6 +4154,7 @@ def gm_redi_tracer_tendency_latlon(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
@@ -4038,6 +4178,13 @@ def gm_redi_tracer_tendency_latlon(
     return_bolus_transport: bool = False,
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    redi_divisor_thickness_override: jnp.ndarray | None = None,
+    redi_closed_bottom_wmask_override: bool = False,
+    redi_horizontal_flux_evaluation_override: str | None = None,
+    redi_area_reciprocal_override: jnp.ndarray | None = None,
+    redi_area_reciprocal_evaluation_override: str | None = None,
+    redi_final_update_evaluation_override: str | None = None,
+    redi_rhs_accumulator_override: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4119,11 +4266,13 @@ def gm_redi_tracer_tendency_latlon(
     _native_eta = eta if native_slope_eta is None else native_slope_eta
     _kappa_native_eta = (
         eta if native_kappa_slope_eta is None else native_kappa_slope_eta)
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
             T, S, eta, H_bathy, grid, z_coord,
-            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+            eos=eos, eos_linear=eos_linear, eos_nemo_seos=eos_nemo_seos,
+            mask=mask, rho_0=rho_0, g=g,
             eos_depth=eos_depth,
         )
     else:
@@ -4454,7 +4603,10 @@ def gm_redi_tracer_tendency_latlon(
                 prd_jacobian=_native_prd_J,
                 prd_TS_override=native_prd_TS,
                 pn2_override=native_slope_pn2,
-                e3w_override=native_slope_e3w, return_diagnostics=return_redi_slope_diagnostics, nmln_override=native_slope_nmln_override)
+                e3w_override=native_slope_e3w,
+                return_diagnostics=return_redi_slope_diagnostics,
+                nmln_override=native_slope_nmln_override,
+                eos_nemo_seos=eos_nemo_seos)
             _slope_diagnostics = _nat[4] if return_redi_slope_diagnostics else None; _nat = _nat[:4]; _bolus_nat = None
             if native_bolus_slope_eta is not None:
                 _bolus_nat = compute_nemo_native_slopes(
@@ -4464,7 +4616,8 @@ def gm_redi_tracer_tendency_latlon(
                     H_bathy=H_bathy, prd_jacobian=_native_prd_J,
                     prd_TS_override=native_prd_TS,
                     pn2_override=native_slope_pn2,
-                    e3w_override=native_slope_e3w)
+                    e3w_override=native_slope_e3w,
+                    eos_nemo_seos=eos_nemo_seos)
             _w_stage = getattr(
                 cfg, "redi_w_slope_stage_evaluation", "redi_tuple")
             if _w_stage == "redi_tuple":
@@ -4505,7 +4658,23 @@ def gm_redi_tracer_tendency_latlon(
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
-                return_operand_diagnostics=return_redi_diagnostics)
+                return_operand_diagnostics=return_redi_diagnostics,
+                divisor_thickness=redi_divisor_thickness_override,
+                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
+                    else "vectorized"),
+                final_update_evaluation=(
+                    redi_final_update_evaluation_override
+                    if redi_final_update_evaluation_override is not None
+                    else "masked"),
+                rhs_accumulator=redi_rhs_accumulator_override)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
@@ -4523,7 +4692,18 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
-                a33_evaluation=_a33_eval)
+                a33_evaluation=_a33_eval,
+                divisor_thickness=redi_divisor_thickness_override,
+                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
+                    else "vectorized"))
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             if return_redi_diagnostics:
@@ -4552,6 +4732,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=redi_divisor_thickness_override,
+            closed_bottom_wmask=redi_closed_bottom_wmask_override,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4565,6 +4747,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=redi_divisor_thickness_override,
+            closed_bottom_wmask=redi_closed_bottom_wmask_override,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus
@@ -4588,6 +4772,7 @@ def compute_isoneutral_K33_latlon(
     *,
     eos: str = "wright",
     eos_linear=None,
+    eos_nemo_seos=None,
     mask: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
@@ -4633,11 +4818,13 @@ def compute_isoneutral_K33_latlon(
     # so the expensive 3-D EOS coupling is not run twice; None => compute
     # inline, bit-identical (scaling review lever #3).
     _eos_mk_kw = {"rho0": rho_0} if eos_depth == "geometric" else {}
-    eos_fn = make_eos_fn(eos, eos_linear, **_eos_mk_kw)
+    eos_fn = make_eos_fn(
+        eos, eos_linear, eos_nemo_seos=eos_nemo_seos, **_eos_mk_kw)
     if density_jacobian is None:
         rho, jacobian = gm_redi_density_and_jacobian(
             T, S, eta, H_bathy, grid, z_coord,
-            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+            eos=eos, eos_linear=eos_linear, eos_nemo_seos=eos_nemo_seos,
+            mask=mask, rho_0=rho_0, g=g,
             eos_depth=eos_depth,
         )
     else:
@@ -4702,7 +4889,8 @@ def compute_isoneutral_K33_latlon(
             prd_TS_override=native_prd_TS,
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,
-            rho_0=rho_0, g=g, active_3d=_act)
+            rho_0=rho_0, g=g, active_3d=_act,
+            eos_nemo_seos=eos_nemo_seos)
         if cfg.redi_coefficient == "nemo21":
             _kgm = native_treguier_kappa_for_state(
                 _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
@@ -5806,7 +5994,7 @@ def _nemo_native_slope_diagnostics(scope):
         "zww": scope["_vslp_raw"], "zuslp_pre": pre_u,
         "zvslp_pre": pre_v, "zuslp_post": post_u,
         "zvslp_post": post_v, "uslp": scope["uslp"],
-        "vslp": scope["vslp"], "r3t_Kmm": r3t,
+        "vslp": scope["vslp"], "wslpi": scope["wslpi"], "wslpj": scope["wslpj"], "r3t_Kmm": r3t,
         "r3u_Kmm": r3u, "r3v_Kmm": r3v,
         "zhmlpt": scope["zhmlpt"], "r1_hmlu": scope["r1_hmlu"],
         "r1_hmlv": scope["r1_hmlv"],

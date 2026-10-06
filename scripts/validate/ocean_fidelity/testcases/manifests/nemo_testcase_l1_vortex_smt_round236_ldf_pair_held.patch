@@ -1,0 +1,115 @@
+Subject: [HELD round 236] NEMO closed-bottom W mask plus live Kmm T divisor
+
+Status: HELD.  Apply the round-229 closed-bottom-W-mask manifest first, then
+this patch.  Given NEMO's recorded stage-3 entry, the pair makes hmsku,
+hmskv, and the live e3t(Kmm) divisor bit-exact and reduces the maximum LDF
+RHS residual from 7.2621621143171395e-11 to
+4.9526264855300654e-12 K/s (93.180231441314%).  The certified SMT-3 ladder
+improves 30 of 50 aggregate rows and worsens four, but the cellwise two-ULP
+ratchet is red (40 violations; maximum worsening 431802197.9165039 row-scale
+ULP).  Production was restored.
+
+Compiled source:
+VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:243-259
+forms the closed W masks; :306-310/:327-331 divides by e3t(Kmm).
+stprk3_stg.f90:531-532 calls tra_ldf at stage 3 with the stage-2 output as
+Kmm, so the divisor SSH is the materialized half-stage field, not the
+once-per-step slope SSH.
+
+diff --git a/packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py b/packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py
+@@
+-from legoesm.ocean.vertical import nemo_qco_live_face_thicknesses
++from legoesm.ocean.vertical import (
++    nemo_qco_live_face_thicknesses,
++    nemo_qco_live_t_thickness,
++)
+@@
+-    closed_bottom_wmask: bool = False,
++    closed_bottom_wmask: bool = True,
+@@
+     redi_flux_eta: jnp.ndarray | None = None,
++    redi_divisor_eta: jnp.ndarray | None = None,
+@@
+-    redi_closed_bottom_wmask_override: bool = False,
++    redi_closed_bottom_wmask_override: bool | None = None,
+@@
+     redi_flux_eta : (n_lat, n_lon) or None
+         Sea-surface height used to form NEMO's live face thicknesses.
++    redi_divisor_eta : (n_lat, n_lon) or None
++        Kmm sea-surface height consumed by ``traldf_iso``'s live T-thickness
++        divisor. On WS-RK3 this is the stage-2 output entering stage 3, not
++        the step-entry height used by the once-per-step slope calculation.
+@@
+         _flux_e3u = None
+         _flux_e3v = None
++        _divisor_e3t = redi_divisor_thickness_override
+         if _flux_face_mode == "nemo_qco_live":
+@@
+             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
+                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
++            if _divisor_e3t is None:
++                # traldf_iso.f90:306-310/:327-331 divides by e3t(Kmm).
++                # domain.f90:193-212 forms ht_0 in source order.
++                _ht0 = jnp.zeros_like(_flux_eta, dtype=T.dtype)
++                for _jk in range(T.shape[-1]):
++                    _ht0 = nemo_source_round(
++                        _ht0 + nemo_source_round(
++                            _e3t0[..., _jk] * _active_3d[..., _jk]))
++                _divisor_eta = (
++                    _flux_eta if redi_divisor_eta is None
++                    else redi_divisor_eta)
++                _divisor_e3t = nemo_qco_live_t_thickness(
++                    _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
++        _closed_bottom_wmask = (
++            True if redi_closed_bottom_wmask_override is None
++            else redi_closed_bottom_wmask_override)
+@@
+-                divisor_thickness=redi_divisor_thickness_override,
+-                closed_bottom_wmask=redi_closed_bottom_wmask_override,
++                divisor_thickness=_divisor_e3t,
++                closed_bottom_wmask=_closed_bottom_wmask,
+@@
+-                divisor_thickness=redi_divisor_thickness_override,
+-                closed_bottom_wmask=redi_closed_bottom_wmask_override,
++                divisor_thickness=_divisor_e3t,
++                closed_bottom_wmask=_closed_bottom_wmask,
+@@
+-            divisor_thickness=redi_divisor_thickness_override,
+-            closed_bottom_wmask=redi_closed_bottom_wmask_override,
++            divisor_thickness=_divisor_e3t,
++            closed_bottom_wmask=_closed_bottom_wmask,
+@@
+-            divisor_thickness=redi_divisor_thickness_override,
+-            closed_bottom_wmask=redi_closed_bottom_wmask_override,
++            divisor_thickness=_divisor_e3t,
++            closed_bottom_wmask=_closed_bottom_wmask,
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@
+                 redi_flux_eta=state.eta.data,
++                # Stage-3 tra_ldf receives the stage-2 output as Kmm
++                # (stprk3_stg.f90:531-532), while slopes stay step-entry.
++                redi_divisor_eta=(
++                    _eta_live_one_half
++                    if getattr(_cfg_b, "tracer_time_integrator", "euler")
++                    == "rk3_ws" else None),
+@@
+-                redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask", False) if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else False),
++                redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+
+diff --git a/tests/ocean/unit/test_gm_redi_latlon_cgrid.py b/tests/ocean/unit/test_gm_redi_latlon_cgrid.py
+--- a/tests/ocean/unit/test_gm_redi_latlon_cgrid.py
++++ b/tests/ocean/unit/test_gm_redi_latlon_cgrid.py
+@@
+-        """The private discriminator closes only the deepest W-mask pair."""
++        """Production closes only the deepest W-mask pair, non-vacuously."""
+@@
+-            return_operand_diagnostics=True)
++            return_operand_diagnostics=True, closed_bottom_wmask=False)
+@@
+-            return_operand_diagnostics=True, closed_bottom_wmask=True)
++            return_operand_diagnostics=True)

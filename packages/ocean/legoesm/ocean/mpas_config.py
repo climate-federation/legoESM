@@ -132,6 +132,10 @@ class MPASOceanConfig(NamedTuple):
     bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
     bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
     bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
+    # NEMO rn_Uc0 [m/s], the reference velocity of the LINEAR law
+    # (zdfdrg np_lin: rCdU_bot = -rn_Cd0*rn_Uc0, constant in time).
+    # Read by 'nemo_linear' only; namelist_ref &namdrg_bot:835.
+    bottom_drag_uc0: float = 0.4
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3

@@ -81,6 +81,7 @@ steps=10
 record_steps=
 coord_tag=ZCO
 smt_zgr=
+extra_deck_basename=
 
 # TWO CARDS, ONE SCRIPT (decision 73, operator note BJ).  The vector-EEN card is
 # the SAME experiment -- same geometry, same simplified equation of state, same
@@ -251,7 +252,9 @@ case "$variant" in
     ;;
   smtflx | smtvec | smtflx100d | smtvec100d | \
   smtflxr3 | smtvecr3 | smtflx100dr3 | smtvec100dr3 | \
-  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6)
+  smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
+  smtflxtra | smtvectra | smt1vec | smt1vec100d | \
+  smt2vec | smt2vec100d | smt3vec | smt3vec100d | smt3vecint | smt3vecint2)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -381,10 +384,111 @@ case "$variant" in
         ref_name=VORTEX_SMT_R5R_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=round215_smt_vec_rhs
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round5/VORTEX_SMT_R5R_VEC_R8_OMIP_L1_P3/rhs ;;
+      # ---- ROUND 218 / VORTEX_SMT round 7 (operator note CD, decision 92).
+      # The seamount cards' first TRACER row over the bar is T at kt=2, and
+      # no admitted record carries a single tracer array: rounds 192 and 200
+      # instrumented the MOMENTUM side of the same stage loop.  These two
+      # variants compile the round-218 per-stage TRACER writer into new
+      # VORTEX_SMT_R7_* configurations; rounds 1, 3, 5 and 6 build
+      # directories are never touched, and the additions-only proof is the
+      # step-10 restart against round 3's ADMITTED run of the same deck.
+      smtflxtra)
+        deck_basename=namelist_cfg_smt_omip_l1.patch
+        ref_name=VORTEX_SMT_R7_OMIP_L1 ; exp_name=VORTEX_SMT_OMIP_L1
+        tag=round218_smt_flux_tracer
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round7/VORTEX_SMT_R7_OMIP_L1_P3/tracer ;;
+      smtvectra)
+        deck_basename=namelist_cfg_smt_vec_een.patch
+        ref_name=VORTEX_SMT_R7_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round218_smt_vec_tracer
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round7/VORTEX_SMT_R7_VEC_R8_OMIP_L1_P3/tracer ;;
+      # ---- ROUND 220 / VORTEX_SMT round 9 -- DECISION 93 (operator note CE),
+      # rung SMT-1 of the seamount mini-ladder.  The SAME seamount vector deck
+      # as smtvecr3, with ONE module's switches moved to ORCA2 rung 0's
+      # values: the background vertical mixing pair and the enhanced vertical
+      # diffusion scheme.  Five namelist lines, each cited to the rung-0 deck
+      # (orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/
+      # namelist_cfg):409 ln_zdfevd, :410 nn_evdm, :411 rn_evd, :417 rn_avm0,
+      # :418 rn_avt0.  Everything else -- geometry, seamount hook, cpp keys,
+      # equation of state, momentum scheme set, barotropic settings -- is
+      # byte-identical to the certified SMT vector deck, and the committed
+      # patch pair makes that diff readable.  New build directories; round 3's
+      # and round 7's are untouched.
+      smt1vec)
+        deck_basename=namelist_cfg_smt1_vec_een.patch
+        ref_name=VORTEX_SMT1_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round220_smt1_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smt1vec100d)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt1_vec_een_100d.patch
+        ref_name=VORTEX_SMT1_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round220_smt1_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/day100 ;;
+      # ---- ROUND 222 / VORTEX_SMT round 10 -- DECISION 93 (operator note CE),
+      # rung SMT-2 of the seamount mini-ladder: LINEAR BOTTOM DRAG, exactly as
+      # ORCA2 rung 0 resolves it.  ONE module's switches change against SMT-1
+      # and the diff is two lines in &namdrg: ln_drg_OFF .true. -> .false. and
+      # ln_lin -> .true. (ORCA2 rung-0 namelist_cfg:270).  &namdrg_bot is NOT
+      # written, because rung 0 does not write it either: rn_Cd0 = 1.e-3
+      # (namelist_ref:834), rn_Uc0 = 0.4 (:835), ln_boost = .false. (:839) and
+      # &namdrg ln_drgimp = .true. (:817) all come from the reference namelist
+      # on both decks.  cpp keys unchanged; new build directories; round 9's
+      # are untouched.
+      smt2vec)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        ref_name=VORTEX_SMT2_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round222_smt2_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10 ;;
+      smt2vec100d)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt2_vec_een_100d.patch
+        ref_name=VORTEX_SMT2_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round222_smt2_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/day100 ;;
+      # ---- ROUND 224 / VORTEX_SMT round 12 -- DECISION 93 (operator note
+      # CG), rung SMT-3.  The SMT-2 deck changes ONE module to ORCA2 rung 0's
+      # lateral-tracer-diffusion values: lap + iso + MSC, coefficient mode 20,
+      # Ud=0.018 m/s and Ld=200 km (rung-0 namelist_cfg:319-326).  The extra
+      # patch is deliberately separate so the deck diff against SMT-2 is the
+      # exact one-module experiment.  New build directories; SMT-2 is untouched.
+      smt3vec)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round224_smt3_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/oracle_vortex_smt3/kt1_10 ;;
+      smt3vec100d)
+        record_steps=60
+        reuse_build=1 ; steps=3000
+        deck_basename=namelist_cfg_smt2_vec_een_100d.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round224_smt3_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/oracle_vortex_smt3/day100 ;;
+      # ---- ROUND 227 / VORTEX_SMT round 15.  Same SMT-3 deck and cpp
+      # keys, but a NEW pair of targets because the read-only writer now
+      # records the internal ldf_slp/traldf_iso seams as named groups.
+      smt3vecint)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R15_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round227_smt3_ldf_internal
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round227/oracle_vortex_smt3_ldf_internal ;;
+      # Round 228 repairs only the scalar capture boundary: the six scalar
+      # tensor temporaries are copied inside the loop that produces them.
+      smt3vecint2)
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        ref_name=VORTEX_SMT3_VEC_R16_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=round228_smt3_ldf_internal
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round228/oracle_vortex_smt3_ldf_internal ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts or smtvecrhs\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec, smt1vec100d, smt2vec, smt2vec100d, smt3vec or smt3vec100d\n' \
       "$variant" >&2
     exit 64
     ;;
@@ -419,8 +523,22 @@ else
 fi
 readonly SPGTS_INSTRUMENT SPGTS_MODULE SPGTS_STUBS
 readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
-if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
+  # Round 224's stage-3 tracer boundary extends the round-218 writer by one
+  # read-only post-tra_ldf dump.  Stages 1/2 keep the original 15 groups;
+  # stage 3 declares and writes 17, including ldf_t/ldf_s.
+  STAGE_INSTRUMENT=$here/stprk3_smt3_tracer_terms_record.patch
+  DYNADV_INSTRUMENT=
+  STAGE_MODULE=$here/vortex_r18_tracer_terms.F90
+  STAGE_STUBS=$here/vortex_r18_tracer_terms_syntax_stubs.F90
+  STAGE_MODULE_NAME=vortex_r18_tracer_terms.F90
+  STAGE_SYMBOL=vortex_r18_tracer
+  STAGE_FLAG_NAME=--smt3-tracer-terms
+elif [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec100d" \
    || "$variant" == "smtvecr3" || "$variant" == "smtvec100dr3" \
+   || "$variant" == "smt1vec" || "$variant" == "smt1vec100d" \
+   || "$variant" == "smt2vec" || "$variant" == "smt2vec100d" \
    || "$variant" == "smtvecspgts" ]]; then
   # VORTEX_SMT_VEC_R8 is a copy of the certified VORTEX_VEC_R8_OMIP_L1_P3
   # instrumented build, so it carries the SAME stage-2/3 term writer.
@@ -431,6 +549,18 @@ if [[ "$variant" == "stage23" || "$variant" == "smtvec" || "$variant" == "smtvec
   STAGE_MODULE_NAME=vortex_r8_stage_terms.F90
   STAGE_SYMBOL=vortex_r8_stage
   STAGE_FLAG_NAME=--stage-terms
+elif [[ "$variant" == "smtflxtra" || "$variant" == "smtvectra" ]]; then
+  # Round 218's TRACER writer.  One patched file; the momentum stage writers
+  # are NOT applied here, because the momentum terms of these two decks are
+  # already admitted (round 3's R3 records) and only one stprk3_stg patch
+  # slot exists.
+  STAGE_INSTRUMENT=$here/stprk3_tracer_terms_record.patch
+  DYNADV_INSTRUMENT=
+  STAGE_MODULE=$here/vortex_r18_tracer_terms.F90
+  STAGE_STUBS=$here/vortex_r18_tracer_terms_syntax_stubs.F90
+  STAGE_MODULE_NAME=vortex_r18_tracer_terms.F90
+  STAGE_SYMBOL=vortex_r18_tracer
+  STAGE_FLAG_NAME=--tracer-terms
 elif [[ "$variant" == "stage123flx" ]]; then
   # One patched file, not two: the flux-form advection trend is recorded at
   # its CALL SITE in stprk3_stg, so dynadv.F90 stays shipped.
@@ -452,9 +582,35 @@ else
 fi
 readonly STAGE_INSTRUMENT DYNADV_INSTRUMENT STAGE_MODULE STAGE_STUBS
 readonly STAGE_MODULE_NAME STAGE_SYMBOL STAGE_FLAG_NAME
+if [[ "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
+  LDF_SLOPE_INSTRUMENT=$here/ldfslp_r227_internal_record.patch
+  LDF_ISO_INSTRUMENT=$here/traldf_iso_r227_internal_record.patch
+  if [[ "$variant" == "smt3vecint2" ]]; then
+    LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r228_internal_record.patch
+  else
+    LDF_SCHEME_INSTRUMENT=$here/traldf_iso_scheme_r227_internal_record.patch
+  fi
+  LDF_MODULE=$here/vortex_r23_ldf_terms.F90
+  LDF_STUBS=$here/vortex_r23_ldf_terms_syntax_stubs.F90
+  LDF_FLAG_NAME=--ldf-internals
+else
+  LDF_SLOPE_INSTRUMENT=
+  LDF_ISO_INSTRUMENT=
+  LDF_SCHEME_INSTRUMENT=
+  LDF_MODULE=
+  LDF_STUBS=
+  LDF_FLAG_NAME=
+fi
+readonly LDF_SLOPE_INSTRUMENT LDF_ISO_INSTRUMENT LDF_SCHEME_INSTRUMENT
+readonly LDF_MODULE LDF_STUBS LDF_FLAG_NAME
+readonly SHIPPED_LDFSLP=$NEMO_ROOT/src/OCE/LDF/ldfslp.F90
+readonly SHIPPED_LDFISO=$NEMO_ROOT/src/OCE/TRA/traldf_iso.F90
+readonly SHIPPED_LDFSCHEME=$NEMO_ROOT/src/OCE/TRA/traldf_iso_scheme.h90
 readonly SHIPPED_STG=$NEMO_ROOT/src/OCE/stprk3_stg.F90
 readonly SHIPPED_DYNADV=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly DECK=$here/$deck_basename
+if [[ -n "$extra_deck_basename" ]]; then DECK_EXTRA=$here/$extra_deck_basename; else DECK_EXTRA=; fi
+readonly DECK_EXTRA
 readonly CHECKER=$here/check_records.py
 readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
 readonly SHIPPED_CFG=$NEMO_ROOT/tests/$TEST_CASE/EXPREF/namelist_cfg
@@ -467,6 +623,10 @@ run_cfg=$NEMO_ROOT/tests/$RUN_CFG
 for path in "$INSTRUMENT" "$DECK" "$CHECKER" "$SHIPPED_STP" "$SHIPPED_CFG"; do
   [[ -f "$path" ]] || { printf 'REFUSE: missing %s\n' "$path" >&2; exit 66; }
 done
+if [[ -n "$DECK_EXTRA" && ! -f "$DECK_EXTRA" ]]; then
+  printf 'REFUSE: missing extra deck patch %s\n' "$DECK_EXTRA" >&2
+  exit 66
+fi
 if [[ -n "$RHS_INSTRUMENT" ]]; then
   [[ -f "$RHS_INSTRUMENT" ]] \
     || { printf 'REFUSE: missing %s\n' "$RHS_INSTRUMENT" >&2; exit 66; }
@@ -510,6 +670,28 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
       printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
         "$TEST_CASE" "$override" >&2
       exit 66
+    fi
+  done
+fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  for path in "$LDF_SLOPE_INSTRUMENT" "$LDF_ISO_INSTRUMENT" \
+              "$LDF_SCHEME_INSTRUMENT" "$LDF_MODULE" "$LDF_STUBS" \
+              "$SHIPPED_LDFSLP" "$SHIPPED_LDFISO" "$SHIPPED_LDFSCHEME"; do
+    [[ -f "$path" ]] \
+      || { printf 'REFUSE: missing internal-LDF record input %s\n' "$path" >&2; exit 66; }
+  done
+  for override in ldfslp.F90 traldf_iso.F90 traldf_iso_scheme.h90 vortex_r23_ldf_terms.F90; do
+    if [[ -e "$SRC_CASE/MY_SRC/$override" ]]; then
+      printf 'REFUSE: %s overrides %s; the shared-source premise is false\n' \
+        "$TEST_CASE" "$override" >&2
+      exit 66
+    fi
+  done
+  for patch_file in "$LDF_SLOPE_INSTRUMENT" "$LDF_ISO_INSTRUMENT" "$LDF_SCHEME_INSTRUMENT"; do
+    if [[ $(grep -c '^-' "$patch_file") -ne $(grep -c '^---' "$patch_file") ]]; then
+      printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+        "$patch_file" >&2
+      exit 67
     fi
   done
 fi
@@ -592,6 +774,11 @@ patch -s "$dry/stprk3.F90" <"$INSTRUMENT" \
 patch -s "$dry/namelist_cfg" <"$DECK" \
   || { printf 'REFUSE: the deck patch does not apply to the shipped namelist_cfg\n' >&2
        rm -rf "$dry"; exit 67; }
+if [[ -n "$DECK_EXTRA" ]]; then
+  patch -s "$dry/namelist_cfg" <"$DECK_EXTRA" \
+    || { printf 'REFUSE: the extra deck patch does not apply after the base deck\n' >&2
+         rm -rf "$dry"; exit 67; }
+fi
 grep -q 'NEMO_L1_ENTRY_1' "$dry/stprk3.F90" \
   || { printf 'REFUSE: the patched stprk3 carries no step-record writer\n' >&2
        rm -rf "$dry"; exit 67; }
@@ -659,6 +846,12 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
       || { printf 'REFUSE: patched sources do not call %s\n' "$symbol" >&2
            exit 67; }
   done
+  if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+     || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
+    grep -q "${STAGE_SYMBOL}_rhs( 'ldf'" "$dry/stprk3_stg.F90" \
+      || { printf 'REFUSE: the SMT-3 tracer writer has no post-LDF boundary\n' >&2
+           exit 67; }
+  fi
   # Every per-term boundary this record claims, in NEMO's own stage order.
   # A boundary that went missing would leave one term silently unmeasured.
   if [[ "$variant" == "stage123flx" ]]; then
@@ -681,6 +874,55 @@ if [[ -n "$STAGE_INSTRUMENT" ]]; then
   "$round192_fc" -J "$syntax_dir" -c "$STAGE_STUBS" -o "$syntax_dir/stubs.o"
   "$round192_fc" -I "$syntax_dir" -J "$syntax_dir" -fsyntax-only "$STAGE_MODULE"
   printf 'GFORTRAN_SYNTAX_PASS %s\n' "$STAGE_MODULE"
+fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  cp "$SHIPPED_LDFSLP" "$dry/ldfslp.F90"
+  cp "$SHIPPED_LDFISO" "$dry/traldf_iso.F90"
+  cp "$SHIPPED_LDFSCHEME" "$dry/traldf_iso_scheme.h90"
+  patch -s --fuzz=0 "$dry/ldfslp.F90" <"$LDF_SLOPE_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 ldfslp patch does not apply\n' >&2; exit 67; }
+  patch -s --fuzz=0 "$dry/traldf_iso.F90" <"$LDF_ISO_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 traldf_iso patch does not apply\n' >&2; exit 67; }
+  patch -s --fuzz=0 "$dry/traldf_iso_scheme.h90" <"$LDF_SCHEME_INSTRUMENT" \
+    || { printf 'REFUSE: Round-227 ISO-scheme patch does not apply\n' >&2; exit 67; }
+  for symbol in r227_slope_begin r227_slope_finish r227_iso_begin r227_iso_finish; do
+    grep -q "$symbol" "$dry/ldfslp.F90" "$dry/traldf_iso.F90" \
+      || { printf 'REFUSE: internal-LDF source lacks %s\n' "$symbol" >&2; exit 67; }
+  done
+  for symbol in r227_dit r227_A11 r227_fu r227_A31 r227_fw_upper; do
+    grep -q "$symbol" "$dry/traldf_iso_scheme.h90" \
+      || { printf 'REFUSE: internal-LDF scheme lacks %s\n' "$symbol" >&2; exit 67; }
+  done
+  ldf_syntax_dir=$dry/ldf_syntax
+  mkdir -p "$ldf_syntax_dir"
+  round227_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
+  "$round227_fc" -ffree-line-length-none -J "$ldf_syntax_dir" -c "$LDF_STUBS" \
+    -o "$ldf_syntax_dir/stubs.o"
+  "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_dir" -J "$ldf_syntax_dir" \
+    -fsyntax-only "$LDF_MODULE"
+  printf 'GFORTRAN_SYNTAX_PASS %s\n' "$LDF_MODULE"
+  # Also compile the PATCHED NEMO routines, not merely their helper module,
+  # against the admitted SMT-3 build's real module interfaces.  This is the
+  # acquisition-time syntax proof; makenemo remains the operator's later full
+  # dependency/build proof.
+  ldf_syntax_base=$NEMO_ROOT/tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3
+  for path in "$ldf_syntax_base/BLD/inc" "$ldf_syntax_base/WORK"; do
+    [[ -d "$path" ]] \
+      || { printf 'REFUSE: admitted SMT-3 syntax input is missing: %s\n' "$path" >&2; exit 67; }
+  done
+  ldf_real_syntax=$dry/ldf_real_syntax
+  mkdir -p "$ldf_real_syntax"
+  "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_base/BLD/inc" \
+    -J "$ldf_real_syntax" -c "$LDF_MODULE" -o "$ldf_real_syntax/writer.o"
+  for source_name in ldfslp traldf_iso; do
+    cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
+      -I "$dry" -I "$ldf_syntax_base/WORK" -I "$ldf_syntax_base/BLD/inc" \
+      "$dry/$source_name.F90" -o "$ldf_real_syntax/$source_name.f90"
+    "$round227_fc" -ffree-line-length-none -I "$ldf_syntax_base/BLD/inc" \
+      -I "$ldf_real_syntax" -J "$ldf_real_syntax" -fsyntax-only \
+      "$ldf_real_syntax/$source_name.f90"
+    printf 'GFORTRAN_PATCHED_NEMO_SYNTAX_PASS %s.f90\n' "$source_name"
+  done
 fi
 # Decision 69 (operator note BG): VORTEX runs its SHIPPED simplified equation
 # of state, the one narrow exception to the campaign's TEOS-10.  The eddy's
@@ -705,6 +947,26 @@ if grep -q 'ln_zad_Aimp' "$dry/namelist_cfg"; then
   printf 'REFUSE: the deck now sets ln_zad_Aimp; the card transcribes the unset default\n' >&2
   rm -rf "$dry"; exit 67
 fi
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
+  for pattern in \
+    '^ *ln_traldf_OFF *= *\.false\.' '^ *ln_traldf_lap *= *\.true\.' \
+    '^ *ln_traldf_iso *= *\.true\.' '^ *ln_traldf_msc *= *\.true\.' \
+    '^ *nn_aht_ijk_t *= *20' '^ *rn_Ud *= *0\.018' '^ *rn_Ld *= *200\.e\+3'; do
+    grep -qE "$pattern" "$dry/namelist_cfg" \
+      || { printf 'REFUSE: SMT-3 deck lost required pattern %s\n' "$pattern" >&2
+           rm -rf "$dry"; exit 67; }
+  done
+  for pattern in \
+    'ln_traldf_blp *= *\.false\.' 'ln_traldf_lev *= *\.false\.' \
+    'ln_traldf_hor *= *\.false\.' 'ln_traldf_triad *= *\.false\.' \
+    'rn_slpmax *= *0\.01' 'ln_triad_iso *= *\.false\.' \
+    'rn_sw_triad *= *1' 'ln_botmix_triad *= *\.false\.'; do
+    grep -qE "$pattern" "$NEMO_ROOT/cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref" \
+      || { printf 'REFUSE: ORCA2 reference companion drifted: %s\n' "$pattern" >&2
+           rm -rf "$dry"; exit 67; }
+  done
+fi
 # THE ONE THING THE TWO CARDS DISAGREE ON (decision 73).  NEMO counts the
 # advection-form switches and stops unless EXACTLY ONE is true
 # (dynadv.F90:184-190), and the vorticity routine reads that count to decide
@@ -715,11 +977,17 @@ fi
 # under this card's name.  Refuse rather than discover it in the ladder.
 case "$variant" in
   flux | stage123flx | res15flx | res10flx | smtflx | smtflx100d \
-  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6)
+  | smtflxr3 | smtflx100dr3 | smtflxspgts | smtflxspgts6 | smtflxtra)
       want_vec='.false.' ; want_up3='.true.'  ;;
   vec | vecrhs | stage23 | spgts | res15vec | res10vec | smtvec | smtvec100d \
-  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs)
+  | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
+  | smt1vec | smt1vec100d | smt2vec | smt2vec100d | smt3vec | smt3vec100d \
+  | smt3vecint | smt3vecint2)
       want_vec='.true.'  ; want_up3='.false.' ;;
+  *)  # Dispatch hardening: a variant added above but forgotten here used to
+      # fall through to an unbound-variable abort.  Name it instead.
+      printf 'REFUSE: variant %s has no momentum-form expectation\n' "$variant" >&2
+      rm -rf "$dry"; exit 64 ;;
 esac
 if ! grep -qE "^ *ln_dynadv_vec *= *${want_vec//./\.}" "$dry/namelist_cfg"; then
   printf 'REFUSE: variant %s needs ln_dynadv_vec = %s\n' "$variant" "$want_vec" >&2
@@ -751,6 +1019,9 @@ printf '  reference config : %s\n  instrumented cfg : %s\n  evidence         : %
   "$ref_cfg" "$run_cfg" "$EVIDENCE"
 printf '  deck deviations  :\n'
 sed -n 's/^/    /p' "$DECK" | grep -E '^\s+[-+][^-+]' || true
+if [[ -n "$DECK_EXTRA" ]]; then
+  sed -n 's/^/    /p' "$DECK_EXTRA" | grep -E '^\s+[-+][^-+]' || true
+fi
 
 if [[ "$do_run" -eq 0 ]]; then
   printf '\nDRY RUN.  Re-run with --run to build and acquire.\n'
@@ -792,7 +1063,8 @@ printf '%s\n' "$round192_git_sha" >"$manifest/legoesm_git_sha.txt"
 ) >"$manifest/shipped_case.sha256"
 sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   "$SRC_CASE/cpp_${TEST_CASE}.fcm" "$SHIPPED_STP" "$SHIPPED_CFG" \
-  "$INSTRUMENT" "$DECK" "$CHECKER" ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
+  "$INSTRUMENT" "$DECK" ${DECK_EXTRA:+"$DECK_EXTRA"} "$CHECKER" \
+  ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
   ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} \
   ${SPGTS_INSTRUMENT:+"$SPGTS_INSTRUMENT"} \
   ${SPGTS_MODULE:+"$SPGTS_MODULE"} ${SPGTS_STUBS:+"$SPGTS_STUBS"} \
@@ -801,7 +1073,14 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   ${DYNADV_INSTRUMENT:+"$DYNADV_INSTRUMENT"} \
   ${STAGE_MODULE:+"$STAGE_MODULE"} ${STAGE_STUBS:+"$STAGE_STUBS"} \
   ${STAGE_INSTRUMENT:+"$SHIPPED_STG"} \
-  ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"} >"$manifest/toolchain.sha256"
+  ${DYNADV_INSTRUMENT:+"$SHIPPED_DYNADV"} \
+  ${LDF_SLOPE_INSTRUMENT:+"$LDF_SLOPE_INSTRUMENT"} \
+  ${LDF_ISO_INSTRUMENT:+"$LDF_ISO_INSTRUMENT"} \
+  ${LDF_SCHEME_INSTRUMENT:+"$LDF_SCHEME_INSTRUMENT"} \
+  ${LDF_MODULE:+"$LDF_MODULE"} ${LDF_STUBS:+"$LDF_STUBS"} \
+  ${LDF_SLOPE_INSTRUMENT:+"$SHIPPED_LDFSLP"} \
+  ${LDF_ISO_INSTRUMENT:+"$SHIPPED_LDFISO"} \
+  ${LDF_SCHEME_INSTRUMENT:+"$SHIPPED_LDFSCHEME"} >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 build_one() {          # $1 = config name, $2 = 1 to apply the instrument
@@ -823,6 +1102,9 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   # cannot be read by accident.
   rm -f "$cfg/EXP00/1_"* "$cfg/EXP00/AGRIF_FixedGrids.in"
   patch "$cfg/EXP00/namelist_cfg" <"$DECK"
+  if [[ -n "$DECK_EXTRA" ]]; then
+    patch "$cfg/EXP00/namelist_cfg" <"$DECK_EXTRA"
+  fi
   if [[ -n "$SMT_ZGR" ]]; then
     cp -f "$SMT_ZGR" "$cfg/MY_SRC/usrdef_zgr.F90"
     # The resolved key set must be exactly the shipped one with vco_1d
@@ -860,6 +1142,15 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
         cp "$SHIPPED_DYNADV" "$cfg/MY_SRC/dynadv.F90"
         patch "$cfg/MY_SRC/dynadv.F90" <"$DYNADV_INSTRUMENT"
       fi
+    fi
+    if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+      cp "$SHIPPED_LDFSLP" "$cfg/MY_SRC/ldfslp.F90"
+      cp "$SHIPPED_LDFISO" "$cfg/MY_SRC/traldf_iso.F90"
+      cp "$SHIPPED_LDFSCHEME" "$cfg/MY_SRC/traldf_iso_scheme.h90"
+      cp "$LDF_MODULE" "$cfg/MY_SRC/vortex_r23_ldf_terms.F90"
+      patch "$cfg/MY_SRC/ldfslp.F90" <"$LDF_SLOPE_INSTRUMENT"
+      patch "$cfg/MY_SRC/traldf_iso.F90" <"$LDF_ISO_INSTRUMENT"
+      patch "$cfg/MY_SRC/traldf_iso_scheme.h90" <"$LDF_SCHEME_INSTRUMENT"
     fi
   fi
   touch "$cfg/MY_SRC/"*.F90
@@ -899,6 +1190,14 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
         || { printf 'REFUSE: stage-term calls are absent from compiled dynadv\n' >&2; exit 69; }
     fi
   fi
+  if [[ -n "$LDF_SLOPE_INSTRUMENT" && "$instrumented" -eq 1 ]]; then
+    grep -q 'r227_slope_begin' "$cfg/BLD/ppsrc/nemo/ldfslp.f90" \
+      || { printf 'REFUSE: slope calls are absent from compiled ldfslp\n' >&2; exit 69; }
+    grep -q 'r227_iso_finish' "$cfg/BLD/ppsrc/nemo/traldf_iso.f90" \
+      || { printf 'REFUSE: ISO calls are absent from compiled traldf_iso\n' >&2; exit 69; }
+    grep -q 'r227_fw_upper' "$cfg/BLD/ppsrc/nemo/traldf_iso.f90" \
+      || { printf 'REFUSE: internal ISO seams are absent from compiled source\n' >&2; exit 69; }
+  fi
   # `nm | grep -q` would report CLEAN if nm itself failed, so capture first
   # and require nm to have succeeded before believing the grep.
   local symbols
@@ -908,6 +1207,30 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
     printf 'REFUSE: vector-math symbol present in %s\n' "$name" >&2
     exit 65
   fi
+}
+
+check_smt3_output() {  # $1 = run directory
+  local dir=$1 pattern
+  if [[ "$variant" != "smt3vec" && "$variant" != "smt3vec100d" \
+     && "$variant" != "smt3vecint" && "$variant" != "smt3vecint2" ]]; then
+    return
+  fi
+  grep -q 'STOP 0' "$dir/run.user.log" \
+    || { printf 'REFUSE: SMT-3 run did not report STOP 0 in %s\n' "$dir" >&2; exit 71; }
+  for pattern in \
+    'ln_traldf_OFF *= *F' 'ln_traldf_lap *= *T' 'ln_traldf_blp *= *F' \
+    'ln_traldf_lev *= *F' 'ln_traldf_hor *= *F' 'ln_traldf_iso *= *T' \
+    'ln_traldf_triad *= *F' 'ln_traldf_msc *= *T' \
+    'rn_slpmax *= *1\.0000000000000000E-002' 'ln_triad_iso *= *F' \
+    'rn_sw_triad *= *1\.0000000000000000' 'ln_botmix_triad *= *F' \
+    'nn_aht_ijk_t *= *20' 'rn_Ud *= *1\.7999999999999999E-002' \
+    'rn_Ld *= *200000\.00000000000'; do
+    grep -qE "$pattern" "$dir/ocean.output" \
+      || { printf 'REFUSE: SMT-3 resolved output lost pattern %s in %s\n' \
+             "$pattern" "$dir/ocean.output" >&2; exit 71; }
+  done
+  grep -q 'ln_tile    =  F' "$dir/ocean.output" \
+    || { printf 'REFUSE: SMT-3 tracer writer requires the non-tiled branch\n' >&2; exit 71; }
 }
 
 run_one() {            # $1 = config name, $2 = run directory
@@ -932,6 +1255,7 @@ run_one() {            # $1 = config name, $2 = run directory
   )
   [[ -f "$dir/$RESTART" ]] \
     || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
+  check_smt3_output "$dir"
   if [[ "$variant" == "stage23" || "$variant" == "stage123flx" ]] && ! grep -q 'ln_tile    =  F' "$dir/ocean.output"; then
     printf 'REFUSE: stage-term writer requires the resolved VORTEX non-tiled branch\n' >&2
     exit 71
@@ -949,6 +1273,9 @@ run_one_reuse() {       # $1 = certified config name, $2 = run directory
   cp -L "$SRC_CASE/EXPREF/namelist_cfg" "$SRC_CASE/EXPREF/namelist_ref" "$dir/"
   rm -f "$dir"/1_* "$dir/AGRIF_FixedGrids.in"
   patch "$dir/namelist_cfg" <"$DECK"
+  if [[ -n "$DECK_EXTRA" ]]; then
+    patch "$dir/namelist_cfg" <"$DECK_EXTRA"
+  fi
   cp "$cfg/BLD/bin/nemo.exe" "$dir/nemo"
   (
     cd "$dir"
@@ -961,6 +1288,7 @@ run_one_reuse() {       # $1 = certified config name, $2 = run directory
   )
   [[ -f "$dir/$RESTART" ]] \
     || { printf 'REFUSE: %s wrote no step-%d restart\n' "$1" "$STEPS" >&2; exit 71; }
+  check_smt3_output "$dir"
 }
 
 if [[ "$reuse_build" -eq 1 ]]; then
@@ -974,6 +1302,9 @@ if [[ "$reuse_build" -eq 1 ]]; then
     smtvec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/VORTEX_SMT_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtflx100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smtvec100dr3) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round3/VORTEX_SMT_R3_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smt1vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round9/VORTEX_SMT1_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smt2vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
+    smt3vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/oracle_vortex_smt3/kt1_10/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
@@ -999,6 +1330,11 @@ if [[ "$reuse_build" -eq 1 ]]; then
     || { printf 'REFUSE: the reused instrumented build carries no writer\n' >&2; exit 69; }
   if grep -q 'NEMO_L1_ENTRY_1' "$ref_cfg/BLD/ppsrc/nemo/stprk3.f90"; then
     printf 'REFUSE: the reused REFERENCE build carries the writer\n' >&2; exit 69
+  fi
+  if [[ "$variant" == "smt3vec100d" ]]; then
+    grep -q "vortex_r18_tracer_rhs( 'ldf'" \
+      "$run_cfg/BLD/ppsrc/nemo/stprk3_stg.f90" \
+      || { printf 'REFUSE: reused SMT-3 build lacks the post-LDF boundary\n' >&2; exit 69; }
   fi
 else
 build_one "$REF_CFG" 0
@@ -1028,14 +1364,18 @@ cp "$manifest/legoesm_git_sha.txt" "$EVIDENCE/"
 if [[ -n "$RHS_INSTRUMENT" ]]; then RHS_FLAG=--rhs-terms; else RHS_FLAG=; fi
 if [[ -n "$STAGE_INSTRUMENT" ]]; then STAGE_FLAG=$STAGE_FLAG_NAME; else STAGE_FLAG=; fi
 if [[ -n "$SPGTS_INSTRUMENT" ]]; then SPGTS_FLAG=--spgts-terms; else SPGTS_FLAG=; fi
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then LDF_FLAG=$LDF_FLAG_NAME; else LDF_FLAG=; fi
 python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
   --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
-  ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
+  ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} ${LDF_FLAG:+$LDF_FLAG} \
   --output "$EVIDENCE/vortex_${TAG}_admission.json"
 # Every plant the checker offers must turn it red.  One plant proves one
 # guard; the record is only admissible if each guard the round relies on is
 # shown to be able to fail.
-if [[ -n "$SPGTS_INSTRUMENT" ]]; then
+if [[ "$variant" == "smt3vec" || "$variant" == "smt3vec100d" \
+   || "$variant" == "smt3vecint" || "$variant" == "smt3vecint2" ]]; then
+  plants=(header field-name truncated)
+elif [[ -n "$SPGTS_INSTRUMENT" ]]; then
   plants=(header field-name truncated missing-frame)
 else
   plants=(header)
@@ -1043,16 +1383,32 @@ fi
 for plant in "${plants[@]}"; do
   if python "$CHECKER" --run-dir "$EVIDENCE" --reference-dir "$EVIDENCE/reference" \
        --restart "$RESTART" --steps "$RECORD_STEPS" ${RHS_FLAG:+$RHS_FLAG} \
-       ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} --plant "$plant" \
+       ${STAGE_FLAG:+$STAGE_FLAG} ${SPGTS_FLAG:+$SPGTS_FLAG} \
+       ${LDF_FLAG:+$LDF_FLAG} --plant "$plant" \
        >"$EVIDENCE/vortex_${TAG}_admission_plant_${plant}.json" 2>&1; then
     printf 'REFUSE: the %s plant did not turn the checker red\n' "$plant" >&2
     exit 70
   fi
   printf 'PLANT_FIRED %s\n' "$plant"
 done
+if [[ -n "$LDF_SLOPE_INSTRUMENT" ]]; then
+  for record in oracle_ldf_slope_kt00000001.bin oracle_ldf_iso_kt00000001.bin; do
+    [[ -f "$EVIDENCE/$record" ]] \
+      || { printf 'REFUSE: cannot stamp missing internal record %s\n' "$record" >&2; exit 70; }
+    digest=$(sha256sum "$EVIDENCE/$record" | awk '{print $1}')
+    printf '%s %s %s\n' "$digest" "$round192_git_sha" "$record" \
+      >"$EVIDENCE/$record.stamp"
+    read -r stamped_digest stamped_commit stamped_name <"$EVIDENCE/$record.stamp"
+    [[ "$stamped_digest" == "$digest" && "$stamped_commit" == "$round192_git_sha" \
+       && "$stamped_name" == "$record" ]] \
+      || { printf 'REFUSE: fail-closed commit stamp disagrees for %s\n' "$record" >&2; exit 70; }
+  done
+  printf 'COMMIT_STAMP_PASS %s\n' "$round192_git_sha"
+fi
 (
   cd "$EVIDENCE"
   sha256sum oracle_*.bin vortex_${TAG}_admission.json "$RESTART" mesh_mask.nc \
-    legoesm_git_sha.txt >vortex_${TAG}_outputs.sha256
+    legoesm_git_sha.txt ${LDF_SLOPE_INSTRUMENT:+oracle_ldf_*.bin.stamp} \
+    >vortex_${TAG}_outputs.sha256
 )
 printf 'VORTEX_%s_KT1_10_ORACLE_READY %s\n' "$TAG" "$EVIDENCE"

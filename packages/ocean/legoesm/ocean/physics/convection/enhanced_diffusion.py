@@ -76,6 +76,7 @@ def convective_K_A_flag(
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
     e3w_int: jnp.ndarray | None = None,
+    seos_cfg=None,
     g: float = constants.g,
     rho_ref: float = _RHO_0_DEFAULT,
 ):
@@ -169,17 +170,24 @@ def convective_K_A_flag(
                 "gdepw); the enhanced_diffusion factory threads them from "
                 "eos.nemo_bn2_depth_ladders(z_coord)."
             )
-        # NemoSEOSConfig() defaults (the DINO/Kamm set) — matching the density
-        # path, where make_eos_fn's "nemo_seos" branch also has no custom-
-        # coefficient threading from any recipe. Thread a cfg through here the
-        # day a recipe carries non-default S-EOS coefficients.
+        # ``seos_cfg`` is the CARD's own NEMO &nameos coefficient set
+        # (``LatLonCGridOceanConfig.eos_nemo_seos``), threaded from the model
+        # config so the trigger sees the same fluid the card's density path
+        # does.  ``None`` keeps ``NemoSEOSConfig()``'s defaults, which is what
+        # the card's own density EOS resolves to when it states none
+        # (``eos.make_eos_fn``'s "nemo_seos" branch does exactly this) -- it
+        # is the card's resolved value, not a substitute for it.  Until this
+        # was threaded the trigger ALWAYS built alpha/beta from the DINO
+        # coefficient set: on the seamount SMT-1 card (rn_a0 = 0.28, every
+        # other coefficient zero) that fired on 61 interfaces of a pristine,
+        # stably stratified initial state where NEMO fires on none.
         # ``eos_form`` selects WHICH alpha/beta the bn2 assembly uses; this
         # forward was MISSING, so the EVD trigger always took the S-EOS
         # branch even on a TEOS-10 card whose TKE sibling
         # (``TKEConfig.n2_eos_form``, threaded at
         # vertical_mixing/_shared.py) used the Roquet polynomial.
         N2 = compute_buoyancy_frequency_nemo_bn2(
-            T, S, t_depth, w_depth, g=g, eos_form=cfg.n2_eos_form,
+            T, S, t_depth, w_depth, seos_cfg, g=g, eos_form=cfg.n2_eos_form,
             e3w_int=e3w_int)
     else:
         # In-situ density N² (SIGNED); reference density on dry columns keeps
@@ -223,6 +231,7 @@ def enhanced_diffusion_convection(
     eos_fn=None,
     eta: jnp.ndarray | None = None,
     H_bathy: jnp.ndarray | None = None,
+    seos_cfg=None,
     g: float = constants.g,
     rho_ref: float = _RHO_0_DEFAULT,
 ) -> OceanConvectionOutput:
@@ -298,6 +307,7 @@ def enhanced_diffusion_convection(
         rho, z_coord.dz_ref, jacobian, cfg,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
         t_depth=_t_depth, w_depth=_w_depth, e3w_int=_e3w_int,
+        seos_cfg=seos_cfg,
         g=g, rho_ref=rho_ref,
     )
 
@@ -363,3 +373,130 @@ def enhanced_diffusion_convection(
         dv_dt=dv_dt,
         A_v=A,
     )
+
+
+# --- NEMO zdfevd composition (zdfevd.f90 of the VORTEX_SMT1 build's ppsrc) ---
+# The coefficient is REPLACED, not added, where the trigger fires:
+#
+#   107  DO jk = 1, jpkm1 ; DO jj = ... ; DO ji = ...
+#   108     IF(  MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12 )      &
+#   109        &  p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)
+#   110  END DO   ;   END DO   ;   END DO
+#
+# and the momentum arm is guarded by the namelist integer:
+#
+#   121  IF( nn_evdm == 1 ) THEN
+#   133     DO jk = 1, jpkm1 ; ...
+#   134        IF(  MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12 )   &
+#   135           &  p_avm(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)
+#
+# zdf_evd runs AFTER the background/closure assembly -- zdfphy.f90:348-351
+# copies avt_k/avm_k into avt/avm and :359 then calls zdf_evd -- so what it
+# overwrites is the FULL coefficient, background and closure included.
+EVD_COMPOSITIONS = ("additive", "nemo_replace")
+
+
+def _static_float(value):
+    """``float(value)`` when it is a concrete number, else ``None``.
+
+    ``K_conv`` / ``K_bg`` are declared tunable (``__param_spec__`` tier 2) and
+    a trainer substitutes TRACED leaves for them inside the loss, so a bare
+    Python comparison on them raises ``TracerBoolConversionError`` under jit.
+    The structural guards below are about the card's SHAPE (which arm runs,
+    which branch is larger), which a trained value cannot change; they are
+    therefore checked whenever the value is concrete -- i.e. at every card
+    build and every production step -- and skipped under tracing.
+    """
+    try:
+        return float(value)
+    except TypeError:
+        return None
+
+
+def resolve_evd_composition(cfg: EnhancedDiffusionConfig) -> str:
+    """The composition this enhanced-diffusion card states (no silent default).
+
+    A card whose trigger is NEMO's (``n2_mode="nemo_bn2"``) MUST state how the
+    coefficient composes, because the two answers differ on exactly the
+    interfaces the trigger selects; leaving it unset raises.  Every other card
+    (the Oceananigans semantics this scheme was written for) keeps the
+    additive composition it has always had.
+    """
+    mode = getattr(cfg, "evd_composition", "") or ""
+    if not mode:
+        if getattr(cfg, "n2_mode", "insitu") == "nemo_bn2":
+            raise ValueError(
+                "EnhancedDiffusionConfig.evd_composition is unset on a card "
+                'whose convective trigger is NEMO\'s own (n2_mode='
+                '"nemo_bn2"): state "nemo_replace" for NEMO\'s statement '
+                "(zdfevd.f90:107-110 overwrites the assembled avt with "
+                'rn_evd) or "additive" for legoESM/Oceananigans\' sum. '
+                "There is no default (decision 94).")
+        return "additive"
+    if mode not in EVD_COMPOSITIONS:
+        raise ValueError(
+            f"unknown EnhancedDiffusionConfig.evd_composition {mode!r}: "
+            f"must be one of {EVD_COMPOSITIONS}.")
+    if mode == "nemo_replace":
+        _K_conv = _static_float(cfg.K_conv)
+        _K_bg = _static_float(cfg.K_bg)
+        _nu_conv = _static_float(cfg.nu_conv)
+        _nu_bg = _static_float(cfg.nu_bg)
+        if cfg.smooth_transition:
+            raise ValueError(
+                'evd_composition="nemo_replace" transcribes a HARD switch '
+                "(zdfevd.f90:108 is an IF, not a blend) and requires "
+                "smooth_transition=False.")
+        if _K_bg is not None and _K_conv is not None and not (
+                _K_bg < _K_conv):
+            raise ValueError(
+                'evd_composition="nemo_replace" requires K_bg < K_conv '
+                f"(got K_bg={cfg.K_bg!r}, K_conv={cfg.K_conv!r}): the fired "
+                "set is read back as the interfaces carrying K_conv, which "
+                "is only unambiguous when the stable branch is smaller. "
+                "NEMO's own stable branch contributes nothing (K_bg = 0).")
+        # nn_evdm, stated rather than implied: zdfevd.f90:121 applies the SAME
+        # rn_evd to avm when nn_evdm=1 and leaves avm untouched when 0.  There
+        # is no NEMO configuration in between.
+        if _nu_bg is not None and _nu_bg != 0.0:
+            raise ValueError(
+                'evd_composition="nemo_replace" requires nu_bg=0.0: NEMO\'s '
+                "zdfevd has no momentum background of its own.")
+        if (_nu_conv is not None and _K_conv is not None
+                and _nu_conv not in (0.0, _K_conv)):
+            raise ValueError(
+                'evd_composition="nemo_replace" requires nu_conv to state '
+                "nn_evdm: 0.0 for nn_evdm=0 (zdfevd.f90:121 leaves avm "
+                f"untouched) or exactly K_conv={cfg.K_conv!r} for nn_evdm=1 "
+                f"(:133-135 writes the same rn_evd to avm); got "
+                f"nu_conv={cfg.nu_conv!r}.")
+    return mode
+
+
+def compose_evd_coefficient(other, evd, mode: str, *, convective: float):
+    """Compose the enhanced-diffusion coefficient with everything else.
+
+    ``other`` is the coefficient assembled from the background and any
+    closure (NEMO ``avt_k``/``avm_k`` copied into ``avt``/``avm``,
+    zdfphy.f90:348-351); ``evd`` is this scheme's own field, ``convective``
+    on the fired interfaces and the stable background elsewhere.
+
+    ``"additive"`` is legoESM's historical sum.  ``"nemo_replace"`` is
+    zdfevd.f90:107-110: the fired interfaces take ``rn_evd`` and nothing
+    else.  The fired set is read back as ``evd >= convective``, which is
+    exact because the stable branch is the strictly smaller ``K_bg``
+    (enforced by :func:`resolve_evd_composition`).  ``convective == 0`` is
+    NEMO's ``nn_evdm = 0``: the arm never runs and ``other`` passes through.
+    """
+    if mode == "additive":
+        return other + evd
+    if mode != "nemo_replace":
+        raise ValueError(
+            f"unknown evd composition {mode!r}; expected one of "
+            f"{EVD_COMPOSITIONS}.")
+    # nn_evdm = 0 is a STRUCTURAL zero (the arm never runs), never a trained
+    # value, so it is read as a static float; a traced coefficient is a live
+    # positive diffusivity and takes the where() below.
+    if _static_float(convective) == 0.0:
+        return other
+    return jnp.where(evd >= convective, convective, other)

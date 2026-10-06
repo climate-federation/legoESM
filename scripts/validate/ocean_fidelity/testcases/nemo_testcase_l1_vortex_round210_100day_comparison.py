@@ -90,6 +90,18 @@ SMT_LADDER = {
 CARDS.update(SMT_CARDS)
 CERTIFIED_LADDER.update(SMT_LADDER)
 
+# Round 226 / mini-ladder SMT-3.  This is the same vector seamount card with
+# only ORCA2 rung-0's tracer-LDF module enabled; its admitted NEMO run and the
+# round's own ten-step registry use the same reader/scorer as every card above.
+CARDS["smt3"] = (
+    "VORTEX_SMT3_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/"
+         "oracle_vortex_smt3/day100"),
+)
+CERTIFIED_LADDER["smt3"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round226/"
+    "smt3_ladder.json")
+
 
 class ComparisonError(RuntimeError):
     pass
@@ -216,7 +228,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
-                     help="comma-separated tags: flux, vec, smtflux, smtvec")
+                     help="comma-separated tags: flux, vec, smtflux, smtvec, smt3")
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     args = ap.parse_args()

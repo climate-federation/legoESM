@@ -4123,6 +4123,7 @@ def nemo_bottom_drag_rate_faces(
         cd_max=float(config.bottom_drag.bottom_drag_cdmax),
         z0=float(config.bottom_drag.bottom_drag_z0),
         ke0=float(config.bottom_drag.bottom_drag_ke0),
+        uc0=float(config.bottom_drag.bottom_drag_uc0),
         von_karman=constants.kappa_von_karman,
     ))
     # t-point -> face 2-point averages (NEMO dynzdf:
@@ -4203,6 +4204,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
                     cd_max=float(config.bottom_drag.bottom_drag_cdmax),
                     z0=float(config.bottom_drag.bottom_drag_z0),
                     ke0=float(config.bottom_drag.bottom_drag_ke0),
+                    uc0=float(config.bottom_drag.bottom_drag_uc0),
                     von_karman=constants.kappa_von_karman,
                 )
                 r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)

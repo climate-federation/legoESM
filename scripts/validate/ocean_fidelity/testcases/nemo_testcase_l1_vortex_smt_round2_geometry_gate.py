@@ -41,6 +41,9 @@ from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
 CASES = {
     "VORTEX_SMT-zps": "VORTEX_SMT_OMIP_L1_P3",
     "VORTEX_SMT_VEC-zps": "VORTEX_SMT_VEC_R8_OMIP_L1_P3",
+    "VORTEX_SMT1_VEC-zps": "VORTEX_SMT1_VEC_R8_OMIP_L1_P3",
+    "VORTEX_SMT2_VEC-zps": "VORTEX_SMT2_VEC_R8_OMIP_L1_P3",
+    "VORTEX_SMT3_VEC-zps": "VORTEX_SMT3_VEC_R8_OMIP_L1_P3",
 }
 
 
@@ -74,6 +77,14 @@ def compare(case: str, run_dir: Path) -> dict:
             "e3v_0": f3("e3v_0"), "e3f_0": f3("e3f_0"),
             "tmask": f3("tmask"), "umask": f3("umask"),
             "vmask": f3("vmask"),
+            # Under key_vco_1d3d NEMO has NO three-dimensional e3w: the mesh
+            # file carries e3w_1d alone, and domzgr_substitute.h90:80 makes
+            # e3w_0(i,j,k) = e3w_1d(k) at every column, partial bottom cells
+            # included.  That 1-D ladder is the divisor trazdf.F90:219-220
+            # uses, so the card's own e3w_0 is compared against it rather
+            # than left as the one unchecked field (round 220's reviewer).
+            "e3w_1d": np.asarray(h.variables["e3w_1d"][0],
+                                 dtype=np.float64).reshape(-1),
         }
 
     rows = []
@@ -158,6 +169,16 @@ def compare(case: str, run_dir: Path) -> dict:
     rows.append({"field": "non-vacuity: n cells where resolved e3u_0 != e3t_0",
                  "bit_identical": n_alias > 0, "row_is_a_counter": True,
                  "n_differing": n_alias, "max_abs_difference": 0.0})
+    # The field section 6 of the round-220 receipt rests on: legoESM's
+    # implicit-solve divisor e3w_0, which nemo_e3w_kmm reads off the card
+    # when the coordinate carries a mesh reference.
+    card_e3w0 = getattr(card.recipe.z_coord, "nemo_e3w_0", None)
+    require(card_e3w0 is not None,
+            f"{case}: the card carries no nemo_e3w_0 for the implicit solve")
+    row("card e3w_0 vs NEMO e3w_1d",
+        np.asarray(card_e3w0)[..., :nlev],
+        np.broadcast_to(nemo["e3w_1d"][:nlev],
+                        np.asarray(card_e3w0)[..., :nlev].shape))
     row("card umask", np.asarray(ops.umask), nemo["umask"][..., :nlev])
     row("card vmask", np.asarray(ops.vmask), nemo["vmask"][..., :nlev])
     tmask_card = (np.asarray(card.recipe.z_coord.is_active)
@@ -171,10 +192,15 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--records-root", type=Path, required=True)
     p.add_argument("--json", type=Path)
+    # The mini-ladder's rungs (decision 93) live under their own round
+    # directory, so a run that scores one card cannot share a records root
+    # with the others.  Default: every case, exactly as before.
+    p.add_argument("--case", choices=tuple(CASES), action="append")
     a = p.parse_args()
     out = {}
     ok = True
-    for case, build in CASES.items():
+    selected = {c: CASES[c] for c in (a.case or list(CASES))}
+    for case, build in selected.items():
         res = compare(case, a.records_root / build / "kt1_10")
         out[case] = res
         ok = ok and res["all_bit_identical"]

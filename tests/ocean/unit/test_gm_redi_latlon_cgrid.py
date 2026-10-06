@@ -1560,6 +1560,63 @@ class TestNemoIsoLapOperator:
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 cfg.kappa_Redi, act, return_operand_diagnostics=True)
 
+    def test_nemo_iso_lap_divisor_override_is_exactly_scoped(self):
+        """A live T thickness changes only the final volume divisor."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        plain, before = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        pinned, same = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True,
+            divisor_thickness=before["e3t"])
+        assert jnp.array_equal(pinned, plain)
+        divisor = before["e3t"].at[1, 1, 0].multiply(1.25)
+        changed, after = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True, divisor_thickness=divisor)
+        for name in ("zfu", "zfv", "zfw_kp1", "zfw_top"):
+            assert jnp.array_equal(after[name], same[name])
+        assert not jnp.array_equal(changed, plain)
+        with pytest.raises(ValueError, match="full tracer shape"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, divisor_thickness=divisor[..., 0])
+
+    def test_nemo_iso_lap_closed_bottom_wmask_is_exactly_scoped(self):
+        """The private discriminator closes only the deepest W-mask pair."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        _, before = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        _, after = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True, closed_bottom_wmask=True)
+        for name in ("A11", "A22", "dit", "djt", "dkt", "zfw_kp1"):
+            assert jnp.array_equal(after[name], before[name])
+        assert jnp.array_equal(after["hmsku"][..., :-1],
+                               before["hmsku"][..., :-1])
+        assert jnp.array_equal(after["hmskv"][..., :-1],
+                               before["hmskv"][..., :-1])
+        wet = np.asarray(act[..., -1], dtype=bool)
+        assert np.all(np.asarray(before["hmsku"])[..., -1][wet] == 0.25)
+        assert np.all(np.asarray(after["hmsku"])[..., -1][wet] == 0.5)
+        assert np.all(np.asarray(before["hmskv"])[..., -1][wet] == 0.25)
+        assert np.all(np.asarray(after["hmskv"])[..., -1][wet] == 0.5)
+
     def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
         """Round-88's source association is explicit and generic-safe."""
         setup = _stratified_with_meridional_tilt()
@@ -1590,6 +1647,97 @@ class TestNemoIsoLapOperator:
             nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
                 kappa_u, act, vertical_skew_evaluation="unknown")
+
+    def test_horizontal_flux_literal_is_opt_in_and_default_is_byte_pinned(
+            self, monkeypatch):
+        """The Round-233 source boundaries are explicit and non-vacuous."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, None], T.shape)
+        default, default_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True)
+        pinned, pinned_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            horizontal_flux_evaluation="vectorized")
+        import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+        source_round_calls = []
+
+        def _record_source_round(value):
+            source_round_calls.append(value.shape)
+            return value
+
+        monkeypatch.setattr(gm, "nemo_source_round", _record_source_round)
+        literal, literal_diag = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            horizontal_flux_evaluation="nemo_literal")
+        assert jnp.array_equal(default, pinned)
+        assert jnp.array_equal(default_diag["zfu"], pinned_diag["zfu"])
+        # This smooth fixture can be bit-identical on both arms.  Prove the
+        # literal arm executed instead of relying on a coincidental bit move;
+        # the developed-state production plants provide the numerical
+        # non-vacuity check.
+        assert len(source_round_calls) == 10
+        assert literal.shape == pinned.shape
+        assert literal_diag["zfu"].shape == pinned_diag["zfu"].shape
+        source_round_calls.clear()
+        divergence, divergence_diag = (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_diagnostics=True,
+                horizontal_flux_evaluation="nemo_literal_divergence"))
+        # Ten horizontal-flux boundaries plus three differences, two sums,
+        # the area multiply, and the live-thickness division.
+        assert len(source_round_calls) == 17
+        assert divergence.shape == pinned.shape
+        assert divergence_diag["zfu"].shape == pinned_diag["zfu"].shape
+        source_round_calls.clear()
+        stored_area, stored_area_diag = (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_diagnostics=True,
+                return_operand_diagnostics=True,
+                horizontal_flux_evaluation="nemo_literal_divergence",
+                area_reciprocal_evaluation="nemo_stored"))
+        # The compiled stored-area product and reciprocal add two boundaries.
+        assert len(source_round_calls) == 19
+        assert stored_area.shape == pinned.shape
+        assert stored_area_diag["r1_e1e2t"].shape == mask.shape
+        source_round_calls.clear()
+        rhs_increment = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act,
+            horizontal_flux_evaluation="nemo_literal_divergence",
+            final_update_evaluation="nemo_rhs_increment",
+            rhs_accumulator=jnp.ones_like(T))
+        # The compiled Krhs add and the writer's increment subtraction add
+        # two boundaries after the seventeen complete-divergence boundaries.
+        assert len(source_round_calls) == 19
+        assert rhs_increment.shape == pinned.shape
+        with pytest.raises(ValueError, match="horizontal_flux_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                horizontal_flux_evaluation="unknown")
+        with pytest.raises(ValueError, match="area_reciprocal_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                area_reciprocal_evaluation="unknown")
+        with pytest.raises(ValueError, match="final_update_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                final_update_evaluation="unknown")
+        with pytest.raises(ValueError, match="rhs_accumulator"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act,
+                final_update_evaluation="nemo_rhs_increment")
 
     def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
         """The Kmm Redi slope carry must not move the earlier through-FCT
