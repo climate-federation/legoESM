@@ -146,7 +146,7 @@ class RichardsConfig(NamedTuple):
     max_iter: int = 30
     theta_tol: float = 1e-6       # convergence: max per-layer |dtheta| per iteration [m3/m3]
     # Damping: scale each column's (soil + surface) Picard psi update by
-    # lam = min(1, this / max_k |dtheta_trial_k| / (theta_sat - theta_r)), where
+    # lam = min(1, this / (max_k |dtheta_trial_k| / (theta_sat - theta_r))), where
     # dtheta_trial is the UNDAMPED trial change.  Retention is nonlinear in psi,
     # so the applied theta change is not bounded by this fraction (measured up
     # to 1.04 of the range on a synthetic 180 mm/h rain on dry soil; <= 0.05 on
