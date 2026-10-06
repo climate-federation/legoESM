@@ -1407,10 +1407,28 @@ def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
 # ---------------------------------------------------------------------------
 
 def _create_vertical(nlev: int, vertical_coord: str):
-    """Create vertical coordinate (sigma or hybrid)."""
+    """Create vertical coordinate (sigma or hybrid).
+
+    ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` (#1029 probe override, 2 or 3)
+    changes only the hybrid ``B = eta**exponent`` power; the reference-state
+    level pressures do not move.  Unset -> the standard tier, unchanged.
+    """
     from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    env = os.environ.get("LEGOESM_MATRIX_TRANSITION_EXPONENT")
+    exponent = None
+    if env is not None:
+        if env not in ("2", "3"):
+            raise ValueError(
+                f"LEGOESM_MATRIX_TRANSITION_EXPONENT must be 2 or 3; got {env!r}")
+        if vertical_coord != "hybrid":
+            raise ValueError(
+                "LEGOESM_MATRIX_TRANSITION_EXPONENT is inert on the "
+                f"{vertical_coord!r} coordinate; unset it")
+        exponent = int(env)
+        print(f"  #1029 LEGOESM_MATRIX_TRANSITION_EXPONENT override: "
+              f"B = eta**{exponent}")
     if vertical_coord == "hybrid":
-        return standard_hybrid_levels(nlev)
+        return standard_hybrid_levels(nlev, transition_exponent=exponent)
     return create_sigma_coordinate(nlev)
 
 
