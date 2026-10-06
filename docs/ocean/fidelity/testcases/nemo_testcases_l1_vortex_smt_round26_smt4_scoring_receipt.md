@@ -210,7 +210,16 @@ move DINO. Tanks, flat VORTEX, existing SMT cards, GYRE, and ORCA2 cannot
 dispatch the new card name; no shared physics changed. The geometry builder,
 operator, and existing card branches are reused rather than duplicated.
 
-Independent review: **REVIEW_PENDING**.
+The required separate read-only Codex review was attempted on the complete
+committed diff. Verbatim result:
+
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** It produced no `SHIP`, `HOLD`,
+or `DO NOT SHIP` verdict. No physics is landed, and the round's HELD outcome
+does not depend on treating review silence as approval.
 
 The focused suite covering the acquisition driver, SMT cards, shared
 prognostic/barotropic path, and generic NEMO recipe reports:
