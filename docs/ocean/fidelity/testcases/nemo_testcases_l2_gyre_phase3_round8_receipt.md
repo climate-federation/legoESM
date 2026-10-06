@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:9887-9889`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:9896-9898`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -9365,7 +9365,7 @@ transcription of the isoneutral formula — it is the CALL SITE.
   `trazdf.F90:173` reads `zwt = avt + ah_wslp2` at every stage.
 * legoESM recomputes its `K33` INSIDE each stage from that stage's own
 tracers: `ocean_model_latlon_cgrid.py:8803` sets `_T_gm_in = T_mid` on this
-path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:9177` hands it
+path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:9186` hands it
   to `compute_isoneutral_K33_latlon`.
 
 At `kt = nit000` GYRE has `ln_rstart = F` and its analytic initial T and S are
@@ -9382,7 +9382,7 @@ all 20416 faces**.  So legoESM's slope arithmetic leaves no rounding residue on
 a horizontally uniform field, and the difference is the STATE the function is
 handed, not the function.  This arm calls the function directly rather than
 through the model and is a property of that function, not of the model's call:
-it omits ten arguments `ocean_model_latlon_cgrid.py:9177` passes.  Two of them
+it omits ten arguments `ocean_model_latlon_cgrid.py:9186` passes.  Two of them
 were measured inert by the diff review (`u_mask`/`v_mask` threaded: 0 bits
 changed), and the zero is not degenerate (a `1e-12` tracer bump gives
 `4.69e-31`).
@@ -9562,8 +9562,8 @@ packages/ocean/legoesm/ocean/state.py:2164       tracer_combine: str = "concentr
 packages/ocean/legoesm/ocean/experiments/dino.py:1012    tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1764    "tracer_combine": "thickness_weighted",
 packages/ocean/legoesm/ocean/experiments/dino.py:3983        tracer_combine=cfg.tracer_combine,
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12667  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13053  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12676  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13062  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
