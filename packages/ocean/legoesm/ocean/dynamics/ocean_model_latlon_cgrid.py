@@ -12068,7 +12068,27 @@ class LatLonCGridOceanModel:
         # convention every fallback-path scheme uses; the pre-step surfaced
         # diagnosis is simply discarded.  Static config gate (pure Python
         # bool) — no traced branch.
-        if self._lat_dependent_constant_vmix():
+        _physics_here = getattr(_cfg_b, "physics", None)
+        _vmix_here = getattr(_physics_here, "vertical_mixing", None)
+        _conv_here = getattr(_physics_here, "convection", None)
+        _constant_nemo_evd = False
+        if (getattr(_vmix_here, "scheme", "none") == "constant"
+                and getattr(_conv_here, "scheme", "none")
+                == "enhanced_diffusion"):
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                resolve_evd_composition,
+            )
+            _constant_nemo_evd = resolve_evd_composition(
+                _conv_here.enhanced_diffusion) == "nemo_replace"
+
+        if self._lat_dependent_constant_vmix() or _constant_nemo_evd:
+            # The combined physics pipeline surfaces only the SUM of the
+            # constant closure and EVD fields.  NEMO keeps those owners
+            # separate: zdfphy.f90:347-351 copies the constant closure, then
+            # :359 calls zdfevd, whose :107-110 REPLACES avt only where the
+            # trigger fires (and leaves avm alone for nn_evdm=0).  Rebuild via
+            # the existing separated-profile path; treating the surfaced sum
+            # as either owner would lose the other one on part of the domain.
             K_v_phys = None
             A_v_phys = None
 

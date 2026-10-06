@@ -161,6 +161,74 @@ def test_the_replace_wiring_reaches_the_solve(smt1):
               composition="nemo_replace"))
 
 
+def test_constant_closure_stays_separate_from_nemo_replacement(smt1):
+    """Rung-0 constant K survives except where NEMO replaces tracer K.
+
+    The merged fast path used to refuse this combination because the physics
+    pipeline had already summed the constant and EVD fields.  Reverting the
+    separated-profile routing makes the model construction below raise; using
+    additive composition produces the explicitly checked wrong sum.
+    """
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    cfg = smt1.recipe.model_config
+    vertical = cfg.physics.vertical_mixing._replace(
+        scheme="constant",
+        constant=cfg.physics.vertical_mixing.constant._replace(
+            A_v=1.2e-4, K_v=1.2e-5, lat_dependent=False),
+        vmix_background_mode="additive",
+    )
+    ed = cfg.physics.convection.enhanced_diffusion._replace(
+        K_conv=100.0, nu_conv=0.0, K_bg=0.0, nu_bg=0.0,
+        evd_composition="nemo_replace")
+    physics = cfg.physics._replace(
+        vertical_mixing=vertical,
+        convection=cfg.physics.convection._replace(
+            enhanced_diffusion=ed),
+    )
+    constant_card = smt1._replace(recipe=smt1.recipe._replace(
+        model_config=cfg._replace(A_v=0.0, K_v=0.0, physics=physics),
+        physics_config=physics,
+    ))
+    unstable = _unstable(constant_card)
+    fired = _fired(
+        constant_card, unstable, cfg.eos_nemo_seos).astype(bool)
+    wet = np.asarray(constant_card.recipe.z_coord.is_active)[..., 1:]
+    fired_wet = fired & wet
+    stable_wet = ~fired & wet
+    assert int(fired_wet.sum()) == 1
+
+    K_v, A_v = compute_vertical_K_profiles(
+        unstable, constant_card.recipe.z_coord, None, physics,
+        A_v_background=0.0, K_v_background=0.0,
+        seos_cfg=cfg.eos_nemo_seos,
+    )
+    K_v = np.asarray(K_v)
+    A_v = np.asarray(A_v)
+    np.testing.assert_array_equal(K_v[fired_wet], np.asarray([100.0]))
+    assert np.all(K_v[stable_wet] == 1.2e-5)
+    assert np.all(A_v[wet] == 1.2e-4)  # nn_evdm=0: momentum is untouched.
+
+    # This is the production integration assertion: the old fast-path guard
+    # raises before returning a state, while the separated-profile route runs.
+    out = _step(constant_card, unstable, k_conv=100.0,
+                composition="nemo_replace")
+    assert np.all(np.isfinite(out))
+
+    additive_physics = physics._replace(
+        convection=physics.convection._replace(
+            enhanced_diffusion=ed._replace(evd_composition="additive")))
+    K_add, _ = compute_vertical_K_profiles(
+        unstable, constant_card.recipe.z_coord, None, additive_physics,
+        A_v_background=0.0, K_v_background=0.0,
+        seos_cfg=cfg.eos_nemo_seos,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(K_add)[fired_wet], np.asarray([100.000012]))
+
+
 def test_the_explicit_branch_refuses_the_replacement():
     """It adds a tendency; zdfevd overwrites a coefficient."""
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
