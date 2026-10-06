@@ -14,7 +14,7 @@ selects `ln_dynldf_lap=.true.`, `ln_dynldf_lev=.true.`, and
 explicitly replaces only that unavailable file-backed coefficient on this
 idealised rung with the stated stand-in `nn_ahm_ijk_t=20`. The values the
 rung leaves unset resolve from
-`cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1135`: div-rot type 0,
+`cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1134`: div-rot type 0,
 `rn_Uv=0.1 m/s`, `rn_Lv=10.e3 m`, and `rn_ahm_b=0`. SMT-4 states all of them
 explicitly. It does not copy VORTEX's pre-existing `rn_Lv=30.e3 m`.
 

@@ -110,7 +110,7 @@ diffusion and a file-backed 3-D coefficient at
 `orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:388-392`.
 Decision 93 explicitly authorises the idealised-card stand-in coefficient
 mode 20. The complete companion tuple comes from
-`cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1135`. Geometry, EOS, tracer
+`cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1134`. Geometry, EOS, tracer
 diffusion, vertical mixing, drag, momentum advection, vorticity, pressure
 gradient, barotropic program, timestep, and run length remain SMT-3's admitted
 values.

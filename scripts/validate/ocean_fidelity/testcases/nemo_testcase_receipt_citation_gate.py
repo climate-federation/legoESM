@@ -5632,8 +5632,8 @@ CITATION_MAP = {
     # --- round 237: SMT-4 deck provenance and compiled momentum-LDF branch ---
     'orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:388-392': [
         '&namdyn_ldf', 'nn_ahm_ijk_t  = -30', 5],
-    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1135': [
-        '&namdyn_ldf', 'rn_ahm_b      = 0.0', 32],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1134': [
+        '&namdyn_ldf', 'rn_ahm_b      = 0.0', 31],
     'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-185': [
         'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
         'IF(lwm) WRITE ( numond, namdyn_ldf )', 9],
@@ -5642,15 +5642,15 @@ CITATION_MAP = {
         'IF( nldf_dyn == np_lap_i )   l_ldfslp = .TRUE.', 56],
     'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:311-346': [
         'IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv',
-        "CALL ldf_c2d( 'DYN', zUfac      , inn        , ahmt, ahmf )", 36],
+        ("CALL ldf_c2d( 'DYN', zUfac      , inn        , ahmt, ahmf )", 1), 36],
     'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90:81-90': [
         'SELECT CASE ( nldf_dyn )',
         'CALL dynldf_lev_blp( kt, Kbb, Kmm, puu, pvv, Krhs )', 10],
     'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
-        'DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)',
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
         '&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 20],
     'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:387-405': [
-        'CASE ( 3 )        !==  Stage 3  ==!',
+        ('CASE ( 3 )        !==  Stage 3  ==!', 1),
         'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )', 19],
     # --- round 226: admitted SMT-3 compiled branch and magnitude boundary ---
     'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:231-233': [
