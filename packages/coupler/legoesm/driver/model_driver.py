@@ -1806,6 +1806,14 @@ class ModelDriver:
         got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         _snow_layer_fields = {"snow_ice_layers", "snow_liq_layers",
                               "snow_T_layers", "snow_rho_layers"}
+        # A BULK-snow checkpoint restarting a LAYERED run: build the pack from
+        # the restored snow water, as a land IC without layers does (user
+        # 2026-10-06), once the rest of the state is restored (below).
+        _land_cfg = getattr(getattr(self, "physics", None), "land_ml_cfg", None)
+        _seed_pack = (got != expected and (expected - got) == _snow_layer_fields
+                      and _land_cfg is not None)
+        if _seed_pack:
+            expected = expected - _snow_layer_fields
         if got != expected and (expected - got) == _snow_layer_fields:
             raise ValueError(
                 "This checkpoint was written with the BULK snowpack but the run "
@@ -1845,6 +1853,15 @@ class ModelDriver:
                     "(resolution / soil-layer-count skew)")
             fields[name] = arr
         self._land_ml_state = template._replace(**fields)
+        if _seed_pack:
+            from legoesm.land.multilayer_land import seed_snow_layers
+            self._land_ml_state = seed_snow_layers(self._land_ml_state, _land_cfg)
+            logger.warning(
+                "  land_ml restore: checkpoint written with the BULK snowpack; the "
+                "LAYERED pack is built from its snow water (%d layers, all ice at "
+                "min(top soil T, freezing), density %.0f kg/m3) -- a seeded, not "
+                "spun-up, pack", _land_cfg.snow_column.n_layers,
+                _land_cfg.snow_column.seed_density)
 
     def _validate_microphysics_tracer_state(
         self,

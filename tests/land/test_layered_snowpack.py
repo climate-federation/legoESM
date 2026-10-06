@@ -442,16 +442,31 @@ def test_init_allocates_layers_only_for_layered():
     np.testing.assert_allclose(total_water(_pack(st)), [0.0, 5.0, 50.0])
 
 
-def test_bulk_checkpoint_into_layered_run_is_refused_clearly():
+def test_bulk_checkpoint_into_layered_run_seeds_the_pack():
+    """A bulk-snow checkpoint restarting a layered run builds the pack from the
+    checkpoint's snow water (user 2026-10-06); without the run's land config to
+    seed from, it is still refused."""
     from legoesm.driver.model_driver import ModelDriver
-    bulk = init_multilayer_land_state(2, _cfg("bulk"))
-    layered = init_multilayer_land_state(2, _cfg())
+    cfg = _cfg()
+    bulk = init_multilayer_land_state(2, _cfg("bulk"), T_init=268.0)
+    bulk = bulk._replace(snow_depth=jnp.array([12.0, 0.0]))
+    layered = init_multilayer_land_state(2, cfg)
     aux = {f"land_ml_{k}": np.asarray(v) for k, v in bulk._asdict().items()
            if v is not None and k != "canopy_x"}
-    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None, _carry_aux=aux,
-                          _land_ml_state=layered)
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None, _carry_aux=dict(aux),
+                          _land_ml_state=layered,
+                          physics=SimpleNamespace(land_ml_cfg=cfg))
+    ModelDriver._restore_land_ml_from_carry_aux(dst)
+    st = dst._land_ml_state
+    want = seed_snow_layers(bulk, cfg)
+    np.testing.assert_array_equal(st.snow_ice_layers, want.snow_ice_layers)
+    np.testing.assert_array_equal(st.snow_T_layers, want.snow_T_layers)
+    np.testing.assert_allclose(jnp.sum(st.snow_ice_layers, -1), [12.0, 0.0])
+    np.testing.assert_array_equal(st.T_soil, bulk.T_soil)
+    no_cfg = SimpleNamespace(_check_land_soil_dz=lambda dz: None, _carry_aux=dict(aux),
+                             _land_ml_state=layered)
     with pytest.raises(ValueError, match="land_snow_scheme: bulk"):
-        ModelDriver._restore_land_ml_from_carry_aux(dst)
+        ModelDriver._restore_land_ml_from_carry_aux(no_cfg)
 
 
 def test_land_restart_round_trips_snow_layers(tmp_path):
