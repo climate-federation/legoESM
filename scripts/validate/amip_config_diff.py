@@ -13,6 +13,10 @@ UNINTENDED and sets a non-zero exit status, so it can gate a launch.
 
 Usage:
     amip_config_diff.py --against <run_dir> --expect land_surface_scheme,... -- <run_amip flags>
+    amip_config_diff.py --against <run_dir> --run <other_run_dir> --expect ...
+
+The second form compares two runs that have both started (e.g. the arm and the
+control of an A/B after day 1), each from its own recorded configuration.
 """
 from __future__ import annotations
 
@@ -117,6 +121,9 @@ def main(argv=None) -> int:
     ap.add_argument("--expect", default="",
                     help="comma-separated fields that are MEANT to differ")
     ap.add_argument("--repo", default=".", help="repository root")
+    ap.add_argument("--run", default=None,
+                    help="a second run directory holding experiment_config.json, "
+                         "compared instead of resolving flags")
     ap.add_argument("flags", nargs=argparse.REMAINDER,
                     help="the proposed run's run_amip flags, after --")
     args = ap.parse_args(argv)
@@ -125,7 +132,13 @@ def main(argv=None) -> int:
     repo = pathlib.Path(args.repo).resolve()
     ref = _flatten(json.loads(
         (pathlib.Path(args.against) / "experiment_config.json").read_text()))
-    new = _flatten(_as_plain(_resolve(flags, repo)))
+    if args.run is not None:
+        if flags:
+            ap.error("give either --run or run_amip flags, not both")
+        new = _flatten(json.loads(
+            (pathlib.Path(args.run) / "experiment_config.json").read_text()))
+    else:
+        new = _flatten(_as_plain(_resolve(flags, repo)))
 
     expected = {e.strip() for e in args.expect.split(",") if e.strip()}
     intended, unintended = [], []

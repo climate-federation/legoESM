@@ -26,13 +26,14 @@ for want in "$@"; do
     [[ "${want_commit}" == HEAD ]] && want_commit="${EXPECT_COMMIT:?set EXPECT_COMMIT to the reviewed commit}"
     [[ "${want_commit}" == "${head}" ]] \
       || { echo "REFUSING: ${repo} is at ${head}, expected ${want_commit}" >&2; exit 2; }
-    [[ -z $(git -c safe.directory='*' -C "${repo}" status --porcelain --untracked-files=no) ]] \
+    [[ -z "$(git -c safe.directory='*' -C "${repo}" status --porcelain -- packages src scripts config)" ]] \
       || { echo "REFUSING: ${repo} has uncommitted changes" >&2; exit 2; }
     d="${ROOT}/${name}"
     [[ -e "${d}" ]] && { echo "REFUSING: ${d} exists" >&2; exit 3; }
     mkdir -p "${d}"
     cp -f "${ck}" "${d}/"
     chmod a-w "${d}/$(basename "${ck}")"
+    ( cd "${d}" && sha256sum "$(basename "${ck}")" > restart.sha256 )
     echo 4 > "${d}/.device_count"
     printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${target}" "${repo}" "${head}" "${extra}" > "${d}/arm.tsv"
     cp -f "${HERE}/PREREG.md" "${d}/PREREG.md"
