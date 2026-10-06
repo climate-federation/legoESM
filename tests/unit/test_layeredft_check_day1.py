@@ -41,7 +41,8 @@ def test_each_failure_is_reported(tmp_path):
     wiped = _run(tmp_path, land_ml_snow_ice_layers=np.zeros((3, 5), np.float32),
                  land_ml_snow_depth=np.zeros(3))
     assert cd1.day1_problems(wiped, 275, "layered", _LOG) == [
-        "snow water 0 after day 1 vs 30 at restart"]
+        "snow water 0 after day 1 vs 30 at restart",
+        "seasonal snow water 0 after day 1 vs 30 at restart"]
     # a thick pack truncated in one column, the global sum still fine
     np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([10.0, 10.0, 500.0]))
     ice = np.full((3, 5), 2.0, np.float32)
@@ -52,3 +53,24 @@ def test_each_failure_is_reported(tmp_path):
         "a column lost more than 200 kg/m2 of snow in a day"]
     # a bulk control needs neither layers nor the warning
     assert cd1.day1_problems(_run(tmp_path, scheme="bulk"), 275, "bulk", "") == []
+
+
+def test_seasonal_erasure_under_an_ice_sheet_and_absurd_gains_fail(tmp_path):
+    ice = np.zeros((3, 5), np.float32)
+    ice[2] = 600.0                                    # 3000 kg/m2 ice-sheet column kept
+    run = _run(tmp_path, land_ml_snow_ice_layers=ice, land_ml_snow_depth=ice.sum(-1))
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([50.0, 50.0, 3000.0]))
+    assert cd1.day1_problems(run, 275, "layered", _LOG) == [
+        "seasonal snow water 0 after day 1 vs 100 at restart"]
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([0.0, 0.0, 2000.0]))
+    assert cd1.day1_problems(run, 275, "layered", _LOG) == [
+        "a column gained more than 500 kg/m2 of snow in a day"]
+
+
+def test_a_layered_day_without_snow_water_is_reported_not_raised(tmp_path):
+    run = _run(tmp_path)
+    z = dict(np.load(run / "checkpoint_day_0276.npz"))
+    del z["land_ml_snow_depth"]
+    np.savez(run / "checkpoint_day_0276.npz", **z)
+    probs = cd1.day1_problems(run, 275, "layered", _LOG)
+    assert any("snow_depth" in p for p in probs), probs

@@ -8,12 +8,12 @@ Pass (exit 0) needs, at checkpoint day restart+1:
 - layered arms: the four snow-layer fields present, the layers' water equal to
   the snow water (rtol 1e-5, float32 storage), and the run log carrying the
   "pack built from its snow water" warning (the bulk restart was seeded);
-- every arm: the summed snow water at day 1 at least half the restart's (a
-  pack erased everywhere cannot pass), and no column losing more than 200
-  kg/m2 in the day (melting that much takes ~770 W/m2 for 24 h, impossible in
-  October, so any thick pack erased or truncated is caught).  An erased THIN
-  seasonal pack is indistinguishable from a day of melt here; PREREG's
-  snow-mass validity rule against the control covers it.
+- every arm: the summed snow water at day 1 at least half the restart's, both
+  over all columns and over the seasonal ones (restart snow < 1000 kg/m2, so
+  the ice sheets cannot hide an erased seasonal pack); no column losing more
+  than 200 kg/m2 in the day (melting that much takes ~770 W/m2 for 24 h,
+  impossible in October) or gaining more than 500 (no October snowfall
+  reaches that; catches a scaled or mis-unit restart).
 Held land column-steps (budgets not closed) are printed, not gated.
 """
 from __future__ import annotations
@@ -28,6 +28,8 @@ import numpy as np
 _LAYERS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers", "snow_rho_layers")
 _SEEDED = "LAYERED pack is built from its snow water"
 _MAX_DAY_LOSS = 200.0   # kg/m2: ~770 W/m2 for 24 h of melt (L_f 3.34e5 J/kg)
+_MAX_DAY_GAIN = 500.0   # kg/m2: an absurdity bound on one day of snowfall
+_SEASONAL_MAX = 1000.0  # kg/m2: restart snow below this is not an ice sheet
 
 
 def day1_problems(run_dir, restart_day, scheme, log_text):
@@ -45,18 +47,25 @@ def day1_problems(run_dir, restart_day, scheme, log_text):
     else:
         w0 = r["land_ml_snow_depth"].astype(np.float64)
         w1 = z["land_ml_snow_depth"].astype(np.float64)
-        s0, s1 = float(w0.sum()), float(w1.sum())
-        if s1 < 0.5 * s0:
-            out.append(f"snow water {s1:.4g} after day 1 vs {s0:.4g} at restart")
-        if w0.shape != w1.shape or np.any(w0 - w1 > _MAX_DAY_LOSS):
-            out.append(f"a column lost more than {_MAX_DAY_LOSS:.0f} kg/m2 of snow in a day")
+        if w0.shape != w1.shape:
+            out.append(f"snow water shape {w1.shape} vs restart {w0.shape}")
+        else:
+            seasonal = w0 < _SEASONAL_MAX
+            for label, m in (("", slice(None)), ("seasonal ", seasonal)):
+                s0, s1 = float(w0[m].sum()), float(w1[m].sum())
+                if s1 < 0.5 * s0:
+                    out.append(f"{label}snow water {s1:.4g} after day 1 vs {s0:.4g} at restart")
+            if np.any(w0 - w1 > _MAX_DAY_LOSS):
+                out.append(f"a column lost more than {_MAX_DAY_LOSS:.0f} kg/m2 of snow in a day")
+            if np.any(w1 - w0 > _MAX_DAY_GAIN):
+                out.append(f"a column gained more than {_MAX_DAY_GAIN:.0f} kg/m2 of snow in a day")
     cfg = json.loads((run_dir / "experiment_config.json").read_text())
     if cfg.get("land_snow_scheme") != scheme:
         out.append(f"resolved land_snow_scheme {cfg.get('land_snow_scheme')!r}, want {scheme!r}")
     if cfg.get("land_soil_freeze_thaw") is not True:
         out.append(f"resolved land_soil_freeze_thaw {cfg.get('land_soil_freeze_thaw')!r}")
     if scheme == "layered":
-        missing = [f for f in _LAYERS if f"land_ml_{f}" not in z.files]
+        missing = [f for f in _LAYERS + ("snow_depth",) if f"land_ml_{f}" not in z.files]
         if missing:
             out.append(f"missing {missing}")
         else:

@@ -84,13 +84,13 @@ for a in "${arms[@]}"; do
   [[ -n "${START[${a}]}" ]] || { echo "REFUSING: ${a} has no checkpoint" >&2; exit 64; }
   # The gated first launch must start from the hashed restart copy itself.
   # The gated first launch must start from the hashed restart copy itself:
-  # the newest checkpoint (the chain's pick) is that very file, by name.
+  # it must be the ONLY checkpoint in the dir, so any pick rule lands on it.
   rfile=$(awk '{print $2}' "${ROOT}/${a}/restart.sha256")
   [[ "${rfile}" =~ ^checkpoint_day_[0-9]+\.npz$ ]] \
     || { echo "REFUSING: ${a}/restart.sha256 names '${rfile}'" >&2; exit 64; }
-  newest=$(basename "$(ls -1 "${ROOT}/${a}"/checkpoint_day_*.npz | sort -V | tail -1)")
-  (( ! DAY1_GATE )) || [[ "${newest}" == "${rfile}" ]] \
-    || { echo "REFUSING: ${a} would start from ${newest}, not its hashed restart ${rfile}; resume with DAY1_GATE=0" >&2; exit 64; }
+  others=$(cd "${ROOT}/${a}" && ls -1 checkpoint_day_*.npz | grep -vxF "${rfile}" | tr '\n' ' ')
+  (( ! DAY1_GATE )) || [[ -z "${others}" ]] \
+    || { echo "REFUSING: ${a} holds ${others}besides its hashed restart ${rfile}; resume with DAY1_GATE=0" >&2; exit 64; }
 done
 if (( DAY1_GATE )); then
   for a in "${arms[@]}"; do TGT[${a}]=$(( START[${a}] + 1 )); done
