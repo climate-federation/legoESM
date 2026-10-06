@@ -9135,6 +9135,15 @@ class LatLonCGridOceanModel:
                 native_bolus_slope_eta=_eta_gm_in,
                 # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
                 redi_flux_eta=state.eta.data,
+                # Stage-3 tra_ldf receives the stage-2 output as Kmm
+                # (stprk3_stg.f90:531-532).  Its T-point divisor therefore
+                # uses the materialized one-half-stage sea surface, while the
+                # once-per-step slope and current face path above retain their
+                # independently cited operands.
+                redi_divisor_eta=(
+                    _eta_live_one_half
+                    if getattr(_cfg_b, "tracer_time_integrator", "euler")
+                    == "rk3_ws" else None),
                 return_bolus_transport=_want_bolus,
                 return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),

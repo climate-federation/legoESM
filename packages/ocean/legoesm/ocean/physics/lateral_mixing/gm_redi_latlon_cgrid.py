@@ -4177,6 +4177,7 @@ def gm_redi_tracer_tendency_latlon(
     native_kappa_slope_eta: jnp.ndarray | None = None,
     native_bolus_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
+    redi_divisor_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
@@ -4209,6 +4210,10 @@ def gm_redi_tracer_tendency_latlon(
         tracer flux after the dynamics update but indexes these faces at Kmm,
         so the MLF model step supplies its step-entry eta here. ``None`` keeps
         same-level callers byte-identical.
+    redi_divisor_eta : (n_lat, n_lon) or None
+        Kmm sea-surface height consumed by ``traldf_iso``'s live T-thickness
+        divisor. On WS-RK3 this is the stage-2 output entering stage 3, not
+        the step-entry height used by the once-per-step slope calculation.
     H_bathy : (n_lat, n_lon)
         Bottom depth (positive).
     grid : LatLonGrid
@@ -4603,8 +4608,11 @@ def gm_redi_tracer_tendency_latlon(
                     _ht0 = nemo_source_round(
                         _ht0 + nemo_source_round(
                             _e3t0[..., _jk] * _active_3d[..., _jk]))
+                _divisor_eta = (
+                    _flux_eta if redi_divisor_eta is None
+                    else redi_divisor_eta)
                 _divisor_e3t = nemo_qco_live_t_thickness(
-                    _flux_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
+                    _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
         _closed_bottom_wmask = (
             True if redi_closed_bottom_wmask_override is None
             else redi_closed_bottom_wmask_override)
