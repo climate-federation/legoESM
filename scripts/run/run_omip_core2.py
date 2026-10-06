@@ -4479,7 +4479,7 @@ def _nearest_wet_target(src_lat_deg, src_lon_deg, tgt_lat_deg, tgt_lon_deg):
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
-                        land_mask=None, spread_passes=2, exclude_isf=False,
+                        land_mask=None, spread_passes=8, exclude_isf=False,
                         regrid="idw4"):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
@@ -7441,12 +7441,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="zdfiwm ln_tsdiff differential T/S mixing (ORCA1: off; "
                         "raises — unsupported on the shared-K solve)")
     p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
-                   help="N^2 the zdfiwm formula reads: insitu (legacy default; "
-                        "compressibility keeps neutral layers 'stable', so the "
-                        "1e-2 cap never engages) or nemo_bn2 (NEMO rn2, "
-                        "zdfiwm.F90:185-211).")
+                   help="N^2 the zdfiwm formula reads: nemo_bn2 (default since "
+                        "2026-10-06; NEMO rn2, zdfiwm.F90:185-211) or insitu "
+                        "(old behaviour: compressibility keeps neutral layers "
+                        "'stable', so the 1e-2 cap never engages).")
     p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
-                   help="alpha/beta for --iwm-n2-mode nemo_bn2 (ORCA1: teos10).")
+                   help="alpha/beta for nemo_bn2 (default teos10 = ORCA1).")
     p.add_argument("--iwm-forcing-file", type=str, default=None,
                    help="de Lavergne power/decay maps (zdfiwm_forcing_TRA.nc "
                         "layout; the ORCA1 INPUTS copy works).  Omit for the "
@@ -8601,8 +8601,6 @@ def main() -> int:
         raise SystemExit("--trd-series-box needs --trd-accumulate")
     if (args.iwm_n2_mode is not None or args.iwm_n2_eos_form is not None) and not args.iwm:
         raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
-    if args.iwm_n2_mode == "nemo_bn2" and args.iwm_n2_eos_form is None:
-        raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
     if args.nemo_carried_external_mode and (args.grid not in ("tripole", "latlon_bathy")
                                             or not args.momentum_rk3):
         raise SystemExit("--nemo-carried-external-mode is wired on --grid tripole/"

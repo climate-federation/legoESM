@@ -231,15 +231,28 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
             from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
                 compute_iwm_diffusivity, uniform_iwm_forcing,
             )
-            if getattr(_iwm_cfg, "n2_mode", "insitu") != "insitu":
-                raise ValueError(
-                    f"IWMConfig.n2_mode={_iwm_cfg.n2_mode!r} is not wired on the "
-                    "FESOM lane (it reads in-situ N2 here); it would be "
-                    "silently ignored.")
             depth_cell = jnp.cumsum(h_live, axis=-1) - 0.5 * h_live   # gdept
             H_col = jnp.sum(h_live, axis=-1)                          # ht
-            N2_iwm = compute_N2(rho, dz_half, constants_config.rho_0,
-                                g=constants_config.g)
+            _iwm_n2 = getattr(_iwm_cfg, "n2_mode", "insitu")
+            if _iwm_n2 == "insitu":
+                N2_iwm = compute_N2(rho, dz_half, constants_config.rho_0,
+                                    g=constants_config.g)
+            elif _iwm_n2 == "nemo_bn2":
+                # bn2 on the SAME live hnode geometry the IWM structure
+                # functions read (gdept, interior gdepw, e3w = diff(gdept)):
+                # FESOM's z* stretches only the upper layers, so the uniform
+                # eta/H ladder would pair N2 and Reb at different depths.
+                N2_iwm = compute_N2(
+                    rho, dz_half, constants_config.rho_0, g=constants_config.g,
+                    T_cell=T, S_cell=S, n2_mode="nemo_bn2",
+                    n2_eos_form=_iwm_cfg.n2_eos_form,
+                    t_depth=depth_cell,
+                    w_depth=jnp.cumsum(h_live, axis=-1)[..., :-1],
+                    e3w_int=dz_half)
+            else:
+                raise ValueError(
+                    f"IWMConfig.n2_mode={_iwm_n2!r} unknown on the FESOM lane "
+                    "(insitu | nemo_bn2).")
             _fields = (iwm_fields if iwm_fields is not None
                        else uniform_iwm_forcing(_iwm_cfg, H_col.shape,
                                                 dtype=K_H.dtype))
