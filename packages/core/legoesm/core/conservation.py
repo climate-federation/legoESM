@@ -505,15 +505,9 @@ def global_area_sum(
         summation; ``global_sum_mpi`` then combines owned portions.
         If ``None``, all faces are summed (single-rank or SPMD).
     differentiable_broadcast : bool, optional
-        VJP semantics of the MPI reduction.  ``False`` (default) uses
-        ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
-        established callers.  ``True`` uses :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
-        (allreduce forward AND backward), REQUIRED when the reduced value is
-        broadcast back and reused on every rank — e.g. a mass-fixer additive
-        ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
-        cell: the identity VJP silently drops the cross-rank cotangent of the
-        shared correction (a ~1e-6 gradient leak the flux-form moisture path
-        exposes via q→p_s coupling; #811).  Forward is identical either way.
+        No longer changes anything: since #1814 both ``global_sum_mpi`` and
+        :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` allreduce
+        the cotangent on the backward pass.  Kept for existing callers.
 
     Execution modes:
 
@@ -658,12 +652,8 @@ def batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
 
-    ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
-    — ``True`` routes the batched reduction through :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
-    (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
-    (identity VJP), for reduced values that scale every rank (the non-anchor p_s
-    mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
-    untouched for its other callers.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
@@ -745,14 +735,8 @@ def global_face_sum_if_scattered(
     Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
     cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
 
-    ``differentiable_broadcast`` (default ``False``) selects the VJP semantics of
-    the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
-    ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
-    established mass-fixer callers (kept byte-identical).  ``True`` uses
-    :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
-    when the reduced value is broadcast back and reused multiplicatively on every
-    rank, so the cross-rank cotangents are not silently dropped (the flux-form
-    ``scale`` — #811).  Forward is identical either way; only the gradient differs.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 

@@ -11,6 +11,7 @@ These functions are only called when the halo backend is set to
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import os
 import re
@@ -401,74 +402,116 @@ def mpi4jax_array_result(result):
     return result
 
 
-def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
+def _allreduce_sum(local_value, comm, timer: str):
+    """Raw mpi4jax ``allreduce(SUM)``.  mpi4jax transposes it to the IDENTITY
+    (each rank keeps its own cotangent), which is right only for a final loss."""
+    mpi4jax, MPI = require_mpi_stack()
+    with mpi_timer(timer):
+        return mpi4jax_array_result(mpi4jax.allreduce(
+            local_value, op=MPI.SUM,
+            comm=MPI.COMM_WORLD if comm is None else comm))
+
+
+class _CommParam:
+    """Hashable primitive parameter wrapping an (unhashable) mpi4py communicator."""
+
+    __slots__ = ("comm",)
+
+    def __init__(self, comm):
+        self.comm = comm
+
+    def __hash__(self):
+        return hash(self.comm.py2f())
+
+    def __eq__(self, other):
+        return isinstance(other, _CommParam) and self.comm == other.comm
+
+
+@functools.cache
+def _replicated_allreduce_p():
+    """Linear primitive y = allreduce(SUM, x) whose transpose is ALSO allreduce.
+
+    Every rank holds y = sum_r' x_r' and may reuse it, so the transpose is
+    x_bar_r = sum_r' y_bar_r' (#811, #1814).  Being linear, its JVP is the same
+    allreduce of the tangent, so forward mode, reverse mode and jit all work.
+    """
+    from jax.extend.core import Primitive
+    from jax.interpreters import ad, batching, mlir
+
+    mpi4jax, MPI = require_mpi_stack()
+
+    def raw(x, *, comm):
+        return mpi4jax_array_result(mpi4jax.allreduce(x, op=MPI.SUM, comm=comm.comm))
+
+    # mpi4jax's ordered effect, read off its own jaxpr (public API only); without
+    # it the lowering has no MPI token to thread.
+    effects = jax.make_jaxpr(lambda v: raw(v, comm=_CommParam(MPI.COMM_WORLD)))(0.0).effects
+
+    prim = Primitive("legoesm_replicated_allreduce_sum")
+    prim.def_impl(raw)
+    prim.def_effectful_abstract_eval(
+        lambda x, *, comm: (jax.core.ShapedArray(x.shape, x.dtype), effects))
+    mlir.register_lowering(prim, mlir.lower_fun(raw, multiple_results=False))
+    ad.primitive_jvps[prim] = lambda primals, tangents, *, comm: (
+        prim.bind(primals[0], comm=comm),
+        prim.bind(ad.instantiate_zeros(tangents[0]), comm=comm))
+    # Instantiate a zero cotangent so EVERY rank enters the backward allreduce,
+    # even one that discarded the sum (skipping it would deadlock the others).
+    ad.primitive_transposes[prim] = (
+        lambda ct, _x, *, comm: [prim.bind(ad.instantiate_zeros(ct), comm=comm)])
+    batching.primitive_batchers[prim] = (
+        lambda args, dims, *, comm: (prim.bind(args[0], comm=comm), dims[0]))
+    return prim
+
+
+def _replicated_sum(local_value, comm, timer):
+    _, MPI = require_mpi_stack()
+    with mpi_timer(timer):
+        return _replicated_allreduce_p().bind(
+            jax.numpy.asarray(local_value),
+            comm=_CommParam(MPI.COMM_WORLD if comm is None else comm))
+
+
+def global_sum_mpi(local_value: jax.Array, comm=None, *,
+                   final_loss: bool = False) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
-    **Gradient: IDENTITY VJP** (mpi4jax ``allreduce`` transpose returns the
-    local cotangent unchanged). Correct ONLY when the result is the final loss
-    that every rank seeds with the same cotangent. For an intermediate global
-    that is broadcast back and reused on every rank (fixer factors,
-    normalisations, inner products), use :func:`broadcast_allreduce_sum`;
-    this function drops the cross-rank cotangents there (#811). PARTIAL FIX:
-    most existing intermediate-sum call sites still use it (open issue).
+    **Gradient**: the backward pass ALSO allreduces (sums) the cotangent over
+    ``comm``, the correct transpose for a sum that every rank holds and reuses
+    (fixer factors, normalisations, inner products, area integrals).  Forward
+    mode (``jax.jvp``/``jacfwd``) allreduces the tangent, on either path.
+    Every rank must differentiate through the same sums: a rank whose input
+    carries no tangent skips the tangent allreduce (as raw mpi4jax does), and
+    the other ranks then wait on it forever.
+
+    ``final_loss=True`` keeps mpi4jax's IDENTITY backward pass instead.  Use it
+    for the reduction that produces the loss every rank evaluates and
+    differentiates identically — normalised or not (a global mean too); the
+    default would scale that gradient by the rank count.  Sums used INSIDE the
+    computation keep the default under either loss convention.
 
     Parameters
     ----------
     local_value : jax.Array
         Scalar (or array) local partial sum.
     comm : mpi4py communicator, optional
-        Communicator to reduce over. Defaults to ``MPI.COMM_WORLD``. Callers on a
-        SUB-communicator (e.g. a plane-LES layout whose distributed FFT uses
-        ``layout.comm``) MUST pass that same communicator — otherwise the reduction
-        spans the wrong rank set and can deadlock or mix unrelated ranks.
+        Communicator to reduce over (forward AND backward). Defaults to
+        ``MPI.COMM_WORLD``. Callers on a SUB-communicator (e.g. a plane-LES
+        layout whose distributed FFT uses ``layout.comm``) MUST pass that same
+        communicator — otherwise the reduction spans the wrong rank set and can
+        deadlock or mix unrelated ranks.
+    final_loss : bool, optional
+        See above.  Default ``False``.
     """
-    mpi4jax, MPI = require_mpi_stack()
-    if comm is None:
-        comm = MPI.COMM_WORLD
-
-    with mpi_timer("global_sum_mpi"):
-        global_val = mpi4jax_array_result(
-            mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
-        )
-    return global_val
+    if final_loss:
+        return _allreduce_sum(local_value, comm, "global_sum_mpi")
+    return _replicated_sum(local_value, comm, "global_sum_mpi")
 
 
-@jax.custom_vjp
 def broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
-    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
-    transpose for a reduced value that is BROADCAST and reused on every rank.
-
-    :func:`global_sum_mpi` has an IDENTITY VJP: each rank keeps its LOCAL
-    cotangent (``test_grad_nonzero``: "gradient 2*x, no scaling"). That is right
-    for a TOP-LEVEL loss reduction ``L = global_sum_mpi(local)`` (each rank
-    contributes 1:1 to ``L``), but WRONG for an INTERMEDIATE global that is
-    broadcast back and reused on every face/rank — e.g. the flux-form ``scale =
-    mass_in / mass_pos`` that rescales EVERY owned face (#811). There,
-    ``field_in`` on rank ``r`` affects the output on EVERY rank ``r'`` through
-    the shared ``scale``, so the true cotangent is the GLOBAL sum of every
-    rank's local cotangent — the reduction's transpose is ``allreduce(SUM)``.
-    Dropping it left a UNIFORM ~1e-3 absolute cotangent error on every owned
-    face (rel 1.1) in the scattered-vs-replicated gradient gate. Forward is
-    byte-identical to :func:`global_sum_mpi`; only the backward differs. Do NOT
-    use it for the final loss: every rank seeds that cotangent, so the
-    allreduce would scale the gradient by the rank count. PARTIAL FIX: most
-    existing intermediate-sum call sites do not use this yet (open issue).
-    """
+    """Same as :func:`global_sum_mpi` since #1814 made its backward pass
+    allreduce the cotangent; kept for existing callers."""
     return global_sum_mpi(local_sum)
-
-
-def _broadcast_allreduce_sum_fwd(local_sum):
-    return global_sum_mpi(local_sum), None
-
-
-def _broadcast_allreduce_sum_bwd(_res, g):
-    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
-    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
-    return (global_sum_mpi(g),)
-
-
-broadcast_allreduce_sum.defvjp(
-    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
 
 
 def is_multi_process() -> bool:
@@ -562,10 +605,8 @@ def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
     MPI/sharded distribution flag (see :func:`is_multi_process`); otherwise
     returns ``local_value`` unchanged so single-rank runs pay no reduction.
 
-    **Gradient**: inherits the IDENTITY VJP of :func:`global_sum_mpi` — correct
-    only for a final-loss reduction; an intermediate global reused on every rank
-    needs :func:`broadcast_allreduce_sum`. PARTIAL FIX: most existing
-    intermediate-sum call sites still use it (open issue). Single canonical
+    **Gradient**: as :func:`global_sum_mpi` (the backward pass allreduces the
+    cotangent).  Single canonical
     MPI-aware reduction (#177) shared by
     ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
     """
@@ -674,10 +715,8 @@ def batch_allreduce_mpi(
     MPI latency), this function packs all values into a single flat
     buffer, performs one ``allreduce``, and unpacks the results.
 
-    Gradient (``op="sum"``): IDENTITY VJP, as :func:`global_sum_mpi` — correct
-    only for final-loss reductions, not for values reused on every rank.
-    PARTIAL FIX: most existing intermediate-sum call sites still use it
-    (open issue).
+    Gradient (``op="sum"``): as :func:`global_sum_mpi` (the backward pass
+    allreduces the cotangent).  ``"max"``/``"min"`` are not differentiable.
 
     Parameters
     ----------
@@ -726,10 +765,13 @@ def batch_allreduce_mpi(
     packed = jnp.concatenate(flat_parts, axis=0)
 
     # Single MPI allreduce.
-    with mpi_timer("batch_allreduce_mpi"):
-        global_packed = mpi4jax_array_result(
-            mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
-        )
+    if op == "sum":
+        global_packed = _replicated_sum(packed, None, "batch_allreduce_mpi")
+    else:
+        with mpi_timer("batch_allreduce_mpi"):
+            global_packed = mpi4jax_array_result(
+                mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
+            )
 
     # Unpack and restore original shapes and dtypes.
     results = []
