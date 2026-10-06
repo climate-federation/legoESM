@@ -88,13 +88,21 @@ def capture(a):
         treedef, stat, dyn, pos = split_static((state, forcing, x, k), is_dyn)
         stat = [np.asarray(v) if isinstance(v, jax.Array) else v for v in stat]
 
+        dt_call = float(x[2])          # static: the land step length of THIS call
+
         def cb(*vals):
+            # The driver's first land call after a (re)start is a short
+            # start-up step (dt = the atmosphere step); only full land steps
+            # are kept, from the first one on (its state is the start state).
+            if dt_call < a.land_dt:
+                print(f"skipped start-up land call (dt {dt_call} s)", flush=True)
+                return
             vals = [np.asarray(v) for v in vals]
             if "args" not in rec:
                 rec["args"] = (treedef, stat, vals, pos)
             rec["forcing"].append(join_static(treedef, stat, vals, pos)[1])
-            print(f"land call {len(rec['forcing'])} ({time.time() - t0:.0f}s)",
-                  flush=True)
+            print(f"land call {len(rec['forcing'])} dt {dt_call} "
+                  f"({time.time() - t0:.0f}s)", flush=True)
         jax.debug.callback(cb, *dyn)
         return real(state, forcing, *x, **k)
     mll.step_multilayer_land_with_diagnostics = wrapped
@@ -275,6 +283,9 @@ def soil_budget(a):
     forcings = [jax.tree_util.tree_map(jnp.asarray, f) for f in cap["forcing"]]
     if config.thermal.snow_insulation:
         raise SystemExit("FATAL: captured run has the snow node on")
+    if abs(len(forcings) * dt - 86400.0) > 1e-6:
+        raise SystemExit(f"FATAL: the captured forcing spans {len(forcings) * dt} s, "
+                         "not one day")
     if a.control:
         config = config._replace(thermal=config.thermal._replace(enable_freeze_thaw=False))
         state0 = state0._replace(snow_depth=jnp.zeros_like(state0.snow_depth))
@@ -361,6 +372,8 @@ def main(argv=None):
     c.add_argument("--day", type=int, required=True)
     c.add_argument("--calls", type=int, required=True)
     c.add_argument("--out", required=True)
+    c.add_argument("--land-dt", type=float, default=1800.0,
+                   help="full land step [s]; shorter (start-up) calls are skipped")
     r = sp.add_parser("replay")
     r.add_argument("capture")
     r.add_argument("--days", type=int, required=True)
