@@ -7324,7 +7324,9 @@ class ModelDriver:
                 self._carry_aux.pop(_k, None)
             self._land_taumag = None
             self._land_taumag_valid = self._land_taumag_fresh = None
-            self._land_stress_ckpt_missing = "land_taumag" not in d.files
+            # A partial payload (any of the three missing) re-seeds too.
+            self._land_stress_ckpt_missing = not all(
+                _k in d.files for _k in _LAND_STRESS_CKPT_KEYS)
             if not self._land_stress_ckpt_missing:
                 for _k in _LAND_STRESS_CKPT_KEYS:
                     _a = np.asarray(d[_k])

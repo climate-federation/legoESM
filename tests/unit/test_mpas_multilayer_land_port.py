@@ -396,9 +396,16 @@ def test_old_checkpoint_without_land_stress_reseeds_loudly(monkeypatch,
     _patch_land_loaders(monkeypatch)
     _, ckpt = _ls_checkpoint(tmp_path)
     old = str(tmp_path / "old_checkpoint_day_0000.npz")
+    partial = str(tmp_path / "partial_checkpoint_day_0000.npz")
     with np.load(ckpt) as z:
         np.savez(old, **{k: z[k] for k in z.files
                          if not k.startswith("land_taumag")})
+        np.savez(partial, **{k: z[k] for k in z.files
+                             if k != "land_taumag_fresh"})
+    dP = _build_driver(str(tmp_path / "p"), ONE_STEP_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    dP.load_checkpoint(partial)
+    assert dP._land_stress_ckpt_missing
     dB = _build_driver(str(tmp_path / "b"), FOUR_STEPS_DAYS, **_LS_KW,
                        mpas_land_stress_from_land=True)
     step, day = dB.load_checkpoint(old)
