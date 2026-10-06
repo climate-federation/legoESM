@@ -106,14 +106,20 @@ def test_profiles_layout_and_wind_response(flat_mesh, z_shim):
     assert model._tke_profiles_fn is not None
 
 
-def test_langmuir_rhs_coupling_reaches_the_fesom_kernel(flat_mesh, z_shim):
+def test_langmuir_rhs_coupling_reaches_the_fesom_kernel(flat_mesh):
     """The FESOM bridge hands config.tke straight to tke_vertical_mixing, so
     the NEMO Langmuir/dissipation ordering must change the forced profiles
-    (identical profiles = the knob was dropped on this grid)."""
+    (identical profiles = the knob was dropped on this grid).  Needs a column
+    that resolves the Langmuir layer: the module's 6-level / 600 m mesh puts
+    it inside the 100 m top cell and is inert by construction."""
+    from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
     from scripts.run.run_omip_core2 import orca1_zdftke_config
-    state = create_rest_state(flat_mesh, z_shim, stratified=True,
-                              vertical_coordinate="zstar")
-    zg = fesom_zgeom(flat_mesh)
+    mesh = build_flat_bottom_mesh(load_mesh(mesh_dir=DEFAULT_PI_MESH_DIR), H_max=200.0, nlev=20)
+    z = np.asarray(mesh.Z, dtype=np.float64)
+    zs = SimpleNamespace(z_full_ref=z, n_levels=int(z.size))
+    state = create_rest_state(mesh, zs, stratified=True, vertical_coordinate="zstar")
+    zg = fesom_zgeom(mesh)
+    flat_mesh = mesh
 
     def run(c):
         vm = VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config(
