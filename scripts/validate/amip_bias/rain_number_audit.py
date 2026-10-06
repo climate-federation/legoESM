@@ -10,9 +10,10 @@ This reports, from the saved state alone, the quantities the issue used:
 - cell-levels above the post-step PSD ceiling
   N_hi = lamr_max**3 * q_r / (pi * rho_w)   [per kg; rho cancels per mass].
 
-Checkpoints stamped ``number_convention='per_mass'`` hold N_r in [1/kg]. The
-issue quoted [1/m^3]; air density is below 1.3 kg/m^3, so a per-mass count
-above a threshold bounds the per-volume one within that factor.
+Checkpoints stamped ``number_convention='per_mass'`` hold N_r in [1/kg] and
+every threshold here is applied per kg. The issue quoted [1/m^3]; per-volume
+number is per-mass times air density (< 1.3 kg/m^3), so the two are not
+interchangeable near a threshold -- convert per level before comparing.
 
 Usage: rain_number_audit.py CHECKPOINT.npz [...]
 """
