@@ -7961,7 +7961,8 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
-    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field):
+    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field,
+                          ni_field=None):
         """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
 
         Reduces over this rank's OWNED cells / edges (halo entities masked
@@ -7970,8 +7971,11 @@ class ModelDriver:
         halo-double-counted values a plain ``jnp.mean(T_data)`` would give.
         Mirrors the owned-mask + allreduce convention of the mass fixer.
 
-        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
-        host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv,
+        ni_max)`` as host floats / bool.  ``cwv`` / ``ni_max`` are NaN when
+        their field is None.  ``ni_max`` rides the existing MAX batch (always
+        present, so every rank sends the same buffer shape); a NaN in an owned
+        N_i cell is reported as +inf so a runaway stays visible.
         ``mean_T`` is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal cell
         weight — areaCell weighting is a deferred refinement on the
         quasi-uniform SCVT).
@@ -7988,6 +7992,11 @@ class ModelDriver:
         finite_l = jnp.all(jnp.isfinite(T_owned))
         cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
                      if cwv_field is not None else jnp.asarray(0.0))
+        if ni_field is not None:
+            _ni_l = jnp.max(jnp.where(om_c[:, None], ni_field, -jnp.inf))
+            ni_max_l = jnp.where(jnp.isnan(_ni_l), jnp.inf, _ni_l)
+        else:
+            ni_max_l = jnp.asarray(-jnp.inf)
         # Pressure-weighted mean T (sum T*dp / sum dp; equal cell weight —
         # the quasi-uniform SCVT makes areaCell weighting a negligible
         # refinement, and the pre-fix convention was equal-cell too), owned
@@ -8006,6 +8015,7 @@ class ModelDriver:
             Tdp_sum_l, jnp.sum(ps_owned), jnp.max(absu_owned),
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
             cwv_sum_l.astype(T_data.dtype), dp_sum_l,
+            ni_max_l.astype(T_data.dtype),
         ]))
         comm = _MPI.COMM_WORLD
         # THREE batched buffer allreduces instead of eight scalar pickle
@@ -8015,13 +8025,13 @@ class ModelDriver:
         # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
         _sums = np.array([_loc[0], _loc[1], _loc[6], _loc[7]],
                          dtype=np.float64)
-        _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
+        _maxs = np.array([_loc[2], _loc[4], _loc[8]], dtype=np.float64)
         _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
         comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
         comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
         comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
         g_sum_Tdp, g_sum_ps, g_sum_cwv, g_sum_dp = (float(v) for v in _sums)
-        g_max_u, g_T_max = (float(v) for v in _maxs)
+        g_max_u, g_T_max, g_ni_max = (float(v) for v in _maxs)
         g_T_min, g_finite_min = (float(v) for v in _mins)
         g_finite = bool(g_finite_min > 0.5)
         # Owned-cell count is partition-static: allreduce ONCE and cache.
@@ -8032,7 +8042,8 @@ class ModelDriver:
         mean_T = g_sum_Tdp / max(g_sum_dp, 1e-30)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
-        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
+        ni_max = g_ni_max if ni_field is not None else float("nan")
+        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv, ni_max
 
     def _mpas_cmip_feed_enabled(self, diag) -> tuple[bool, bool]:
         """Decide whether the per-interval MPAS CMOR accumulator feed runs.
@@ -8229,7 +8240,8 @@ class ModelDriver:
             if _acc is not None and not state_only:
                 _acc.reset(window_start_day=day)
 
-    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
+    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict, *,
+                                   global_fields: bool = False) -> None:
         """Record the atmospheric water-budget closure E - P - dW/dt.
 
         The model has always carried this tracker, and this lane has never fed
@@ -8245,20 +8257,14 @@ class ModelDriver:
         rather than against a second, privately-averaged pair that could differ
         for reasons nobody could trace.
 
-        SERIAL ONLY, deliberately. The tracker takes a plain area-weighted mean,
-        which under a cell partition would be rank-local and count halo cells
-        twice -- a confidently wrong global number, which is worse than none.
-        The multi-rank path needs the owned-mask-and-allreduce treatment
-        ``_mpas_global_diag`` already does, and says so once rather than
-        publishing rubbish.
+        Under a multi-rank cell partition the tracker's plain area-weighted
+        mean would be rank-local and count halo cells twice, so it is fed ONLY
+        on rank 0 from the owned-cell gather of the CMOR feed
+        (``global_fields=True``: ``kw`` then holds GLOBAL ``q_v`` / ``p_s`` /
+        ``precip`` / ``evspsbl`` and the weights are the global ``areaCell``).
+        A rank-local call under the partition still returns without recording.
         """
-        if self._voronoi_layout is not None:
-            if not getattr(self, "_logged_moisture_budget_mpi", False):
-                logger.info(
-                    "  moisture-budget closure NOT recorded under the cell "
-                    "partition (the tracker's area mean is rank-local); serial "
-                    "runs publish it.")
-                self._logged_moisture_budget_mpi = True
+        if _is_mpas_cell_partitioned(self) and not global_fields:
             return
         # The CMOR slot getter falls back to an INSTANTANEOUS diagnostic when a
         # slot has no accumulated samples.  Mixing a mean rainfall with an
@@ -8269,8 +8275,16 @@ class ModelDriver:
             return
         precip = kw.get("precip")
         evspsbl = kw.get("evspsbl")
-        tracers = self.state.tracers
-        if precip is None or tracers is None or "q_v" not in tracers:
+        if global_fields:
+            q_v, _p_s = kw.get("q_v"), kw.get("p_s")
+            area = getattr(self._grid_global, "areaCell", None)
+        else:
+            tracers = self.state.tracers
+            q_v = (tracers["q_v"].data
+                   if tracers is not None and "q_v" in tracers else None)
+            _p_s = self.state.p_s.data
+            area = getattr(self.grid, "areaCell", None)
+        if precip is None or q_v is None or _p_s is None:
             return          # dry run, or a window whose fluxes were withheld
         if evspsbl is None:
             # Heat without water: the closure will NOT rebuild E as hfls / L_v
@@ -8282,11 +8296,10 @@ class ModelDriver:
                 "but no evspsbl (turbulence evap_sfc slot); the closure refuses "
                 "to derive water from latent heat.", stacklevel=2)
             return
-        area = getattr(self.grid, "areaCell", None)
-        _p_s = self.state.p_s.data
+        _p_s = jnp.asarray(_p_s)
         _p_half = self.sigma.pressure_at_half(_p_s)
         diag.moisture_tracker.update(
-            tracers["q_v"].data, _p_s, self.sigma.dsigma,
+            jnp.asarray(q_v), _p_s, self.sigma.dsigma,
             precip, evap=evspsbl,
             elapsed_seconds=float(day) * 86400.0,
             area_weights=(None if area is None
@@ -8818,6 +8831,9 @@ class ModelDriver:
                 diag.feed_cmip_accumulators_native(
                     day, flux_interval_days=flux_days,
                     include_state=not flux_only, **gathered)
+                # Root-only, strictly after the last collective.
+                self._feed_mpas_moisture_budget(
+                    day, diag, gathered, global_fields=True)
 
     def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
         """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
@@ -12855,6 +12871,7 @@ class ModelDriver:
                         self.sigma.dsigma,
                         dp=self.sigma.layer_thickness_dp(p_s_data))
 
+                _ni_max_mpi = float("nan")
                 if self._voronoi_layout is not None:
                     # MPAS cell-partition MPI: the state spans owned+halo
                     # cells, and each rank holds only its band — so a plain
@@ -12862,9 +12879,13 @@ class ModelDriver:
                     # cells AND be rank-local.  Reduce over OWNED cells only
                     # and allreduce to a true global diagnostic (mirrors the
                     # owned-mask + allreduce mass fixer).
-                    mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv = \
-                        self._mpas_global_diag(
-                            T_data, p_s_data, u_data, _cwv_field)
+                    _ni_fld = (self.state.tracers["N_i"].data
+                               if (self.state.tracers is not None
+                                   and "N_i" in self.state.tracers) else None)
+                    (mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv,
+                     _ni_max_mpi) = self._mpas_global_diag(
+                        T_data, p_s_data, u_data, _cwv_field,
+                        ni_field=_ni_fld)
                 else:
                     # Serial / single-rank: fuse the reductions into one
                     # device→host transfer (each ``float()`` is a GPU stall).
@@ -13047,10 +13068,9 @@ class ModelDriver:
                 # diagnostic nominal, because PSD clamps mask absurd N in all
                 # rates — only the raw field overflowing was visible.  A
                 # daily max makes any number runaway visible in the log
-                # months before overflow.  Serial/single-rank only (the MPI
-                # lane's fused global diag would need an allreduce-MAX
-                # extension; rank-local would mislead).
-                _ni_max = float("nan")
+                # months before overflow.  On the MPI lane it comes from the
+                # owned-cell MAX batch of ``_mpas_global_diag`` above.
+                _ni_max = _ni_max_mpi
                 if (self._voronoi_layout is None
                         and self.state.tracers is not None
                         and "N_i" in self.state.tracers):
