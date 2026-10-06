@@ -325,10 +325,11 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
     the bulk pack's does under the same forcing (measured 2026-09-26: largest
     step change 1.3 K while melting out vs 8 K for bulk, whose whole 3 kg pack
     vanishes in one step; both ~6-8 K at the forcing switch itself)."""
-    # 72 melt steps: under partial cover only f*G reaches a thin pack, so a trace
-    # pack decays exponentially (f ~ SWE/snow_depth_crit at small SWE; measured
-    # 1.9e-4 kg/m2 left after 72 steps) and "bare" means f < 1e-3 (SWE < 0.01).
-    seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 72),
+    # 288 melt steps: under partial cover only f*G reaches a thin pack, so a trace
+    # pack decays exponentially (f ~ SWE/snow_depth_crit at small SWE, e-folding
+    # ~1 day here; measured 2026-10-06: 0.65 kg/m2 left after 72 steps, 3.3e-3
+    # after 288) and "bare" means f < 2e-4 (SWE < 0.01).
+    seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 288),
            (_forcing(1, T_air=266.0, snow=3e-4, sw=0.0, lw=250.0), 48))
     jumps = {}
     for scheme in ("bulk", "layered"):
@@ -843,13 +844,16 @@ def test_freeze_thaw_closes_energy_in_both_directions(case):
 
 def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
     """A melting pack over -4 C soil (production grid, two-leaf): exact closure
-    at 1800 s and 900 s, and the day-end soil and pack agree between the two."""
+    at 1800 s and 900 s, and the day-end soil and pack agree between the two.
+    150 kg/m2 so the pack covers the cell (f = 0.995): under a partial pack the
+    bare fraction thaws the top soil before any meltwater arrives.  Measured
+    2026-10-06: dt gap 0.25 kg/m2 in pack, <= 0.16 K in the top four layers."""
     cfg = _cfg_ft(scheme=TwoLeafCanopyConfig())
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.5]))
     f = _forcing(1, T_air=281.0, sw=600.0, lw=320.0, q=0.004)
     end = {}
     for dt in (1800.0, 900.0):
-        st = _state(cfg, 1, T_soil=TF - 4.0, swe=20.0)
+        st = _state(cfg, 1, T_soil=TF - 4.0, swe=150.0)
         pairs = _closure_run(cfg, st, ((f, int(86400 / dt)),), dt=dt, lp=lp)
         end[dt] = pairs[-1][1]
         # Meltwater reaches the frozen soil under the pack and part of it freezes:
@@ -860,7 +864,7 @@ def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
                  and float(o.snow_depth[0]) > 1.0 for o, n in pairs]
         assert any(froze)
     a, b = end[1800.0], end[900.0]
-    assert float(a.snow_depth[0]) < 20.0                       # it melted
+    assert float(a.snow_depth[0]) < 150.0                      # it melted
     np.testing.assert_allclose(a.snow_depth, b.snow_depth, atol=0.05 * 20.0)
     np.testing.assert_allclose(a.T_soil[:, :4], b.T_soil[:, :4], atol=0.5)
 
