@@ -51,19 +51,31 @@ echo "sha=$(git rev-parse --short HEAD) host=$(hostname) $(date -u) fine=$FINE c
 echo "### control C1: rebuild the production file from its own recipe"
 "$PY" scripts/data/prep_subgrid_orography.py --input "$SRC1DEG" --out "$OUT/c1_rebuild.nc" \
     --fine-res-deg 1.0 --block-deg 2.0
-"$PY" - "$PROD" "$OUT/c1_rebuild.nc" <<'EOF'
+"$PY" - "$PROD" "$OUT/c1_rebuild.nc" "$SRC1DEG" <<'EOF'
 import sys, numpy as np, xarray as xr
+sys.path.insert(0, "scripts/data")
+from prep_etopo_topography import regrid_elevation_to_latlon
+from prep_subgrid_orography import subgrid_orography_stddev
 a = xr.open_dataset(sys.argv[1])["SSO_STDH"].values
 b = xr.open_dataset(sys.argv[2])["SSO_STDH"].values
 assert a.shape == b.shape, (a.shape, b.shape)
-# The production file predates the periodic-lon fix in the regridder: its last
-# block column (358-360E) was built from a copied, not interpolated, seam
-# column.  Everything else must reproduce exactly.
-d = float(np.max(np.abs(a[:, :-1] - b[:, :-1])))
+# The production file predates the periodic-lon fix: its last fine column
+# (359.5E) fell outside the interpolation hull, nearest-fill along lon does
+# not extrapolate, and the final fillna(0) set it to sea level.  Rebuild
+# exactly that and require the whole production field to be reproduced.
+fine = regrid_elevation_to_latlon(xr.open_dataset(sys.argv[3]), target_res_deg=1.0)
+legacy = fine.copy()
+legacy["elevation"].values[:, -1] = 0.0
+c = subgrid_orography_stddev(legacy, fine_res_deg=1.0, block_deg=2.0)["SSO_STDH"].values
+d_legacy = float(np.max(np.abs(a - c)))
+off = float(np.max(np.abs(a[:, :-1] - b[:, :-1])))
 seam = np.abs(a[:, -1] - b[:, -1])
-print(f"C1 max|rebuild - production| off the seam = {d:.3e} m; seam column: "
+print(f"C1 legacy rebuild vs production: max {d_legacy:.3e} m (whole field); "
+      f"current rebuild: off-seam {off:.3e} m, seam column "
       f"{int((seam > 0).sum())} cells differ, max {seam.max():.1f} m")
-assert d == 0.0, "C1 FAILED: the instrument does not reproduce the production file"
+# second pass through the regridder at identity: weights 1 +- 1e-12 (C3 bound)
+assert d_legacy < 1e-3, "C1 FAILED: the instrument does not reproduce the production file"
+assert off == 0.0, "C1 FAILED off the seam"
 print("C1 PASS")
 EOF
 
