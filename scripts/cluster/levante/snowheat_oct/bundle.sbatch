@@ -48,7 +48,22 @@ done
 # Long arms only after the 1-day gate, re-checked HERE from the checkpoints
 # (not from a note): base vs base2 (the run is reproducible) and switch-off vs
 # base (the OFF arms are plain 468cef302) must both be byte-identical.
-if [[ " ${arms[*]} " != *" sh2_gate_"* ]]; then
+# Residual, accepted: a tree moved between this check and the model import
+# (seconds) is caught only afterwards, by the commit each run log prints.
+n_gate=$(printf '%s\n' "${arms[@]}" | grep -c '^sh2_gate_')
+(( n_gate == 0 || n_gate == ${#arms[@]} )) \
+  || { echo "REFUSING: gate and long arms in one submission" >&2; exit 64; }
+if (( n_gate == 0 )); then
+  # The gate must have run the SAME code: the switch-off gate arm's recorded
+  # commit equals every long arm's, and the base gate arms ran 468cef302.
+  _gc() { IFS=$'\t' read -r _ _ _ c _ < "${ROOT}/$1/arm.tsv"; echo "${c}"; }
+  for a in "${arms[@]}"; do
+    [[ "$(_gc "${a}")" == "$(_gc sh2_gate_off)" ]] \
+      || { echo "REFUSING: ${a} commit differs from the gate's" >&2; exit 64; }
+  done
+  [[ "$(_gc sh2_gate_base)" == 468cef3020035652b7e170a83963c25ba110a1d3 && \
+     "$(_gc sh2_gate_base2)" == 468cef3020035652b7e170a83963c25ba110a1d3 ]] \
+    || { echo "REFUSING: base gate arms did not run 468cef302" >&2; exit 64; }
   GATE="$(dirname "${CHAIN}")/snowheat_oct/compare_gate.py"
   g="checkpoint_day_0276.npz"
   "${PY}" "${GATE}" "${ROOT}/sh2_gate_base/${g}" "${ROOT}/sh2_gate_base2/${g}" \
