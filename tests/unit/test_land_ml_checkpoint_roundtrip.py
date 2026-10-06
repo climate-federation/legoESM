@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.land.state import MultiLayerLandState
 
@@ -203,8 +204,9 @@ def test_snow_node_initialised_when_checkpoint_lacks_it(tmp_path):
     dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
                           _carry_aux=dict(loaded), _land_ml_state=tmpl)
     ModelDriver._restore_land_ml_from_carry_aux(dst)
+    tf = constants.T_freeze
     np.testing.assert_allclose(np.asarray(dst._land_ml_state.T_snow),
-                               [280.0, 273.15, 280.0, 273.15], rtol=1e-6)
+                               [280.0, tf, 280.0, tf], rtol=1e-6)
     # Other prognostic fields are still mandatory.
     short = {k: v for k, v in loaded.items() if k != "land_ml_snow_age"}
     dst2 = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
