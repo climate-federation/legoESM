@@ -148,9 +148,10 @@ def test_incremental_runs_on_mpas_and_moves_toward_the_obs(mpas):
     assert diag.cost_history[-1] < diag.cost_history[0]
 
 
-def test_unpreconditioned_genbe_on_mpas_fails_at_entry(mpas):
-    with pytest.raises(ValueError, match="use_preconditioning"):
-        _run(mpas, use_preconditioning=False)
+@pytest.mark.parametrize("name", ["mpas", "gauss"])
+def test_unpreconditioned_genbe_fails_at_entry(name, request):
+    with pytest.raises(ValueError, match=r"IncrementalConfig\(use_preconditioning=True\)"):
+        _run(request.getfixturevalue(name), use_preconditioning=False)
 
 
 @pytest.mark.parametrize("name,method,n_steps",
@@ -188,9 +189,3 @@ def test_cycling_runs_on_mpas_and_second_cycle_moves_further(mpas):
     one, _ = _run(mpas)
     T_final, T_one = (np.asarray(grid.to_columns(s.T.data))[3, 0] for s in (final, one))
     assert len(diags) == 2 and 280.0 < T_one < T_final < 283.0
-
-
-def test_unpreconditioned_genbe_with_an_inverse_warns(gauss, caplog):
-    with caplog.at_level("WARNING", logger="legoesm.da.incremental"):
-        _run(gauss, use_preconditioning=False)
-    assert "exact only on the subspace" in caplog.text

@@ -107,18 +107,13 @@ def incremental_4dvar(
     (analysis_state, IncrementalDiagnostics)
     """
     vspace = _uses_vspace_background(B)
-    if vspace and not config.use_preconditioning and not B.inverse_available:
-        raise ValueError(
-            "incremental_4dvar: use_preconditioning=False needs B^{-1}, which this "
-            "GenBETransform does not provide (MPAS mesh, #1819); use the "
-            "preconditioned control-variable path (use_preconditioning=True)."
-        )
     if vspace and not config.use_preconditioning:
-        logger.warning(
-            "incremental_4dvar: GenBETransform with use_preconditioning=False "
-            "minimises the x-space cost, whose B^{-1} is exact only on the subspace "
-            "U^{-1} U preserves; its analysis can differ from the B = U U^T one "
-            "(#1819). use_preconditioning=True minimises the exact v-space cost."
+        raise ValueError(
+            "incremental_4dvar: GenBETransform needs use_preconditioning=True. The "
+            "x-space cost (use_preconditioning=False) needs B^{-1}, which GenBE does "
+            "not provide on MPAS meshes and provides only on the subspace U^{-1} U "
+            "preserves on the Gaussian grid, so its analysis is not the B = U U^T "
+            "one (#1819). Fix: IncrementalConfig(use_preconditioning=True)."
         )
     x_b = state_to_control(background_state, control_spec)
     x_k = x_b.copy()
