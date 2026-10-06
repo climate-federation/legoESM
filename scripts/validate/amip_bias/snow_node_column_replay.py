@@ -81,6 +81,8 @@ def capture(a):
     argv[argv.index("--days") + 1] = str(int(np.ceil(a.calls * a.land_dt / 86400.0)) + 1)
     if a.config:                       # e.g. another run's state on THIS tree's deck
         argv[argv.index("--config") + 1] = a.config
+    if a.restart_copy:                 # a checkpoint copy away from the run's sidecars
+        argv[argv.index("--restart-from") + 1] = a.restart_copy
     rec: dict = {"forcing": [], "cells": None}
 
     def is_dyn(v):
@@ -401,6 +403,9 @@ def main(argv=None):
     c.add_argument("--day", type=int, required=True)
     c.add_argument("--calls", type=int, required=True)
     c.add_argument("--out", required=True)
+    c.add_argument("--restart-copy", default="",
+                   help="restart from this copy of the day's checkpoint instead "
+                        "(e.g. without the run's CMOR accumulator sidecars)")
     c.add_argument("--config", default="",
                    help="replace the run's --config deck (default: keep it)")
     c.add_argument("--land-dt", type=float, default=1800.0,
