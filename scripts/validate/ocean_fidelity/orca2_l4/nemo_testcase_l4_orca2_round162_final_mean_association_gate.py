@@ -32,7 +32,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 ARMS = ("production", "final_only", "substep_only", "pair")
-PLANTS = ("none", "passivity", "boundary-bit", "salinity")
+PLANTS = ("none", "passivity", "boundary-bit", "source-scope", "salinity")
 
 
 class GateError(RuntimeError):
@@ -148,6 +148,13 @@ def measure_boundary(deck_root: Path, record_root: Path, admission: Path,
         "admission": growth.validate_admission(admission),
         "record_census": census,
         "production_repeat_passive": passive,
+        # dynspg_ts.f90:924-937 is guarded by
+        # .NOT.(ln_dynadv_vec .OR. lk_linssh).  Rung 0 explicitly takes
+        # ln_dynadv_vec, so the measured hook is a dead-arm discriminator,
+        # not a candidate transcription for this card.
+        "resolved_momentum_advection":
+            card.recipe.model_config.momentum_advection,
+        "nemo_final_association_branch_executes": False,
         "rows_against_nemo": rows,
         "movement_against_production": movement,
         "worktree": stamp,
@@ -176,6 +183,8 @@ def classify(boundary: dict, production: dict, substep: dict, pair: dict,
     elif plant == "boundary-bit":
         boundary["movement_against_production"]["final_only"]["uu_b"][
             "differing_cells"] = 0
+    elif plant == "source-scope":
+        boundary["nemo_final_association_branch_executes"] = True
         boundary["movement_against_production"]["final_only"]["vv_b"][
             "differing_cells"] = 0
     elif plant == "salinity":
@@ -190,6 +199,10 @@ def classify(boundary: dict, production: dict, substep: dict, pair: dict,
             "boundary measurement is not independent")
     require(boundary.get("production_repeat_passive") is True,
             "false-default production repeat moved")
+    require(boundary.get("resolved_momentum_advection") == "vector_invariant",
+            "rung-0 card no longer resolves ln_dynadv_vec")
+    require(boundary.get("nemo_final_association_branch_executes") is False,
+            "source-scope plant made the dead final association branch live")
     moved = sum(
         int(boundary["movement_against_production"]["final_only"][field][
             "differing_cells"])
@@ -201,25 +214,50 @@ def classify(boundary: dict, production: dict, substep: dict, pair: dict,
         boundary["rows_against_nemo"]["pair"][field]["candidate_finite"]
         for field in ("uu_b", "vv_b"))
     comparison = compare_gate.compare(production, pair)
-    veto = compare_gate.require_salinity_veto(production, pair)
+    try:
+        veto = compare_gate.require_salinity_veto(production, pair)
+        salinity_pass = True
+    except compare_gate.GateError as error:
+        production_rows, _ = compare_gate._rows(production)
+        pair_rows, _ = compare_gate._rows(pair)
+        key = lambda row: (row["kt"], row["checkpoint"], row["field"])
+        before = {key(row): row for row in production_rows}
+        after = {key(row): row for row in pair_rows}
+        target = (10, "stage3", "S")
+        veto = {
+            "before_max_abs": float(before[target]["max_abs"]),
+            "after_max_abs": float(after[target]["max_abs"]),
+            "refusal": str(error),
+        }
+        salinity_pass = False
     require(plant == "none", f"{plant} plant stayed green")
     return {
         "format": "nemo-testcase-l4-orca2-round162-classification-v1",
-        "status": "PASS_R162_FINAL_ASSOCIATION_CLASSIFICATION",
+        "status": "REFUSE_R162_DEAD_ARM",
         "claim_label": "independent",
         "boundary": boundary,
         "ladder_comparison": comparison,
         "salinity_veto": veto,
         "prediction_ledger": {
-            "R162-P1": {"status": "CONFIRMED", "moved_cells": moved},
+            "R162-P1": {
+                "status": "REFUTED",
+                "reason": "compiled final association branch is dead under ln_dynadv_vec",
+                "hypothetical_moved_cells": moved,
+            },
             "R162-P2": {
                 "status": ("CONFIRMED" if pair_finite and pair_unequal < substep_unequal
                            else "REFUTED"),
                 "substep_only_unequal": substep_unequal,
                 "pair_unequal": pair_unequal,
             },
-            "R162-P3": {"status": "CONFIRMED"},
-            "R162-P4": {"status": "UNMEASURED_PENDING_MONTH"},
+            "R162-P3": {
+                "status": "REFUTED",
+                "reason": ("candidate is outside the executed NEMO branch; "
+                           + ("salinity veto cleared" if salinity_pass
+                              else "salinity veto also refused")),
+            },
+            "R162-P4": {"status": ("UNMEASURED_PENDING_MONTH" if salinity_pass
+                                   else "UNMEASURED_BY_PROTOCOL")},
             "R162-P5": {"status": "UNMEASURED_PENDING_GYRE"},
         },
     }
@@ -265,7 +303,7 @@ def main() -> int:
         args.output.write_text(rendered)
     print(rendered, end="")
     print(f"STATUS {result['status']}")
-    return 0
+    return 2 if result["status"].startswith("REFUSE") else 0
 
 
 if __name__ == "__main__":

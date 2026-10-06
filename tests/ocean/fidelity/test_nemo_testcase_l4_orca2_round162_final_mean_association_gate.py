@@ -44,6 +44,8 @@ def _boundary() -> dict:
         "status": "PASS_R162_FINAL_ASSOCIATION_BOUNDARY",
         "claim_label": "independent",
         "production_repeat_passive": True,
+        "resolved_momentum_advection": "vector_invariant",
+        "nemo_final_association_branch_executes": False,
         "movement_against_production": {
             "final_only": {"uu_b": exact_row, "vv_b": exact_row},
         },
@@ -60,15 +62,18 @@ def _boundary() -> dict:
     }
 
 
-def test_classification_registers_reduced_boundary_debt() -> None:
+def test_classification_refuses_dead_branch_and_registers_discriminator() -> None:
     base = _ladder(0.4)
     pair = copy.deepcopy(base)
     result = gate.classify(_boundary(), base, copy.deepcopy(base), pair)
+    assert result["status"] == "REFUSE_R162_DEAD_ARM"
+    assert result["prediction_ledger"]["R162-P1"]["status"] == "REFUTED"
     assert result["prediction_ledger"]["R162-P2"]["status"] == "CONFIRMED"
     assert result["salinity_veto"]["after_max_abs"] == 0.4
 
 
-@pytest.mark.parametrize("plant", ("passivity", "boundary-bit", "salinity"))
+@pytest.mark.parametrize(
+    "plant", ("passivity", "boundary-bit", "source-scope", "salinity"))
 def test_each_plant_fires(plant: str) -> None:
     base = _ladder(0.4)
     with pytest.raises((gate.GateError, gate.compare_gate.GateError)):
