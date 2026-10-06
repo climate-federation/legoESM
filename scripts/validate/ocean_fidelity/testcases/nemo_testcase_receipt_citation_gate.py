@@ -5765,7 +5765,7 @@ CITATION_MAP = {
         'CALL dynldf_lev_blp( kt, Kbb, Kmm, puu, pvv, Krhs )', 10],
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
         ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
-        '&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 20],
+        ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 20],
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:328-344': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
         ("CALL vortex_r16_stage_rhs( 'adv', Krhs, uu, vv )", 2), 17],
