@@ -136,10 +136,10 @@ def test_soil_budget_control_closes_and_freeze_thaw_does_not(tmp_path, capsys):
     st = st._replace(T_soil=st.T_soil.at[:, :3].set(constants.T_freeze - 0.3))
     p = _capture_file(tmp_path, cfg, st, f)
     rp.soil_budget(argparse.Namespace(capture=str(p), lat_band=(45.0, 70.0),
-                                      nq=200, control=True))
+                                      nq=200, control=True, substeps=0))
     lin, sub, r = _budget_lines(capsys.readouterr().out)
     assert lin < 1e-6 and sub < 1e-9 and abs(r) < 1e-6, (lin, sub, r)
     rp.soil_budget(argparse.Namespace(capture=str(p), lat_band=(45.0, 70.0),
-                                      nq=200, control=False))
+                                      nq=200, control=False, substeps=0))
     lin, sub, r = _budget_lines(capsys.readouterr().out)
     assert lin < 1e-6 and sub < 1e-9 and abs(r) > 1e-3, (lin, sub, r)

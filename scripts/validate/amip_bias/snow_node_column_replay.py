@@ -329,6 +329,9 @@ def soil_budget(a):
         return T1
 
     mll.solve_soil_thermal = wrapped
+    n_sub0 = mll.FINAL_THERMAL_SUBSTEPS
+    if a.substeps:                  # attribution test: the linearisation error
+        mll.FINAL_THERMAL_SUBSTEPS = a.substeps   # must fall with more sub-steps
     try:
         step = jax.jit(lambda s, f: mll.step_multilayer_land_with_diagnostics(
             s, f, config, U_min, dt, **k))
@@ -338,6 +341,7 @@ def soil_budget(a):
         jax.effects_barrier()
     finally:
         mll.solve_soil_thermal = real
+        mll.FINAL_THERMAL_SUBSTEPS = n_sub0
     if len(rec) != len(forcings):
         raise SystemExit(f"FATAL: {len(rec)} final solves for {len(forcings)} steps")
     res = np.stack([r[0] for r in rec])                 # (steps, ncol, nl) J/m2
@@ -346,7 +350,8 @@ def soil_budget(a):
     G = np.stack([r[3] for r in rec])
     span = len(forcings) * dt
     print(f"run {cap['run']} day {cap['day']}: {len(forcings)} land steps, dt {dt} s, "
-          f"freeze/thaw {th.enable_freeze_thaw}, control {a.control}, quadrature {a.nq}")
+          f"freeze/thaw {th.enable_freeze_thaw}, control {a.control}, quadrature {a.nq}, "
+          f"final-solve sub-steps {a.substeps or n_sub0}")
     print(f"instrument: max |sum lin - flux| {np.max(np.abs(chk)) / dt:.2e} W/m2; "
           f"max |sub-stepped by hand - solve| {sub:.2e} K")
     land = cap["f_land_packed"] > 0.5
@@ -365,6 +370,11 @@ def soil_budget(a):
         print("by layer (band, W/m2): " + " ".join(f"{v:+.3f}" for v in lay))
         worst = np.max(np.abs(res[:, band, :].sum(-1)), axis=1) / dt
         print(f"largest single-step |residual| in band: {worst.max():.2f} W/m2")
+        step_r = res[:, band, :].sum(-1) / dt                # (steps, ncol) W/m2
+        print("band column-steps with |residual| > 1 / 10 W/m2: "
+              f"{100 * np.mean(np.abs(step_r) > 1):.2f}% / "
+              f"{100 * np.mean(np.abs(step_r) > 10):.3f}%; >0 share of those "
+              f"> 1 W/m2: {100 * np.mean(step_r[np.abs(step_r) > 1] > 0):.0f}%")
 
 
 def main(argv=None):
@@ -386,6 +396,8 @@ def main(argv=None):
     b.add_argument("--lat-band", type=float, nargs=2, default=(45.0, 70.0))
     b.add_argument("--nq", type=int, default=200)
     b.add_argument("--control", action="store_true")
+    b.add_argument("--substeps", type=int, default=0,
+                   help="override the final solve's freeze/thaw sub-steps (0 = model's)")
     a = p.parse_args(argv)
     return {"capture": capture, "replay": replay, "soil-budget": soil_budget}[a.cmd](a)
 
