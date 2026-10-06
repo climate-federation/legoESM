@@ -1,7 +1,9 @@
-Subject: [HELD round 236] NEMO closed-bottom W mask plus live Kmm T divisor
+Subject: [LANDED round 237 under Decisions 95/96] NEMO closed-bottom W mask plus live Kmm T divisor
 
-Status: HELD.  Apply the round-229 closed-bottom-W-mask manifest first, then
-this patch.  Given NEMO's recorded stage-3 entry, the pair makes hmsku,
+Status: LANDED in round 237 under Decisions 95/96.  Apply the round-229
+closed-bottom-W-mask member first, then this patch.  The historical round-236
+measurement and disclosed ratchet result below are retained unchanged.  Given
+NEMO's recorded stage-3 entry, the pair makes hmsku,
 hmskv, and the live e3t(Kmm) divisor bit-exact and reduces the maximum LDF
 RHS residual from 7.2621621143171395e-11 to
 4.9526264855300654e-12 K/s (93.180231441314%).  The certified SMT-3 ladder
