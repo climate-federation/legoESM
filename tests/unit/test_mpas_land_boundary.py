@@ -767,3 +767,216 @@ def test_land_stress_lane_predicate_is_the_driver_dispatch():
                     discretization="fv3_duo"))):
         ok, why = mpas_land_stress_eligibility(bad)
         assert not ok and "not the MPAS lane" in why
+
+
+# ---------------------------------------------------------------------------
+# Non-land fraction on the ocean surface (mpas_ocean_flux_on_ocean_surface,
+# #1320 stage 1)
+# ---------------------------------------------------------------------------
+
+_T_OCEAN = 304.0     # warm ocean/ice surface [K]
+_T_SKIN = 268.0      # cold land skin [K], blended into T_sfc over the land share
+
+
+def _ocean_sfc_forcing(ncell, f_land, *, with_key=True, T_blend=None):
+    """Land-flux handoff forcing over a mixed mesh; T_sfc is the land-blended
+    anchor, T_sfc_ocean (optional) the non-land surface."""
+    T_oc = jnp.full((ncell,), _T_OCEAN)
+    if T_blend is None:
+        T_blend = (1.0 - f_land) * T_oc + f_land * _T_SKIN
+    f = _land_forcing(ncell, 40.0, 90.0)
+    f["T_sfc"] = T_blend
+    f["q_sfc_land"] = jnp.full((ncell,), 0.004)
+    if with_key:
+        f["T_sfc_ocean"] = T_oc
+    return f
+
+
+@pytest.fixture(scope="module")
+def state64(mpas_state):
+    """The fixture state in float64: the comparisons below are exact, and the
+    fp32 state would make each run's output dtype follow its inputs' dtype."""
+    return jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.float64)
+        if getattr(x, "dtype", None) == jnp.float32 else x, mpas_state)
+
+
+def _fluxes(out):
+    out = out[0] if isinstance(out, tuple) else out
+    return {k: np.asarray(getattr(out, k).data)
+            for k in ("shflx_sfc", "lhflx_sfc", "evap_sfc")}, out
+
+
+@pytest.mark.parametrize("scheme", _LAND_FLUX_ACCEPTED)
+def test_non_land_fraction_sees_the_ocean_surface(mpas_mesh, sigma_coord,
+                                                  state64, scheme):
+    """With T_sfc_ocean, the non-land share is the bulk flux of the OCEAN
+    surface: it equals a run whose only surface IS that ocean surface (same
+    land fluxes), whatever the land skin blended into T_sfc.  Tendencies too:
+    with the flux injected the kernel must not re-read the blended T_sfc/q_sfc
+    (if it did, the boundary state and the handed flux would disagree)."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.1, 0.9, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme=scheme), 300.0,
+                               f_land=f_land)
+    on = fn(state64, mpas_mesh, sigma_coord,
+            forcing=_ocean_sfc_forcing(ncell, f_land))
+    ref_f = _ocean_sfc_forcing(ncell, f_land, with_key=False,
+                               T_blend=jnp.full((ncell,), _T_OCEAN))
+    del ref_f["q_sfc_land"]                     # q_sfc = q_sat(T_ocean)
+    ref = fn(state64, mpas_mesh, sigma_coord, forcing=ref_f)
+    off = fn(state64, mpas_mesh, sigma_coord,
+             forcing=_ocean_sfc_forcing(ncell, f_land, with_key=False))
+    fl_on, t_on = _fluxes(on)
+    fl_ref, t_ref = _fluxes(ref)
+    fl_off, _ = _fluxes(off)
+    for k in fl_on:
+        np.testing.assert_allclose(fl_on[k], fl_ref[k], rtol=1e-12, atol=0,
+                                   err_msg=k)
+        assert not np.allclose(fl_on[k], fl_off[k]), (
+            f"{k}: the ocean-surface key changed nothing (vacuous)")
+    for name, a, b in (
+            ("dT_dt", t_on.dT_dt.data, t_ref.dT_dt.data),
+            ("du_dt", t_on.du_dt.data, t_ref.du_dt.data),
+            ("q_v", t_on.tracer_tendencies["q_v"],
+             t_ref.tracer_tendencies["q_v"])):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12,
+                                   atol=0, err_msg=name)
+    # Turbulent carry (CLUBB/clubb_lite energy, cloud fraction): same.
+    c_on, c_ref = on[1], ref[1]
+    if c_on is not None:
+        for a, b in zip(jax.tree_util.tree_leaves(c_on),
+                        jax.tree_util.tree_leaves(c_ref)):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                       rtol=1e-12, atol=0, err_msg="carry")
+
+
+def test_non_land_closure_and_sign(mpas_mesh, sigma_coord, state64):
+    """Closure: the handed flux is exactly (1-f)*ocean + f*land, so changing
+    the land flux by d moves the total by f*d.  Sign: a 304 K ocean under
+    290 K air is a SENSIBLE SOURCE; diluting it with the cold land skin (the
+    old path) under-estimates it on every mixed cell."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.1, 0.9, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    f1 = _ocean_sfc_forcing(ncell, f_land)
+    f2 = dict(f1, shflx_land=f1["shflx_land"] + 100.0)
+    a, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=f1))
+    b, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=f2))
+    np.testing.assert_allclose(b["shflx_sfc"] - a["shflx_sfc"],
+                               100.0 * np.asarray(f_land), rtol=1e-10)
+    # Latent heat and water, which the inverse with L(T_sfc_ocean) feeds.
+    f3 = dict(f1, lhflx_land=f1["lhflx_land"] + 100.0,
+              evap_land=f1["evap_land"] + 1e-5)
+    c, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord, forcing=f3))
+    np.testing.assert_allclose(c["lhflx_sfc"] - a["lhflx_sfc"],
+                               100.0 * np.asarray(f_land), rtol=1e-10)
+    np.testing.assert_allclose(c["evap_sfc"] - a["evap_sfc"],
+                               1e-5 * np.asarray(f_land), rtol=1e-8)
+    # The non-land water is the non-land latent heat over L(T_sfc_ocean).
+    from legoesm.thermo import charged_latent_heat
+    fl = np.asarray(f_land)
+    lh_oc = (a["lhflx_sfc"] - fl * 90.0) / (1.0 - fl)
+    ev_oc = (a["evap_sfc"] - fl * 90.0 / constants.L_v) / (1.0 - fl)
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        get_turbulence_fn,
+    )
+    _bulk = get_turbulence_fn(TurbulenceConfig(scheme="louis"))[2].surface
+    L_oc = np.asarray(charged_latent_heat(_bulk.bulk_scheme,
+                                          jnp.full((ncell,), _T_OCEAN)))
+    np.testing.assert_allclose(ev_oc, lh_oc / L_oc, rtol=1e-9)
+    sh_ocean = (a["shflx_sfc"] - np.asarray(f_land) * 40.0) / (
+        1.0 - np.asarray(f_land))
+    assert (sh_ocean > 0.0).all(), "warm ocean under cold air must heat it"
+    old, _ = _fluxes(fn(state64, mpas_mesh, sigma_coord,
+                        forcing=_ocean_sfc_forcing(ncell, f_land,
+                                                   with_key=False)))
+    assert (a["shflx_sfc"] > old["shflx_sfc"]).all()
+
+
+def test_ocean_only_cells_bit_identical(mpas_mesh, sigma_coord, state64):
+    """Where f_land = 0 the driver's T_sfc_ocean equals T_sfc bit for bit, so
+    the key must change nothing there."""
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray((np.arange(ncell) % 2) * 0.6)
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    on = fn(state64, mpas_mesh, sigma_coord,
+            forcing=_ocean_sfc_forcing(ncell, f_land))
+    off = fn(state64, mpas_mesh, sigma_coord,
+             forcing=_ocean_sfc_forcing(ncell, f_land, with_key=False))
+    ocean = np.asarray(f_land) == 0.0
+    fo, to = _fluxes(on)
+    ff, tf = _fluxes(off)
+    for k in fo:
+        np.testing.assert_array_equal(fo[k][ocean], ff[k][ocean], err_msg=k)
+    np.testing.assert_array_equal(np.asarray(to.dT_dt.data)[ocean],
+                                  np.asarray(tf.dT_dt.data)[ocean])
+
+
+def test_ocean_surface_key_without_land_fluxes_is_refused(mpas_mesh,
+                                                          sigma_coord,
+                                                          state64):
+    ncell = state64.T.data.shape[0]
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=jnp.full((ncell,), 0.5))
+    f = {"T_sfc": jnp.full((ncell,), 300.0),
+         "T_sfc_ocean": jnp.full((ncell,), 300.0)}
+    with pytest.raises(ValueError, match="T_sfc_ocean"):
+        fn(state64, mpas_mesh, sigma_coord, forcing=f)
+
+
+def test_ocean_surface_gradient_finite_and_jit_parity(mpas_mesh, sigma_coord,
+                                                     state64):
+    ncell = state64.T.data.shape[0]
+    f_land = jnp.asarray(np.linspace(0.1, 0.9, ncell))
+    fn = _make_mpas_turbulence(TurbulenceConfig(scheme="louis"), 300.0,
+                               f_land=f_land)
+    base = _ocean_sfc_forcing(ncell, f_land)
+
+    def loss(T_oc):
+        out = fn(state64, mpas_mesh, sigma_coord,
+                 forcing=dict(base, T_sfc_ocean=T_oc))
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(out.dT_dt.data[:, -1] ** 2)
+
+    g = jax.grad(loss)(base["T_sfc_ocean"])
+    assert np.isfinite(np.asarray(g)).all() and np.abs(np.asarray(g)).max() > 0
+    np.testing.assert_allclose(float(jax.jit(loss)(base["T_sfc_ocean"])),
+                               float(loss(base["T_sfc_ocean"])), rtol=1e-10)
+    np.testing.assert_allclose(np.asarray(jax.jit(jax.grad(loss))(
+        base["T_sfc_ocean"])), np.asarray(g), rtol=1e-8, atol=1e-30)
+
+
+@pytest.mark.parametrize("kw,why", [
+    (dict(use_multilayer_land=False, mpas_land_beta_soil=False),
+     "use_multilayer_land"),
+    (dict(mpas_land_beta_soil=False), "mpas_land_beta_soil"),
+    (dict(turbulence="ysu"), "turbulence"),
+])
+def test_ocean_surface_flag_refused_where_inert(kw, why):
+    cfg = _eligible_cfg(mpas_ocean_flux_on_ocean_surface=True)
+    cfg.validate_strict()
+    bad = cfg._replace(**kw)
+    with pytest.raises(ValueError, match="mpas_ocean_flux_on_ocean_surface"):
+        bad.validate_strict()
+    from legoesm.driver.config import mpas_land_flux_handoff_eligibility
+    ok, reason = mpas_land_flux_handoff_eligibility(bad)
+    assert not ok and why in reason
+
+
+def test_ocean_surface_flag_refused_without_sst_or_land_stress():
+    cfg = _eligible_cfg(mpas_ocean_flux_on_ocean_surface=True)
+    with pytest.raises(ValueError, match="radiation='none'"):
+        cfg._replace(radiation="none").validate_strict()
+    with pytest.raises(ValueError, match="land model's stress"):
+        cfg._replace(mpas_land_stress_from_land=False).validate_strict()
+    with pytest.raises(ValueError, match="land model's stress"):
+        cfg._replace(land_surface_scheme="clm_ml").validate_strict()
+    cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+
+
+def test_ocean_surface_flag_refused_off_the_mpas_lane():
+    with pytest.raises(ValueError, match="not the MPAS lane"):
+        _cdgrid_cfg(mpas_ocean_flux_on_ocean_surface=True).validate_strict()

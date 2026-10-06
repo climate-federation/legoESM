@@ -20,6 +20,8 @@ import glob
 import os
 
 import numpy as np
+from legoesm import constants
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -455,3 +457,77 @@ def test_land_stress_held_column_reuses_its_last_valid_drag(monkeypatch,
     assert d._land_stress_reused_total == 2
     assert len(solved) == 4 and solved[1] != solved[0]
     assert float(np.asarray(d._land_stress_last)[j]) == solved[0]
+
+
+def _record_turbulence_forcing_keys(monkeypatch):
+    """Every trace of the MPAS turbulence records the forcing keys it saw."""
+    from legoesm.atmosphere.physics.turbulence import integration as _ti
+    orig, seen, gaps = _ti._make_mpas_turbulence, [], []
+
+    def factory(*a, **k):
+        fn = orig(*a, **k)
+
+        def wrapped(state, mesh, sigma, phys_state=None, forcing=None):
+            seen.append(frozenset(forcing or ()))
+            if forcing is not None and "T_sfc_ocean" in forcing:
+                # Runtime value: max |T_sfc - T_sfc_ocean| on this call.
+                jax.debug.callback(
+                    lambda g: gaps.append(float(g)),
+                    jnp.max(jnp.abs(jnp.asarray(forcing["T_sfc"])
+                                    - jnp.asarray(forcing["T_sfc_ocean"]))))
+            return fn(state, mesh, sigma, phys_state=phys_state,
+                      forcing=forcing)
+
+        wrapped.reset_state = fn.reset_state
+        return wrapped
+
+    monkeypatch.setattr(_ti, "_make_mpas_turbulence", factory)
+    return seen, gaps
+
+
+@pytest.mark.parametrize("ice_skin,lapse", [(False, False), (True, False),
+                                             (False, True)])
+def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
+        monkeypatch, tmp_path, ice_skin, lapse):
+    """mpas_ocean_flux_on_ocean_surface: T_sfc_ocean is in the turbulence
+    forcing on EVERY trace (step 0 included, and on the prognostic ice-skin
+    re-anchor path), never without it, and the run differs from the flag-off
+    run; flag off, the key never appears.  Its VALUE is the non-land surface:
+    without orography equal to T_sfc on step 0 (no land skin yet) and
+    different once the land skin is blended into T_sfc; over a mountain with
+    the land lapse correction on, different already on step 0 (the lapse
+    cools only the land share of T_sfc, never the ocean anchor)."""
+    _patch_land_loaders(monkeypatch)
+    u = {}
+    for on in (False, True):
+        seen, gaps = _record_turbulence_forcing_keys(monkeypatch)
+        extra = {}
+        if lapse:
+            # A 1 km plateau on every cell (loader patched; the half-land
+            # mask above still decides f_land).
+            import legoesm.grids.topography as topo
+            monkeypatch.setattr(
+                topo, "load_real_topography",
+                lambda grid, config=None, data_path=None: (
+                    jnp.full(jnp.asarray(grid.grid_lat).shape,
+                             1000.0 * constants.g),
+                    jnp.full(jnp.asarray(grid.grid_lat).shape, 0.5)))
+            extra = dict(topography="synthetic_elevation.nc",
+                         mpas_land_lapse_K_per_km=6.5)
+        d = _build_driver(str(tmp_path / str(on)), TWO_STEPS_DAYS, **_LS_KW,
+                          mpas_ice_skin_prognostic=ice_skin,
+                          mpas_ocean_flux_on_ocean_surface=on, **extra)
+        assert d.run() == "COMPLETED"
+        assert seen, "the turbulence was never traced"
+        has = ["T_sfc_ocean" in s for s in seen]
+        assert all(has) if on else not any(has), (on, has)
+        if on:
+            assert len(gaps) >= 2, gaps
+            assert (gaps[0] > 1e-3) if lapse else (gaps[0] == 0.0), gaps
+            assert max(gaps[1:]) > 1e-3, (
+                f"T_sfc_ocean tracks the land-blended T_sfc: {gaps}")
+        u[on] = np.asarray(d.state.u.data), np.asarray(d.state.T.data)
+    assert np.isfinite(u[True][1]).all()
+    assert np.max(np.abs(u[True][1] - u[False][1])) > 0.0, (
+        "the flag left the run bit-identical: T_sfc_ocean is not reaching "
+        "the non-land surface fluxes")

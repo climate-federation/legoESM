@@ -1768,6 +1768,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "multilayer land with --mpas-land-beta-soil, a "
                              "turbulence scheme taking injected fluxes, "
                              "two_leaf/simple_seb); --no-... = old bulk stress.")
+    parser.add_argument("--mpas-ocean-flux-on-ocean-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_ocean_flux_on_ocean_surface",
+                        help="MPAS lane, land-flux handoff on: evaluate the "
+                             "non-land fraction's bulk surface fluxes on the "
+                             "ocean/ice surface (SST/SIC blend) instead of on "
+                             "the land-blended surface temperature/humidity "
+                             "(#1320). Requires --mpas-land-beta-soil, the "
+                             "land model's stress over land (--mpas-land-"
+                             "stress-from-land, default auto) and radiation "
+                             "!= none.")
     parser.add_argument("--mpas-land-params-refresh",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_land_params_refresh",
@@ -2645,6 +2656,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
         mpas_land_stress_from_land=args.mpas_land_stress_from_land,
+        mpas_ocean_flux_on_ocean_surface=args.mpas_ocean_flux_on_ocean_surface,
         mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
