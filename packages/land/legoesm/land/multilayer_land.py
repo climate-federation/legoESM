@@ -684,7 +684,7 @@ def _step_multilayer_land_impl(
             if layered:
                 # Tentative combined pack+soil solve; the SEB boundary is the
                 # snow-blended skin of the tentative column.
-                C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow)
+                C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow, config.land_albedo.snow_depth_crit)
                 T_s, T_g = solve_snow_soil_thermal(
                     pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
                     config.hydraulics, config.thermal, G, dt_)
@@ -1307,7 +1307,7 @@ def _step_multilayer_land_impl(
         # The post-hydrology remainder is charged to the top soil layer below.
         evap_excess_energy_pre = lhflx - (sublim_actual * _L_s_T
                                           + soil_evap * _L_v_T)
-        C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow)
+        C_s, coeff_s, rb_s = snow_thermal_props(pack, scc, f_snow, config.land_albedo.snow_depth_crit)
         T_pack_solved, T_soil_new = solve_snow_soil_thermal(
             pack.T, C_s, coeff_s, rb_s, f_snow, T_soil, theta, grid,
             config.hydraulics, config.thermal,
@@ -1420,12 +1420,13 @@ def _step_multilayer_land_impl(
             W_moved = (constants.rho_water * constants.L_f  # latent-ok: T_freeze reference
                        * dz * (richards_out.theta_new - theta))        # J/m2
             # The pack's drainage leaves it with c_liq (T - T_freeze) + L_f per
-            # kg; W_moved books the L_f of what the soil takes in, so the
-            # sensible part (nonzero only from an all-liquid layer above
-            # T_freeze) is handed to the top soil layer here, whether the water
-            # then infiltrates, ponds or runs off (pack + soil energy closes).
-            snow_drain_sensible = (snow_drainage_heat
-                                   - constants.L_f * snow_drainage)  # latent-ok: T_freeze reference
+            # kg; W_moved books the L_f of what the soil takes in.  The sensible
+            # part (nonzero only from an all-liquid layer above T_freeze) goes to
+            # the top soil layer for the share of the surface water the soil
+            # accepts; the surface runoff carries its own share away.
+            snow_drain_sensible = drainage_heat_to_soil(
+                snow_drainage_heat - constants.L_f * snow_drainage,  # latent-ok: T_freeze reference
+                richards_out.runoff_surface, infil_rain + melt_rate)
             E_target = (soil_layer_enthalpy(T_soil, theta, dz, config.hydraulics,
                                             config.thermal)
                         + Q_solve + W_moved)
@@ -1777,6 +1778,15 @@ def _step_multilayer_land_impl(
             snow_ground_heat_applied=snow_ground_heat_applied)
 
     return new_state, response, carbon_state_new, surface_out
+
+
+def drainage_heat_to_soil(drain_sensible, runoff_surface, water_in):
+    """Share [J/m2] of the pack drainage's sensible heat ``drain_sensible`` that
+    stays with the surface water the soil (or its pond) accepts: the surface
+    runoff ``runoff_surface`` [kg/m2/s] takes its proportional share of the
+    well-mixed surface input ``water_in`` [kg/m2/s] (rain + meltwater)."""
+    accepted = jnp.clip(1.0 - runoff_surface / jnp.maximum(water_in, 1e-30), 0.0, 1.0)
+    return accepted * drain_sensible
 
 
 def _snow_skin(pack, T_soil_top, f_snow):

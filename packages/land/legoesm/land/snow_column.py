@@ -449,7 +449,7 @@ def snow_remap_compact(state: SnowColumnState, dt, wind):
 
 
 def snow_thermal_props(state: SnowColumnState, config: SnowColumnConfig,
-                       f_snow):
+                       f_snow, empty_cover_swe):
     """Pack thermal properties for an implicit conduction solve, CELL-MEAN.
 
     The pack lies on the snow-covered fraction ``f_snow`` of the cell only (CLM5
@@ -466,10 +466,20 @@ def snow_thermal_props(state: SnowColumnState, config: SnowColumnConfig,
     soil half-layer and weights the series conductance by ``f``
     (``soil_thermal.solve_snow_soil_thermal``).  ``f_snow = 1`` is a pack
     spread over the whole cell.
+
+    ``empty_cover_swe`` [kg/m^2] is the limit of ``SWE / f_snow`` as the pack
+    empties (``snow_depth_crit`` for the tanh cover, 0 for ``f_snow = 1``): the
+    covered thickness ``dz_l / f = (m_l / M) (M / f) / rho_l`` then keeps its
+    finite limit (and zero slope) at an empty pack instead of collapsing to 0.
     """
     dz, k = _thickness_and_conductivity(state.swe_ice, state.swe_liq, state.density, config)
     f = jnp.asarray(f_snow)[..., None]
-    dz_cov = dz / jnp.maximum(f, _EPS)
+    mass = state.swe_ice + state.swe_liq
+    M = jnp.sum(mass, axis=-1, keepdims=True)
+    has = M > _EPS
+    share = jnp.where(has, mass / jnp.where(has, M, 1.0), 1.0 / mass.shape[-1])
+    swe_cov = jnp.where(has, M / jnp.maximum(f, _EPS), empty_cover_swe)   # M / f
+    dz_cov = share * swe_cov / jnp.maximum(state.density, _EPS)
     C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
     coeff = jnp.maximum(f * _interface_coeff(dz_cov, k), _COEFF_MIN)
     r_base = dz_cov[..., -1] / (2.0 * k[..., -1])
@@ -549,7 +559,7 @@ def step_snow_column(
     state = snow_add_mass(state, precip_snow * dt, T_air,
                           rho_fresh=new_snow_bulk_density(T_air, wind))
     state = snow_remap_compact(state, dt, wind)
-    C, coeff, _ = snow_thermal_props(state, config, 1.0)   # stand-alone: whole cell
+    C, coeff, _ = snow_thermal_props(state, config, 1.0, 0.0)   # stand-alone: whole cell
     diag = C / dt
     diag = diag.at[..., 1:].add(coeff)
     diag = diag.at[..., :-1].add(coeff)

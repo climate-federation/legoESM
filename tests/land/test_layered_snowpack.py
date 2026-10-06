@@ -38,6 +38,7 @@ from legoesm.surface_albedo import snow_cover_fraction
 jax.config.update("jax_enable_x64", True)
 
 TF = constants.T_freeze
+_CRIT = MultiLayerLandConfig().land_albedo.snow_depth_crit
 RHO_W = constants.rho_water
 
 
@@ -142,7 +143,7 @@ def test_combined_solve_conserves_energy_with_split_flux_and_robin(ft):
     swe = jnp.array([0.0, 3.0, 40.0, 200.0])
     pack = seed_snow_state(swe, T[:, 0] - 8.0)
     f = snow_cover_fraction(swe, MultiLayerLandConfig().land_albedo)
-    C, coeff, rb = snow_thermal_props(pack, SnowColumnConfig(), f)
+    C, coeff, rb = snow_thermal_props(pack, SnowColumnConfig(), f, _CRIT)
     G = jnp.array([-80.0, 10.0, 150.0, 30.0])
     lam = jnp.array([5.0, 12.0, 0.0, 3.0])
     dt = 1800.0
@@ -178,7 +179,7 @@ def test_column_step_closes_energy_with_rain_sublimation_and_melt():
     p = p._replace(swe_ice=p.swe_ice.at[:, 0].add(-sub))
     f = snow_cover_fraction(total_water(p), MultiLayerLandConfig().land_albedo)
     p = snow_add_mass(p, 0.0, T_air, rain=f * rain, T_rain=T_air)
-    C, coeff, rb = snow_thermal_props(p, SnowColumnConfig(), f)
+    C, coeff, rb = snow_thermal_props(p, SnowColumnConfig(), f, _CRIT)
     Ts, Tg = solve_snow_soil_thermal(p.T, C, coeff, rb, f, T, theta, grid, hc, tc, G, dt)
     p2, drain, drain_H = snow_phase_and_percolate(p._replace(T=Ts))
     Cg = compute_apparent_heat_capacity(T, theta, hc, tc) * grid.dz
@@ -937,6 +938,45 @@ def test_warm_drainage_sensible_heat_enters_the_soil(monkeypatch):
     assert max(rec) > 1.0, rec                     # J/m2 of sensible drainage heat
 
 
+def test_drainage_heat_follows_the_water_to_soil_or_runoff():
+    from legoesm.land.multilayer_land import drainage_heat_to_soil
+    got = drainage_heat_to_soil(jnp.array([10.0, 10.0, 10.0, 0.0]),
+                                jnp.array([0.0, 0.25, 2.0, 0.0]),
+                                jnp.array([1.0, 1.0, 1.0, 0.0]))
+    np.testing.assert_allclose(got, [10.0, 7.5, 0.0, 0.0], rtol=1e-15)
+
+
+def test_warm_drainage_onto_a_full_pond_leaves_with_the_runoff(monkeypatch):
+    """Saturated soil under a full pond, 100 mm of warm liquid draining in one
+    step (far above what the soil can take): most of it runs off, and so does
+    its share of the sensible heat; pack + soil energy still closes."""
+    from legoesm.land import multilayer_land as ml
+    rec = []
+    real = ml.drainage_heat_to_soil
+
+    def spy(s, ro, w):
+        out = real(s, ro, w)
+        jax.debug.callback(lambda *a: rec.append([float(np.sum(x)) for x in a]),
+                           s, ro, w, out)
+        return out
+
+    monkeypatch.setattr(ml, "drainage_heat_to_soil", spy)
+    cfg = _cfg_ft()
+    st = _state(cfg, 1, T_soil=TF + 1.0, swe=0.0)
+    liq = jnp.full_like(st.snow_liq_layers, 100.0 / st.snow_liq_layers.shape[-1])
+    st = st._replace(snow_liq_layers=liq, snow_T_layers=jnp.full_like(liq, 280.0),
+                     snow_depth=jnp.sum(liq, -1),
+                     theta_soil=jnp.full_like(st.theta_soil, cfg.hydraulics.theta_sat),
+                     surface_water=jnp.full_like(st.surface_water, 0.05))
+    f = _forcing(1, T_air=280.0, sw=0.0, lw=320.0, q=0.005)
+    _closure_run(cfg, st, ((f, 2),))
+    hot = [r for r in rec if r[0] > 1.0]                 # J/m2 sensible drained
+    assert hot, rec
+    s, ro, w, out = max(hot)
+    assert ro > 0.5 * w, (ro, w)                         # most of it overflows
+    np.testing.assert_allclose(out, s * (1.0 - ro / w), rtol=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # the pack lies on the snow-covered fraction (CLM5 frac_sno)
 # ---------------------------------------------------------------------------
@@ -950,8 +990,8 @@ def test_pack_conducts_over_the_covered_area_only():
     pack = seed_snow_state(jnp.array([4.0, 30.0]), jnp.array([265.0, 260.0]))
     f = jnp.array([0.3, 0.8])
     cov = pack._replace(swe_ice=pack.swe_ice / f[:, None], swe_liq=pack.swe_liq / f[:, None])
-    C, coeff, rb = snow_thermal_props(pack, cfg, f)
-    C1, coeff1, rb1 = snow_thermal_props(cov, cfg, 1.0)
+    C, coeff, rb = snow_thermal_props(pack, cfg, f, _CRIT)
+    C1, coeff1, rb1 = snow_thermal_props(cov, cfg, 1.0, 0.0)
     np.testing.assert_allclose(C, f[:, None] * C1, rtol=1e-12)
     np.testing.assert_allclose(coeff, f[:, None] * coeff1, rtol=1e-12)
     np.testing.assert_allclose(rb, rb1, rtol=1e-12)
@@ -964,6 +1004,27 @@ def test_pack_conducts_over_the_covered_area_only():
                                        hc, tc, jnp.zeros(2), 1800.0)
     # soil under a partial pack warms less than under a whole-cell pack (pack colder)
     assert bool(jnp.all(jnp.abs(Tg[:, 0] - T[:, 0]) < jnp.abs(Tg1[:, 0] - T[:, 0])))
+
+
+def test_trace_pack_keeps_a_finite_covered_thickness_and_gradient():
+    """As SWE -> 0 the cover f ~ SWE / snow_depth_crit, so the covered thickness
+    tends to share * snow_depth_crit / rho, not to 0: base resistance stays
+    finite and continuous down to the empty pack, with a finite gradient."""
+    from legoesm.surface_albedo import snow_cover_fraction
+    alb = MultiLayerLandConfig().land_albedo
+    cfg = SnowColumnConfig()
+
+    def rb_of(swe):
+        p = seed_snow_state(jnp.atleast_1d(swe), jnp.array([265.0]))
+        return snow_thermal_props(p, cfg, snow_cover_fraction(jnp.atleast_1d(swe), alb),
+                                  alb.snow_depth_crit)[2][0]
+
+    rbs = [float(rb_of(s)) for s in (1e-9, 1e-6, 1e-3)]
+    rb0 = float(rb_of(0.0))
+    assert np.all(np.isfinite(rbs + [rb0])) and rb0 > 0.0, (rbs, rb0)
+    np.testing.assert_allclose(rbs, rb0, rtol=1e-3)
+    g = [float(jax.grad(rb_of)(s)) for s in (0.0, 1e-6)]
+    assert np.all(np.isfinite(g)), g
 
 
 def test_physical_cover_ignores_the_albedo_snow_scale_at_night():
