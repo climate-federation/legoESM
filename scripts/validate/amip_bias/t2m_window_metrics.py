@@ -42,8 +42,14 @@ def era5_on_model(era5_file, lat, lon, var="tas"):
     v = t.values
     if v.shape != (la.size, lo.size):
         v = v.T
+    return bin_to_model(v, la, lo, lat, lon)
+
+
+def bin_to_model(v, la, lo, lat, lon):
+    """Cos-lat weighted box average of a (la, lo) field into model cells (lat, lon)."""
+    lo = np.asarray(lo) % 360.0
     if not np.isfinite(v).all():
-        raise SystemExit("ERA5 window has non-finite values")
+        raise SystemExit("ERA5 field has non-finite values")
     lb, ob = _bounds(lat), _bounds(lon % 360.0)
     i = np.clip(np.searchsorted(lb, la) - 1, 0, lat.size - 1)
     # longitude bins on the circle
