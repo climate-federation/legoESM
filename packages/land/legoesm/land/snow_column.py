@@ -91,6 +91,14 @@ _DRIFT_SPH = 1.0                  # drift_sph
 _DRIFT_TAU_REF_S = 48.0 * 3600.0  # tau_ref [s]
 _DRIFT_SI_MAX = 3.25              # driftability index cap
 _DRIFT_Z_DECAY_M = 0.1            # pseudo-depth e-folding [m]
+_DRIFT_FRHO_0 = 1.25              # mobility density factor: Frho = 1.25 - 0.0042 (rho - rho_min)
+_DRIFT_FRHO_SLOPE = 0.0042
+_DRIFT_MO_GRAIN = 0.34            # MO = 0.34 (-0.583 gs - 0.833 sph + 0.833) + 0.66 Frho
+_DRIFT_MO_GS = 0.583
+_DRIFT_MO_SPH = 0.833
+_DRIFT_MO_FRHO = 0.66
+_DRIFT_SI_AMP = 2.868             # SI = -2.868 exp(-0.085 wind) + 1 + MO
+_DRIFT_SI_WIND = 0.085
 # Fresh-snow bulk density (CTSM NewSnowBulkDensity, CLM5: lotmp Slater2017 and
 # wind_dependent_snow_density = .true.):
 _BIFALL_BASE_KG_M3 = 50.0
@@ -341,9 +349,11 @@ def _wind_drift_rate(bi, dz, active, wind):
     ``SI = -2.868 exp(-0.085 wind) + 1 + MO`` (capped at 3.25),
     rate ``= -max(0, rho_max - bi) SI exp(-zpseudo / 0.1) / tau_ref``.
     """
-    Frho = 1.25 - 0.0042 * (jnp.maximum(_DRIFT_RHO_MIN_KG_M3, bi) - _DRIFT_RHO_MIN_KG_M3)
-    MO = 0.34 * (-0.583 * _DRIFT_GS - 0.833 * _DRIFT_SPH + 0.833) + 0.66 * Frho
-    SI_raw = -2.868 * jnp.exp(-0.085 * wind[..., None]) + 1.0 + MO
+    Frho = _DRIFT_FRHO_0 - _DRIFT_FRHO_SLOPE * (
+        jnp.maximum(_DRIFT_RHO_MIN_KG_M3, bi) - _DRIFT_RHO_MIN_KG_M3)
+    MO = (_DRIFT_MO_GRAIN * (-_DRIFT_MO_GS * _DRIFT_GS - _DRIFT_MO_SPH * _DRIFT_SPH
+                             + _DRIFT_MO_SPH) + _DRIFT_MO_FRHO * Frho)
+    SI_raw = -_DRIFT_SI_AMP * jnp.exp(-_DRIFT_SI_WIND * wind[..., None]) + 1.0 + MO
     drifts = active & (SI_raw > 0.0)
     SI = jnp.minimum(SI_raw, _DRIFT_SI_MAX)
     # mobile at layer j: every layer above drifts (exclusive cumulative AND).
