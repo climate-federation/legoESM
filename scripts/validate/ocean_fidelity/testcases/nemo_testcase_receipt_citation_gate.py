@@ -1427,7 +1427,7 @@ CITATION_MAP = {
         ("CASE ( 'V' )                               ! V-point", 5),
         ('END DO   ;   END DO', 6), 38],
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
-    'barotropic_latlon_cgrid.py:689-739': [
+    'barotropic_latlon_cgrid.py:689-743': [
         ('def _nemo_external_mode_boundary_association(', 1),
         ('inverse_u_post, inverse_v_post, eta,', 1), 51],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
@@ -1449,7 +1449,7 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:570-599': [
         ('def _nemo_literal_reference_face_depths(z_coord, dtype):', 1),
         ('return hu_compact, hv_compact', 1), 30],
-    'barotropic_latlon_cgrid.py:851-883': [
+    'barotropic_latlon_cgrid.py:855-887': [
         ('def nemo_literal_continuity_divergence(', 1),
         ('return (du + dv) * (1.0 / grid.area)', 1), 33],
     # --- ORCA2 round 148: V-face north-neighbour association arm --------
@@ -1465,7 +1465,7 @@ CITATION_MAP = {
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
         'return H_u, H_v, r1_u_entry, r1_v_entry', 80],
     # --- ORCA2 round 149: carried V reciprocal retraction ---------------
-    'barotropic_latlon_cgrid.py:2555-2559': [
+    'barotropic_latlon_cgrid.py:2559-2563': [
         '# Preserve associated halo operands in the private trace.',
         '"inverse_depth_v": r1_H_v,', 5],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
@@ -1476,13 +1476,13 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
         ('END DO   ;   END DO', 5), 45],
-    'barotropic_latlon_cgrid.py:1080-1101': [
+    'barotropic_latlon_cgrid.py:1084-1105': [
         ('def _nemo_een_north_u(field, grid):', 1),
         ('return north', 2), 22],
-    'barotropic_latlon_cgrid.py:1206-1221': [
+    'barotropic_latlon_cgrid.py:1210-1225': [
         ('e3u = b(e3u0 * b(one + r3u[..., None] * umask))', 1),
         ('jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)', 1), 16],
-    'barotropic_latlon_cgrid.py:1324-1360': [
+    'barotropic_latlon_cgrid.py:1328-1364': [
         ('un = {', 1),
         ('e3v, mbkv, neighbor, neighbor_mask, vq[corner],', 1), 37],
     # --- ORCA2 round 127: northern V recurrence prefix -------------------
@@ -1493,7 +1493,7 @@ CITATION_MAP = {
         ('r105_acc_v_nw(ji,jj) = ffv_nw(ji,jj)', 1),
         ('ffv_ne(ji,jj) = r1_12 * r1_e2v(ji,jj)', 1), 8],
     # --- ORCA2 round 126: complete northern frozen-mask association ------
-    'barotropic_latlon_cgrid.py:1171-1177': [
+    'barotropic_latlon_cgrid.py:1175-1181': [
         ('# dommsk.f90:232-258 applies the ordinary F-grid lateral boundary before', 1),
         ('fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])', 1), 7],
     # --- ORCA2 round 125: northeast northern frozen-mask association ------
@@ -1508,10 +1508,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747': [
         ("CASE ( 'F' )", 5),
         ('END DO; END DO', 6), 26],
-    'barotropic_latlon_cgrid.py:1051-1072': [
+    'barotropic_latlon_cgrid.py:1055-1076': [
         ('def _nemo_een_north_f(field, grid):', 1),
         ('return north', 1), 22],
-    'barotropic_latlon_cgrid.py:1209-1212': [
+    'barotropic_latlon_cgrid.py:1213-1216': [
         ('q = b(ff[..., None] / e3f)', 1),
         ('q_north = b(ff_north[..., None] / e3f_north)', 1), 4],
     # --- ORCA2 round 121: northern V fraction walk -------------------------
@@ -1563,7 +1563,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1999-2004': [
         ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 4),
         ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 4), 6],
-    'barotropic_latlon_cgrid.py:1046-1048': [
+    'barotropic_latlon_cgrid.py:1050-1052': [
         ('def _nemo_south_zero_fill(field):', 1),
         ('return jnp.concatenate([jnp.zeros_like(field[:1]), field[:-1]], axis=0)', 1), 3],
     # --- ORCA2 round 113: southern frozen vorticity thickness association ---
@@ -1582,10 +1582,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:2021-2046': [
         ('ELSE                                                        ! southern/northern side', 4),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 4), 26],
-    'barotropic_latlon_cgrid.py:1041-1043': [
+    'barotropic_latlon_cgrid.py:1045-1047': [
         ('def _nemo_een_south_e3f0(e3f0, mesh_e3f0):', 1),
         ('return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1231-1245': [
+    'barotropic_latlon_cgrid.py:1235-1249': [
         ('# dyn_vor_init applies the default zero fill to e3f_0vor', 1),
         ('q_south = b(ff_south[..., None] / e3f_south)', 1), 15],
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
@@ -1601,10 +1601,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         ('& ff_f(ji  ,jj-1) /', 1), 5],
-    'barotropic_latlon_cgrid.py:1036-1038': [
+    'barotropic_latlon_cgrid.py:1040-1042': [
         ('def _nemo_south_copy_fill(field):', 1),
         ('return jnp.concatenate([field[:1], field[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1227-1230': [
+    'barotropic_latlon_cgrid.py:1231-1234': [
         ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
         ('ff_south = _nemo_south_copy_fill(ff)', 1), 4],
     # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
@@ -4510,7 +4510,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:3130-3131': [
+    'barotropic_latlon_cgrid.py:3134-3135': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],

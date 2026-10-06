@@ -41,7 +41,7 @@ applies the field sign while overwriting the selected pivot cells in
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1747-1766`.
 
 The legoESM helper remains private and complete by default at
-`barotropic_latlon_cgrid.py:689-739`. No card selects any round-157 component.
+`barotropic_latlon_cgrid.py:689-743`. No card selects any round-157 component.
 The hook rejects an unknown component and rejects overlap with either the
 complete or one-field association arms.
 

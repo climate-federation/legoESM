@@ -140,8 +140,11 @@ def test_external_mode_boundary_association_is_one_seven_field_map():
     got = _nemo_external_mode_boundary_association(
         u, v, depth_u, depth_v, inverse_u, inverse_v, eta, grid)
 
-    for value, source in ((got[0], u), (got[2], depth_u),
-                          (got[4], inverse_u)):
+    np.testing.assert_array_equal(np.asarray(got[0][:, 0]),
+                                  np.asarray(u[:, -1]))
+    np.testing.assert_array_equal(np.asarray(got[0][:, 1:]),
+                                  np.asarray(u[:, 1:]))
+    for value, source in ((got[2], depth_u), (got[4], inverse_u)):
         np.testing.assert_array_equal(np.asarray(value[:, 0]),
                                       np.asarray(source[:, -1]))
         np.testing.assert_array_equal(np.asarray(value[:, 1:]),
@@ -181,6 +184,8 @@ def test_external_mode_u_fold_is_compiled_half_row_map():
     eta = jnp.ones((4, 8), dtype=jnp.float64)
     got = _nemo_external_mode_boundary_association(
         u, v, scalar_u, v, scalar_u, v, eta, grid)[0]
+    np.testing.assert_array_equal(np.asarray(got[-1, 0]),
+                                  np.asarray(-u[-1, 1]))
     np.testing.assert_array_equal(np.asarray(got[-1, 1:5]),
                                   np.asarray(u[-1, 1:5]))
     np.testing.assert_array_equal(np.asarray(got[-1, 5:]),
