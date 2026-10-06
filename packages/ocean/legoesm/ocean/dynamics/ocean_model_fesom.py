@@ -125,6 +125,10 @@ class FesomOceanConfig(NamedTuple):
     # fesom's own closure left the Southern Ocean mixed layer at 18.6 m vs
     # NEMO's 41 m with SST +1.45 C where the other two grids sat at +0.2.
     vertical_mixing: str = "fesom"
+    # Vertical momentum advection: "fesom_flux" (fesom_jax's flux form on scalar
+    # control volumes) or "nemo_advective" (NEMO dynzad.F90 advective form on
+    # elements, the scheme the tripole lane runs).  Unknown raises in fesom_jax.
+    vertical_momentum_scheme: str = "fesom_flux"
 
 
 # =============================================================================
@@ -1696,6 +1700,7 @@ class FesomOceanModel:
             surface_fluxes=surface_fluxes,
             vertical_mixing=vertical_mixing,
             visc_nemo=self._visc_nemo,
+            vertical_momentum=self.config.vertical_momentum_scheme,
         )
         if tke_nl is not None:
             new_inner = dataclasses.replace(new_inner, tke=tke_nl)

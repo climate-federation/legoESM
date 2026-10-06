@@ -197,3 +197,26 @@ def test_river_mouth_gate_accepted_on_fesom():
 def test_window_mean_flags_allowed():
     args, p = _parse(["--state-accumulate", "--mld-accumulate"])
     validate_fesom_stage(args, p)  # no raise
+
+
+def test_vertical_momentum_nemo_advective_reaches_fesom_config():
+    import inspect
+    import scripts.run.run_omip_core2 as core2
+    args, p = _parse(["--vertical-momentum-scheme", "nemo_advective"])
+    validate_fesom_stage(args, p)  # allowlisted: no raise
+    assert args.vertical_momentum_scheme == "nemo_advective"
+    src = inspect.getsource(core2.main)
+    i = src.index("build_fesom_ocean(")
+    call = src[i:src.index("vmix_config=", i)]
+    assert "vertical_momentum_scheme=args.vertical_momentum_scheme" in call
+    assert 'args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"' in src
+    b = inspect.getsource(core2.build_fesom_ocean)
+    assert '"vertical_momentum_scheme": vertical_momentum_scheme' in b
+
+
+def test_fesom_config_field_default_and_forwarding():
+    import inspect
+    from legoesm.ocean.dynamics.ocean_model_fesom import FesomOceanConfig, FesomOceanModel
+    assert FesomOceanConfig().vertical_momentum_scheme == "fesom_flux"
+    assert FesomOceanConfig(vertical_momentum_scheme="nemo_advective").vertical_momentum_scheme == "nemo_advective"
+    assert "vertical_momentum=self.config.vertical_momentum_scheme" in inspect.getsource(FesomOceanModel.step)
