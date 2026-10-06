@@ -739,9 +739,13 @@ class GenBETransform:
         MPAS meshes only.  "explicit" (default): ``n_diffusion_iter`` steps of
         x + sLx, which has no usable inverse (#1819).  "implicit_matern":
         U_h = (I - sL)^{-2} with s = L^2 / 4, so B_h = (I - sL)^{-4} (Matern,
-        nu = 3 in 2-D) and U_h^{-1} = (I - sL)^2 is exact.  The length scales
-        and ``horiz_norm`` were fitted for the explicit kernel; refitting them
-        for this kernel is future work, so the correlation is not the same.
+        nu = 3 in 2-D) and U_h^{-1} = (I - sL)^2 is exact (``n_diffusion_iter``
+        is unused).  ``inv_multiply`` then works with ``wind_transform=
+        "identity"``; the psi/chi transform still refuses (constant psi/chi are
+        null modes).  B^-1 B x reproduces x to ~1e-11 in float64, ~1e-5 in
+        float32.  The length scales and ``horiz_norm`` were fitted for the
+        explicit kernel; refitting them for this kernel is future work, so the
+        correlation is not the same.
     """
 
     def __init__(
@@ -1245,8 +1249,9 @@ class GenBETransform:
                 "horizontal correlation attenuates grid-scale modes by up to "
                 "~exp(-L^2 |lambda_min| / 2) (about 1e-30 for 500 km on the "
                 "40962-cell mesh, 400 iterations), and the default psi/chi wind "
-                "transform has null modes. "
-                "Write the cost in the "
+                "transform has null modes. horizontal_scheme='implicit_matern' with "
+                "wind_transform='identity' has an exact inverse. "
+                "Otherwise write the cost in the "
                 "preconditioned control variable v with sqrt_multiply only "
                 "(J_b = 0.5 |v|^2), as the MPAS 3D/4D-Var drivers do."
             )

@@ -19,7 +19,7 @@ LEN_SCALE_M = 5.0e5
 INVERSE_RTOL = 1e-10
 
 
-def _transform(grid, scheme="implicit_matern"):
+def _transform(grid, scheme="implicit_matern", len_scale=None, wind="identity"):
     kw = {} if scheme is None else {"horizontal_scheme": scheme}
     n = grid.grid_n_columns
     f3 = lambda val: grid.from_columns(jnp.full((n, NLEV), val))
@@ -40,10 +40,10 @@ def _transform(grid, scheme="implicit_matern"):
         vert_eig_val=jnp.stack([jnp.array([4.0, 1.0])] * 3),
         std_ps=jnp.asarray(100.0),
         reg_coeff=jnp.asarray(reg),
-        len_scale=jnp.full((n_ch,), LEN_SCALE_M),
+        len_scale=jnp.full((n_ch,), LEN_SCALE_M) if len_scale is None else len_scale,
         tracer_names=(),
         n_levels=NLEV,
-        wind_transform="identity",
+        wind_transform=wind,
     )
     spec = build_control_spec(template, grid, fields=("u", "v", "T", "p_s"))
     return GenBETransform(params, spec, grid, n_diffusion_iter=400, **kw), spec
@@ -118,3 +118,27 @@ def test_unknown_scheme_and_non_mpas_grid_raise():
         _transform(mpas, scheme="implicit")
     with pytest.raises(ValueError, match="needs an MPAS mesh"):
         _transform(create_grid("gaussian", 10))
+
+
+def test_psi_chi_wind_still_refuses_the_inverse(production):
+    """Constant psi/chi are null modes of the wind transform, whatever the
+    horizontal kernel."""
+    grid, _, spec = production
+    B, spec = _transform(grid, wind="mpas_helmholtz")
+    with pytest.raises(NotImplementedError):
+        B.inv_multiply(_white(spec, 5))
+
+
+def test_per_channel_length_scales(production):
+    """Each channel smooths with its own length scale: a mixed-scale transform
+    matches, channel by channel, transforms built with that scale everywhere."""
+    grid, B0, _ = production
+    n_ch = B0._n_total_ch
+    scales = jnp.linspace(2.0e5, 1.0e6, n_ch)
+    B, _ = _transform(grid, len_scale=scales)
+    b = jax.random.normal(jax.random.PRNGKey(6), (B._ncol, n_ch))
+    mixed = B._horiz_smooth(b)
+    for j in (0, n_ch - 1):
+        Bj, _ = _transform(grid, len_scale=jnp.full((n_ch,), scales[j]))
+        ref = Bj._horiz_smooth(b)[:, j]
+        assert float(jnp.linalg.norm(mixed[:, j] - ref) / jnp.linalg.norm(ref)) < INVERSE_RTOL
