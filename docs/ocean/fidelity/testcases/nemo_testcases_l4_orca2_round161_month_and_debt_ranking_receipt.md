@@ -113,8 +113,8 @@ the GYRE round-129 spread record rejecting a moved certified-year harness; the
 round-179 acquisition plant being pre-empted by this receipt's dirty-tree
 check; 12 VORTEX drivers failing the process-global allow-dirty scope ratchet;
 and the registered worktree-stamp ratchet (11 emitters). No failure names a
-round-161 gate or model path. The dirty-tree-pre-empted round-179 test is
-re-run from the clean receipt commit below.
+round-161 gate or model path. From the clean receipt commit, the
+dirty-tree-pre-empted round-179 test passes 1/1.
 
 ASKED choices: none. UNASKED choices: empty. No configuration, forcing,
 carried-state policy, stabiliser, sea-ice selector, or production model file
