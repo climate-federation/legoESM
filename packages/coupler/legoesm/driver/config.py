@@ -1240,6 +1240,12 @@ class ExperimentConfig(NamedTuple):
     # InterceptionConfig()): a prognostic canopy water store, throughfall and
     # wet-leaf evaporation. Default off; decks set it explicitly.
     land_canopy_interception: bool = False
+    # One-layer snow thermal node (SoilThermalConfig.snow_insulation): the
+    # snowpack gets a temperature, ice heat capacity and Jordan (1991)
+    # insulation between its surface and the soil, solved with the soil as in
+    # CLM5.  Off (default) = the heat-free snow bucket.  Opt-in A/B switch
+    # (northern-winter cold bias, 2026-10-03); decks set it explicitly.
+    land_snow_insulation: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -2281,6 +2287,22 @@ class ExperimentConfig(NamedTuple):
                 "require use_multilayer_land with land_surface_scheme="
                 "'two_leaf': only the two-leaf canopy reads them — the knob "
                 "would be silently inert.")
+        if self.land_snow_insulation and not self.use_multilayer_land:
+            errors.append(
+                "land_snow_insulation requires use_multilayer_land: only the "
+                "multilayer soil has a snow thermal node — the knob would be "
+                "silently inert.")
+        if self.land_snow_insulation and self.land_surface_scheme != "two_leaf":
+            errors.append(
+                "land_snow_insulation is not supported with land_surface_scheme="
+                f"{self.land_surface_scheme!r}: only the two-leaf canopy (explicit "
+                "ground flux) is supported; the land step would refuse at its "
+                "first call.")
+        if self.land_snow_insulation and self.land_snow_scheme != "bulk":
+            errors.append(
+                "land_snow_insulation is the one-layer thermal node of the bulk "
+                f"snowpack; land_snow_scheme={self.land_snow_scheme!r} carries "
+                "its own snow heat (the two would double-count it).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "

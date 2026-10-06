@@ -465,3 +465,33 @@ def test_restart_with_partial_carbon_pools_raises(tmp_path):
     with pytest.raises(ValueError, match="missing"):
         load_land_restart(p, expected_land_mode="multilayer",
                           expected_ncol=ncol)
+
+
+def test_snow_node_temperature_round_trips_and_grafts(tmp_path):
+    """The snow-node temperature is prognostic: it round-trips exactly, is
+    grafted onto a snow-node template, and is absent when never written."""
+    from legoesm.land.restart import merge_land_restart_into_template
+    st = _fake_state(seed=3)._replace(
+        T_snow=jnp.asarray([250.0, 255.5, 261.0, 266.25, 271.0]))
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0)
+    st2, _ = load_land_restart(tmp_path / "r.npz",
+                               expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    np.testing.assert_array_equal(np.asarray(st2.T_snow), np.asarray(st.T_snow))
+    tmpl = _fake_state(seed=4)._replace(T_snow=jnp.zeros(_NCOL))
+    merged = merge_land_restart_into_template(st2, tmpl)
+    np.testing.assert_array_equal(np.asarray(merged.T_snow), np.asarray(st.T_snow))
+    save_land_restart(tmp_path / "r0.npz", _fake_state(seed=5),
+                      land_mode="multilayer", t_end_s=0.0, n_steps_completed=0)
+    st3, _ = load_land_restart(tmp_path / "r0.npz",
+                               expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    assert st3.T_snow is None
+
+
+def test_snow_node_restart_into_a_run_without_it_is_refused():
+    from legoesm.land.restart import merge_land_restart_into_template
+    st = _fake_state(seed=6)._replace(T_snow=jnp.full(_NCOL, 260.0))
+    with pytest.raises(ValueError, match="T_snow"):
+        merge_land_restart_into_template(st, _fake_state(seed=7))
