@@ -7987,47 +7987,62 @@ class ModelDriver:
         # sail past the probe, which is worse than the snapshot it
         # replaced because it looks trustworthy. Require a COMPLETE
         # window AND every slot the energy budget reads.
-        _facc_e = getattr(self, "_mpas_sfc_accum", None)
-        _use_accum = (_facc_e is not None
-                      and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
-        if (_facc_e is not None and _facc_e.is_complete()
-                and not _use_accum):
-            print("  energy tracker: complete window but energy "
-                  "slots have unequal sample counts -- this sample "
-                  "falls back to SNAPSHOT fluxes (stamped 0)")
-        _qv_e = (self.state.tracers["q_v"].data
-                 if (self.state.tracers is not None
-                     and "q_v" in self.state.tracers) else None)
-        # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
-        # (#1354/#1515): without the -L_f*q_frozen term, deposition and
-        # freezing read as a spurious source.  Sum whatever frozen
-        # species this microphysics carries (None -> vapor-only MSE).
-        _qfrz_e = None
-        if self.state.tracers is not None:
-            for _fk in ("q_i", "q_s", "q_g"):
-                if _fk in self.state.tracers:
-                    _fd = self.state.tracers[_fk].data
-                    _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
+        _partitioned = _is_mpas_cell_partitioned(self)
+        try:
+            _facc_e = getattr(self, "_mpas_sfc_accum", None)
+            _use_accum = (_facc_e is not None
+                          and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+            if (_facc_e is not None and _facc_e.is_complete()
+                    and not _use_accum):
+                print("  energy tracker: complete window but energy "
+                      "slots have unequal sample counts -- this sample "
+                      "falls back to SNAPSHOT fluxes (stamped 0)")
+            _qv_e = (self.state.tracers["q_v"].data
+                     if (self.state.tracers is not None
+                         and "q_v" in self.state.tracers) else None)
+            # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
+            # (#1354/#1515): without the -L_f*q_frozen term, deposition and
+            # freezing read as a spurious source.  Sum whatever frozen
+            # species this microphysics carries (None -> vapor-only MSE).
+            _qfrz_e = None
+            if self.state.tracers is not None:
+                for _fk in ("q_i", "q_s", "q_g"):
+                    if _fk in self.state.tracers:
+                        _fd = self.state.tracers[_fk].data
+                        _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
 
-        def _slot(i):
-            # Interval mean first (the APPLIED quantity); the
-            # end-of-interval snapshot only when no accumulator ran.
-            # `mean()` returns a host array, so this round-trips
-            # device->host->device. That is 7 small transfers per
-            # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
-            # not per model step, so it is not on the hot path
-            # (codex review, accepted rather than restructured --
-            # `mean()` is shared with the CMOR feed).
-            if _use_accum:   # window_ready() => every slot has a mean
-                return jnp.asarray(_facc_e.mean(i))
-            return (_sd[i].data if (_sd is not None and len(_sd) > i
-                                    and _sd[i] is not None) else None)
-        _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
-        _sw_ns, _lw_ns = _slot(0), _slot(1)
-        _shf, _lhf = _slot(6), _slot(7)
-        _evp = _slot(_evap_sfc_slot())
-        _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
-        if _is_mpas_cell_partitioned(self):
+            def _slot(i):
+                # Interval mean first (the APPLIED quantity); the
+                # end-of-interval snapshot only when no accumulator ran.
+                # `mean()` returns a host array, so this round-trips
+                # device->host->device. That is 7 small transfers per
+                # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+                # not per model step, so it is not on the hot path
+                # (codex review, accepted rather than restructured --
+                # `mean()` is shared with the CMOR feed).
+                if _use_accum:   # every ENERGY slot has a mean; evap may not
+                    _m = _facc_e.mean(i)
+                    return None if _m is None else jnp.asarray(_m)
+                return (_sd[i].data if (_sd is not None and len(_sd) > i
+                                        and _sd[i] is not None) else None)
+            _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
+            _sw_ns, _lw_ns = _slot(0), _slot(1)
+            _shf, _lhf = _slot(6), _slot(7)
+            _evp = _slot(_evap_sfc_slot())
+            _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
+        except Exception as exc:  # noqa: BLE001
+            if not _partitioned:
+                raise
+            # A rank that fails here must still enter every collective of
+            # the partitioned sample, or its peers hang: vote "cannot".
+            logger.error("  energy tracker: input preparation failed on "
+                         "rank %d (%s: %s); this sample is NaN on every "
+                         "rank.", getattr(self, "_mpi_rank", -1),
+                         type(exc).__name__, exc)
+            return self._mpas_energy_partitioned(
+                None, None, None, (None,) * 5, (None,) * 3, False,
+                p_s_data, elapsed_day)
+        if _partitioned:
             return self._mpas_energy_partitioned(
                 _ebd, _qv_e, _qfrz_e, _rad, (_shf, _lhf, _evp), _use_accum,
                 p_s_data, elapsed_day)
@@ -13432,7 +13447,10 @@ class ModelDriver:
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
-        self._save_lightweight_timeseries(_ts, run_status, t_start)
+        # One writer: ranks must not race on the shared timeseries.npz /
+        # results.txt.  The published series are rank 0's.
+        if getattr(self, "_mpi_rank", 0) == 0:
+            self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
     # ==================================================================

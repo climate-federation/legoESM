@@ -237,3 +237,40 @@ def test_optional_flux_missing_on_one_rank_is_nan_not_partial():
     out = d._mpas_energy_sample(d.state.p_s.data, 0.0)
     assert np.isnan(out["hfss"])
     _assert_close(out, want, ("energy_toa_net", "hfls", "evspsbl"))
+
+
+class _BrokenAccum(_ReadyAccum):
+    def window_ready(self, slots):
+        raise RuntimeError("accumulator broke on this rank")
+
+
+def test_input_preparation_failure_on_one_rank_gives_nan_not_a_hang():
+    """A rank whose accumulator raises BEFORE the first collective must
+    still take part in every collective (voting "cannot"), so all ranks
+    record NaN instead of the others hanging in the allreduce."""
+    _, d = _serial_and_mpi()
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        d._mpas_sfc_accum = _BrokenAccum(np.zeros(1))
+    out = d._mpas_energy_sample(d.state.p_s.data, 0.0)
+    assert np.isnan(out["energy_toa_net"])
+    assert d.diagnostics.energy_tracker.column_energy == []
+
+
+class _ReadyAccumNoEvap(_ReadyAccum):
+    def mean(self, i):
+        return None if i not in self.ENERGY_SLOTS else super().mean(i)
+
+
+def test_interval_mean_without_evaporation_keeps_the_energy_budget():
+    """A complete window whose evaporation slot was never fed: evspsbl is
+    NaN, the energy budget is still recorded and stamped interval-mean."""
+    ref, d = _serial_and_mpi()
+    ref._mpas_sfc_accum = _ReadyAccumNoEvap(
+        np.arange(ref.state.T.data.shape[0]))
+    d._mpas_sfc_accum = _ReadyAccumNoEvap(
+        np.asarray(d._voronoi_layout.partition.local_cells))
+    want = ref._mpas_energy_sample(ref.state.p_s.data, 0.0)
+    got = d._mpas_energy_sample(d.state.p_s.data, 0.0)
+    assert np.isnan(want["evspsbl"]) and np.isnan(got["evspsbl"])
+    assert got["energy_flux_interval_mean"] == 1.0
+    _assert_close(got, want, ("energy_toa_net", "sw_net_sfc", "hfss", "hfls"))
