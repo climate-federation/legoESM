@@ -81,6 +81,19 @@ def regrid_elevation_to_latlon(ds, *, var_name: str = "", target_res_deg: float 
     lon = np.asarray(da["lon"].values, dtype=np.float64) % 360.0
     da = da.assign_coords(lon=lon).sortby("lon").sortby("lat")
     da = da.drop_duplicates("lon", keep="first").drop_duplicates("lat", keep="first")
+    # A GLOBAL source is periodic in lon: wrap one column onto each side so
+    # targets past the last source lon interpolate across the seam.  Without
+    # it they fall outside the hull (a 1e-14 overshoot is enough) and get the
+    # neighbouring column copied in by the nearest-fill below (#1712).
+    src_lon = np.asarray(da["lon"].values)
+    if src_lon.size > 1:
+        dlon = float(np.median(np.diff(src_lon)))
+        if abs(src_lon[-1] - src_lon[0] + dlon - 360.0) < 0.5 * dlon:
+            da = xr.concat(
+                [da.isel(lon=[-1]).assign_coords(lon=[src_lon[-1] - 360.0]),
+                 da,
+                 da.isel(lon=[0]).assign_coords(lon=[src_lon[0] + 360.0])],
+                dim="lon")
 
     res = float(target_res_deg)
     tgt_lat = np.arange(-90.0 + res / 2.0, 90.0, res)
