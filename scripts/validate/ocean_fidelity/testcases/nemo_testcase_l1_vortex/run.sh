@@ -1106,6 +1106,7 @@ else
   done
 fi
 for mount in /tmp "$(dirname "$EVIDENCE")" "$NEMO_ROOT"; do
+  mkdir -p "$mount"
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
   if [[ "$free_kb" -lt 2097152 ]]; then
     printf 'REFUSE: %s has %s kB free, under the 2 GB floor\n' "$mount" "$free_kb" >&2

@@ -108,6 +108,16 @@ def test_existing_all_stage_writer_brackets_momentum_ldf():
     assert set(checker._STAGE_FLUX_BY_STAGE) == {1, 2, 3}
 
 
+def test_shared_driver_creates_each_space_check_target_before_df():
+    source = (TOOLS / "run.sh").read_text()
+    loop = source.index(
+        'for mount in /tmp "$(dirname "$EVIDENCE")" "$NEMO_ROOT"; do')
+    mkdir = source.index('mkdir -p "$mount"', loop)
+    disk_free = source.index('free_kb=$(df -Pk "$mount"', loop)
+    end = source.index("done", disk_free)
+    assert loop < mkdir < disk_free < end
+
+
 def _run_wrapper_with_stub_driver(tmp_path: Path, *args: str):
     repo = tmp_path / "repo"
     wrapper_dir = (repo / "scripts/validate/ocean_fidelity/testcases/"
