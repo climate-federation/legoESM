@@ -42,5 +42,13 @@ def test_each_failure_is_reported(tmp_path):
                  land_ml_snow_depth=np.zeros(3))
     assert cd1.day1_problems(wiped, 275, "layered", _LOG) == [
         "snow water 0 after day 1 vs 30 at restart"]
+    # a thick pack truncated in one column, the global sum still fine
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([10.0, 10.0, 500.0]))
+    ice = np.full((3, 5), 2.0, np.float32)
+    ice[2] = 50.0
+    cut = _run(tmp_path, land_ml_snow_ice_layers=ice, land_ml_snow_depth=ice.sum(-1))
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([10.0, 10.0, 500.0]))
+    assert cd1.day1_problems(cut, 275, "layered", _LOG) == [
+        "a column lost more than 200 kg/m2 of snow in a day"]
     # a bulk control needs neither layers nor the warning
     assert cd1.day1_problems(_run(tmp_path, scheme="bulk"), 275, "bulk", "") == []

@@ -9,7 +9,11 @@ Pass (exit 0) needs, at checkpoint day restart+1:
   the snow water (rtol 1e-5, float32 storage), and the run log carrying the
   "pack built from its snow water" warning (the bulk restart was seeded);
 - every arm: the summed snow water at day 1 at least half the restart's (a
-  pack that seeding or the first day erased cannot pass).
+  pack erased everywhere cannot pass), and no column losing more than 200
+  kg/m2 in the day (melting that much takes ~770 W/m2 for 24 h, impossible in
+  October, so any thick pack erased or truncated is caught).  An erased THIN
+  seasonal pack is indistinguishable from a day of melt here; PREREG's
+  snow-mass validity rule against the control covers it.
 Held land column-steps (budgets not closed) are printed, not gated.
 """
 from __future__ import annotations
@@ -23,6 +27,7 @@ import numpy as np
 
 _LAYERS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers", "snow_rho_layers")
 _SEEDED = "LAYERED pack is built from its snow water"
+_MAX_DAY_LOSS = 200.0   # kg/m2: ~770 W/m2 for 24 h of melt (L_f 3.34e5 J/kg)
 
 
 def day1_problems(run_dir, restart_day, scheme, log_text):
@@ -34,13 +39,17 @@ def day1_problems(run_dir, restart_day, scheme, log_text):
     out = [f"non-finite {k}" for k in z.files
            if z[k].dtype.kind in "fc" and not np.all(np.isfinite(z[k]))]
     rst = run_dir / f"checkpoint_day_{restart_day:04d}.npz"
-    if rst.exists():
-        s0 = float(np.sum(np.load(rst, allow_pickle=False)["land_ml_snow_depth"], dtype=np.float64))
-        s1 = float(np.sum(z["land_ml_snow_depth"], dtype=np.float64))
+    r = np.load(rst, allow_pickle=False) if rst.exists() else None
+    if r is None or "land_ml_snow_depth" not in r.files or "land_ml_snow_depth" not in z.files:
+        out.append(f"no snow water in {rst.name} or {ck.name}")
+    else:
+        w0 = r["land_ml_snow_depth"].astype(np.float64)
+        w1 = z["land_ml_snow_depth"].astype(np.float64)
+        s0, s1 = float(w0.sum()), float(w1.sum())
         if s1 < 0.5 * s0:
             out.append(f"snow water {s1:.4g} after day 1 vs {s0:.4g} at restart")
-    else:
-        out.append(f"no restart {rst.name}")
+        if w0.shape != w1.shape or np.any(w0 - w1 > _MAX_DAY_LOSS):
+            out.append(f"a column lost more than {_MAX_DAY_LOSS:.0f} kg/m2 of snow in a day")
     cfg = json.loads((run_dir / "experiment_config.json").read_text())
     if cfg.get("land_snow_scheme") != scheme:
         out.append(f"resolved land_snow_scheme {cfg.get('land_snow_scheme')!r}, want {scheme!r}")

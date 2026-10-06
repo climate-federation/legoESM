@@ -83,9 +83,14 @@ for a in "${arms[@]}"; do
   TGT[${a}]=${_t}
   [[ -n "${START[${a}]}" ]] || { echo "REFUSING: ${a} has no checkpoint" >&2; exit 64; }
   # The gated first launch must start from the hashed restart copy itself.
-  rday=$(awk '{print $2}' "${ROOT}/${a}/restart.sha256" | sed -E 's/.*checkpoint_day_0*([0-9]+)\.npz/\1/')
-  (( ! DAY1_GATE || START[${a}] == rday )) \
-    || { echo "REFUSING: ${a} already holds day ${START[${a}]} past its restart ${rday}; resume with DAY1_GATE=0" >&2; exit 64; }
+  # The gated first launch must start from the hashed restart copy itself:
+  # the newest checkpoint (the chain's pick) is that very file, by name.
+  rfile=$(awk '{print $2}' "${ROOT}/${a}/restart.sha256")
+  [[ "${rfile}" =~ ^checkpoint_day_[0-9]+\.npz$ ]] \
+    || { echo "REFUSING: ${a}/restart.sha256 names '${rfile}'" >&2; exit 64; }
+  newest=$(basename "$(ls -1 "${ROOT}/${a}"/checkpoint_day_*.npz | sort -V | tail -1)")
+  (( ! DAY1_GATE )) || [[ "${newest}" == "${rfile}" ]] \
+    || { echo "REFUSING: ${a} would start from ${newest}, not its hashed restart ${rfile}; resume with DAY1_GATE=0" >&2; exit 64; }
 done
 if (( DAY1_GATE )); then
   for a in "${arms[@]}"; do TGT[${a}]=$(( START[${a}] + 1 )); done
