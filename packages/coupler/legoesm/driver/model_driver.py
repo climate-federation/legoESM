@@ -1160,6 +1160,9 @@ _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
 # MultiLayerLandState fields that are numerical CACHES, not prognostic state:
 # never written to a checkpoint and never required by one, so a checkpoint
 # written before the field existed still restarts (the cache cold-starts).
+# MPAS checkpoint keys of the land surface stress handed to the boundary
+# layer (last valid magnitude, valid mask, value-from-latest-solve mask).
+_LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh")
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
 
 
@@ -1570,7 +1573,9 @@ class ModelDriver:
                     self.tracers[k] + dt * tend, dp=_dp)
 
     def _land_stress_for_checkpoint(self):
-        """``(land_taumag, land_taumag_valid)`` to persist, or ``None``.
+        """``(land_taumag, land_taumag_valid, land_taumag_fresh)`` to persist,
+        or ``None`` (``fresh``: the column's value came from the latest land
+        solve, so the reused-drag counter resumes exactly).
 
         Gated on THIS run's resolved land-stress switch (a feature-off run never
         writes it).  Before any run has adopted a loaded checkpoint (load ->
@@ -1582,10 +1587,10 @@ class ModelDriver:
             return None
         mag = getattr(self, "_land_taumag", None)
         if mag is not None:
-            return mag, self._land_taumag_valid
+            return mag, self._land_taumag_valid, self._land_taumag_fresh
         ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
         if "land_taumag" in ck:
-            return ck["land_taumag"], ck["land_taumag_valid"]
+            return tuple(ck[k] for k in _LAND_STRESS_CKPT_KEYS)
         return None
 
     def _checkpoint_carry_aux(self) -> dict | None:
@@ -6572,6 +6577,7 @@ class ModelDriver:
             if _ls_save is not None:
                 _save["land_taumag"] = np.asarray(_ls_save[0])
                 _save["land_taumag_valid"] = np.asarray(_ls_save[1], dtype=bool)
+                _save["land_taumag_fresh"] = np.asarray(_ls_save[2], dtype=bool)
             # #1353 (codex-2 finding 2): within-interval CMOR flux sums —
             # so a mid-interval (wallclock / off-cadence) restart resumes
             # the interval mean instead of dropping the pre-checkpoint
@@ -7314,13 +7320,21 @@ class ModelDriver:
             # Land surface stress: same stale-persistence rule.  A checkpoint
             # without it (written before it was persisted, or by a run with the
             # land stress off) is recorded so _run_mpas re-seeds LOUDLY.
-            for _k in ("land_taumag", "land_taumag_valid"):
+            for _k in _LAND_STRESS_CKPT_KEYS:
                 self._carry_aux.pop(_k, None)
-            self._land_taumag = self._land_taumag_valid = None
+            self._land_taumag = None
+            self._land_taumag_valid = self._land_taumag_fresh = None
             self._land_stress_ckpt_missing = "land_taumag" not in d.files
             if not self._land_stress_ckpt_missing:
-                for _k in ("land_taumag", "land_taumag_valid"):
-                    _a = np.asarray(d[_k]).reshape(-1)
+                for _k in _LAND_STRESS_CKPT_KEYS:
+                    _a = np.asarray(d[_k])
+                    if _a.ndim != 1 or (_k != "land_taumag"
+                                        and _a.dtype != np.bool_):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_k}: expected a "
+                            f"1-D {'float' if _k == 'land_taumag' else 'bool'}"
+                            f" cell field, got shape {_a.shape} dtype "
+                            f"{_a.dtype}.")
                     if _mpi:
                         if _a.shape[0] != part.nCells_global:
                             raise ValueError(
@@ -12045,6 +12059,7 @@ class ModelDriver:
                     )
                     _land_taumag_cells = jnp.zeros_like(_q_air0)
                     _land_taumag_valid = jnp.zeros(_q_air0.shape, dtype=bool)
+                    _land_taumag_fresh = _land_taumag_valid
                     _ls_ck = (self._carry_aux
                               if isinstance(self._carry_aux, dict) else {})
                     if "land_taumag" in _ls_ck:
@@ -12052,7 +12067,10 @@ class ModelDriver:
                                          dtype=_q_air0.dtype).reshape(-1)
                         _v = jnp.asarray(_ls_ck.pop("land_taumag_valid"),
                                          dtype=bool).reshape(-1)
-                        if _m.shape != _q_air0.shape or _v.shape != _q_air0.shape:
+                        _fr = jnp.asarray(_ls_ck.pop("land_taumag_fresh"),
+                                          dtype=bool).reshape(-1)
+                        if not (_m.shape == _v.shape == _fr.shape
+                                == _q_air0.shape):
                             raise ValueError(
                                 f"checkpoint land_taumag shape {_m.shape} / "
                                 f"valid {_v.shape} != (nCells={_q_air0.size},)"
@@ -12062,6 +12080,7 @@ class ModelDriver:
                                 "checkpoint land_taumag has non-finite values "
                                 "— refusing to resume from a corrupt stress.")
                         _land_taumag_cells, _land_taumag_valid = _m, _v
+                        _land_taumag_fresh = _fr
                         logger.info(
                             "  MPAS land stress: resumed from checkpoint "
                             "(%d columns with a solved value)",
@@ -12076,9 +12095,9 @@ class ModelDriver:
                             "step. This restart is not bit-identical to an "
                             "unbroken run.")
                     self._land_stress_ckpt_missing = False
-                    _land_taumag_fresh = _land_taumag_valid
                     self._land_taumag = _land_taumag_cells
                     self._land_taumag_valid = _land_taumag_valid
+                    self._land_taumag_fresh = _land_taumag_fresh
                     _land_stress_landcell = (
                         jnp.asarray(_f_land_cols).reshape(-1) > 0.0)
                     # Diagnostics: land column-steps whose drag was the
@@ -12588,6 +12607,7 @@ class ModelDriver:
                                 _land_taumag_step, _land_held_step)
                             self._land_taumag = _land_taumag_cells
                             self._land_taumag_valid = _land_taumag_valid
+                            self._land_taumag_fresh = _land_taumag_fresh
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).

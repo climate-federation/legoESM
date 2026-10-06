@@ -321,10 +321,13 @@ def _ls_checkpoint(tmp_path):
     return dA, ckpt
 
 
-def test_land_stress_restart_matches_an_unbroken_run(monkeypatch, tmp_path):
+def test_land_stress_restart_matches_an_unbroken_run(monkeypatch, tmp_path,
+                                                     caplog):
     """The land stress rides the checkpoint: the first post-restart step hands
     the boundary layer exactly the drag an unbroken run hands it on that step,
-    and no land column is re-seeded."""
+    and no land column is re-seeded (the seed count also pins the restored
+    valid mask: a column restored as not-yet-solved would count as seeded)."""
+    import logging
     _patch_land_loaders(monkeypatch)
     _, ckpt = _ls_checkpoint(tmp_path)
     with np.load(ckpt) as z:
@@ -338,11 +341,51 @@ def test_land_stress_restart_matches_an_unbroken_run(monkeypatch, tmp_path):
                        mpas_land_stress_from_land=True)
     step, day = dB.load_checkpoint(ckpt)
     assert step == 2
-    assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    with caplog.at_level(logging.WARNING):
+        assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    assert not any("RE-SEEDING" in r.getMessage() for r in caplog.records)
     np.testing.assert_array_equal(np.asarray(dB._land_stress_last),
                                   np.asarray(dC._land_stress_last))
     assert np.asarray(dB._land_stress_last).max() > 0.0
     assert int(dB._land_stress_seed_total) == 0
+
+
+def test_restart_after_a_held_solve_counts_the_reuse(monkeypatch, tmp_path):
+    """A column whose last pre-checkpoint land solve was held reuses an older
+    drag on the first resumed step; the restart must count that reuse exactly
+    as the unbroken run does (the "fresh" mask rides the checkpoint)."""
+    import legoesm.land.multilayer_land as ml
+    _patch_land_loaders(monkeypatch)
+    orig = ml.step_multilayer_land_with_diagnostics
+
+    def held_after_first(state, *a, **k):
+        new_state, resp, carbon, sfc = orig(state, *a, **k)
+        held = jnp.zeros(resp.tau_x.shape, bool).at[0].set(
+            jnp.sum(state.T_soil) != _T0[0])
+        return new_state, resp, carbon, sfc._replace(held=held)
+
+    def build(name, days):
+        d = _build_driver(str(tmp_path / name), days, **_LS_KW,
+                          mpas_land_stress_from_land=True)
+        _T0[0] = jnp.sum(d._land_ml_state.T_soil)
+        return d
+
+    _T0 = [None]
+    monkeypatch.setattr(ml, "step_multilayer_land_with_diagnostics",
+                        held_after_first)
+    dC = build("c", THREE_STEPS_DAYS)
+    assert dC.run() == "COMPLETED"
+    dA = build("a", TWO_STEPS_DAYS)
+    assert dA.run() == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
+                                         "checkpoint_day_*.npz")))[-1]
+    dB = _build_driver(str(tmp_path / "b"), ONE_STEP_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    step, day = dB.load_checkpoint(ckpt)
+    assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    unbroken = dC._land_stress_reused_total - dA._land_stress_reused_total
+    assert unbroken == 1
+    assert dB._land_stress_reused_total == unbroken
 
 
 def test_old_checkpoint_without_land_stress_reseeds_loudly(monkeypatch,
