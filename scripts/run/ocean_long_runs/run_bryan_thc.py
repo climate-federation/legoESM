@@ -123,7 +123,7 @@ def main() -> int:
 
     forcing = load_core2_nyf(n_time=12)   # monthly climatology
 
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+    from run_omip2 import step_with_omip2_forcing  # type: ignore
 
     rpe0 = compute_rpe(state, z_coord,
                        grid_type="latlon_regional", grid=grid)
@@ -148,12 +148,10 @@ def main() -> int:
         n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // max(1, steps_per_year)
-            state = apply_omip2_surface_fluxes(
-                state, forcing=forcing, idx_t=idx_t,
-                z_coord=z_coord, grid=grid,
+            state = step_with_omip2_forcing(
+                model, state, forcing=forcing, idx_t=idx_t, grid=grid,
                 grid_type="latlon_regional", dt=dt,
             )
-            state = model.step(state, dt)
         state = jax.block_until_ready(state)
 
         if y == 0 or (y + 1) % max(1, args.diag_interval_years) == 0 \

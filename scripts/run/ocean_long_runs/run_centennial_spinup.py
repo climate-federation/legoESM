@@ -178,7 +178,7 @@ def main() -> int:
         synthetic_baroclinic_tide_energy_from_bathy,
     )
     import jax.numpy as jnp
-    from run_omip2 import _build_state  # type: ignore
+    from run_omip2 import _build_state, step_with_omip2_forcing  # type: ignore
     import jax
 
     print(f"==> Building global rest-state on {args.grid}/{args.resolution}")
@@ -495,8 +495,6 @@ def main() -> int:
             salt_drift_frac=float(row["salt_drift_frac"]),
         ))
 
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-
     days_per_year = 1 if args.smoke else 365
     base_dt = float(args.dt)
     wall_t0 = time.time()
@@ -557,11 +555,6 @@ def main() -> int:
         K_tidal_year_steps = 0
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // steps_per_year
-            state = apply_omip2_surface_fluxes(
-                state, forcing=forcing, idx_t=idx_t,
-                z_coord=z_coord, grid=grid, grid_type=args.grid,
-                dt=dt,
-            )
             # Dai-Trenberth runoff (when enabled). Grid-dispatched like the
             # SSS / ice-shelf steps: the mpas apply shares the same virtual-salt
             # + eta-rise convention. Both R fields carry the (spatial,) shape
@@ -636,7 +629,12 @@ def main() -> int:
                         mesh=grid,
                         dt=dt,
                     )
-            state = model.step(state, dt)
+            # CORE-II / JRA55-do bulk forcing integrated inside the step,
+            # after the pre-step runoff / ice-shelf / SSS edits (issue #1820).
+            state = step_with_omip2_forcing(
+                model, state, forcing=forcing, idx_t=idx_t, grid=grid,
+                grid_type=args.grid, dt=dt,
+            )
 
             # Jayne-StLaurent tidal vertical mixing — applied AFTER
             # the dycore's own step so it layers on top of any other

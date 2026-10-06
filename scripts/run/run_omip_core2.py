@@ -9,9 +9,10 @@ Both models use the SAME CORE-II forcing: NEMO reads the raw COREv2 files; here
 bulk fluxes match). The eORCA1 grid + land mask + bathymetry come from NEMO's
 own ``eORCA1.2_mesh_mask.nc`` (tmaskutil / e3t_0), so the geometry matches too.
 
-Loop: ``load_core2_nyf`` -> per step pick the 6-hourly record -> apply CORE-II
-bulk fluxes via ``apply_omip2_surface_fluxes`` (ocean-reaction sign, tripole
-rotation) -> ``model.step``. Annual snapshots + scalar diagnostics are written
+Loop: ``load_core2_nyf`` -> per step pick the 6-hourly record -> build CORE-II
+bulk forcing via ``compute_omip2_surface_forcing`` -> ``model.step(...,
+surface_forcing=...)`` (the core applies the ocean-reaction sign and tripole
+rotation). Annual snapshots + scalar diagnostics are written
 for scoring against the NEMO climatology.
 
 NOTE the applicator is host-side NumPy, so each step round-trips the state
