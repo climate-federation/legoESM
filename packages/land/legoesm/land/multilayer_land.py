@@ -47,9 +47,12 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import (
+    compute_apparent_heat_capacity,
     compute_heat_capacity,
+    invert_soil_layer_enthalpy,
     liquid_water_content,
     moisture_fusion_heat_source,
+    soil_layer_enthalpy,
     solve_snow_soil_thermal,
     solve_soil_thermal,
 )
@@ -572,20 +575,6 @@ def _step_multilayer_land_impl(
             raise ValueError(
                 "snow_scheme='layered' needs the snow-layer state; build the state "
                 "with init_multilayer_land_state(config=...) or seed_snow_layers().")
-        if config.thermal.enable_freeze_thaw:
-            # The bulk branch charges the fusion heat of the ice change the
-            # hydrology step makes at fixed T (moisture_fusion_heat_source, with
-            # sub-steps) on its POST-hydrology thermal solve.  This branch solves
-            # soil heat BEFORE hydrology (the pack's drainage feeds the Richards
-            # top flux), so that term has no place to be charged yet; running
-            # without it would silently reopen the enthalpy leak main closed.
-            raise ValueError(
-                "snow_scheme='layered' is not supported with "
-                "thermal.enable_freeze_thaw=True yet: the layered branch solves "
-                "soil heat before the hydrology step and cannot charge the "
-                "fusion heat of the hydrology-driven ice change "
-                "(moisture_fusion_heat_source). Use snow_scheme='bulk' with "
-                "freeze/thaw, or layered snow with freeze/thaw off.")
         scc = config.snow_column
         pack = SnowColumnState(swe_ice=state.snow_ice_layers,
                                swe_liq=state.snow_liq_layers,
@@ -1396,14 +1385,40 @@ def _step_multilayer_land_impl(
         # The snow terms (sublim_actual at L_s) are identical in the pre and final
         # excess and cancel here, so a negative snow sublimation cost is booked
         # exactly once, by the combined solve above.
-        # Charged as a sensible increment of the top soil layer at the heat
-        # capacity the combined solve used (start-of-step theta; freeze/thaw is
-        # refused on this branch), so pack + soil energy closes against the
-        # realised latent flux (in - out - dStorage = 0).
         evap_excess_energy_post = evap_excess_energy - evap_excess_energy_pre
-        C_top = compute_heat_capacity(
-            theta, config.hydraulics, config.thermal)[:, 0] * dz[0]   # J/m2/K
-        T_soil_new = T_soil_new.at[:, 0].add(evap_excess_energy_post * dt / C_top)
+        if config.thermal.enable_freeze_thaw:
+            # Soil freeze/thaw (CLM5 order: one combined solve, then an
+            # energy-exact phase correction, SoilTemperatureMod Phasechange_beta).
+            # Every soil layer is re-equilibrated on its freezing curve at the
+            # post-Richards water: its enthalpy (ice at T_freeze = 0) is the
+            # start-of-step value plus the energy the linear solve deposited in
+            # it (row identity, C_app at start-of-step T and water, as the solve
+            # used), plus the water Richards moved, booked as LIQUID AT T_freeze
+            # (rho_w*L_f per m3; meltwater from the pack arrives so; water
+            # leaving a frozen layer melts its ice there), plus the unmet-
+            # evaporation remainder on the top layer.  The solve's overshoot
+            # across the 0 C curtain becomes phase change, so pack + soil energy
+            # closes exactly; the surface flux stays the one booked by the solve.
+            Q_solve = compute_apparent_heat_capacity(
+                T_soil, theta, config.hydraulics, config.thermal) * dz * (
+                    T_soil_new - T_soil)                               # J/m2
+            W_moved = (constants.rho_water * constants.L_f  # latent-ok: liquid referenced to ice at T_freeze, where L_f(T_freeze) == L_f
+                       * dz * (richards_out.theta_new - theta))        # J/m2
+            E_target = (soil_layer_enthalpy(T_soil, theta, dz, config.hydraulics,
+                                            config.thermal)
+                        + Q_solve + W_moved)
+            E_target = E_target.at[:, 0].add(evap_excess_energy_post * dt)
+            T_soil_new = invert_soil_layer_enthalpy(
+                E_target, T_soil_new, richards_out.theta_new, dz,
+                config.hydraulics, config.thermal)
+        else:
+            # Charged as a sensible increment of the top soil layer at the heat
+            # capacity the combined solve used (start-of-step theta), so pack +
+            # soil energy closes against the realised latent flux
+            # (in - out - dStorage = 0).
+            C_top = compute_heat_capacity(
+                theta, config.hydraulics, config.thermal)[:, 0] * dz[0]   # J/m2/K
+            T_soil_new = T_soil_new.at[:, 0].add(evap_excess_energy_post * dt / C_top)
         snow_ground_heat_applied = snow_ground_heat_applied + evap_excess_energy_post
 
     # --- Soil thermal diffusion (final, with converged G) ---

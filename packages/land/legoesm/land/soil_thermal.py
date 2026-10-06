@@ -243,6 +243,94 @@ def moisture_fusion_heat_source(
     return constants.rho_water * constants.L_f * d_ice * dz / dt
 
 
+# Bisection steps of the enthalpy inversion: 40 halvings of a bracket up to a few
+# hundred K wide leave < 1e-9 K before the closing Newton step.  A loop count,
+# never config.
+_ENTHALPY_BISECTION_STEPS = 40
+
+
+def _sensible_base_and_split(theta, hydro_config, thermal_config):
+    """``A`` (the heat capacity with all water counted as ice) [J/m3/K], the
+    liquid-minus-ice capacity ``dC`` [J/m3/K] and the residual film ``theta_min``
+    (the same clip as :func:`liquid_water_content`)."""
+    theta_sat = hydro_config.theta_sat
+    A = ((1.0 - theta_sat) * thermal_config.C_soil
+         + theta * thermal_config.C_ice_vol
+         + (theta_sat - theta) * thermal_config.C_air)
+    dC = thermal_config.C_water_vol - thermal_config.C_ice_vol
+    theta_min = jnp.clip(thermal_config.theta_liq_residual_frac * theta, 0.0, theta)
+    return A, dC, theta_min
+
+
+def soil_layer_enthalpy(
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    dz: jnp.ndarray,
+    hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig,
+) -> jnp.ndarray:
+    """Layer enthalpy [J/m2] whose temperature derivative is exactly the
+    apparent heat capacity ``compute_apparent_heat_capacity * dz``.
+
+    Reference: ice at ``T_freeze`` (zero), so liquid at ``T_freeze`` carries
+    ``rho_water * L_f`` per m3, the same reference as the snowpack enthalpy
+    (``snow_column``).  With ``x = T - T_freeze`` and the freezing curve of
+    :func:`liquid_water_content`::
+
+        E/dz = (A + dC*theta) x + dC (theta - theta_min) w [softplus(-x/w) - ln 2]
+               + rho_w L_f theta_liq(T)
+
+    the integral of ``C_sensible + rho_w L_f d(theta_liq)/dT`` in T, where
+    ``A = (1-theta_sat) C_soil + theta C_ice + (theta_sat-theta) C_air`` and
+    ``dC = C_water - C_ice``.
+    """
+    w = thermal_config.freeze_curve_width_K
+    A, dC, theta_min = _sensible_base_and_split(theta, hydro_config, thermal_config)
+    theta_liq, _ = liquid_water_content(T_soil, theta, thermal_config)
+    x = T_soil - constants.T_freeze
+    sensible = ((A + dC * theta) * x
+                + dC * (theta - theta_min) * w
+                * (jax.nn.softplus(-x / w) - jnp.log(2.0)))
+    return (sensible + constants.rho_water * constants.L_f * theta_liq) * dz
+
+
+def invert_soil_layer_enthalpy(
+    E_target: jnp.ndarray,
+    T_guess: jnp.ndarray,
+    theta: jnp.ndarray,
+    dz: jnp.ndarray,
+    hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig,
+) -> jnp.ndarray:
+    """Temperature ``T`` with ``soil_layer_enthalpy(T, theta) == E_target``.
+
+    The enthalpy rises strictly with T (slope >= ``(A + dC*theta_min) dz > 0``),
+    so ``[T_guess -+ |E_target - E(T_guess)| / slope_min]`` brackets the root.
+    Bisection under ``stop_gradient`` finds it, then one Newton step from the
+    bisected point carries the implicit-function derivative
+    ``dT = (dE_target - dE)/C_app`` for ``jax.grad``.
+    """
+    sg = jax.lax.stop_gradient
+    E_t, th, T_g = sg(E_target), sg(theta), sg(T_guess)
+    A, dC, theta_min = _sensible_base_and_split(th, hydro_config, thermal_config)
+    slope_min = (A + dC * theta_min) * dz
+    half = jnp.abs(E_t - soil_layer_enthalpy(T_g, th, dz, hydro_config,
+                                             thermal_config)) / slope_min
+
+    def _bisect(_, lo_hi):
+        lo, hi = lo_hi
+        mid = 0.5 * (lo + hi)
+        below = soil_layer_enthalpy(mid, th, dz, hydro_config, thermal_config) < E_t
+        return jnp.where(below, mid, lo), jnp.where(below, hi, mid)
+
+    lo, hi = jax.lax.fori_loop(0, _ENTHALPY_BISECTION_STEPS, _bisect,
+                               (T_g - half, T_g + half))
+    T_b = sg(0.5 * (lo + hi))
+    C = compute_apparent_heat_capacity(T_b, theta, hydro_config, thermal_config) * dz
+    return T_b - (soil_layer_enthalpy(T_b, theta, dz, hydro_config, thermal_config)
+                  - E_target) / C
+
+
 def compute_apparent_heat_capacity(
     T_soil: jnp.ndarray,
     theta: jnp.ndarray,

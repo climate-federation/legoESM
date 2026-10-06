@@ -25,10 +25,11 @@ from legoesm.land.snow_column import (
     SnowColumnState, column_enthalpy, seed_snow_state, snow_add_mass,
     snow_phase_and_percolate, snow_remap_compact, snow_thermal_props,
     total_water)
-from legoesm.land.soil_grid import make_soil_grid
+from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import (
     SoilThermalConfig, compute_apparent_heat_capacity, compute_heat_capacity,
+    invert_soil_layer_enthalpy, liquid_water_content, soil_layer_enthalpy,
     solve_snow_soil_thermal, solve_soil_thermal)
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 
@@ -79,6 +80,19 @@ def _run(cfg, st, forcing, n_steps, dt, lp=None, lat=0.9):
 def _soil_water(cfg, st):
     dz = make_soil_grid(cfg.soil_grid).dz
     return (jnp.sum(st.theta_soil * dz, -1) + st.surface_water) * RHO_W
+
+
+def _soil_dE(s, s_new, grid, hc, tc):
+    """Soil energy change [J/m2] in the closure's convention.  Freeze/thaw off:
+    sensible at the start-of-step water (moved water carries no heat).  On: the
+    exact layer enthalpy, minus the water Richards moved booked as liquid at
+    T_freeze (rho_w L_f per m3)."""
+    if not tc.enable_freeze_thaw:
+        C = compute_heat_capacity(s.theta_soil, hc, tc) * grid.dz
+        return jnp.sum(C * (s_new.T_soil - s.T_soil), -1)
+    E = lambda st: soil_layer_enthalpy(st.T_soil, st.theta_soil, grid.dz, hc, tc)
+    W = RHO_W * constants.L_f * grid.dz * (s_new.theta_soil - s.theta_soil)
+    return jnp.sum(E(s_new) - E(s) - W, -1)
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +249,12 @@ def test_water_closes_and_albedo_contract_holds_through_melt_and_refreeze():
 
 
 @pytest.mark.parametrize("scheme, ft", [
-    # Freeze/thaw off: the layered pack refuses it.  With it off the LAI-2 column
-    # converges through the melt (measured 2026-10-04); the earlier xfail, recorded
-    # with freeze/thaw on, had since been satisfied by the refusal's ValueError.
+    # The LAI-2 two-leaf column is the case #1808 recorded as non-converging; it
+    # must converge (n_held == 0) with freeze/thaw off AND on.
     ("two_leaf", False),
-    ("seb", False)])
+    ("seb", False),
+    ("two_leaf", True),
+    ("seb", True)])
 def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
     """Full land step, both surface schemes, through cold snowfall, rain on snow
     and a warm melt: pack enthalpy + soil energy change by exactly
@@ -255,22 +270,23 @@ def test_land_step_closes_pack_plus_soil_energy(scheme, ft):
     tc, hc = cfg.thermal, cfg.hydraulics
     dt = 1800.0
     saw = {"drain": False, "rain": False}
+    moved = False
     for forcing, nstep in ((_forcing(n, T_air=255.0, snow=2e-4, q=0.0015), 8),
                            (_forcing(n, T_air=276.0, rain=5e-4, lw=320.0), 8),
                            (_forcing(n, T_air=283.0, sw=600.0, lw=330.0, q=0.004), 16)):
         _, out = _run(cfg, s, forcing, nstep, dt, lp=lp)
         for s_new, resp, sfc in out:
-            Cg = (compute_apparent_heat_capacity(s.T_soil, s.theta_soil, hc, tc) if ft
-                  else compute_heat_capacity(s.theta_soil, hc, tc)) * grid.dz
-            dE = (column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(s))
-                  + jnp.sum(Cg * (s_new.T_soil - s.T_soil), -1))
+            dE = column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(s)) + _soil_dE(
+                s, s_new, grid, hc, tc)
             src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
             np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
             assert int(sfc.n_held) == 0
+            moved |= bool(jnp.any(jnp.abs(s_new.theta_soil - s.theta_soil) > 1e-4))
             saw["drain"] |= bool(jnp.any(s_new.snow_depth < s.snow_depth - 1e-3))
             saw["rain"] |= float(forcing.precip_total[0]) > float(forcing.precip_snow[0])
             s = s_new
     assert all(saw.values()), saw
+    assert moved          # water moved through the (frozen) soil
 
 
 def test_melt_is_dt_converged_and_overshoot_is_first_order():
@@ -413,11 +429,6 @@ def test_unknown_or_unsupported_snow_scheme_raises():
     with pytest.raises(ValueError, match="elev_bands"):
         step_multilayer_land_with_diagnostics(
             init_multilayer_land_state(1, banded, T_init=270.0), f, banded, 1.0, 1800.0)
-    ft = _cfg()
-    ft = ft._replace(thermal=ft.thermal._replace(enable_freeze_thaw=True))
-    with pytest.raises(ValueError, match="enable_freeze_thaw"):
-        step_multilayer_land_with_diagnostics(
-            init_multilayer_land_state(1, ft, T_init=270.0), f, ft, 1.0, 1800.0)
 
 
 def test_init_allocates_layers_only_for_layered():
@@ -677,3 +688,197 @@ def test_vapour_conductance_reproduces_the_scheme_flux_under_most(cover, q_air):
     assert abs(E) > 1e-7, E
     np.testing.assert_allclose(
         float(out.vapour_conductance[0]) * (float(out.q_surface[0]) - q_air), E, rtol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# soil freeze/thaw under the layered pack
+# ---------------------------------------------------------------------------
+# Production soil column: 10 layers to 3 m, top layer ~2.9 mm.
+_PROD_GRID = SoilGridConfig(n_layers=10, total_depth=3.0)
+_FT = SoilThermalConfig(enable_freeze_thaw=True)
+_HC = SoilHydraulicsConfig()
+
+
+def _cfg_ft(scheme=None, **kw):
+    cfg = _cfg(scheme=scheme, soil_grid=_PROD_GRID, **kw)
+    return cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=True))
+
+
+def _ice(T, th):
+    return th - liquid_water_content(T, th, _FT)[0]
+
+
+def test_soil_layer_enthalpy_derivative_is_the_apparent_heat_capacity():
+    T = TF + jnp.linspace(-6.0, 4.0, 401)
+    dz = jnp.asarray(0.003)
+    for th in (0.05, 0.25, 0.45):
+        th_a = jnp.full_like(T, th)
+        dEdT = jax.vmap(jax.grad(lambda t, w: soil_layer_enthalpy(t, w, dz, _HC, _FT)))(
+            T, th_a)
+        C = compute_apparent_heat_capacity(T, th_a, _HC, _FT) * dz
+        np.testing.assert_allclose(dEdT, C, rtol=1e-12)
+    # Reference: ice at T_freeze is zero; liquid at T_freeze carries rho_w L_f.
+    th0 = jnp.asarray(0.3)
+    E_f = soil_layer_enthalpy(jnp.asarray(TF), th0, 1.0, _HC, _FT)
+    np.testing.assert_allclose(E_f, RHO_W * constants.L_f * liquid_water_content(
+        jnp.asarray(TF), th0, _FT)[0], rtol=1e-12)
+
+
+def test_enthalpy_inversion_round_trips_and_carries_the_implicit_gradient():
+    dz = jnp.asarray([0.003, 0.05, 0.4])
+    th = jnp.asarray([0.30, 0.20, 0.40])
+    for T_true in (TF - 8.0, TF - 0.3, TF + 0.05, TF + 3.0):
+        Tt = jnp.full(3, T_true)
+        E = soil_layer_enthalpy(Tt, th, dz, _HC, _FT)
+        T = invert_soil_layer_enthalpy(E, Tt + 5.0, th, dz, _HC, _FT)
+        np.testing.assert_allclose(T, Tt, rtol=0, atol=1e-9)
+    E0 = soil_layer_enthalpy(jnp.full(3, TF - 0.2), th, dz, _HC, _FT)
+    g = jax.grad(lambda e: jnp.sum(invert_soil_layer_enthalpy(
+        e, jnp.full(3, TF), th, dz, _HC, _FT)))(E0)
+    T0 = invert_soil_layer_enthalpy(E0, jnp.full(3, TF), th, dz, _HC, _FT)
+    np.testing.assert_allclose(
+        g, 1.0 / (compute_apparent_heat_capacity(T0, th, _HC, _FT) * dz), rtol=1e-8)
+
+
+def test_liquid_water_into_a_frozen_layer_freezes_and_stops_on_the_curtain():
+    """0.6 kg/m2 of liquid at T_freeze into a -4 C, 2.9 mm layer.  Freezing it
+    releases ~2e5 J/m2 against ~5e3 J/m2/K of sensible capacity: charged as a
+    sensible source this would be ~+40 K; re-equilibrated it warms the layer to
+    the curtain and only part of the water freezes."""
+    dz = jnp.asarray(0.0029)
+    th0, T0 = jnp.asarray(0.15), jnp.asarray(TF - 4.0)
+    th1 = th0 + 0.6 / (RHO_W * dz)
+    E = (soil_layer_enthalpy(T0, th0, dz, _HC, _FT)
+         + RHO_W * constants.L_f * dz * (th1 - th0))
+    T1 = invert_soil_layer_enthalpy(E, T0, th1, dz, _HC, _FT)
+    assert TF - 1.0 < float(T1) <= TF + _FT.freeze_curve_width_K, float(T1)
+    assert float(_ice(T1, th1)) > float(_ice(T0, th0))          # some of it froze
+    assert float(_ice(T1, th1)) < float(_ice(T0, th0)) + float(th1 - th0)
+
+
+
+def test_liquid_water_into_a_warm_layer_only_mixes_sensibly():
+    """Water at T_freeze into a +5 C layer: no ice forms (fusion ~ 0); the layer
+    cools by sensible mixing, staying between T_freeze and its start."""
+    dz = jnp.asarray(0.05)
+    th0, T0 = jnp.asarray(0.20), jnp.asarray(TF + 5.0)
+    th1 = th0 + 0.05
+    E = (soil_layer_enthalpy(T0, th0, dz, _HC, _FT)
+         + RHO_W * constants.L_f * dz * (th1 - th0))
+    T1 = invert_soil_layer_enthalpy(E, T0, th1, dz, _HC, _FT)
+    assert TF + 3.0 < float(T1) < float(T0), float(T1)
+    assert float(_ice(T1, th1)) < 1e-4
+
+def _closure_run(cfg, st, seq, dt=1800.0, lp=None):
+    """Run ``seq`` and assert pack + soil energy closure every step; returns the
+    list of (old, new) states."""
+    grid = make_soil_grid(cfg.soil_grid)
+    tc, hc = cfg.thermal, cfg.hydraulics
+    pairs = []
+    for forcing, nstep in seq:
+        _, out = _run(cfg, st, forcing, nstep, dt, lp=lp)
+        for s_new, _, sfc in out:
+            dE = column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(st)) + _soil_dE(
+                st, s_new, grid, hc, tc)
+            src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
+            np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
+            assert int(sfc.n_held) == 0
+            pairs.append((st, s_new))
+            st = s_new
+    return pairs
+
+
+@pytest.mark.parametrize("case", ["freeze_wet_soil", "evaporate_frozen_top",
+                                  "rain_on_frozen"])
+def test_freeze_thaw_closes_energy_in_both_directions(case):
+    """Snow-free (empty pack) columns on the production grid: a cold clear night
+    over wet thawed soil (ice created by cooling), dry sunny air over a frozen
+    top (water leaves a frozen layer), rain onto frozen soil (water arrives and
+    freezes).  Exact closure every step, and the process actually happened."""
+    cfg = _cfg_ft()
+    T0, theta0 = {"freeze_wet_soil": (275.0, 0.40), "evaporate_frozen_top": (268.0, 0.30),
+                  "rain_on_frozen": (269.0, 0.15)}[case]
+    st = init_multilayer_land_state(1, cfg, T_init=T0, theta_init=theta0)
+    st = seed_snow_layers(st, cfg)
+    f = {"freeze_wet_soil": _forcing(1, T_air=250.0, lw=170.0, sw=0.0, q=0.0005),
+         "evaporate_frozen_top": _forcing(1, T_air=271.0, sw=400.0, lw=230.0, q=0.0002,
+                                          wind=8.0),
+         "rain_on_frozen": _forcing(1, T_air=276.0, rain=1e-3, sw=0.0, lw=300.0,
+                                    q=0.005)}[case]
+    pairs = _closure_run(cfg, st, ((f, 12),))
+    s0, s1 = pairs[0][0], pairs[-1][1]
+    ice0, ice1 = _ice(s0.T_soil, s0.theta_soil), _ice(s1.T_soil, s1.theta_soil)
+    if case == "freeze_wet_soil":
+        assert float(ice1[0, 0]) > float(ice0[0, 0]) + 0.05
+    elif case == "evaporate_frozen_top":
+        assert float(s1.theta_soil[0, 0]) < float(s0.theta_soil[0, 0])
+        assert float(s1.T_soil[0, 0]) < TF
+    else:
+        # The first step's rain soaks in and part of it freezes (measured: top
+        # two layers +0.013 / +0.006 ice); the warm rain then thaws the top.
+        a, b = pairs[0]
+        d_ice = _ice(b.T_soil, b.theta_soil) - _ice(a.T_soil, a.theta_soil)
+        assert float(b.theta_soil[0, 0] - a.theta_soil[0, 0]) > 0.1
+        assert float(d_ice[0, 0]) > 0.005 and float(d_ice[0, 1]) > 0.0
+
+
+def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
+    """A melting pack over -4 C soil (production grid, two-leaf): exact closure
+    at 1800 s and 900 s, and the day-end soil and pack agree between the two."""
+    cfg = _cfg_ft(scheme=TwoLeafCanopyConfig())
+    lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.5]))
+    f = _forcing(1, T_air=281.0, sw=600.0, lw=320.0, q=0.004)
+    end = {}
+    for dt in (1800.0, 900.0):
+        st = _state(cfg, 1, T_soil=TF - 4.0, swe=20.0)
+        pairs = _closure_run(cfg, st, ((f, int(86400 / dt)),), dt=dt, lp=lp)
+        end[dt] = pairs[-1][1]
+    a, b = end[1800.0], end[900.0]
+    assert float(a.snow_depth[0]) < 20.0                       # it melted
+    np.testing.assert_allclose(a.snow_depth, b.snow_depth, atol=0.05 * 20.0)
+    np.testing.assert_allclose(a.T_soil[:, :4], b.T_soil[:, :4], atol=0.5)
+
+
+def test_diurnal_freeze_thaw_does_not_ring_at_1800_s():
+    """Three days of warm days / cold nights over moist bare soil at 1800 s on
+    the 2.9 mm top layer: the top layer crosses the curtain about twice a day,
+    never flip-flopping step to step."""
+    cfg = _cfg_ft()
+    st = seed_snow_layers(init_multilayer_land_state(1, cfg, T_init=TF + 0.5,
+                                                     theta_init=0.35), cfg)
+    day = _forcing(1, T_air=280.0, sw=450.0, lw=290.0, q=0.003)
+    night = _forcing(1, T_air=262.0, sw=0.0, lw=200.0, q=0.001)
+    pairs = _closure_run(cfg, st, ((day, 24), (night, 24)) * 3)
+    x = np.array([float(n.T_soil[0, 0]) for _, n in pairs]) - TF
+    sign = np.sign(np.where(np.abs(x) > _FT.freeze_curve_width_K, x, 0.0))
+    s = sign[sign != 0]
+    flips = int(np.sum(s[1:] != s[:-1]))
+    assert 2 <= flips <= 7, (flips, x)                        # ~1 freeze + 1 thaw a day
+    assert bool(np.all(np.isfinite(x)))
+
+
+def test_freeze_thaw_layered_jit_matches_eager_and_gradient_matches_fd():
+    cfg0 = _cfg_ft()
+    st = _state(cfg0, 2, T_soil=TF - 0.3, swe=8.0)
+    f = _forcing(2, T_air=278.0, rain=3e-4, sw=300.0, lw=300.0, q=0.004)
+    lat = jnp.full(2, 0.9)
+    a = step_multilayer_land_with_diagnostics(st, f, cfg0, 1.0, 1800.0, lat=lat)
+    b = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg0, 1.0, 1800.0, lat=lat))(st)
+    for x, y in zip(jax.tree.leaves(a[0]), jax.tree.leaves(b[0])):
+        np.testing.assert_allclose(x, y, rtol=1e-12, atol=1e-10)
+
+    @jax.jit
+    def loss(r):
+        cfg = cfg0._replace(thermal=cfg0.thermal._replace(theta_liq_residual_frac=r))
+        s = st
+        for _ in range(3):
+            s, _, _, _ = step_multilayer_land_with_diagnostics(s, f, cfg, 1.0, 1800.0,
+                                                               lat=lat)
+        return jnp.sum(s.T_soil[:, :3])
+
+    g = float(jax.grad(loss)(0.05))
+    h = 1e-5
+    fd = float((loss(0.05 + h) - loss(0.05 - h)) / (2 * h))
+    assert np.isfinite(g) and abs(g) > 1e-3, g
+    assert g == pytest.approx(fd, rel=1e-3)
