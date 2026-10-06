@@ -448,6 +448,7 @@ def capture(a):
         for k, v in solve(**o).items():
             out_arr[f"rad_{n}_{k}"] = v
         print(f"radiation arm {n} ({time.time() - t0:.0f}s)", flush=True)
+    control_fail: list = []
     if a.era5_pl:
         # CONTROL GATE: the round-trip arms must reproduce clear-sky surface
         # downward LW over 45-70N land within 1 W/m2 (area-weighted), else the
@@ -462,8 +463,8 @@ def capture(a):
             _ad = float((np.abs(_dd) * _w).sum() / _w.sum())     # no cancellation
             print(f"control {_arm}: 45-70N land clear-sky DLW change mean {_d:+.3f}, "
                   f"mean |.| {_ad:.3f} W/m2", flush=True)
-            if _ad > 1.0:
-                raise SystemExit(f"FATAL: control {_arm} moved DLW by mean |.| {_ad:.2f} W/m2 (> 1)")
+            if not np.isfinite(_ad) or _ad > 1.0:
+                control_fail.append(f"{_arm}: mean |dDLW| {_ad} W/m2 (limit 1, must be finite)")
     out_arr["rad_sfc_albedo"] = np.broadcast_to(
         np.asarray(ra["sfc_albedo_override"]), out_arr["rad_inst_olr"].shape).copy()
     out_arr["rad_cos_sza"] = np.asarray(ra["cos_sza"])
@@ -483,8 +484,11 @@ def capture(a):
             "argv": argv}
     f = out / f"cap_{a.run}_d{a.day:04d}{tag}.npz"
     meta["argv_tail"] = argv[-8:]
+    meta["control_fail"] = control_fail
     np.savez(f, meta=json.dumps(meta), **out_arr)
     print(f"wrote {f} ({time.time() - t0:.0f}s)")
+    if control_fail:   # written first so the failing arrays can be inspected
+        raise SystemExit("FATAL: ERA5-swap control failed: " + "; ".join(control_fail))
     return 0
 
 
