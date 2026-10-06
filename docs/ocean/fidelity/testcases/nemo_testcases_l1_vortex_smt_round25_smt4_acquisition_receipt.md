@@ -224,13 +224,16 @@ its passive record before making a physics claim.
 
 ## 7. Independent review and final gates
 
-The required separate review was attempted on the clean committed tree with:
+The required separate review was attempted twice on clean committed trees:
+once for the acquisition package and once after the complete physics landing.
+The landing review used:
 
 ```text
 codex exec --sandbox read-only -C <writable-clone> <adversarial review prompt>
 ```
 
-It exited 1 before reading the diff. Its verdict, quoted verbatim, was:
+Both exited 1 before reading the diff. The landing attempt's verdict, quoted
+verbatim, was:
 
 ```text
 WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
@@ -239,8 +242,9 @@ Error: failed to initialize in-process app-server client: Read-only file system 
 ```
 
 **Independent review unavailable in-sandbox.** There is no `SHIP`, `HOLD`,
-or `DO NOT SHIP` verdict, and none is invented. The full log is
-`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/codex_review.log`.
+or `DO NOT SHIP` verdict, and none is invented. The acquisition and landing
+logs are `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/codex_review.log`
+and `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/codex_review_landing.log`.
 
 The first citation-gate pass correctly refused one off-by-one endpoint and
 three ambiguous repeated symbols. After correcting and committing those
@@ -251,13 +255,18 @@ failures, 0 unmapped**. Shifting
 by two lines exits **1** with one citation failure, so the plant fires.
 
 The final focused suite was launched only after the host battery census
-returned zero:
+returned zero. It includes the generic NEMO-GYRE recipe, complete GM/Redi,
+SMT card, constructibility, acquisition, and citation suites:
 
 ```text
+tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
 tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round224_smt3_record.py
 tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round237_smt4_record.py
-tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
-============================== 33 passed in 3.52s ==============================
+tests/ocean/fidelity/test_fidelity_card_constructibility.py
+tests/ocean/unit/test_gm_redi_latlon_cgrid.py
+tests/ocean/unit/test_nemo_vortex_smt_card.py
+tests/ocean/unit/test_nemo_recipe.py
+======================= 201 passed in 537.32s (0:08:57) ========================
 ```
 
 ## 8. OPEN — round 238
