@@ -98,6 +98,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --ice-lead-freeze-source nemo_qlead \
   --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
+  --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-coeff 70 \
   --sss-restore --sss-restore-channel water_flux \
   --sss-restore-normalization live_s \

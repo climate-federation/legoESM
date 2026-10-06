@@ -106,6 +106,26 @@ def test_profiles_layout_and_wind_response(flat_mesh, z_shim):
     assert model._tke_profiles_fn is not None
 
 
+def test_langmuir_rhs_coupling_reaches_the_fesom_kernel(flat_mesh, z_shim):
+    """The FESOM bridge hands config.tke straight to tke_vertical_mixing, so
+    the NEMO Langmuir/dissipation ordering must change the forced profiles
+    (identical profiles = the knob was dropped on this grid)."""
+    from scripts.run.run_omip_core2 import orca1_zdftke_config
+    state = create_rest_state(flat_mesh, z_shim, stratified=True,
+                              vertical_coordinate="zstar")
+    zg = fesom_zgeom(flat_mesh)
+
+    def run(c):
+        vm = VerticalMixingConfig(scheme="tke", tke=orca1_zdftke_config(
+            prognostic=True)._replace(eice=0, tke_langmuir_rhs_coupling=c))
+        return make_tke_profiles_fesom(vm)(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+    Kv_s, _, tke_s = run("separate")
+    Kv_s2, _, _ = run("separate")
+    Kv_p, _, tke_p = run("nemo_pre_solve")
+    assert bool(jnp.all(Kv_s2 == Kv_s))
+    assert float(jnp.max(jnp.abs(tke_p - tke_s))) > 0.0
+
+
 def test_model_step_injects_and_carries_tke(flat_mesh, z_shim):
     model = _model(flat_mesh, z_shim)
     state = create_rest_state(flat_mesh, z_shim, stratified=True,

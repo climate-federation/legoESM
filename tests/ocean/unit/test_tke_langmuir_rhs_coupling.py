@@ -100,7 +100,7 @@ def test_step_entry_shear_refuses_gradient_richardson_prandtl():
                             precomputed_p_sh2=jnp.zeros((1, 1, 3)))
 
 
-def test_cli_flag_reaches_the_card_and_is_tripole_only():
+def test_cli_flag_reaches_the_card_on_every_tke_lane():
     from scripts.run import run_omip_core2 as r
     a = r._build_arg_parser().parse_args(
         ["--grid", "tripole", "--tke-langmuir-rhs-coupling", "nemo_pre_solve"])
@@ -113,10 +113,33 @@ def test_cli_flag_reaches_the_card_and_is_tripole_only():
     assert vm.tke.tke_langmuir_rhs_coupling == "nemo_pre_solve"
     with pytest.raises(ValueError, match="requires --tripole-vmix tke"):
         r.build_tripole_vmix_config("kpp", tke_langmuir_rhs_coupling="nemo_pre_solve")
-    with pytest.raises(SystemExit, match="tke-langmuir-rhs-coupling"):
-        r._validate_tke_card_grid("mpas", tripole_vmix="none",
-                                  tke_langmuir_rhs_coupling="nemo_pre_solve",
-                                  mpas_vmix="tke")
+    # all three lanes run tke_vertical_mixing: accepted where the closure runs
+    r._validate_tke_card_grid("mpas", tripole_vmix="none",
+                              tke_langmuir_rhs_coupling="nemo_pre_solve",
+                              mpas_vmix="tke")
+    r._validate_tke_card_grid("fesom", tripole_vmix="none",
+                              tke_langmuir_rhs_coupling="nemo_pre_solve",
+                              fesom_vmix="legoesm_tke")
+    # ... and refused where it would be a silent no-op
+    for grid, kw in (("mpas", {"mpas_vmix": "kpp"}),
+                     ("fesom", {"fesom_vmix": "fesom"}),
+                     ("tripole", {"tripole_vmix": "kpp"})):
+        with pytest.raises(SystemExit, match="tke-langmuir-rhs-coupling"):
+            r._validate_tke_card_grid(grid, tke_langmuir_rhs_coupling="nemo_pre_solve", **kw)
+    assert "tke_langmuir_rhs_coupling" in r._FESOM_WIRED_DESTS
+
+
+def test_mpas_and_fesom_builders_thread_the_flag():
+    """Both non-tripole call sites pass the CLI value into the TKE card
+    (a knob validated and then dropped is a silent no-op)."""
+    import inspect
+    from scripts.run import run_omip_core2 as r
+    src = inspect.getsource(r.main)
+    n = src.count("tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling")
+    assert n >= 4, n   # validator, tripole attach, MPAS, FESOM
+    for marker in ('if args.mpas_vmix == "tke"', 'if args.fesom_vmix == "legoesm_tke"'):
+        i = src.index(marker)
+        assert "tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling" in src[i - 900:i]
 
 
 def test_public_path_coupling_raises_forced_tke_above_floor():
@@ -131,7 +154,7 @@ def test_public_path_coupling_raises_forced_tke_above_floor():
     dz_half = jnp.full((1, 1, nz - 1), 2.0)
     z_int = 0.5 * (zc[1:] + zc[:-1])
     e0 = jnp.full((1, 1, nz - 1), 3e-4)
-    base = TKEConfig(lc=True, dissipation_discretization="nemo_1p5_split")
+    base = TKEConfig(lc=True, prognostic=True, dissipation_discretization="nemo_1p5_split")
 
     def run(coupling):
         out = tke_vertical_mixing(

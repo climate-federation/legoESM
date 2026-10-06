@@ -95,6 +95,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
   `# ---- THE FOUR ADOPTED SETS, and nothing else, appended ----` \
   --ice-freeze-scheme unesco \

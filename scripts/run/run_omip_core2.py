@@ -2991,7 +2991,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # the MPAS lane threads; _validate_tke_card_grid gates them):
     "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_surface_bc_level", "tke_mxl_choice",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
-    "tke_shear_production", "tke_lc", "tke_etau",
+    "tke_shear_production", "tke_lc", "tke_etau", "tke_langmuir_rhs_coupling",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
@@ -4389,12 +4389,19 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
             "(--grid tripole --tripole-vmix tke, or --grid mpas --mpas-vmix "
             f"tke). Got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
             f"--mpas-vmix {mpas_vmix!r}.")
+    # The coupling lives in tke_vertical_mixing, the pre-mixing solve the
+    # tripole, MPAS (mpas_integration) and FESOM (fesom_integration) TKE
+    # bridges all call; anywhere else the flag would be a silent no-op.
     if tke_langmuir_rhs_coupling is not None and not (
-            grid == "tripole" and tripole_vmix == "tke"):
+            (grid == "tripole" and tripole_vmix == "tke")
+            or (grid == "mpas" and mpas_vmix == "tke")
+            or (grid == "fesom" and fesom_vmix == "legoesm_tke")):
         raise SystemExit(
-            "--tke-langmuir-rhs-coupling takes effect ONLY on --grid tripole "
-            f"--tripole-vmix tke; got --grid {grid!r} --tripole-vmix "
-            f"{tripole_vmix!r}.")
+            "--tke-langmuir-rhs-coupling takes effect ONLY where the legoESM "
+            "TKE closure runs (--grid tripole --tripole-vmix tke, --grid mpas "
+            "--mpas-vmix tke, --grid fesom --fesom-vmix legoesm_tke); got "
+            f"--grid {grid!r} --tripole-vmix {tripole_vmix!r} --mpas-vmix "
+            f"{mpas_vmix!r} --fesom-vmix {fesom_vmix!r}.")
     if tke_step_evaluation is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
@@ -9411,7 +9418,8 @@ def main() -> int:
                     tke_kappa_convention=args.tke_kappa_convention,
                     tke_shear_production=args.tke_shear_production,
                     tke_lc=args.tke_lc, tke_etau=args.tke_etau,
-                    tke_kappah_min=args.tke_kappah_min)
+                    tke_kappah_min=args.tke_kappah_min,
+                    tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -9451,7 +9459,8 @@ def main() -> int:
                 tke_kappa_convention=args.tke_kappa_convention,
                 tke_shear_production=args.tke_shear_production,
                 tke_lc=args.tke_lc, tke_etau=args.tke_etau,
-                tke_kappah_min=args.tke_kappah_min)
+                tke_kappah_min=args.tke_kappah_min,
+                tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
                 if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)
