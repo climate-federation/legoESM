@@ -300,11 +300,11 @@ def test_melt_is_dt_converged_and_overshoot_is_first_order():
     assert 0.0 < over[900.0] < 0.75 * over[1800.0], over
 
 
-# 5.41 K measured + 0.1 K: the same 0.1 K slack the former bulk-relative bound
-# allowed.  The run is deterministic in float64, so the slack only absorbs
-# legitimate small numerical changes; a regression toward the bulk pack's old
-# one-step melt-out (~8 K) still fails.
-_LAYERED_MAX_SKIN_JUMP_K = 5.5
+# 5.409 K measured (2026-10-06, float64, CPU) + 0.1 K: the same 0.1 K slack the
+# former bulk-relative bound allowed.  The slack only absorbs small numerical
+# changes; a regression toward the bulk pack's old one-step melt-out (~8 K)
+# still fails.
+_LAYERED_MAX_SKIN_JUMP_K = 5.51
 
 
 def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
@@ -321,7 +321,7 @@ def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
     seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 72),
            (_forcing(1, T_air=266.0, snow=3e-4, sw=0.0, lw=250.0), 48))
     jumps = {}
-    for scheme in ("layered",):
+    for scheme in ("bulk", "layered"):     # bulk: finiteness + re-accumulation only
         cfg = _cfg(scheme)
         st = _state(cfg, 1, T_soil=273.5, swe=3.0)
         saw_bare = False
