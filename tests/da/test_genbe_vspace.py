@@ -188,3 +188,9 @@ def test_cycling_runs_on_mpas_and_second_cycle_moves_further(mpas):
     one, _ = _run(mpas)
     T_final, T_one = (np.asarray(grid.to_columns(s.T.data))[3, 0] for s in (final, one))
     assert len(diags) == 2 and 280.0 < T_one < T_final < 283.0
+
+
+def test_unpreconditioned_genbe_with_an_inverse_warns(gauss, caplog):
+    with caplog.at_level("WARNING", logger="legoesm.da.incremental"):
+        _run(gauss, use_preconditioning=False)
+    assert "exact only on the subspace" in caplog.text
