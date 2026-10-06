@@ -745,8 +745,8 @@ class GenBETransform:
         is exact (``n_diffusion_iter``
         is unused).  ``inv_multiply`` then works with ``wind_transform=
         "identity"``; the psi/chi transform still refuses (constant psi/chi are
-        null modes).  B^-1 B x reproduces x to ~1e-11 in float64, ~1e-5 in
-        float32.  The length scales and ``horiz_norm`` were fitted for the
+        null modes).  Measured on 40962 cells at 500 km: B^-1 B x
+        reproduces x to ~1e-11 in float64, U^-1 U v to ~1e-5 in float32.  The length scales and ``horiz_norm`` were fitted for the
         explicit kernel; refitting them for this kernel is future work, so the
         correlation is not the same.
     """
@@ -1321,7 +1321,8 @@ class GenBETransform:
     def inv_multiply(self, x: jax.Array) -> jax.Array:
         """Apply B^{-1} x = U^{-T} U^{-1} x.
 
-        Raises NotImplementedError on MPAS meshes (see :meth:`_inverse`).
+        Raises NotImplementedError on MPAS meshes (see :meth:`_inverse`), except
+        with horizontal_scheme="implicit_matern" and wind_transform="identity".
 
         Uses jax.vjp to compute U^{-T} exactly (U^{-1} is linear, so its
         VJP is the matrix transpose applied to the cotangent).

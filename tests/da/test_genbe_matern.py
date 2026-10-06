@@ -83,7 +83,7 @@ def test_U_inverse_U_is_identity_on_the_production_mesh(production):
     assert float(err) < INVERSE_RTOL
 
 
-def test_chebyshev_solve_residual(production):
+def test_horizontal_smooth_roundtrip(production):
     _, B, _ = production
     b = jax.random.normal(jax.random.PRNGKey(3), (B._ncol, B._n_total_ch))
     y = B._horiz_smooth(b) / B._horiz_norm[None, :]
