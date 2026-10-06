@@ -162,7 +162,7 @@ or `DO NOT SHIP` verdict, and none is invented. The full log is
 
 The first citation-gate pass correctly refused one off-by-one endpoint and
 three ambiguous repeated symbols. After correcting and committing those
-pins, the final round gate reports **PASS: 9 citations, 0 failures, 0 unmapped**.
+pins, the final round gate reports **PASS: 8 citations, 0 failures, 0 unmapped**.
 The cumulative default receipt also reports **PASS: 274 citations, 0
 failures, 0 unmapped**. Shifting
 `VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140`
