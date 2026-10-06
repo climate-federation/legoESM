@@ -145,6 +145,7 @@ def test_per_channel_length_scales(production):
 
 
 @pytest.mark.parametrize("bad, match", [(jnp.nan, "must be finite"),
+                                        (-5.0e5, "must be finite and >= 0"),
                                         (1.0e8, "Chebyshev iterations per solve")])
 def test_bad_length_scale_raises(production, bad, match):
     grid, B0, _ = production

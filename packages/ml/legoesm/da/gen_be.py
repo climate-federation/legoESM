@@ -856,6 +856,7 @@ class GenBETransform:
             # floor: a zero length scale gives A = I and a 0/0 in the recurrence
             self._cheb_delta = jnp.maximum(0.5 * (lam_hi - 1.0), 1.0e-30)
             try:
+                len_scale_np = np.asarray(params.len_scale)
                 sqrt_k = float(jnp.sqrt(jnp.max(lam_hi)))
             except (jax.errors.ConcretizationTypeError,
                     jax.errors.TracerArrayConversionError) as err:
@@ -865,10 +866,10 @@ class GenBETransform:
                     "built under jax.grad/jit with respect to the length scale; the "
                     "explicit scheme can."
                 ) from err
-            if not np.isfinite(sqrt_k):
+            if not (np.all(np.isfinite(len_scale_np)) and np.all(len_scale_np >= 0.0)):
                 raise ValueError(
-                    f"GenBETransform: implicit_matern spectral bound is {sqrt_k**2}; "
-                    "len_scale must be finite"
+                    "GenBETransform: implicit_matern len_scale must be finite and >= 0; "
+                    f"got min {np.min(len_scale_np)}, max {np.max(len_scale_np)}"
                 )
             rate = (sqrt_k - 1.0) / (sqrt_k + 1.0)
             with np.errstate(divide="ignore"):
