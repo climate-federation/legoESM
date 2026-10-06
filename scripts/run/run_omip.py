@@ -255,8 +255,8 @@ def build_iwm_config_from_args(args) -> "IWMConfig":
         power_sho_wm2=args.iwm_power_sho,
         scale_bot_m=args.iwm_scale_bot,
         scale_cri_m=args.iwm_scale_cri,
-        n2_mode=getattr(args, "iwm_n2_mode", None) or "insitu",
-        n2_eos_form=getattr(args, "iwm_n2_eos_form", None) or "seos",
+        n2_mode=getattr(args, "iwm_n2_mode", None) or _DEFAULT_IWM_CONFIG.n2_mode,
+        n2_eos_form=getattr(args, "iwm_n2_eos_form", None) or _DEFAULT_IWM_CONFIG.n2_eos_form,
     )
 
 
@@ -829,10 +829,11 @@ def parse_args(argv: list[str] | None = None):
                         "additive avt/avm through the implicit vertical "
                         "solve; requires implicit vertical mixing).")
     p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
-                   help="N^2 the zdfiwm formula reads: insitu (legacy) or "
-                        "nemo_bn2 (NEMO rn2, zdfiwm.F90:185-211).")
+                   help="N^2 the zdfiwm formula reads: nemo_bn2 (default since "
+                        "2026-10-06; NEMO rn2, zdfiwm.F90:185-211) or insitu "
+                        "(old behaviour).")
     p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
-                   help="alpha/beta for --iwm-n2-mode nemo_bn2 (ORCA1: teos10).")
+                   help="alpha/beta for nemo_bn2 (default teos10 = ORCA1).")
     p.add_argument("--iwm-mevar", action="store_true",
                    help="zdfiwm ln_mevar: variable mixing efficiency "
                         "(ORCA1 oracle: off).")
@@ -7165,8 +7166,6 @@ def main():
     args = parse_args()
     if (getattr(args, "iwm_n2_mode", None) or getattr(args, "iwm_n2_eos_form", None)) and not args.iwm:
         raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
-    if getattr(args, "iwm_n2_mode", None) == "nemo_bn2" and not getattr(args, "iwm_n2_eos_form", None):
-        raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
 
     # Route-B multicontroller (jax.distributed cross-process NCCL): initialize
     # the federation BEFORE any device work (model build / device query), or

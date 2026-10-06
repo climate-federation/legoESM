@@ -1342,9 +1342,9 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     and spacings come from the partial thicknesses (``h_partial·J`` —
     exactly NEMO's partial-aware e3t/gdept construction); on a pure
     z-star coordinate they are the reference geometry stretched by the
-    Jacobian.  ``N²`` uses the shared ``compute_N2`` in-situ mode
-    (clipped >= 0) — the same construction as NEMO's ``MAX(0, rn2)``
-    usage in every zdfiwm structure function.
+    Jacobian.  ``N²`` comes from the shared ``compute_N2``, selected by
+    ``iwm_cfg.n2_mode``: ``nemo_bn2`` (default; NEMO's ``rn2`` = eosbn2
+    ``bn2``) or ``insitu`` (clipped >= 0); unknown modes raise.
     """
     from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
     from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (

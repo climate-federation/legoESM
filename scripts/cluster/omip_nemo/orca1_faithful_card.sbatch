@@ -82,6 +82,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
   --dm2dc --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --bbl-adv --woa-init \
   --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc \

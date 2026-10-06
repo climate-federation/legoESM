@@ -208,10 +208,21 @@ def test_iwm_splices_additively_and_only_when_enabled(flat_mesh, z_shim):
     assert float(np.asarray(Av1 - Av0).max()) > 0.0
 
 
-def test_iwm_bn2_mode_is_refused_on_fesom(flat_mesh, z_shim):
-    """FESOM's IWM splice reads in-situ N2; a nemo_bn2 request must fail loudly."""
+def test_iwm_n2_mode_is_consumed_on_fesom(flat_mesh, z_shim):
+    """FESOM's IWM splice honours n2_mode: nemo_bn2 (default) and insitu give
+    different K, and an unknown mode raises instead of falling back."""
     from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
     state = create_rest_state(flat_mesh, z_shim, stratified=True, vertical_coordinate="zstar")
-    prof = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(enabled=True, n2_mode="nemo_bn2")))
-    with pytest.raises(ValueError, match="not wired on the FESOM lane"):
-        prof(state, flat_mesh, fesom_zgeom(flat_mesh), _wind(flat_mesh), dt_tke=DT)
+    zg = fesom_zgeom(flat_mesh)
+    K = {}
+    for mode in ("nemo_bn2", "insitu"):
+        prof = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(
+            enabled=True, n2_mode=mode, power_nsq_wm2=1.0e-3, power_cri_wm2=1.0e-3,
+            power_bot_wm2=1.0e-3)))
+        K[mode] = np.asarray(prof(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)[0])
+        assert np.isfinite(K[mode]).all()
+    assert float(np.abs(K["nemo_bn2"] - K["insitu"]).max()) > 0.0
+    bad = make_tke_profiles_fesom(_vmix()._replace(iwm=IWMConfig(
+        enabled=True, n2_mode="potential", power_nsq_wm2=1.0e-3)))
+    with pytest.raises(ValueError, match="unknown on the FESOM lane"):
+        bad(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)

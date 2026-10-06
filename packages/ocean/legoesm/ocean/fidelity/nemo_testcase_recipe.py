@@ -1782,6 +1782,10 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         mevar=False,
         tsdiff=False,
         require_forcing_maps=True,
+        # Pinned to the behaviour this card was measured with: the IWMConfig
+        # default moved to NEMO's bn2 on 2026-10-06 (zdfiwm.F90:185-211).
+        # Moving this card to "nemo_bn2" is the card owner's decision.
+        n2_mode="insitu",
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(

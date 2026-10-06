@@ -563,10 +563,32 @@ def test_iwm_neutral_column_saturates_only_with_bn2():
     z = create_ocean_z_star(n_levels=6, H_max=4000.0)
     st = rest_state_latlon_cgrid_ocean(grid, z, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0)
     k_bn2 = _iwm_K(st, z, n2_mode="nemo_bn2", n2_eos_form="seos")
-    k_ins = _iwm_K(st, z)
+    k_ins = _iwm_K(st, z, n2_mode="insitu")
     cap = IWMConfig().k_max
     np.testing.assert_allclose(k_bn2, cap, rtol=1e-6)
     assert k_ins.max() < 0.1 * cap
+
+
+def test_iwm_gradient_finite_on_neutral_column():
+    # bn2 is exactly 0 in a neutral layer; the N weighting must not send a NaN
+    # cotangent through sqrt(0) (it did before the double-where).
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        compute_iwm_diffusivity, uniform_iwm_forcing,
+    )
+    nz = 6
+    depth = jnp.linspace(5.0, 500.0, nz)
+    dz_w = jnp.diff(depth)
+    cfg = _IWM_STRONG
+    fields = uniform_iwm_forcing(cfg, ())
+
+    def f(n2):
+        K, _ = compute_iwm_diffusivity(fields, depth, dz_w, jnp.asarray(600.0), n2, cfg=cfg,
+                                       rho_0=RHO0)
+        return jnp.sum(K)
+
+    n2 = jnp.zeros(nz - 1).at[-1].set(1e-5)
+    g = jax.grad(f)(n2)
+    assert bool(jnp.all(jnp.isfinite(g)))
 
 
 def test_iwm_bn2_on_stratified_column_is_bounded_and_mixes(grid_z_state):
@@ -591,9 +613,14 @@ def test_iwm_n2_cli_round_trip_and_guards(monkeypatch):
         ["--iwm", "--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "teos10"])
     cfg = build_iwm_config_from_args(a)
     assert (cfg.n2_mode, cfg.n2_eos_form) == ("nemo_bn2", "teos10")
-    assert build_iwm_config_from_args(core2._build_arg_parser().parse_args(["--iwm"])).n2_mode == "insitu"
-    for argv, msg in ((["--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "seos"], "need --iwm"),
-                      (["--iwm", "--iwm-n2-mode", "nemo_bn2"], "explicit --iwm-n2-eos-form")):
+    # user 2026-10-06: NEMO's bn2 (TEOS-10) is the default, CLI and config alike
+    d = build_iwm_config_from_args(core2._build_arg_parser().parse_args(["--iwm"]))
+    assert (d.n2_mode, d.n2_eos_form) == ("nemo_bn2", "teos10")
+    assert (IWMConfig().n2_mode, IWMConfig().n2_eos_form) == ("nemo_bn2", "teos10")
+    ins = build_iwm_config_from_args(core2._build_arg_parser().parse_args(
+        ["--iwm", "--iwm-n2-mode", "insitu"]))
+    assert ins.n2_mode == "insitu"
+    for argv, msg in ((["--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "seos"], "need --iwm"),):
         monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole"] + argv)
         with pytest.raises(SystemExit, match=msg):
             core2.main()
@@ -602,8 +629,7 @@ def test_iwm_n2_cli_round_trip_and_guards(monkeypatch):
 def test_iwm_n2_guards_in_run_omip(monkeypatch):
     import sys
     import scripts.run.run_omip as ro
-    for argv, msg in ((["--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "seos"], "need --iwm"),
-                      (["--iwm", "--iwm-n2-mode", "nemo_bn2"], "explicit --iwm-n2-eos-form")):
+    for argv, msg in ((["--iwm-n2-mode", "nemo_bn2", "--iwm-n2-eos-form", "seos"], "need --iwm"),):
         monkeypatch.setattr(sys, "argv", ["run_omip.py"] + argv)
         with pytest.raises(SystemExit, match=msg):
             ro.main()

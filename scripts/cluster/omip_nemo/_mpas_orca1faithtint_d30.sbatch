@@ -130,6 +130,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   --prognostic-ice-dynamics free_drift --ice-lead-freeze-source nemo_qlead \
   --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
   --bbl-adv --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
   --restart-save $OUT/restart_leg$LEG.npz \
   $([ "$LEG" -gt 1 ] && echo "--restart-from $OUT/restart_leg$((LEG-1)).npz") \
