@@ -15,7 +15,7 @@
 diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
 --- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
 +++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
-@@
+@@ -6562,6 +6562,7 @@
                                       legacy_hpg_algebraic=(
                                           self._nemo_ws_test_hooks
                                           .legacy_hpg_algebraic_association),

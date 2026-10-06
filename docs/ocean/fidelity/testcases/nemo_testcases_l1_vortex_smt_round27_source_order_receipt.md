@@ -127,6 +127,25 @@ reading the diff. Its verdict is quoted verbatim:
 **Independent review unavailable in-sandbox.** No SHIP verdict is inferred.
 The candidate is HELD independently by its mechanical trajectory veto.
 
+The final round citation gate reports **PASS: 3 citations, 0 failures, 0
+unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting the HPG loop citation by two lines reports
+`SYMBOL-NOT-AT-LINE` and exits 1. The first citation pass refused two ambiguous
+anchors; both were corrected by occurrence or a unique endpoint rather than
+weakening the citation.
+
+The final restored-tree focused suite reports:
+
+> `66 passed in 500.01s (0:08:20)`
+
+The complete citation-gate unit module separately reports:
+
+> `17 passed in 3.43s`
+
+The held manifest passes `git apply --check` on the restored tree. Removing
+its one candidate line restores the exact production file measured in round
+238; the final worktree contains no executable physics change.
+
 ### OPEN — next round
 
 Do not walk the source-order arm's last-bit VOR remainder. Rank the SMT-4
