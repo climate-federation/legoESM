@@ -64,6 +64,71 @@ class _Captured(BaseException):
     pass
 
 
+
+def _era5_field(path, var, date):
+    """One ERA5 00Z field from a cdo -R regular Gaussian netCDF; checks the
+    variable name and the timestamp, returns (values, lat, lon, plev or None)."""
+    import xarray as xr
+    with xr.open_dataset(path) as ds:
+        if var not in ds.data_vars:
+            raise SystemExit(f"FATAL: {path} has no {var} ({list(ds.data_vars)})")
+        tt = np.asarray(ds["time"].values)
+        if tt.size != 1 or str(tt[0])[:19] != f"{date}T00:00:00":
+            raise SystemExit(f"FATAL: {path} time {tt} is not {date} 00Z")
+        da = ds[var].squeeze("time", drop=True)
+        da = da.transpose(*[d for d in ("plev", "lat", "lon") if d in da.dims])
+        plev = np.asarray(da["plev"], dtype=np.float64) if "plev" in da.dims else None
+        return (np.asarray(da.values, dtype=np.float64),
+                np.asarray(da["lat"], dtype=np.float64),
+                np.asarray(da["lon"], dtype=np.float64) % 360.0, plev)
+
+
+def era5_columns(e5dir, date, lat_deg, lon_deg):
+    """ERA5 00Z T [K] and specific humidity [kg/kg] profiles on its 37 levels
+    [Pa], nearest ERA5 column to each model cell, with a SURFACE node at the
+    ERA5 surface pressure (2 m temperature; specific humidity from the 2 m
+    dewpoint, Tetens over water as ECMWF defines it).  ERA5 levels at or below
+    its own surface (extrapolated by ECMWF) are not used."""
+    from legoesm import constants
+    from legoesm.thermo import saturation_vapor_pressure
+    T, la, lo, plev = _era5_field(f"{e5dir}/e5pl_130_{date}.nc", "T", date)
+    q, la2, lo2, plev2 = _era5_field(f"{e5dir}/e5pl_133_{date}.nc", "Q", date)
+    if not (np.array_equal(plev, plev2) and np.array_equal(la, la2) and np.array_equal(lo, lo2)):
+        raise SystemExit("FATAL: ERA5 T and Q files are on different grids")
+    if not (np.all(np.diff(plev) > 0) and 9.0e4 <= plev.max() <= 1.1e5 and plev.min() < 1.0e3):
+        raise SystemExit(f"FATAL: ERA5 plev not ascending Pa 1..1000 hPa: {plev[[0, -1]]}")
+    sp, *_ = _era5_field(f"{e5dir}/e5sf_134_{date}.nc", "SP", date)
+    t2, *_ = _era5_field(f"{e5dir}/e5sf_167_{date}.nc", "T2M", date)
+    d2, *_ = _era5_field(f"{e5dir}/e5sf_168_{date}.nc", "D2M", date)
+    i = np.abs(la[:, None] - lat_deg[None, :]).argmin(0)
+    dlon = np.abs(((lo[:, None] - (lon_deg[None, :] % 360.0)) + 180.0) % 360.0 - 180.0)
+    j = dlon.argmin(0)
+    Tc, qc = T[:, i, j].T, q[:, i, j].T                       # (ncol, nplev)
+    psc, t2c, d2c = sp[i, j], t2[i, j], d2[i, j]
+    e2 = np.asarray(saturation_vapor_pressure(d2c), dtype=np.float64)
+    q2 = constants.epsilon * e2 / (psc - (1.0 - constants.epsilon) * e2)
+    for name, v in (("T", Tc), ("Q", qc), ("SP", psc), ("T2M", t2c), ("q2", q2)):
+        if not np.isfinite(v).all():
+            raise SystemExit(f"FATAL: non-finite ERA5 {name}")
+    if not (5.0e4 < psc.min() and psc.max() < 1.1e5):
+        raise SystemExit(f"FATAL: ERA5 surface pressure out of range {psc.min()}..{psc.max()}")
+    return dict(T=Tc, q=qc, plev=plev, sp=psc, t2=t2c, q2=q2,
+                dlat=np.abs(la[i] - lat_deg))
+
+
+def column_interp(prof, plev, sfc_p, sfc_x, p_full):
+    """Per column: nodes = ERA5 levels above its surface, plus (sfc_p, sfc_x);
+    linear in log p to p_full [Pa]; constant beyond the end nodes.  Returns the
+    profile and the mask of model layers beyond the end nodes."""
+    out = np.empty_like(p_full)
+    for c in range(p_full.shape[0]):
+        above = plev < sfc_p[c]
+        xp = np.log(np.append(plev[above], sfc_p[c]))
+        fp = np.append(prof[c, above], sfc_x[c])
+        out[c] = np.interp(np.log(p_full[c]), xp, fp)
+    beyond = (p_full > sfc_p[:, None]) | (p_full < plev[0])
+    return out, beyond
+
 def capture(a):
     import mpas_onestep_param_grad as H
     t0 = time.time()
@@ -293,6 +358,47 @@ def capture(a):
             "inst_noliq": {"q_cloud": z0c(ra.get("q_cloud"))},
             "inst_noice": {"q_ice": z0c(ra.get("q_ice")),
                            "conv_icwmr": z0c(ra.get("conv_icwmr"))}}
+    if a.era5_pl:
+        # Clear-sky radiation with ONE atmospheric input swapped to the ERA5
+        # 00Z analysis of the same date (skin, clouds, gases unchanged), and
+        # CONTROL arms: the model's own T and q taken to the ERA5 levels and
+        # back (with the model's own lowest layer as the surface node), so the
+        # interpolation error is measured on the same columns and gated below.
+        if getattr(getattr(cfg, "cloud_config", None), "cap_floor_on", False):
+            raise SystemExit("FATAL: polar cloud floor is on; zeroed clouds are not clear sky")
+        if ra.get("ml_ozone_coefs") is not None and ra.get("o3_vmr_override") is None:
+            raise SystemExit("FATAL: ML ozone reads T; a T swap would also change ozone")
+        date = (dt.date(2001, 1, 1) + dt.timedelta(days=a.day)).isoformat()
+        lat_d = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+        lon_d = np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64))
+        pf = np.asarray(ra["p_full"], dtype=np.float64)
+        if not (np.isfinite(pf).all() and np.all(np.diff(pf, axis=1) > 0)
+                and 5.0e4 < pf[:, -1].min() and pf[:, -1].max() < 1.1e5):
+            raise SystemExit("FATAL: p_full is not finite, top-to-bottom, in Pa")
+        T_m = np.asarray(ra["T"], dtype=np.float64)
+        q_m = np.asarray(ra["q_v"], dtype=np.float64)
+        e5 = era5_columns(a.era5_pl, date, lat_d, lon_d)
+        T_e5, beyond = column_interp(e5["T"], e5["plev"], e5["sp"], e5["t2"], pf)
+        q_e5, _ = column_interp(e5["q"], e5["plev"], e5["sp"], e5["q2"], pf)
+        # model -> ERA5 levels -> model, surface node = the model's lowest layer
+        to_pl = lambda X: np.stack([np.interp(np.log(e5["plev"]), np.log(pf[c]), X[c])
+                                    for c in range(pf.shape[0])])
+        T_rt, _ = column_interp(to_pl(T_m), e5["plev"], pf[:, -1], T_m[:, -1], pf)
+        q_rt, _ = column_interp(to_pl(q_m), e5["plev"], pf[:, -1], q_m[:, -1], pf)
+        cast = lambda v, ref: jnp.asarray(v, dtype=np.asarray(ref).dtype)
+        arms.update({
+            "clr_e5T": {**clear, "T": cast(T_e5, ra["T"])},
+            "clr_e5q": {**clear, "q_v": cast(q_e5, ra["q_v"])},
+            "clr_e5Tq": {**clear, "T": cast(T_e5, ra["T"]), "q_v": cast(q_e5, ra["q_v"])},
+            "clr_selfT": {**clear, "T": cast(T_rt, ra["T"])},
+            "clr_selfq": {**clear, "q_v": cast(q_rt, ra["q_v"])}})
+        out_arr_e5 = {"e5_T_minus_model": T_e5 - T_m, "e5_q_minus_model": q_e5 - q_m,
+                      "e5_selfT_minus_model": T_rt - T_m, "e5_selfq_minus_model": q_rt - q_m,
+                      "e5_beyond_nodes": beyond, "e5_p_full": pf, "e5_dlat": e5["dlat"]}
+        print(f"ERA5 swap arms for {date} added; model layers beyond ERA5 nodes: "
+              f"{100 * beyond.mean():.2f} %", flush=True)
+    else:
+        out_arr_e5 = {}
     # Column condensate handed to the radiation (grid-mean paths, kg/m2) and
     # its cloud fraction: where the cloud water is, and how much the solver gets.
     from legoesm import constants
@@ -337,10 +443,24 @@ def capture(a):
         for k, v in solve(**o).items():
             out_arr[f"rad_{n}_{k}"] = v
         print(f"radiation arm {n} ({time.time() - t0:.0f}s)", flush=True)
+    if a.era5_pl:
+        # CONTROL GATE: the round-trip arms must reproduce clear-sky surface
+        # downward LW over 45-70N land within 1 W/m2 (area-weighted), else the
+        # interpolation error is the size of the effect and the swap is void.
+        _lat = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+        _fl = np.asarray(d._f_land, dtype=np.float64).reshape(-1)
+        _w = np.asarray(mesh.areaCell, dtype=np.float64) * ((_lat >= 45) & (_lat <= 70) & (_fl > 0.5))
+        _base = out_arr["rad_inst_clr_lw_dn_sfc"]
+        for _arm in ("clr_selfT", "clr_selfq"):
+            _d = float(((out_arr[f"rad_{_arm}_lw_dn_sfc"] - _base) * _w).sum() / _w.sum())
+            print(f"control {_arm}: 45-70N land clear-sky DLW change {_d:+.3f} W/m2", flush=True)
+            if abs(_d) > 1.0:
+                raise SystemExit(f"FATAL: control {_arm} moved DLW by {_d:+.2f} W/m2 (> 1)")
     out_arr["rad_sfc_albedo"] = np.broadcast_to(
         np.asarray(ra["sfc_albedo_override"]), out_arr["rad_inst_olr"].shape).copy()
     out_arr["rad_cos_sza"] = np.asarray(ra["cos_sza"])
     out_arr.update(radin)
+    out_arr.update(out_arr_e5)
     for k, v in rec["land"].items():
         out_arr[f"land_{k}"] = v
     for k, v in rec["bulk"].items():
@@ -587,6 +707,9 @@ def main(argv=None):
     c.add_argument("--out", required=True)
     c.add_argument("--config", default=None, help="replace the logged --config deck")
     c.add_argument("--tag", default="", help="suffix of the capture file name")
+    c.add_argument("--era5-pl", default=None,
+                   help="dir of ERA5 00Z e5pl_130/133_<date>.nc (era5pl/extract.sh): "
+                        "adds clear-sky arms with ERA5 T, q, both, and a round-trip control")
     c.add_argument("--land-only", action="store_true",
                    help="save only the land bootstrap outputs (no atmosphere replay)")
     c.add_argument("--extra", nargs=argparse.REMAINDER,
