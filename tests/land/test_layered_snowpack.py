@@ -549,7 +549,8 @@ def test_exported_humidity_agrees_with_latent_flux_sign(scheme, q_air):
         assert np.all(np.sign(lh[big]) == np.sign(dq[big])), (lh, dq)
 
 
-def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
+@pytest.mark.parametrize("ft", [False, True])
+def test_layered_step_closes_energy_against_realised_latent_on_dry_soil(ft):
     """Trace pack (0.05 kg/m2) on a hot soil at its dry floor (two-leaf, no
     Robin term): the latent demand the soil cannot supply is only known after hydrology (the Richards
     refill).  Every step, the energy the column receives equals the scheme's
@@ -558,10 +559,11 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
     realised-evaporation fix crashed this branch (energy read before hydrology);
     dropping the post-hydrology remainder leaves the first identity open."""
     from legoesm.land.richards import psi_dry_floor
-    from legoesm.land.soil_grid import SoilGridConfig
     from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
     cfg = _cfg(scheme=TwoLeafCanopyConfig(),
                soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
+    # Freeze/thaw on: the remainder goes into the top layer's enthalpy target.
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=ft))
     hc, tc = cfg.hydraulics, cfg.thermal
     n = 1
     tfl = float(jnp.max(theta_from_psi(psi_dry_floor(hc), hc)))
@@ -579,9 +581,8 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
         assert int(sfc.n_held) == 0
         want = sfc.G_soil + sfc.lhflx - resp.lhflx
         np.testing.assert_allclose(sfc.snow_ground_heat_applied, want, rtol=0, atol=1e-6)
-        Cg = compute_heat_capacity(s.theta_soil, hc, tc) * grid.dz
         dE = (column_enthalpy(_pack(s_new)) - column_enthalpy(_pack(s))
-              + jnp.sum(Cg * (s_new.T_soil - s.T_soil), -1))
+              + _soil_dE(s, s_new, grid, hc, tc))
         src = dt * (sfc.snow_ground_heat_applied + tc.Q_geothermal) + sfc.snow_advected_heat
         np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
         unmet = max(unmet, float(jnp.max(sfc.lhflx - resp.lhflx)))
@@ -854,6 +855,9 @@ def test_diurnal_freeze_thaw_does_not_ring_at_1800_s():
     s = sign[sign != 0]
     flips = int(np.sum(s[1:] != s[:-1]))
     assert 2 <= flips <= 7, (flips, x)                        # ~1 freeze + 1 thaw a day
+    # No adjacent-step reversal: a crossing is never undone on the next step.
+    bounce = (sign[:-2] != 0) & (sign[1:-1] == -sign[:-2]) & (sign[2:] == sign[:-2])
+    assert not bool(np.any(bounce)), np.nonzero(bounce)
     assert bool(np.all(np.isfinite(x)))
 
 
