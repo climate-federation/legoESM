@@ -236,13 +236,6 @@ def _wet_ch_world_state():
     return _state(theta, psi)
 
 
-_WET_FRONT_PICARD = pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "pre-existing Richards defect: on this wet-over-dry front the fixed-count "
-    "Picard iteration cycles between two states (max_iter 199 vs 201: top "
-    "theta 0.277 vs 0.429) and neither iterate is mass-conservative "
-    "(-0.56 / +0.53 mm). Separate solver fix."))
-
-
 def _first_step(tmp_path, dtype, wet):
     run = soil_hydraulics_stamp("van_genuchten", HYDRAULICS_SOURCE_CLM_MAP,
                                 _param_file(tmp_path))
@@ -276,7 +269,7 @@ def test_first_step_after_conversion_reports_and_the_carried_potential_leaks(
     assert residual_mm(st0).max() > 1.0
 
 
-@pytest.mark.parametrize("wet", [False, pytest.param(True, marks=_WET_FRONT_PICARD)])
+@pytest.mark.parametrize("wet", [False, True])
 @pytest.mark.parametrize("dtype,atol_mm", [(jnp.float64, 1e-9), (jnp.float32, 1e-2)])
 def test_first_step_after_conversion_closes_the_water_budget(
         tmp_path, dtype, atol_mm, wet):
