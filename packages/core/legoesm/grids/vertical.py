@@ -1593,6 +1593,7 @@ def assert_hybrid_valid_for_surface_pressure(
 def standard_hybrid_levels(
     n_levels: int = 40,
     p_ref: float = constants.p_ref,
+    transition_exponent: int | None = None,
 ) -> HybridSigmaPressureCoordinate:
     """Create standard hybrid levels with good defaults for any resolution.
 
@@ -1612,6 +1613,11 @@ def standard_hybrid_levels(
         Number of full levels. Default 40.
     p_ref : float
         Reference surface pressure [Pa].
+    transition_exponent : int, optional
+        Overrides the tier's ``B = eta**exponent`` power while keeping its
+        ``p_top`` and stretching.  ``A + B`` does not depend on it, so the
+        reference-state level pressures are unchanged; only how strongly the
+        levels follow terrain moves.  ``None`` keeps the tier's value.
 
     Returns
     -------
@@ -1621,21 +1627,23 @@ def standard_hybrid_levels(
         # Moderate resolution: 10 hPa top, mild stretching
         p_top = 1000.0
         stretching = 1.5
-        transition_exponent = 2
+        tier_exponent = 2
     elif n_levels <= 45:
         # Standard resolution: 2 hPa top, good BL resolution
         p_top = 200.0
         stretching = 2.5
-        transition_exponent = 3
+        tier_exponent = 3
     else:
         # High resolution: 0.1 hPa top, strong BL + strat resolution
         p_top = 10.0
         stretching = 2.5
-        transition_exponent = 3
+        tier_exponent = 3
 
     return make_hybrid_levels(
         n_levels, p_top_Pa=p_top, p_ref=p_ref,
-        transition_exponent=transition_exponent, stretching=stretching,
+        transition_exponent=(tier_exponent if transition_exponent is None
+                             else transition_exponent),
+        stretching=stretching,
     )
 
 

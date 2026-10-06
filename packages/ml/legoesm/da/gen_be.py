@@ -1141,14 +1141,25 @@ class GenBETransform:
           U_wind^{-1} → U_sigma^{-1} → U_vert^{-1} → U_bal^{-1} → U_horiz^{-1}
         """
         if self._laplacian_weights is not None or self._use_mpas_helmholtz:
-            # (I - sL)^n is not the inverse of the forward (I + sL)^n diffusion
-            # (their product is (I - s^2 L^2)^n, amplifying grid-scale modes by up
-            # to ~2^n), and the wind inverse uses a Poisson iteration that is not
-            # convergent on the global mesh. Refuse rather than return a wrong B^-1.
+            # Not implemented, and at production settings not implementable: the
+            # forward diffusion (I + sL)^n multiplies the most negative
+            # eigenmode of L by (1 + s lam_min)^n.  While the step is unclipped
+            # (s < 0.49 / max_i sum_j w_ij), s n = L^2 / 2 and this tends to
+            # exp(-L^2 |lam_min| / 2), set by length scale vs mesh spacing
+            # rather than n or the solver: on the 40962-cell mesh (n=400)
+            # 1e-30 at 500 km, 7e-11 at 300 km, 4e-5 at 200 km; 1e-7 at 500 km
+            # on 10242 cells (scripts/validate/genbe_mpas_inverse_conditioning_1819.py;
+            # float64 cannot recover below ~1e-8).  When the psi/chi wind
+            # transform is selected (the default), its LSQ gradients also map
+            # constant psi and chi to zero.  Refuse rather than return a wrong B^-1.
             raise NotImplementedError(
-                "GenBETransform: U^{-1} (inv_multiply) is not implemented on MPAS "
-                "meshes; the reverse-diffusion and Poisson-iteration inverses are "
-                "not inverses of the forward operator. Write the cost in the "
+                "GenBETransform: B^{-1} (inv_multiply) is not implemented on MPAS "
+                "meshes. At production settings none is numerically meaningful: the "
+                "horizontal correlation attenuates grid-scale modes by up to "
+                "~exp(-L^2 |lambda_min| / 2) (about 1e-30 for 500 km on the "
+                "40962-cell mesh, 400 iterations), and the default psi/chi wind "
+                "transform has null modes. "
+                "Write the cost in the "
                 "preconditioned control variable v with sqrt_multiply only "
                 "(J_b = 0.5 |v|^2), as the MPAS 3D/4D-Var drivers do."
             )
