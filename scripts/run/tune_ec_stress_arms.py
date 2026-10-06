@@ -8,7 +8,7 @@ forwards in parallel worker processes):
 * arm ``beta_theta``: tunes the shared soil/root set
   {root_depth, theta_wp, theta_fc(=wp+gap), soil_evap_litter_resistance_s_m}
 * arm ``phydro``: tunes the same four PLUS
-  {gplant_mol, minlwp_mpa, gamma_cost, root_biomass_gm2}
+  {gplant_mol, gamma_cost, root_biomass_gm2}
 
 Reused machinery (pre-impl search): driver reading + per-site config
 construction from ``run_ec_site`` (imported, not copied); the bounded-sigmoid
@@ -95,14 +95,13 @@ SHARED = {
 }
 PHYDRO = {
     "gplant_mol": (5e-4, 2e-2),
-    "minlwp_mpa": (-5.0, -0.5),
-    "gamma_cost": (0.1, 10.0),
+    "gamma_cost": (0.0, 10.0),
     "root_biomass_gm2": (50.0, 2000.0),
 }
 DEFAULTS = {
     "root_depth": 1.0, "theta_wp": None, "fc_gap": None,
     "soil_evap_litter_resistance_s_m": 300.0,
-    "gplant_mol": 4e-3, "minlwp_mpa": -2.0, "gamma_cost": 1.0,
+    "gplant_mol": 4e-3, "gamma_cost": 0.0,
     "root_biomass_gm2": 500.0,
 }
 
@@ -249,7 +248,7 @@ def apply_params(lc, cp, arm):
         soil_evap_litter_resistance_s_m=cp["soil_evap_litter_resistance_s_m"])
     if arm == "phydro":
         lc = lc._replace(phydro=lc.phydro._replace(
-            gplant_mol=cp["gplant_mol"], minlwp_mpa=cp["minlwp_mpa"],
+            gplant_mol=cp["gplant_mol"],
             gamma_cost=cp["gamma_cost"],
             root_biomass_gm2=cp["root_biomass_gm2"]))
     return lc
