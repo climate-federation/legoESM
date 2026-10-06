@@ -220,3 +220,9 @@ def test_fesom_config_field_default_and_forwarding():
     assert FesomOceanConfig().vertical_momentum_scheme == "fesom_flux"
     assert FesomOceanConfig(vertical_momentum_scheme="nemo_advective").vertical_momentum_scheme == "nemo_advective"
     assert "vertical_momentum=self.config.vertical_momentum_scheme" in inspect.getsource(FesomOceanModel.step)
+
+
+def test_fesom_lane_accepts_the_iwm_n2_flags():
+    # the FESOM bridge consumes IWMConfig.n2_mode/n2_eos_form; the lane gate
+    # rejected the flags because they were missing from the wired set
+    assert {"iwm_n2_mode", "iwm_n2_eos_form"} <= _FESOM_WIRED_DESTS

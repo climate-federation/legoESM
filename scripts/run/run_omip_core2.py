@@ -3015,6 +3015,9 @@ _FESOM_WIRED_DESTS = frozenset({
     # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
     # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
     "iwm", "iwm_forcing_file",
+    # IWM N2 input, read by build_iwm_config_from_args; the FESOM bridge
+    # computes nemo_bn2 on its own layers (fesom_integration.py):
+    "iwm_n2_mode", "iwm_n2_eos_form",
     # B4 — NEMO-monthly / WOA initial condition (--nemo-init-tint is the
     # Dec/Jan blend NEMO itself starts from; build_fesom_ocean takes it):
     "nemo_monthly_init", "nemo_init_month", "nemo_init_tint",
