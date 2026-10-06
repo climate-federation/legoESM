@@ -45,6 +45,7 @@ Conserved (see ``tests/land/test_snow_column.py``):
 
 from __future__ import annotations
 
+import numbers
 from typing import NamedTuple
 
 import jax
@@ -313,7 +314,7 @@ def snow_add_mass(state: SnowColumnState, snowfall, T_snow, rho_fresh=None,
     Enthalpy added (relative to ice at ``T_freeze``):
     ``snowfall*c_ice*(T_s - Tf) + rain*(c_liq*(T_r - Tf) + L_f)``.
     """
-    if rho_fresh is None and not (isinstance(snowfall, (int, float)) and snowfall == 0):
+    if rho_fresh is None and not (isinstance(snowfall, numbers.Real) and snowfall == 0):
         raise ValueError("snow_add_mass: snowfall needs its fresh-snow density rho_fresh")
     swe_ice, swe_liq, T, density = state
     H_add = snowfall * _C_ICE * (jnp.minimum(T_snow, _TF) - _TF)
@@ -339,7 +340,14 @@ def snow_add_mass(state: SnowColumnState, snowfall, T_snow, rho_fresh=None,
 
 
 def _wind_drift_rate(bi, dz, active, wind):
-    """CTSM ``WindDriftCompaction`` for every layer at once [1/s].
+    """CTSM ``WindDriftCompaction`` for every layer at once.
+
+    As in CTSM, the result is a DENSITY rate (kg/m3/s) that CTSM adds as is to
+    the fractional thickness rates [1/s]; it is ported unchanged (do not "fix"
+    the units without the user: it is what CLM5 runs).  At a 1800 s step a thin,
+    light, windy top layer therefore reaches the saturated-thickness floor in
+    one step, exactly as in CLM5.  With this pack's 5 equal-mass layers the
+    0.1 m pseudo-depth decay confines drift to the top layer of a deep pack.
 
     Top-down in CTSM: a layer drifts while every layer above it was
     compactable and driftable (``mobile``); the pseudo-depth ``zpseudo``
@@ -367,6 +375,12 @@ def _wind_drift_rate(bi, dz, active, wind):
 
 
 def clm5_compaction_rate(state: SnowColumnState, wind):
+    """CLM5 fractional thickness change rate per layer [1/s]; see
+    :func:`_clm5_rate_and_active`."""
+    return _clm5_rate_and_active(state, wind)[0]
+
+
+def _clm5_rate_and_active(state: SnowColumnState, wind):
     """CLM5 fractional thickness change rate per layer [1/s] (negative =
     compaction): destructive metamorphism + Vionnet (2012) overburden + wind
     drift, as CTSM clm5.0 ``SnowHydrologyMod.SnowCompaction``::
@@ -408,7 +422,7 @@ def clm5_compaction_rate(state: SnowColumnState, wind):
            * _VIONNET_ETA0)
     ddz2 = -(burden + 0.5 * mass) / eta
     ddz4 = _wind_drift_rate(bi, dz, active, jnp.asarray(wind))
-    return jnp.where(active, ddz1 + ddz2 + ddz4, 0.0)
+    return jnp.where(active, ddz1 + ddz2 + ddz4, 0.0), active
 
 
 def snow_compact(state: SnowColumnState, dt, wind):
@@ -420,7 +434,10 @@ def snow_compact(state: SnowColumnState, dt, wind):
     mass = ice + liq
     dz = mass / jnp.maximum(density, _EPS)
     dz_sat = ice / constants.rho_ice + liq / constants.rho_water
-    dz_new = jnp.maximum(dz * (1.0 + clm5_compaction_rate(state, wind) * dt), dz_sat)
+    rate, active = _clm5_rate_and_active(state, wind)
+    # CTSM changes only compactable layers; a (near-)saturated or ice-poor
+    # layer keeps its thickness, even if denser than the floor.
+    dz_new = jnp.where(active, jnp.maximum(dz * (1.0 + rate * dt), dz_sat), dz)
     return state._replace(
         density=jnp.where(mass > _EPS, mass / jnp.maximum(dz_new, _EPS), density))
 
@@ -507,13 +524,15 @@ def step_snow_column(
     Q_top: jnp.ndarray,
     G_bottom: jnp.ndarray,
     dt: float,
-    wind: jnp.ndarray,
     config: SnowColumnConfig = SnowColumnConfig(),
+    *,
+    wind: jnp.ndarray,
 ):
     """Advance a STAND-ALONE pack one step with a prescribed base flux.
 
     ``precip_snow`` snowfall rate [kg/m^2/s]; ``T_air`` fresh-snow temperature
-    [K]; ``wind`` wind speed [m/s] (fresh-snow density, wind drift); ``Q_top`` net flux INTO the pack top and ``G_bottom`` conductive flux
+    [K]; ``wind`` wind speed [m/s] (fresh-snow density, wind drift); ``Q_top``
+    net flux INTO the pack top and ``G_bottom`` conductive flux
     from the base INTO the soil [W/m^2].  Returns ``(state, drainage [kg/m^2],
     drainage_heat [J/m^2])``.  The land model couples the pack to the soil
     implicitly instead (``soil_thermal.solve_snow_soil_thermal``).

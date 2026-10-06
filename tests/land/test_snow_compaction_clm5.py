@@ -103,7 +103,11 @@ _COLUMNS = {
                   [300.0, 320.0, 350.0, 380.0, 400.0]),
     # trace top layer (no compaction, stops the drift below it) + saturated base
     "trace_and_saturated": ([0.05, 2.0, 2.0, 2.0, 2.0], [0.0, 0.0, 0.0, 0.0, 0.1],
-                            [TF - 3] * 5, [100.0, 150.0, 200.0, 250.0, 905.0]),
+                            [TF - 3] * 5, [100.0, 150.0, 200.0, 250.0, 930.0]),
+    # a layer denser than its saturated thickness allows (void < 0): CTSM leaves
+    # it alone (no expansion to the floor)
+    "over_saturated": ([5.0, 5.0, 2.0, 5.0, 5.0], [0.0, 0.0, 0.5, 0.0, 0.0],
+                       [TF - 3] * 5, [150.0, 200.0, 950.0, 250.0, 300.0]),
 }
 _WINDS = (0.0, 4.0, 15.0)
 
@@ -139,13 +143,17 @@ def test_wind_drift_is_active_and_stops_below_an_undriftable_layer():
     tr = _state("trace_and_saturated")
     np.testing.assert_allclose(clm5_compaction_rate(tr, jnp.asarray([15.0])),
                                clm5_compaction_rate(tr, jnp.asarray([0.0])), rtol=1e-14)
+    # the saturated base layer (void < 0.001) neither compacts nor is expanded
+    assert float(clm5_compaction_rate(tr, jnp.asarray([15.0]))[0, -1]) == 0.0
+    out = snow_compact(tr, 1800.0, jnp.asarray([15.0]))
+    assert float(out.density[0, -1]) == float(tr.density[0, -1])
 
 
 def test_thirty_day_density_trajectory_matches_ctsm():
-    """30 days at a 30-min step, fixed temperatures and 6 m/s wind, compaction
-    only: every layer's density tracks the oracle to 1e-9."""
+    """30 days at a 30-min step, fixed temperatures and 9 m/s wind (drift on),
+    compaction only: every layer's density tracks the oracle to 1e-9."""
     ice, liq, T, rho = (np.asarray(v, dtype=float) for v in _COLUMNS["fresh_cold"])
-    dt, n, wind = 1800.0, 30 * 48, 6.0
+    dt, n, wind = 1800.0, 30 * 48, 9.0
     st = _state("fresh_cold")
     step = jax.jit(lambda s: snow_compact(s, dt, jnp.asarray([wind])))
     dz = list((ice + liq) / rho)

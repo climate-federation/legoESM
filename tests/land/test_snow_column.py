@@ -65,7 +65,7 @@ def test_water_mass_conservation_with_drainage():
     w0 = total_water(s)
     total_drain = jnp.zeros((ncol,))
     for _ in range(20):
-        s, drain, _ = step_snow_column(s, snowfall, T_air, Q_top, jnp.zeros((ncol,)), dt, _W, CFG)
+        s, drain, _ = step_snow_column(s, snowfall, T_air, Q_top, jnp.zeros((ncol,)), dt, CFG, wind=_W)
         total_drain = total_drain + drain
     assert jnp.allclose(total_water(s), w0 + snowfall * dt * 20 - total_drain,
                         atol=1e-8, rtol=1e-9)
@@ -81,7 +81,7 @@ def _run_energy(s, Q_top, G_bottom, nsteps, dt=1800.0, snowfall=None, T_air=None
     H0 = column_enthalpy(s)
     tot_drain_H = jnp.zeros((ncol,))
     for _ in range(nsteps):
-        s, _, dH = step_snow_column(s, snowfall, T_air, Q_top, G_bottom, dt, _W, cfg)
+        s, _, dH = step_snow_column(s, snowfall, T_air, Q_top, G_bottom, dt, cfg, wind=_W)
         tot_drain_H = tot_drain_H + dH
     dH_actual = column_enthalpy(s) - H0
     # No snowfall -> dH = (Q_top - G_bottom)*dt*nsteps - drainage_heat.
@@ -112,7 +112,7 @@ def test_accumulation_adds_swe():
     s = initial_snow_state((2,), CFG)
     snowfall = jnp.full((2,), 5e-4)
     s, _, _ = step_snow_column(s, snowfall, jnp.full((2,), _TF - 10.0),
-                               jnp.zeros((2,)), jnp.zeros((2,)), 3600.0, _W, CFG)
+                               jnp.zeros((2,)), jnp.zeros((2,)), 3600.0, CFG, wind=_W)
     assert jnp.allclose(total_water(s), snowfall * 3600.0, atol=1e-8)
 
 
@@ -120,7 +120,7 @@ def test_melt_produces_drainage():
     s = _packed_state()
     ice0 = jnp.sum(s.swe_ice, -1)
     s2, drain, _ = step_snow_column(s, jnp.zeros((3,)), jnp.full((3,), _TF),
-                                    jnp.full((3,), 300.0), jnp.zeros((3,)), 3600.0, _W, CFG)
+                                    jnp.full((3,), 300.0), jnp.zeros((3,)), 3600.0, CFG, wind=_W)
     assert jnp.all(jnp.sum(s2.swe_ice, -1) <= ice0 + 1e-9)   # ice melted, not created
     assert jnp.all(drain >= 0.0)
 
@@ -128,7 +128,7 @@ def test_melt_produces_drainage():
 def test_empty_pack_is_safe():
     s = initial_snow_state((4,), CFG)
     s2, _, _ = step_snow_column(s, jnp.zeros((4,)), jnp.full((4,), 250.0),
-                                jnp.zeros((4,)), jnp.zeros((4,)), 3600.0, _W, CFG)
+                                jnp.zeros((4,)), jnp.zeros((4,)), 3600.0, CFG, wind=_W)
     assert jnp.all(jnp.isfinite(s2.T)) and jnp.all(jnp.isfinite(s2.swe_ice))
     assert jnp.allclose(total_water(s2), 0.0, atol=1e-12)
 
@@ -137,7 +137,7 @@ def test_jit_and_differentiable():
     """Static-N under jit (config closed over) + grad flow."""
     s = _packed_state()
     step = jax.jit(lambda st, q: step_snow_column(
-        st, jnp.zeros((3,)), jnp.full((3,), _TF), q, jnp.zeros((3,)), 3600.0, _W, CFG))
+        st, jnp.zeros((3,)), jnp.full((3,), _TF), q, jnp.zeros((3,)), 3600.0, CFG, wind=_W))
     out = step(s, jnp.full((3,), 40.0))[0]
     assert jnp.all(jnp.isfinite(out.T))
     g = jax.grad(lambda q: jnp.mean(step(s, jnp.full((3,), q))[0].T))(40.0)
