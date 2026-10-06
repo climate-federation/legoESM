@@ -137,6 +137,7 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
     scale the arm's inputs on the all-sky call and record its outputs.
     """
     import inspect
+    import jax
     if forcing is None or forcing.get("seconds_of_day") is None:
         raise SystemExit("captured forcing has no seconds_of_day: cannot move the sun")
     fn = fns["radiation"]
@@ -158,6 +159,9 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
 
         def backend(*a, **kw):
             b = sig_bound.bind(*a, **kw).arguments
+            if isinstance(b.get("T"), jax.core.Tracer):
+                raise SystemExit("cloud_levers reached a traced radiation call; "
+                                 "the arms must run eagerly")
             allsky = b.get("q_cloud") is not None
             if allsky:
                 b = scale_inputs(b, factors)
@@ -201,6 +205,9 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
     def spy(*a, **kw):
         out = real_backend(*a, **kw)
         b = sig_bound.bind(*a, **kw).arguments
+        if isinstance(b.get("T"), jax.core.Tracer):
+            raise SystemExit("cloud_levers reached a traced radiation call; "
+                             "the arms must run eagerly")
         if b.get("q_cloud") is not None:
             real_out["o"] = out
         return out
@@ -273,6 +280,9 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
             gate(np.array_equal(r["cf"], base["cf"]), f"{name}: cloud fraction unchanged")
         if name.startswith("Nc"):
             gate(abs(r["lwp"] / base["lwp"] - 1.0) < 1e-9, f"{name}: LWP unchanged")
+        if name.startswith("ice"):
+            k = fac["q_ice"]
+            gate(abs(r["iwp"] / base["iwp"] - k) < 0.01 * k, f"{name}: IWP ratio {r['iwp'] / base['iwp']:.4f} = {k} +-1%")
     ln_r = np.log(rows["Nc x0.5"]["reff"] / rows["Nc x2"]["reff"])
     print(f"\nd rsut / d ln r_eff (Nc x0.5 vs x2): "
           f"{(rows['Nc x0.5']['rsut'] - rows['Nc x2']['rsut']) / ln_r:+.2f} W/m2 per ln unit "
