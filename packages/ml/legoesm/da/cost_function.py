@@ -158,6 +158,22 @@ def _obs_cost_rollout(
     return J_o
 
 
+def _window_cost(x, J_b, model, observations, control_spec, template_state, dt,
+                 n_steps, checkpoint_schedule, checkpoints, storage):
+    """J_b + J_o for the window started from control x (state inversion)."""
+    state_0 = control_to_state(x, control_spec, template_state)
+
+    def indexed_step(i, s):  # state inversion: forcing is fixed in the model
+        return model.step(s, dt)
+
+    J_o = _obs_cost_rollout(
+        state_0, indexed_step, observations, n_steps,
+        J_b=J_b, checkpoint_schedule=checkpoint_schedule,
+        checkpoints=checkpoints, storage=storage,
+    )
+    return J_b + J_o
+
+
 def build_cost_fn(
     model,
     background: jax.Array,
@@ -217,17 +233,8 @@ def build_cost_fn(
     def cost_fn(x: jax.Array) -> jax.Array:
         dx = x - background
         J_b = 0.5 * jnp.sum(dx * B.inv_multiply(dx))
-        state_0 = control_to_state(x, control_spec, template_state)
-
-        def indexed_step(i, s):  # state inversion: forcing is fixed in the model
-            return model.step(s, dt)
-
-        J_o = _obs_cost_rollout(
-            state_0, indexed_step, observations, n_steps,
-            J_b=J_b, checkpoint_schedule=checkpoint_schedule,
-            checkpoints=checkpoints, storage=storage,
-        )
-        return J_b + J_o
+        return _window_cost(x, J_b, model, observations, control_spec, template_state,
+                            dt, n_steps, checkpoint_schedule, checkpoints, storage)
 
     return cost_fn
 
@@ -263,17 +270,8 @@ def build_vspace_cost_fn(
     def cost_fn(v: jax.Array) -> jax.Array:
         J_b = 0.5 * jnp.sum(v * v)
         x = background + B.sqrt_multiply(v)
-        state_0 = control_to_state(x, control_spec, template_state)
-
-        def indexed_step(i, s):
-            return model.step(s, dt)
-
-        J_o = _obs_cost_rollout(
-            state_0, indexed_step, observations, n_steps,
-            J_b=J_b, checkpoint_schedule=checkpoint_schedule,
-            checkpoints=checkpoints, storage=storage,
-        )
-        return J_b + J_o
+        return _window_cost(x, J_b, model, observations, control_spec, template_state,
+                            dt, n_steps, checkpoint_schedule, checkpoints, storage)
 
     return cost_fn
 

@@ -50,6 +50,9 @@ class IncrementalConfig(NamedTuple):
 class IncrementalDiagnostics(NamedTuple):
     """Diagnostics from incremental 4D-Var."""
     cost_history: list
+    # ||grad J|| at each outer start.  In v (x = x_b + B^{1/2} v) for a
+    # GenBETransform with use_preconditioning=True, otherwise in x; the outer
+    # early exit compares this same norm with inner_gtol.
     grad_norm_history: list
     inner_iterations: list
     # RMS of y - H(M(x)) over all obs, after each outer iteration; NaN when
@@ -109,6 +112,13 @@ def incremental_4dvar(
             "incremental_4dvar: use_preconditioning=False needs B^{-1}, which this "
             "GenBETransform does not provide (MPAS mesh, #1819); use the "
             "preconditioned control-variable path (use_preconditioning=True)."
+        )
+    if vspace and not config.use_preconditioning:
+        logger.warning(
+            "incremental_4dvar: GenBETransform with use_preconditioning=False "
+            "minimises the x-space cost, whose B^{-1} is exact only on the subspace "
+            "U^{-1} U preserves; its analysis can differ from the B = U U^T one "
+            "(#1819). use_preconditioning=True minimises the exact v-space cost."
         )
     x_b = state_to_control(background_state, control_spec)
     x_k = x_b.copy()

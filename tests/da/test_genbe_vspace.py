@@ -131,12 +131,14 @@ def test_vspace_cost_equals_xspace_cost_where_the_inverse_exists(gauss):
     assert float(jnp.dot(d, gv)) == pytest.approx(float(jnp.dot(d, gx)), rel=1e-8)
 
 
-def _run(grid_tuple, use_preconditioning=True):
+def _run(grid_tuple, use_preconditioning=True, method="lbfgs", n_steps=1):
     _, B, spec, template = grid_tuple
     cfg = IncrementalConfig(n_outer=2, n_inner=60, inner_gtol=1e-10,
-                            inner_method="lbfgs", use_preconditioning=use_preconditioning)
-    return incremental_4dvar(_Identity(), template, _t_obs(template, 283.0), B, spec,
-                             dt=1.0, n_steps=1, config=cfg)
+                            inner_method=method, use_preconditioning=use_preconditioning)
+    obs = _t_obs(template, 283.0)
+    obs = tuple(o._replace(time_index=n_steps - 1) for o in obs)
+    return incremental_4dvar(_Identity(), template, obs, B, spec,
+                             dt=1.0, n_steps=n_steps, config=cfg)
 
 
 def test_incremental_runs_on_mpas_and_moves_toward_the_obs(mpas):
@@ -151,12 +153,14 @@ def test_unpreconditioned_genbe_on_mpas_fails_at_entry(mpas):
         _run(mpas, use_preconditioning=False)
 
 
-@pytest.mark.parametrize("name", ["mpas", "gauss"])
-def test_vspace_analysis_is_the_closed_form_blue(name, request):
+@pytest.mark.parametrize("name,method,n_steps",
+                         [("mpas", "lbfgs", 1), ("gauss", "lbfgs", 1), ("mpas", "cg", 3)])
+def test_vspace_analysis_is_the_closed_form_blue(name, method, n_steps, request):
     """Identity model + linear obs: the exact analysis is
     x_b + U J^T (J J^T + R)^{-1} d with J = H U.  The x-space path is NOT a
     reference here: on the Gaussian grid its B^{-1} is exact only on the
-    subspace U^{-1}U preserves, which misses half of this analysis."""
+    subspace U^{-1}U preserves; this analysis's v lies 51% (in norm) outside
+    it, and the x-space analysis misses this one by 10% of the increment."""
     from legoesm.da.control_vector import control_to_state
 
     grid, B, spec, template = request.getfixturevalue(name)
@@ -167,7 +171,7 @@ def test_vspace_analysis_is_the_closed_form_blue(name, request):
     v_a = J.T @ jnp.linalg.solve(J @ J.T + jnp.diag(obs.errors ** 2), obs.values - Hx(x_b))
     T_blue = np.asarray(control_to_state(x_b + B.sqrt_multiply(v_a), spec, template).T.data)
 
-    analysis, _ = _run((grid, B, spec, template))
+    analysis, _ = _run((grid, B, spec, template), method=method, n_steps=n_steps)
     inc_blue = np.max(np.abs(T_blue - 280.0))
     assert inc_blue > 0.1
     assert np.max(np.abs(np.asarray(analysis.T.data) - T_blue)) < 1e-6 * inc_blue
