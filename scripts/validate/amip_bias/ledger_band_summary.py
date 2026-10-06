@@ -7,7 +7,8 @@ K/day with the SAME band mass the ledger integrates over (p_s * dsigma with
 dsigma = d(A+B), weight = fractional overlap of the A+B band), so the
 ledger's known hybrid-mass approximation (#1400) changes the relative layer
 weights inside the band, not the K/day scale.  p_s is the mean of the run's
-checkpoints at the start and end of the ledger window.
+checkpoints at the start and end of the ledger window (the ledger's own
+step-mean p_s is not stored; a ~1 % p_s change gives a ~1 % scale error).
 
 Regions use the land fraction and areas of a same-mesh surface capture.
 
@@ -18,6 +19,8 @@ import sys
 import numpy as np
 
 from legoesm import constants
+
+DT_S = 112.5   # dynamics step of the production MPAS res6 deck [s]; checked against the window
 
 REGIONS = {"45-70N land": lambda la, fl: (la >= 45) & (la <= 70) & (fl > 0.5),
            "45-70N ocean": lambda la, fl: (la >= 45) & (la <= 70) & (fl < 0.05),
@@ -45,6 +48,11 @@ def main(a):
         n_steps, end_day = int(z["n_steps"]), float(z["day"])
         if rates.shape[0] != lat.size or not np.isfinite(rates).all():
             raise SystemExit(f"{d}: {rates.shape} columns vs {lat.size}, or non-finite rates")
+        if "area_cell" in z.files and not np.allclose(
+                np.asarray(z["area_cell"]) / np.asarray(z["area_cell"]).sum(), area / area.sum(), rtol=1e-6):
+            raise SystemExit(f"{d}: ledger column order/areas differ from the capture's")
+        if abs(n_steps * DT_S - (end_day - start) * 86400.0) > DT_S:
+            raise SystemExit(f"{d}: {n_steps} steps of {DT_S} s do not span days {start}-{end_day:g}")
         ck0 = np.load(f"{run_dir}/checkpoint_day_{start:04d}.npz", allow_pickle=True)
         ck1 = np.load(f"{run_dir}/checkpoint_day_{int(round(end_day)):04d}.npz", allow_pickle=True)
         vg = np.asarray(ck0["meta_vgrid"], dtype=np.float64)          # (2, nlev+1): A, B
@@ -54,7 +62,7 @@ def main(a):
         mass = ps * (w * np.diff(eta)).sum() / constants.g             # kg/m2 in the band
         kday = rates[:, :, 1] / (constants.c_pd * mass[:, None]) * 86400.0
         print(f"\n{label} band A+B {lo:.2f}-{hi:.2f}: ledger window ends day {end_day:g}, "
-              f"{n_steps} steps ({n_steps * 112.5 / 86400:.2f} days at dt 112.5 s)")
+              f"{n_steps} steps ({n_steps * DT_S / 86400:.2f} days)")
         print("  region         " + " ".join(f"{p[:9]:>9s}" for p in procs) + "      sum")
         for name, sel in REGIONS.items():
             m = sel(lat, fl)

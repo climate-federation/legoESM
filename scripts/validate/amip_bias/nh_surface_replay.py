@@ -463,13 +463,20 @@ def capture(a):
             raise SystemExit(f"FATAL: snow/graupel {_qs.shape}/{_qg.shape} vs ice {_qi.shape}")
         # Same state, same level order: the cloud-ice tracer must match the
         # ice the backend was handed (else the snow lands on the wrong levels).
-        if "q_i" in _tr:
-            _qit = np.asarray(_tr["q_i"].data if hasattr(_tr["q_i"], "data") else _tr["q_i"],
-                              dtype=np.float64)
-            _c = np.corrcoef(_qit.ravel(), np.asarray(_qi, dtype=np.float64).ravel())[0, 1]
-            print(f"snow arms: q_i tracer vs radiation q_ice correlation {_c:.4f}", flush=True)
-            if not _c > 0.99:
-                raise SystemExit("FATAL: cloud-ice tracer does not match the radiation's q_ice")
+        if getattr(_cc, "cap_floor_on", False):
+            raise SystemExit("FATAL: polar cloud floor is on; the cover audit would miss it")
+        if "q_i" not in _tr:
+            raise SystemExit("FATAL: no q_i tracer to check the radiation's q_ice against")
+        _qit = np.asarray(_tr["q_i"].data if hasattr(_tr["q_i"], "data") else _tr["q_i"],
+                          dtype=np.float64)
+        _qin = np.asarray(_qi, dtype=np.float64)
+        # per-level column sums must agree (level order AND scale), not just correlate
+        _lev_t, _lev_r = _qit.sum(0), _qin.sum(0)
+        _rel = float(np.abs(_lev_t - _lev_r).max() / max(np.abs(_lev_r).max(), 1e-30))
+        print(f"snow arms: q_i tracer vs radiation q_ice, max per-level relative difference {_rel:.2e}",
+              flush=True)
+        if not (np.isfinite(_rel) and _rel < 0.05 and _lev_r.max() > 0.0):
+            raise SystemExit("FATAL: cloud-ice tracer does not match the radiation's q_ice by level")
         _dpn = np.abs(np.diff(np.asarray(_ph, dtype=np.float64), axis=1))
         for _n, _q in (("snow", _qi + _qs.astype(_qi.dtype)),
                        ("snowg", _qi + (_qs + _qg).astype(_qi.dtype))):
