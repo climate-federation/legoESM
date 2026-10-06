@@ -51,7 +51,10 @@ from legoesm.ocean.eos import (
     nemo_seos_prd_literal,
     rho_0 as _RHO_0,
 )
-from legoesm.ocean.vertical import nemo_qco_live_face_thicknesses
+from legoesm.ocean.vertical import (
+    nemo_qco_live_face_thicknesses,
+    nemo_qco_live_t_thickness,
+)
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     EPS_DIV as _EPS_DIV,
@@ -2361,7 +2364,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
     divisor_thickness: jnp.ndarray | None = None,
-    closed_bottom_wmask: bool = False,
+    closed_bottom_wmask: bool = True,
     horizontal_flux_evaluation: str = "vectorized",
     area_reciprocal: jnp.ndarray | None = None,
     area_reciprocal_evaluation: str = "vectorized",
@@ -4179,7 +4182,7 @@ def gm_redi_tracer_tendency_latlon(
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     redi_divisor_thickness_override: jnp.ndarray | None = None,
-    redi_closed_bottom_wmask_override: bool = False,
+    redi_closed_bottom_wmask_override: bool | None = None,
     redi_horizontal_flux_evaluation_override: str | None = None,
     redi_area_reciprocal_override: jnp.ndarray | None = None,
     redi_area_reciprocal_evaluation_override: str | None = None,
@@ -4571,6 +4574,7 @@ def gm_redi_tracer_tendency_latlon(
                 "'nemo_qco_live'")
         _flux_e3u = None
         _flux_e3v = None
+        _divisor_e3t = redi_divisor_thickness_override
         if _flux_face_mode == "nemo_qco_live":
             if eta is None:
                 raise ValueError(
@@ -4587,6 +4591,16 @@ def gm_redi_tracer_tendency_latlon(
             _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
+            if _divisor_e3t is None:
+                # traldf_iso.f90:306-310/:327-331 divides the flux
+                # divergence by e3t(Kmm).  Use the same literal QCO T-point
+                # statement as the rest of the WS-RK3 identity path instead
+                # of the reference/Jacobian thickness.
+                _divisor_e3t = nemo_qco_live_t_thickness(
+                    _flux_eta, H_bathy, z_coord, T.dtype, e3t_0=_e3t0)
+        _closed_bottom_wmask = (
+            True if redi_closed_bottom_wmask_override is None
+            else redi_closed_bottom_wmask_override)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
@@ -4659,8 +4673,8 @@ def gm_redi_tracer_tendency_latlon(
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
                 return_operand_diagnostics=return_redi_diagnostics,
-                divisor_thickness=redi_divisor_thickness_override,
-                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                divisor_thickness=_divisor_e3t,
+                closed_bottom_wmask=_closed_bottom_wmask,
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
@@ -4693,8 +4707,8 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
-                divisor_thickness=redi_divisor_thickness_override,
-                closed_bottom_wmask=redi_closed_bottom_wmask_override,
+                divisor_thickness=_divisor_e3t,
+                closed_bottom_wmask=_closed_bottom_wmask,
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
@@ -4732,8 +4746,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
-            divisor_thickness=redi_divisor_thickness_override,
-            closed_bottom_wmask=redi_closed_bottom_wmask_override,
+            divisor_thickness=_divisor_e3t,
+            closed_bottom_wmask=_closed_bottom_wmask,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4747,8 +4761,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
-            divisor_thickness=redi_divisor_thickness_override,
-            closed_bottom_wmask=redi_closed_bottom_wmask_override,
+            divisor_thickness=_divisor_e3t,
+            closed_bottom_wmask=_closed_bottom_wmask,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus
