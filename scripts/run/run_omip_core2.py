@@ -3021,6 +3021,8 @@ _FESOM_WIRED_DESTS = frozenset({
     "woa_init", "woa_t", "woa_s",
     "nemo_ldf_file", "lateral_side_bc", "nemo_domain_cfg",
     "state_accumulate", "mld_accumulate",
+    # NEMO dynzad vertical momentum on FESOM elements (fesom_jax vertical="nemo_advective")
+    "vertical_momentum_scheme",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
@@ -3130,7 +3132,8 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       iwm_forcing_file: str | None = None,
                       nemo_ldf_file: str | None = None,
                       nemo_domain_cfg: str | None = None,
-                      lateral_side_bc: str | None = None):
+                      lateral_side_bc: str | None = None,
+                      vertical_momentum_scheme: str | None = None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -3170,7 +3173,9 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                               dz_ref=_dz_ref)
     config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
                               constants="legoesm",
-                              vertical_mixing=str(vertical_mixing))
+                              vertical_mixing=str(vertical_mixing),
+                              **({"vertical_momentum_scheme": vertical_momentum_scheme}
+                                 if vertical_momentum_scheme is not None else {}))
     # zdfiwm maps on the node cloud (paired lat/lon, the MPAS pattern): the
     # atlas is remapped here, K_iwm is recomputed from FESOM's own N2 inside
     # the closure bridge.
@@ -8594,9 +8599,12 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
-    if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas"):
-        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas only "
-                         f"(got {args.grid!r}); it would be silently ignored.")
+    if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas") and not (
+            args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"):
+        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas, and "
+                         "on fesom for nemo_advective only "
+                         f"(got {args.grid!r}, {args.vertical_momentum_scheme!r}); "
+                         "it would be silently ignored.")
     if args.dm2dc_hold_s is not None:
         _h = float(args.dm2dc_hold_s)
         if (not args.dm2dc or _h <= 0 or 86400.0 % _h != 0.0
@@ -9448,6 +9456,7 @@ def main() -> int:
             nemo_ldf_file=args.nemo_ldf_file,
             nemo_domain_cfg=args.nemo_domain_cfg or _NEMO_DOMAIN_CFG,
             lateral_side_bc=args.lateral_side_bc,
+            vertical_momentum_scheme=args.vertical_momentum_scheme,
             vmix_config=(build_tripole_vmix_config(
                 "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
