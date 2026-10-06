@@ -74,3 +74,12 @@ def test_a_layered_day_without_snow_water_is_reported_not_raised(tmp_path):
     np.savez(run / "checkpoint_day_0276.npz", **z)
     probs = cd1.day1_problems(run, 275, "layered", _LOG)
     assert any("snow_depth" in p for p in probs), probs
+
+
+def test_new_snow_elsewhere_cannot_mask_an_erased_seasonal_pack(tmp_path):
+    ice = np.zeros((3, 5), np.float32)
+    ice[1], ice[2] = 10.0, 600.0                      # day 1: [0, 50, 3000]
+    run = _run(tmp_path, land_ml_snow_ice_layers=ice, land_ml_snow_depth=ice.sum(-1))
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.array([100.0, 0.0, 3000.0]))
+    assert cd1.day1_problems(run, 275, "layered", _LOG) == [
+        "seasonal snow water 0 after day 1 vs 100 at restart"]

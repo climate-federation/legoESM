@@ -9,7 +9,8 @@ Pass (exit 0) needs, at checkpoint day restart+1:
   the snow water (rtol 1e-5, float32 storage), and the run log carrying the
   "pack built from its snow water" warning (the bulk restart was seeded);
 - every arm: the summed snow water at day 1 at least half the restart's, both
-  over all columns and over the seasonal ones (restart snow < 1000 kg/m2, so
+  over all columns and over those holding seasonal snow at restart (0 < snow
+  < 1000 kg/m2, so new snow elsewhere cannot mask it and
   the ice sheets cannot hide an erased seasonal pack); no column losing more
   than 200 kg/m2 in the day (melting that much takes ~770 W/m2 for 24 h,
   impossible in October) or gaining more than 500 (no October snowfall
@@ -50,7 +51,7 @@ def day1_problems(run_dir, restart_day, scheme, log_text):
         if w0.shape != w1.shape:
             out.append(f"snow water shape {w1.shape} vs restart {w0.shape}")
         else:
-            seasonal = w0 < _SEASONAL_MAX
+            seasonal = (w0 > 0.0) & (w0 < _SEASONAL_MAX)   # columns HOLDING seasonal snow
             for label, m in (("", slice(None)), ("seasonal ", seasonal)):
                 s0, s1 = float(w0[m].sum()), float(w1[m].sum())
                 if s1 < 0.5 * s0:
