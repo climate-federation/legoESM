@@ -575,10 +575,12 @@ def test_layered_step_closes_energy_against_realised_latent_on_dry_soil():
         np.testing.assert_allclose(dE, src, rtol=1e-9, atol=1e-3)
         unmet = max(unmet, float(jnp.max(sfc.lhflx - resp.lhflx)))
         s = s_new
-    # the soil really fell short of the demand (peak ~26 W/m2 measured).  Dropping
-    # the post-hydrology remainder breaks the first identity (by 0.58 W/m2 already
-    # on step 1), and the merge as first resolved raised UnboundLocalError.
-    assert unmet > 5.0, unmet
+    # the soil really fell short of the demand (peak 4.8 W/m2 measured, on step 1;
+    # 25 W/m2 under the former fixed-count solve, whose top layer cycled on and off
+    # the dry floor every other step).  Dropping the post-hydrology remainder breaks
+    # the first identity (by 0.58 W/m2 already on step 1), and the merge as first
+    # resolved raised UnboundLocalError.
+    assert unmet > 1.0, unmet
 
 
 @pytest.mark.parametrize("swe", [5.0, 15.0, 40.0])

@@ -260,13 +260,12 @@ def _first_step(tmp_path, dtype, wet):
 
 @pytest.mark.parametrize("wet", [False, True])
 @pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
-def test_first_step_after_conversion_reports_and_the_carried_potential_leaks(
-        tmp_path, dtype, wet):
-    """The conversion reports the wet rule when it ran; the carried
-    Clapp-Hornberger potential fails the first-step water budget."""
-    st0, conv, rep, residual_mm = _first_step(tmp_path, dtype, wet)
+def test_first_step_after_conversion_reports_the_wet_rule(tmp_path, dtype, wet):
+    """The conversion reports the wet rule when it ran.  (The carried
+    Clapp-Hornberger potential used to fail the first-step water budget by > 1 mm;
+    the solver's post-solve correction now closes it either way.)"""
+    _, _, rep, _ = _first_step(tmp_path, dtype, wet)
     assert (rep["wet_columns"] > 0) is wet
-    assert residual_mm(st0).max() > 1.0
 
 
 @pytest.mark.parametrize("wet", [False, True])
@@ -278,7 +277,10 @@ def test_first_step_after_conversion_closes_the_water_budget(
     assert residual_mm(conv).max() < atol_mm
 
 
-def test_one_day_keeps_the_deep_water_that_the_carried_potential_loses(tmp_path):
+def test_one_day_keeps_the_deep_water(tmp_path):
+    """The converted state keeps its deep water through a day.  (The carried
+    potential used to lose > 0.05 m3/m3 of it; with the converged, budget-closed
+    solve it loses 7e-4, so that contrast is no longer asserted.)"""
     run = soil_hydraulics_stamp("van_genuchten", HYDRAULICS_SOURCE_CLM_MAP,
                                 _param_file(tmp_path))
     src = soil_hydraulics_stamp("clapp_hornberger", HYDRAULICS_SOURCE_SURFDATA_COSBY,
@@ -304,7 +306,6 @@ def test_one_day_keeps_the_deep_water_that_the_carried_potential_loses(tmp_path)
 
     deep0 = float(np.asarray(st0.theta_soil)[:, -1].mean())
     assert abs(deep_after_one_day(conv) - deep0) < 0.005
-    assert deep0 - deep_after_one_day(st0) > 0.05
 
 
 def _overflow_first_step(tmp_path):
@@ -335,11 +336,6 @@ def test_overflowing_column_goes_to_the_cap_and_the_pond(tmp_path):
     assert np.all(np.asarray(o.runoff_surface) > 0)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "pre-existing Richards defect, second trigger: pond infiltration pushes the "
-    "capped top layers onto the elastic branch (psi > 0) and the fixed-count "
-    "Picard iteration cycles between two states (odd vs even iterates) that "
-    "are not mass-conservative (-0.018 / -0.023 mm). Separate solver fix."))
 def test_overflowing_column_first_step_closes_the_budget(tmp_path):
     conv, _, o = _overflow_first_step(tmp_path)
     w0 = (np.asarray(conv.theta_soil) * _DZ).sum(1) + np.asarray(conv.surface_water)
