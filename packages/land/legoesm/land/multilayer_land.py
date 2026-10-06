@@ -1370,12 +1370,16 @@ def _step_multilayer_land_impl(
     # Total vapour mass leaving the surface = pack sublimation + soil / plant
     # evaporation; total latent energy = their L_s / L_v weighted sum.
     #
-    # Latent energy the surface solve spent on evaporation that the reservoirs
-    # could not supply (snow-pack cap, SimpleSEB bare-soil resistance, Richards
-    # dry-floor refill) leaves as SENSIBLE heat to the air, the CLM/CTSM rule
-    # (SoilFluxesMod: "conserve total energy flux", eflx_sh_grnd += (demand -
-    # limit)*htvp; t_grnd is not re-solved).  The ground heat flux is unchanged,
-    # so the land boundary still closes: Rn = (SH + X) + LE_actual + G.
+    # X = lhflx - lhflx_actual has two parts.  UNMET demand -- latent energy the
+    # surface solve spent on evaporation the reservoirs could not supply
+    # (snow-pack cap, SimpleSEB bare-soil resistance, Richards dry-floor refill)
+    # -- leaves as SENSIBLE heat to the air, the CLM/CTSM rule (SoilFluxesMod:
+    # "conserve total energy flux", eflx_sh_grnd += (demand - limit)*htvp;
+    # t_grnd is not re-solved).  The SUBLIMATION COST of snow charged below
+    # L_s, sublim_actual * (L_charged - L_s), stays in the ground heat flux
+    # (cools the ground while subliming, warms it under frost; see above).
+    # The land boundary still closes: Rn = (SH + X_unmet) + LE_actual
+    # + (G + X_sublim).
     # Previously X went into G, i.e. into the ~3 mm top soil layer with no skin
     # re-solve: 85-160 W/m2 at midday over dry desert, top soil 336-351 K, and
     # the overheated columns then failed their canopy solve and were held.
@@ -1387,7 +1391,8 @@ def _step_multilayer_land_impl(
     # combined solve, remainder in the top soil layer below), so it is NOT also
     # added to SH there; the sensible-heat rule is the bulk branch's.
     if not layered:
-        shflx = shflx + evap_excess_energy
+        _sublim_cost = sublim_actual * (_L_snow_charged - _L_s_T)
+        shflx = shflx + (evap_excess_energy - _sublim_cost)
 
     if layered:
         # Post-hydrology remainder of the unmet-evaporation energy: the latent
@@ -1415,6 +1420,7 @@ def _step_multilayer_land_impl(
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
     if not layered:
+        G_surface = G_surface + _sublim_cost
         # Fusion heat of the ice change Richards made at fixed T (evaluated at the
         # start-of-step T the apparent heat capacity uses).
         _fusion_source = (
