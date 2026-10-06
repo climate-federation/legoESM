@@ -1220,6 +1220,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private round-157 split of the U/V field arms into the compiled
     # east/west exchange followed by the T-pivot north-fold exchange.
     barotropic_external_mode_association_component: str = ""
+    # Private round-162 arm for dynspg_ts.f90:937's second U/V association,
+    # after the primary transport mean has been divided back to velocity.
+    barotropic_final_mean_association: bool = False
     # Private round-148 one-variable arm: use the T-pivot row-below halo as
     # the north T neighbour in the V-face SSH-average depth calculation.
     barotropic_t_pivot_north_neighbor: bool = False
@@ -7289,6 +7292,13 @@ class LatLonCGridOceanModel:
                         _baro_seed,
                         _nemo_external_mode_association_component_test_override=(
                             _association_component))
+                if (
+                    self._nemo_ws_test_hooks
+                    .barotropic_final_mean_association
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_final_mean_association_test_override=True)
                 if (
                     self._nemo_ws_test_hooks
                     .barotropic_t_pivot_north_neighbor

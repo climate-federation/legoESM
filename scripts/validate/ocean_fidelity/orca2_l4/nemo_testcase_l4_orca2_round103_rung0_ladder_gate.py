@@ -96,6 +96,7 @@ def run(
     *,
     plant: str = "none",
     external_mode_association: bool = False,
+    final_mean_association: bool = False,
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
@@ -155,6 +156,7 @@ def run(
             expose_momentum_stage=stage,
             expose_tracer_stage=stage,
             barotropic_external_mode_association=external_mode_association,
+            barotropic_final_mean_association=final_mean_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport),
@@ -163,6 +165,7 @@ def run(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
             barotropic_external_mode_association=external_mode_association,
+            barotropic_final_mean_association=final_mean_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
             barotropic_materialize_v_transport=materialize_v_transport))
@@ -223,6 +226,7 @@ def run(
         "unmeasured_features": list(card.unmeasured_features),
         "private_arm": {
             "external_mode_association": external_mode_association,
+            "final_mean_association": final_mean_association,
             "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
@@ -242,6 +246,7 @@ def main() -> int:
     parser.add_argument("--record-root", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--external-mode-association", action="store_true")
+    parser.add_argument("--final-mean-association", action="store_true")
     parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
@@ -253,6 +258,7 @@ def main() -> int:
             args.record_root,
             plant=args.plant,
             external_mode_association=args.external_mode_association,
+            final_mean_association=args.final_mean_association,
             raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,

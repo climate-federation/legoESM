@@ -2919,6 +2919,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_external_mode_association_test_override=False,
     _nemo_external_mode_association_field_test_override="",
     _nemo_external_mode_association_component_test_override="",
+    _nemo_final_mean_association_test_override=False,
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
 ) -> LatLonCGridOceanState:
@@ -3473,6 +3474,16 @@ def barotropic_substeps_latlon_cgrid(
                 _H_u_primary, min_water_col)
             V_bar_avg = V_bar_avg / jnp.maximum(
                 _H_v_primary, min_water_col)
+
+    if _nemo_final_mean_association_test_override:
+        # NEMO associates the completed primary-mean velocities after the
+        # transport-to-velocity division (dynspg_ts.f90:924-937).  Reuse the
+        # exact seven-field compact association; the other five returned
+        # fields are deliberately ignored by this private one-statement arm.
+        U_bar_avg, V_bar_avg = _nemo_external_mode_boundary_association(
+            U_bar_avg, V_bar_avg,
+            U_bar_avg, V_bar_avg, U_bar_avg, V_bar_avg, eta_avg, grid,
+        )[:2]
 
     # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
     # restore GLOBAL mass conservation with ONE redistribute call on the
