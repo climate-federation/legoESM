@@ -389,7 +389,7 @@ def test_forced_share_keeps_constancy_and_conserves(monkeypatch, fp64):
     spread_n, drift_n, f_n = _forced_firing_run(monkeypatch, "nemo_rk3_t")
     assert spread_l < 1e-10                       # the harness resolves constancy
     assert spread_n < 1e-10
-    assert drift_n <= 10.0 * drift_l + 1e-13
+    assert drift_n <= 10.0 * drift_l + 1e-13 and drift_n < 1e-12
     assert float(jnp.max(jnp.abs(f_n.S.data - f_l.S.data))) > 1e-13  # share is live
     du = float(jnp.max(jnp.abs(f_n.u.data - f_l.u.data)))
     assert du > 1e3 * np.finfo(np.float64).eps * float(jnp.max(jnp.abs(f_l.u.data)))
@@ -413,3 +413,139 @@ def test_census_accumulator_window_max_and_drain():
     np.testing.assert_array_equal(out["aimp_max_nemo"], [0.0, 0.2])
     np.testing.assert_array_equal(out["aimp_cmx_v"], [1.2, 0.9])
     assert acc.drain() == {}
+
+
+# --------------------------------------------------------------------------
+# 5. MPAS (Voronoi) port through the shared helpers
+# --------------------------------------------------------------------------
+def test_tripole_helper_composes_shared_column_split():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import nemo_aimp_implicit_w
+    from legoesm.ocean.vertical import (
+        nemo_aimp_midstep_geometry, nemo_wicker_aimp_partition_transport)
+    r = np.random.default_rng(7)
+    ny, nx, nl = 3, 4, 5
+    grid = SimpleNamespace(area_T=jnp.asarray(r.uniform(5e7, 1e8, (ny, nx))),
+                           dy_u=jnp.asarray(r.uniform(5e3, 1e4, (ny, nx + 1))),
+                           dx_v=jnp.asarray(r.uniform(5e3, 1e4, (ny + 1, nx))))
+    ho = jnp.asarray(r.uniform(5, 50, (ny, nx, nl))); hn = ho * 1.01
+    w = jnp.asarray(r.normal(0, 0.02, (ny, nx, nl + 1))).at[..., 0].set(0).at[..., -1].set(0)
+    mfu = jnp.asarray(r.normal(0, 30, (ny, nx + 1, nl)))
+    mfv = jnp.asarray(r.normal(0, 30, (ny + 1, nx, nl)))
+    act = jnp.ones((ny, nx, nl)).at[1, 2, 4].set(0.0)
+    got = nemo_aimp_implicit_w(mfu, mfv, w, ho, hn, act, grid, 900.0)
+    hm, e3w = nemo_aimp_midstep_geometry(ho, hn)
+    ref = nemo_wicker_aimp_partition_transport(
+        mfu, mfv, w, hm, e3w, grid.area_T, grid.dy_u, grid.dx_v, 900.0).w_implicit
+    gate = jnp.pad(act[..., :-1] * act[..., 1:], ((0, 0), (0, 0), (1, 1)))
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(ref * gate))
+    assert float(jnp.max(jnp.abs(got))) > 0.0
+
+
+@pytest.fixture()
+def vmesh():
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    return create_voronoi_mesh(subdivision_level=2)
+
+
+def test_voronoi_outflow_counts_each_edge_flux_once(vmesh):
+    from legoesm.core.operators_voronoi import divergence_cell_3d, outflow_cell_3d
+    r = np.random.default_rng(8)
+    F = jnp.asarray(r.normal(0.0, 1.0, (vmesh.dvEdge.shape[0], 3)))
+    out = outflow_cell_3d(F, vmesh) * vmesh.areaCell[:, None]
+    np.testing.assert_allclose(np.asarray(jnp.sum(out, 0)),
+                               np.asarray(jnp.sum(jnp.abs(F) * vmesh.dvEdge[:, None], 0)),
+                               rtol=1e-12)
+    # outflow - inflow = divergence
+    inflow = outflow_cell_3d(-F, vmesh)
+    np.testing.assert_allclose(np.asarray(outflow_cell_3d(F, vmesh) - inflow),
+                               np.asarray(divergence_cell_3d(F, vmesh)), atol=1e-12)
+
+
+def _mpas_model(vmesh, aimp="none", scheme="upwind_perturbation", **kw):
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    z = create_ocean_z_star(n_levels=6, H_max=4000.0)
+    cfg = MPASOceanConfig(barotropic_solver="implicit_cn", implicit_vertical_mixing=True,
+                          A_h=1.0e4, A_v=1.0e-3, K_v=1.0e-4, bottom_drag_r=1.1e-3,
+                          barotropic_implicit_pcg_tol=1.0e-12,
+                          barotropic_implicit_pcg_maxiter=400,
+                          aimp_partition=aimp, vertical_momentum_scheme=scheme, **kw)
+    state = rest_state_mpas_ocean(vmesh, z, H_max=4000.0)
+    lat = np.asarray(vmesh.latCell)
+    S = 35.0 + 0.5 * np.tanh(np.degrees(lat) / 15.0)[:, None] * np.ones(state.S.data.shape)
+    state = state._replace(T=state.T.replace(data=jnp.full(state.T.data.shape, 10.0)),
+                           S=state.S.replace(data=jnp.asarray(S)))
+    return z, state, MPASOceanModel(vmesh, z, cfg)
+
+
+def _mpas_run(vmesh, monkeypatch, aimp, forced=True, flip=False, n=3,
+              scheme="upwind_perturbation"):
+    import legoesm.ocean.vertical as V
+    import legoesm.ocean.physics.vertical_mixing.implicit_solver as IS
+    from legoesm.ocean.vertical import compute_layer_thickness
+    if forced:
+        monkeypatch.setattr(V, "nemo_aimp_fraction",
+                            lambda cu_v, cu_h, w: jnp.full_like(cu_v, 0.5))
+    if flip:
+        orig = IS._build_implicit_tridiag
+
+        def flipped(*a, implicit_w=None, **k):
+            return orig(*a, implicit_w=None if implicit_w is None else -implicit_w, **k)
+        monkeypatch.setattr(IS, "_build_implicit_tridiag", flipped)
+    z, st, model = _mpas_model(vmesh, aimp, scheme)
+    s0 = st
+
+    def content(s):
+        h = compute_layer_thickness(s.eta.data, s.H_bathy.data, z)
+        return float(jnp.sum(vmesh.areaCell[:, None] * h * s.S.data))
+    for _ in range(n):
+        st = model.step(st, dt=1800.0)
+    T = np.asarray(st.T.data)
+    return float(T.max() - T.min()), abs(content(st) / content(s0) - 1.0), st
+
+
+@pytest.mark.parametrize("scheme", ["upwind_perturbation", "nemo_advective"])
+def test_mpas_forced_share_constancy_conservation_and_live(vmesh, monkeypatch, fp64, scheme):
+    sp0, dr0, f0 = _mpas_run(vmesh, monkeypatch, "none", scheme=scheme)
+    sp1, dr1, f1 = _mpas_run(vmesh, monkeypatch, "nemo_rk3_t", scheme=scheme)
+    assert sp0 < 1e-10 and sp1 < 1e-10
+    assert dr1 <= 10.0 * dr0 + 1e-13 and dr1 < 2e-11   # lane baseline 5.3e-12
+    assert float(jnp.max(jnp.abs(f1.S.data - f0.S.data))) > 1e-13
+    du = float(jnp.max(jnp.abs(f1.u.data - f0.u.data)))
+    assert du > 1e3 * np.finfo(np.float64).eps * float(jnp.max(jnp.abs(f0.u.data)))
+
+
+def test_mpas_forced_share_planted_flip_breaks_constancy(vmesh, monkeypatch, fp64):
+    sp, _, _ = _mpas_run(vmesh, monkeypatch, "nemo_rk3_t", flip=True)
+    assert sp > 1e-8
+
+
+@pytest.mark.parametrize("scheme", ["upwind_perturbation", "nemo_advective"])
+def test_mpas_idle_rule_is_bitwise_identity_and_census(vmesh, monkeypatch, fp64, scheme):
+    _, _, f0 = _mpas_run(vmesh, monkeypatch, "none", forced=False, n=2, scheme=scheme)
+    z, st, model = _mpas_model(vmesh, "nemo_rk3_t", scheme)
+    seen = []
+    model._aimp_census_callback = lambda c, a, b, cmx: seen.append(np.asarray(c))
+    for _ in range(2):
+        st = model.step(st, dt=1800.0)
+    jax.effects_barrier()
+    for a, b in ((f0.T.data, st.T.data), (f0.S.data, st.S.data),
+                 (f0.u.data, st.u.data), (f0.eta.data, st.eta.data)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    assert len(seen) == 2 and all(c[3] == 0 and c[4] > 0 for c in seen)
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(aimp_partition="nemo"), "must be 'none' or 'nemo_rk3_t'"),
+    (dict(aimp_partition="nemo_rk3_t", implicit_vertical_mixing=False), "wired for"),
+])
+def test_mpas_validation_raises(vmesh, kw, match):
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    with pytest.raises(ValueError, match=match):
+        MPASOceanModel(vmesh, create_ocean_z_star(n_levels=4, H_max=4000.0),
+                       MPASOceanConfig(**{"barotropic_solver": "implicit_cn",
+                                          "implicit_vertical_mixing": True, **kw}))

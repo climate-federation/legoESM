@@ -579,6 +579,11 @@ class MPASOceanConfig(NamedTuple):
     # at the edge (NEMO ln_dynadv_vec; explicit, as NEMO is below Aimp's Courant
     # threshold).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # Adaptive-implicit vertical advection (appended at the END). "none"
+    # (default) = fully explicit, as before; "nemo_rk3_t" = NEMO wAimp_RK3_t
+    # (sshwzv.F90:744-836), the share solved implicitly for tracers (after
+    # advection) and for the upwind-perturbation momentum.
+    aimp_partition: str = "none"
 
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.

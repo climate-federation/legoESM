@@ -185,6 +185,18 @@ class MPASOceanModel(IntegrationMixin):
                 "iwm_forcing was supplied but "
                 "physics.vertical_mixing.iwm.enabled is not True — the maps "
                 "would be silently ignored.")
+        _aimp = getattr(self.config, "aimp_partition", "none")
+        if _aimp not in ("none", "nemo_rk3_t"):
+            raise ValueError(
+                f"aimp_partition must be 'none' or 'nemo_rk3_t', got {_aimp!r}")
+        if _aimp == "nemo_rk3_t" and not (
+                self.config.implicit_vertical_mixing
+                and self.config.vertical_momentum_scheme
+                in ("upwind_perturbation", "nemo_advective")):
+            raise ValueError(
+                "aimp_partition='nemo_rk3_t' on MPAS is wired for "
+                "implicit_vertical_mixing=True with vertical_momentum_scheme "
+                "'upwind_perturbation' or 'nemo_advective'")
         if (self._iwm_cfg is not None
                 and not getattr(self.config, "implicit_vertical_mixing",
                                 False)):
@@ -529,6 +541,7 @@ class MPASOceanModel(IntegrationMixin):
         surface_forcing=None,
         sponge=None,
         halo_refresh=None,
+        aimp_dt=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
@@ -538,6 +551,7 @@ class MPASOceanModel(IntegrationMixin):
             surface_forcing=surface_forcing,
             sponge=sponge,
             halo_refresh=halo_refresh,
+            aimp_dt=aimp_dt,
         )
 
     def _step_impl(
@@ -615,7 +629,8 @@ class MPASOceanModel(IntegrationMixin):
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
                                surface_forcing=surface_forcing,
-                               sponge=sponge, halo_refresh=halo_refresh)
+                               sponge=sponge, halo_refresh=halo_refresh,
+                               aimp_dt=dt)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -839,6 +854,29 @@ class MPASOceanModel(IntegrationMixin):
                     A_v_kpp_edge = A_v_kpp_edge * active_half_edge
                 A_v_edge = A_v_edge + A_v_kpp_edge
 
+            if tend.w_imp_edge is not None:
+                from legoesm.ocean.vertical import (
+                    implicit_vertical_advection_ocean,
+                    implicit_vertical_advection_ocean_advective)
+                _hw = dz_edge * edge_mask_3d
+                _hsum = jnp.maximum(jnp.sum(_hw, axis=-1, keepdims=True), 1e-10)
+                if config.vertical_momentum_scheme == "nemo_advective":
+                    # dynzdf vector form on the full u; its depth-mean change
+                    # is removed, as on the tripole (the barotropic mode owns
+                    # the depth mean).
+                    _du = implicit_vertical_advection_ocean_advective(
+                        u_star * edge_mask_3d, tend.w_imp_edge, dz_edge, dt,
+                        face_active=edge_mask_3d) - u_star * edge_mask_3d
+                    _du = _du - jnp.sum(_du * _hw, axis=-1, keepdims=True) / _hsum
+                    u_star = u_star + _du * edge_mask_3d
+                else:
+                    # Flux-form implicit upwind on u - ubar (conserves
+                    # sum(dz u'), so ubar stays).
+                    _ub = jnp.sum(u_star * _hw, axis=-1, keepdims=True) / _hsum
+                    _up = (u_star - _ub) * edge_mask_3d
+                    u_star = u_star + (implicit_vertical_advection_ocean(
+                        _up, tend.w_imp_edge, dz_edge, dt,
+                        face_active=edge_mask_3d) - _up)
             u_star = implicit_vertical_diffusion_ocean(
                 u_star * edge_mask_3d, A_v_edge, dz_edge, dz_half_edge, dt,
             ) * edge_mask_3d
@@ -1139,6 +1177,41 @@ class MPASOceanModel(IntegrationMixin):
             flux_div_3d, z_coord, thickness_weighted=True,
         )  # (nCells, nlev+1)
 
+        # NEMO wAimp_RK3_t tracer share: advect with w - wi, then solve wi
+        # implicitly (K=0, dz=h_new) after the flux-form update.  MPAS GM is a
+        # tendency and MLE's bolus enters as a tendency, so (deviation from
+        # traadv.F90:207-224) only the resolved transport sets the trigger.
+        _aimp_tr = getattr(config, "aimp_partition", "none") == "nemo_rk3_t"
+        _census_cb = getattr(self, "_aimp_census_callback", None)
+        w_tr = w
+        if _aimp_tr or _census_cb is not None:
+            from legoesm.core.operators_voronoi import outflow_cell_3d
+            from legoesm.ocean.vertical import (
+                nemo_aimp_implicit_w_columns, nemo_aimp_midstep_geometry)
+            _h_mid, _e3w = nemo_aimp_midstep_geometry(h_k_old, h_k_new)
+            _cu_h = dt * outflow_cell_3d(mass_flux, mesh) / jnp.maximum(_h_mid, 1e-10)
+            _wi_tr, _cu_v = nemo_aimp_implicit_w_columns(
+                _cu_h, w, _e3w, active_3d, dt, return_cu_v=True)
+            if _aimp_tr:
+                w_tr = w - _wi_tr
+            if _census_cb is not None:
+                from jax.experimental import io_callback
+                _wint = w[:, 1:-1]
+                _frac = jnp.where(_wint == 0.0, 0.0,
+                                  _wi_tr[:, 1:-1] / jnp.where(_wint == 0.0, 1.0, _wint))
+                _act = jnp.broadcast_to(active_3d, h_k_new.shape)
+                _wet = _act[:, :-1] * _act[:, 1:]
+                _z = jnp.zeros(_wint.shape[0], dtype=w.dtype)
+                # [legacy_T, legacy_u, legacy_v, nemo_T, wet_T]: MPAS has no
+                # legacy rule, so its three slots are zero.
+                _n0 = jnp.zeros((), jnp.int64)
+                _counts = jnp.stack([_n0, _n0, _n0,
+                                     jnp.sum(_frac * _wet > 0).astype(jnp.int64),
+                                     jnp.sum(_wet > 0).astype(jnp.int64)])
+                io_callback(_census_cb, None, *jax.lax.stop_gradient(
+                    (_counts, _z, jnp.max(_frac * _wet, axis=-1),
+                     jnp.max(_cu_v, axis=-1))), ordered=True)
+
         # 9. Flux-form tracer transport (horizontal + vertical)
         #
         # Both horizontal and vertical transport use the barotropic-averaged
@@ -1180,16 +1253,21 @@ class MPASOceanModel(IntegrationMixin):
             # Vertical flux divergence
             if use_tvd:
                 vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                    tr, w, h_k_old, dt, cell_active=active_3d,
+                    tr, w_tr, h_k_old, dt, cell_active=active_3d,
                     limiter_fn=limiter_fn,
                 )
             else:
-                vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
+                vert_flux_div = flux_form_vertical_tracer_advection(tr, w_tr)
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz
             hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
             tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+            if _aimp_tr:
+                _dzn = jnp.maximum(h_k_new, 1e-10)
+                tr_new = implicit_vertical_diffusion_ocean(
+                    tr_new * active_3d, jnp.zeros_like(tr_new[:, :-1]), _dzn,
+                    build_dz_half(_dzn), dt, implicit_w=_wi_tr)
             # Preserve pre-step land values instead of zeroing them.
             # Zeroing T, S on land each step and then averaging those
             # zeros into coastal cells via the Neumann fill produced a

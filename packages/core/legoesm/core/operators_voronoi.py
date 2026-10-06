@@ -520,6 +520,21 @@ def divergence_cell_3d(u_edge_3d, mesh):
     return jnp.sum(flux, axis=0) / mesh.areaCell[:, None]
 
 
+def outflow_cell_3d(u_edge_3d, mesh):
+    """Horizontal OUTFLOW per unit cell area, all levels (same stencil as
+    :func:`divergence_cell_3d`, keeping only the outward edge fluxes).
+
+    Returns ``sum_e max(sign*u*dv, 0) / areaCell``, shape (nCells, nlev).
+    """
+    eoc = mesh.edgesOnCell
+    sign = mesh.edgeSignOnCell
+    mask = (eoc >= 0).astype(u_edge_3d.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+    flux = (sign[:, :, None] * u_edge_3d[eoc_safe]
+            * mesh.dvEdge[eoc_safe][:, :, None] * mask[:, :, None])
+    return jnp.sum(jnp.maximum(flux, 0.0), axis=0) / mesh.areaCell[:, None]
+
+
 def gradient_edge_3d(phi_cell_3d, mesh):
     """Gradient at edges for all levels.
 

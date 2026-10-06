@@ -706,3 +706,6 @@ class MPASOceanTendencies(NamedTuple):
     dS_dt: Field
     deta_dt: Field
     F_slow_u: Field | None = None
+    # NEMO wAimp implicit share of the edge w (nEdges, nlev+1), set only under
+    # MPASOceanConfig.aimp_partition='nemo_rk3_t'; the step solves it implicitly.
+    w_imp_edge: object | None = None

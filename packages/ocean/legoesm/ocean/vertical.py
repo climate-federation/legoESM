@@ -139,6 +139,55 @@ def nemo_aimp_fraction(cu_v_int, cu_h, w_int):
     return jnp.clip(frac_int, 0.0, 1.0)
 
 
+def nemo_aimp_midstep_geometry(h_old, h_new):
+    """Step-midpoint T thickness and w-cell spacing for the Aimp Courant
+    (NEMO stage-3 Kmm ~ N+1/2): ``e3w`` = mean of the adjacent thicknesses,
+    half a cell at the surface and bottom interfaces (nlev+1)."""
+    h_mid = 0.5 * (h_old + h_new)
+    e3w = jnp.concatenate(
+        [0.5 * h_mid[..., :1], 0.5 * (h_mid[..., :-1] + h_mid[..., 1:]),
+         0.5 * h_mid[..., -1:]], axis=-1)
+    return h_mid, e3w
+
+
+def cgrid_outflow_courant(mass_flux_u, mass_flux_v, h_t, area_t, dy_u, dx_v, dt):
+    """Horizontal OUTFLOW Courant number of each C-grid T cell (NEMO
+    ``Cu_adv``, sshwzv.F90:779-797): positive east/north face transports minus
+    negative west/south ones, times dt over the cell volume."""
+    dtype = mass_flux_u.dtype
+    hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
+    hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
+    outflow = (
+        jnp.maximum(hu_transport[:, 1:, :], 0.0)
+        - jnp.minimum(hu_transport[:, :-1, :], 0.0)
+        + jnp.maximum(hv_transport[1:, :, :], 0.0)
+        - jnp.minimum(hv_transport[:-1, :, :], 0.0)
+    )
+    area = jnp.asarray(area_t, dtype=dtype)
+    return jnp.asarray(dt, dtype=dtype) * outflow / jnp.maximum(
+        area[..., None] * h_t, jnp.asarray(_H_FLOOR, dtype=dtype))
+
+
+def nemo_aimp_implicit_w_columns(cu_h, w, e3w, active, dt, return_cu_v=False):
+    """Mesh-agnostic NEMO ``wAimp_RK3_t`` implicit share ``wi`` (nlev+1
+    interfaces) from a per-cell horizontal Courant ``cu_h`` (each mesh builds
+    its own) and the w-cell spacing ``e3w``.  Interior interfaces are zeroed
+    unless both adjacent cells are ``active``."""
+    dtype = w.dtype
+    nlev = cu_h.shape[-1]
+    w_int = w[..., 1:nlev]
+    cu_v_int = jnp.asarray(dt, dtype=dtype) * jnp.abs(w_int) / jnp.maximum(
+        e3w[..., 1:nlev], jnp.asarray(_H_FLOOR, dtype=dtype))
+    frac_int = nemo_aimp_fraction(cu_v_int, cu_h, w_int)
+    pad = ((0, 0),) * (frac_int.ndim - 1) + ((1, 1),)
+    act = jnp.broadcast_to(active, cu_h.shape).astype(dtype)
+    gate = jnp.pad(act[..., :-1] * act[..., 1:], pad)
+    wi = (jnp.pad(frac_int, pad) * w) * gate
+    if return_cu_v:
+        return wi, jnp.pad(cu_v_int, pad) * gate
+    return wi
+
+
 def nemo_wicker_aimp_partition_transport(
     mass_flux_u: jnp.ndarray,
     mass_flux_v: jnp.ndarray,
@@ -166,19 +215,8 @@ def nemo_wicker_aimp_partition_transport(
     """
     dtype = w.dtype
     dt_a = jnp.asarray(dt, dtype=dtype)
-    area = jnp.asarray(area_t, dtype=dtype)
-    hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
-    hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
-    # OUTflow: positive east/north faces minus negative west/south faces
-    # (sshwzv.F90:793-797).
-    outflow = (
-        jnp.maximum(hu_transport[:, 1:, :], 0.0)
-        - jnp.minimum(hu_transport[:, :-1, :], 0.0)
-        + jnp.maximum(hv_transport[1:, :, :], 0.0)
-        - jnp.minimum(hv_transport[:-1, :, :], 0.0)
-    )
-    cu_h = dt_a * outflow / jnp.maximum(
-        area[..., None] * h_t_kmm, jnp.asarray(_H_FLOOR, dtype=dtype))
+    cu_h = cgrid_outflow_courant(mass_flux_u, mass_flux_v, h_t_kmm, area_t,
+                                 dy_u, dx_v, dt)
 
     nlev = h_t_kmm.shape[-1]
     if w.shape[-1] != nlev + 1 or e3w_kmm.shape[-1] != nlev + 1:

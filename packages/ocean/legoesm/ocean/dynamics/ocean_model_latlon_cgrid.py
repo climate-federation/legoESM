@@ -157,20 +157,14 @@ def nemo_aimp_implicit_w(mass_flux_u, mass_flux_v, w, h_k_old, h_k_new,
     Interior interfaces are zeroed unless both adjacent cells are active, so
     no implicit transport crosses a partial seafloor.
     """
-    h_mid = 0.5 * (h_k_old + h_k_new)
-    e3w_int = 0.5 * (h_mid[..., :-1] + h_mid[..., 1:])
-    e3w = jnp.concatenate(
-        [0.5 * h_mid[..., :1], e3w_int, 0.5 * h_mid[..., -1:]], axis=-1)
-    split = nemo_wicker_aimp_partition_transport(
-        mass_flux_u, mass_flux_v, w, h_mid, e3w,
-        grid.area_T, grid.dy_u, grid.dx_v, dt)
-    act = jnp.broadcast_to(active_3d, h_mid.shape).astype(w.dtype)
-    gate_int = act[..., :-1] * act[..., 1:]
-    pad = ((0, 0),) * (gate_int.ndim - 1) + ((1, 1),)
-    gate = jnp.pad(gate_int, pad)
-    if return_cu_v:
-        return split.w_implicit * gate, split.courant_vertical * gate
-    return split.w_implicit * gate
+    from legoesm.ocean.vertical import (
+        cgrid_outflow_courant, nemo_aimp_implicit_w_columns,
+        nemo_aimp_midstep_geometry)
+    h_mid, e3w = nemo_aimp_midstep_geometry(h_k_old, h_k_new)
+    cu_h = cgrid_outflow_courant(mass_flux_u, mass_flux_v, h_mid, grid.area_T,
+                                 grid.dy_u, grid.dx_v, dt)
+    return nemo_aimp_implicit_w_columns(cu_h, w, e3w, active_3d, dt,
+                                        return_cu_v=return_cu_v)
 
 
 def aimp_census_arrays(mass_flux_u, mass_flux_v, w_baro, h_k_old, h_k_new,

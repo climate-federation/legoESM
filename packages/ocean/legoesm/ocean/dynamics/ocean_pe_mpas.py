@@ -103,6 +103,7 @@ def mpas_ocean_baroclinic_tendencies(
     sponge=None,
     halo_refresh=None,
     term_diagnostics: bool = False,
+    aimp_dt: float | None = None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -317,6 +318,24 @@ def mpas_ocean_baroclinic_tendencies(
     w = diagnose_w_from_flux_div(
         div_flux, z_coord, thickness_weighted=True,
     )  # (nCells, nlev+1)
+    # NEMO wAimp_RK3_t momentum share (state-time geometry): the explicit
+    # vertical advection below sees w - wi; the step solves wi implicitly.
+    w_imp_edge = None
+    w_adv = w
+    if getattr(config, "aimp_partition", "none") == "nemo_rk3_t":
+        if aimp_dt is None:
+            raise ValueError("aimp_partition='nemo_rk3_t' needs aimp_dt")
+        from legoesm.core.operators_voronoi import outflow_cell_3d
+        from legoesm.ocean.vertical import (
+            nemo_aimp_implicit_w_columns, nemo_aimp_midstep_geometry)
+        _act_c = (z_coord.is_active.astype(w.dtype)
+                  if isinstance(z_coord, OceanPartialCellCoordinate)
+                  else mask[:, None])
+        _h_mid, _e3w = nemo_aimp_midstep_geometry(h_k, h_k)
+        _cu_h = aimp_dt * outflow_cell_3d(thickness_flux, mesh) / jnp.maximum(
+            _h_mid, 1.0e-10)
+        _wi = nemo_aimp_implicit_w_columns(_cu_h, w, _e3w, _act_c, aimp_dt)
+        w_adv = w - _wi
 
     # ---- Momentum tendencies (batched 3D) ----
     # Split-explicit Coriolis approach: the PV flux below uses ONLY
@@ -676,7 +695,19 @@ def mpas_ocean_baroclinic_tendencies(
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     _vms = getattr(config, "vertical_momentum_scheme", "upwind_perturbation")
-    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1); also a term diagnostic
+    w_e = 0.5 * (w_adv[c1] + w_adv[c2])  # (nEdges, nlev+1); also a term diagnostic
+    _aw_imp_e = None
+    if w_adv is not w:
+        # Edge share gated by the per-level edge mask on BOTH sides of each
+        # interface, so it cannot reopen a shallower neighbour's seafloor.
+        _em = jnp.pad(edge_mask_3d[:, :-1] * edge_mask_3d[:, 1:], ((0, 0), (1, 1)))
+        w_imp_edge = (0.5 * (w[c1] + w[c2]) - w_e) * _em
+        w_e = 0.5 * (w[c1] + w[c2]) - w_imp_edge
+        if _vms == "nemo_advective":
+            # dynzdf.F90:235-250: area-weighted wi at the edge, vector form.
+            _a = mesh.areaCell[:, jnp.newaxis]
+            _aw_imp_e = 0.5 * ((_a * (w - w_adv))[c1] + (_a * (w - w_adv))[c2]) * _em
+            w_imp_edge = _aw_imp_e / (0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2]))[:, None]
     if _vms == "upwind_perturbation":
         vert_adv_u = flux_form_vertical_momentum_advection(
             u_prime_3d, w_e, h_e_3d,
@@ -685,8 +716,11 @@ def mpas_ocean_baroclinic_tendencies(
         # NEMO dynzad: 2-cell mean of areaCell*w at the edge, normalised by the
         # 2-cell mean area (the edge's e1e2u analogue), full velocity.
         _aw = mesh.areaCell[:, jnp.newaxis] * w
+        _aw_e = 0.5 * (_aw[c1] + _aw[c2])
+        if _aw_imp_e is not None:
+            _aw_e = _aw_e - _aw_imp_e
         vert_adv_u = nemo_advective_vertical_momentum_advection(
-            u_3d, 0.5 * (_aw[c1] + _aw[c2]), h_e_3d,
+            u_3d, _aw_e, h_e_3d,
             (0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2]))[:, jnp.newaxis],
             face_active=edge_mask_3d,
         )
@@ -1198,6 +1232,7 @@ def mpas_ocean_baroclinic_tendencies(
                           dims=("nCells",), units="m/s"),
             F_slow_u=Field(data=F_slow_u, name="F_slow_u",
                            dims=("nEdges",), units="m/s²"),
+            w_imp_edge=w_imp_edge,
         ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
             "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
             "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
@@ -1212,6 +1247,7 @@ def mpas_ocean_baroclinic_tendencies(
                       dims=("nCells",), units="m/s"),
         F_slow_u=Field(data=F_slow_u, name="F_slow_u",
                        dims=("nEdges",), units="m/s²"),
+        w_imp_edge=w_imp_edge,
     )
 
 

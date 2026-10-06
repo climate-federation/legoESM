@@ -3854,7 +3854,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      no_gm_redi=False, K_zeta_bih=None,
                      gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                      gm_kappa_min=0.0, nemo_ldf_file=None,
-                     lateral_side_bc=None, vertical_momentum_scheme=None):
+                     lateral_side_bc=None, vertical_momentum_scheme=None,
+                     aimp_partition=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3948,7 +3949,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("freeze_floor", freeze_floor),
                               ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
-                              ("vertical_momentum_scheme", vertical_momentum_scheme))
+                              ("vertical_momentum_scheme", vertical_momentum_scheme),
+                              ("aimp_partition", aimp_partition))
             if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
@@ -9098,13 +9100,21 @@ def main() -> int:
     _aimp_tripole_only = [n for n, v in (("--aimp-partition", args.aimp_partition),
                                          ("--aimp-census", args.aimp_census or None))
                           if v is not None]
-    if _aimp_tripole_only and args.grid != "tripole":
+    if _aimp_tripole_only and args.grid not in ("tripole", "mpas"):
         raise SystemExit(f"{' and '.join(_aimp_tripole_only)} is wired on --grid "
-                         f"tripole only (got {args.grid!r}); it would be "
+                         f"tripole|mpas only (got {args.grid!r}); it would be "
                          "silently ignored.")
+    if args.grid == "mpas" and args.aimp_partition == "shchepetkin_vertical":
+        raise SystemExit("--aimp-partition shchepetkin_vertical does not exist "
+                         "on MPAS (no legacy rule); use nemo_rk3_t")
     _not_on_mpas = [n for n, v in (("--momentum-rk3", args.momentum_rk3 or None),
-                                   ("--adaptive-implicit-vertadv",
-                                    args.adaptive_implicit_vertadv or None),
+                                   # MPAS has only NEMO's rule: the flag is
+                                   # wired there with --aimp-partition nemo_rk3_t.
+                                   ("--adaptive-implicit-vertadv without "
+                                    "--aimp-partition nemo_rk3_t",
+                                    (args.adaptive_implicit_vertadv
+                                     and args.aimp_partition != "nemo_rk3_t")
+                                    or None),
                                    ("--min-levels",
                                     args.min_levels if args.min_levels != 1
                                     else None),
@@ -9431,6 +9441,7 @@ def main() -> int:
             nemo_ldf_file=args.nemo_ldf_file,
             lateral_side_bc=args.lateral_side_bc,
             vertical_momentum_scheme=args.vertical_momentum_scheme,
+            aimp_partition=(args.aimp_partition if args.adaptive_implicit_vertadv else None),
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
