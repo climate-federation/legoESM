@@ -48,7 +48,11 @@ def main(a):
         n_steps, end_day = int(z["n_steps"]), float(z["day"])
         if rates.shape[0] != lat.size or not np.isfinite(rates).all():
             raise SystemExit(f"{d}: {rates.shape} columns vs {lat.size}, or non-finite rates")
-        if "area_cell" in z.files and not np.allclose(
+        # Positional area check (required).  Residual, stated: two EQUAL-area
+        # columns swapped would pass; both files come from the same
+        # deterministic mesh build of the same deck, so order is identical
+        # by construction and this guards against a different mesh/deck.
+        if "area_cell" not in z.files or not np.allclose(
                 np.asarray(z["area_cell"]) / np.asarray(z["area_cell"]).sum(), area / area.sum(), rtol=1e-6):
             raise SystemExit(f"{d}: ledger column order/areas differ from the capture's")
         if abs(n_steps * DT_S - (end_day - start) * 86400.0) > DT_S:

@@ -470,13 +470,15 @@ def capture(a):
         _qit = np.asarray(_tr["q_i"].data if hasattr(_tr["q_i"], "data") else _tr["q_i"],
                           dtype=np.float64)
         _qin = np.asarray(_qi, dtype=np.float64)
-        # per-level column sums must agree (level order AND scale), not just correlate
-        _lev_t, _lev_r = _qit.sum(0), _qin.sum(0)
-        _rel = float(np.abs(_lev_t - _lev_r).max() / max(np.abs(_lev_r).max(), 1e-30))
-        print(f"snow arms: q_i tracer vs radiation q_ice, max per-level relative difference {_rel:.2e}",
-              flush=True)
-        if not (np.isfinite(_rel) and _rel < 0.05 and _lev_r.max() > 0.0):
-            raise SystemExit("FATAL: cloud-ice tracer does not match the radiation's q_ice by level")
+        # element-wise (column AND level AND scale): the snow tracer comes from
+        # the same state as the cloud-ice tracer, so if q_i lines up with the
+        # radiation's q_ice cell by cell, q_s does too.
+        if _qit.shape != _qin.shape:
+            raise SystemExit(f"FATAL: q_i tracer {_qit.shape} vs radiation q_ice {_qin.shape}")
+        _rel = float(np.abs(_qit - _qin).max() / max(np.abs(_qin).max(), 1e-30))
+        print(f"snow arms: q_i tracer vs radiation q_ice, max |diff| / max {_rel:.2e}", flush=True)
+        if not (np.isfinite(_rel) and _rel < 1e-3 and _qin.max() > 0.0):
+            raise SystemExit("FATAL: cloud-ice tracer does not match the radiation's q_ice cell by cell")
         _dpn = np.abs(np.diff(np.asarray(_ph, dtype=np.float64), axis=1))
         for _n, _q in (("snow", _qi + _qs.astype(_qi.dtype)),
                        ("snowg", _qi + (_qs + _qg).astype(_qi.dtype))):
