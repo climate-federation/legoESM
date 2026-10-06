@@ -143,12 +143,28 @@ cellwise ratchet.
 
 ## 5. Review, citations, and tests
 
-Independent read-only Codex review: **PENDING FINAL PASS**.
+The required separate read-only Codex review was attempted, but is unavailable
+in this sandbox. Its complete verdict, quoted verbatim, is:
 
-Citation gate: **PENDING FINAL PASS**. The shifted-citation plant must exit
-nonzero.
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+> Reading additional input from stdin...
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
 
-Focused tests: **PENDING FINAL PASS**.
+There is no `SHIP`/`DO NOT SHIP` verdict to suppress. The held disposition is
+stricter than a review could make it: no candidate physics remains live.
+
+The citation gate finds five mapped citations, zero failures, zero unmapped
+citations, and zero map-audit failures. Shifting the compiled stage-call range
+by two lines produces `SYMBOL-NOT-AT-LINE`, status FAIL, and exit `1`.
+
+The final focused suite is:
+
+> 138 passed in 183.44s (0:03:03)
+
+It covers the citation gate, the complete GM/Redi unit file (including the
+source-bound mask control), and the seamount card tests. Production restoration
+is additionally certified by the 50-row SMT-3 comparison: zero row moves,
+zero cellwise worsening, status PASS.
 
 ## 6. OPEN — next round
 
