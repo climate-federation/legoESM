@@ -232,6 +232,52 @@ def build_cost_fn(
     return cost_fn
 
 
+def build_vspace_cost_fn(
+    model,
+    background: jax.Array,
+    observations: tuple,
+    B,
+    control_spec,
+    template_state,
+    dt: float,
+    n_steps: int,
+    checkpoint: bool = True,
+    *,
+    checkpoint_schedule: str | None = None,
+    checkpoints: int | None = None,
+    storage: str = "recompute",
+) -> Callable[[jax.Array], jax.Array]:
+    """4D-Var cost in the control variable v, with x = x_b + B^{1/2} v.
+
+    J(v) = 1/2 v^T v + J_o(x_b + B^{1/2} v)
+
+    For B = U U^T with U invertible this equals the x-space cost of
+    :func:`build_cost_fn` at x = x_b + U v; it needs only ``B.sqrt_multiply``,
+    so it is also defined where B^{-1} is not (GEN_BE on MPAS meshes, #1819).
+    Arguments as in :func:`build_cost_fn`.
+    """
+    checkpoint_schedule = _resolve_and_validate_dispatch(
+        checkpoint, checkpoint_schedule, storage, observations, n_steps
+    )
+
+    def cost_fn(v: jax.Array) -> jax.Array:
+        J_b = 0.5 * jnp.sum(v * v)
+        x = background + B.sqrt_multiply(v)
+        state_0 = control_to_state(x, control_spec, template_state)
+
+        def indexed_step(i, s):
+            return model.step(s, dt)
+
+        J_o = _obs_cost_rollout(
+            state_0, indexed_step, observations, n_steps,
+            J_b=J_b, checkpoint_schedule=checkpoint_schedule,
+            checkpoints=checkpoints, storage=storage,
+        )
+        return J_b + J_o
+
+    return cost_fn
+
+
 def build_cost_and_grad_fn(
     model,
     background: jax.Array,

@@ -19,11 +19,22 @@ from legoesm.da.control_vector import (
     control_to_state,
     state_to_control,
 )
-from legoesm.da.cost_function import build_cost_fn
+from legoesm.da.cost_function import build_cost_fn, build_vspace_cost_fn
 from legoesm.da.minimizer import minimize_cg, minimize_lbfgs
 from legoesm.da.preconditioning import preconditioned_cost_fn
 
 logger = logging.getLogger(__name__)
+
+
+def _uses_vspace_background(B) -> bool:
+    """GEN_BE covariances are minimised in the control variable v (J_b = 1/2|v|^2).
+
+    Exact wherever GEN_BE has an inverse, and the only option where it has none
+    (MPAS meshes, #1819).
+    """
+    from legoesm.da.gen_be import GenBETransform
+
+    return isinstance(B, GenBETransform)
 
 
 class IncrementalConfig(NamedTuple):
@@ -73,7 +84,10 @@ def incremental_4dvar(
     observations : tuple of Observation
         Observation batches.
     B : background error covariance
-        Must have .inv_multiply() and .sqrt_multiply().
+        Must have .sqrt_multiply(); also .inv_multiply() unless it is a
+        GenBETransform with preconditioning on, whose cost is taken in the
+        control variable (J_b = 1/2|v|^2; the reported gradient is then with
+        respect to v).
     control_spec : ControlVectorSpec
         Control vector specification.
     dt : float
@@ -89,6 +103,13 @@ def incremental_4dvar(
     -------
     (analysis_state, IncrementalDiagnostics)
     """
+    vspace = _uses_vspace_background(B)
+    if vspace and not config.use_preconditioning and not B.inverse_available:
+        raise ValueError(
+            "incremental_4dvar: use_preconditioning=False needs B^{-1}, which this "
+            "GenBETransform does not provide (MPAS mesh, #1819); use the "
+            "preconditioned control-variable path (use_preconditioning=True)."
+        )
     x_b = state_to_control(background_state, control_spec)
     x_k = x_b.copy()
     # Preconditioned iterate, x_k = x_b + B^{1/2} v_k; carried across outer
@@ -125,6 +146,17 @@ def incremental_4dvar(
         J_tilde = preconditioned_cost_fn(cost_fn, B, x_b)
         return jax.value_and_grad(J_tilde)(v)
 
+    @jax.jit
+    def _vspace_and_grad(v, template_state):
+        cost_fn = build_vspace_cost_fn(
+            model, x_b, observations, B, control_spec,
+            template_state, dt, n_steps, config.checkpoint,
+        )
+        return jax.value_and_grad(cost_fn)(v)
+
+    use_v = vspace and config.use_preconditioning
+    precond_and_grad = _vspace_and_grad if use_v else _precond_and_grad
+
     n_obs_values = sum(int(jnp.size(o.values)) for o in observations)
 
     @jax.jit
@@ -153,7 +185,10 @@ def incremental_4dvar(
         template = control_to_state(x_k, control_spec, background_state)
 
         # Current cost and gradient (compiled once; no per-outer recompile).
-        J_k, g_k = _cost_and_grad(x_k, template)
+        if use_v:
+            J_k, g_k = _vspace_and_grad(v_k, template)
+        else:
+            J_k, g_k = _cost_and_grad(x_k, template)
         g_norm = float(jnp.linalg.norm(g_k))
         cost_history.append(float(J_k))
         grad_norm_history.append(g_norm)
@@ -172,7 +207,7 @@ def incremental_4dvar(
         # ``f(x) -> (J, grad)`` backed by the once-compiled wrapper above.
         if config.use_preconditioning:
             v0 = v_k
-            inner_fn = partial(_precond_and_grad, template_state=template)
+            inner_fn = partial(precond_and_grad, template_state=template)
 
             if config.inner_method == "cg":
                 result = minimize_cg(

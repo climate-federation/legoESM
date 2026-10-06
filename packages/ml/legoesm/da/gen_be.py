@@ -1140,7 +1140,7 @@ class GenBETransform:
         Applies the operators in reverse order:
           U_wind^{-1} → U_sigma^{-1} → U_vert^{-1} → U_bal^{-1} → U_horiz^{-1}
         """
-        if self._laplacian_weights is not None or self._use_mpas_helmholtz:
+        if not self.inverse_available:
             # Not implemented, and at production settings not implementable: the
             # forward diffusion (I + sL)^n multiplies the most negative
             # eigenmode of L by (1 + s lam_min)^n.  While the step is unclipped
@@ -1216,6 +1216,11 @@ class GenBETransform:
     # ------------------------------------------------------------------
     # Public interface (matches DiagonalB / DiffusionB)
     # ------------------------------------------------------------------
+
+    @property
+    def inverse_available(self) -> bool:
+        """False where :meth:`inv_multiply` refuses (MPAS meshes, #1819)."""
+        return self._laplacian_weights is None and not self._use_mpas_helmholtz
 
     def sqrt_multiply(self, v: jax.Array) -> jax.Array:
         """Apply B^{1/2} v. Pure, differentiable, JIT-compatible."""
