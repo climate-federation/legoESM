@@ -291,7 +291,7 @@ def soil_layer_enthalpy(
     sensible = ((A + dC * theta) * x
                 + dC * (theta - theta_min) * w
                 * (jax.nn.softplus(-x / w) - jnp.log(2.0)))
-    return (sensible + constants.rho_water * constants.L_f * theta_liq) * dz
+    return (sensible + constants.rho_water * constants.L_f * theta_liq) * dz  # latent-ok: T_freeze reference (ice at T_freeze = 0)
 
 
 def invert_soil_layer_enthalpy(
