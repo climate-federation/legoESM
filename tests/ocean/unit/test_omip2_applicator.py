@@ -1,4 +1,4 @@
-"""Unit tests for the OMIP-2 surface-flux applicator."""
+"""Unit tests for the OMIP-2 surface-forcing builders (omip2_applicator)."""
 
 from __future__ import annotations
 
@@ -49,64 +49,6 @@ def _rest_state_latlon():
     return state, grid, z, model
 
 
-def test_applicator_returns_same_type():
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.ocean.forcing import synthetic_ocean_forcing
-    state, grid, z, _ = _rest_state_latlon()
-    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
-    new_state = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=grid, grid_type="latlon", dt=1800.0,
-    )
-    assert type(new_state) is type(state)
-    # ``T_max`` of the modified surface layer must remain finite.
-    T_top = np.asarray(new_state.T.data)[..., 0]
-    assert np.isfinite(T_top).all()
-
-
-def test_applicator_injects_kinetic_energy_from_rest():
-    """At rest, applying nonzero wind should produce nonzero top-cell u/v."""
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.ocean.forcing import synthetic_ocean_forcing
-    state, grid, z, _ = _rest_state_latlon()
-    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
-    # Sanity: u/v exactly zero before.
-    assert np.all(np.asarray(state.u.data) == 0.0)
-    assert np.all(np.asarray(state.v.data) == 0.0)
-    new_state = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=grid, grid_type="latlon", dt=1800.0,
-    )
-    u_top = np.asarray(new_state.u.data)[..., 0]
-    v_top = np.asarray(new_state.v.data)[..., 0]
-    # Wind stress should have moved at least some surface velocity.
-    assert np.abs(u_top).max() > 1e-6
-    assert np.abs(v_top).max() > 1e-6
-    # Below the surface should stay at rest after a single step
-    # (no vertical mixing applied by the applicator).
-    assert np.all(np.asarray(new_state.u.data)[..., 1:] == 0.0)
-
-
-def test_applicator_temperature_responds_to_heat_flux():
-    """Top-cell T should drift toward the forcing temperature; for a
-    warm-air over cold-ocean column the top cell heats up."""
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.ocean.forcing import synthetic_ocean_forcing
-    state, grid, z, _ = _rest_state_latlon()
-    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
-    T_top_initial = np.asarray(state.T.data)[..., 0].copy()
-    new_state = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=grid, grid_type="latlon", dt=1800.0,
-    )
-    T_top_after = np.asarray(new_state.T.data)[..., 0]
-    delta = T_top_after - T_top_initial
-    # At least one cell must change; magnitude must be sane (<1 K per
-    # half-hour step is sane; flagging > 5 K would catch a runaway).
-    assert np.abs(delta).max() > 1e-6
-    assert np.abs(delta).max() < 5.0
-
-
 def test_woa_synthetic_sst_in_realistic_range():
     """WOA synthetic SST falls inside the global-ocean range."""
     from legoesm.ocean.forcing import synthetic_woa_sst
@@ -153,19 +95,6 @@ def test_woa_into_sst_climatology_bias(tmp_path):
     assert res.rmse_K == pytest.approx(1.0, abs=1e-12)
 
 
-def test_applicator_raises_on_unsupported_grid():
-    """Spectral grid type is not supported by the applicator."""
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.ocean.forcing import synthetic_ocean_forcing
-    state, grid, z, _ = _rest_state_latlon()
-    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
-    with pytest.raises(NotImplementedError):
-        apply_omip2_surface_fluxes(
-            state, forcing=forcing, idx_t=0,
-            z_coord=z, grid=grid, grid_type="spectral", dt=1800.0,
-        )
-
-
 def _rest_state(grid_type, res, H_max=5500.0, nlev=10):
     import importlib.util
     repo_root = Path(__file__).resolve().parents[3]
@@ -203,88 +132,6 @@ def _uniform_wind_forcing(u_east=8.0, nlat=18, nlon=36):
         sw_down=fld(0.0), lw_down=fld(0.0),
         precip=fld(0.0), runoff=fld(0.0),
     )
-
-
-def test_applicator_wind_stress_sign_latlon():
-    """Eastward wind must accelerate the ocean EASTWARD (u_top > 0).
-
-    Guards the ``air_sea_fluxes`` atmospheric-convention sign: it returns
-    ``tau = -rho_air Cd |U| U`` (opposing the wind), so the ocean feels ``-tau``.
-    Applying ``+tau`` (the previous applicator bug) would drive the surface
-    WESTWARD -- this test would fail under that bug.
-    """
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    state, grid, z, _ = _rest_state_latlon()
-    forcing = _uniform_wind_forcing(u_east=8.0)
-    new = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=grid, grid_type="latlon", dt=1800.0,
-    )
-    u_top = np.asarray(new.u.data)[..., 0]
-    v_top = np.asarray(new.v.data)[..., 0]
-    u_mask = np.asarray(state.u_mask.data) > 0.5
-    assert np.isfinite(u_top).all()
-    assert u_mask.any()
-    # Eastward wind -> eastward (positive) mean u over wet faces.
-    assert u_top[u_mask].mean() > 0.0
-    assert np.abs(u_top[u_mask]).max() > 1e-6
-    # No meridional wind -> no meridional stress -> v stays at rest.
-    assert np.abs(v_top).max() < 1e-9
-
-
-def test_applicator_tripole_runs_and_sign():
-    """Tripole branch: NN-sample 2-D forcing, rotate, apply on the C-grid.
-
-    Uses a synthetic tripole (regular metrics, identity rotation), so an
-    eastward wind must give a positive-u response like the lat-lon path.
-    """
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.grids.tripole import create_synthetic_tripole
-    from legoesm.ocean.vertical import create_ocean_z_star
-    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-    geom = create_synthetic_tripole(n_lat=36)
-    z = create_ocean_z_star(n_levels=10, H_max=5500.0)
-    state = rest_state_latlon_cgrid_ocean(geom, z, H_max=5500.0)
-    forcing = _uniform_wind_forcing(u_east=8.0)
-    new = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=geom, grid_type="tripole", dt=1800.0,
-    )
-    assert type(new) is type(state)
-    u_top = np.asarray(new.u.data)[..., 0]
-    assert np.isfinite(u_top).all()
-    u_mask = np.asarray(state.u_mask.data) > 0.5
-    assert u_mask.any()
-    assert u_top[u_mask].mean() > 0.0
-
-
-@pytest.mark.parametrize("grid_type,res", [
-    ("cubed_sphere", "C24"),
-    ("mpas", "ico3"),
-])
-def test_applicator_on_cube_and_mpas(grid_type, res):
-    """Applicator builds + steps cube + MPAS states without errors."""
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-    from legoesm.ocean.forcing import synthetic_ocean_forcing
-    state, grid, z, _ = _rest_state(grid_type, res)
-    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
-    new_state = apply_omip2_surface_fluxes(
-        state, forcing=forcing, idx_t=0,
-        z_coord=z, grid=grid, grid_type=grid_type, dt=1800.0,
-    )
-    assert type(new_state) is type(state)
-    # u must respond: cube has collocated u, MPAS u on edges.
-    u_new = np.asarray(new_state.u.data)
-    assert np.isfinite(u_new).all()
-    assert np.abs(u_new).max() > 0.0
-    # T top-cell must respond.
-    T_top = (np.asarray(new_state.T.data)[..., 0]
-             if grid_type == "cubed_sphere"
-             else np.asarray(new_state.T.data)[:, 0])
-    T0_top = (np.asarray(state.T.data)[..., 0]
-              if grid_type == "cubed_sphere"
-              else np.asarray(state.T.data)[:, 0])
-    assert (T_top != T0_top).any()
 
 
 def test_compute_omip2_surface_forcing_mpas():
@@ -922,14 +769,3 @@ def test_conservative_regrid_rejects_partial_longitude_source():
     )
     assert np.all(np.isfinite(out))
 
-
-def test_legacy_applicator_warns_it_is_known_defective():
-    """The legacy per-step applicator must say it applies no albedo and
-    leaves cube stress unrotated (review decision item 14 guard)."""
-    import inspect
-    from legoesm.ocean.coupler import omip2_applicator as A
-    src = inspect.getsource(A.apply_omip2_surface_fluxes)
-    body = src.split('"""', 2)[2]
-    assert body.lstrip().startswith("warnings.warn(")
-    assert "no shortwave albedo" in body and "unrotated" in body
-    assert "FutureWarning" in body
