@@ -208,7 +208,7 @@ def centre_uv_collocated(un, vn):
 def _var_candidates(v):
     return {"T": _T_CANDS, "S": _S_CANDS, "U": _U_CANDS, "V": _V_CANDS,
             "en": _EN_CANDS, "avt_k": _AVTK_CANDS, "avm_k": _AVMK_CANDS,
-            "ssh": _SSH_CANDS}[v]
+            "ssh": _SSH_CANDS, "dissl": ("dissl",)}[v]
 
 
 def reassemble_restart(glob_pat, varnames, twins):

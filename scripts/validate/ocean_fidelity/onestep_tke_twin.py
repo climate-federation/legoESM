@@ -77,7 +77,7 @@ def load_strip_taum(run_dir: Path, step: int):
 
 
 def our_step(*, R, band, cfg, eos, rho0, g, dz_ref, t_depth_ref, taum_cols,
-             en_in, dt, p_sh2=None):
+             en_in, dt, p_sh2=None, carry=None):
     """One TKE step on the strip columns; returns (en_new, zk).
 
     ``p_sh2`` (ncol, nlev-1): NEMO's own shear production (strip eshear_k =
@@ -125,8 +125,10 @@ def our_step(*, R, band, cfg, eos, rho0, g, dz_ref, t_depth_ref, taum_cols,
         dz_surface=(-jnp.asarray(z_coord.z_full_ref[0])) * J,
         lat_deg=jnp.asarray(R["nav_lat"][band][None, :]),
         T_n2=T, S_n2=S, t_depth=t_depth, w_depth=w_depth, e3w_int=e3w_int,
-        precomputed_p_sh2=(None if p_sh2 is None else jnp.asarray(p_sh2[None])))
+        precomputed_p_sh2=(None if p_sh2 is None else jnp.asarray(p_sh2[None])),
+        **({} if carry is None else {k: jnp.asarray(v[None]) for k, v in carry.items()}))
     zk = np.abs(np.asarray(z_coord.z_half_ref[1:-1]))
+    our_step.last = out
     return np.asarray(out.tke_new)[0], zk
 
 
@@ -211,6 +213,28 @@ def stats(ours, nemo, zk, kmax, label):
         print(f"  {k + 1:2d} {zk[k]:6.2f} | {np.median(nemo[m[:, k], k]):12.4e} {np.median(ours[m[:, k], k]):12.4e} "
               f"| {p[0]:+.4f} {p[1]:+.4f} {p[2]:+.4f} | {np.max(np.abs(r)):.4f} | {np.mean(np.abs(r) > 0.02):.3f}")
     return rel
+
+
+def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg, zk, kmax):
+    """Arm a's budget terms vs NEMO's own strip diagnostics of the SAME step.
+
+    eshear_k = p_sh2 (injected, so ~identity: a self-check), estrat_k = -K_H*N2
+    with post-avn K_H, ediss_k = 0.5*rn_ediss*dissl_old*en_post.  The implied
+    dissl_old (ours: ediss/(0.5 c_eps e_post)) is also compared with
+    restart(kt) dissl, which is what NEMO's matrix consumes."""
+    ours = dict(eshear_k=budget[0], estrat_k=budget[1], ediss_k=budget[2])
+    print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W)")
+    print("   k   z_w | eshear | estrat | ediss  | dissl_used/dissl_rst(kt)")
+    nemo = {n: load_strip_w(run_next, step, n)[:, sj, si].T[:, 1:] for n in ours}
+    dissl_ours = np.asarray(budget[2])[0] / np.maximum(0.5 * cfg.c_eps * our_step_e, 1e-300)
+    def ratio(a, b):
+        ok = np.isfinite(a) & np.isfinite(b) & (np.abs(b) > 0)
+        return float(np.median(a[ok] / b[ok])) if ok.any() else np.nan
+    for k in range(kmax):
+        row = [ratio(np.asarray(ours[n])[0][:, k], nemo[n][:, k]) for n in ours]
+        d = dissl_rst[:, k]
+        rd = ratio(dissl_ours[:, k], d)
+        print(f"  {k + 1:2d} {zk[k]:6.2f} | " + " | ".join(f"{v:6.3f}" for v in row) + f" | {rd:6.3f}")
 
 
 def _mesh_e3w(mesh):
@@ -310,7 +334,7 @@ def main(argv=None) -> int:
     # the direct-K-only restriction in load_resolved_config does not apply here.
     cfg, eos, rho0, g = fz.load_resolved_config(Path(a.manifest), allow_z0_direct=True)
     fz._echo_cfg(cfg, eos, rho0, g)
-    names = ("T", "S", "U", "V", "en", "avt_k", "avm_k", "ssh")
+    names = ("T", "S", "U", "V", "en", "avt_k", "avm_k", "dissl", "ssh")
     R0 = fz.reassemble_restart(a.run_dir / f"ORCA1_{a.kt:08d}_restart_oce_*.nc", names, twins)
     R1 = fz.reassemble_restart(a.run_dir_next / f"ORCA1_{a.kt + 1:08d}_restart_oce_*.nc", ("en", "ssh"), twins)
     check_runs_identical(a.run_dir, a.run_dir_next, a.kt)
@@ -361,6 +385,17 @@ def main(argv=None) -> int:
     ours_a, _ = our_step(cfg=cfg_a, en_in=en_in, p_sh2=p_sh2, **kw)
     rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected")
     band_report(rel_a, chg, zk, a.band_lo, a.band_hi, "arm a")
+    budget_a = our_step.last.budget
+    # arm c: NEMO's time level for the closure coefficients -- avm_k/avt_k
+    # (and surface avm_k) CARRIED from restart(kt), as zdftke consumes them
+    carry = dict(preclosure_K_M=R0["avm_k"][band][:, 1:], preclosure_K_H=R0["avt_k"][band][:, 1:],
+                 preclosure_K_M_surface=R0["avm_k"][band][:, 0])
+    cfg_c = cfg_a._replace(tke_preclosure_coeff_source="carried_previous_step")
+    ours_c, _ = our_step(cfg=cfg_c, en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
+    rel_c = stats(ours_c, en_nemo, zk, min(kmax, nsh), "arm c: NEMO p_sh2 + carried avm_k/avt_k")
+    band_report(rel_c, chg, zk, a.band_lo, a.band_hi, "arm c")
+    budget_compare(budget_a, a.run_dir_next, a.kt + 1, sj, si, R0["dissl"][band][:, 1:],
+                   our_step_e=ours_a, cfg=cfg_a, zk=zk, kmax=min(kmax, nsh))
     # GATES: a local plant and a uniform (distributed) plant, both on arm a
     bk = (zk >= a.band_lo) & (zk <= a.band_hi)
     en_p = en_in.copy(); en_p[:, PLANT_K] *= a.plant
