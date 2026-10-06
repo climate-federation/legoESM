@@ -122,6 +122,8 @@ def main(argv=None):
     scratch = out_dir / f"_launch_{args.run}"
     scratch.mkdir(exist_ok=True)
     argv_run = H.launch_argv(args.run, args.day, scratch)
+    while "--distributed" in argv_run:     # single CPU process: the MPI step
+        argv_run.remove("--distributed")   # path never calls model.step
     if args.config:
         # The logged --config path can point into a worktree whose deck has
         # moved on since the launch; replay with the deck as it was.
@@ -178,7 +180,15 @@ def main(argv=None):
         return real_make_physics(config, *a, **kw)
     cap: dict = {}
 
+    real_step = MPASPrimitiveEquationModel.step
+
     def spy_step(self, state, dt, physics_fn=None, forcing=None, phys_state=None):
+        # Let the FIRST step run (the land model bootstraps after it) and
+        # capture the SECOND, as nh_surface_replay.py does.
+        if not cap.get("stepped"):
+            cap["stepped"] = True
+            return real_step(self, state, dt, physics_fn=physics_fn,
+                             forcing=forcing, phys_state=phys_state)
         cap.update(model=self, state=state, dt=dt, physics_fn=physics_fn,
                    forcing=forcing, phys_state=phys_state)
         raise H._Captured()
