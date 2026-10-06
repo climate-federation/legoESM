@@ -249,3 +249,60 @@ def test_forcing_is_computed_before_the_pre_step_edits():
     late = compute_omip2_surface_forcing(warm(state), forcing=forcing,
                                          idx_t=0, grid=grid, grid_type="latlon")
     assert float(np.abs(np.asarray(late.q_net) - np.asarray(sf0.q_net)).max()) > 1.0
+
+
+def test_centennial_driver_orders_flux_edits_then_step(tmp_path, monkeypatch):
+    """With runoff, ice-shelf melt and SSS restoring all on, each centennial
+    step evaluates the bulk flux FIRST, then the three edits, then the ocean
+    step (production / NEMO "now"-field order; user decision on #1820)."""
+    m = _omip2()
+    import legoesm.ocean.coupler as cpl
+    log = []
+
+    def spy(name, fn):
+        def wrapped(*a, **k):
+            log.append(name)
+            return fn(*a, **k)
+        monkeypatch.setattr(cpl, name, wrapped)
+
+    for name in ("compute_omip2_surface_forcing", "apply_runoff_step",
+                 "apply_ice_shelf_basal_step", "apply_sss_restoring_step"):
+        spy(name, getattr(cpl, name))
+
+    class _Model:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def step(self, *a, **k):
+            log.append("model.step")
+            return self._inner.step(*a, **k)
+
+        def __getattr__(self, attr):
+            return getattr(self._inner, attr)
+
+    orig_build = m._build_state
+
+    def build(*a, **k):
+        state, grid, z, model = orig_build(*a, **k)
+        return state, grid, z, _Model(model)
+
+    monkeypatch.setattr(m, "_build_state", build)
+    mask = np.zeros((18, 36)); mask[:2, :] = 1.0
+    np.save(tmp_path / "mask.npy", mask)
+    np.save(tmp_path / "draft.npy", np.where(mask > 0, 300.0, 0.0))
+    driver = _load("_run_centennial_order_1820",
+                   _REPO / "scripts/run/ocean_long_runs/run_centennial_spinup.py")
+    monkeypatch.setattr(sys, "argv", [
+        "run_centennial_spinup.py", "--smoke", "--allow-synthetic",
+        "--dt", "43200", "--grid", "latlon", "--resolution", "18x36",
+        "--years", "1", "--output", str(tmp_path / "out"),
+        "--runoff", "--sss-restoring", "--ice-shelf",
+        "--ice-shelf-mask", str(tmp_path / "mask.npy"),
+        "--ice-draft", str(tmp_path / "draft.npy")])
+    assert driver.main() == 0
+    per_step = ["compute_omip2_surface_forcing", "apply_runoff_step",
+                "apply_ice_shelf_basal_step", "apply_sss_restoring_step",
+                "model.step"]
+    steps = [x for x in log if x in per_step]
+    assert len(steps) >= len(per_step) and len(steps) % len(per_step) == 0, steps
+    assert steps == per_step * (len(steps) // len(per_step)), steps
