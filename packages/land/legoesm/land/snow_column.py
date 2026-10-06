@@ -476,9 +476,11 @@ def snow_thermal_props(state: SnowColumnState, config: SnowColumnConfig,
     f = jnp.asarray(f_snow)[..., None]
     mass = state.swe_ice + state.swe_liq
     M = jnp.sum(mass, axis=-1, keepdims=True)
-    has = M > _EPS
+    has = M > 0.0
     share = jnp.where(has, mass / jnp.where(has, M, 1.0), 1.0 / mass.shape[-1])
-    swe_cov = jnp.where(has, M / jnp.maximum(f, _EPS), empty_cover_swe)   # M / f
+    # M / f, keyed on f itself so the trace branch has no floored-f jump
+    covered = f > _EPS
+    swe_cov = jnp.where(covered, M / jnp.where(covered, f, 1.0), empty_cover_swe)
     dz_cov = share * swe_cov / jnp.maximum(state.density, _EPS)
     C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
     coeff = jnp.maximum(f * _interface_coeff(dz_cov, k), _COEFF_MIN)

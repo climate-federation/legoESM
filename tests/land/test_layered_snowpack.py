@@ -973,7 +973,7 @@ def test_warm_drainage_onto_a_full_pond_leaves_with_the_runoff(monkeypatch):
     hot = [r for r in rec if r[0] > 1.0]                 # J/m2 sensible drained
     assert hot, rec
     s, ro, w, out = max(hot)
-    assert ro > 0.5 * w, (ro, w)                         # most of it overflows
+    assert 0.5 * w < ro < w, (ro, w)                     # most, not all, overflows
     np.testing.assert_allclose(out, s * (1.0 - ro / w), rtol=1e-9)
 
 
@@ -1019,7 +1019,7 @@ def test_trace_pack_keeps_a_finite_covered_thickness_and_gradient():
         return snow_thermal_props(p, cfg, snow_cover_fraction(jnp.atleast_1d(swe), alb),
                                   alb.snow_depth_crit)[2][0]
 
-    rbs = [float(rb_of(s)) for s in (1e-9, 1e-6, 1e-3)]
+    rbs = [float(rb_of(s)) for s in (1e-13, 1e-12, 1.01e-12, 1e-11, 1e-9, 1e-6, 1e-3)]
     rb0 = float(rb_of(0.0))
     assert np.all(np.isfinite(rbs + [rb0])) and rb0 > 0.0, (rbs, rb0)
     np.testing.assert_allclose(rbs, rb0, rtol=1e-3)
