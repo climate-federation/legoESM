@@ -1591,7 +1591,7 @@ class TestNemoIsoLapOperator:
                 cfg.kappa_Redi, act, divisor_thickness=divisor[..., 0])
 
     def test_nemo_iso_lap_closed_bottom_wmask_is_exactly_scoped(self):
-        """Production closes only the deepest W-mask pair, non-vacuously."""
+        """The private discriminator closes only the deepest W-mask pair."""
         setup = _stratified_with_meridional_tilt()
         (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
          rho, T, S, cfg) = setup
@@ -1600,11 +1600,11 @@ class TestNemoIsoLapOperator:
         _, before = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
             cfg.kappa_Redi, act, return_diagnostics=True,
-            return_operand_diagnostics=True, closed_bottom_wmask=False)
+            return_operand_diagnostics=True)
         _, after = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
             cfg.kappa_Redi, act, return_diagnostics=True,
-            return_operand_diagnostics=True)
+            return_operand_diagnostics=True, closed_bottom_wmask=True)
         for name in ("A11", "A22", "dit", "djt", "dkt", "zfw_kp1"):
             assert jnp.array_equal(after[name], before[name])
         assert jnp.array_equal(after["hmsku"][..., :-1],

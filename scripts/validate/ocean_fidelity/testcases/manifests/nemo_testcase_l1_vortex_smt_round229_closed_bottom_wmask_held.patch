@@ -1,7 +1,6 @@
-Subject: [LANDED round 236] close the bottom W level in horizontal Redi masks
+Subject: [HELD round 229] close the bottom W level in horizontal Redi masks
 
-Status: LANDED with the live Kmm T divisor in round 236.  The earlier
-standalone production-JIT R16 replay made hmsku/hmskv and
+Status: HELD.  The production-JIT R16 replay makes hmsku/hmskv and
 A13/A23 bit-exact, but reduces the maximum tracer-LDF RHS error only from
 7.2621621143171395e-11 to 4.8307864472774789e-11 K/s (33.48%).  This
 refutes the preregistered >=90% closure threshold.  The remaining horizontal
