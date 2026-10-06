@@ -3869,6 +3869,7 @@ class LatLonCGridOceanModel:
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
             VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE,
+            VALID_LATERAL_VISCOSITY_FILE_COASTAL,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -3959,6 +3960,19 @@ class LatLonCGridOceanModel:
                 "requires lateral_viscosity_operator='nemo_div_curl' (it "
                 "selects where THAT operator's ahmt/ahmf come from); got "
                 f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
+            )
+        _file_coastal = getattr(config, "lateral_viscosity_file_coastal", "four_cell")
+        if _file_coastal not in VALID_LATERAL_VISCOSITY_FILE_COASTAL:
+            raise ValueError(
+                f"lateral_viscosity_file_coastal must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_FILE_COASTAL)}, "
+                f"got {_file_coastal!r}",
+            )
+        if _file_coastal != "four_cell" and _ahm_src != "nemo_ahm_3d_file":
+            raise ValueError(
+                "lateral_viscosity_file_coastal != 'four_cell' requires "
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file'; got "
+                f"{_ahm_src!r}",
             )
         _vert_mom_scheme = getattr(
             config, "vertical_momentum_scheme", "upwind_perturbation")

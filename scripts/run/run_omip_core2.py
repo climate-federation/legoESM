@@ -1371,10 +1371,14 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     copies the row below: the file is uniform there (asserted).
 
     ahmt is multiplied by tmask and ahmf by NEMO's rn_shlat fmask
-    (ldfdyn.F90:329-330, dommsk.F90:207-210).
+    (ldfdyn.F90:329-330, dommsk.F90:207-210).  The coefficient read itself is
+    the shared NEMO -30 reader (``build_orca2_ldf_dyn_coefficients``, halo
+    layout); this wrapper adds the eORCA1 checks and e3f_0.
     """
     import netCDF4 as nc4
     from legoesm.ocean.dynamics.latlon_cgrid_operators import nemo_fmask_shlat_3d
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_ldf_dyn_coefficients)
 
     def _read(path, names):
         ds = nc4.Dataset(path)
@@ -1407,10 +1411,6 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
             raise SystemExit(f"{ldf_path}: {nm} not uniform in the top rows; "
                              "the fold-row copy would not be exact")
 
-    def _to_T(a):                                   # (nk,331,360) -> (332,362,nk)
-        out = a[:, :, ci_t].transpose(1, 2, 0)
-        return np.concatenate([out, out[-1:]], axis=0)
-
     def _to_F(a, south):                            # -> (333,363,nk)
         out = a[:, :, ci_f].transpose(1, 2, 0)
         return np.concatenate([south, out, out[-1:]], axis=0)
@@ -1419,17 +1419,16 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     tmask = np.asarray(z_coord.is_active, dtype=np.float64)
     fmask = np.asarray(nemo_fmask_shlat_3d(z_coord.is_active, grid, rn_shlat),
                        dtype=np.float64)
-    zero_row = np.zeros((1, n_lon + 1, nk))
-    ahmt = _to_T(ahmt_f) * tmask
-    ahmf = _to_F(ahmf_f, zero_row) * fmask
+    ahmt, ahmf = build_orca2_ldf_dyn_coefficients(
+        ldf_path, tmask, fmask, halo_layout=True)
     e3f = _to_F(e3f_f, np.broadcast_to(np.asarray(z_coord.dz_ref, np.float64),
                                        (1, n_lon + 1, nk)))
     print(f"[nemo-ldf] {ldf_path}: ahmt {ahmt[tmask > 0].min():g}..{ahmt.max():g} "
           f"m2/s; rn_shlat={rn_shlat:g}: coastal F points "
           f"{int(((fmask > 0) & (fmask != 1)).sum())}, wet-interior "
           f"{int((fmask == 1).sum())}; e3f_0 from {domcfg_path}")
-    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt, dtype),
-                            nemo_ahmf_3d=jnp.asarray(ahmf, dtype),
+    return z_coord._replace(nemo_ldf_ahmt=jnp.asarray(ahmt, dtype),
+                            nemo_ldf_ahmf=jnp.asarray(ahmf, dtype),
                             nemo_e3f_0=jnp.asarray(e3f, dtype))
 
 
@@ -1496,8 +1495,8 @@ def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
           f"m2/s at {ahmt.shape[0]} cells; rn_shlat={rn_shlat:g}: coastal vertex "
           f"factor range {fac[(fac > 0) & (fac != 1)].min() if np.any((fac > 0) & (fac != 1)) else 0:.3f}"
           f"..{fac.max():.3f}")
-    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt * act, dtype),
-                            nemo_ahmf_3d=jnp.asarray(ahmf * fac, dtype))
+    return z_coord._replace(nemo_ldf_ahmt=jnp.asarray(ahmt * act, dtype),
+                            nemo_ldf_ahmf=jnp.asarray(ahmf * fac, dtype))
 
 
 def nemo_ldf_fesom(mesh, ldf_path, domcfg_path, rn_shlat: float):
@@ -2021,6 +2020,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                                "nemo_div_curl" if nemo_ldf_file else None),
                               ("lateral_viscosity_e3_weighting",
                                "nemo_e3" if nemo_ldf_file else None),
+                              ("lateral_viscosity_coefficient_source",
+                               "nemo_ahm_3d_file" if nemo_ldf_file else None),
+                              ("lateral_viscosity_file_coastal",
+                               "nemo_fmask" if nemo_ldf_file else None),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),

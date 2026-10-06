@@ -121,36 +121,36 @@ def main():
     v = np.moveaxis(rs["vn"][:, :, ci_v], 0, -1)       # our v row j <- NEMO V row j-1
     v = np.concatenate([np.zeros_like(v[:1]), v, np.zeros_like(v[:1])], axis=0)
 
-    Zc = namedtuple("Zc", "n_levels is_active h_partial dz_ref nemo_ahmt_3d nemo_ahmf_3d nemo_e3f_0")
+    Zc = namedtuple("Zc", "n_levels is_active h_partial dz_ref nemo_ldf_ahmt nemo_ldf_ahmf nemo_e3f_0")
     zc = Zc(nk, jnp.asarray(act), jnp.asarray(h_k), jnp.asarray(e3t0_i.max(axis=(1, 2))),
             None, None, None)
     zc = _driver().attach_nemo_ldf_fields(zc, grid, a.mesh, a.ldf, a.domcfg, a.rn_shlat)
 
     fj, fi, tj, ti = (int(x) for x in a.debug_shift.replace(":", ",").split(","))
     if (fj, fi, tj, ti) != (0, 0, 0, 0):
-        _af = np.asarray(zc.nemo_ahmf_3d); _fmk = np.asarray(nemo_fmask_shlat_3d(jnp.asarray(act), grid, a.rn_shlat))
+        _af = np.asarray(zc.nemo_ldf_ahmf); _fmk = np.asarray(nemo_fmask_shlat_3d(jnp.asarray(act), grid, a.rn_shlat))
         _raw = np.where(_fmk > 0, _af / np.where(_fmk > 0, _fmk, 1.0), 0.0)
         _raw = np.where(_fmk > 0, _raw, np.roll(_raw, (-fj, -fi), axis=(0, 1)))  # fill land from neighbour before roll
-        zc = zc._replace(nemo_ahmf_3d=jnp.asarray(np.roll(_raw, (fj, fi), axis=(0, 1)) * _fmk),
-                         nemo_ahmt_3d=jnp.roll(zc.nemo_ahmt_3d, (tj, ti), axis=(0, 1)))
+        zc = zc._replace(nemo_ldf_ahmf=jnp.asarray(np.roll(_raw, (fj, fi), axis=(0, 1)) * _fmk),
+                         nemo_ldf_ahmt=jnp.roll(zc.nemo_ldf_ahmt, (tj, ti), axis=(0, 1)))
         print(f"[debug-shift] ahmf ({fj},{fi}) ahmt ({tj},{ti})")
     um, vm = compute_face_masks_3d(jnp.asarray(act), grid)
     um = np.asarray(um, float); vm = np.asarray(vm, float)
-    fm = np.asarray(zc.nemo_ahmf_3d) > 0
+    fm = np.asarray(zc.nemo_ldf_ahmf) > 0
     vm3 = np.stack([np.asarray(compute_vertex_mask(jnp.asarray(act[..., kk].astype(float)), grid=grid))
                     for kk in range(nk)], axis=-1)
     hk = jnp.asarray(h_k)
     h_vtx = jnp.where(vm3 > 0, min_cell_to_vertex(hk, grid), zc.nemo_e3f_0)
     tu, tv = nemo_ldf_lap_viscosity_e3_cgrid(
-        jnp.asarray(u * um), jnp.asarray(v * vm), grid, zc.nemo_ahmt_3d, zc.nemo_ahmf_3d, hk,
+        jnp.asarray(u * um), jnp.asarray(v * vm), grid, zc.nemo_ldf_ahmt, zc.nemo_ldf_ahmf, hk,
         mask=jnp.asarray(act[..., 0].astype(float)), u_mask=jnp.asarray(um),
         v_mask=jnp.asarray(vm), vertex_mask=jnp.asarray(fm.astype(float)), h_vtx=h_vtx)
     tu, tv = np.asarray(tu), np.asarray(tv)
     _kw = dict(mask=jnp.asarray(act[..., 0].astype(float)), u_mask=jnp.asarray(um),
                v_mask=jnp.asarray(vm), vertex_mask=jnp.asarray(fm.astype(float)), h_vtx=h_vtx)
     du_div, dv_div = (np.asarray(x) for x in nemo_ldf_lap_viscosity_e3_cgrid(
-        jnp.asarray(u * um), jnp.asarray(v * vm), grid, zc.nemo_ahmt_3d,
-        0.0 * zc.nemo_ahmf_3d, hk, **_kw))
+        jnp.asarray(u * um), jnp.asarray(v * vm), grid, zc.nemo_ldf_ahmt,
+        0.0 * zc.nemo_ldf_ahmf, hk, **_kw))
     du_cur, dv_cur = tu - du_div, tv - dv_div
 
     (nu,) = _read(a.trd_u, ("utrd_ldf",))
@@ -162,7 +162,7 @@ def main():
     ours_v = tv[1:332, 1:361].transpose(2, 0, 1)
     wu = um[:331, 2:362].transpose(2, 0, 1) > 0
     wv = vm[1:332, 1:361].transpose(2, 0, 1) > 0
-    coast_f = (np.asarray(zc.nemo_ahmf_3d) > 0) & ~(vm3 > 0)
+    coast_f = (np.asarray(zc.nemo_ldf_ahmf) > 0) & ~(vm3 > 0)
     cu = (coast_f[:-1] | coast_f[1:])[:331, 2:362].transpose(2, 0, 1)   # vertex S/N of u face
     cv = (coast_f[:, :-1] | coast_f[:, 1:])[1:332, 1:361].transpose(2, 0, 1)
     if a.dump_at:
@@ -173,7 +173,7 @@ def main():
         print("our v-face mask\n", wv[kq][sl].astype(int)); print("our u-face mask\n", wu[kq][sl].astype(int))
         print("v ours\n", ours_v[kq][sl]); print("v nemo\n", nv[kq][sl])
         print("u ours\n", ours_u[kq][sl]); print("u nemo\n", nu[kq][sl])
-        fmk = np.asarray(zc.nemo_ahmf_3d)[..., kq][1:332, 2:363]   # vertex (r+1, c+2) = NEMO F inner (r, c)
+        fmk = np.asarray(zc.nemo_ldf_ahmf)[..., kq][1:332, 2:363]   # vertex (r+1, c+2) = NEMO F inner (r, c)
         print("ahmf*fmask at NEMO F inner\n", fmk[sl])
         print("restart vn\n", rs["vn"][kq][sl]); print("restart un\n", rs["un"][kq][sl])
     rows = np.arange(331)[None, :, None]

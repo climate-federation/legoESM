@@ -6,8 +6,9 @@
 * the ``h_vtx`` override is what keeps no-slip alive in the e3-weighted
   operator (the min-rule gives e3f = 0 at the coast, silently free-slip);
 * the operator dissipates kinetic energy with no-slip walls;
-* ``_bc_horizontal_viscosity`` routes coordinate-carried NEMO fields to the
-  operator and refuses a nonzero A_h next to them.
+* ``_bc_horizontal_viscosity`` routes the read coefficient (source
+  "nemo_ahm_3d_file", coastal "nemo_fmask") to the operator, refuses a
+  nonzero A_h with it, and refuses the coastal mode without the file source.
 """
 from __future__ import annotations
 
@@ -151,22 +152,44 @@ def test_bc_horizontal_viscosity_routes_file_fields_and_refuses_A_h():
     fm = nemo_fmask_shlat_3d(act, geo, 2.0)
     h = jnp.where(act, 50.0, 0.0)
     e3f = jnp.full((NLAT + 1, NLON + 1, 2), 50.0)
-    zc = SimpleNamespace(is_active=act, nemo_ahmt_3d=1.0e4 * cm,
-                         nemo_ahmf_3d=1.0e4 * fm, nemo_e3f_0=e3f)
+    zc = SimpleNamespace(is_active=act, nemo_ldf_ahmt=1.0e4 * cm,
+                         nemo_ldf_ahmf=1.0e4 * fm, nemo_e3f_0=e3f)
     u, v = _uv(np.random.default_rng(3)); u, v = u * um, v * vm
     z0u, z0v = jnp.zeros_like(u), jnp.zeros_like(v)
     mask2 = cm[..., 0]; um2 = um[..., 0]; vm2 = vm[..., 0]
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
-        lateral_viscosity_e3_weighting="nemo_e3", A_h=0.0, C_smag_lap=0.0)
+        lateral_viscosity_e3_weighting="nemo_e3", A_h=0.0, C_smag_lap=0.0,
+        lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
+        lateral_viscosity_file_coastal="nemo_fmask", lateral_side_bc="no_slip")
     out = _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2, cfg,
                                    zc, None, 1.0, h_k=h)
     ref, _ = nemo_ldf_lap_viscosity_e3_cgrid(
-        u, v, geo, zc.nemo_ahmt_3d, zc.nemo_ahmf_3d, h, mask=mask2,
-        u_mask=um, v_mask=vm, vertex_mask=(zc.nemo_ahmf_3d > 0).astype(float),
+        u, v, geo, zc.nemo_ldf_ahmt, zc.nemo_ldf_ahmf, h, mask=mask2,
+        u_mask=um, v_mask=vm, vertex_mask=(zc.nemo_ldf_ahmf > 0).astype(float),
         h_vtx=e3f)
     assert float(np.max(np.abs(np.asarray(ref)))) > 0.0
     np.testing.assert_allclose(np.asarray(out[0]), np.asarray(ref), rtol=1e-12, atol=1e-20)
     with pytest.raises(ValueError, match="A_h must be 0"):
         _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2,
                                  cfg.replace_flat(A_h=1.0e4), zc, None, 1.0, h_k=h)
+    with pytest.raises(ValueError, match="must be one of"):
+        _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2,
+                                 cfg.replace_flat(lateral_viscosity_file_coastal="x"),
+                                 zc, None, 1.0, h_k=h)
+    with pytest.raises(ValueError, match="requires lateral_viscosity_coefficient_source"):
+        _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2,
+                                 cfg.replace_flat(lateral_viscosity_coefficient_source="nemo_ldf_c2d"),
+                                 zc, None, 1.0, h_k=h)
+    # main's four-cell closure keeps refusing the scalar no-slip side drag
+    with pytest.raises(ValueError, match="no_slip"):
+        _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2,
+                                 cfg.replace_flat(lateral_viscosity_file_coastal="four_cell",
+                                                  A_h=1.0e4),
+                                 zc, None, 1.0, h_k=h)
+    # carried coefficient with the default source is refused, never ignored
+    with pytest.raises(ValueError, match="would ignore it"):
+        _bc_horizontal_viscosity(z0u, z0v, u, v, geo, mask2, um2, vm2,
+                                 cfg.replace_flat(lateral_viscosity_coefficient_source="nemo_ldf_c2d",
+                                                  lateral_viscosity_file_coastal="four_cell"),
+                                 zc, None, 1.0, h_k=h)

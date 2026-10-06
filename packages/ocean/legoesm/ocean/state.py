@@ -2519,6 +2519,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # no-slip side drag or the flux-form K_diss_h diagnostic, both of which do
     # read the scalar A_h or a latitude profile.
     lateral_viscosity_coefficient_source: str = "nemo_ldf_c2d"
+    # Coastal closure of the "nemo_ahm_3d_file" coefficient.  "four_cell"
+    # (default, bit-identical): the caller's face masks and the min-rule e3f,
+    # which is 0 at every coastal F point.  "nemo_fmask": the read ahmf
+    # already carries NEMO's rn_shlat fmask (dommsk.F90:207-210), so the
+    # operator takes per-level face masks from is_active and NEMO's static
+    # e3f_0 (z_coord.nemo_e3f_0) at coastal F points, A_h may be 0 (rn_Uv is
+    # inert in the -30 arm) and lateral_side_bc only sets rn_shlat in the
+    # coefficient (no scalar side drag: it needs A_h > 0).  Raises on others.
+    lateral_viscosity_file_coastal: str = "four_cell"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag
