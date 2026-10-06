@@ -4,7 +4,9 @@ The inputs are two columns recorded from a production AMIP run (res6, 16 ranks)
 whose top layer sat near residual water content over an even drier layer.  The
 former solver (10 undamped Picard iterations, last iterate accepted) cycled
 there without converging and returned a top-layer head of 3e4-6e4 m, theta
-1.5-2.6 (theta_sat 0.39), creating 4-7 mm of water in one step.
+1.5-2.6 (theta_sat 0.39), creating 4-7 mm of water in one step.  On current
+code the post-solve water take-back removes that water again (from the layers
+below), but the spike in the top layer remains.
 """
 
 from __future__ import annotations
@@ -102,12 +104,18 @@ def test_unconverged_column_is_flagged_without_a_spike():
 
 
 def test_former_undamped_ten_iterations_spike_on_these_columns():
-    """The recorded columns do bite: the former iteration settings still spike."""
+    """The recorded columns do bite: the former iteration settings still spike.
+
+    Main's take-back now closes the water budget of the spiked step (measured
+    residual ~1e-17 m on both columns) by draining the layers below, so the
+    defect left is the spike itself: a positive top-layer head of 3e4-6e4 m
+    and theta 1.5-2.6 against theta_sat 0.39.
+    """
     for col in (_COL_A, _COL_B):
-        out, residual = _solve(col, _former())
+        out, _ = _solve(col, _former())
         assert not bool(out.converged[0])
         assert float(out.theta_new[0, 0]) > 1.0
-        assert residual > 3e-3
+        assert float(out.psi_new[0, 0]) > 1e4
 
 
 def test_float32_gradient_finite_through_converged_frozen_columns():

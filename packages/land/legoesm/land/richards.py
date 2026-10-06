@@ -140,7 +140,9 @@ class RichardsConfig(NamedTuple):
     # accepting the 10th iterate put top-layer heads of 1e3-6e4 m and theta up to
     # 2.6 into AMIP runs and created 0.7-7.4 mm of water per such step.  Measured on
     # 35 recorded production steps: 10 iterations undamped -> 21/35 converged, max
-    # water error 7.4 mm; 30 iterations at max_dse_per_iter=0.1 -> 32/35, 0.03 mm.
+    # water error 7.4 mm; 30 iterations at max_dse_per_iter=0.1 -> 32/35, 0.03 mm
+    # (measured before the post-solve water take-back below existed; with it the
+    # undamped spike conserves water but still leaves theta > theta_sat on top).
     max_iter: int = 30
     theta_tol: float = 1e-6       # convergence: max per-layer |dtheta| per iteration [m3/m3]
     # Damping: scale each column's (soil + surface) Picard psi update by
