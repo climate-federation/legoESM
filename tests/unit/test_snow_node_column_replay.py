@@ -102,3 +102,44 @@ def test_replay_refuses_a_partial_day(tmp_path):
     p.write_bytes(pickle.dumps(cap))
     with pytest.raises(SystemExit, match="not one day"):
         rp.replay(argparse.Namespace(capture=str(p), days=1, lat_band=(45.0, 70.0)))
+
+
+def _capture_file(tmp_path, cfg, st, f, n=48):
+    td, stat, dyn, pos = rp.split_static(
+        (st, f, (cfg, 1.0, 1800.0), {"lat": jnp.deg2rad(jnp.array([60.0, 60.0, 20.0]))}),
+        lambda v: isinstance(v, jax.Array))
+    p = tmp_path / "cap.pkl"
+    p.write_bytes(pickle.dumps({
+        "run": "synthetic", "day": 330, "argv": [],
+        "args": (td, stat, [np.asarray(v) for v in dyn], pos),
+        "forcing": [jax.tree_util.tree_map(np.asarray, f)] * n,
+        "f_land_packed": np.ones(3)}))
+    return p
+
+
+def _budget_lines(out):
+    inst = [ln for ln in out.splitlines() if ln.startswith("instrument:")][0]
+    res = [ln for ln in out.splitlines() if ln.startswith("all land")][0]
+    lin = float(inst.split("flux|")[1].split()[0])
+    sub = float(inst.split("solve|")[1].split()[0])
+    r = float(res.split("residual")[1].split()[0])
+    return lin, sub, r
+
+
+def test_soil_budget_control_closes_and_freeze_thaw_does_not(tmp_path, capsys):
+    """Known answer: freeze/thaw off and no snow, the heat capacity is
+    constant, so the budget closes to rounding; with freeze/thaw on near
+    freezing it does not (the curtain linearisation), and the instrument's own
+    checks (discrete flux identity, hand sub-stepping) still hold."""
+    from legoesm import constants
+    cfg, st, f = _setup()
+    st = st._replace(T_soil=st.T_soil.at[:, :3].set(constants.T_freeze - 0.3))
+    p = _capture_file(tmp_path, cfg, st, f)
+    rp.soil_budget(argparse.Namespace(capture=str(p), lat_band=(45.0, 70.0),
+                                      nq=200, control=True))
+    lin, sub, r = _budget_lines(capsys.readouterr().out)
+    assert lin < 1e-6 and sub < 1e-9 and abs(r) < 1e-6, (lin, sub, r)
+    rp.soil_budget(argparse.Namespace(capture=str(p), lat_band=(45.0, 70.0),
+                                      nq=200, control=False))
+    lin, sub, r = _budget_lines(capsys.readouterr().out)
+    assert lin < 1e-6 and sub < 1e-9 and abs(r) > 1e-3, (lin, sub, r)

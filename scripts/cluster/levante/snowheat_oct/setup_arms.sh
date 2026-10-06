@@ -5,7 +5,7 @@
 # pointer to a live run), a .device_count stamp of 4, and arm.tsv
 # (name, target, repo, commit, extra -- extra LAST: it may be empty, and bash
 # collapses adjacent tab delimiters) for bundle.sbatch.  The repo must be clean
-# and at the arms.tsv commit (a full hash, or HEAD = record what it is now);
+# and at the arms.tsv commit (a full hash, or HEAD = EXPECT_COMMIT from the env);
 # bundle.sbatch refuses to launch a repo that has moved since.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -21,8 +21,11 @@ for want in "$@"; do
     [[ -f "${ck}" ]] || { echo "missing ${ck}" >&2; exit 2; }
     [[ "${repo}" == /* && -e "${repo}/.git" ]] || { echo "bad repo ${repo}" >&2; exit 2; }
     head=$(git -c safe.directory='*' -C "${repo}" rev-parse HEAD)
-    [[ "${want_commit}" == HEAD || "${want_commit}" == "${head}" ]] \
-      || { echo "REFUSING: ${repo} is at ${head}, arms.tsv wants ${want_commit}" >&2; exit 2; }
+    # HEAD rows: the operator names the reviewed commit (EXPECT_COMMIT); a
+    # clean tree at any other commit is refused.
+    [[ "${want_commit}" == HEAD ]] && want_commit="${EXPECT_COMMIT:?set EXPECT_COMMIT to the reviewed commit}"
+    [[ "${want_commit}" == "${head}" ]] \
+      || { echo "REFUSING: ${repo} is at ${head}, expected ${want_commit}" >&2; exit 2; }
     [[ -z $(git -c safe.directory='*' -C "${repo}" status --porcelain --untracked-files=no) ]] \
       || { echo "REFUSING: ${repo} has uncommitted changes" >&2; exit 2; }
     d="${ROOT}/${name}"

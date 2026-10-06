@@ -22,6 +22,7 @@ Usage (run's checkout on PYTHONPATH, JAX_PLATFORMS=cpu, JAX_ENABLE_X64=1, cwd =
 repo root):
   snow_node_column_replay.py capture <run> --day N --calls K --out DIR
   snow_node_column_replay.py replay <capture.pkl> --days D [--lat-band 45 70]
+  snow_node_column_replay.py soil-budget <capture.pkl> [--control] [--nq 200]
 """
 from __future__ import annotations
 
@@ -239,6 +240,119 @@ def replay(a):
           f"{int(np.sum((last_n['skin'] > tf + 1e-9) & (last_n['snow'] > 0)))}")
 
 
+def soil_budget(a):
+    """Energy budget of the FINAL soil-thermal solve of every land step, node
+    OFF (main's bulk path), on the captured columns over the captured day.
+
+    Per column, per land step, all in J/m2 (W/m2 = / dt):
+      residual = true soil enthalpy change - (G_in + Q_geo + sum(source)) * dt
+      true     = sum_layers dz * int_{T0}^{T1} C_app(T; theta1) dT
+    with T0 the start-of-step and T1 the solved soil temperature, theta1 the
+    post-Richards water, C_app the apparent heat capacity (sensible + latent
+    freezing curtain), G_in the ground flux the solve receives (positive INTO
+    the soil), Q_geo the bottom flux (positive into the soil) and ``source``
+    the latent heat of the ice change Richards made at fixed T0
+    (``moisture_fusion_heat_source``, positive = heating).  So the identity
+    is H(T1, theta1) - H(T0, theta0) = (G_in + Q_geo) dt, water moving at
+    fixed temperature.  SIGN: residual > 0 = the scheme CREATED energy (the
+    soil gained more than it was given); < 0 = destroyed.
+    Per layer the residual is true_l - lin_l, lin_l = sum_k C_app(T_k) dz
+    (T_{k+1} - T_k) over the sub-steps; sum_l lin_l equals the flux exactly
+    (printed as an instrument check), so the per-layer split is complete.
+    ``--control``: freeze/thaw OFF and no snow -- C is constant, the residual
+    must vanish (instrument check)."""
+    import jax
+    import jax.numpy as jnp
+    import legoesm.land.multilayer_land as mll
+    from legoesm.land.soil_grid import make_soil_grid
+    from legoesm.land.soil_thermal import (compute_apparent_heat_capacity,
+                                           compute_heat_capacity)
+
+    cap = pickle.load(open(a.capture, "rb"))
+    treedef, stat, vals, pos = cap["args"]
+    state0, _, x, k = join_static(treedef, stat, [jnp.asarray(v) for v in vals], pos)
+    config, U_min, dt = x[0], x[1], x[2]
+    forcings = [jax.tree_util.tree_map(jnp.asarray, f) for f in cap["forcing"]]
+    if config.thermal.snow_insulation:
+        raise SystemExit("FATAL: captured run has the snow node on")
+    if a.control:
+        config = config._replace(thermal=config.thermal._replace(enable_freeze_thaw=False))
+        state0 = state0._replace(snow_depth=jnp.zeros_like(state0.snow_depth))
+        forcings = [f._replace(precip_snow=jnp.zeros_like(f.precip_snow)) for f in forcings]
+    th = config.thermal
+    dz = jnp.asarray(make_soil_grid(config.soil_grid).dz)
+    lat = np.asarray(k["lat"])
+    lat_deg = np.rad2deg(lat) if np.max(np.abs(lat)) <= np.pi / 2 + 1e-9 else lat
+    rec = []
+    real = mll.solve_soil_thermal
+
+    def cap_C(T, theta, hyd, thc):
+        return (compute_apparent_heat_capacity(T, theta, hyd, thc)
+                if thc.enable_freeze_thaw else compute_heat_capacity(theta, hyd, thc))
+
+    def wrapped(T0, theta, grid, hyd, thc, G, dt_, **kw):
+        T1 = real(T0, theta, grid, hyd, thc, G, dt_, **kw)
+        if "layer_source" not in kw:           # Picard tentative solve, not the update
+            return T1
+        if kw.get("surface_conductance") is not None:
+            raise SystemExit("FATAL: semi-implicit surface; budget not defined here")
+        src, n = kw["layer_source"], kw.get("n_substeps", 1)
+        T, lin = T0, 0.0
+        for _ in range(n):                     # the solve's own sub-steps, one by one
+            Tn = real(T, theta, grid, hyd, thc, G, dt_ / n, layer_source=src)
+            lin = lin + cap_C(T, theta, hyd, thc) * dz * (Tn - T)
+            T = Tn
+        q = (jnp.arange(a.nq) + 0.5) / a.nq
+        Tq = T0[..., None] + (T1 - T0)[..., None] * q
+        Cq = jax.vmap(lambda Tk: cap_C(Tk, theta, hyd, thc), in_axes=-1,
+                      out_axes=-1)(Tq)
+        true = jnp.mean(Cq, -1) * (T1 - T0) * dz
+        flux = (G + thc.Q_geothermal
+                + (0.0 if src is None else jnp.sum(src, axis=-1))) * dt_
+        jax.debug.callback(lambda *v: rec.append([np.asarray(u) for u in v]),
+                           true - lin, jnp.sum(lin, -1) - flux,
+                           jnp.max(jnp.abs(T - T1)), G)
+        return T1
+
+    mll.solve_soil_thermal = wrapped
+    try:
+        step = jax.jit(lambda s, f: mll.step_multilayer_land_with_diagnostics(
+            s, f, config, U_min, dt, **k))
+        s = state0
+        for f in forcings:
+            s = step(s, f)[0]
+        jax.effects_barrier()
+    finally:
+        mll.solve_soil_thermal = real
+    if len(rec) != len(forcings):
+        raise SystemExit(f"FATAL: {len(rec)} final solves for {len(forcings)} steps")
+    res = np.stack([r[0] for r in rec])                 # (steps, ncol, nl) J/m2
+    chk = np.stack([r[1] for r in rec])
+    sub = max(float(r[2]) for r in rec)
+    G = np.stack([r[3] for r in rec])
+    span = len(forcings) * dt
+    print(f"run {cap['run']} day {cap['day']}: {len(forcings)} land steps, dt {dt} s, "
+          f"freeze/thaw {th.enable_freeze_thaw}, control {a.control}, quadrature {a.nq}")
+    print(f"instrument: max |sum lin - flux| {np.max(np.abs(chk)) / dt:.2e} W/m2; "
+          f"max |sub-stepped by hand - solve| {sub:.2e} K")
+    land = cap["f_land_packed"] > 0.5
+    snow0 = np.asarray(state0.snow_depth) > 0.0
+    band = land & (lat_deg >= a.lat_band[0]) & (lat_deg <= a.lat_band[1])
+    tot = res.sum(-1).sum(0) / span                      # (ncol,) W/m2, daily mean
+    for name, m in (("all land", land), (f"{a.lat_band[0]:.0f}-{a.lat_band[1]:.0f}N land", band),
+                    ("  of which snow", band & snow0), ("  of which no snow", band & ~snow0)):
+        if not m.any():
+            continue
+        print(f"{name:22s} n={int(m.sum()):6d} daily-mean residual {tot[m].mean():+8.3f} W/m2 "
+              f"(|.| {np.abs(tot[m]).mean():7.3f}; >0 in {100 * np.mean(tot[m] > 0):5.1f}%) "
+              f"mean G_in {G[:, m].mean():+8.2f}")
+    if band.any():
+        lay = res[:, band, :].sum(0).mean(0) / span
+        print("by layer (band, W/m2): " + " ".join(f"{v:+.3f}" for v in lay))
+        worst = np.max(np.abs(res[:, band, :].sum(-1)), axis=1) / dt
+        print(f"largest single-step |residual| in band: {worst.max():.2f} W/m2")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -251,8 +365,13 @@ def main(argv=None):
     r.add_argument("capture")
     r.add_argument("--days", type=int, required=True)
     r.add_argument("--lat-band", type=float, nargs=2, default=(45.0, 70.0))
+    b = sp.add_parser("soil-budget")
+    b.add_argument("capture")
+    b.add_argument("--lat-band", type=float, nargs=2, default=(45.0, 70.0))
+    b.add_argument("--nq", type=int, default=200)
+    b.add_argument("--control", action="store_true")
     a = p.parse_args(argv)
-    return capture(a) if a.cmd == "capture" else replay(a)
+    return {"capture": capture, "replay": replay, "soil-budget": soil_budget}[a.cmd](a)
 
 
 if __name__ == "__main__":

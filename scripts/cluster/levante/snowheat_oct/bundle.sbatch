@@ -17,8 +17,8 @@
 #   2. python compare_gate.py $ROOT/sh2_gate_base/checkpoint_day_0276.npz $ROOT/sh2_gate_base2/checkpoint_day_0276.npz
 #      (base vs base: the run must be reproducible for the gate to mean anything), then
 #      python compare_gate.py $ROOT/sh2_gate_off/checkpoint_day_0276.npz $ROOT/sh2_gate_base/checkpoint_day_0276.npz
-#      -> both must print IDENTICAL (exit 0); append both outputs to $ROOT/sh2_gate.ok
-#      (this script refuses every non-gate arm until that file holds two IDENTICAL lines).
+#      -> both must print IDENTICAL (exit 0).  Step 3 re-runs both comparisons
+#      itself and refuses to launch unless they pass.
 #   3. sbatch --nodes=4 --job-name=snowheat2 --export=ALL,ARMS="sh2_on_a sh2_off_a sh2_on_b sh2_off_b" bundle.sbatch
 # Chain: ONE script for every arm (base arms too), the frozen run tree's
 # amip_mpas_gpu_chain.sbatch, which pins a bundled arm's step to its own node
@@ -44,13 +44,17 @@ for a in "${arms[@]}"; do
   [[ "$(git -c safe.directory='*' -C "${_r}" rev-parse HEAD)" == "${_c}" && \
      -z $(git -c safe.directory='*' -C "${_r}" status --porcelain --untracked-files=no) ]] \
     || { echo "REFUSING: ${_r} moved or is dirty since setup (want ${_c})" >&2; exit 64; }
-  # Long arms only after the recorded 1-day gate: sh2_gate.ok holds the two
-  # compare_gate.py outputs (base vs base2, off vs base), both IDENTICAL.
-  if [[ "${a}" != sh2_gate_* ]]; then
-    [[ $(grep -c '^IDENTICAL$' "${ROOT}/sh2_gate.ok" 2>/dev/null) == 2 ]] \
-      || { echo "REFUSING: ${a} needs a passed gate in ${ROOT}/sh2_gate.ok" >&2; exit 64; }
-  fi
 done
+# Long arms only after the 1-day gate, re-checked HERE from the checkpoints
+# (not from a note): base vs base2 (the run is reproducible) and switch-off vs
+# base (the OFF arms are plain 468cef302) must both be byte-identical.
+if [[ " ${arms[*]} " != *" sh2_gate_"* ]]; then
+  GATE="$(dirname "${CHAIN}")/snowheat_oct/compare_gate.py"
+  g="checkpoint_day_0276.npz"
+  "${PY}" "${GATE}" "${ROOT}/sh2_gate_base/${g}" "${ROOT}/sh2_gate_base2/${g}" \
+    && "${PY}" "${GATE}" "${ROOT}/sh2_gate_off/${g}" "${ROOT}/sh2_gate_base/${g}" \
+    || { echo "REFUSING: the 1-day gate has not passed" >&2; exit 64; }
+fi
 export ROOT PY AMIP_SURFDATA ERA5_IC AMIP_N_GPUS=4
 declare -A pid
 for i in "${!arms[@]}"; do
