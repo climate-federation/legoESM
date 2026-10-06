@@ -175,7 +175,7 @@ returned zero:
 tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round224_smt3_record.py
 tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round237_smt4_record.py
 tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
-============================== 33 passed in 3.61s ==============================
+============================== 33 passed in 3.52s ==============================
 ```
 
 ## 8. OPEN — round 238
