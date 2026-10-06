@@ -834,6 +834,13 @@ def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
         st = _state(cfg, 1, T_soil=TF - 4.0, swe=20.0)
         pairs = _closure_run(cfg, st, ((f, int(86400 / dt)),), dt=dt, lp=lp)
         end[dt] = pairs[-1][1]
+        # Meltwater reaches the frozen soil under the pack and part of it freezes:
+        # some step gains soil water AND top-two-layer ice while snow is present.
+        froze = [float(jnp.sum(n.theta_soil - o.theta_soil)) > 0.0
+                 and float(jnp.sum((_ice(n.T_soil, n.theta_soil)
+                                    - _ice(o.T_soil, o.theta_soil))[0, :2])) > 0.0
+                 and float(o.snow_depth[0]) > 1.0 for o, n in pairs]
+        assert any(froze)
     a, b = end[1800.0], end[900.0]
     assert float(a.snow_depth[0]) < 20.0                       # it melted
     np.testing.assert_allclose(a.snow_depth, b.snow_depth, atol=0.05 * 20.0)
@@ -869,7 +876,7 @@ def test_freeze_thaw_layered_jit_matches_eager_and_gradient_matches_fd():
     a = step_multilayer_land_with_diagnostics(st, f, cfg0, 1.0, 1800.0, lat=lat)
     b = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
         s, f, cfg0, 1.0, 1800.0, lat=lat))(st)
-    for x, y in zip(jax.tree.leaves(a[0]), jax.tree.leaves(b[0])):
+    for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):     # state AND diagnostics
         np.testing.assert_allclose(x, y, rtol=1e-12, atol=1e-10)
 
     @jax.jit
@@ -886,3 +893,25 @@ def test_freeze_thaw_layered_jit_matches_eager_and_gradient_matches_fd():
     fd = float((loss(0.05 + h) - loss(0.05 - h)) / (2 * h))
     assert np.isfinite(g) and abs(g) > 1e-3, g
     assert g == pytest.approx(fd, rel=1e-3)
+
+
+def test_warm_drainage_sensible_heat_enters_the_soil(monkeypatch):
+    """A thin pack under a very strong flux turns all-liquid above T_freeze and
+    drains with sensible heat c_liq (T - T_freeze): that heat is handed to the
+    top soil layer, and pack + soil energy still closes exactly."""
+    from legoesm.land import multilayer_land as ml
+    rec = []
+    real = ml.snow_phase_and_percolate
+
+    def spy(pack, scc):
+        out = real(pack, scc)
+        jax.debug.callback(lambda d, h: rec.append(float(np.sum(h - constants.L_f * d))),
+                           out[1], out[2])
+        return out
+
+    monkeypatch.setattr(ml, "snow_phase_and_percolate", spy)
+    cfg = _cfg_ft()
+    st = _state(cfg, 1, T_soil=TF + 1.0, swe=0.3)
+    f = _forcing(1, T_air=295.0, sw=900.0, lw=380.0, q=0.012, wind=1.0)
+    _closure_run(cfg, st, ((f, 2),))
+    assert max(rec) > 1.0, rec                     # J/m2 of sensible drainage heat

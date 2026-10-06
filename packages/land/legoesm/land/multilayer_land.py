@@ -1323,6 +1323,7 @@ def _step_multilayer_land_impl(
                    + (1.0 - f_snow) * (T_soil_new[:, 0] - T_soil[:, 0])))
         pack, snow_drainage, snow_drainage_heat = snow_phase_and_percolate(
             pack._replace(T=T_pack_solved), scc)
+        snow_drain_sensible = None   # handed to the soil only with freeze/thaw (below)
         # Meltwater leaves the pack base into the soil top (no sensible heat,
         # the same convention as rain infiltration).
         melt_rate = snow_drainage / dt
@@ -1404,16 +1405,29 @@ def _step_multilayer_land_impl(
             # leaving a frozen layer melts its ice there), plus the unmet-
             # evaporation remainder on the top layer.  The solve's overshoot
             # across the 0 C curtain becomes phase change, so pack + soil energy
-            # closes exactly; the surface flux stays the one booked by the solve.
+            # closes exactly (to float64 roundoff in tests); the surface flux
+            # stays the one booked by the solve.  The bulk lane instead charges
+            # moisture_fusion_heat_source in a sub-stepped solve (water at the
+            # layer temperature): the two lanes book moving water differently.
+            # Row identity of ONE backward-Euler step at C_app(T0, theta0): valid
+            # only while the combined solve above is not sub-stepped.
             Q_solve = compute_apparent_heat_capacity(
                 T_soil, theta, config.hydraulics, config.thermal) * dz * (
                     T_soil_new - T_soil)                               # J/m2
-            W_moved = (constants.rho_water * constants.L_f  # latent-ok: liquid referenced to ice at T_freeze, where L_f(T_freeze) == L_f
+            W_moved = (constants.rho_water * constants.L_f  # latent-ok: T_freeze reference
                        * dz * (richards_out.theta_new - theta))        # J/m2
+            # The pack's drainage leaves it with c_liq (T - T_freeze) + L_f per
+            # kg; W_moved books the L_f of what the soil takes in, so the
+            # sensible part (nonzero only from an all-liquid layer above
+            # T_freeze) is handed to the top soil layer here, whether the water
+            # then infiltrates, ponds or runs off (pack + soil energy closes).
+            snow_drain_sensible = (snow_drainage_heat
+                                   - constants.L_f * snow_drainage)  # latent-ok: T_freeze reference
             E_target = (soil_layer_enthalpy(T_soil, theta, dz, config.hydraulics,
                                             config.thermal)
                         + Q_solve + W_moved)
-            E_target = E_target.at[:, 0].add(evap_excess_energy_post * dt)
+            E_target = E_target.at[:, 0].add(evap_excess_energy_post * dt
+                                             + snow_drain_sensible)
             T_soil_new = invert_soil_layer_enthalpy(
                 E_target, T_soil_new, richards_out.theta_new, dz,
                 config.hydraulics, config.thermal)
@@ -1754,7 +1768,9 @@ def _step_multilayer_land_impl(
     if layered:
         surface_out = surface_out._replace(
             snow_T_top_excess=snow_T_top_excess,
-            snow_advected_heat=snow_advected_heat - snow_drainage_heat,
+            snow_advected_heat=(snow_advected_heat - snow_drainage_heat
+                                if snow_drain_sensible is None else
+                                snow_advected_heat - snow_drainage_heat + snow_drain_sensible),
             snow_ground_heat_applied=snow_ground_heat_applied)
 
     return new_state, response, carbon_state_new, surface_out
