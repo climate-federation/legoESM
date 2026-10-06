@@ -79,6 +79,8 @@ def capture(a):
     # Long enough for the start-up call plus --calls full land steps (the run
     # is stopped as soon as they are recorded).
     argv[argv.index("--days") + 1] = str(int(np.ceil(a.calls * a.land_dt / 86400.0)) + 1)
+    if a.config:                       # e.g. another run's state on THIS tree's deck
+        argv[argv.index("--config") + 1] = a.config
     rec: dict = {"forcing": [], "cells": None}
 
     def is_dyn(v):
@@ -336,8 +338,13 @@ def soil_budget(a):
         step = jax.jit(lambda s, f: mll.step_multilayer_land_with_diagnostics(
             s, f, config, U_min, dt, **k))
         s = state0
+        held = []
         for f in forcings:
-            s = step(s, f)[0]
+            out = step(s, f)
+            s = out[0]
+            h = out[-1].held
+            held.append(np.zeros(s.T_soil.shape[0], bool) if h is None
+                        else np.asarray(h).astype(bool))
         jax.effects_barrier()
     finally:
         mll.solve_soil_thermal = real
@@ -345,6 +352,8 @@ def soil_budget(a):
     if len(rec) != len(forcings):
         raise SystemExit(f"FATAL: {len(rec)} final solves for {len(forcings)} steps")
     res = np.stack([r[0] for r in rec])                 # (steps, ncol, nl) J/m2
+    # A held column's update is rejected and reverted: its solve changed nothing.
+    res = np.where(np.stack(held)[..., None], 0.0, res)
     chk = np.stack([r[1] for r in rec])
     sub = max(float(r[2]) for r in rec)
     G = np.stack([r[3] for r in rec])
@@ -371,6 +380,13 @@ def soil_budget(a):
         worst = np.max(np.abs(res[:, band, :].sum(-1)), axis=1) / dt
         print(f"largest single-step |residual| in band: {worst.max():.2f} W/m2")
         step_r = res[:, band, :].sum(-1) / dt                # (steps, ncol) W/m2
+        hb = np.stack(held)[:, band]                         # rejected-and-reverted
+        acc = ~hb.any(0)                                     # never held this day
+        day_r = res[:, band, :].sum(-1).sum(0) / span        # (ncol,) W/m2
+        i = int(np.argmax(np.where(acc, np.abs(day_r), -1.0)))
+        print(f"held column-steps in band: {int(hb.sum())}; largest 24-h |residual| of "
+              f"a never-held column: {abs(day_r[i]):.3f} W/m2 (lat "
+              f"{lat_deg[band][i]:.1f}, snow {bool(snow0[band][i])})")
         print("band column-steps with |residual| > 1 / 10 W/m2: "
               f"{100 * np.mean(np.abs(step_r) > 1):.2f}% / "
               f"{100 * np.mean(np.abs(step_r) > 10):.3f}%; >0 share of those "
@@ -385,6 +401,8 @@ def main(argv=None):
     c.add_argument("--day", type=int, required=True)
     c.add_argument("--calls", type=int, required=True)
     c.add_argument("--out", required=True)
+    c.add_argument("--config", default="",
+                   help="replace the run's --config deck (default: keep it)")
     c.add_argument("--land-dt", type=float, default=1800.0,
                    help="full land step [s]; shorter (start-up) calls are skipped")
     r = sp.add_parser("replay")
