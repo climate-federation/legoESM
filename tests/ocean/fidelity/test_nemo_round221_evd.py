@@ -182,7 +182,8 @@ def test_constant_closure_stays_separate_from_nemo_replacement(smt1):
     )
     ed = cfg.physics.convection.enhanced_diffusion._replace(
         K_conv=100.0, nu_conv=0.0, K_bg=0.0, nu_bg=0.0,
-        evd_composition="nemo_replace")
+        evd_composition="nemo_replace", two_level_trigger=True,
+        evd_n2_time_level="nemo_now_before")
     physics = cfg.physics._replace(
         vertical_mixing=vertical,
         convection=cfg.physics.convection._replace(
@@ -203,6 +204,9 @@ def test_constant_closure_stays_separate_from_nemo_replacement(smt1):
     K_v, A_v = compute_vertical_K_profiles(
         unstable, constant_card.recipe.z_coord, None, physics,
         A_v_background=0.0, K_v_background=0.0,
+        n2_tracers=(unstable.T.data, unstable.S.data),
+        n2_tracers_before=(unstable.T.data, unstable.S.data),
+        eta_now=unstable.eta.data,
         seos_cfg=cfg.eos_nemo_seos,
     )
     K_v = np.asarray(K_v)
@@ -223,6 +227,9 @@ def test_constant_closure_stays_separate_from_nemo_replacement(smt1):
     K_add, _ = compute_vertical_K_profiles(
         unstable, constant_card.recipe.z_coord, None, additive_physics,
         A_v_background=0.0, K_v_background=0.0,
+        n2_tracers=(unstable.T.data, unstable.S.data),
+        n2_tracers_before=(unstable.T.data, unstable.S.data),
+        eta_now=unstable.eta.data,
         seos_cfg=cfg.eos_nemo_seos,
     )
     np.testing.assert_array_equal(

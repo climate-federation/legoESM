@@ -10749,11 +10749,11 @@ class LatLonCGridOceanModel:
         """Before-advection (Nnow) T/S for the vmix diffusivity-stage N².
 
         Static Python predicate (config-only): returns ``(T, S)`` from the
-        STEP-ENTRY state when ``vertical_mixing.scheme=="tke"`` and
-        ``tke.n2_before_advection`` is set — the NEMO ``eosbn2`` sequencing
-        (``bn2(Nnow)`` at step start, before ``fct2`` tracer advection drifts
-        the deepest wet cell). ``None`` (default) ⇒ the closure keeps sampling
-        N² on the post-advection state ⇒ BIT-IDENTICAL.
+        STEP-ENTRY state when the TKE closure requests its before-advection N²
+        or when enhanced diffusion selects NEMO's NOW/BEFORE trigger.  NEMO's
+        RK3 program builds ``rn2b`` before ``zdf_phy`` (stprk3.f90:172-181),
+        before tracer advection can change either operand. ``None`` (default)
+        leaves every other closure sampling N² on the post-advection state.
 
         Both the ``adiabatic`` (Veros parcel-displacement) and ``nemo_bn2``
         (NEMO eosbn2 S-EOS) N² paths read the T/S contrast — the
@@ -10766,12 +10766,25 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config  # SPMD band override
         vmix = getattr(getattr(_cfg_b, "physics", None),
                        "vertical_mixing", None)
-        if vmix is None or vmix.scheme != "tke":
+        _tke_reads_entry = (
+            vmix is not None
+            and vmix.scheme == "tke"
+            and getattr(vmix.tke, "n2_before_advection", False)
+        )
+        _conv = getattr(getattr(_cfg_b, "physics", None), "convection", None)
+        _evd = (getattr(_conv, "enhanced_diffusion", None)
+                if getattr(_conv, "scheme", "none") == "enhanced_diffusion"
+                else None)
+        _evd_reads_entry = (
+            _evd is not None
+            and getattr(_evd, "evd_n2_time_level", "solver_state")
+            == "nemo_now_before"
+        )
+        if not (_tke_reads_entry or _evd_reads_entry):
             return None
-        if not getattr(vmix.tke, "n2_before_advection", False):
-            return None
-        if getattr(vmix.tke, "n2_mode", "insitu") not in (
-                "adiabatic", "nemo_bn2"):
+        if (_tke_reads_entry
+                and getattr(vmix.tke, "n2_mode", "insitu") not in (
+                    "adiabatic", "nemo_bn2")):
             raise ValueError(
                 "vertical_mixing.tke.n2_before_advection=True requires "
                 "n2_mode='adiabatic' or 'nemo_bn2' (the only N² paths that "
@@ -10813,8 +10826,7 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config  # SPMD band override
         vmix = getattr(getattr(_cfg_b, "physics", None),
                        "vertical_mixing", None)
-        if vmix is None or vmix.scheme != "tke":
-            return None
+        _tke_active = vmix is not None and vmix.scheme == "tke"
         _conv = getattr(getattr(_cfg_b, "physics", None), "convection", None)
         _evd = (getattr(_conv, "enhanced_diffusion", None)
                 if getattr(_conv, "scheme", "none") == "enhanced_diffusion"
@@ -10827,7 +10839,8 @@ class LatLonCGridOceanModel:
             # EVD's selector: the one-variable EVD ablation must not make the
             # still-live TKE consumer invent state.T_before/S_before.
             _tke_uses_entry_as_nbb = (
-                getattr(vmix.tke, "tke_n2_time_level", "step_entry")
+                _tke_active
+                and getattr(vmix.tke, "tke_n2_time_level", "step_entry")
                 == "nemo_before")
             _evd_uses_entry_as_nbb = (
                 _evd is not None
@@ -10835,7 +10848,9 @@ class LatLonCGridOceanModel:
                 == "nemo_now_before")
             if _tke_uses_entry_as_nbb or _evd_uses_entry_as_nbb:
                 return (entry_state.T.data, entry_state.S.data)
-        if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
+        if (not _tke_active
+                or getattr(vmix.tke, "tke_n2_time_level", "step_entry")
+                != "nemo_before"):
             return None
         if entry_state.T_before is None or entry_state.S_before is None:
             raise ValueError(
