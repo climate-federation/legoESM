@@ -223,7 +223,7 @@ def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg
     dissl_old (ours: ediss/(0.5 c_eps e_post)) is also compared with
     restart(kt) dissl, which is what NEMO's matrix consumes."""
     ours = dict(eshear_k=budget[0], estrat_k=budget[1], ediss_k=budget[2])
-    print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W)")
+    print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W; estrat and K_H carry the step_entry Pr=10 artefact)")
     print("   k   z_w | eshear | estrat | ediss  | dissl_used/dissl_rst(kt) | K_M/avm_k(kt+1) | K_H/avt_k(kt+1) | implied N2")
     nemo = {n: load_strip_w(run_next, step, n)[:, sj, si].T[:, 1:] for n in ours}
     dissl_ours = np.asarray(budget[2])[0] / np.maximum(0.5 * cfg.c_eps * our_step_e, 1e-300)
@@ -372,6 +372,13 @@ def main(argv=None) -> int:
     kw = dict(R=R0, band=band, eos=eos, rho0=rho0, g=g, dz_ref=dz_ref,
               t_depth_ref=t_depth_ref, taum_cols=tau_cols, dt=STEP_DT)
     ours, zk = our_step(cfg=cfg, en_in=en_in, **kw)
+    kh_nemo = R1["avt_k"][band][:, 1:]
+    def kh_line(lab):
+        kh = np.asarray(our_step.last.K_H)[0]
+        ok = np.isfinite(kh) & np.isfinite(kh_nemo) & (kh_nemo > 0)
+        print(f"[{lab}] K_H/avt_k(kt+1) median per interface: " + " ".join(
+            f"{np.median(kh[ok[:, k], k] / kh_nemo[ok[:, k], k]):.3f}" for k in range(14)))
+    kh_line("arm b")
     print(f"[twin] dtypes: en_out {ours.dtype} dz_ref {np.asarray(dz_ref).dtype}")
     if not np.allclose(zk[:20], np.asarray(w_interior)[:20], atol=0.05):
         raise SystemExit("our interface ladder != NEMO gdepw interior (k mapping broken)")
@@ -387,7 +394,7 @@ def main(argv=None) -> int:
     p_sh2 = np.where(np.isfinite(p_sh2), p_sh2, 0.0)
     cfg_a = cfg._replace(tke_shear_evaluation_stage="step_entry")
     ours_a, _ = our_step(cfg=cfg_a, en_in=en_in, p_sh2=p_sh2, **kw)
-    rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected")
+    rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected (sink K_H uses Pr=10 artefact)")
     band_report(rel_a, chg, zk, a.band_lo, a.band_hi, "arm a")
     budget_a = our_step.last.budget
     post_a = (np.asarray(our_step.last.K_M)[0], np.asarray(our_step.last.K_H)[0],
@@ -400,13 +407,7 @@ def main(argv=None) -> int:
     ours_c, _ = our_step(cfg=cfg_c, en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
     rel_c = stats(ours_c, en_nemo, zk, min(kmax, nsh), "arm c: NEMO p_sh2 + carried avm_k/avt_k")
     band_report(rel_c, chg, zk, a.band_lo, a.band_hi, "arm c")
-    kh_nemo = R1["avt_k"][band][:, 1:]
-    def kh_line(lab):
-        kh = np.asarray(our_step.last.K_H)[0]
-        ok = np.isfinite(kh) & np.isfinite(kh_nemo) & (kh_nemo > 0)
-        print(f"[{lab}] K_H/avt_k(kt+1) median per interface: " + " ".join(
-            f"{np.median(kh[ok[:, k], k] / kh_nemo[ok[:, k], k]):.3f}" for k in range(min(kmax, nsh))))
-    kh_line("arm c")
+    kh_line("arm c (INVALID: step_entry zeroes cell shear -> richardson Pr=10)")
     # arm d: arm c + NEMO's Richardson form (rn2b*avm_old/p_sh2, nemo_ri)
     ours_d, _ = our_step(cfg=cfg_c._replace(prandtl_mode="nemo_ri"), en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
     band_report(stats(ours_d, en_nemo, zk, min(kmax, nsh), "arm d: arm c + prandtl nemo_ri"),
