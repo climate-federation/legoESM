@@ -1569,6 +1569,25 @@ class ModelDriver:
                 self.tracers[k] = self._conserving_floor(
                     self.tracers[k] + dt * tend, dp=_dp)
 
+    def _land_stress_for_checkpoint(self):
+        """``(land_taumag, land_taumag_valid)`` to persist, or ``None``.
+
+        Gated on THIS run's resolved land-stress switch (a feature-off run never
+        writes it).  Before any run has adopted a loaded checkpoint (load ->
+        save with no step) the staged pair is forwarded, so a no-step re-save
+        cannot strip it.  Rank-local under MPI; the caller gathers.
+        """
+        from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        if not resolve_mpas_land_stress_from_land(self.config):
+            return None
+        mag = getattr(self, "_land_taumag", None)
+        if mag is not None:
+            return mag, self._land_taumag_valid
+        ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        if "land_taumag" in ck:
+            return ck["land_taumag"], ck["land_taumag_valid"]
+        return None
+
     def _checkpoint_carry_aux(self) -> dict | None:
         """``self._carry_aux`` augmented with the evolved double-moment tracers
         (namespaced ``dmtr_*``) so a checkpoint persists them — otherwise a
@@ -6418,9 +6437,16 @@ class ModelDriver:
                     if _skin_local is not None:
                         _skin_save = gather_voronoi_field(
                             jnp.asarray(_skin_local).reshape(-1), part, "cell")
+                _ls_save = self._land_stress_for_checkpoint()
+                if _ls_save is not None:
+                    _ls_save = tuple(
+                        gather_voronoi_field(jnp.asarray(_a).reshape(-1),
+                                             part, "cell")
+                        for _a in _ls_save)
                 if self._mpi_rank != 0:
                     return
             else:
+                _ls_save = self._land_stress_for_checkpoint()
                 u_d, T_d, ps_d, phis_d = (
                     s.u.data, s.T.data, s.p_s.data, s.phis.data)
                 trc_d = (None if s.tracers is None
@@ -6539,6 +6565,13 @@ class ModelDriver:
                     _skin = _skin_save
                 if _skin is not None:
                     _save["ice_T_skin"] = np.asarray(_skin)
+            # Land surface stress handed to the boundary layer (last valid
+            # solve per column + whether one exists): persisted so a restart
+            # hands the atmosphere the same drag an unbroken run would,
+            # instead of re-seeding the neutral drag for one land step.
+            if _ls_save is not None:
+                _save["land_taumag"] = np.asarray(_ls_save[0])
+                _save["land_taumag_valid"] = np.asarray(_ls_save[1], dtype=bool)
             # #1353 (codex-2 finding 2): within-interval CMOR flux sums —
             # so a mid-interval (wallclock / off-cadence) restart resumes
             # the interval mean instead of dropping the pre-checkpoint
@@ -7278,6 +7311,26 @@ class ModelDriver:
                     _skin_ck = scatter_to_local(
                         jnp.asarray(_skin_ck), part, "cell")
                 self._carry_aux["ice_T_skin"] = np.asarray(_skin_ck)
+            # Land surface stress: same stale-persistence rule.  A checkpoint
+            # without it (written before it was persisted, or by a run with the
+            # land stress off) is recorded so _run_mpas re-seeds LOUDLY.
+            for _k in ("land_taumag", "land_taumag_valid"):
+                self._carry_aux.pop(_k, None)
+            self._land_taumag = self._land_taumag_valid = None
+            self._land_stress_ckpt_missing = "land_taumag" not in d.files
+            if not self._land_stress_ckpt_missing:
+                for _k in ("land_taumag", "land_taumag_valid"):
+                    _a = np.asarray(d[_k]).reshape(-1)
+                    if _mpi:
+                        if _a.shape[0] != part.nCells_global:
+                            raise ValueError(
+                                f"MPAS checkpoint {path.name} {_k} length "
+                                f"{_a.shape[0]} != global mesh "
+                                f"({part.nCells_global},); rebuild with the "
+                                "same --resolution.")
+                        _a = np.asarray(scatter_to_local(
+                            jnp.asarray(_a), part, "cell"))
+                    self._carry_aux[_k] = _a
             # #1353 partial-interval CMOR flux sums: same stale-persistence
             # rule — drop prior staging, then stage this checkpoint's
             # payload for the _run_mpas accumulator restore.  WHITELISTED
@@ -11992,7 +12045,40 @@ class ModelDriver:
                     )
                     _land_taumag_cells = jnp.zeros_like(_q_air0)
                     _land_taumag_valid = jnp.zeros(_q_air0.shape, dtype=bool)
+                    _ls_ck = (self._carry_aux
+                              if isinstance(self._carry_aux, dict) else {})
+                    if "land_taumag" in _ls_ck:
+                        _m = jnp.asarray(_ls_ck.pop("land_taumag"),
+                                         dtype=_q_air0.dtype).reshape(-1)
+                        _v = jnp.asarray(_ls_ck.pop("land_taumag_valid"),
+                                         dtype=bool).reshape(-1)
+                        if _m.shape != _q_air0.shape or _v.shape != _q_air0.shape:
+                            raise ValueError(
+                                f"checkpoint land_taumag shape {_m.shape} / "
+                                f"valid {_v.shape} != (nCells={_q_air0.size},)"
+                                " — mesh mismatch.")
+                        if not bool(jnp.all(jnp.isfinite(_m))):
+                            raise ValueError(
+                                "checkpoint land_taumag has non-finite values "
+                                "— refusing to resume from a corrupt stress.")
+                        _land_taumag_cells, _land_taumag_valid = _m, _v
+                        logger.info(
+                            "  MPAS land stress: resumed from checkpoint "
+                            "(%d columns with a solved value)",
+                            int(jnp.sum(_v)))
+                    elif getattr(self, "_land_stress_ckpt_missing", False):
+                        logger.warning(
+                            "  MPAS land stress: the checkpoint carries no "
+                            "land surface stress (written before it was "
+                            "persisted, or with the land stress off); "
+                            "RE-SEEDING every land column with the neutral "
+                            "drag of its static roughness for the first land "
+                            "step. This restart is not bit-identical to an "
+                            "unbroken run.")
+                    self._land_stress_ckpt_missing = False
                     _land_taumag_fresh = _land_taumag_valid
+                    self._land_taumag = _land_taumag_cells
+                    self._land_taumag_valid = _land_taumag_valid
                     _land_stress_landcell = (
                         jnp.asarray(_f_land_cols).reshape(-1) > 0.0)
                     # Diagnostics: land column-steps whose drag was the
@@ -12500,6 +12586,8 @@ class ModelDriver:
                              _land_taumag_fresh) = hold_last_valid_land_stress(
                                 _land_taumag_cells, _land_taumag_valid,
                                 _land_taumag_step, _land_held_step)
+                            self._land_taumag = _land_taumag_cells
+                            self._land_taumag_valid = _land_taumag_valid
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).

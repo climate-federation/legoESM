@@ -308,22 +308,60 @@ def test_land_stress_first_step_is_the_seed(monkeypatch, tmp_path):
     assert d._land_stress_reused_total == 0
 
 
-def test_land_stress_restart_reseeds_once(monkeypatch, tmp_path):
-    """After a restart the land drag is not in the checkpoint: the first host
-    step uses the seed (one seeded step per land column), then the land's own
-    solve; nothing is reused."""
-    _patch_land_loaders(monkeypatch)
+THREE_STEPS_DAYS = 901.0 / 86400.0
+
+
+def _ls_checkpoint(tmp_path):
+    """Two land-stress steps, checkpointed; returns (driver, checkpoint path)."""
     dA = _build_driver(str(tmp_path / "a"), TWO_STEPS_DAYS, **_LS_KW,
                        mpas_land_stress_from_land=True)
     assert dA.run() == "COMPLETED"
-    assert int(dA._land_stress_seed_total) == _n_land_cells(dA)
     ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
                                          "checkpoint_day_*.npz")))[-1]
-    dB = _build_driver(str(tmp_path / "b"), FOUR_STEPS_DAYS, **_LS_KW,
+    return dA, ckpt
+
+
+def test_land_stress_restart_matches_an_unbroken_run(monkeypatch, tmp_path):
+    """The land stress rides the checkpoint: the first post-restart step hands
+    the boundary layer exactly the drag an unbroken run hands it on that step,
+    and no land column is re-seeded."""
+    _patch_land_loaders(monkeypatch)
+    _, ckpt = _ls_checkpoint(tmp_path)
+    with np.load(ckpt) as z:
+        assert "land_taumag" in z.files and z["land_taumag_valid"].any()
+    dC = _build_driver(str(tmp_path / "c"), THREE_STEPS_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    assert dC.run() == "COMPLETED"
+    # On the MPAS lane ``days`` counts the steps of THIS job, so one step here
+    # is absolute step 2: the first post-restart step.
+    dB = _build_driver(str(tmp_path / "b"), ONE_STEP_DAYS, **_LS_KW,
                        mpas_land_stress_from_land=True)
     step, day = dB.load_checkpoint(ckpt)
-    assert step > 0
+    assert step == 2
     assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    np.testing.assert_array_equal(np.asarray(dB._land_stress_last),
+                                  np.asarray(dC._land_stress_last))
+    assert np.asarray(dB._land_stress_last).max() > 0.0
+    assert int(dB._land_stress_seed_total) == 0
+
+
+def test_old_checkpoint_without_land_stress_reseeds_loudly(monkeypatch,
+                                                          tmp_path, caplog):
+    """A checkpoint written before the land stress was persisted still loads:
+    every land column is re-seeded for the first land step, with a warning."""
+    import logging
+    _patch_land_loaders(monkeypatch)
+    _, ckpt = _ls_checkpoint(tmp_path)
+    old = str(tmp_path / "old_checkpoint_day_0000.npz")
+    with np.load(ckpt) as z:
+        np.savez(old, **{k: z[k] for k in z.files
+                         if not k.startswith("land_taumag")})
+    dB = _build_driver(str(tmp_path / "b"), FOUR_STEPS_DAYS, **_LS_KW,
+                       mpas_land_stress_from_land=True)
+    step, day = dB.load_checkpoint(old)
+    with caplog.at_level(logging.WARNING):
+        assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    assert any("RE-SEEDING" in r.getMessage() for r in caplog.records)
     assert int(dB._land_stress_seed_total) == _n_land_cells(dB)
     assert int(dB._land_stress_reused_total) == 0
 
