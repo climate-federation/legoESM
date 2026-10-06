@@ -287,6 +287,10 @@ FILES = {
     # precise failing line before either statement can be repaired.
     "ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R84FRAMES_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2_R84FRAMES_COMPILED / "zdfphy.f90"),
+    "ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfevd.f90": (
+        _ORCA2_R84FRAMES_COMPILED / "zdfevd.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _OVERFLOW_COMPILED / "stprk3_stg.f90"),
     "OVERFLOW_OMIP_L1/BLD/ppsrc/nemo/dynhpg.f90": (
@@ -6044,6 +6048,31 @@ CITATION_MAP = {
         ('FUNCTION l4_canon_2d( pfield, cdgrid ) RESULT( zfield )', 1),
         ('END FUNCTION l4_canon_2d', 1),
         31,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfphy.f90:205-228': [
+        ('Background eddy viscosity and diffusivity', 1),
+        ('avm_k(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1),jk)', 1),
+        24,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfphy.f90:347-359': [
+        ('start from turbulent closure values', 1),
+        ('IF( ln_zdfevd )   CALL zdf_evd', 1),
+        13,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfevd.f90:107-110': [
+        ('DO jk =  1,  jpkm1', 1),
+        ('END DO   ;   END DO   ;   END DO', 2),
+        4,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/zdfevd.f90:120-135': [
+        ('enhance momentum Kz', 1),
+        ('p_avm(ji,jj,jk) = rn_evd * wmask', 1),
+        16,
+    ],
+    'ORCA2_OMIP_L4_R84FRAMES/BLD/ppsrc/nemo/stprk3.f90:172-181': [
+        ('CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )', 1),
+        ('CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
+        10,
     ],
     'namelist_ref:1200': ('ln_zdfiwm   = .false.      ! internal wave-induced mixing            (T =>   fill namzdf_iwm)', 1),
     'domhgr.F90:222-227': [("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1), ('kff = 1', 1), 6],
