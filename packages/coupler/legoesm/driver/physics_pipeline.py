@@ -665,7 +665,7 @@ class PhysicsPipeline:
 
         - non-tiled (``surface_tiled=False``, e.g. the compiled lat-lon AMIP
           lane with holtslag_boville): the turbulence kernel runs
-          ``compute_surface_fluxes(..., config.surface)`` on the BLENDED
+          ``surface_fluxes_at_lowest_level(..., config.surface, z_low)`` on the BLENDED
           surface temperature ``T_sfc = blend(T_sfc_ocean, T_land)`` with a
           saturated ``q_sfc = q_sat(T_sfc)`` and NO beta limiting
           (physics_step_no_rad).  The law is evaluated HERE on the same
@@ -796,8 +796,8 @@ class PhysicsPipeline:
         equilibrium), window-mean residual:
 
             window            legacy_dual        unified
-            1 x 600 s          114.2 W/m^2        3.3 W/m^2   (35x smaller)
-            24 x 600 s (4 h)   244.3 W/m^2       36.1 W/m^2   (6.8x smaller)
+            1 x 600 s          116.8 W/m^2        1.02 W/m^2  (115x smaller)
+            24 x 600 s (4 h)   251.3 W/m^2        3.75 W/m^2  (67x smaller)
 
         Going fully explicit would close the implicitness exactly but is
         UNSTABLE at a 4 h cadence in convective conditions (measured
@@ -4316,35 +4316,6 @@ def apply_surface_flux_config(tc, config):
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
 
-    # #1783: the unified land-flux law pins the reference height OFF.
-    #
-    # The height correction tells the MOST solver the real height of the lowest
-    # full level (~135 m instead of a nominal 10 m) and brings the air down
-    # dry-adiabatically, ~1.5 K.  Against the unified land interface that
-    # manufactures an air-surface contrast that is not there: with it on, five
-    # tests of TestUnifiedLaneOneFluxLaw fail with sensible heat at
-    # -1.13 .. -7.94 W/m^2 where the blended law wants +43.6 .. -16.9, i.e. a
-    # downward flux out of nothing.  Forcing it off takes that class to 7
-    # passed and the whole module to 29 passed -- measured, one constructor
-    # field, job 9946756.
-    #
-    # Only when the run does not state it.  An explicit request is never
-    # silently inverted; the two settings genuinely disagree, so asking for
-    # both is refused rather than resolved behind the caller's back.
-    if getattr(config, "land_interface_flux", None) == "unified":
-        if zml is None:
-            zml = False
-        elif bool(zml):
-            raise ValueError(
-                "land_interface_flux='unified' with "
-                "surface_z_ref_model_level=True is not a supported "
-                "combination (#1783): the lowest-level height correction "
-                "invents an air-surface contrast that the unified flux law "
-                "then debits, producing a downward sensible heat flux out of "
-                "nothing. Set surface_z_ref_model_level=False or leave it "
-                "unset (the unified lane pins it off), or select a different "
-                "land_interface_flux."
-            )
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
     # sea-water surface humidity needs a path that separates the ocean from

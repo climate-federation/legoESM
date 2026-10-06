@@ -1804,7 +1804,7 @@ class ExperimentConfig(NamedTuple):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
     #       constant-C_H/C_E no-stability bulk fluxes while the atmosphere's
     #       turbulence scheme debits stability-dependent surface-layer fluxes
-    #       (compute_surface_fluxes, config.surface) from the SAME interface —
+    #       (surface_fluxes_at_lowest_level, config.surface) from the SAME interface —
     #       two different flux laws, measured same-state mismatch
     #       +75..+152 W/m^2 (a spurious skin heat source; energy is NOT
     #       conserved at the interface).  Kept as the default only for
