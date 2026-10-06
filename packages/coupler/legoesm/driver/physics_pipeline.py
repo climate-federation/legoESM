@@ -2566,7 +2566,8 @@ class PhysicsPipeline:
                     else self.land_ml_params) if _ml_active else None
         if _land_active:
             if _ml_active:
-                T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
+                from legoesm.land.multilayer_land import land_skin_temperature
+                T_land_grid = ad.unflatten_2d(land_skin_temperature(land_ml))
                 # Radiation wants ONE broadband land albedo.  A bulk surface
                 # supplies it directly as ``albedo_veg``; a CANOPY parameter set
                 # has no such field — it carries the two solar BAND albedos and

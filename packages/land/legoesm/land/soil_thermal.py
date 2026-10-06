@@ -68,6 +68,9 @@ __param_spec__ = {
             "sr_clip_min": "numerics: saturation-ratio floor",
             "C_ice_vol": "material: ice volumetric heat capacity (= rho_ice·c_pi)",
             "freeze_curve_width_K": "numerics: freezing-curve smoothing half-width [K]",
+            "snow_bulk_density_kg_m3": "material: fixed bulk snow density of the "
+                                       "one-layer snow thermal node (no density "
+                                       "state; user-fixed 250 kg/m^3, 2026-10-03)",
         },
         "params": {
             "theta_liq_residual_frac": {
@@ -108,6 +111,17 @@ __param_spec__ = {
 }
 
 
+# --- snow thermal conductivity (Jordan 1991, as in CLM5 SoilTemperatureMod) ---
+# thk = tkair + (7.75e-5*rho + 1.105e-6*rho^2) * (tkice - tkair); CTSM 5.1
+# SoilTemperatureMod.F90:690 with clm_varcon tkair=0.023, tkice=2.290.  The two
+# end-member conductivities are part of the published fit, so they are kept with
+# it rather than taken from ``constants`` (whose k_ice/k_air differ slightly).
+_JORDAN_TKAIR_W_M_K = 0.023
+_JORDAN_TKICE_W_M_K = 2.290
+_JORDAN_LIN_M3_KG = 7.75e-5
+_JORDAN_QUAD_M6_KG2 = 1.105e-6
+
+
 class SoilThermalConfig(NamedTuple):
     """Configuration for soil thermal properties.
 
@@ -143,6 +157,11 @@ class SoilThermalConfig(NamedTuple):
     C_ice_vol: float = constants.rho_ice * constants.c_pi  # ice heat cap [J/m3/K]
     freeze_curve_width_K: float = 0.5      # [K] smooth freezing-curve half-width
     theta_liq_residual_frac: float = 0.05  # [-] residual unfrozen liquid fraction
+    # --- one-layer snow thermal node on the BULK snowpack (opt-in,
+    # ``solve_snow_node_soil_thermal``).  False (default) = snow has no heat
+    # capacity and no insulation (the legacy bucket), bit-identical to before.
+    snow_insulation: bool = False
+    snow_bulk_density_kg_m3: float = 250.0  # [kg/m3] fixed bulk snow density
 
 
 def compute_heat_capacity(
@@ -475,6 +494,8 @@ def solve_snow_soil_thermal(
     dt: float,
     surface_conductance: jnp.ndarray | None = None,
     T_snow_top_ref: jnp.ndarray | None = None,
+    layer_source: jnp.ndarray | None = None,
+    n_substeps: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """ONE implicit (backward-Euler) heat solve of a snowpack stacked on the soil.
 
@@ -497,29 +518,146 @@ def solve_snow_soil_thermal(
     sensible energy exactly; latent heat in the pack is handled afterwards by the
     enthalpy re-equilibration (``snow_column.snow_phase_and_percolate``).
 
+    ``layer_source`` [W/m^2, (ncol, nlayers)] is an explicit per-SOIL-layer
+    heat source and ``n_substeps`` splits the step into equal backward-Euler
+    sub-steps, both exactly as in :func:`solve_soil_thermal` (the apparent heat
+    capacity is re-evaluated at each sub-step's start; fluxes are rates held
+    over the step; the Robin terms stay linearised about the step's original
+    temperatures).  Defaults (``None``, 1) leave the single solve unchanged.
+
     Returns ``(T_snow_new (ncol, ns), T_soil_new (ncol, nlayers))``.
     """
     ns = T_snow.shape[-1]
-    d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
-        T_soil, theta, grid, hydro_config, thermal_config, dt)
-    c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
-    coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
-    diag = jnp.concatenate([C_snow / dt, d_soil], axis=-1)
-    # The soil diagonal already carries its internal conductances; add the pack's
-    # internal ones and the snow-soil interface to the rows they join.
-    diag = diag.at[:, 1:ns + 1].add(coeff[:, :ns])
-    diag = diag.at[:, :ns].add(coeff[:, :ns])
-    rhs = jnp.concatenate([C_snow * T_snow / dt, r_soil], axis=-1)
-    rhs = rhs.at[:, 0].add(f_snow * G_surface)
-    rhs = rhs.at[:, ns].add((1.0 - f_snow) * G_surface)
+    dt_sub = dt / n_substeps
+    T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
+    T_g_ref = T_soil[:, 0]
+    T_s, T_g = T_snow, T_soil
+    for _ in range(n_substeps):
+        d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
+            T_g, theta, grid, hydro_config, thermal_config, dt_sub)
+        c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
+        coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
+        diag = jnp.concatenate([C_snow / dt_sub, d_soil], axis=-1)
+        # The soil diagonal already carries its internal conductances; add the
+        # pack's internal ones and the snow-soil interface to the rows they join.
+        diag = diag.at[:, 1:ns + 1].add(coeff[:, :ns])
+        diag = diag.at[:, :ns].add(coeff[:, :ns])
+        rhs = jnp.concatenate([C_snow * T_s / dt_sub, r_soil], axis=-1)
+        rhs = rhs.at[:, 0].add(f_snow * G_surface)
+        rhs = rhs.at[:, ns].add((1.0 - f_snow) * G_surface)
+        if surface_conductance is not None:
+            lam_s = f_snow * surface_conductance
+            lam_g = (1.0 - f_snow) * surface_conductance
+            diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
+            rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_g_ref)
+        rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
+        if layer_source is not None:
+            rhs = rhs.at[:, ns:].add(layer_source)
+        a = jnp.pad(-coeff, ((0, 0), (1, 0)))
+        c = jnp.pad(-coeff, ((0, 0), (0, 1)))
+        T_new = thomas_solve(a, diag, c, rhs)
+        T_s, T_g = T_new[:, :ns], T_new[:, ns:]
+    return T_s, T_g
+
+
+def snow_thermal_conductivity(rho_snow):
+    """Bulk dry-snow thermal conductivity [W/m/K] from density [kg/m3].
+
+    Jordan (1991), exactly as CLM5 (CTSM 5.1 SoilTemperatureMod.F90:690):
+    ``k = tkair + (7.75e-5*rho + 1.105e-6*rho^2) * (tkice - tkair)``.
+    0.223 W/m/K at 250 kg/m3.
+    """
+    return _JORDAN_TKAIR_W_M_K + (
+        _JORDAN_LIN_M3_KG * rho_snow + _JORDAN_QUAD_M6_KG2 * rho_snow ** 2
+    ) * (_JORDAN_TKICE_W_M_K - _JORDAN_TKAIR_W_M_K)
+
+
+def melt_snow_node_excess(snow_swe, T_snow):
+    """Melt snow with the snow node's heat above ``T_freeze`` (fixed enthalpy).
+
+    The node holds ``E = c_ice * snow_swe * max(T_snow - T_freeze, 0)``
+    [J/m2].  It melts ``m = min(snow_swe, E / L_f)`` [kg/m2]; the remaining
+    pack sits at ``T_freeze`` and ``heat = E - m * L_f >= 0`` [J/m2] is what is
+    left once the whole pack has melted (nonzero only then).  Exactly
+    ``c_ice*S*(T-Tf) == m*L_f + heat``.  Returns
+    ``(snow_swe - m, T_snow_new, m, heat)``; columns with no excess are
+    unchanged.
+    """
+    tf = constants.T_freeze
+    excess = constants.c_pi * snow_swe * jnp.maximum(T_snow - tf, 0.0)
+    melt = jnp.minimum(snow_swe, excess / constants.L_f)
+    # Leftover only where the whole pack melted (exact zero elsewhere, not a
+    # rounding residue of excess - melt*L_f).
+    heat = jnp.where(melt < snow_swe, 0.0, excess - melt * constants.L_f)
+    T_new = jnp.where(excess > 0.0, tf, T_snow)
+    return snow_swe - melt, T_new, melt, heat
+
+
+def solve_snow_node_soil_thermal(
+    T_snow: jnp.ndarray,
+    snow_swe: jnp.ndarray,
+    T_soil: jnp.ndarray,
+    theta: jnp.ndarray,
+    grid: SoilGrid,
+    hydro_config: SoilHydraulicsConfig,
+    thermal_config: SoilThermalConfig,
+    G_surface: jnp.ndarray,
+    dt: float,
+    surface_conductance: jnp.ndarray | None = None,
+    layer_source: jnp.ndarray | None = None,
+    n_substeps: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Soil heat diffusion with ONE snow thermal node over the BULK snowpack.
+
+    The bulk pack (``snow_swe`` [kg/m2], one SWE reservoir) becomes a single
+    node stacked on the soil and solved in the same implicit system
+    (:func:`solve_snow_soil_thermal` with one layer and whole-cell cover, as
+    CLM5 solves its snow and soil together):
+
+    * ``T_snow`` [K] is the SNOW-SURFACE temperature; the ground heat flux
+      ``G_surface`` acts on it (explicit; a semi-implicit
+      ``surface_conductance`` is refused);
+    * heat capacity ``c_ice * snow_swe`` [J/m2/K] (the bucket holds no liquid);
+    * the whole pack's resistance ``R_s = (snow_swe/rho_s)/k_s`` [m2 K/W] lies
+      between that surface node and the top soil node, in series with the top
+      soil half-layer.  ``rho_s`` is the fixed bulk density
+      ``snow_bulk_density_kg_m3``; ``k_s`` is Jordan (1991).  A node at the
+      pack MID-depth would expose the surface to only half of ``R_s``.
+
+    Snow-free columns (``snow_swe <= 0``) take the plain soil solve, bit-
+    identical to :func:`solve_soil_thermal`, and return ``T_snow_new =
+    T_soil_new[:, 0]`` (the node then mirrors the top soil).
+
+    Energy: the solve uses the heat capacity at ``snow_swe`` (the mass the
+    caller hands in, i.e. after this step's accumulation, melt and
+    sublimation) and starts from ``T_snow``, so every snow-mass change carries
+    ice enthalpy at the node's start-of-step temperature.  The atmosphere does
+    not account for snowfall enthalpy, so the coupled budget is not closed by
+    that term (~0.3 W/m2 while snow falls; accepted 2026-10-03).
+
+    Returns ``(T_snow_new (ncol,), T_soil_new (ncol, n_layers))``.
+    """
     if surface_conductance is not None:
-        lam_s = f_snow * surface_conductance
-        lam_g = (1.0 - f_snow) * surface_conductance
-        diag = diag.at[:, 0].add(lam_s).at[:, ns].add(lam_g)
-        T_ref = T_snow[:, 0] if T_snow_top_ref is None else T_snow_top_ref
-        rhs = rhs.at[:, 0].add(lam_s * T_ref).at[:, ns].add(lam_g * T_soil[:, 0])
-    rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
-    a = jnp.pad(-coeff, ((0, 0), (1, 0)))
-    c = jnp.pad(-coeff, ((0, 0), (0, 1)))
-    T_new = thomas_solve(a, diag, c, rhs)
-    return T_new[:, :ns], T_new[:, ns:]
+        # A semi-implicit surface (SimpleSEB) linearises the surface loss in
+        # the skin temperature, which a snow surface caps at T_freeze; doing
+        # that consistently needs the cap inside the solve.  Only the explicit
+        # ground flux (the two-leaf canopy's Picard loop) is supported.
+        raise ValueError(
+            "solve_snow_node_soil_thermal does not support surface_conductance "
+            "(semi-implicit surface); use the two-leaf canopy surface scheme.")
+    T_soil_bare = solve_soil_thermal(
+        T_soil, theta, grid, hydro_config, thermal_config, G_surface, dt,
+        layer_source=layer_source, n_substeps=n_substeps)
+    swe = jnp.maximum(snow_swe, 0.0)
+    rho_s = thermal_config.snow_bulk_density_kg_m3
+    R_snow = swe / rho_s / snow_thermal_conductivity(rho_s)       # [m2 K/W]
+    C_snow = constants.c_pi * swe                                  # [J/m2/K]
+    T_snow_cov, T_soil_cov = solve_snow_soil_thermal(
+        T_snow[:, None], C_snow[:, None], jnp.zeros_like(T_soil[:, :0]),
+        R_snow, jnp.ones_like(swe), T_soil, theta, grid, hydro_config,
+        thermal_config, G_surface, dt, layer_source=layer_source,
+        n_substeps=n_substeps)
+    covered = swe > 0.0
+    T_soil_new = jnp.where(covered[:, None], T_soil_cov, T_soil_bare)
+    T_snow_new = jnp.where(covered, T_snow_cov[:, 0], T_soil_bare[:, 0])
+    return T_snow_new, T_soil_new

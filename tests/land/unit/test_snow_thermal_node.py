@@ -1,0 +1,749 @@
+"""One-layer snow thermal node (``SoilThermalConfig.snow_insulation``).
+
+Pins: the Jordan (1991) conductivity CLM5 uses; snow-free columns bit-identical
+to the plain soil solve; the snow node's flux balance with the whole-pack
+resistance; the column enthalpy ledger (boundary fluxes + snow-mass change at
+the node's start temperature); insulation of a warm soil under a cold surface;
+water conservation of a full land step that melts a warm pack from storage;
+the restart initialisation; jit parity and finite, FD-checked gradients.
+Run with ``JAX_ENABLE_X64=1``.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm import constants
+from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.multilayer_land import (
+    init_multilayer_land_state, init_snow_temperature, land_skin_temperature,
+    step_multilayer_land)
+from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+from legoesm.land.soil_thermal import (
+    SoilThermalConfig, compute_apparent_heat_capacity, compute_heat_capacity,
+    compute_thermal_conductivity,
+    melt_snow_node_excess, snow_thermal_conductivity, solve_snow_node_soil_thermal,
+    solve_soil_thermal)
+from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+pytestmark = pytest.mark.skipif(
+    not jax.config.jax_enable_x64, reason="needs JAX_ENABLE_X64=1")
+
+_TF = constants.T_freeze
+_GRID = make_soil_grid(SoilGridConfig(n_layers=10, total_depth=3.0))
+_HYD = SoilHydraulicsConfig()
+_TH = SoilThermalConfig(snow_insulation=True)
+
+
+def _column(ncol=3):
+    T = jnp.linspace(268.0, 276.0, 10)[None, :] + jnp.arange(ncol)[:, None]
+    theta = jnp.full((ncol, 10), 0.25)
+    return T, theta
+
+
+def _enthalpy(T_soil, theta, T_snow, swe):
+    C = compute_heat_capacity(theta, _HYD, _TH)
+    return (jnp.sum(C * _GRID.dz * (T_soil - _TF), axis=-1)
+            + constants.c_pi * swe * (T_snow - _TF))
+
+
+def test_jordan_conductivity_is_clm5():
+    rho = 250.0
+    clm5 = 0.023 + (7.75e-5 * rho + 1.105e-6 * rho * rho) * (2.290 - 0.023)
+    assert abs(float(snow_thermal_conductivity(rho)) - clm5) < 1e-12
+    assert 0.22 < clm5 < 0.23
+
+
+@pytest.mark.parametrize("ft,n_sub", [(False, 1), (True, 6)])
+def test_snow_free_columns_bit_identical_to_soil_solve(ft, n_sub):
+    """Bit-identical, not just equal to rounding: the zero-capacity node of the
+    stacked system reproduces the soil solve only to ~1e-12 K in most columns
+    (measured on 2000 random columns), so 200 random columns catch a lost
+    snow-free selection."""
+    rng = np.random.default_rng(0)
+    T = jnp.asarray(265.0 + 15.0 * rng.random((200, 10)))
+    theta = jnp.asarray(0.05 + 0.4 * rng.random((200, 10)))
+    G = jnp.asarray(-80.0 + 160.0 * rng.random(200))
+    th = _TH._replace(enable_freeze_thaw=ft)
+    ref = solve_soil_thermal(T, theta, _GRID, _HYD, th, G, 1800.0, n_substeps=n_sub)
+    Ts, Tn = solve_snow_node_soil_thermal(T[:, 0] + 3.0, jnp.zeros(200), T, theta,
+                                          _GRID, _HYD, th, G, 1800.0,
+                                          n_substeps=n_sub)
+    np.testing.assert_array_equal(np.asarray(Tn), np.asarray(ref))
+    np.testing.assert_array_equal(np.asarray(Ts), np.asarray(ref[:, 0]))
+
+
+def test_semi_implicit_surface_is_refused():
+    T, theta = _column()
+    with pytest.raises(ValueError, match="surface_conductance"):
+        solve_snow_node_soil_thermal(T[:, 0], jnp.ones(3), T, theta, _GRID, _HYD,
+                                _TH, jnp.zeros(3), 1800.0,
+                                surface_conductance=jnp.ones(3))
+
+
+def test_snow_node_flux_balance_uses_whole_pack_resistance():
+    """C_s (T_s' - T_s)/dt = G - g (T_s' - T_0') with g = 1/(R_s + dz0/(2 k0)),
+    R_s = (swe/rho)/k_Jordan -- computed here independently of the solver."""
+    T, theta = _column()
+    swe = jnp.array([1.0, 20.0, 60.0])
+    T_s0 = jnp.array([260.0, 255.0, 250.0])
+    G = jnp.array([-20.0, -35.0, 10.0])
+    dt = 1800.0
+    Ts, Tn = solve_snow_node_soil_thermal(T_s0, swe, T, theta, _GRID, _HYD, _TH, G, dt)
+    rho = _TH.snow_bulk_density_kg_m3
+    R = swe / rho / snow_thermal_conductivity(rho)
+    k0 = compute_thermal_conductivity(theta, _HYD, _TH)[:, 0]
+    g = 1.0 / (R + 0.5 * _GRID.dz[0] / k0)
+    lhs = constants.c_pi * swe * (Ts - T_s0) / dt
+    rhs = G - g * (Ts - Tn[:, 0])
+    np.testing.assert_allclose(np.asarray(lhs), np.asarray(rhs), atol=1e-8)
+
+
+@pytest.mark.parametrize("n_sub,ft,src", [(1, False, False), (4, False, False),
+                                         (1, True, False), (4, False, True)])
+def test_column_enthalpy_ledger(n_sub, ft, src):
+    """dE = (G + Q_geo + sum(layer_source)) dt + (swe' - swe) c_ice (T_s - Tf)."""
+    T, theta = _column()
+    swe_old = jnp.array([10.0, 40.0, 0.0])       # col 2: pack created this step
+    swe_new = jnp.array([12.0, 35.0, 3.0])
+    T_s0 = jnp.array([262.0, 258.0, float(T[2, 0])])   # created at the skin T
+    G = jnp.array([-25.0, 15.0, -5.0])
+    dt = 1800.0
+    th = _TH._replace(enable_freeze_thaw=ft)
+    # An explicit soil source (the moisture fusion heat in production).
+    S = (jnp.linspace(-4.0, 6.0, 10)[None, :] * jnp.ones((3, 1))) if src else None
+    Ts, Tn = solve_snow_node_soil_thermal(T_s0, swe_new, T, theta, _GRID, _HYD, th,
+                                          G, dt, layer_source=S, n_substeps=n_sub)
+    flux = G + _TH.Q_geothermal + (jnp.sum(S, axis=-1) if src else 0.0)
+    if ft:
+        # Freeze/thaw: the solver's identity is in the linearised metric (the
+        # apparent heat capacity at the start temperature), one step.
+        C = compute_apparent_heat_capacity(T, theta, _HYD, th)
+        dE = (jnp.sum(C * _GRID.dz * (Tn - T), axis=-1)
+              + constants.c_pi * swe_new * (Ts - _TF)
+              - constants.c_pi * swe_old * (T_s0 - _TF))
+    else:
+        dE = (_enthalpy(Tn, theta, Ts, swe_new)
+              - _enthalpy(T, theta, T_s0, swe_old))
+    expect = flux * dt + (swe_new - swe_old) * constants.c_pi * (T_s0 - _TF)
+    np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                               rtol=1e-10, atol=1e-4)
+
+
+def test_deep_snow_insulates_warm_soil():
+    """30 days under 240 K air with a surface exchange of 2 W/m2/K: under
+    54 kg/m2 of snow the soil at ~17.5 cm stays far warmer than bare, and the
+    snow surface sits colder than the bare soil top.  (A PRESCRIBED surface
+    flux would drain the same energy from both columns -- insulation acts only
+    because the exchange depends on the surface temperature.)"""
+    lam, T_air = 2.0, 240.0
+    theta = jnp.full((2, 10), 0.25)
+    swe = jnp.array([0.0, 54.0])
+
+    def body(_, carry):
+        Ts, T = carry
+        return solve_snow_node_soil_thermal(
+            Ts, swe, T, theta, _GRID, _HYD, _TH, lam * (T_air - Ts), 1800.0)
+
+    T0 = jnp.full((2, 10), 272.0)
+    Ts, T = jax.jit(lambda c: jax.lax.fori_loop(0, 30 * 48, body, c))(
+        (T0[:, 0], T0))
+    k = int(np.argmin(np.abs(np.asarray(_GRID.z_node) - 0.175)))
+    assert float(T[1, k] - T[0, k]) > 5.0
+    assert float(Ts[1]) < float(Ts[0])
+
+
+def test_restart_init_caps_under_snow_and_mirrors_elsewhere():
+    cfg = MultiLayerLandConfig(thermal=_TH)
+    st = init_multilayer_land_state(3, cfg, T_init=278.0)
+    np.testing.assert_array_equal(np.asarray(st.T_snow), np.asarray(st.T_soil[:, 0]))
+    st = st._replace(T_snow=None, snow_depth=jnp.array([0.0, 5.0, 5.0]),
+                     T_soil=st.T_soil.at[2, 0].set(265.0))
+    out = init_snow_temperature(st)
+    np.testing.assert_allclose(np.asarray(out.T_snow), [278.0, _TF, 265.0])
+    np.testing.assert_array_equal(np.asarray(land_skin_temperature(out)),
+                                  np.asarray(out.T_snow))
+    warm = out._replace(T_snow=jnp.array([280.0, 280.0, 280.0]))
+    np.testing.assert_allclose(np.asarray(land_skin_temperature(warm)),
+                               [278.0, _TF, _TF])
+    off = init_multilayer_land_state(3, MultiLayerLandConfig(), T_init=278.0)
+    assert off.T_snow is None
+
+
+def _forcing(ncol, T_air, precip, precip_snow):
+    o = jnp.ones(ncol)
+    p_s = 1.0e5 * o
+    return AtmToSurface(
+        sw_down=60.0 * o, lw_down=250.0 * o, precip_total=precip * o,
+        precip_snow=precip_snow * o, T_lowest=T_air * o, q_lowest=0.002 * o,
+        u_lowest=4.0 * o, v_lowest=0.0 * o, p_lowest=0.99 * p_s, p_surface=p_s,
+        rho_lowest=p_s / (constants.R_d * T_air), cos_zenith=0.3 * o,
+        co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+
+
+@pytest.mark.parametrize("ft", [False, True])
+def test_full_step_conserves_water_with_warm_pack(ft):
+    """Snow + soil + pond water closes over steps that melt a pack whose node
+    starts above freezing (the stored-heat melt) and accumulate new snow; with
+    soil freeze/thaw off and ON (the production deck)."""
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
+        thermal=_TH._replace(enable_freeze_thaw=ft),
+        surface_scheme=TwoLeafCanopyConfig())
+    ncol = 2
+    st = init_multilayer_land_state(ncol, cfg, T_init=279.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([20.0, 2.0]),
+                     T_snow=jnp.array([278.0, 276.0]))
+    f = _forcing(ncol, 268.0, 3.0e-5, 3.0e-5)
+    dz = jnp.asarray(_GRID.dz)
+    dt = 1800.0
+
+    def W(s):
+        return (jnp.sum(dz * s.theta_soil, axis=-1) + s.surface_water) * \
+            constants.rho_water + s.snow_depth
+
+    W0 = W(st)
+    s = st
+    out = 0.0
+    melted_first = None
+    step = jax.jit(lambda s_: step_multilayer_land(
+        s_, f, cfg, 1.0, dt, lat=jnp.full(ncol, 1.0)))
+    for i in range(6):
+        s2, r, _ = step(s)
+        if i == 0:
+            melted_first = s.snow_depth + f.precip_snow * dt - s2.snow_depth
+        out = out + (r.surface_mass_flux + s2.runoff_surface
+                     + s2.runoff_subsurface) * dt
+        s = s2
+    P = f.precip_total * dt * 6
+    resid = W(s) - W0 - (P - out)
+    np.testing.assert_allclose(np.asarray(resid), 0.0, atol=1e-6)
+    # Stored heat above freezing melted snow on the first step.
+    want = constants.c_pi * jnp.array([20.0, 2.0]) * jnp.array([278.0, 276.0]) \
+        - constants.c_pi * jnp.array([20.0, 2.0]) * _TF
+    assert np.all(np.asarray(melted_first) >= 0.9 * np.asarray(want) / constants.L_f)
+    assert np.all(np.isfinite(np.asarray(s.T_snow)))
+
+
+@pytest.mark.parametrize("ft", [False, True])
+def test_full_step_jit_parity(ft):
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
+        thermal=_TH._replace(enable_freeze_thaw=ft))
+    st = init_multilayer_land_state(2, cfg, T_init=270.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([0.0, 30.0]),
+                     T_snow=jnp.array([270.0, 262.0]))
+    f = _forcing(2, 262.0, 1.0e-5, 1.0e-5)
+
+    def run(s):
+        return step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                    lat=jnp.full(2, 1.0))[0]
+
+    e = run(st)
+    j = jax.jit(run)(st)
+    np.testing.assert_allclose(np.asarray(j.T_snow), np.asarray(e.T_snow), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(j.T_soil), np.asarray(e.T_soil), rtol=1e-12)
+
+
+def test_solver_gradient_matches_finite_difference():
+    T, theta = _column(2)
+
+    def loss(swe):
+        Ts, Tn = solve_snow_node_soil_thermal(jnp.array([258.0, 258.0]), swe, T,
+                                         theta, _GRID, _HYD, _TH,
+                                         jnp.array([-30.0, -30.0]), 1800.0,
+                                         n_substeps=2)
+        return jnp.sum(Tn[:, 1]) + jnp.sum(Ts)
+
+    swe = jnp.array([15.0, 40.0])
+    g = jax.jit(jax.grad(loss))(swe)
+    eps = 1e-4
+    fd = [(loss(swe.at[i].add(eps)) - loss(swe.at[i].add(-eps))) / (2 * eps)
+          for i in range(2)]
+    assert np.all(np.isfinite(np.asarray(g))) and np.all(np.abs(np.asarray(g)) > 0)
+    np.testing.assert_allclose(np.asarray(g), np.asarray(fd), rtol=1e-6)
+
+
+def test_snow_fallen_this_step_gets_its_own_node():
+    """Snow falling on bare ground forms a pack in the step's FINAL solve (end-
+    of-step mass): the node then decouples from the top soil."""
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+    st = init_multilayer_land_state(1, cfg, T_init=271.0, theta_init=0.25)
+    f = _forcing(1, 255.0, 2.0e-3, 2.0e-3)      # 3.6 kg/m2 of snow in 30 min
+    s2 = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                                lat=jnp.full(1, 1.0))[0])(st)
+    assert float(s2.snow_depth[0]) > 1.0
+    assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) > 1e-3
+
+
+def test_stored_heat_melt_conserves_enthalpy_and_leaves_pack_at_freezing():
+    """c_ice S (T - Tf) == m L_f + leftover; the remaining pack sits at Tf;
+    leftover heat only where the whole pack melted; cold packs untouched."""
+    S = jnp.array([20.0, 0.05, 10.0, 0.0])
+    T = jnp.array([278.0, 290.0, 260.0, 280.0])
+    S2, T2, m, heat = melt_snow_node_excess(S, T)
+    E = constants.c_pi * S * jnp.maximum(T - _TF, 0.0)
+    np.testing.assert_allclose(np.asarray(m * constants.L_f + heat),
+                               np.asarray(E), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(S2 + m), np.asarray(S), rtol=1e-14)
+    np.testing.assert_allclose(np.asarray(T2[:2]), _TF)
+    assert float(heat[0]) == 0.0 and float(heat[1]) == 0.0
+    np.testing.assert_array_equal(np.asarray(T2[2:]), np.asarray(T[2:]))
+    assert float(m[2]) == 0.0 and float(m[3]) == 0.0
+    # Whole-pack melt with heat to spare: needs c S dT > L_f S, i.e. dT > 158 K
+    S3, T3, m3, h3 = melt_snow_node_excess(jnp.array([1.0]), jnp.array([_TF + 200.0]))
+    assert float(S3[0]) == 0.0 and float(h3[0]) > 0.0
+
+
+def test_full_step_gradient_wrt_snow_mass_is_finite_and_matches_fd():
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH)
+    st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
+    f = _forcing(1, 258.0, 0.0, 0.0)
+
+    def loss(swe):
+        s = st._replace(snow_depth=swe, T_snow=jnp.array([262.0]))
+        s2 = step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                  lat=jnp.full(1, 1.0))[0]
+        return s2.T_soil[0, 1] + s2.T_snow[0]
+
+    swe = jnp.array([30.0])
+    g = jax.jit(jax.grad(loss))(swe)
+    lj = jax.jit(loss)
+    eps = 1e-3
+    fd = (lj(swe + eps) - lj(swe - eps)) / (2 * eps)
+    assert np.isfinite(float(g[0])) and abs(float(g[0])) > 0.0
+    np.testing.assert_allclose(float(g[0]), float(fd), rtol=1e-4)
+
+
+def test_canopy_ground_node_is_the_snow_surface():
+    """Two-leaf canopy: the Picard loop's converged ground temperature is the
+    snow-node solve (close to the final T_snow), not the warm top soil."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=272.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([40.0]), T_snow=jnp.array([255.0]))
+    f = _forcing(1, 252.0, 0.0, 0.0)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0)))(st)
+    s2, sfc = out[0], out[-1]
+    Tg = float(sfc.Ts_solve[0])
+    assert abs(Tg - float(s2.T_snow[0])) < 1.0
+    assert float(s2.T_soil[0, 0]) - Tg > 5.0
+
+
+def test_flux_heats_the_node_and_melt_follows_from_its_enthalpy():
+    """Enthalpy-method melt: a pack starting at freezing is not melted by the
+    surface flux in the same step (so it can never melt AND end below
+    freezing); the heat it gained above freezing melts exactly
+    c_ice*S*(T - Tf)/L_f at the next step; the exported surface humidity is
+    ice saturation at the capped skin (T_freeze)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    from legoesm.thermo import charged_latent_heat, saturation_mixing_ratio_ice
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 285.0, 0.0, 0.0)._replace(sw_down=700.0 * o,
+                                               lw_down=340.0 * o,
+                                               cos_zenith=0.8 * o,
+                                               q_lowest=0.006 * o)
+    dt = 1800.0
+    step = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 0.8)))
+
+    def melt(s0, out):
+        s1, r1, sfc = out[0], out[1], out[-1]
+        transp = sfc.lhflx - sfc.LE_soil
+        assert float(transp[0]) >= 0.0          # no canopy dew onto the pack
+        # Pack mass leaves at the latent heat the two-leaf scheme CHARGED
+        # (vaporization at the start-of-step skin, here T_freeze); the
+        # L_s - L_v difference is returned to the ground heat (main's rule).
+        sublim = sfc.LE_soil / charged_latent_heat("two_leaf", jnp.array([_TF]))
+        return s0.snow_depth - s1.snow_depth - sublim * dt, s1, r1
+
+    m1, s1, r1 = melt(st, step(st))
+    np.testing.assert_allclose(np.asarray(m1), 0.0, atol=1e-9)
+    assert float(s1.T_snow[0]) > _TF            # flux heated the node
+    np.testing.assert_allclose(
+        np.asarray(r1.q_surface),
+        np.asarray(saturation_mixing_ratio_ice(jnp.array([_TF]), f.p_surface)),
+        rtol=1e-12)
+    m2, s2, _ = melt(s1, step(s1))
+    want = constants.c_pi * s1.snow_depth * (s1.T_snow - _TF) / constants.L_f
+    np.testing.assert_allclose(np.asarray(m2), np.asarray(want), rtol=1e-9)
+
+
+def test_full_step_energy_ledger_under_melting_conditions():
+    """Assembled land enthalpy over two two-leaf steps of warm air on a pack:
+    dE_sens = (G_soil + latent_excess + Q_geo) dt - L_f * m_store, with
+    E_sens = sum C dz (T - Tf) + c_ice SWE (T_snow - Tf); snow-mass changes
+    other than the stored-heat melt happen at a node already at Tf (no term).
+    ``latent_excess`` = latent demand the reservoirs could not meet, returned
+    to the ground (scheme lhflx minus the delivered lhflx)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([20.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 285.0, 0.0, 0.0)._replace(sw_down=700.0 * o,
+                                               lw_down=340.0 * o,
+                                               cos_zenith=0.8 * o,
+                                               q_lowest=0.006 * o)
+    dt = 1800.0
+    step = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 0.8)))
+
+    def E(s):
+        C = compute_heat_capacity(s.theta_soil, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (s.T_snow - _TF))
+
+    s = st
+    for _ in range(2):
+        m_store = constants.c_pi * s.snow_depth * jnp.maximum(
+            s.T_snow - _TF, 0.0) / constants.L_f
+        out = step(s)
+        s2, r2, sfc = out[0], out[1], out[-1]
+        flux = (sfc.G_soil + (sfc.lhflx - r2.lhflx)
+                + cfg.thermal.Q_geothermal)
+        expect = flux * dt - constants.L_f * m_store
+        # Water moved by Richards changes C (theta) at fixed T: compare at the
+        # end-of-step theta for the soil part.
+        dE = E(s2) - E(s._replace(theta_soil=s2.theta_soil))
+        np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                                   rtol=1e-9, atol=1e-3)
+        s = s2
+
+
+def test_canopy_ground_node_never_above_freezing_under_snow():
+    """Warm air and strong sun on a pack at freezing: the two-leaf canopy's
+    converged ground temperature is capped at T_freeze (a melting surface)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=270.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([15.0]), T_snow=jnp.array([_TF]))
+    o = jnp.ones(1)
+    f = _forcing(1, 285.0, 0.0, 0.0)._replace(sw_down=700.0 * o,
+                                               lw_down=340.0 * o,
+                                               cos_zenith=0.8 * o)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 0.8)))(st)
+    s2, sfc = out[0], out[-1]
+    assert float(sfc.Ts_solve[0]) <= _TF + 1e-9
+    assert float(s2.T_snow[0]) > _TF        # the node did take up heat
+
+
+def test_substeps_equal_repeated_single_steps_with_freeze_thaw():
+    """The sub-stepped solve (production: freeze/thaw on, several sub-steps)
+    is exactly repeated one-step solves of dt/n, each of which closes the
+    ledger tested above."""
+    T, theta = _column()
+    T = T - 6.0                                   # straddle freezing
+    th = _TH._replace(enable_freeze_thaw=True)
+    swe = jnp.array([10.0, 40.0, 0.0])
+    T_s0 = jnp.array([262.0, 258.0, float(T[2, 0])])
+    G = jnp.array([-25.0, 15.0, -5.0])
+    n, dt = 6, 1800.0
+    Ts6, Tn6 = solve_snow_node_soil_thermal(T_s0, swe, T, theta, _GRID, _HYD, th,
+                                       G, dt, n_substeps=n)
+    Ts, Tn = T_s0, T
+    for _ in range(n):
+        Ts, Tn = solve_snow_node_soil_thermal(Ts, swe, Tn, theta, _GRID, _HYD, th,
+                                         G, dt / n)
+    np.testing.assert_allclose(np.asarray(Tn6), np.asarray(Tn), rtol=1e-13)
+    np.testing.assert_allclose(np.asarray(Ts6), np.asarray(Ts), rtol=1e-13)
+
+
+def test_node_mirrors_top_soil_once_the_pack_is_gone():
+    """A trace pack that sublimates away within the step leaves no node:
+    T_snow equals the top-soil temperature (the state invariant every skin
+    consumer relies on)."""
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=272.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([1.0e-4]), T_snow=jnp.array([268.0]))
+    o = jnp.ones(1)
+    f = _forcing(1, 278.0, 0.0, 0.0)._replace(sw_down=600.0 * o,
+                                               q_lowest=0.0005 * o)
+    s2 = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, 1800.0,
+                                                lat=jnp.full(1, 0.8))[0])(st)
+    assert float(s2.snow_depth[0]) == 0.0
+    assert float(s2.T_snow[0]) == float(s2.T_soil[0, 0])
+
+
+@pytest.mark.parametrize("swe", [1.0e-3, 1.0e-2, 1.0e-1])
+def test_trace_pack_stays_bounded_and_canopy_converges(swe):
+    """A dusting is a nearly massless node, but it is tied to the top soil by
+    the conductance of its thin pack, so the node stays within a few kelvin of
+    the soil top and the canopy closure converges (no held column)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([swe]), T_snow=jnp.array([266.0]))
+    o = jnp.ones(1)
+    f = _forcing(1, 250.0, 0.0, 0.0)._replace(sw_down=0.0 * o,
+                                               lw_down=180.0 * o)
+    out = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0)))(st)
+    s2, sfc = out[0], out[-1]
+    assert int(sfc.n_held) == 0
+    assert np.isfinite(float(s2.T_snow[0]))
+    assert abs(float(s2.T_snow[0] - s2.T_soil[0, 0])) < 5.0
+    # ...and it responds to the cooling flux through that conductance: the
+    # snow surface ends colder than the soil top it drains.
+    assert float(s2.T_snow[0]) < float(s2.T_soil[0, 0])
+
+
+def test_held_column_reports_the_capped_skin():
+    """A column the canopy fails to solve is held at its previous skin, which
+    for a snow node above freezing (pending melt) is T_freeze."""
+    from legoesm.land.multilayer_land import (
+        _hold_unsolved_columns, step_multilayer_land_with_diagnostics)
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=0.25)
+    st = st._replace(snow_depth=jnp.array([10.0]), T_snow=jnp.array([276.0]))
+    f = _forcing(1, 262.0, 0.0, 0.0)
+    new, resp, _c, sfc = step_multilayer_land_with_diagnostics(
+        st, f, cfg, 1.0, 1800.0, lat=jnp.full(1, 1.0))
+    _h, held_resp, _hc, mask, _n = _hold_unsolved_columns(
+        st, new, resp, sfc._replace(converged=jnp.array([False])), f, cfg, 1)
+    assert bool(mask[0])
+    np.testing.assert_array_equal(np.asarray(_h.T_snow), [276.0])  # pending melt kept
+    np.testing.assert_allclose(np.asarray(held_resp.T_sfc), [_TF])
+    np.testing.assert_allclose(np.asarray(held_resp.T_rad), [_TF])
+
+
+def test_skin_helper_contract():
+    """Node off: top soil whatever the snow (switch-off identity). Node on:
+    snow-free -> top soil (never a stale node value); snow -> node capped at
+    T_freeze; a warm snow-free column is never capped."""
+    off = init_multilayer_land_state(2, MultiLayerLandConfig(), T_init=265.0)
+    off = off._replace(snow_depth=jnp.array([50.0, 0.0]))
+    np.testing.assert_array_equal(np.asarray(land_skin_temperature(off)),
+                                  np.asarray(off.T_soil[:, 0]))
+    on = init_multilayer_land_state(3, MultiLayerLandConfig(thermal=_TH),
+                                    T_init=300.0)
+    on = on._replace(snow_depth=jnp.array([0.0, 10.0, 10.0]),
+                     T_snow=jnp.array([260.0, 276.0, 260.0]))
+    np.testing.assert_allclose(np.asarray(land_skin_temperature(on)),
+                               [300.0, _TF, 260.0])
+
+
+def test_snow_falling_on_warm_ground_does_not_arrive_warm():
+    """A pack created this step on a 285 K surface starts at T_freeze: the
+    land enthalpy changes only by the boundary fluxes (no c_ice*S*(285 - Tf)
+    credited to snow that never carried it)."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=285.0, theta_init=0.25)
+    f = _forcing(1, 271.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
+    dt = 1800.0
+    s1, r1, _c, sfc = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0)))(st)
+    assert float(s1.snow_depth[0]) > 1.0
+
+    def E(s, theta):
+        C = compute_heat_capacity(theta, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (s.T_snow - _TF))
+
+    dE = E(s1, s1.theta_soil) - E(st, s1.theta_soil)
+    expect = (sfc.G_soil + (sfc.lhflx - r1.lhflx) + cfg.thermal.Q_geothermal) * dt
+    np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                               rtol=1e-9, atol=1e-3)
+
+
+def test_new_pack_after_melt_out_starts_at_cold_soil():
+    """Fresh snow on refrozen ground: the new node starts at the (cold) top
+    soil, not at a freezing-point leftover of an earlier pack."""
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig())
+    st = init_multilayer_land_state(1, cfg, T_init=262.0, theta_init=0.25)
+    st = st._replace(T_snow=jnp.array([_TF]))       # stale node, no snow
+    f = _forcing(1, 258.0, 2.0e-3, 2.0e-3)._replace(sw_down=jnp.zeros(1))
+    dt = 1800.0
+    s1, r1, _c, sfc = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0)))(st)
+
+    def E(s, T_node, theta):
+        C = compute_heat_capacity(theta, _HYD, cfg.thermal)
+        return (jnp.sum(C * _GRID.dz * (s.T_soil - _TF), axis=-1)
+                + constants.c_pi * s.snow_depth * (T_node - _TF))
+
+    # Ledger with the new pack's start at T_soil0 (262 K): snowfall carries
+    # c_ice*S*(262 - Tf) < 0; starting from the stale Tf would add zero.
+    S = s1.snow_depth
+    dE = E(s1, s1.T_snow, s1.theta_soil) - E(st, st.T_soil[:, 0], s1.theta_soil) \
+        - constants.c_pi * S * (st.T_soil[:, 0] - _TF)
+    expect = (sfc.G_soil + (sfc.lhflx - r1.lhflx) + cfg.thermal.Q_geothermal) * dt
+    np.testing.assert_allclose(np.asarray(dE), np.asarray(expect),
+                               rtol=1e-9, atol=1e-3)
+
+
+def _true_soil_dH(T0, T1, theta, th, n=4000):
+    """Soil enthalpy change [J/m2] at fixed ``theta``: the exact integral of the
+    apparent heat capacity (sensible + freezing curtain) from T0 to T1."""
+    q = (jnp.arange(n) + 0.5) / n
+    Tq = T0[..., None] + (T1 - T0)[..., None] * q
+    Cq = jax.vmap(lambda Tk: compute_apparent_heat_capacity(Tk, theta, _HYD, th),
+                  in_axes=-1, out_axes=-1)(Tq)
+    return jnp.sum(jnp.mean(Cq, -1) * (T1 - T0) * _GRID.dz, axis=-1)
+
+
+# Measured true-enthalpy residuals of the final solve [W/m2], sub-stepped /
+# one 1800 s step, node ON vs main's bulk path (node off) on the same column
+# and forcing (2026-10-06; the node-off numbers are pinned by
+# test_freeze_thaw_bulk_path_is_not_better_than_the_node below):
+#   cold snowfall, soil Tf-0.3 K:   on 0.47 / 2.10    off 109.9 / 234.2
+#   rain on frozen soil Tf-4 K:     on 11.5 / 171.4   off  26.6 / 587.7
+#   near-freezing melt, Tf-0.2 K:   on 0.16 / 2.12    off   0.23 / 2.41
+# The residual is the apparent-heat-capacity linearisation of main's soil
+# scheme (main's own rain-on-frozen test measures 44 W/m2); the node does not
+# add to it.  Limits below sit just above the measured node-on values.
+_FT_CASES = {
+    "cold_snowfall": dict(T0=-0.3, th=0.30, swe=15.0, Ts=262.0, Ta=258.0,
+                          P=1.0e-5, Ps=1.0e-5, limit=1.0, fusion=False),
+    "rain_on_frozen": dict(T0=-4.0, th=0.20, swe=5.0, Ts=None, Ta=276.0,
+                           P=2.0e-4, Ps=0.0, limit=15.0, fusion=True),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FT_CASES))
+def test_freeze_thaw_final_solve_with_snow_node(monkeypatch, case):
+    """PRODUCTION combination (soil freeze/thaw ON) with the snow node.  The
+    final solve receives the moisture fusion source and the freeze/thaw
+    sub-steps, its result is the step's state, and the column's TRUE enthalpy
+    (curtain-integrated soil + snow node, minus the fusion heat of the water
+    Richards moved) closes against the boundary heat within the stated limit
+    and better than the same solve as one 1800 s step.  ``rain_on_frozen`` is
+    the thaw/infiltration case (water freezing into the soil under a pack)."""
+    c = _FT_CASES[case]
+    from legoesm.land import multilayer_land
+    from legoesm.land.soil_thermal import (liquid_water_content,
+                                           moisture_fusion_heat_source)
+    th = _TH._replace(enable_freeze_thaw=True)
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=th,
+        surface_scheme=TwoLeafCanopyConfig())
+    calls = []
+    real = multilayer_land.solve_snow_node_soil_thermal
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((a, k, out))
+        return out
+
+    monkeypatch.setattr(multilayer_land, "solve_snow_node_soil_thermal", spy)
+    st = init_multilayer_land_state(1, cfg, T_init=_TF + c["T0"],
+                                    theta_init=c["th"])
+    st = st._replace(snow_depth=jnp.array([c["swe"]]),
+                     T_snow=jnp.array([_TF if c["Ts"] is None else c["Ts"]]))
+    f = _forcing(1, c["Ta"], c["P"], c["Ps"])
+    dt = 1800.0
+    new, _, _ = step_multilayer_land(st, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0))
+    a, k, (Ts1, T1) = calls[-1]                       # the final solve
+    T_s0, swe1, T0, th1, _, _, _, G, _ = a
+    assert k["n_substeps"] == multilayer_land.FINAL_THERMAL_SUBSTEPS > 1
+    np.testing.assert_allclose(
+        np.asarray(k["layer_source"]),
+        np.asarray(moisture_fusion_heat_source(T0, st.theta_soil, th1,
+                                               _GRID.dz, th, dt)), rtol=1e-12)
+    assert jnp.array_equal(T1.astype(new.T_soil.dtype), new.T_soil)
+    assert jnp.array_equal(Ts1.astype(new.T_snow.dtype), new.T_snow)
+    assert float(swe1[0]) > 0.0 and float(T1[0, 0]) < _TF
+
+    def ice(T, w):
+        return w - liquid_water_content(T, w, th)[0]
+
+    fusion = constants.rho_water * constants.L_f * jnp.sum(
+        _GRID.dz * (ice(T0, th1) - ice(T0, st.theta_soil)), axis=-1)
+
+    def resid(Ts, Tn):
+        return (_true_soil_dH(T0, Tn, th1, th) - fusion
+                + constants.c_pi * swe1 * (Ts - T_s0)
+                - (G + th.Q_geothermal) * dt)
+
+    assert (abs(float(fusion[0])) / dt > 10.0) == c["fusion"], fusion / dt
+    r6 = float(resid(Ts1, T1)[0])
+    Ts_one, T_one = real(*a, **{**k, "n_substeps": 1})
+    r1 = float(resid(Ts_one, T_one)[0])
+    assert abs(r6) < 0.5 * abs(r1), (r6, r1)
+    assert abs(r6) / dt < c["limit"], r6 / dt          # W/m2
+
+
+def test_snow_node_with_layered_snowpack_is_refused():
+    from legoesm.land.multilayer_land import seed_snow_layers
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=_TH,
+        surface_scheme=TwoLeafCanopyConfig(), snow_scheme="layered")
+    st = init_multilayer_land_state(1, cfg, T_init=265.0, theta_init=0.25)
+    st = seed_snow_layers(st._replace(snow_depth=jnp.array([10.0])), cfg)
+    with pytest.raises(ValueError, match="BULK snowpack"):
+        step_multilayer_land(st, _forcing(1, 262.0, 0.0, 0.0), cfg, 1.0, 1800.0,
+                             lat=jnp.full(1, 1.0))
+
+
+@pytest.mark.parametrize("case", sorted(_FT_CASES))
+def test_freeze_thaw_bulk_path_is_not_better_than_the_node(monkeypatch, case):
+    """The comparison behind the limits above: main's bulk path (node OFF) on
+    the same column and forcing has a true-enthalpy residual ABOVE the node-on
+    limit, so the limit is the soil scheme's linearisation error and the node
+    does not add to it."""
+    c = _FT_CASES[case]
+    from legoesm.land import multilayer_land
+    from legoesm.land.soil_thermal import liquid_water_content
+    th = SoilThermalConfig(enable_freeze_thaw=True)          # node off
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=th,
+        surface_scheme=TwoLeafCanopyConfig())
+    calls = []
+    real = multilayer_land.solve_soil_thermal
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((a, k, out))
+        return out
+
+    monkeypatch.setattr(multilayer_land, "solve_soil_thermal", spy)
+    st = init_multilayer_land_state(1, cfg, T_init=_TF + c["T0"],
+                                    theta_init=c["th"])
+    st = st._replace(snow_depth=jnp.array([c["swe"]]))
+    dt = 1800.0
+    step_multilayer_land(st, _forcing(1, c["Ta"], c["P"], c["Ps"]), cfg, 1.0, dt,
+                         lat=jnp.full(1, 1.0))
+    a, k, T1 = calls[-1]                               # the final solve
+    T0, th1, _, _, _, G, _ = a
+    assert k["n_substeps"] == multilayer_land.FINAL_THERMAL_SUBSTEPS
+
+    def ice(T, w):
+        return w - liquid_water_content(T, w, th)[0]
+
+    fusion = constants.rho_water * constants.L_f * jnp.sum(
+        _GRID.dz * (ice(T0, th1) - ice(T0, st.theta_soil)), axis=-1)
+    r = (_true_soil_dH(T0, T1, th1, th) - fusion
+         - (G + th.Q_geothermal) * dt) / dt
+    assert abs(float(r[0])) > c["limit"], float(r[0])

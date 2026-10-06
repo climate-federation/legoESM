@@ -309,6 +309,9 @@ land_snow_scheme: bulk
 # Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
 # (user 2026-09-28).  Active because freeze/thaw is on.
 land_soil_ice_impedance_exponent: 6.0
+# One-layer snow thermal node OFF (record only; A/B switch added 2026-10-03,
+# user decision: off until the Sep-Dec arm verdict).
+land_snow_insulation: false
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
