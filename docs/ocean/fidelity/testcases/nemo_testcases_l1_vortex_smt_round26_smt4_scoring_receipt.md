@@ -226,8 +226,13 @@ prognostic/barotropic path, and generic NEMO recipe reports:
 
 > `65 passed in 474.24s (0:07:54)`
 
-Citation-gate and shifted-plant results are added after the committed receipt
-is reviewed.
+The round citation gate reports **PASS: 7 citations, 0 failures, 0
+unmapped**, while the cumulative default receipt and complete map audit also
+pass. Shifting the `dynldf_lev` operator citation by two lines reports
+`SYMBOL-NOT-AT-LINE`, status FAIL, and exits 1. The citation-gate unit module
+reports:
+
+> `17 passed in 3.41s`
 
 ## 8. OPEN — next round
 
