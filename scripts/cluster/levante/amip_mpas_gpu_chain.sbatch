@@ -105,6 +105,7 @@ export LEGOESM_JIT_CACHE_DIR="${LEGOESM_JIT_CACHE_DIR:-/scratch/b/b381103/legoes
 mkdir -p "${LEGOESM_JIT_CACHE_DIR}" 2>/dev/null || true
 
 export PATH=/sw/spack-levante/git-2.43.7-2ofazl/bin:$PATH
+source "${REPO}/scripts/cluster/levante/git_trust_repo.sh" "${REPO}"
 BRANCH=$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo unknown)
 echo "AMIP MPAS-lane chain  NAME=${NAME}  job=${SLURM_JOB_ID:-local}  branch=${BRANCH}  $(date -u)"
 echo "  TARGET_DAYS=${TARGET_DAYS}  EXTRA='${EXTRA:-}'"
