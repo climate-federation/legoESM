@@ -320,15 +320,17 @@ def test_melt_is_dt_converged_and_overshoot_is_first_order():
 
 
 def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
-    """A thin pack melts out, the column runs bare, then snow re-accumulates: no
-    NaN, and the skin temperature handed to the atmosphere never jumps more than
+    """A thin pack melts down to a trace (< 0.01 kg/m2; the bulk pack to zero),
+    then snow re-accumulates: no NaN, and the skin temperature handed to the atmosphere never jumps more than
     the bulk pack's does under the same forcing (measured 2026-09-26: largest
     step change 1.3 K while melting out vs 8 K for bulk, whose whole 3 kg pack
     vanishes in one step; both ~6-8 K at the forcing switch itself)."""
-    # 288 melt steps: under partial cover only f*G reaches a thin pack, so a trace
-    # pack decays exponentially (f ~ SWE/snow_depth_crit at small SWE, e-folding
-    # ~1 day here; measured 2026-10-06: 0.65 kg/m2 left after 72 steps, 3.3e-3
-    # after 288) and "bare" means f < 2e-4 (SWE < 0.01).
+    # 288 melt steps: under partial cover only f*G reaches a thin pack, and this
+    # model's cover is tanh(SWE/snow_depth_crit) in melt as in accumulation, so a
+    # thin pack decays exponentially (e-folding ~1 day here; measured 2026-10-06:
+    # 0.65 kg/m2 left after 72 steps, 3.3e-3 after 288).  CLM5 instead melts with
+    # the Swenson-Lawrence depletion curve (f ~ sqrt(SWE) near zero: finite-time
+    # melt-out); this test pins the model's own behaviour, not CLM5 fidelity.
     seq = ((_forcing(1, T_air=282.0, sw=500.0, lw=330.0, q=0.004), 288),
            (_forcing(1, T_air=266.0, snow=3e-4, sw=0.0, lw=250.0), 48))
     jumps = {}
@@ -865,7 +867,7 @@ def test_meltwater_into_frozen_soil_closes_and_converges_in_dt():
         assert any(froze)
     a, b = end[1800.0], end[900.0]
     assert float(a.snow_depth[0]) < 150.0                      # it melted
-    np.testing.assert_allclose(a.snow_depth, b.snow_depth, atol=0.05 * 20.0)
+    np.testing.assert_allclose(a.snow_depth, b.snow_depth, atol=1.0)   # kg/m2
     np.testing.assert_allclose(a.T_soil[:, :4], b.T_soil[:, :4], atol=0.5)
 
 
@@ -1023,7 +1025,8 @@ def test_trace_pack_keeps_a_finite_covered_thickness_and_gradient():
         return snow_thermal_props(p, cfg, snow_cover_fraction(jnp.atleast_1d(swe), alb),
                                   alb.snow_depth_crit)[2][0]
 
-    rbs = [float(rb_of(s)) for s in (1e-13, 1e-12, 1.01e-12, 1e-11, 1e-9, 1e-6, 1e-3)]
+    # f = 1e-12 at SWE ~ 5e-11 (crit 50): sample both sides of it
+    rbs = [float(rb_of(s)) for s in (1e-13, 1e-11, 4e-11, 6e-11, 1e-9, 1e-6, 1e-3)]
     rb0 = float(rb_of(0.0))
     assert np.all(np.isfinite(rbs + [rb0])) and rb0 > 0.0, (rbs, rb0)
     np.testing.assert_allclose(rbs, rb0, rtol=1e-3)
