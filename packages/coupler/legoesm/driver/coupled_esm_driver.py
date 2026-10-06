@@ -2341,6 +2341,42 @@ class CoupledESMDriver:
         dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
         self._co2_field = self._co2_field.at[..., -1].add(dco2)
 
+    def _co2_global_mean_kgkg(self):
+        """Air-mass-weighted global-mean CO2 mixing ratio [kg/kg].
+
+        sum(q dp A) / sum(dp A): total CO2 mass over total air mass.  An
+        unweighted mean counts the flux-receiving lowest layer as 1/nlev of
+        the atmosphere instead of dp_low/p_s (#1817).  Under MPI only owned
+        columns enter the partial sums (cube: owned faces of the replicated
+        state; MPAS: owned cells, halos are duplicates; lat-lon bands are
+        owned-only already), which are then all-reduced.
+        """
+        from legoesm.parallel.reductions import global_sum_if_distributed
+        q = self._co2_field
+        dp = self._atm.sigma.layer_thickness_dp(self._atm.state.p_s.data)
+        area = getattr(self._atm.grid, "grid_area", None)
+        w = jnp.ones(dp.shape[:-1], dp.dtype) if area is None else jnp.asarray(area)
+        faces = getattr(self._atm, "_owned_face_ids", None)
+        if faces is not None:
+            q, dp, w = q[faces], dp[faces], w[faces]
+        layout = getattr(self._atm, "_voronoi_layout", None)
+        if layout is not None:
+            # Mask the INPUTS, not the products: a NaN halo would otherwise
+            # leak into the reverse pass through q*dp.
+            own = layout.owned_mask_cells
+            q = jnp.where(own[..., None], q, 0.0)
+            dp = jnp.where(own[..., None], dp, 0.0)
+            w = jnp.where(own, w, 0.0)
+        num = jnp.sum(w * jnp.sum(q * dp, axis=-1))
+        den = jnp.sum(w * jnp.sum(dp, axis=-1))
+        return global_sum_if_distributed(num) / global_sum_if_distributed(den)
+
+    def _update_co2_radiation(self):
+        """Feed the prognostic CO2 (mole fraction) to the next segment's radiation."""
+        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
+            self._atm._co2_vmr_override = float(self._co2_global_mean_kgkg()) / (
+                constants.M_CO2 / constants.M_air)
+
     def _segment_hook(self, driver, day, dt_segment):
         """Callback at each segment boundary: step ocean + coupler.
 
@@ -2420,10 +2456,7 @@ class CoupledESMDriver:
         # override uses this global-mean CO2 mole fraction, so the carbon cycle
         # changes radiative forcing.  Gated on the tracer (and inert for gray
         # radiation, which ignores GHG) => fixed-CO2 runs are byte-identical.
-        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            co2_vmr = float(jnp.mean(self._co2_field)) / (
-                constants.M_CO2 / constants.M_air)
-            self._atm._co2_vmr_override = co2_vmr
+        self._update_co2_radiation()
 
         # Diagnostics (once per segment, not per sub-step)
         self._log_coupled_diag(day, dt_segment)
@@ -2442,12 +2475,9 @@ class CoupledESMDriver:
 
         terms = [area_weighted_mean(sst, self._ocean_area_w),
                  jnp.min(sst), jnp.max(sst)]
-        # co2/T_sfc kept as unweighted means deliberately: the co2 global mean
-        # mirrors the radiation-override mean (line ~1100), so area-weighting it
-        # here would diverge from the value that actually forces the radiation —
-        # that change is NOT diagnostics-only and needs separate validation.
+        # co2 uses the same air-mass-weighted mean that forces the radiation.
         if has_co2:
-            terms.append(jnp.mean(self._co2_field))
+            terms.append(self._co2_global_mean_kgkg())
         if has_T_sfc:
             terms.append(jnp.mean(self._last_sfc_response.T_sfc))
         host = np.asarray(jnp.stack(terms))
