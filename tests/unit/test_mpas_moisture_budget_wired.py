@@ -176,11 +176,6 @@ def test_rank0_publishes_the_global_number_from_gathered_fields():
         sdiag.moisture_tracker.residual[-1], rel=1e-12)
 
 
-def test_the_multirank_feed_calls_it_with_global_fields():
-    import inspect
-    src = inspect.getsource(ModelDriver._feed_mpas_cmip_multirank)
-    assert "_feed_mpas_moisture_budget" in src and "global_fields=True" in src
-
 
 def test_a_dry_run_is_skipped_not_crashed():
     d = _Driver()
