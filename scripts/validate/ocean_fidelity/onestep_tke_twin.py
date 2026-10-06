@@ -215,7 +215,7 @@ def stats(ours, nemo, zk, kmax, label):
     return rel
 
 
-def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg, zk, kmax):
+def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg, zk, kmax, post):
     """Arm a's budget terms vs NEMO's own strip diagnostics of the SAME step.
 
     eshear_k = p_sh2 (injected, so ~identity: a self-check), estrat_k = -K_H*N2
@@ -224,7 +224,7 @@ def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg
     restart(kt) dissl, which is what NEMO's matrix consumes."""
     ours = dict(eshear_k=budget[0], estrat_k=budget[1], ediss_k=budget[2])
     print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W)")
-    print("   k   z_w | eshear | estrat | ediss  | dissl_used/dissl_rst(kt)")
+    print("   k   z_w | eshear | estrat | ediss  | dissl_used/dissl_rst(kt) | K_M/avm_k(kt+1) | K_H/avt_k(kt+1) | implied N2")
     nemo = {n: load_strip_w(run_next, step, n)[:, sj, si].T[:, 1:] for n in ours}
     dissl_ours = np.asarray(budget[2])[0] / np.maximum(0.5 * cfg.c_eps * our_step_e, 1e-300)
     def ratio(a, b):
@@ -234,7 +234,11 @@ def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg
         row = [ratio(np.asarray(ours[n])[0][:, k], nemo[n][:, k]) for n in ours]
         d = dissl_rst[:, k]
         rd = ratio(dissl_ours[:, k], d)
-        print(f"  {k + 1:2d} {zk[k]:6.2f} | " + " | ".join(f"{v:6.3f}" for v in row) + f" | {rd:6.3f}")
+        km, kh = ratio(post[0][:, k], post[2][:, k]), ratio(post[1][:, k], post[3][:, k])
+        n2 = ratio(-np.asarray(ours["estrat_k"])[0][:, k] / np.where(post[1][:, k] > 0, post[1][:, k], np.nan),
+                   -nemo["estrat_k"][:, k] / np.where(post[3][:, k] > 0, post[3][:, k], np.nan))
+        print(f"  {k + 1:2d} {zk[k]:6.2f} | " + " | ".join(f"{v:6.3f}" for v in row)
+              + f" | {rd:6.3f} | {km:6.3f} | {kh:6.3f} | {n2:6.3f}")
 
 
 def _mesh_e3w(mesh):
@@ -336,7 +340,7 @@ def main(argv=None) -> int:
     fz._echo_cfg(cfg, eos, rho0, g)
     names = ("T", "S", "U", "V", "en", "avt_k", "avm_k", "dissl", "ssh")
     R0 = fz.reassemble_restart(a.run_dir / f"ORCA1_{a.kt:08d}_restart_oce_*.nc", names, twins)
-    R1 = fz.reassemble_restart(a.run_dir_next / f"ORCA1_{a.kt + 1:08d}_restart_oce_*.nc", ("en", "ssh"), twins)
+    R1 = fz.reassemble_restart(a.run_dir_next / f"ORCA1_{a.kt + 1:08d}_restart_oce_*.nc", ("en", "avm_k", "avt_k", "ssh"), twins)
     check_runs_identical(a.run_dir, a.run_dir_next, a.kt)
     box_args = argparse.Namespace(lat_halfwidth=a.lat_halfwidth, lon_west=a.lon_west, lon_east=a.lon_east)
     # deep columns only (>= 45 wet levels, ~ >1000 m): the 1-D ladder is exact in
@@ -386,6 +390,8 @@ def main(argv=None) -> int:
     rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected")
     band_report(rel_a, chg, zk, a.band_lo, a.band_hi, "arm a")
     budget_a = our_step.last.budget
+    post_a = (np.asarray(our_step.last.K_M)[0], np.asarray(our_step.last.K_H)[0],
+              R1["avm_k"][band][:, 1:], R1["avt_k"][band][:, 1:])
     # arm c: NEMO's time level for the closure coefficients -- avm_k/avt_k
     # (and surface avm_k) CARRIED from restart(kt), as zdftke consumes them
     carry = dict(preclosure_K_M=R0["avm_k"][band][:, 1:], preclosure_K_H=R0["avt_k"][band][:, 1:],
@@ -395,7 +401,7 @@ def main(argv=None) -> int:
     rel_c = stats(ours_c, en_nemo, zk, min(kmax, nsh), "arm c: NEMO p_sh2 + carried avm_k/avt_k")
     band_report(rel_c, chg, zk, a.band_lo, a.band_hi, "arm c")
     budget_compare(budget_a, a.run_dir_next, a.kt + 1, sj, si, R0["dissl"][band][:, 1:],
-                   our_step_e=ours_a, cfg=cfg_a, zk=zk, kmax=min(kmax, nsh))
+                   our_step_e=ours_a, cfg=cfg_a, zk=zk, kmax=min(kmax, nsh), post=post_a)
     # GATES: a local plant and a uniform (distributed) plant, both on arm a
     bk = (zk >= a.band_lo) & (zk <= a.band_hi)
     en_p = en_in.copy(); en_p[:, PLANT_K] *= a.plant
