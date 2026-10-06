@@ -400,6 +400,22 @@ def main(argv=None) -> int:
     ours_c, _ = our_step(cfg=cfg_c, en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
     rel_c = stats(ours_c, en_nemo, zk, min(kmax, nsh), "arm c: NEMO p_sh2 + carried avm_k/avt_k")
     band_report(rel_c, chg, zk, a.band_lo, a.band_hi, "arm c")
+    kh_nemo = R1["avt_k"][band][:, 1:]
+    def kh_line(lab):
+        kh = np.asarray(our_step.last.K_H)[0]
+        ok = np.isfinite(kh) & np.isfinite(kh_nemo) & (kh_nemo > 0)
+        print(f"[{lab}] K_H/avt_k(kt+1) median per interface: " + " ".join(
+            f"{np.median(kh[ok[:, k], k] / kh_nemo[ok[:, k], k]):.3f}" for k in range(min(kmax, nsh))))
+    kh_line("arm c")
+    # arm d: arm c + NEMO's Richardson form (rn2b*avm_old/p_sh2, nemo_ri)
+    ours_d, _ = our_step(cfg=cfg_c._replace(prandtl_mode="nemo_ri"), en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
+    band_report(stats(ours_d, en_nemo, zk, min(kmax, nsh), "arm d: arm c + prandtl nemo_ri"),
+                chg, zk, a.band_lo, a.band_hi, "arm d")
+    kh_line("arm d")
+    # arm e: arm c with Langmuir off -- magnitude of that source in the band only
+    ours_e, _ = our_step(cfg=cfg_c._replace(lc=False), en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
+    band_report(stats(ours_e, en_nemo, zk, min(kmax, nsh), "arm e: arm c, Langmuir off"),
+                chg, zk, a.band_lo, a.band_hi, "arm e")
     budget_compare(budget_a, a.run_dir_next, a.kt + 1, sj, si, R0["dissl"][band][:, 1:],
                    our_step_e=ours_a, cfg=cfg_a, zk=zk, kmax=min(kmax, nsh), post=post_a)
     # GATES: a local plant and a uniform (distributed) plant, both on arm a
