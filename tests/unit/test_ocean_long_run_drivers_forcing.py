@@ -162,6 +162,13 @@ def test_mpas_external_physics_switches_nothing_else_on():
                   duration_days=1.0, quick_days=1.0)
     _, _, _, bare, _, _, _ = _create_ocean_setup(
         tc, H_max=5500.0, nlev=6, A_h=5.0e4, A_v=1.0e-4, bottom_drag_r=1.0e-3)
+    # Perturb first (one forced step): from rest, horizontally uniform fields
+    # make lateral mixing a no-op, and the comparison could not fail.
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    sf = compute_omip2_surface_forcing(state, forcing=_east_wind(), idx_t=0,
+                                       grid=grid, grid_type="mpas")
+    state = model.step(state, _DT, surface_forcing=sf)
+    assert float(np.abs(np.asarray(state.u.data)).max()) > 0.0
     a = model.step(state, _DT, surface_forcing=_zero_forcing(grid))
     b = bare.step(state, _DT)
     for f in ("T", "S", "u", "eta"):
