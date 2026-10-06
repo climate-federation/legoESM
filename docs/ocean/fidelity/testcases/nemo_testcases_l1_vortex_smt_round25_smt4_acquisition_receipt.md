@@ -248,11 +248,12 @@ and `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/codex_review_landi
 
 The first citation-gate pass correctly refused one off-by-one endpoint and
 three ambiguous repeated symbols. After correcting and committing those
-pins, the final round gate reports **PASS: 8 citations, 0 failures, 0 unmapped**.
+pins, the final round gate reports **PASS: 13 citations, 0 failures, 0 unmapped**.
 The cumulative default receipt also reports **PASS: 274 citations, 0
 failures, 0 unmapped**. Shifting
-`VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140`
-by two lines exits **1** with one citation failure, so the plant fires.
+`VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:306-310`
+by two lines exits **1** with `SYMBOL-NOT-AT-LINE`, so the landed statement's
+own plant fires.
 
 The final focused suite was launched only after the host battery census
 returned zero. It includes the generic NEMO-GYRE recipe, complete GM/Redi,
