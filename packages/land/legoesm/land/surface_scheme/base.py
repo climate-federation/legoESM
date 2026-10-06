@@ -199,3 +199,9 @@ class SurfaceFluxOutput(NamedTuple):
     # convention as rain infiltration), so the drainage enthalpy leaves the column.
     snow_advected_heat: jax.Array | None = None
     snow_ground_heat_applied: jax.Array | None = None
+    # The scheme's solved surface stress MAGNITUDE rho*u*^2 [Pa] (appended
+    # last, same positional reason).  ``tau_x``/``tau_y`` lay it along a
+    # wind-speed-floored direction, so their length is smaller in light wind;
+    # a consumer handing the land's stress to the atmosphere reads this.
+    # ``None`` for schemes that solve no friction velocity.
+    tau_mag: jax.Array | None = None

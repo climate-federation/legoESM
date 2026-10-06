@@ -89,6 +89,7 @@ from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
+    static_canopy_roughness,
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
@@ -126,6 +127,46 @@ def _get(lp, name: str, fallback):
         return fallback
     v = getattr(lp, name, fallback)
     return fallback if v is None else v
+
+
+def solved_stress_magnitude(surface_out, response):
+    """The land's solved surface stress magnitude [Pa] per column.
+
+    The scheme's own ``rho*u*^2`` (``surface_out.tau_mag``) when it reports
+    one -- the ``(tau_x, tau_y)`` vector can be shortened by a wind-speed
+    floor in light wind -- else the vector length.  Non-finite stays NaN, so a
+    failed solve cannot pass as a calm one.  sqrt guarded so a zero vector
+    has a finite derivative.
+    """
+    mag = getattr(surface_out, "tau_mag", None)
+    if mag is not None:
+        return jnp.asarray(mag).reshape(response.tau_x.shape)
+    t2 = response.tau_x ** 2 + response.tau_y ** 2
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)),
+                     jnp.where(jnp.isfinite(t2), 0.0, jnp.nan))
+
+
+def static_land_roughness(land_params, config, ncol):
+    """Momentum roughness z0m and displacement height d [m] of each column from
+    its STATIC parameters, through the same function and defaults its surface
+    scheme uses (two-leaf: ``canopy.stability.compute_aerodynamics`` on the
+    prescribed LAI / hc / rz0m / rd; SimpleSEB: its per-column z0, d = 0).
+
+    Used where no solved land state may be trusted (the first host step after a
+    start or restart, before any land step has succeeded for a column): it never
+    depends on a solve.  The prognostic LAI of a carbon-coupled canopy is NOT
+    used here, only the prescribed one.
+    """
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        return static_canopy_roughness(land_params, ncol)
+    if isinstance(config.surface_scheme, SimpleSEBConfig):
+        z0 = jnp.broadcast_to(
+            jnp.asarray(_get(land_params, "z0", config.z0_land), dtype=float),
+            (ncol,))
+        return z0, jnp.zeros((ncol,), dtype=z0.dtype)
+    raise ValueError(
+        f"static_land_roughness: no static roughness for surface scheme "
+        f"{type(config.surface_scheme).__name__}")
 
 
 def resolve_plant_wilting_point(land_params, config):
