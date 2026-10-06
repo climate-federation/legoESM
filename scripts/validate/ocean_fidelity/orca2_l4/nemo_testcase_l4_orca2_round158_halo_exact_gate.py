@@ -145,7 +145,13 @@ def _oracle_compact_rows(frames: list[dict], step: int) -> dict[str, np.ndarray]
     v_name = _frame_name(step, "v")
     rank0_u, rank1_u = (frames[rank][u_name] for rank in (0, 1))
     rank0_v, rank1_v = (frames[rank][v_name] for rank in (0, 1))
+    u_native = np.concatenate(
+        [rank0_u[2:92, 2:150].T, rank1_u[2:92, 2:150].T], axis=1)
+    v_native = np.concatenate(
+        [rank0_v[2:92, 2:150].T, rank1_v[2:92, 2:150].T], axis=1)
     return {
+        "u_native": u_native,
+        "v_native": v_native,
         # Inner west halo of rank 0 is the compact periodic U closure.
         "u_closure": np.array(rank0_u[1, 2:150], copy=True),
         # Local j=149/150 (zero based 148/149) are global rows 147/148.
@@ -196,42 +202,75 @@ def _operand_walk(trace, frames: list[dict], grid, *, plant: str) -> dict:
         "r1_face_depth_u_exit", "r1_face_depth_v_exit", "eta_exit",
     )
     for index in range(STEPS):
-        operands = tuple(jnp.asarray(trace[key][index]) for key in keys)
+        trace_operands = tuple(jnp.asarray(trace[key][index]) for key in keys)
         full = _nemo_external_mode_boundary_association(
-            *operands, grid, component="")
-        u_cyclic = _nemo_external_mode_boundary_association(
-            *operands, grid, component="u_cyclic")
+            *trace_operands, grid, component="")
+        trace_u_cyclic = _nemo_external_mode_boundary_association(
+            *trace_operands, grid, component="u_cyclic")
         u_both = _nemo_external_mode_boundary_association(
-            *u_cyclic, grid, component="u_fold")
-        v_fold = _nemo_external_mode_boundary_association(
-            *operands, grid, component="v_fold")
+            *trace_u_cyclic, grid, component="u_fold")
+        trace_v_fold = _nemo_external_mode_boundary_association(
+            *trace_operands, grid, component="v_fold")
         oracle = _oracle_compact_rows(frames, index + 1)
 
-        u_cyclic_value = np.asarray(jax.device_get(u_cyclic[0]))
-        u_final = np.asarray(jax.device_get(u_both[0]))
+        oracle_u = np.concatenate(
+            [oracle["u_closure"][:, None], oracle["u_native"]], axis=1)
+        oracle_v = np.concatenate(
+            [np.zeros_like(oracle["v_native"][:1]), oracle["v_native"]],
+            axis=0)
+        zero_u = np.zeros_like(oracle_u)
+        zero_v = np.zeros_like(oracle_v)
+        zero_t = np.zeros_like(oracle["u_native"])
+        oracle_operands = tuple(map(jnp.asarray, (
+            oracle_u, oracle_v, zero_u, zero_v, zero_u, zero_v, zero_t)))
+
+        # Known-answer restoration: perturb only the target, retain NEMO's
+        # recorded source, and require the selected operation to restore it.
+        planted_u = np.array(oracle_u, copy=True)
+        planted_u[28, 0] = np.nextafter(
+            planted_u[28, 0], np.float64(np.inf))
+        cyclic_operands = (jnp.asarray(planted_u), *oracle_operands[1:])
+        oracle_u_cyclic = _nemo_external_mode_boundary_association(
+            *cyclic_operands, grid, component="u_cyclic")[0]
+        planted_u_pivot = np.array(oracle_u, copy=True)
+        planted_u_pivot[-1, 0] = -planted_u_pivot[-1, 0]
+        fold_operands = (jnp.asarray(planted_u_pivot), *oracle_operands[1:])
+        oracle_u_fold = _nemo_external_mode_boundary_association(
+            *fold_operands, grid, component="u_fold")[0]
+        planted_v = np.array(oracle_v, copy=True)
+        planted_v[-1, 135] = np.nextafter(
+            planted_v[-1, 135], np.float64(np.inf))
+        v_operands = (oracle_operands[0], jnp.asarray(planted_v),
+                      *oracle_operands[2:])
+        oracle_v_fold = _nemo_external_mode_boundary_association(
+            *v_operands, grid, component="v_fold")[1]
+
+        u_cyclic_value = np.asarray(jax.device_get(oracle_u_cyclic))
+        u_final = np.asarray(jax.device_get(oracle_u_fold))
         if plant == "u-pivot-sign" and index == 0:
             u_final = np.array(u_final, copy=True)
             u_final[-1, 0] = -u_final[-1, 0]
         u_nonpivot_rows.append(_pair(
             u_cyclic_value[:-1, 0], oracle["u_closure"][:-1]))
+        trace_cyclic = np.asarray(jax.device_get(trace_u_cyclic[0]))
         u_pivot_cyclic_rows.append(_pair(
-            u_cyclic_value[-1:, 0], oracle["u_closure"][-1:]))
+            trace_cyclic[-1:, 0], oracle["u_closure"][-1:]))
         u_pivot_final_rows.append(_pair(
             u_final[-1:, 0], oracle["u_closure"][-1:]))
         u_change_rows.append(_pair(
-            u_cyclic_value, np.asarray(trace["u_exit"][index])))
+            trace_cyclic, np.asarray(trace["u_exit"][index])))
 
-        source = np.asarray(trace["v_exit"][index])[-2]
+        source = np.asarray(oracle["v_source"])
         if plant == "v-source" and index == 0:
             source = _plant_one(source)
         v_source_rows.append(_pair(source, oracle["v_source"]))
         sign = np.float64(1.0 if plant == "v-sign" else fold.vector_sign_v)
         formula = sign * source[v_perm]
         v_formula_rows.append(_pair(formula, oracle["v_target"]))
-        v_final = np.asarray(jax.device_get(v_fold[1]))[-1]
+        v_final = np.asarray(jax.device_get(oracle_v_fold))[-1]
         v_final_rows.append(_pair(v_final, oracle["v_target"]))
         v_change_rows.append(_pair(
-            np.asarray(jax.device_get(v_fold[1])),
+            np.asarray(jax.device_get(trace_v_fold[1])),
             np.asarray(trace["v_exit"][index])))
 
         # The sequential split must remain the exact complete helper image.
