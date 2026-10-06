@@ -166,8 +166,12 @@ def test_richards_drainage_reported_at_solver_debited_K():
         out_m1.psi_new, theta_from_psi(out_m1.psi_new, loam), loam)[:, -1]
     K_final = hydraulic_conductivity(out.psi_new, out.theta_new, loam)[:, -1]
     reported = np.asarray(out.runoff_subsurface) / _RHO   # [m/s]
-    np.testing.assert_allclose(reported, np.asarray(K_carry), rtol=1e-12, atol=0.0)
-    assert float(jnp.max(jnp.abs(out.runoff_subsurface / _RHO - K_final))) > 0.0, (
+    # rtol 1e-7: the (max_iter-1) run's post-solve correction returns its small
+    # lost water (1.4e-10 m) and recomputes psi, so its psi is not the exact carry
+    # (measured off by 2.4e-9 relative); K(psi_final) differs by 2.9e-6.
+    np.testing.assert_allclose(reported, np.asarray(K_carry), rtol=1e-7, atol=0.0)
+    assert float(jnp.max(jnp.abs(out.runoff_subsurface / _RHO - K_final)
+                         / (out.runoff_subsurface / _RHO))) > 1e-7, (
         "vacuous pin: K(psi_final) coincides with the debited K on the "
         "draining column; pick a wetter/faster-draining scenario")
 
