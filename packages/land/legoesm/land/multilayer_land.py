@@ -1079,6 +1079,18 @@ def _step_multilayer_land_impl(
         flux_top, sink, dt,
         surface_water=state.surface_water,
     )
+    # The dry-floor clamp put back water the soil could not supply to this step's
+    # bare-soil evaporation; that water never left, so take it off the bare-soil
+    # evaporation and return the latent energy to the ground heat flux, as the
+    # evaporation caps above do.  Transpiration is NOT cut (GPP was solved with
+    # it); clamp water beyond the bare-soil evaporation stays unattributed.
+    # Measured in a production day: +9.3 mm/yr of land water created otherwise.
+    _floor_flux = (richards_out.floor_water * rho_w / dt).astype(evap_bare.dtype)  # kg m-2 s-1
+    _cut = jnp.minimum(_floor_flux, jnp.maximum(evap_bare, 0.0))
+    evap_bare = evap_bare - _cut
+    soil_evap = soil_evap - _cut
+    lhflx_actual = lhflx_actual - _cut * constants.L_v
+    evap_excess_energy = evap_excess_energy + _cut * constants.L_v
     # NB (#671): the former "evaporation water budget closure" — a clip of
     # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
     # band-aid for the old infiltration/evap mismatch; theta_from_psi is now

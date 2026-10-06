@@ -146,6 +146,10 @@ class RichardsOutput(NamedTuple):
     n_iter: jnp.ndarray        # (ncol,) Picard iterations applied before convergence (or max_iter)
     surface_water: jnp.ndarray  # (ncol,) updated surface ponding depth [m]
     converged: jnp.ndarray     # (ncol,) bool; False = last iterate kept, water budget not closed
+    # (ncol,) water [m] the dry-floor clamp added on a converged column (some layer
+    # pinned at the floor): the part of the step's withdrawal the soil could not
+    # supply.  The caller removes it from the evaporation it charged the soil for.
+    floor_water: jnp.ndarray
 
 
 def solve_richards(
@@ -587,6 +591,24 @@ def solve_richards(
     else:
         runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)
 
+    # Water the dry-floor clamp created.  A converged mixed-form solve closes the
+    # column budget to within the last iteration's linearisation error except
+    # where the clamp lifted a layer back to the floor; there the residual is the
+    # withdrawal the soil could not supply.  Unconverged columns are excluded:
+    # their residual is Picard slack, not a floor deficit.
+    residual = (jnp.sum((theta_final - theta_n) * dz[None, :], axis=1)
+                + (surface_water_new - h_s0) - flux_top * dt
+                + jnp.sum(sink * dz[None, :], axis=1) * dt
+                + (runoff_surface + runoff_subsurface) * dt)
+    # Lifting a layer that ENTERED below the floor is a state correction, not an
+    # unmet withdrawal of this step: leave it out.
+    theta_floor = theta_from_psi(
+        jnp.broadcast_to(_psi_dry_floor, theta_n.shape), hydro_config)
+    entry_lift = jnp.sum(jnp.maximum(theta_floor - theta_n, 0.0) * dz[None, :], axis=1)
+    at_floor = jnp.any(psi_final <= _psi_dry_floor, axis=1)
+    floor_water = jnp.where(converged & at_floor,
+                            jnp.maximum(residual - entry_lift, 0.0), 0.0)
+
     # Convert runoff from m/s of water to kg/m2/s
     runoff_surface_kgm2s = runoff_surface * constants.rho_water
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
@@ -599,6 +621,7 @@ def solve_richards(
         n_iter=n_iter_final,
         surface_water=surface_water_new,
         converged=converged,
+        floor_water=floor_water,
     )
 
 

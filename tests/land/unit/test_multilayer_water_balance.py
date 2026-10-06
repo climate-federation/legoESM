@@ -301,6 +301,32 @@ def test_surface_resistance_throttles_dry_soil_evaporation():
     assert et_resist < et_none, (et_resist, et_none)
 
 
+def test_dry_floor_top_layer_does_not_create_water_through_bare_soil_evaporation():
+    """Top layer at the Richards dry floor over a moister sandy column, no rain.
+    Bare-soil evaporation kept drawing on the pinned top layer and the floor clamp
+    put the water back (1 kg/m2 of ET over a day, ~0.8 kg/m2 of it created).  The
+    clamp water is now taken off the bare-soil evaporation."""
+    col = lambda v: jnp.full((1, 1), v)
+    hyd = SoilHydraulicsConfig(theta_r=col(0.065), theta_sat=col(0.41), alpha_vg=col(7.5),
+                               n_vg=col(1.89), K_sat=col(1.22e-05))
+    cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0),
+                               hydraulics=hyd)
+    f = _forcing(1, T_air=305.0, q_air=0.002, precip=0.0)
+    dt, n = 1800.0, 48
+    dz = jnp.asarray(make_soil_grid(cfg.soil_grid).dz)
+    st = init_multilayer_land_state(1, cfg, T_init=290.0, theta_init=0.094)
+    th = st.theta_soil.at[:, 0].set(0.065 + 1e-4 * (0.41 - 0.065))
+    st = st._replace(theta_soil=th, psi_soil=psi_from_theta(th, cfg.hydraulics))
+    W0 = float((jnp.sum(dz * st.theta_soil[0]) + st.surface_water[0]) * _RHO)
+    step = jax.jit(lambda s: step_multilayer_land(s, f, cfg, 1.0, dt, lat=jnp.full(1, 0.3)))
+    out = 0.0
+    for _ in range(n):
+        st, r, _ = step(st)
+        out += float(r.surface_mass_flux[0] + st.runoff_surface[0] + st.runoff_subsurface[0]) * dt
+    resid = float((jnp.sum(dz * st.theta_soil[0]) + st.surface_water[0]) * _RHO) - W0 + out
+    assert abs(resid) < 0.05, resid  # kg/m2 over a day; +0.81 before the fix
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

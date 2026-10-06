@@ -125,3 +125,58 @@ def test_float32_gradient_finite_through_converged_frozen_columns():
     g = jax.grad(loss)(jnp.zeros(3, dtype=jnp.float32))
     assert g.dtype == jnp.float32
     assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# Top layer pinned at the dry floor while bare-soil evaporation still draws on it
+# (recorded production call: converged in 7 iterations, 0.103 mm of water created).
+_HYDRO_SAND = SoilHydraulicsConfig(theta_r=0.065, theta_sat=0.41, alpha_vg=7.5,
+                                   n_vg=1.89, K_sat=1.22e-05)
+_COL_FLOOR = dict(
+    psi=(-4162.179044655679, -26.30658940867679, -2.170612525080939,
+         -2.1135974844446457, -2.1113390886565773, -2.1112973291307386,
+         -2.1112903434504995, -2.111289578335616, -2.111289562391965,
+         -2.1112895623783094),
+    theta=(0.06503450000000001, 0.06812714291045885, 0.09373493156972039,
+           0.09442014135515249, 0.09444799691578157, 0.09444851251322796,
+           0.09444859876604773, 0.09444860821302226, 0.09444860840988069,
+           0.09444860841004929),
+    sink=(0.0, 0.0, 3.2088441941850865e-10, 1.4121971653219986e-10,
+          4.747052382169177e-11, 1.0667773958906095e-11, 1.0773620938583233e-12,
+          2.1976588137353353e-14, 1.8288858352457417e-17, 2.5331985392437404e-23),
+    flux_top=-5.9147064077228316e-08)
+
+
+def test_floor_clamp_water_is_reported_for_the_caller_to_charge_back():
+    grid = make_soil_grid_custom(_DZ)
+    col = _COL_FLOOR
+    out = solve_richards(
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, _HYDRO_SAND,
+        MultiLayerLandConfig().richards, jnp.asarray([col["flux_top"]]),
+        jnp.asarray([col["sink"]]), _DT, surface_water=jnp.zeros(1))
+    dz = np.asarray(_DZ)
+    residual = (np.asarray(out.theta_new[0]) @ dz - np.asarray(col["theta"]) @ dz
+                - col["flux_top"] * _DT + np.asarray(col["sink"]) @ dz * _DT
+                + float(out.surface_water[0])
+                + (float(out.runoff_surface[0]) + float(out.runoff_subsurface[0]))
+                / constants.rho_water * _DT)
+    assert bool(out.converged[0])
+    assert residual > 5e-5                      # the clamp created ~0.1 mm
+    assert abs(float(out.floor_water[0]) - residual) < 1e-12
+    # a converged column off the floor reports nothing
+    out_a, _ = _solve(_COL_A, MultiLayerLandConfig().richards)
+    assert float(out_a.floor_water[0]) == 0.0
+
+
+def test_layer_entering_below_the_floor_is_not_charged_as_withdrawal():
+    """Lifting a layer that starts below the floor is a state correction; with
+    no withdrawal this step, nothing may be charged to evaporation."""
+    col = dict(_COL_FLOOR, flux_top=0.0, sink=(0.0,) * 10)
+    theta = list(col["theta"]); theta[5] = 0.060          # below theta_r = 0.065
+    col["theta"] = tuple(theta)
+    grid = make_soil_grid_custom(_DZ)
+    out = solve_richards(
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, _HYDRO_SAND,
+        MultiLayerLandConfig().richards, jnp.asarray([col["flux_top"]]),
+        jnp.asarray([col["sink"]]), _DT, surface_water=jnp.zeros(1))
+    assert bool(out.converged[0])
+    assert float(out.floor_water[0]) == 0.0
