@@ -89,6 +89,9 @@ __physics_contract__ = {
 N_SUBCOLUMNS_DEFAULT = 8
 _PERM_SEED = 20260731          # fixed at import: a table, never per-call noise
 _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
+# Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
+_SHIFT_LAYER_SLOPE = 2.0 ** 0.5
+_SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 
 
 @functools.lru_cache(maxsize=32)
@@ -134,16 +137,24 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
     n_sub : int
         Number of subcolumns (STATIC -- it sets the traced batch size).
     shift : jnp.ndarray, optional
-        ``(ncol,)`` offsets in [0, 1) added modulo 1 to the table, so columns
-        do not all pair subcolumn ``i`` with the same CDF values; each layer
-        keeps its stratified marginal.
+        ``(ncol,)`` per-column seed in [0, 1).  Layer ``k`` is offset by
+        ``frac(shift*(1 + k*sqrt2) + k*golden)`` (added modulo 1 to the table),
+        so each layer keeps its stratified marginal AND the offsets of different
+        layers vary independently across columns.  A single offset shared by all
+        layers kept every subcolumn's between-layer pairing fixed, so a given
+        g-point saw the wrong overlap in every column (layers [0.5, 0, 0.5]:
+        per-g-point cover 0.50-1.00 instead of 0.75; worst error 0.25 -> 0.03).
+        Plain arithmetic, so CPU and GPU give the same masks.
     """
     cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
     ncol, nlev = cf.shape
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
-        u = jnp.mod(u + jnp.asarray(shift, dtype=cf.dtype)[None, :, None], 1.0)
+        k = jnp.arange(nlev, dtype=cf.dtype)
+        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        u = jnp.mod(u + off[None, :, :], 1.0)
     clear = 1.0 - cf                                    # (ncol, nlev)
 
     # nlev is static and small, so the recursion unrolls; a lax.scan would add

@@ -158,7 +158,8 @@ def test_canopy_forward_reports_gross_and_net():
     x_star, _, _ = solve_canopy_closure(_X0, bundle, _CFG)
     fluxes = canopy_forward(
         x_star, bundle, _CFG.LE_module, _CFG.stomatal_model,
-        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
+        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+        _CFG.rh_cap_smoothing_width, _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)
 
     for k in ("An_Sun", "An_Sh", "Agross_Sun", "Agross_Sh"):
         assert k in fluxes, f"canopy_forward dict missing {k}"
@@ -300,7 +301,7 @@ def test_two_leaf_public_export_gpp_is_gross():
     x_star, _, _ = jax.vmap(lambda x, b: solve_canopy_closure(x, b, cc))(x0, bundle)
     d = jax.vmap(lambda x, b: canopy_forward(
         x, b, cc.LE_module, cc.stomatal_model, cc.le_cap_mode,
-        cc.use_ta_for_photosynthesis))(x_star, bundle)
+        cc.use_ta_for_photosynthesis, cc.rh_cap_smoothing_width, cc.zeta_cap_smoothing_width, cc.most_n_iters))(x_star, bundle)
 
     gross_sum = (d["Agross_Sun"] + d["Agross_Sh"]) * conv
     net_sum = (d["An_Sun"] + d["An_Sh"]) * conv
