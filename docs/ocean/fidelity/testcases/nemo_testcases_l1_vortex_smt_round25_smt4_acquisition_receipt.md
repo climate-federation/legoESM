@@ -142,9 +142,41 @@ its passive record before making a physics claim.
 
 ## 7. Independent review and final gates
 
-Pending against the committed receipt and citation map. The exact external
-review verdict, citation-gate counts, shifted-citation plant, and final
-focused-suite summary are appended before this receipt is final.
+The required separate review was attempted on the clean committed tree with:
+
+```text
+codex exec --sandbox read-only -C <writable-clone> <adversarial review prompt>
+```
+
+It exited 1 before reading the diff. Its verdict, quoted verbatim, was:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+**Independent review unavailable in-sandbox.** There is no `SHIP`, `HOLD`,
+or `DO NOT SHIP` verdict, and none is invented. The full log is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/codex_review.log`.
+
+The first citation-gate pass correctly refused one off-by-one endpoint and
+three ambiguous repeated symbols. After correcting and committing those
+pins, the final round gate reports **PASS: 9 citations, 0 failures, 0 unmapped**.
+The cumulative default receipt also reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting
+`VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140`
+by two lines exits **1** with one citation failure, so the plant fires.
+
+The final focused suite was launched only after the host battery census
+returned zero:
+
+```text
+tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round224_smt3_record.py
+tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round237_smt4_record.py
+tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
+============================== 33 passed in 3.61s ==============================
+```
 
 ## 8. OPEN — round 238
 
