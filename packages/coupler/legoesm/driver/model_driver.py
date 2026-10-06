@@ -11021,6 +11021,20 @@ class ModelDriver:
                 _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
                             / constants.g)
 
+            def _ocean_ice_T_sfc(_sst, _sic):
+                # The non-land surface alone: SST/SIC blend with the ice
+                # component, no land lapse correction (which only ever applies
+                # to the land fraction) -- the ocean-surface anchor the
+                # turbulence uses for the non-land fraction when
+                # mpas_ocean_flux_on_ocean_surface is on (#1320).  The ice
+                # component is the constant T_ice or the per-cell prognostic
+                # skin READ AT CALL TIME.
+                _sst = jnp.asarray(_sst).reshape(-1)
+                _sic = jnp.asarray(_sic).reshape(-1)
+                return blend_surface_temperature(
+                    _sst, _sic,
+                    self._ice_T_skin if _ice_skin_on else _T_ice).reshape(-1)
+
             def _blend_T_sfc(_sst, _sic):
                 # Blend prescribed SST with the ice component (constant T_ice,
                 # or the per-cell prognostic skin READ AT CALL TIME) and apply
@@ -11036,13 +11050,8 @@ class ModelDriver:
                 # source broadcasts ELEMENTWISE against the (nCells,) skin
                 # rather than to (nCells,nCells) — the scalar-T_ice blend
                 # tolerated (nCells,1) via a trailing reshape; the array skin
-                # must not (codex-4).
-                _sst = jnp.asarray(_sst).reshape(-1)
-                _sic = jnp.asarray(_sic).reshape(-1)
-                _ice_component = (
-                    self._ice_T_skin if _ice_skin_on else _T_ice)
-                _ts = blend_surface_temperature(
-                    _sst, _sic, _ice_component).reshape(-1)
+                # must not (codex-4) -- done in _ocean_ice_T_sfc.
+                _ts = _ocean_ice_T_sfc(_sst, _sic)
                 if _lapse_z is not None:
                     # Cast the storage-dtype (possibly f32) statics to the
                     # anchor dtype so the correction is formed at anchor
@@ -11054,6 +11063,14 @@ class ModelDriver:
                         _ts, _f_land_cells.astype(_ts.dtype),
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
+
+            def _write_sfc_anchors(_dst, _sst, _sic):
+                # The ONE place both surface anchors are written, so the
+                # ocean/ice anchor can never go stale against T_sfc (daily
+                # write and the per-step ice-skin re-anchor both come here).
+                _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
+                if _ocean_sfc_on:
+                    _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -11254,6 +11271,12 @@ class ModelDriver:
             hold_last_valid_land_stress,
         )
         _land_stress_on = resolve_mpas_land_stress_from_land(cfg)
+        # Validated (validate_strict) to imply the land-flux handoff, so the
+        # turbulence always receives T_sfc_ocean together with shflx_land.
+        _ocean_sfc_on = bool(cfg.mpas_ocean_flux_on_ocean_surface)
+        print(f"  Non-land surface fluxes evaluated on: "
+              f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
+              f" (mpas_ocean_flux_on_ocean_surface={_ocean_sfc_on})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(mpas_land_stress_from_land="
@@ -12285,8 +12308,7 @@ class ModelDriver:
                         if _ice_skin_on:
                             _ice_sst_cur = _sst_day
                             _ice_sic_cur = _sic_day
-                        _forcing_daily["T_sfc"] = _blend_T_sfc(
-                            _sst_day, _sic_day)
+                        _write_sfc_anchors(_forcing_daily, _sst_day, _sic_day)
                         # Tile-blended surface shortwave albedo.  ONE formula
                         # (forcing.surface_utils.blended_surface_albedo) shared
                         # with the FV lane's blend; ocean/ice first, then the
@@ -12508,8 +12530,7 @@ class ModelDriver:
                 # every step the feature is active (even one that skipped
                 # the advance for missing fluxes) so T_sfc stays consistent
                 # with self._ice_T_skin.
-                _forcing_daily["T_sfc"] = _blend_T_sfc(
-                    _ice_sst_cur, _ice_sic_cur)
+                _write_sfc_anchors(_forcing_daily, _ice_sst_cur, _ice_sic_cur)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and

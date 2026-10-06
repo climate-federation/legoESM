@@ -1576,6 +1576,12 @@ class ExperimentConfig(NamedTuple):
     # ``resolve_mpas_land_stress_from_land``); True = required (refused where it
     # cannot apply); False = explicit off, the old bulk stress (comparison runs).
     mpas_land_stress_from_land: bool | None = None
+    # MPAS lane, land-flux handoff on (#1320 stage 1): the NON-LAND fraction's
+    # bulk surface fluxes (heat, water, stress) are evaluated on the ocean/ice
+    # surface -- the SST/SIC blend, without the land skin and without the land
+    # lapse correction -- instead of on the land-blended surface temperature
+    # and humidity.  The land fraction keeps the land model's own fluxes.
+    mpas_ocean_flux_on_ocean_surface: bool = False
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -4214,6 +4220,26 @@ class ExperimentConfig(NamedTuple):
                     "See docs/user-guide/climateeval_evaluation.md."
                 )
 
+        if self.mpas_ocean_flux_on_ocean_surface:
+            _ok, _why = mpas_land_flux_handoff_eligibility(self)
+            if _ok and self.radiation == "none":
+                _ok, _why = False, ("radiation='none' builds no SST anchor "
+                                    "(the ocean surface it needs)")
+            if not _ok:
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True separates the "
+                    "non-land fraction's surface fluxes from the land's, but "
+                    f"{_why}; it would be silently inert.")
+            elif not resolve_mpas_land_stress_from_land(self):
+                # The bulk stress covers the whole cell unless the land's own
+                # stress replaces it over land; evaluated on the OCEAN surface
+                # it would then misstate the land share's stability.
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True needs the land "
+                    "model's stress over the land fraction "
+                    "(mpas_land_stress_from_land unset or true, eligible); "
+                    "otherwise the ocean-surface stress covers the land too.")
+
         if self.mpas_land_stress_from_land is True:
             _ok, _why = mpas_land_stress_eligibility(self)
             if not _ok:
@@ -4892,14 +4918,12 @@ def load_experiment_config(path: Path | str, *,
 _LAND_STRESS_SCHEMES = ("two_leaf", "simple_seb")
 
 
-def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
-    """Can the land model's surface stress reach the boundary layer in ``cfg``?
-
-    Returns ``(eligible, reason_if_not)``.  Every predicate is static: the MPAS
-    lane, the interactive multilayer land, its flux handoff
-    (``mpas_land_beta_soil`` publishes the land's fluxes), a turbulence kernel
-    that accepts an injected surface flux, and a land scheme whose stress is
-    roughness-controlled.
+def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
+    """Does ``cfg`` hand the land model's own surface fluxes to the MPAS
+    boundary layer?  ``(eligible, reason_if_not)``; every predicate is static:
+    the MPAS lane, the interactive multilayer land, its flux handoff
+    (``mpas_land_beta_soil`` publishes the land's fluxes) and a turbulence
+    kernel that accepts an injected surface flux.
     """
     # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
     # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
@@ -4917,6 +4941,19 @@ def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
     if cfg.turbulence not in schemes_accepting_surface_flux():
         return False, (f"turbulence={cfg.turbulence!r} takes no injected "
                        "surface flux")
+    return True, ""
+
+
+def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
+    """Can the land model's surface stress reach the boundary layer in ``cfg``?
+
+    Returns ``(eligible, reason_if_not)``: the land-flux handoff
+    (:func:`mpas_land_flux_handoff_eligibility`) plus a land scheme whose
+    stress is roughness-controlled.
+    """
+    _ok, _why = mpas_land_flux_handoff_eligibility(cfg)
+    if not _ok:
+        return _ok, _why
     if cfg.land_surface_scheme not in _LAND_STRESS_SCHEMES:
         return False, (f"land_surface_scheme={cfg.land_surface_scheme!r} is not "
                        f"one of {_LAND_STRESS_SCHEMES} on this lane")
