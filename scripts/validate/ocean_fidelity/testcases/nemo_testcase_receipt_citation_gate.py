@@ -5778,11 +5778,11 @@ CITATION_MAP = {
         "CALL vortex_r16_stage_rhs( 'ldf', Krhs, uu, vv )", 7],
     # --- round 239: locally exact but trajectory-refused source order ---
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:314-335': [
-        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value',
-        'END DO   ;   END DO   ;   END DO', 22],
-    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-139': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 1),
+        ('END DO   ;   END DO   ;   END DO', 1), 22],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
-        '!', 6],
+        'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
 }
 
 

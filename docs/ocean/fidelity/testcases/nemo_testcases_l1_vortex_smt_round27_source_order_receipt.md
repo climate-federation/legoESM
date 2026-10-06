@@ -17,7 +17,7 @@ The admitted SMT-4 stage program calls HPG first, VOR second, and vector
 advection third at
 `VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:328-344`.
 The vector dispatcher then calls KEG before ZAD at
-`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-139`.
+`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138`.
 The compiled z-level HPG routine assigns `Krhs`, rather than accumulating into
 an earlier term, at
 `VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:314-335`.
