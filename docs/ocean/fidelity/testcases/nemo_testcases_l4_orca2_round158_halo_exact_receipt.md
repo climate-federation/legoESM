@@ -28,7 +28,7 @@ The admitted two-rank record proves the source program directly:
 The source-ordered statement is NEMO's west/east send at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:1961-1979`, followed by
 the blocking receive and halo write at
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2060-2073`. The north
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2060-2068`. The north
 fold is dispatched at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2105-2113`.
 
@@ -37,7 +37,7 @@ at `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1561-1577`, prepares
 the field-dependent exchange at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1629-1669`, selects the
 V-point neighbour and applies `psgn` at
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1712-1739`, then performs
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1712-1738`, then performs
 the partial-line overwrite at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1747-1766`. The topology
 table marks the T-pivot half-lines and the already-periodic edge cells at

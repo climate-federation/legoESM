@@ -34,11 +34,11 @@ def _rendered() -> list[str]:
 def test_receipt_renders_exactly_eight_compiled_citations():
     assert _rendered() == [
         PREFIX + "lbclnk.f90:1961-1979",
-        PREFIX + "lbclnk.f90:2060-2073",
+        PREFIX + "lbclnk.f90:2060-2068",
         PREFIX + "lbclnk.f90:2105-2113",
         PREFIX + "lbcnfd.f90:1561-1577",
         PREFIX + "lbcnfd.f90:1629-1669",
-        PREFIX + "lbcnfd.f90:1712-1739",
+        PREFIX + "lbcnfd.f90:1712-1738",
         PREFIX + "lbcnfd.f90:1747-1766",
         PREFIX + "mppini.f90:1412-1440",
     ]
