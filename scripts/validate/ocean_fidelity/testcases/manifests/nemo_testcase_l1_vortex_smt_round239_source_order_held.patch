@@ -1,0 +1,25 @@
+# HELD — VORTEX_SMT round 27 / lane round 239.
+#
+# NEMO's compiled vector RK3 program assigns HPG before accumulating VOR,
+# KEG, and ZAD (VORTEX_SMT4_VEC_R8_OMIP_L1_P3 stprk3_stg.f90:328-344,
+# dynhpg.f90:314-335, dynadv.f90:134-139).  This one-line selection of the
+# existing shared source-order implementation makes the production-JIT HPG
+# boundary bit-exact on NEMO's recorded entry.
+#
+# It is held because the certified SMT-4 trajectory does not improve on net:
+# 24/50 aggregate rows move, only 11 toward NEMO and 13 away; the cellwise
+# ratchet has 30 violations and a 14.75-row-scale-ULP maximum worsening.
+# First-over-bar remains kt=2 and kt=1 stays at the bar.  Day-100 T RMS moves
+# only +4.72e-16 K, far below the 2e-10-K run-to-run floor.  Decision 96's
+# majority-toward criterion is not met.  Apply only for measurement.
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@
+                                      legacy_hpg_algebraic=(
+                                          self._nemo_ws_test_hooks
+                                          .legacy_hpg_algebraic_association),
+                                      nemo_operator_association=(
++                                         _vector_velocity_stage_update or
+                                          self._nemo_ws_test_hooks
+                                          .nemo_stage_rhs_accumulation_order_arm is True),
