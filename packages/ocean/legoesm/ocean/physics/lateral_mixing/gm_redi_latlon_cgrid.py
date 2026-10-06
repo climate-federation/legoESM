@@ -4595,9 +4595,16 @@ def gm_redi_tracer_tendency_latlon(
                 # traldf_iso.f90:306-310/:327-331 divides the flux
                 # divergence by e3t(Kmm).  Use the same literal QCO T-point
                 # statement as the rest of the WS-RK3 identity path instead
-                # of the reference/Jacobian thickness.
+                # of the reference/Jacobian thickness.  NEMO's r3t divisor
+                # is ht_0, the source-ordered sum of e3t_0*tmask
+                # (domain.f90:193-212), not the card's analytic bathymetry.
+                _ht0 = jnp.zeros_like(_flux_eta, dtype=T.dtype)
+                for _jk in range(T.shape[-1]):
+                    _ht0 = nemo_source_round(
+                        _ht0 + nemo_source_round(
+                            _e3t0[..., _jk] * _active_3d[..., _jk]))
                 _divisor_e3t = nemo_qco_live_t_thickness(
-                    _flux_eta, H_bathy, z_coord, T.dtype, e3t_0=_e3t0)
+                    _flux_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
         _closed_bottom_wmask = (
             True if redi_closed_bottom_wmask_override is None
             else redi_closed_bottom_wmask_override)
