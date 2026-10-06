@@ -3124,6 +3124,15 @@ def tke_vertical_mixing(
             "factored matrix, vectorized Langmuir and "
             "dissipation_discretization='nemo_1p5_split' (it would be inert "
             "or double-applied otherwise).")
+    if _lc_coupling == "nemo_pre_solve" and not getattr(cfg, "prognostic", False):
+        # NEMO's ordering is a property of ONE prognostic step; the diagnostic
+        # sub-iterated mode (large dt, n_iterations) re-adds the Langmuir
+        # increment every sub-iteration (measured: 13x K on a 20-level MPAS
+        # column), which is not NEMO's statement.
+        raise ValueError(
+            "tke_langmuir_rhs_coupling='nemo_pre_solve' needs prognostic=True "
+            "(NEMO's ordering is one prognostic step, not the diagnostic "
+            "sub-iterated mode).")
     _lc_pre_solve = None
     _supplied_carry = (preclosure_K_M, preclosure_K_H,
                        preclosure_K_M_surface, preclosure_dissl)

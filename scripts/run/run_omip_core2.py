@@ -1371,10 +1371,14 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     copies the row below: the file is uniform there (asserted).
 
     ahmt is multiplied by tmask and ahmf by NEMO's rn_shlat fmask
-    (ldfdyn.F90:329-330, dommsk.F90:207-210).
+    (ldfdyn.F90:329-330, dommsk.F90:207-210).  The coefficient read itself is
+    the shared NEMO -30 reader (``build_orca2_ldf_dyn_coefficients``, halo
+    layout); this wrapper adds the eORCA1 checks and e3f_0.
     """
     import netCDF4 as nc4
     from legoesm.ocean.dynamics.latlon_cgrid_operators import nemo_fmask_shlat_3d
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_ldf_dyn_coefficients)
 
     def _read(path, names):
         ds = nc4.Dataset(path)
@@ -1407,10 +1411,6 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
             raise SystemExit(f"{ldf_path}: {nm} not uniform in the top rows; "
                              "the fold-row copy would not be exact")
 
-    def _to_T(a):                                   # (nk,331,360) -> (332,362,nk)
-        out = a[:, :, ci_t].transpose(1, 2, 0)
-        return np.concatenate([out, out[-1:]], axis=0)
-
     def _to_F(a, south):                            # -> (333,363,nk)
         out = a[:, :, ci_f].transpose(1, 2, 0)
         return np.concatenate([south, out, out[-1:]], axis=0)
@@ -1419,17 +1419,16 @@ def attach_nemo_ldf_fields(z_coord, grid, mesh_path, ldf_path, domcfg_path,
     tmask = np.asarray(z_coord.is_active, dtype=np.float64)
     fmask = np.asarray(nemo_fmask_shlat_3d(z_coord.is_active, grid, rn_shlat),
                        dtype=np.float64)
-    zero_row = np.zeros((1, n_lon + 1, nk))
-    ahmt = _to_T(ahmt_f) * tmask
-    ahmf = _to_F(ahmf_f, zero_row) * fmask
+    ahmt, ahmf = build_orca2_ldf_dyn_coefficients(
+        ldf_path, tmask, fmask, halo_layout=True)
     e3f = _to_F(e3f_f, np.broadcast_to(np.asarray(z_coord.dz_ref, np.float64),
                                        (1, n_lon + 1, nk)))
     print(f"[nemo-ldf] {ldf_path}: ahmt {ahmt[tmask > 0].min():g}..{ahmt.max():g} "
           f"m2/s; rn_shlat={rn_shlat:g}: coastal F points "
           f"{int(((fmask > 0) & (fmask != 1)).sum())}, wet-interior "
           f"{int((fmask == 1).sum())}; e3f_0 from {domcfg_path}")
-    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt, dtype),
-                            nemo_ahmf_3d=jnp.asarray(ahmf, dtype),
+    return z_coord._replace(nemo_ldf_ahmt=jnp.asarray(ahmt, dtype),
+                            nemo_ldf_ahmf=jnp.asarray(ahmf, dtype),
                             nemo_e3f_0=jnp.asarray(e3f, dtype))
 
 
@@ -1496,8 +1495,8 @@ def attach_nemo_ldf_fields_mpas(z_coord, mesh, ldf_path, domcfg_path,
           f"m2/s at {ahmt.shape[0]} cells; rn_shlat={rn_shlat:g}: coastal vertex "
           f"factor range {fac[(fac > 0) & (fac != 1)].min() if np.any((fac > 0) & (fac != 1)) else 0:.3f}"
           f"..{fac.max():.3f}")
-    return z_coord._replace(nemo_ahmt_3d=jnp.asarray(ahmt * act, dtype),
-                            nemo_ahmf_3d=jnp.asarray(ahmf * fac, dtype))
+    return z_coord._replace(nemo_ldf_ahmt=jnp.asarray(ahmt * act, dtype),
+                            nemo_ldf_ahmf=jnp.asarray(ahmf * fac, dtype))
 
 
 def nemo_ldf_fesom(mesh, ldf_path, domcfg_path, rn_shlat: float):
@@ -2022,6 +2021,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                                "nemo_div_curl" if nemo_ldf_file else None),
                               ("lateral_viscosity_e3_weighting",
                                "nemo_e3" if nemo_ldf_file else None),
+                              ("lateral_viscosity_coefficient_source",
+                               "nemo_ahm_3d_file" if nemo_ldf_file else None),
+                              ("lateral_viscosity_file_coastal",
+                               "nemo_fmask" if nemo_ldf_file else None),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("aimp_partition", aimp_partition),
                               ("momentum_time_integrator", momentum_time_integrator),
@@ -2995,7 +2998,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # the MPAS lane threads; _validate_tke_card_grid gates them):
     "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_surface_bc_level", "tke_mxl_choice",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
-    "tke_shear_production", "tke_lc", "tke_etau",
+    "tke_shear_production", "tke_lc", "tke_etau", "tke_langmuir_rhs_coupling",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
@@ -3022,6 +3025,8 @@ _FESOM_WIRED_DESTS = frozenset({
     "woa_init", "woa_t", "woa_s",
     "nemo_ldf_file", "lateral_side_bc", "nemo_domain_cfg",
     "state_accumulate", "mld_accumulate",
+    # NEMO dynzad vertical momentum on FESOM elements (fesom_jax vertical="nemo_advective")
+    "vertical_momentum_scheme",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
@@ -3131,7 +3136,8 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       iwm_forcing_file: str | None = None,
                       nemo_ldf_file: str | None = None,
                       nemo_domain_cfg: str | None = None,
-                      lateral_side_bc: str | None = None):
+                      lateral_side_bc: str | None = None,
+                      vertical_momentum_scheme: str | None = None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -3171,7 +3177,9 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                               dz_ref=_dz_ref)
     config = FesomOceanConfig(dt=float(dt), vertical_coordinate="zstar",
                               constants="legoesm",
-                              vertical_mixing=str(vertical_mixing))
+                              vertical_mixing=str(vertical_mixing),
+                              **({"vertical_momentum_scheme": vertical_momentum_scheme}
+                                 if vertical_momentum_scheme is not None else {}))
     # zdfiwm maps on the node cloud (paired lat/lon, the MPAS pattern): the
     # atlas is remapped here, K_iwm is recomputed from FESOM's own N2 inside
     # the closure bridge.
@@ -4395,12 +4403,19 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
             "(--grid tripole --tripole-vmix tke, or --grid mpas --mpas-vmix "
             f"tke). Got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
             f"--mpas-vmix {mpas_vmix!r}.")
+    # The coupling lives in tke_vertical_mixing, the pre-mixing solve the
+    # tripole, MPAS (mpas_integration) and FESOM (fesom_integration) TKE
+    # bridges all call; anywhere else the flag would be a silent no-op.
     if tke_langmuir_rhs_coupling is not None and not (
-            grid == "tripole" and tripole_vmix == "tke"):
+            (grid == "tripole" and tripole_vmix == "tke")
+            or (grid == "mpas" and mpas_vmix == "tke")
+            or (grid == "fesom" and fesom_vmix == "legoesm_tke")):
         raise SystemExit(
-            "--tke-langmuir-rhs-coupling takes effect ONLY on --grid tripole "
-            f"--tripole-vmix tke; got --grid {grid!r} --tripole-vmix "
-            f"{tripole_vmix!r}.")
+            "--tke-langmuir-rhs-coupling takes effect ONLY where the legoESM "
+            "TKE closure runs (--grid tripole --tripole-vmix tke, --grid mpas "
+            "--mpas-vmix tke, --grid fesom --fesom-vmix legoesm_tke); got "
+            f"--grid {grid!r} --tripole-vmix {tripole_vmix!r} --mpas-vmix "
+            f"{mpas_vmix!r} --fesom-vmix {fesom_vmix!r}.")
     if tke_step_evaluation is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
@@ -4485,7 +4500,7 @@ def _nearest_wet_target(src_lat_deg, src_lon_deg, tgt_lat_deg, tgt_lon_deg):
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
-                        land_mask=None, spread_passes=2, exclude_isf=False,
+                        land_mask=None, spread_passes=8, exclude_isf=False,
                         regrid="idw4"):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
@@ -7491,12 +7506,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="zdfiwm ln_tsdiff differential T/S mixing (ORCA1: off; "
                         "raises — unsupported on the shared-K solve)")
     p.add_argument("--iwm-n2-mode", choices=("insitu", "nemo_bn2"), default=None,
-                   help="N^2 the zdfiwm formula reads: insitu (legacy default; "
-                        "compressibility keeps neutral layers 'stable', so the "
-                        "1e-2 cap never engages) or nemo_bn2 (NEMO rn2, "
-                        "zdfiwm.F90:185-211).")
+                   help="N^2 the zdfiwm formula reads: nemo_bn2 (default since "
+                        "2026-10-06; NEMO rn2, zdfiwm.F90:185-211) or insitu "
+                        "(old behaviour: compressibility keeps neutral layers "
+                        "'stable', so the 1e-2 cap never engages).")
     p.add_argument("--iwm-n2-eos-form", choices=("seos", "teos10"), default=None,
-                   help="alpha/beta for --iwm-n2-mode nemo_bn2 (ORCA1: teos10).")
+                   help="alpha/beta for nemo_bn2 (default teos10 = ORCA1).")
     p.add_argument("--iwm-forcing-file", type=str, default=None,
                    help="de Lavergne power/decay maps (zdfiwm_forcing_TRA.nc "
                         "layout; the ORCA1 INPUTS copy works).  Omit for the "
@@ -8634,9 +8649,12 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
-    if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas"):
-        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas only "
-                         f"(got {args.grid!r}); it would be silently ignored.")
+    if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas") and not (
+            args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"):
+        raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas, and "
+                         "on fesom for nemo_advective only "
+                         f"(got {args.grid!r}, {args.vertical_momentum_scheme!r}); "
+                         "it would be silently ignored.")
     if args.dm2dc_hold_s is not None:
         _h = float(args.dm2dc_hold_s)
         if (not args.dm2dc or _h <= 0 or 86400.0 % _h != 0.0
@@ -8651,8 +8669,6 @@ def main() -> int:
         raise SystemExit("--trd-series-box needs --trd-accumulate")
     if (args.iwm_n2_mode is not None or args.iwm_n2_eos_form is not None) and not args.iwm:
         raise SystemExit("--iwm-n2-mode/--iwm-n2-eos-form need --iwm")
-    if args.iwm_n2_mode == "nemo_bn2" and args.iwm_n2_eos_form is None:
-        raise SystemExit("--iwm-n2-mode nemo_bn2 needs an explicit --iwm-n2-eos-form")
     if args.nemo_carried_external_mode and (args.grid not in ("tripole", "latlon_bathy")
                                             or not args.momentum_rk3):
         raise SystemExit("--nemo-carried-external-mode is wired on --grid tripole/"
@@ -9480,7 +9496,8 @@ def main() -> int:
                     tke_kappa_convention=args.tke_kappa_convention,
                     tke_shear_production=args.tke_shear_production,
                     tke_lc=args.tke_lc, tke_etau=args.tke_etau,
-                    tke_kappah_min=args.tke_kappah_min)
+                    tke_kappah_min=args.tke_kappah_min,
+                    tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -9508,6 +9525,7 @@ def main() -> int:
             nemo_ldf_file=args.nemo_ldf_file,
             nemo_domain_cfg=args.nemo_domain_cfg or _NEMO_DOMAIN_CFG,
             lateral_side_bc=args.lateral_side_bc,
+            vertical_momentum_scheme=args.vertical_momentum_scheme,
             vmix_config=(build_tripole_vmix_config(
                 "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
@@ -9520,7 +9538,8 @@ def main() -> int:
                 tke_kappa_convention=args.tke_kappa_convention,
                 tke_shear_production=args.tke_shear_production,
                 tke_lc=args.tke_lc, tke_etau=args.tke_etau,
-                tke_kappah_min=args.tke_kappah_min)
+                tke_kappah_min=args.tke_kappah_min,
+                tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
                 if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)

@@ -1344,7 +1344,8 @@ _ORCA2_RED_SEA_TEMPERATURES_C = ((4, 10, 7.0), (11, 13, 6.5), (14, 20, 6.0))
 
 
 def build_orca2_ldf_dyn_coefficients(
-    viscosity_path, tmask: np.ndarray, fmask: np.ndarray,
+    viscosity_path, tmask: np.ndarray, fmask: np.ndarray, *,
+    halo_layout: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """NEMO ``ldf_dyn_init`` with ``nn_ahm_ijk_t = -30``: the coefficient is READ.
 
@@ -1373,7 +1374,16 @@ def build_orca2_ldf_dyn_coefficients(
     Parameters
     ----------
     viscosity_path : path to ``eddy_viscosity_3D.nc``.
-    tmask, fmask : the card's own ``(n_lat, n_lon, nlev)`` masks.
+    tmask, fmask : the card's own ``(n_lat, n_lon, nlev)`` masks.  With
+        ``halo_layout`` they are the model-layout masks instead: ``tmask``
+        ``(n_lat, n_lon, nlev)`` and ``fmask`` already on the vertex stagger
+        ``(n_lat+1, n_lon+1, nlev)`` (e.g. the rn_shlat fmask).
+    halo_layout : the model mesh is the file's inner domain plus one west
+        cyclic halo column and a north fold row (the full eORCA1 332 x 362 vs
+        the 331 x 360 file): T ``(j, i)`` = file ``(j, i-1)``, vertex
+        ``(j, i)`` = file F ``(j-1, i-2)``, columns wrapping, the fold row a
+        copy of the row below (the OMIP driver asserts the file is uniform
+        there), the south vertex row a wall.
 
     Returns
     -------
@@ -1394,6 +1404,15 @@ def build_orca2_ldf_dyn_coefficients(
         raw_t = np.asarray(ds.variables["ahmt_3d"][0], dtype=np.float64)
         raw_f = np.asarray(ds.variables["ahmf_3d"][0], dtype=np.float64)
     # File axes are (z, y, x); the card's are (y, x, z).
+    if halo_layout:
+        t = np.moveaxis(raw_t, 0, -1)[..., :nlev]
+        f = np.moveaxis(raw_f, 0, -1)[..., :nlev]
+        n_lon = tmask.shape[1]
+        t = t[:, (np.arange(n_lon) - 1) % t.shape[1]]
+        f = f[:, (np.arange(n_lon + 1) - 2) % f.shape[1]]
+        t = np.concatenate([t, t[-1:]], axis=0)
+        f = np.concatenate([np.zeros((1,) + f.shape[1:]), f, f[-1:]], axis=0)
+        return t * tmask, f * fmask
     ahmt = np.moveaxis(raw_t, 0, -1)[..., :nlev] * tmask
     ahmf_native = np.moveaxis(raw_f, 0, -1)[..., :nlev] * fmask
     n_lat, n_lon = ahmf_native.shape[0], ahmf_native.shape[1]
@@ -1782,6 +1801,10 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         mevar=False,
         tsdiff=False,
         require_forcing_maps=True,
+        # Pinned to the behaviour this card was measured with: the IWMConfig
+        # default moved to NEMO's bn2 on 2026-10-06 (zdfiwm.F90:185-211).
+        # Moving this card to "nemo_bn2" is the card owner's decision.
+        n2_mode="insitu",
     )
     model_config = model_config._replace(
         physics=model_config.physics._replace(

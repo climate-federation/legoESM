@@ -7,6 +7,7 @@
 #SBATCH --mem=64G
 #SBATCH --time=2:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/diurn_%j.out
+# user 2026-10-06: the EVD arm (EVD=1) combines additive as before (--convection-evd-composition additive)
 #
 # THE NIGHT-TIME MEASUREMENT the convection arm could not make.  Two model
 # days from the SAME day-15 restart, hourly box-mean temperature at eight
@@ -67,7 +68,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
-  $([ "$EVD" = 1 ] && echo "--convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12") \
+  $([ "$EVD" = 1 ] && echo "--convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-evd-composition additive --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12") \
   --evd-occupancy-every-hours 1 \
   --output $OUT 2>&1 | tail -25
 run_rc=$?

@@ -1524,21 +1524,17 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
-    # NEMO lateral-viscosity fields (nn_ahm_ijk_t=-30, ldfdyn.F90:288-331) on
-    # the model's own stagger, attached by the driver from eddy_viscosity_3D.nc:
-    # ahmt at T (n_lat, n_lon, nlev) already * tmask; ahmf at the vertex/F
-    # stagger (n_lat+1, n_lon+1, nlev) already * the rn_shlat fmask
-    # (dommsk.F90:207-210), so a coastal F point carries 2*ahmf for no-slip;
-    # e3f_0 at the vertex stagger (domain_cfg) for the coastal zcur thickness.
-    nemo_ahmt_3d: jnp.ndarray | None = None
-    nemo_ahmf_3d: jnp.ndarray | None = None
+    # NEMO e3f_0 at the vertex stagger (domain_cfg), the coastal zcur
+    # thickness of lateral_viscosity_file_coastal="nemo_fmask".
     nemo_e3f_0: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
-    # the T grid, ``nemo_ldf_ahmf`` on legoESM's vertex layout.  Only the
-    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
-    # every other card leaves them None and is bit-identical.
+    # the T grid (* tmask), ``nemo_ldf_ahmf`` on the model's vertex stagger
+    # (* fmask; on the OMIP cards the rn_shlat fmask, so a coastal F point
+    # carries 2*ahmf for no-slip).  Read by the lat-lon
+    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm and by the
+    # MPAS NEMO-viscosity operator; every other card leaves them None.
     nemo_ldf_ahmt: jnp.ndarray | None = None
     nemo_ldf_ahmf: jnp.ndarray | None = None
 

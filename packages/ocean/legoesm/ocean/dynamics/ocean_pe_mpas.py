@@ -621,7 +621,7 @@ def mpas_ocean_baroclinic_tendencies(
     _mid_refresh = None if halo_refresh is None else halo_refresh.edges
     # NEMO nn_ahm_ijk_t=-30 viscosity (coefficients attached to the coordinate
     # by the driver, fmask/shlat folded into ahmf): the file IS the Laplacian.
-    _nemo_ahmt = getattr(z_coord, "nemo_ahmt_3d", None)
+    _nemo_ahmt = getattr(z_coord, "nemo_ldf_ahmt", None)
     if _nemo_ahmt is not None:
         if config.A_h != 0.0 or config.B_h != 0.0:
             raise ValueError(
@@ -629,7 +629,7 @@ def mpas_ocean_baroclinic_tendencies(
                 f"A_h and B_h must be 0 (got A_h={config.A_h!r}, B_h={config.B_h!r}).")
         _h_vtx = nemo_vertex_thickness_3d(h_k, z_coord.is_active, z_coord.dz_ref, mesh)
         visc = visc + nemo_ldf_lap_e3_voronoi_3d(
-            u_3d, mesh, _nemo_ahmt, z_coord.nemo_ahmf_3d, h_k, h_e_3d, _h_vtx,
+            u_3d, mesh, _nemo_ahmt, z_coord.nemo_ldf_ahmf, h_k, h_e_3d, _h_vtx,
             edge_mask_3d)
     if config.A_h > 0 and config.B_h > 0:
         _del2_u_visc = vector_laplacian_del2_3d(u_3d, mesh)

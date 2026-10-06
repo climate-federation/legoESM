@@ -113,25 +113,30 @@ echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
 rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
-JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
+JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` \
+  --A-h 0 --B-h 0 --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip `# NEMO 3-D viscosity + no-slip walls, as every MPAS comparison since 2026-09-22 ran` ${EXTRA:-} \
+  --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the tripole card scores` \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
-  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
+  --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
+  --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --vertical-momentum-scheme nemo_advective `# user 2026-10-05: vertical advection as on the tripole (NEMO vector form)` \
   --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \
   --ew-cyclic-overlap \
   --mle --mle-ce 0.06 \
   --dm2dc --sw-rgb-chl \
-  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
+  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --freshwater-closure real_freshwater --sss-restore-channel water_flux --sss-restore-normalization live_s \
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \
   --prognostic-ice-dynamics free_drift --ice-lead-freeze-source nemo_qlead \
   --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
   --bbl-adv --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
   --restart-save $OUT/restart_leg$LEG.npz \
-  $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
+  $([ "$LEG" -gt 1 ] && echo "--restart-from $OUT/restart_leg$((LEG-1)).npz") \
   --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
-  --ice-ocean-heat-coeff 70 \
+  --ice-ocean-heat-scheme nemo_ustar \
   --woa-init \
   --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
     $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
