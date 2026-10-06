@@ -215,3 +215,8 @@ class SurfaceFluxOutput(NamedTuple):
     # a consumer handing the land's stress to the atmosphere reads this.
     # ``None`` for schemes that solve no friction velocity.
     tau_mag: jax.Array | None = None
+    # Latent heat [J/kg] the canopy scheme charged its GROUND latent flux
+    # ``LE_soil`` at, so ground vapour mass = LE_soil / L_soil exactly (appended
+    # last, same positional reason).  Over snow it carries the sublimation share
+    # (#1875).  ``None`` for SimpleSEB.
+    L_soil: jax.Array | None = None

@@ -35,7 +35,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    charged_latent_heat, latent_heat_sublimation, saturation_mixing_ratio,
+    saturation_mixing_ratio_ice, surface_latent_heat)
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
@@ -669,6 +671,24 @@ def _step_multilayer_land_impl(
     wind_dir_x = forcing.u_lowest / jnp.maximum(wind_speed, 1e-6)
     wind_dir_y = forcing.v_lowest / jnp.maximum(wind_speed, 1e-6)
 
+    # --- Snow phase (iter-68 — consistent with simple_seb's flux calc) ---
+    # Reuse the same warm-surface-snowfall gate as simple_seb.py so
+    # downstream latent-mass partition (sublimation vs soil evap) is
+    # consistent with the L_eff that produced the demand.  Ported from
+    # main during the jianing/land ↔ main sync 2026-06-03.  Uses the banded
+    # ``precip_snow_eff`` (== forcing.precip_snow when bands are off).
+    # Evaluated BEFORE the surface solve: the canopy schemes charge the snow
+    # weight of their ground latent flux at L_s(T_surface) inside the solve
+    # (#1875) -- the bulk pack's binary gate, the layered pack's cover f.
+    fresh_snow_mass = precip_snow_eff * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (
+        (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    )
+    has_snow = has_existing_snow | has_surviving_fresh_snow
+    _w_ground_snow = f_snow if layered else has_snow.astype(T_surface.dtype)
+    _L_s_T = latent_heat_sublimation(T_surface)
+
     # --- Root distribution and per-layer moisture stress (shared) ---
     theta_r = config.hydraulics.theta_r
     z_centers = grid.z_node
@@ -879,6 +899,7 @@ def _step_multilayer_land_impl(
                 else _h_r_top * _S_top ** config.soil_evap_resistance_exp),
             soil_surface_relsat=_W1_top,
             ground_emissivity=_eps_ground,
+            ground_latent_heat=surface_latent_heat(T_surface, _w_ground_snow),
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
@@ -940,6 +961,8 @@ def _step_multilayer_land_impl(
             pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+            ground_snow_weight=_w_ground_snow,
+            ground_sublimation_heat=_L_s_T,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
@@ -1038,18 +1061,7 @@ def _step_multilayer_land_impl(
     else:
         band_rad = None
 
-    # --- Snow phase (iter-68 — consistent with simple_seb's flux calc) ---
-    # Reuse the same warm-surface-snowfall gate as simple_seb.py so
-    # downstream latent-mass partition (sublimation vs soil evap) is
-    # consistent with the L_eff that produced the demand.  Ported from
-    # main during the jianing/land ↔ main sync 2026-06-03.  Uses the banded
-    # ``precip_snow_eff`` (== forcing.precip_snow when bands are off).
-    fresh_snow_mass = precip_snow_eff * dt
-    has_existing_snow = snow > 1e-6
-    has_surviving_fresh_snow = (
-        (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
-    )
-    has_snow = has_existing_snow | has_surviving_fresh_snow
+    # (Snow phase gate ``has_snow`` is evaluated before the surface solve.)
 
     # --- Snow (+ firn/ice, banded) budget (energy-limited melt) ---
     if bands is not None:
@@ -1149,6 +1161,26 @@ def _step_multilayer_land_impl(
         lhflx_ground = jnp.zeros_like(lhflx)
         lhflx_transp = lhflx
     transp_to_snow = has_snow & (lhflx_transp < 0.0)
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        _lsch = "clm_ml"
+    elif scheme_is_seb:
+        _lsch = "simple_seb"
+    elif isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        _lsch = "two_leaf"
+    else:
+        raise ValueError(
+            f"no latent-heat charge known for surface_scheme "
+            f"{type(config.surface_scheme)!r}")
+    # Every stream converts latent energy to water with exactly the latent heat
+    # the surface solve CHARGED it, so the vapour mass equals the scheme's own E.
+    # CLM-ML charges its leaves at its reference air temperature (the forcing
+    # T_lowest: hsub at or below freezing, hvap above), the two-leaf leaves at
+    # L_v(T_surface).  Over snow every scheme charges the snow-covered ground
+    # sublimation L_s(T_surface) INSIDE its solve (#1875): SimpleSEB through its
+    # L_eff / layered LE_snow, the canopy schemes through the snow weight of their
+    # ground charge ``surface_out.L_soil`` = (1-w) L_leaf + w L_s(T_surface).
+    _T_charge = forcing.T_lowest if _lsch == "clm_ml" else T_surface
+    _L_v_T = charged_latent_heat(_lsch, _T_charge)
     if layered:
         # Partial cover: only the snow-covered fraction f of the ground (and of
         # canopy dew) is the pack; the snow-free (1-f) evaporates from the soil.
@@ -1163,12 +1195,33 @@ def _step_multilayer_land_impl(
                 "layered snow with SimpleSEB needs the scheme's pack share "
                 "(SurfaceFluxOutput.LE_snow): call compute_simple_seb_fluxes with "
                 "snow_cover=f.")
-        snow_latent = (surface_out.LE_snow if scheme_is_seb else
-                       f_snow * (lhflx_ground
-                                 + jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0)))
-    else:
-        snow_latent = (jnp.where(has_snow, lhflx_ground, 0.0)
+    if scheme_is_seb:
+        snow_latent = (surface_out.LE_snow if layered else
+                       jnp.where(has_snow, lhflx_ground, 0.0)
                        + jnp.where(transp_to_snow, lhflx_transp, 0.0))
+        sublim_demand = snow_latent / charged_latent_heat(_lsch, _T_charge, ice=True)
+    else:
+        # The ground's vapour mass is LE_soil / L_soil; its snow weight w leaves
+        # the pack as ice at the L_s(T_surface) it was charged, the rest is soil
+        # water at L_leaf.  Canopy dew over snow (negative transpiration) is a
+        # LEAF flux charged L_leaf that frosts the pack, so it keeps an
+        # (L_leaf - L_s) ground term below.
+        if surface_out.LE_soil is None:
+            _E_ground = jnp.zeros_like(lhflx)
+        elif surface_out.L_soil is None:
+            raise ValueError(
+                "a canopy scheme reporting LE_soil must report the latent heat it "
+                "charged it (SurfaceFluxOutput.L_soil)")
+        else:
+            _E_ground = lhflx_ground / surface_out.L_soil
+        if layered:
+            _E_snow_ground = f_snow * _E_ground
+            _dew_to_snow = f_snow * jnp.where(lhflx_transp < 0.0, lhflx_transp, 0.0)
+        else:
+            _E_snow_ground = jnp.where(has_snow, _E_ground, 0.0)
+            _dew_to_snow = jnp.where(transp_to_snow, lhflx_transp, 0.0)
+        snow_latent = _E_snow_ground * _L_s_T + _dew_to_snow
+        sublim_demand = _E_snow_ground + _dew_to_snow / _L_v_T
     soil_latent = lhflx - snow_latent
 
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
@@ -1179,35 +1232,6 @@ def _step_multilayer_land_impl(
     # after the remap a non-empty top layer always holds ice.
     max_sublim = jnp.maximum((pack.swe_ice[:, 0] if layered else snow_after_melt)
                              / dt, 0.0)
-    from legoesm.thermo import charged_latent_heat, latent_heat_sublimation
-    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
-        _lsch = "clm_ml"
-    elif isinstance(config.surface_scheme, SimpleSEBConfig):
-        _lsch = "simple_seb"
-    elif isinstance(config.surface_scheme, TwoLeafCanopyConfig):
-        _lsch = "two_leaf"
-    else:
-        raise ValueError(
-            f"no latent-heat charge known for surface_scheme "
-            f"{type(config.surface_scheme)!r}")
-    # Both streams convert latent energy to water with exactly the latent heat
-    # the surface solve CHARGED, so the vapour mass equals the scheme's own E.
-    # CLM-ML evaluates its latent heat at its reference air temperature (the
-    # forcing T_lowest: hsub at or below freezing, hvap above), every other
-    # scheme at T_surface.  Over snow SimpleSEB charges sublimation (its L_eff /
-    # layered LE_snow use L_s(T_surface)); the two-leaf canopy charges
-    # vaporization to its ground and canopy-dew fluxes.
-    _T_charge = forcing.T_lowest if _lsch == "clm_ml" else T_surface
-    _L_v_T = charged_latent_heat(_lsch, _T_charge)
-    _L_snow_charged = charged_latent_heat(
-        _lsch, _T_charge, ice=(_lsch == "simple_seb"))
-    # Snow mass really leaves the pack as ICE: sublimating it costs L_s(T_surface)
-    # per kg (lhflx_actual below).  Where the scheme charged less (L_v), the
-    # difference (L_s - L_charged) * E enters evap_excess_energy = lhflx -
-    # lhflx_actual as a NEGATIVE term and cools the ground; frost deposition
-    # (E < 0) warms it by the same rule.  No other correction is applied.
-    _L_s_T = latent_heat_sublimation(T_surface)
-    sublim_demand = snow_latent / _L_snow_charged
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -1341,8 +1365,10 @@ def _step_multilayer_land_impl(
     if layered:
         # The soil stream is transpiration plus the snow-FREE share of the ground
         # latent, split like any snow-free cell.
+        # (energy of the ground's snow-free water: LE_soil less the snow share
+        # charged L_s inside the solve; (1 - f) LE_soil when that charge is L_leaf)
         _le_soil = (None if surface_out.LE_soil is None
-                    else (1.0 - f_snow) * surface_out.LE_soil)
+                    else surface_out.LE_soil - _E_snow_ground * _L_s_T)
         evap_bare, evap_transp = _partition_latent_root_top(
             soil_evap, jnp.zeros_like(has_snow), f_veg,
             surface_out.LE_canopy, _le_soil)
@@ -1386,10 +1412,11 @@ def _step_multilayer_land_impl(
         # The unmet-evaporation energy is only final after hydrology (the Richards
         # refill), so the solve takes a PRE-hydrology estimate: the latent demand
         # minus what the start-of-step supply cap lets the soil give.  Sign: W/m^2,
-        # positive = energy INTO the column (same convention as G_surface).  Where
-        # the scheme charged snow at L_v it carries the pack's extra sublimation
-        # cost -(L_s - L_charged) * E (negative while subliming, positive for
-        # frost), on top of any positive unmet-demand term.
+        # positive = energy INTO the column (same convention as G_surface).  Canopy
+        # dew frosting the pack was charged L_leaf, so it carries the pack's
+        # fusion credit -(L_s - L_leaf) * E (positive for frost), on top of any
+        # positive unmet-demand term; the ground's own snow is charged L_s inside
+        # the solve and adds nothing here (#1875).
         # The post-hydrology remainder is charged to the top soil layer below.
         evap_excess_energy_pre = lhflx - (sublim_actual * _L_s_T
                                           + soil_evap * _L_v_T)
@@ -1471,8 +1498,9 @@ def _step_multilayer_land_impl(
     # -- leaves as SENSIBLE heat to the air, the CLM/CTSM rule (SoilFluxesMod:
     # "conserve total energy flux", eflx_sh_grnd += (demand - limit)*htvp;
     # t_grnd is not re-solved).  The SUBLIMATION COST of snow charged below
-    # L_s, sublim_actual * (L_charged - L_s), stays in the ground heat flux
-    # (cools the ground while subliming, warms it under frost; see above).
+    # L_s -- since #1875 only canopy dew frosting the pack (charged L_leaf);
+    # the ground's snow pays L_s inside the solve -- stays in the ground heat
+    # flux (warms it under frost; see above).
     # The land boundary still closes: Rn = (SH + X_unmet) + LE_actual
     # + (G + X_sublim).
     # Previously X went into G, i.e. into the ~3 mm top soil layer with no skin
@@ -1486,7 +1514,18 @@ def _step_multilayer_land_impl(
     # combined solve, remainder in the top soil layer below), so it is NOT also
     # added to SH there; the sensible-heat rule is the bulk branch's.
     if not layered:
-        _sublim_cost = sublim_actual * (_L_snow_charged - _L_s_T)
+        # Charge the scheme made for the mass that actually left the pack minus
+        # its L_s: the realised share of ``snow_latent`` (all of it unless the
+        # pack capped the demand) less sublim_actual * L_s.  Zero for SimpleSEB
+        # (charges L_s) and ~0 for ground snow; (L_leaf - L_s) * E for canopy dew
+        # over snow.
+        if scheme_is_seb:
+            _sublim_cost = jnp.zeros_like(sublim_actual)
+        else:
+            _nz = sublim_demand != 0.0
+            _realised = jnp.where(
+                _nz, sublim_actual / jnp.where(_nz, sublim_demand, 1.0), 1.0)
+            _sublim_cost = _realised * snow_latent - sublim_actual * _L_s_T
         shflx = shflx + (evap_excess_energy - _sublim_cost)
 
     if layered:

@@ -219,6 +219,7 @@ def compute_two_leaf_canopy_fluxes(
     fwet: jnp.ndarray | None = None,
     canopy_seed: jnp.ndarray | None = None,  # (ncol, 6) warm start; see below
     ground_emissivity: jnp.ndarray | None = None,  # (ncol,) overrides cc.epss
+    ground_latent_heat: jnp.ndarray | None = None,  # (ncol,) [J/kg] soil LE charge
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -253,6 +254,11 @@ def compute_two_leaf_canopy_fluxes(
     ground_emissivity : optional per-column emissivity of the ground under the
                     canopy (e.g. the snow-cover blend of snow and soil); ``None``
                     uses the configured soil emissivity ``epss``.
+    ground_latent_heat : optional per-column latent heat [J/kg] charged to the
+                    ground latent flux inside the solve (over snow the caller's
+                    ``surface_latent_heat(T, snow weight)``, #1875); ``None``
+                    charges ``L_v(T_soil_top)`` like the leaves.  Returned as
+                    ``SurfaceFluxOutput.L_soil``.
 
     Returns
     -------
@@ -470,6 +476,7 @@ def compute_two_leaf_canopy_fluxes(
             r_soil_surface=r_soil_surface,
             fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
                   else jnp.broadcast_to(fwet, w_frac_rz.shape)),
+            lam_soil=None if ground_latent_heat is None else _bcast(ground_latent_heat),
         )
 
     def _solve_one_col(x0, bun):
@@ -709,4 +716,5 @@ def compute_two_leaf_canopy_fluxes(
         residual_ext=residual_ext_d,
         stomatal_ratio=jnp.ones_like(T_soil_top),
         tau_mag=tau_mag,
+        L_soil=_bcast(lam if ground_latent_heat is None else ground_latent_heat),
     )

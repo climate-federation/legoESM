@@ -18,7 +18,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
-from legoesm.thermo import latent_heat_vaporization
+from legoesm.thermo import charged_latent_heat, latent_heat_vaporization
 
 pytestmark = pytest.mark.skipif(
     not jax.config.read("jax_enable_x64"), reason="float64 water budget; JAX_ENABLE_X64=1")
@@ -34,7 +34,8 @@ def _stub(*, T_soil_top, forcing, canopy_state, **_):
         sw_net=300.0 * o, lw_net=-60.0 * o, lw_up=460.0 * o, G_soil=120.0 * o,
         T_surface=T_soil_top, q_surface=0.015 * o, albedo=0.15 * o,
         emissivity=0.97 * o, z0=0.1 * o, T_canopy_air=T_soil_top, stomatal_ratio=o,
-        LE_soil=_LE_SOIL * o, LE_canopy=(_LH - _LE_SOIL) * o), canopy_state
+        LE_soil=_LE_SOIL * o, LE_canopy=(_LH - _LE_SOIL) * o,
+        L_soil=charged_latent_heat("clm_ml", forcing.T_lowest)), canopy_state
 
 
 @pytest.mark.parametrize("T_soil,T_air,L_charged", [
