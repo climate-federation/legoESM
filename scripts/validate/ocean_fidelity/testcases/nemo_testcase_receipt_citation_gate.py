@@ -5938,21 +5938,21 @@ CITATION_MAP = {
         ("CASE ( 'V' )", 5),
         ('END DO   ;   END DO', 6), 38],
     # --- ORCA2 round 157: MPI cyclic exchange / T-pivot split -----------
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:1960-1992': [
-        ('3. Do east and west MPI_Isend if needed', 1),
-        ('4. Fill east and west halos', 1), 33],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2104-2114': [
-        ('6. north fold treatment', 1),
-        ('CALL mpp_nfd(', 1), 11],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1561-1578': [
-        ('IF( ln_nnogather ) THEN', 1),
-        ('l_full_nf_update = .TRUE.', 1), 18],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:1961-1979': [
+        ('3. Do east and west MPI_Isend if needed', 2),
+        ('CALL MPI_ISEND( buffsnd_dp(ishtS(jn)+1)', 1), 19],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2105-2113': [
+        ('6. north fold treatment', 2),
+        ('CALL mpp_nfd(', 3), 9],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1561-1577': [
+        ('IF( ln_nnogather ) THEN', 2),
+        ('l_full_nf_update = .TRUE.', 2), 17],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1629-1669': [
-        ('ALLOCATE(ipjfld(kfld))', 1),
-        ('CALL MPI_Isend(', 1), 41],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1746-1767': [
-        ('IF( lnfd_same(ii1,iig) )', 1),
-        ('ptab(jf)%pt4d(ji,ij1,jk,jl) = psgn(jf)', 1), 22],
+        ('ALLOCATE(ipjfld(kfld))', 2),
+        ('CALL MPI_Isend(', 2), 41],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1747-1766': [
+        ('IF( lnfd_same(ii1,iig) )', 2),
+        ('ptab(jf)%pt4d(ji,ij1,jk,jl) = psgn(jf)', 4), 20],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-960': [
         ('un_adv(:,:) = un_adv(:,:) / r1_wgt2s', 1),
         ("CALL r95_spg_w2('ssh_aa', pssh(:,:,Kaa))", 1),

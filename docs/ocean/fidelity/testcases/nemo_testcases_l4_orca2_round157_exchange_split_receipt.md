@@ -29,16 +29,16 @@ The compiled rung-0 call associates seven live fields together in
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779`. The
 resolved `jpni=2`, `jpnj=1`, `nn_hls=2`, `ln_nnogather=.TRUE.` path
 first performs the east/west MPI send and fill in
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:1960-1992`, then calls
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:1961-1979`, then calls
 the north-fold exchange in
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2104-2114`.
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2105-2113`.
 
 The T-pivot no-gather branch documents the duplicated U/V polar lines in
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1561-1578`, packs the
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1561-1577`, packs the
 per-field extra lines and sends them in
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1629-1669`, and finally
 applies the field sign while overwriting the selected pivot cells in
-`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1746-1767`.
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1747-1766`.
 
 The legoESM helper remains private and complete by default at
 `barotropic_latlon_cgrid.py:689-739`. No card selects any round-157 component.
