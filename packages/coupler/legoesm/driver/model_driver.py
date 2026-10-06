@@ -11242,6 +11242,12 @@ class ModelDriver:
             # Owned (non-halo) columns: under MPAS MPI local cells are owned
             # first, then halo copies, which must not be counted twice.
             _vl_land = getattr(self, "_voronoi_layout", None)
+            if _vl_land is not None and (
+                    _land_ncol_full != int(_vl_land.partition.n_local_cells)):
+                raise ValueError(
+                    f"land columns ({_land_ncol_full}) are not the rank's local "
+                    f"cells ({_vl_land.partition.n_local_cells}); the owned-"
+                    "column mask would be wrong")
             _owned_cols = jnp.arange(_land_ncol_full) < (
                 int(_vl_land.partition.n_owned_cells) if _vl_land is not None
                 else _land_ncol_full)
@@ -11346,7 +11352,7 @@ class ModelDriver:
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
                 # Owned columns with any land whose soil-water solve kept an
-                # unconverged iterate (their water budget does not close).
+                # unconverged iterate (any water it left is in water_created).
                 _unconv_mask = getattr(_sfc, "soil_unconverged", None)
                 _n_unconv_land = (
                     jnp.sum((jnp.asarray(_unconv_mask).reshape(-1)
@@ -12438,7 +12444,7 @@ class ModelDriver:
                         logger.warning(
                             "land (rank %s): %d owned land column-steps in "
                             "the last %d steps kept an unconverged soil-water "
-                            "iterate (their water budget does not close); %d "
+                            "iterate; %d "
                             "since the run began — at step %d",
                             getattr(self, "_mpi_rank", 0), _window_unconv,
                             _HARD_SAT_LOG_CADENCE_STEPS,

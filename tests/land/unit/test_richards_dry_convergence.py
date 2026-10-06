@@ -73,11 +73,15 @@ def _solve(col, richards_config):
                 - col["flux_top"] * _DT + np.asarray(col["sink"]) @ dz * _DT
                 + float(out.surface_water[0])
                 + (float(out.runoff_surface[0]) + float(out.runoff_subsurface[0]))
-                / constants.rho_water * _DT)
+                / constants.rho_water * _DT
+                - float(out.refill[0]))
     return out, residual
 
 
 def _former():
+    # Former iteration settings (10 undamped iterations).  Main's post-loop
+    # water take-back still runs, so this is not the historical solver; the
+    # spike survives it on these columns.
     return MultiLayerLandConfig().richards._replace(max_iter=10, max_dse_per_iter=1e9)
 
 
@@ -98,7 +102,7 @@ def test_unconverged_column_is_flagged_without_a_spike():
 
 
 def test_former_undamped_ten_iterations_spike_on_these_columns():
-    """The recorded columns do bite: the former settings reproduce the spike."""
+    """The recorded columns do bite: the former iteration settings still spike."""
     for col in (_COL_A, _COL_B):
         out, residual = _solve(col, _former())
         assert not bool(out.converged[0])

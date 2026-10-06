@@ -193,6 +193,9 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
+    # Pinned explicitly (not inherited): the land model's solver settings are a
+    # recorded choice (user-approved 2026-10-05), not whatever RichardsConfig
+    # defaults to later.
     richards: RichardsConfig = RichardsConfig(
         fc_drain_saturation=0.5, max_iter=30, max_dse_per_iter=0.1, theta_tol=1e-6)
     # Carbon cycle

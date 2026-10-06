@@ -143,9 +143,13 @@ class RichardsConfig(NamedTuple):
     # water error 7.4 mm; 30 iterations at max_dse_per_iter=0.1 -> 32/35, 0.03 mm.
     max_iter: int = 30
     theta_tol: float = 1e-6       # convergence: max per-layer |dtheta| per iteration [m3/m3]
-    # Damping: scale each column's (soil + surface) Picard update so no layer's
-    # theta would move more than this fraction of (theta_sat - theta_r) in one
-    # iteration.  Changes only the path, not the converged solution.
+    # Damping: scale each column's (soil + surface) Picard psi update by
+    # lam = min(1, this / max_k |dtheta_trial_k| / (theta_sat - theta_r)), where
+    # dtheta_trial is the UNDAMPED trial change.  Retention is nonlinear in psi,
+    # so the applied theta change is not bounded by this fraction (measured up
+    # to 1.04 of the range on a synthetic 180 mm/h rain on dry soil; <= 0.05 on
+    # the recorded production columns).  Changes only the path, not the
+    # converged solution.
     max_dse_per_iter: float = 0.1
     bottom_bc: str = "free_drainage"  # "free_drainage" or "zero_flux"
     # Surface ponding: max depth [m] held on the surface before it overflows to
@@ -181,7 +185,7 @@ class RichardsOutput(NamedTuple):
     #   NOT supply (the psi dry floor refilled it): the caller must not report it
     water_created: jnp.ndarray  # (ncol,) remaining signed budget residual [m]:
     #   dStorage - (flux_top - sum(sink dz) - runoff) dt - refill
-    converged: jnp.ndarray     # (ncol,) bool; False = last iterate kept, water budget not closed
+    converged: jnp.ndarray     # (ncol,) bool; False = last iterate kept (residual in water_created)
 
 
 def solve_richards(
@@ -485,8 +489,9 @@ def solve_richards(
         # Recover the surface-cell increment from the Schur relation, then update.
         dh_s = (-R_s_m + Kc_m * dpsi[:, 0]) / D_s_m
         # Damp the whole column update (soil and surface cell together, so the
-        # Schur relation still holds) to at most max_dse_per_iter of the
-        # theta range in any layer, judged on the undamped trial state.
+        # Schur relation still holds) by the factor that would cap the UNDAMPED
+        # trial theta change at max_dse_per_iter of the theta range; the applied
+        # theta change is not bounded by it (see RichardsConfig).
         theta_try = theta_from_psi(jnp.maximum(psi_m + dpsi, _psi_dry_floor), hydro_config)
         theta_span = jnp.broadcast_to(hydro_config.theta_sat - hydro_config.theta_r,
                                       theta_m.shape)
@@ -533,6 +538,8 @@ def solve_richards(
         # dry-floor clamp) is below theta_tol in every layer.
         conv = (lam >= 1.0) & (
             jnp.max(jnp.abs(theta_new - theta_m), axis=1) < richards_config.theta_tol)
+        # where() masks the frozen lane's cotangent but not a NaN made upstream
+        # in it: keep every division in this body finite at a converged state.
         h_s_new = jnp.where(done_m, h_s_m, h_s_new)
         psi_new = jnp.where(done_m[:, None], psi_m, psi_new)
         theta_new = jnp.where(done_m[:, None], theta_m, theta_new)
