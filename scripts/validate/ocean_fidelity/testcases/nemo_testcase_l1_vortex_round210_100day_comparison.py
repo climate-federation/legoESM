@@ -102,6 +102,15 @@ CERTIFIED_LADDER["smt3"] = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round226/"
     "smt3_ladder.json")
 
+CARDS["smt4"] = (
+    "VORTEX_SMT4_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
+         "oracle_vortex_smt4/day100"),
+)
+CERTIFIED_LADDER["smt4"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round238/"
+    "smt4_ladder.json")
+
 
 class ComparisonError(RuntimeError):
     pass
@@ -228,7 +237,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
-                     help="comma-separated tags: flux, vec, smtflux, smtvec, smt3")
+                     help=("comma-separated tags: flux, vec, smtflux, smtvec, "
+                           "smt3, smt4"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     args = ap.parse_args()
