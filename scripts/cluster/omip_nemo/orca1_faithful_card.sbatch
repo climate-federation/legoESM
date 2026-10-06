@@ -63,23 +63,28 @@ mkdir -p $OUT
 # OWN VALUES, so an unparameterised submission runs exactly what it always
 # ran.  Both columns must move together: --C-smag-lap sets the value the
 # schedule's first segment inherits before day 0.
-CSMAG=${CSMAG:-3.0}
-VSCHED=${VSCHED:-0:1e4:3.0,8:1e4:1.5,16:1e4:0.5}
+# user 2026-10-06: card = baseline run trp_vadv_d30 (no Smagorinsky, as in NEMO; user 2026-09-27)
+CSMAG=${CSMAG:-0}
+VSCHED=${VSCHED:-0:1e4:0,8:1e4:0,16:1e4:0}
 echo "CSMAG=$CSMAG VSCHED=$VSCHED"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap $CSMAG --smag-cfl-safety 0.125 \
   --A-h 2e4 --A-h-profile-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc \
-  --visc-schedule "$VSCHED" \
+  --visc-schedule "$VSCHED" --lateral-side-bc no_slip \
+  --vertical-momentum-scheme nemo_advective `# user-adopted vertical momentum (prod since trp_vadv_d30)` \
+  --ke-gradient-scheme hollingsworth `# user 2026-09-28: Hollingsworth KE on prod` \
+  --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --barotropic-slow-forcing-depth-evaluation min_rule_live `# user 2026-10-05: old method; NEMO average is ~99% inert under implicit CN (needs split-explicit + carried mode)` \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
+  --freshwater-closure real_freshwater --sss-restore-channel water_flux --sss-restore-normalization live_s \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
   --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
-  --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
+  --tracer-advection superbee --runoff-depth-nemo-ini --runoff-spread-passes 8 --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
@@ -94,8 +99,8 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --nemo-init-tint \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
-  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
-  --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
+  --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-scheme nemo_ustar \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
   `# ---- THE FOUR ADOPTED SETS, and nothing else, appended ----` \

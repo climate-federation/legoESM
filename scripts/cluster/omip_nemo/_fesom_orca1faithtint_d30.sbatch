@@ -96,10 +96,12 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --dm2dc --sw-rgb-chl \
   --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
-  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 \
+  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
-  --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-coeff 70 \
+  --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-scheme nemo_ustar \
+  --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip \
+  --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
   --sss-restore --sss-restore-channel water_flux \
   --sss-restore-normalization live_s \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
@@ -108,11 +110,11 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --runoff --river-mouth-restoring-gate \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
   --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
-  --forcing-ramp-days 5 \
+  --forcing-ramp-days 0 `# user 2026-10-06: card = baseline run fesom_base1001_d30` \
   `# ---- the adopted sets the FESOM lane wires ----` \
   --ice-exchange nemo_si3 \
   --forcing-time-interp linear \
-  --dt 1800 --years 0.0822 --snapshot-every-days 5 \
+  --dt 900 --years 0.0822 --snapshot-every-days 5 \
   --output $OUT 2>&1 | tail -20
 run_rc=${PIPESTATUS[0]}
 echo "=== run rc=$run_rc"
