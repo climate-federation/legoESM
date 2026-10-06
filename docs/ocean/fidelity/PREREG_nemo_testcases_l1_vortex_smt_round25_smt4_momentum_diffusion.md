@@ -82,3 +82,32 @@ diffusion, vertical mixing, drag, momentum advection, vorticity, pressure
 gradient, barotropic program, timestep, and run lengths remain the admitted
 SMT-3 values. No default, threshold, stabiliser, carried state, or record
 source is selected here.
+
+## Binding Decision-95/96 addendum — frozen before production changes
+
+At 2026-10-05 21:52 the external campaign ledger recorded Decisions 95 and
+96 after round 236: land and register the already measured source-exact SMT-3
+closed-bottom-W-mask plus live-Kmm-divisor pair. The aggregate result is a net
+improvement (30 of 34 moved rows toward NEMO, first-over-bar unchanged, no
+status loss); the only refused control was the two-ULP cellwise ratchet on
+near-zero cells. Decision 96 makes that ratchet a registered quantity rather
+than a veto in exactly this case. This binding decision supersedes R25-P6's
+acquisition-only disposition before any production file is edited or new
+landing result is read. The SMT-4 acquisition package remains a prepared next
+step, not scientific evidence.
+
+The landing prediction remains round 236's frozen one-variable table:
+`kt2 T 1.020298116571876e-08 -> 6.957537701781045e-10`, 34 aggregate rows
+moved, 30 toward and four away, first-over-bar still kt2, with all 40
+cellwise ratchet violations registered. The exact production candidate is
+the state immediately before round 236's restoration commit; no statement is
+added to it.
+
+Before calling the decision landed, the candidate must reproduce that SMT-3
+registry and pass the blast-radius gates that round 236 stopped before: GYRE
+ladder and year, generic GYRE, all certified VORTEX/SMT cards and tanks, and a
+private DINO month run. A new row-status loss, earlier first-over-bar, year
+movement beyond Decision 59, DINO beyond its bar, or unregistered card move
+REFUSES the landing. The already disclosed near-zero-cell ratchet result is
+not rerationalised and remains red in the receipt. No new configuration or
+carried state is authorised.
