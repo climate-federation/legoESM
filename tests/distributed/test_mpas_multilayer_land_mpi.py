@@ -518,7 +518,7 @@ def test_mpas_multilayer_land_checkpoint_round_trip_under_mpi():
         f"round trip changed which land leaves exist: "
         f"lost {set(before) - set(after)}, gained {set(after) - set(before)}")
     bad = {k: float(np.max(np.abs(after[k] - before[k])))
-           for k in before if not np.array_equal(after[k], before[k])}
+           for k in before if not _bitwise_equal(after[k], before[k])}
     assert not bad, (
         f"land leaves changed across the MPI checkpoint round trip: {bad}")
     if MPI.COMM_WORLD.Get_rank() == 0:

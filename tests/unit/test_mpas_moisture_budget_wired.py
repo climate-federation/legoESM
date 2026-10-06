@@ -6,8 +6,9 @@ AMIP campaign published a blank moisture residual while a ~0.4 mm/day gap
 between reported global evaporation and rainfall went unexamined. A test that
 only asserted "the residual is small" would have passed against that blank.
 So the assertions here are about the WIRING: that a known imbalance comes out
-of the tracker with the right sign and size, and that the multi-rank path
-refuses to publish a rank-local number instead of quietly publishing one.
+of the tracker with the right sign and size, that a rank-local call on the
+multi-rank path publishes nothing, and that rank 0 publishes the GLOBAL number
+from the owned-cell gather (#1321).
 """
 from __future__ import annotations
 
@@ -135,10 +136,50 @@ def test_the_partitioned_lane_publishes_nothing_rather_than_a_local_number():
     """Under a cell partition the tracker's area mean would be rank-local and
     would double-count halo cells. Silence is the correct output."""
     d = _Driver(voronoi_layout=object())
+    d._mpi_world_size = 2
     diag = _Diag()
     d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
                                                 hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert diag.moisture_tracker.residual == []
+
+
+def test_rank0_publishes_the_global_number_from_gathered_fields():
+    """Under a 2-rank partition, rank 0 is handed the GATHERED global q_v /
+    p_s / fluxes and must use them with the GLOBAL areaCell -- not its own
+    rank-local state (here deliberately wrong: 4 columns, a different q_v and
+    unit areas) -- and so reproduce the serial residual on the same global
+    fields.  Non-uniform areas make a wrong weighting visible."""
+    ncol, nlev = 16, 4
+    area = jnp.linspace(1.0, 4.0, ncol)
+    q1 = jnp.full((ncol, nlev), 0.01)
+    q2 = q1 * jnp.linspace(1.0, 1.2, ncol)[:, None]   # W grows, unevenly
+    ps = jnp.full((ncol,), 1.0e5)
+    e = jnp.linspace(1.0, 5.0, ncol) / 86400.0         # uneven evaporation
+    base = _kw(ncol, precip_mm_day=2.0, hfls_w_m2=50.0, evspsbl=e)
+
+    serial, sdiag = _Driver(ncol, nlev), _Diag()
+    serial.grid.areaCell = area
+    for day, q in ((0.0, q1), (1.0, q2)):
+        serial.state.tracers["q_v"] = _Field(q)
+        serial._feed_mpas_moisture_budget(day, sdiag, base)
+
+    root, rdiag = _Driver(4, nlev, voronoi_layout=object()), _Diag()
+    root._mpi_world_size = 2
+    root._grid_global = _Grid(ncol)
+    root._grid_global.areaCell = area
+    for day, q in ((0.0, q1), (1.0, q2)):
+        root._feed_mpas_moisture_budget(
+            day, rdiag, {**base, "q_v": q, "p_s": ps}, global_fields=True)
+
+    assert len(rdiag.moisture_tracker.residual) == 2
+    assert rdiag.moisture_tracker.residual[-1] == pytest.approx(
+        sdiag.moisture_tracker.residual[-1], rel=1e-12)
+
+
+def test_the_multirank_feed_calls_it_with_global_fields():
+    import inspect
+    src = inspect.getsource(ModelDriver._feed_mpas_cmip_multirank)
+    assert "_feed_mpas_moisture_budget" in src and "global_fields=True" in src
 
 
 def test_a_dry_run_is_skipped_not_crashed():
