@@ -76,6 +76,9 @@ def capture(a):
     argv = H.launch_argv(a.run, a.day, scratch)
     while "--distributed" in argv:
         argv.remove("--distributed")
+    # Long enough for the start-up call plus --calls full land steps (the run
+    # is stopped as soon as they are recorded).
+    argv[argv.index("--days") + 1] = str(int(np.ceil(a.calls * a.land_dt / 86400.0)) + 1)
     rec: dict = {"forcing": [], "cells": None}
 
     def is_dyn(v):
