@@ -999,6 +999,25 @@ def zero_mean_tendency(
     orig_dtype = tendency.dtype
     area_ndim = area.ndim  # 3 for cubed-sphere, 2 for lat-lon
 
+    if tendency.ndim in (area_ndim, area_ndim + 1):
+        # Rank/band-partial grids (lat-band MPI, lat-band SPMD, replicated
+        # cube MPI): reduce the area exactly like the numerator, in one
+        # collective, or the global integral is divided by this rank's own
+        # area.  ``None`` = this process holds the whole domain.
+        tend_acc = tendency.astype(acc)
+        if tendency.ndim == area_ndim:
+            local_num = jnp.sum(tend_acc * area_acc)[None]
+        else:
+            local_num = jnp.sum(tend_acc * area_acc[..., None],
+                                axis=tuple(range(area_ndim)))
+        reduced = _reduce_rank_partials(
+            jnp.concatenate([local_num, total_area_acc[None]]))
+        if reduced is not None:
+            corrections = reduced[:-1] / reduced[-1]
+            if tendency.ndim == area_ndim:
+                corrections = corrections[0]
+            return (tend_acc - corrections).astype(orig_dtype)
+
     if tendency.ndim == area_ndim:
         # 2D tendency (lat-lon) or 3D tendency (cubed-sphere) — no level axis
         global_sum = global_area_sum(tendency, grid)
@@ -1011,9 +1030,6 @@ def zero_mean_tendency(
         # Sum over all spatial axes (all except the last)
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
-        if is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
-            level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
         for _ in range(area_ndim):
@@ -1021,6 +1037,22 @@ def zero_mean_tendency(
         return (tend_acc - corrections).astype(orig_dtype)
     else:
         return tendency
+
+
+def _reduce_rank_partials(local: jax.Array) -> jax.Array | None:
+    """Sum rank/band partials with the same dispatch as :func:`global_area_sum`;
+    ``None`` when this process already holds the whole domain (serial, GSPMD).
+
+    ``broadcast_allreduce_sum`` (allreduce VJP): the reduced value is a shared
+    correction reused on every rank, so its cotangent must be summed too.
+    """
+    spmd = _spmd_lat_psum_or_none([local])
+    if spmd is not None:
+        return spmd[0]
+    if is_distributed():
+        from legoesm.parallel.reductions import broadcast_allreduce_sum
+        return broadcast_allreduce_sum(local)
+    return None
 
 
 # ==============================================================================
