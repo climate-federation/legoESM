@@ -443,6 +443,37 @@ def capture(a):
         jnp.where(jnp.asarray(_p) > 68000.0, _cp.cloud_fraction, 0.0)))
     radin["rad_lwp"] = np.asarray(_cp.lwp, dtype=np.float64).sum(1)
     radin["rad_iwp"] = np.asarray(_cp.iwp, dtype=np.float64).sum(1)
+    if a.snow_arms:
+        # CAM6 radiates falling snow (MG2 hands snow mass, its own size and a
+        # snow cloud fraction to RRTMG: micro_mg_cam.F90 cldfsnow, radiation.F90
+        # snow_cloud_get_rad_props_lw, cam_cesm2_1_rel).  This model's solver has
+        # no snow condensate, so the snow (and graupel) mass is ADDED TO THE
+        # CLOUD ICE handed to the backend, with the backend's own cloud cover:
+        # snow in layers with zero cover stays invisible (CAM gives such layers
+        # a 0.25 snow cover), so this is a LOWER bound on CAM6's treatment.
+        _tr = cap["state"].tracers
+        _qs = jnp.asarray(_tr["q_s"].data if hasattr(_tr["q_s"], "data") else _tr["q_s"])
+        _qg = jnp.asarray(_tr["q_g"].data if hasattr(_tr["q_g"], "data") else _tr["q_g"])
+        _qi = jnp.asarray(ra["q_ice"])
+        if _qs.shape != _qi.shape or _qg.shape != _qi.shape:
+            raise SystemExit(f"FATAL: snow/graupel {_qs.shape}/{_qg.shape} vs ice {_qi.shape}")
+        _dpn = np.abs(np.diff(np.asarray(_ph, dtype=np.float64), axis=1))
+        for _n, _q in (("snow", _qi + _qs.astype(_qi.dtype)),
+                       ("snowg", _qi + (_qs + _qg).astype(_qi.dtype))):
+            arms[f"inst_{_n}"] = {"q_ice": _q}
+            _cps = compute_cloud_properties(
+                T=ra["T"], p_full=ra["p_full"], q_v=ra["q_v"],
+                dp=_ph[:, 1:] - _ph[:, :-1], config=_cc, q_cloud=ra.get("q_cloud"),
+                q_ice=_q, n_ice=ra.get("n_ice"), n_cloud=ra.get("n_cloud"),
+                conv_precip=ra.get("conv_precip"),
+                cloud_fraction_override=ra.get("cloud_fraction_override"),
+                lat=ra["lat"], conv_mass_flux_up=ra.get("conv_mass_flux_up"),
+                conv_icwmr=ra.get("conv_icwmr"), p_half=_ph)
+            radin[f"rad_iwp_{_n}"] = np.asarray(_cps.iwp, dtype=np.float64).sum(1)
+            radin[f"rad_cf_total_maxrand_{_n}"] = np.asarray(
+                maximum_random_overlap(_cps.cloud_fraction))
+        radin["radin_q_snow_path"] = (np.asarray(_qs, dtype=np.float64) * _dpn).sum(1) / constants.g
+        radin["radin_q_graupel_path"] = (np.asarray(_qg, dtype=np.float64) * _dpn).sum(1) / constants.g
     out_arr = {}
     for n, o in arms.items():
         for k, v in solve(**o).items():
@@ -719,6 +750,8 @@ def main(argv=None):
     c.add_argument("--out", required=True)
     c.add_argument("--config", default=None, help="replace the logged --config deck")
     c.add_argument("--tag", default="", help="suffix of the capture file name")
+    c.add_argument("--snow-arms", action="store_true",
+                   help="add radiation arms with snow (and snow+graupel) mass added to the cloud ice")
     c.add_argument("--era5-pl", default=None,
                    help="dir of ERA5 00Z e5pl_130/133_<date>.nc (era5pl/extract.sh): "
                         "adds clear-sky arms with ERA5 T, q, both, and a round-trip control")
