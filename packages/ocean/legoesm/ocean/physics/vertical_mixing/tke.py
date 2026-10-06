@@ -1193,6 +1193,7 @@ def _solve_tke_backward_euler(
     cfg: TKEConfig,
     external_source: jnp.ndarray | None = None,
     literal_external_rhs: jnp.ndarray | None = None,
+    pre_solve_source: jnp.ndarray | None = None,
     dz_cell: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
     dz_face_surface: jnp.ndarray | None = None,
@@ -1737,6 +1738,15 @@ def _solve_tke_backward_euler(
         rhs = rhs + dt * 0.5 * diss_rate * e_old
     if external_source is not None and not literal_matrix:
         rhs = rhs + dt * external_source
+    if pre_solve_source is not None:
+        # NEMO zdftke.F90:367,419: the source is added to en before the RHS,
+        # so the explicit add-back 0.5*rn_ediss*dissl*en also acts on it.
+        if literal_matrix or _disc != "nemo_1p5_split":
+            raise ValueError(
+                "pre_solve_source requires the factored matrix with "
+                "dissipation_discretization='nemo_1p5_split'.")
+        _pre = dt * pre_solve_source.astype(e_old.dtype)
+        rhs = rhs + _pre + dt * 0.5 * diss_rate * _pre
 
     if bottom_dirichlet is not None:
         # NEMO bottom TKE BC (zdftke.F90:279-288): en(mbkt+1) =
@@ -3069,6 +3079,13 @@ def tke_vertical_mixing(
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' requires "
                 "precomputed_p_sh2 from the selected step-entry face levels.")
+        if getattr(cfg, "prandtl_mode", "unit") == "richardson":
+            # step_entry zeroes the cell shear_sq, so the gradient Ri would be
+            # N2/1e-12 and Pr would silently pin at its cap.
+            raise ValueError(
+                "tke_shear_evaluation_stage='step_entry' cannot be combined "
+                "with prandtl_mode='richardson' (it reads the cell shear this "
+                "stage does not form); use prandtl_mode='nemo_ri'.")
         if precomputed_p_sh2.shape != tke_old.shape:
             raise ValueError(
                 "precomputed_p_sh2 must match tke_old shape; got "
@@ -3092,6 +3109,22 @@ def tke_vertical_mixing(
         raise ValueError(
             "Unknown TKEConfig.tke_langmuir_evaluation: expected "
             f"'vectorized' or 'nemo_literal', got {_lc_eval!r}.")
+    _lc_coupling = getattr(cfg, "tke_langmuir_rhs_coupling", "separate")
+    if _lc_coupling not in ("separate", "nemo_pre_solve"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_langmuir_rhs_coupling: expected "
+            f"'separate' or 'nemo_pre_solve', got {_lc_coupling!r}.")
+    if _lc_coupling == "nemo_pre_solve" and (
+            not getattr(cfg, "lc", False) or _matrix_eval == "nemo_literal"
+            or _lc_eval == "nemo_literal"
+            or getattr(cfg, "dissipation_discretization",
+                       "backward_euler") != "nemo_1p5_split"):
+        raise ValueError(
+            "tke_langmuir_rhs_coupling='nemo_pre_solve' needs lc=True, the "
+            "factored matrix, vectorized Langmuir and "
+            "dissipation_discretization='nemo_1p5_split' (it would be inert "
+            "or double-applied otherwise).")
+    _lc_pre_solve = None
     _supplied_carry = (preclosure_K_M, preclosure_K_H,
                        preclosure_K_M_surface, preclosure_dissl)
     if not _carried_coeffs and any(x is not None for x in _supplied_carry):
@@ -3387,8 +3420,11 @@ def tke_vertical_mixing(
             taum, N2b, _depth_w, _surface_e3w, cfg,
             ice_frac=ice_frac, bottom_level=bottom_level,
             w_active=w_active)
-        external_source = (_lc_src if external_source is None
-                           else external_source + _lc_src)
+        if _lc_coupling == "nemo_pre_solve":
+            _lc_pre_solve = _lc_src
+        else:
+            external_source = (_lc_src if external_source is None
+                               else external_source + _lc_src)
 
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
@@ -3463,6 +3499,7 @@ def tke_vertical_mixing(
             dt=dt, cfg=cfg,
             external_source=external_source,
             literal_external_rhs=_literal_external_rhs,
+            pre_solve_source=_lc_pre_solve,
             dz_cell=dz_cell,
             dz_surface=(dz_surface if veros_slots else None),
             dz_face_surface=dz_face_surface,
@@ -3984,6 +4021,11 @@ def tke_integrate_post_mixing(
     tke_new : (..., nlev-1) — the carried interior interfaces (signed; no
         interior floor).
     """
+    if getattr(cfg, "tke_langmuir_rhs_coupling", "separate") != "separate":
+        raise ValueError(
+            "tke_langmuir_rhs_coupling='nemo_pre_solve' is wired only in the "
+            "pre-mixing tke_vertical_mixing solve, not the Veros post-mixing "
+            "order.")
     _validate_post_mixing_cfg(cfg)
     e_old = ctx.tke_old
     n_int = e_old.shape[-1]          # nlev - 1 interior interfaces

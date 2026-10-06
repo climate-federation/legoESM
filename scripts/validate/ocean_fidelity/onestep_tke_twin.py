@@ -223,7 +223,7 @@ def budget_compare(budget, run_next, step, sj, si, dissl_rst, *, our_step_e, cfg
     dissl_old (ours: ediss/(0.5 c_eps e_post)) is also compared with
     restart(kt) dissl, which is what NEMO's matrix consumes."""
     ours = dict(eshear_k=budget[0], estrat_k=budget[1], ediss_k=budget[2])
-    print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W; estrat and K_H carry the step_entry Pr=10 artefact)")
+    print("\n[budget arm a] per-interface median ratio ours/NEMO (same step; NEMO strip W)")
     print("   k   z_w | eshear | estrat | ediss  | dissl_used/dissl_rst(kt) | K_M/avm_k(kt+1) | K_H/avt_k(kt+1) | implied N2")
     nemo = {n: load_strip_w(run_next, step, n)[:, sj, si].T[:, 1:] for n in ours}
     dissl_ours = np.asarray(budget[2])[0] / np.maximum(0.5 * cfg.c_eps * our_step_e, 1e-300)
@@ -388,13 +388,21 @@ def main(argv=None) -> int:
           + " ".join(f"{np.nanmedian(chg[:, k]):+.4f}" for k in range(kmax)))
     rel = stats(ours, en_nemo, zk, kmax, "arm b: production (own shear)")
     band_report(rel, chg, zk, a.band_lo, a.band_hi, "arm b")
+    # arm f: production + NEMO's Langmuir/dissipation RHS coupling
+    # (zdftke.F90:367,419: the add-back zfact3*dissl*en sees post-Langmuir en)
+    cfg_f = cfg._replace(tke_langmuir_rhs_coupling="nemo_pre_solve")
+    ours_f, _ = our_step(cfg=cfg_f, en_in=en_in, **kw)
+    rel_f = stats(ours_f, en_nemo, zk, kmax, "arm f: production + Langmuir pre-solve coupling")
+    band_report(rel_f, chg, zk, a.band_lo, a.band_hi, "arm f")
     # arm a: NEMO's p_sh2 injected -> residual = non-shear part of the step
     nsh = min(esh.shape[1] - 1, en_in.shape[1])
     p_sh2 = np.zeros_like(en_in); p_sh2[:, :nsh] = esh[:, 1:nsh + 1]
     p_sh2 = np.where(np.isfinite(p_sh2), p_sh2, 0.0)
-    cfg_a = cfg._replace(tke_shear_evaluation_stage="step_entry")
+    # step_entry forms no cell shear, so the gradient-Ri Prandtl cannot run
+    # on it (now raises); NEMO's own Ri form is the only valid pairing.
+    cfg_a = cfg._replace(tke_shear_evaluation_stage="step_entry", prandtl_mode="nemo_ri")
     ours_a, _ = our_step(cfg=cfg_a, en_in=en_in, p_sh2=p_sh2, **kw)
-    rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected (sink K_H uses Pr=10 artefact)")
+    rel_a = stats(ours_a, en_nemo, zk, min(kmax, nsh), "arm a: NEMO p_sh2 injected (prandtl nemo_ri)")
     band_report(rel_a, chg, zk, a.band_lo, a.band_hi, "arm a")
     budget_a = our_step.last.budget
     post_a = (np.asarray(our_step.last.K_M)[0], np.asarray(our_step.last.K_H)[0],
@@ -407,12 +415,13 @@ def main(argv=None) -> int:
     ours_c, _ = our_step(cfg=cfg_c, en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
     rel_c = stats(ours_c, en_nemo, zk, min(kmax, nsh), "arm c: NEMO p_sh2 + carried avm_k/avt_k")
     band_report(rel_c, chg, zk, a.band_lo, a.band_hi, "arm c")
-    kh_line("arm c (INVALID: step_entry zeroes cell shear -> richardson Pr=10)")
-    # arm d: arm c + NEMO's Richardson form (rn2b*avm_old/p_sh2, nemo_ri)
-    ours_d, _ = our_step(cfg=cfg_c._replace(prandtl_mode="nemo_ri"), en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
-    band_report(stats(ours_d, en_nemo, zk, min(kmax, nsh), "arm d: arm c + prandtl nemo_ri"),
-                chg, zk, a.band_lo, a.band_hi, "arm d")
-    kh_line("arm d")
+    kh_line("arm c")
+    # arm g: arm c (NEMO p_sh2, carried avm_k/avt_k, nemo_ri) + the Langmuir
+    # pre-solve coupling
+    ours_g, _ = our_step(cfg=cfg_c._replace(tke_langmuir_rhs_coupling="nemo_pre_solve"),
+                         en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
+    band_report(stats(ours_g, en_nemo, zk, min(kmax, nsh), "arm g: arm c + Langmuir pre-solve coupling"),
+                chg, zk, a.band_lo, a.band_hi, "arm g")
     # arm e: arm c with Langmuir off -- magnitude of that source in the band only
     ours_e, _ = our_step(cfg=cfg_c._replace(lc=False), en_in=en_in, p_sh2=p_sh2, carry=carry, **kw)
     band_report(stats(ours_e, en_nemo, zk, min(kmax, nsh), "arm e: arm c, Langmuir off"),

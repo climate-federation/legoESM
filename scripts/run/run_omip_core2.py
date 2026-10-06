@@ -681,7 +681,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         etau_mode: str | None = None,
                         preclosure_coeff_source: str | None = None,
                         buoyancy_sink: str | None = None,
-                        step_evaluation: str | None = None):
+                        step_evaluation: str | None = None,
+                        langmuir_rhs_coupling: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -1189,6 +1190,14 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # (--tke-surface-bc-level nemo_z0 --tke-preclosure-coeff-source
     # carried_previous_step), which the closure enforces.  None keeps the card
     # ('factored' + 'shared_thomas').
+    # Langmuir vs explicit dissipation add-back (``--tke-langmuir-rhs-coupling``,
+    # zdftke.F90:367,419).  None keeps the card ('separate').
+    if langmuir_rhs_coupling is not None:
+        if langmuir_rhs_coupling not in ("separate", "nemo_pre_solve"):
+            raise ValueError(
+                f"orca1_zdftke_config langmuir_rhs_coupling {langmuir_rhs_coupling!r} "
+                "invalid; expected 'separate' or 'nemo_pre_solve'.")
+        _cfg = _cfg._replace(tke_langmuir_rhs_coupling=langmuir_rhs_coupling)
     if step_evaluation is not None:
         if step_evaluation not in ("factored", "nemo_literal"):
             raise ValueError(
@@ -1790,7 +1799,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_etau=None,
                               tke_preclosure_coeff_source=None,
                               tke_kappah_min=None, tke_buoyancy_sink=None,
-                              tke_step_evaluation=None):
+                              tke_step_evaluation=None,
+                              tke_langmuir_rhs_coupling=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -1831,7 +1841,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                      tke_preclosure_coeff_source),
                     ("--tke-kappah-min", tke_kappah_min),
                     ("--tke-buoyancy-sink", tke_buoyancy_sink),
-                    ("--tke-step-evaluation", tke_step_evaluation)):
+                    ("--tke-step-evaluation", tke_step_evaluation),
+                    ("--tke-langmuir-rhs-coupling", tke_langmuir_rhs_coupling)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -1852,7 +1863,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    preclosure_coeff_source=(
                                        tke_preclosure_coeff_source),
                                    buoyancy_sink=tke_buoyancy_sink,
-                                   step_evaluation=tke_step_evaluation)
+                                   step_evaluation=tke_step_evaluation,
+                                   langmuir_rhs_coupling=tke_langmuir_rhs_coupling)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
@@ -1923,6 +1935,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_preclosure_coeff_source=None,
                   tke_kappah_min=None, tke_buoyancy_sink=None,
                   tke_step_evaluation=None,
+                  tke_langmuir_rhs_coupling=None,
                   A_h_profile_file=None, nemo_ldf_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
@@ -2223,6 +2236,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
             tke_buoyancy_sink=tke_buoyancy_sink,
             tke_step_evaluation=tke_step_evaluation,
+            tke_langmuir_rhs_coupling=tke_langmuir_rhs_coupling,
             tke_kappah_min=tke_kappah_min)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
@@ -4305,6 +4319,7 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_preclosure_coeff_source=None,
                             tke_buoyancy_sink=None,
                             tke_step_evaluation=None,
+                            tke_langmuir_rhs_coupling=None,
                             mpas_vmix="kpp",
                             fesom_vmix="fesom"):
     """Reject the zdftke card knobs unless the tke closure is active.
@@ -4374,6 +4389,12 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
             "(--grid tripole --tripole-vmix tke, or --grid mpas --mpas-vmix "
             f"tke). Got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
             f"--mpas-vmix {mpas_vmix!r}.")
+    if tke_langmuir_rhs_coupling is not None and not (
+            grid == "tripole" and tripole_vmix == "tke"):
+        raise SystemExit(
+            "--tke-langmuir-rhs-coupling takes effect ONLY on --grid tripole "
+            f"--tripole-vmix tke; got --grid {grid!r} --tripole-vmix "
+            f"{tripole_vmix!r}.")
     if tke_step_evaluation is not None and not (
             grid == "tripole" and tripole_vmix == "tke"):
         raise SystemExit(
@@ -8291,6 +8312,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "AND recurrences); it requires --tke-surface-bc-level "
                         "nemo_z0 and --tke-preclosure-coeff-source "
                         "carried_previous_step (the closure raises otherwise).")
+    p.add_argument("--tke-langmuir-rhs-coupling", type=str, default=None,
+                   choices=["separate", "nemo_pre_solve"],
+                   help="Langmuir TKE source vs the explicit dissipation "
+                        "add-back on --tripole-vmix tke. None (default) keeps "
+                        "the card ('separate'). 'nemo_pre_solve' is "
+                        "zdftke.F90:367,419: the source is added to en before "
+                        "the RHS, so 0.5*rn_ediss*dissl*en also acts on it.")
     p.add_argument("--tke-kappa-convention", type=str, default=None,
                    choices=["veros_sqrte", "gaspar_sqrt2e"],
                    help="Amplitude of K from TKE for --tripole-vmix tke. "
@@ -8952,6 +8980,7 @@ def main() -> int:
                                 args.tke_preclosure_coeff_source),
                             tke_buoyancy_sink=args.tke_buoyancy_sink,
                             tke_step_evaluation=args.tke_step_evaluation,
+                            tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
                             mpas_vmix=args.mpas_vmix,
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
@@ -9266,6 +9295,7 @@ def main() -> int:
             tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
             tke_buoyancy_sink=args.tke_buoyancy_sink,
             tke_step_evaluation=args.tke_step_evaluation,
+            tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
@@ -9547,7 +9577,8 @@ def main() -> int:
                                       or args.tke_surface_bc is not None
                                       or args.tke_surface_bc_level is not None
                                       or args.tke_buoyancy_sink is not None
-                                      or args.tke_step_evaluation is not None):
+                                      or args.tke_step_evaluation is not None
+                                      or args.tke_langmuir_rhs_coupling is not None):
                 raise ValueError(
                     "--kpp-ri-crit/--kpp-cv/--kpp-eice/--tke-buoyancy-sink/--tke-step-evaluation conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "

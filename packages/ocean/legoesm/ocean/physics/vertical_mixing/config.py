@@ -653,6 +653,14 @@ class TKEConfig(NamedTuple):
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
     # complete DINO NEMO cards select it; all other cards remain vectorized.
     tke_langmuir_evaluation: str = "vectorized"
+    # Langmuir source vs NEMO's explicit dissipation add-back.  NEMO adds the
+    # Langmuir increment to en BEFORE the matrix (zdftke.F90:367), so the RHS
+    # add-back zfact3*dissl*en (:419) multiplies the post-Langmuir en.
+    # ``separate`` (historical): Langmuir is a plain RHS source and the
+    # add-back uses the pre-Langmuir e_old.  ``nemo_pre_solve``: the add-back
+    # also acts on dt*source, as in NEMO (factored matrix + nemo_1p5_split
+    # only; the literal matrix already assembles it that way).
+    tke_langmuir_rhs_coupling: str = "separate"
     # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
     # evaluates from the state handed to the implicit solve.  Complete DINO
     # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
