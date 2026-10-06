@@ -448,22 +448,31 @@ def snow_remap_compact(state: SnowColumnState, dt, wind):
     return snow_compact(SnowColumnState(*_remap_equal_mass(*state)), dt, wind)
 
 
-def snow_thermal_props(state: SnowColumnState,
-                       config: SnowColumnConfig = SnowColumnConfig()):
-    """Pack thermal properties for an implicit conduction solve.
+def snow_thermal_props(state: SnowColumnState, config: SnowColumnConfig,
+                       f_snow):
+    """Pack thermal properties for an implicit conduction solve, CELL-MEAN.
 
-    Returns ``(C, coeff, r_base)``: per-layer sensible heat capacity per unit area
-    [J/m^2/K] (floored so an empty layer stays non-singular), the conductance
-    between adjacent layers [W/m^2/K] (harmonic-mean k over the node spacing,
-    floored at ``_COEFF_MIN`` so no layer ever decouples), and the thermal
-    resistance from the base node to the pack bottom ``dz_last / (2 k_last)``
-    [m^2 K/W] — the caller adds its own half-layer to form the snow-soil series
-    conductance.
+    The pack lies on the snow-covered fraction ``f_snow`` of the cell only (CLM5
+    ``frac_sno``): its layer thickness there is ``dz / f`` (``dz = mass /
+    density`` is the cell-mean thickness) and conduction happens over that area,
+    so a cell-mean conductance is ``f * k / dz_covered`` (CTSM SoilTemperatureMod
+    solves the snow rows per covered area and hands the soil ``frac_sno * fn``).
+    Returns ``(C, coeff, r_base)``: per-layer sensible heat capacity per unit
+    cell area [J/m^2/K] (floored so an empty layer stays non-singular), the
+    cell-mean conductance between adjacent layers [W/m^2/K] (harmonic-mean k
+    over the covered node spacing, floored at ``_COEFF_MIN`` so no layer ever
+    decouples), and the resistance from the base node to the pack bottom over
+    the covered area ``dz_cov_last / (2 k_last)`` [m^2 K/W]; the caller adds the
+    soil half-layer and weights the series conductance by ``f``
+    (``soil_thermal.solve_snow_soil_thermal``).  ``f_snow = 1`` is a pack
+    spread over the whole cell.
     """
     dz, k = _thickness_and_conductivity(state.swe_ice, state.swe_liq, state.density, config)
+    f = jnp.asarray(f_snow)[..., None]
+    dz_cov = dz / jnp.maximum(f, _EPS)
     C = jnp.maximum(_sensible_hc(state.swe_ice, state.swe_liq), _EPS)
-    coeff = jnp.maximum(_interface_coeff(dz, k), _COEFF_MIN)
-    r_base = dz[..., -1] / (2.0 * k[..., -1])
+    coeff = jnp.maximum(f * _interface_coeff(dz_cov, k), _COEFF_MIN)
+    r_base = dz_cov[..., -1] / (2.0 * k[..., -1])
     return C, coeff, r_base
 
 
@@ -540,7 +549,7 @@ def step_snow_column(
     state = snow_add_mass(state, precip_snow * dt, T_air,
                           rho_fresh=new_snow_bulk_density(T_air, wind))
     state = snow_remap_compact(state, dt, wind)
-    C, coeff, _ = snow_thermal_props(state, config)
+    C, coeff, _ = snow_thermal_props(state, config, 1.0)   # stand-alone: whole cell
     diag = C / dt
     diag = diag.at[..., 1:].add(coeff)
     diag = diag.at[..., :-1].add(coeff)

@@ -571,7 +571,9 @@ def solve_snow_soil_thermal(
     (``snow_column.snow_thermal_props``); rows ``ns..`` are the soil layers, built
     exactly as in :func:`solve_soil_thermal` (apparent heat capacity when
     freeze/thaw is on).  The pack base couples to the top soil node through the
-    series resistance ``r_snow_base + z_node0 / k_soil0`` (CLM5 structure).
+    series resistance ``r_snow_base + z_node0 / k_soil0`` over the snow-covered
+    fraction, i.e. a cell-mean conductance ``f_snow / (r_snow_base + z_node0 /
+    k_soil0)`` (CLM5 structure; ``f_snow = 1`` for a pack over the whole cell).
 
     The ground heat flux ``G_surface`` [W/m^2, positive INTO the ground] is split
     by the snow-covered fraction ``f_snow``: ``f*G`` enters the pack top and
@@ -590,7 +592,9 @@ def solve_snow_soil_thermal(
     ns = T_snow.shape[-1]
     d_soil, c_soil, r_soil, k_soil = _soil_heat_system(
         T_soil, theta, grid, hydro_config, thermal_config, dt)
-    c_if = 1.0 / (r_snow_base + grid.z_node[0] / k_soil[:, 0])     # (ncol,)
+    # Pack base -> top soil node over the snow-covered area only (CLM5: the soil
+    # receives frac_sno * fn); f_snow = 1 is a pack over the whole cell.
+    c_if = f_snow / (r_snow_base + grid.z_node[0] / k_soil[:, 0])  # (ncol,)
     coeff = jnp.concatenate([coeff_snow, c_if[:, None], c_soil], axis=-1)
     diag = jnp.concatenate([C_snow / dt, d_soil], axis=-1)
     # The soil diagonal already carries its internal conductances; add the pack's

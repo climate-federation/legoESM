@@ -18,11 +18,12 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.boundary_data.gap_fill import bare_canopy_params
 from legoesm.land.multilayer_land import (
-    MultiLayerLandConfig, init_multilayer_land_state, land_snow_cover, seed_snow_layers,
+    MultiLayerLandConfig, init_multilayer_land_state, seed_snow_layers,
     step_multilayer_land_with_diagnostics)
 from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.snow_column import (
-    SnowColumnState, column_enthalpy, new_snow_bulk_density, seed_snow_state, snow_add_mass,
+    SnowColumnConfig, SnowColumnState, column_enthalpy, new_snow_bulk_density, seed_snow_state,
+    snow_add_mass,
     snow_phase_and_percolate, snow_remap_compact, snow_thermal_props,
     total_water)
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
@@ -32,6 +33,7 @@ from legoesm.land.soil_thermal import (
     invert_soil_layer_enthalpy, liquid_water_content, soil_layer_enthalpy,
     solve_snow_soil_thermal, solve_soil_thermal)
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+from legoesm.surface_albedo import snow_cover_fraction
 
 jax.config.update("jax_enable_x64", True)
 
@@ -139,8 +141,8 @@ def test_combined_solve_conserves_energy_with_split_flux_and_robin(ft):
     grid, T, theta, hc, tc = _column_inputs(ft)
     swe = jnp.array([0.0, 3.0, 40.0, 200.0])
     pack = seed_snow_state(swe, T[:, 0] - 8.0)
-    C, coeff, rb = snow_thermal_props(pack)
-    f = land_snow_cover(swe, MultiLayerLandConfig().land_albedo)
+    f = snow_cover_fraction(swe, MultiLayerLandConfig().land_albedo)
+    C, coeff, rb = snow_thermal_props(pack, SnowColumnConfig(), f)
     G = jnp.array([-80.0, 10.0, 150.0, 30.0])
     lam = jnp.array([5.0, 12.0, 0.0, 3.0])
     dt = 1800.0
@@ -174,9 +176,9 @@ def test_column_step_closes_energy_with_rain_sublimation_and_melt():
     sub = jnp.minimum(sub, p.swe_ice[:, 0])
     H_sub = sub * constants.c_pi * (p.T[:, 0] - TF)
     p = p._replace(swe_ice=p.swe_ice.at[:, 0].add(-sub))
-    f = land_snow_cover(total_water(p), MultiLayerLandConfig().land_albedo)
+    f = snow_cover_fraction(total_water(p), MultiLayerLandConfig().land_albedo)
     p = snow_add_mass(p, 0.0, T_air, rain=f * rain, T_rain=T_air)
-    C, coeff, rb = snow_thermal_props(p)
+    C, coeff, rb = snow_thermal_props(p, SnowColumnConfig(), f)
     Ts, Tg = solve_snow_soil_thermal(p.T, C, coeff, rb, f, T, theta, grid, hc, tc, G, dt)
     p2, drain, drain_H = snow_phase_and_percolate(p._replace(T=Ts))
     Cg = compute_apparent_heat_capacity(T, theta, hc, tc) * grid.dz
@@ -220,8 +222,8 @@ def test_insulation_bulk_vs_layered():
         cfg = _cfg(scheme)
         st, _ = _run(cfg, _state(cfg, 1, T_soil=270.0, swe=75.0), f, 240, 3600.0)
         top[scheme] = float(st.T_soil[0, 0])
-    assert float(land_snow_cover(jnp.array(75.0), cfg.land_albedo)) == pytest.approx(
-        0.9051, abs=1e-3)                     # tanh(75/50), the albedo's cover
+    assert float(snow_cover_fraction(jnp.array(75.0), cfg.land_albedo)) == pytest.approx(
+        0.9051, abs=1e-3)                     # tanh(75/50), the physical cover
     assert top["layered"] > top["bulk"] + 5.0, top
 
 
@@ -364,7 +366,7 @@ def test_sublimation_clamped_to_top_layer_and_water_closes():
     st1, out = _run(cfg, st, f, 1, dt)
     _, resp, sfc = out[0]
     p = snow_remap_compact(snow_add_mass(_pack(st), 0.0, 271.0), dt, 12.0)
-    frac = float(land_snow_cover(total_water(p), cfg.land_albedo)[0])
+    frac = float(snow_cover_fraction(total_water(p), cfg.land_albedo)[0])
     demand = frac * float(sfc.lhflx[0]) / constants.L_s * dt
     assert demand > float(p.swe_ice[0, 0]), (demand, float(p.swe_ice[0, 0]))  # clamp binds
     assert bool(jnp.all(st1.snow_ice_layers >= 0.0))
@@ -498,7 +500,7 @@ def test_rain_on_snow_enters_the_pack_in_the_land_step():
     st = st._replace(snow_T_layers=jnp.full_like(st.snow_T_layers, 255.0))
     rain = 1e-3
     st1, out = _run(cfg, st, _forcing(1, T_air=275.0, rain=rain, lw=300.0), 1, 1800.0)
-    f = float(land_snow_cover(jnp.asarray(40.0), cfg.land_albedo))
+    f = float(snow_cover_fraction(jnp.asarray(40.0), cfg.land_albedo))
     gained = float(st1.snow_depth[0] - st.snow_depth[0])
     sub = float(out[0][1].surface_mass_flux[0]) * 1800.0     # upper bound on vapour loss
     assert gained == pytest.approx(f * rain * 1800.0, abs=abs(sub) + 1e-6)
@@ -611,7 +613,7 @@ def test_partial_cover_sublimation_scales_with_f_not_f_squared(swe):
     s = init_multilayer_land_state(1, cfg, T_init=268.0, theta_init=tfl + 1.0e-3)
     s = seed_snow_layers(s._replace(psi_soil=psi_from_theta(s.theta_soil, hc),
                                     snow_depth=jnp.full(1, swe)), cfg)
-    f = float(land_snow_cover(jnp.full(1, swe), cfg.land_albedo)[0])
+    f = float(snow_cover_fraction(jnp.full(1, swe), cfg.land_albedo)[0])
     fo = _forcing(1, T_air=270.0, sw=200.0, lw=250.0, q=0.0005)
     _, out = _run(cfg, s, fo, 1, 1800.0)
     _, resp, sfc = out[0]
@@ -896,8 +898,8 @@ def test_freeze_thaw_layered_jit_matches_eager_and_gradient_matches_fd():
 
 
 def test_warm_drainage_sensible_heat_enters_the_soil(monkeypatch):
-    """A thin pack under a very strong flux turns all-liquid above T_freeze and
-    drains with sensible heat c_liq (T - T_freeze): that heat is handed to the
+    """A pack that holds only warm liquid (ice all melted, 280 K) drains with
+    sensible heat c_liq (T - T_freeze) on top of L_f: that heat is handed to the
     top soil layer, and pack + soil energy still closes exactly."""
     from legoesm.land import multilayer_land as ml
     rec = []
@@ -911,7 +913,55 @@ def test_warm_drainage_sensible_heat_enters_the_soil(monkeypatch):
 
     monkeypatch.setattr(ml, "snow_phase_and_percolate", spy)
     cfg = _cfg_ft()
-    st = _state(cfg, 1, T_soil=TF + 1.0, swe=0.3)
-    f = _forcing(1, T_air=295.0, sw=900.0, lw=380.0, q=0.012, wind=1.0)
+    st = _state(cfg, 1, T_soil=TF + 1.0, swe=0.0)
+    liq = jnp.full_like(st.snow_liq_layers, 0.2)
+    st = st._replace(snow_liq_layers=liq, snow_T_layers=jnp.full_like(liq, 280.0),
+                     snow_depth=jnp.sum(liq, -1))
+    f = _forcing(1, T_air=280.0, sw=0.0, lw=320.0, q=0.005)
     _closure_run(cfg, st, ((f, 2),))
     assert max(rec) > 1.0, rec                     # J/m2 of sensible drainage heat
+
+
+# ---------------------------------------------------------------------------
+# the pack lies on the snow-covered fraction (CLM5 frac_sno)
+# ---------------------------------------------------------------------------
+
+def test_pack_conducts_over_the_covered_area_only():
+    """A pack on fraction f of the cell is, per unit CELL area, f times the same
+    pack per unit COVERED area (mass / f, same density): heat capacity and every
+    conductance scale by f, the base resistance is the covered one (CTSM solves
+    the snow rows per covered area and gives the soil frac_sno * fn)."""
+    cfg = SnowColumnConfig()
+    pack = seed_snow_state(jnp.array([4.0, 30.0]), jnp.array([265.0, 260.0]))
+    f = jnp.array([0.3, 0.8])
+    cov = pack._replace(swe_ice=pack.swe_ice / f[:, None], swe_liq=pack.swe_liq / f[:, None])
+    C, coeff, rb = snow_thermal_props(pack, cfg, f)
+    C1, coeff1, rb1 = snow_thermal_props(cov, cfg, 1.0)
+    np.testing.assert_allclose(C, f[:, None] * C1, rtol=1e-12)
+    np.testing.assert_allclose(coeff, f[:, None] * coeff1, rtol=1e-12)
+    np.testing.assert_allclose(rb, rb1, rtol=1e-12)
+    # the snow-soil interface: f / (r_base + z0 / k0) (zero flux through bare ground)
+    grid, T, theta, hc, tc = _column_inputs()
+    T, theta = T[:2], theta[:2]
+    Ts, Tg = solve_snow_soil_thermal(pack.T, C, coeff, rb, f, T, theta, grid, hc, tc,
+                                     jnp.zeros(2), 1800.0)
+    Ts1, Tg1 = solve_snow_soil_thermal(pack.T, C, coeff, rb, jnp.ones(2), T, theta, grid,
+                                       hc, tc, jnp.zeros(2), 1800.0)
+    # soil under a partial pack warms less than under a whole-cell pack (pack colder)
+    assert bool(jnp.all(jnp.abs(Tg[:, 0] - T[:, 0]) < jnp.abs(Tg1[:, 0] - T[:, 0])))
+
+
+def test_physical_cover_ignores_the_albedo_snow_scale_at_night():
+    """With no sunlight the albedo cannot matter, so a per-cell snow_cover_scale
+    (an albedo brightness calibration) must leave every physical result of a
+    layered step unchanged: ground-flux split, latent split, thickness, skin."""
+    out = {}
+    for scale in (None, jnp.array([0.4])):
+        cfg = _cfg_ft()
+        cfg = cfg._replace(land_albedo=cfg.land_albedo._replace(snow_cover_scale=scale))
+        st = _state(cfg, 1, T_soil=TF - 2.0, swe=12.0)
+        st, _ = _run(cfg, st, _forcing(1, T_air=255.0, sw=0.0, lw=200.0, snow=1e-4), 4,
+                     1800.0)
+        out[scale is None] = st
+    for name in ("T_soil", "theta_soil", "snow_depth", "snow_T_layers", "snow_rho_layers"):
+        np.testing.assert_array_equal(getattr(out[True], name), getattr(out[False], name))
