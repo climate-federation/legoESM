@@ -412,22 +412,64 @@ def _allreduce_sum(local_value, comm, timer: str):
             comm=MPI.COMM_WORLD if comm is None else comm))
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+class _CommParam:
+    """Hashable primitive parameter wrapping an (unhashable) mpi4py communicator."""
+
+    __slots__ = ("comm",)
+
+    def __init__(self, comm):
+        self.comm = comm
+
+    def __hash__(self):
+        return hash(self.comm.py2f())
+
+    def __eq__(self, other):
+        return isinstance(other, _CommParam) and self.comm == other.comm
+
+
+@functools.cache
+def _replicated_allreduce_p():
+    """Linear primitive y = allreduce(SUM, x) whose transpose is ALSO allreduce.
+
+    Every rank holds y = sum_r' x_r' and may reuse it, so the transpose is
+    x_bar_r = sum_r' y_bar_r' (#811, #1814).  Being linear, its JVP is the same
+    allreduce of the tangent, so forward mode, reverse mode and jit all work.
+    """
+    from jax.extend.core import Primitive
+    from jax.interpreters import ad, batching, mlir
+
+    mpi4jax, MPI = require_mpi_stack()
+
+    def raw(x, *, comm):
+        return mpi4jax_array_result(mpi4jax.allreduce(x, op=MPI.SUM, comm=comm.comm))
+
+    # mpi4jax's ordered effect, read off its own jaxpr (public API only); without
+    # it the lowering has no MPI token to thread.
+    effects = jax.make_jaxpr(lambda v: raw(v, comm=_CommParam(MPI.COMM_WORLD)))(0.0).effects
+
+    prim = Primitive("legoesm_replicated_allreduce_sum")
+    prim.def_impl(raw)
+    prim.def_effectful_abstract_eval(
+        lambda x, *, comm: (jax.core.ShapedArray(x.shape, x.dtype), effects))
+    mlir.register_lowering(prim, mlir.lower_fun(raw, multiple_results=False))
+    ad.primitive_jvps[prim] = lambda primals, tangents, *, comm: (
+        prim.bind(primals[0], comm=comm),
+        prim.bind(ad.instantiate_zeros(tangents[0]), comm=comm))
+    # Instantiate a zero cotangent so EVERY rank enters the backward allreduce,
+    # even one that discarded the sum (skipping it would deadlock the others).
+    ad.primitive_transposes[prim] = (
+        lambda ct, _x, *, comm: [prim.bind(ad.instantiate_zeros(ct), comm=comm)])
+    batching.primitive_batchers[prim] = (
+        lambda args, dims, *, comm: (prim.bind(args[0], comm=comm), dims[0]))
+    return prim
+
+
 def _replicated_sum(local_value, comm, timer):
-    return _allreduce_sum(local_value, comm, timer)
-
-
-def _replicated_sum_fwd(local_value, comm, timer):
-    return _allreduce_sum(local_value, comm, timer), None
-
-
-def _replicated_sum_bwd(comm, timer, _res, g):
-    # Every rank holds y = sum_r' x_r' and may reuse it, so the transpose is
-    # x_bar_r = sum_r' y_bar_r' = allreduce(SUM) of the cotangent (#811, #1814).
-    return (_allreduce_sum(g, comm, timer),)
-
-
-_replicated_sum.defvjp(_replicated_sum_fwd, _replicated_sum_bwd)
+    _, MPI = require_mpi_stack()
+    with mpi_timer(timer):
+        return _replicated_allreduce_p().bind(
+            jax.numpy.asarray(local_value),
+            comm=_CommParam(MPI.COMM_WORLD if comm is None else comm))
 
 
 def global_sum_mpi(local_value: jax.Array, comm=None, *,
@@ -437,7 +479,10 @@ def global_sum_mpi(local_value: jax.Array, comm=None, *,
     **Gradient**: the backward pass ALSO allreduces (sums) the cotangent over
     ``comm``, the correct transpose for a sum that every rank holds and reuses
     (fixer factors, normalisations, inner products, area integrals).  Forward
-    mode (``jax.jvp``/``jacfwd``) through it raises.
+    mode (``jax.jvp``/``jacfwd``) allreduces the tangent, on either path.
+    Every rank must differentiate through the same sums: a rank whose input
+    carries no tangent skips the tangent allreduce (as raw mpi4jax does), and
+    the other ranks then wait on it forever.
 
     ``final_loss=True`` keeps mpi4jax's IDENTITY backward pass instead.  Use it
     for the reduction that produces the loss every rank evaluates and

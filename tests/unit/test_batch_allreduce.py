@@ -279,7 +279,9 @@ class TestMPI4JAXArrayResult:
 
 
 # ---------------------------------------------------------------------------
-# global_sum_mpi VJP (emulated ranks: vmap axis + psum)
+# global_sum_mpi(final_loss=True) VJP (emulated ranks: vmap axis).  The default
+# path is a real MPI primitive that a vmap axis cannot emulate; its cross-rank
+# contract is tested on 2 ranks in tests/distributed/test_mpi_differentiability.py
 # ---------------------------------------------------------------------------
 
 @jax.custom_vjp
@@ -301,39 +303,6 @@ def _emulate_ranks(monkeypatch):
     return red
 
 
-def test_global_sum_mpi_vjp_sums_cross_rank_cotangents(monkeypatch):
-    """Each emulated rank r computes y_r = x_r * S with S = sum over ALL ranks
-    (reused on every rank) and seeds its own local loss sum(y_r).  True
-    dL/dx_r = S + sum_all x = 2 S.  An identity VJP gives S + sum(x_r)."""
-    red = _emulate_ranks(monkeypatch)
-    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)  # 3 ranks
-
-    def local_loss(x_r):
-        return jnp.sum(x_r * red.global_sum_mpi(jnp.sum(x_r)))
-
-    g = jax.vmap(jax.grad(local_loss), axis_name="rank")(x)
-    np.testing.assert_allclose(np.asarray(g), 2.0 * float(jnp.sum(x)),
-                               rtol=1e-12)
-
-
-def test_batch_allreduce_sum_vjp_sums_cross_rank_cotangents(monkeypatch):
-    """Same contract through the packed batch reduction."""
-    red = _emulate_ranks(monkeypatch)
-    monkeypatch.setattr(red, "require_mpi_stack",
-                        lambda: (None, type("M", (), {"SUM": 0, "MAX": 1,
-                                                      "MIN": 2})))
-    x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)
-
-    def local_loss(x_r):
-        s, s2 = red.batch_allreduce_mpi([jnp.sum(x_r), jnp.sum(2.0 * x_r)])
-        return jnp.sum(x_r * s) + jnp.sum(x_r * s2)
-
-    g = jax.vmap(jax.grad(local_loss), axis_name="rank")(x)
-    # d/dx_r [x_r*S + x_r*2S] summed over ranks: 3S + 3*sum_all x = 6S.
-    np.testing.assert_allclose(np.asarray(g), 6.0 * float(jnp.sum(x)),
-                               rtol=1e-12)
-
-
 def test_global_sum_mpi_final_loss_keeps_identity_vjp(monkeypatch):
     """final_loss=True: L = sum over ranks of x^2, seeded 1 on every rank, so
     the per-rank gradient is 2 x_r (no rank-count factor)."""
@@ -347,11 +316,38 @@ def test_global_sum_mpi_final_loss_keeps_identity_vjp(monkeypatch):
     np.testing.assert_allclose(np.asarray(g), 2.0 * np.asarray(x), rtol=1e-12)
 
 
+def test_replicated_sum_backward_allreduces_even_a_discarded_sum():
+    """Single process: the default sum's backward pass binds the allreduce
+    again (it is not mpi4jax's identity), and still does so when the sum is
+    discarded (a zero cotangent), so no rank can skip the collective."""
+    import legoesm.parallel.reductions as red
+    try:
+        red.require_mpi_stack()
+    except Exception as exc:  # no MPI stack on this lane
+        pytest.skip(f"MPI stack unavailable: {exc}")
+
+    def count(f, x):
+        return str(jax.make_jaxpr(f)(x)).count(
+            "legoesm_replicated_allreduce_sum")
+
+    x = jnp.arange(3.0)
+    used = jax.grad(lambda v: jnp.sum(v * red.global_sum_mpi(jnp.sum(v))))
+    discarded = jax.grad(lambda v: (red.global_sum_mpi(jnp.sum(v)),
+                                    jnp.sum(v ** 2))[1])
+    assert count(used, x) == 2
+    assert count(discarded, x) == 2
+    assert count(lambda v: jax.jvp(lambda u: red.global_sum_mpi(jnp.sum(u)),
+                                   (v,), (v,))[1], x) == 2
+
+
 def test_broadcast_allreduce_sum_vjp_sums_cross_rank_cotangents(monkeypatch):
     """Each emulated rank r computes y_r = x_r * S with S = Σ_all x (broadcast)
     and seeds its own local loss sum(y_r). True dL/dx_r = S + Σ_all x = 2 S.
     The identity-VJP reduction would give S + Σ_local x_r instead."""
-    red = _emulate_ranks(monkeypatch)
+    import legoesm.parallel.reductions as red
+
+    monkeypatch.setattr(red, "global_sum_mpi",
+                        lambda v: jax.lax.psum(v, "rank"))
     x = jnp.arange(1.0, 7.0, dtype=jnp.float64).reshape(3, 2)  # 3 ranks
 
     def local_loss(x_r):

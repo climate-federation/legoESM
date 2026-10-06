@@ -191,6 +191,26 @@ class TestReusedSumGrad:
         finally:
             sub.Free()
 
+    def test_rank_that_discards_the_sum_still_joins_backward(self):
+        """Only rank 0 uses the sum; the others discard it.  Their cotangent
+        for it is a symbolic zero, but they must still enter the backward
+        allreduce, or rank 0 deadlocks / misses nothing it needs."""
+        rank = MPI.COMM_WORLD.Get_rank()
+
+        def local_loss(x):
+            s = global_sum_mpi(jnp.sum(x))
+            if rank == 0:
+                return jnp.sum(jnp.sin(x) * s)
+            return jnp.sum(jnp.cos(x))
+
+        def total(xs):
+            return (jnp.sum(jnp.sin(xs[0]) * jnp.sum(xs))
+                    + jnp.sum(jnp.cos(xs[1:])))
+
+        g = jax.grad(local_loss)(self._x(rank))
+        np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
+                                   rtol=1e-12)
+
     def test_reused_sum_inside_jit_scan(self):
         def step(c, s):
             return 0.5 * c + jnp.sin(c) * s / 100.0
@@ -210,6 +230,90 @@ class TestReusedSumGrad:
         g = jax.jit(jax.grad(local_loss))(self._x(MPI.COMM_WORLD.Get_rank()))
         np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
                                    rtol=1e-12)
+
+
+class TestForwardMode:
+    """#1814 follow-up: forward mode through the MPI global sum.  The tangent of
+    S = sum_r x_r is sum_r v_r, so each rank's JVP must equal the matching row
+    of the serial JVP with every rank's tangent stacked."""
+
+    @pytest.fixture(autouse=True)
+    def _two_ranks(self):
+        if MPI.COMM_WORLD.Get_size() < 2:
+            pytest.skip("needs >= 2 MPI ranks")
+
+    @staticmethod
+    def _xv(rank):
+        x = jnp.arange(3.0, dtype=jnp.float64) + 10.0 * rank + 1.0
+        return x, jnp.cos(x) + rank
+
+    def _serial_jvp_row(self, total_rows):
+        comm = MPI.COMM_WORLD
+        xs, vs = (jnp.stack(a) for a in
+                  zip(*(self._xv(r) for r in range(comm.Get_size()))))
+        return np.asarray(jax.jvp(total_rows, (xs,), (vs,))[1])[comm.Get_rank()]
+
+    @pytest.mark.parametrize("jit", [False, True])
+    def test_jvp_global_sum_matches_serial(self, jit):
+        def local(x):
+            return jnp.sin(x) * global_sum_mpi(jnp.sum(x ** 2))
+
+        def rows(xs):
+            return jnp.sin(xs) * jnp.sum(xs ** 2)
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        fn = jax.jit(local) if jit else local
+        t = jax.jvp(fn, (x,), (v,))[1]
+        np.testing.assert_allclose(np.asarray(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_jvp_batch_allreduce_matches_serial(self):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+
+        def local(x):
+            s1, s2 = batch_allreduce_mpi([jnp.sum(x), jnp.sum(x ** 2)])
+            return jnp.sin(x) * s1 + x * s2
+
+        def rows(xs):
+            return jnp.sin(xs) * jnp.sum(xs) + xs * jnp.sum(xs ** 2)
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        t = jax.jvp(local, (x,), (v,))[1]
+        np.testing.assert_allclose(np.asarray(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_jvp_final_loss_matches_serial(self):
+        def local(x):
+            return global_sum_mpi(jnp.sum(x ** 2), final_loss=True)
+
+        def rows(xs):
+            return jnp.broadcast_to(jnp.sum(xs ** 2), xs.shape[:1])
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        t = jax.jvp(local, (x,), (v,))[1]
+        np.testing.assert_allclose(float(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_check_grads_fwd_and_rev_order2(self):
+        """Inputs identical on every rank (check_grads draws its direction from
+        a fixed seed, so all ranks perturb alike); then the local JVP/VJP
+        identity <ct, J v> = <J^T ct, v> holds rank by rank."""
+        from jax.test_util import check_grads
+
+        def local(x):
+            return jnp.sin(x) * global_sum_mpi(jnp.sum(x ** 2))
+
+        check_grads(local, (jnp.arange(1.0, 4.0, dtype=jnp.float64),),
+                    order=2, modes=("fwd", "rev"), atol=1e-6, rtol=1e-6)
+
+    def test_check_grads_final_loss_fwd_order2(self):
+        """final_loss keeps the per-rank identity backward by convention, so
+        only forward mode has a finite-difference reference."""
+        from jax.test_util import check_grads
+
+        check_grads(lambda x: global_sum_mpi(jnp.sum(x ** 3), final_loss=True),
+                    (jnp.arange(1.0, 4.0, dtype=jnp.float64),),
+                    order=2, modes=("fwd",), atol=1e-6, rtol=1e-6)
 
 
 class TestFixerGradScatteredMatchesSerial:
