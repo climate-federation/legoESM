@@ -137,6 +137,7 @@ def run(root: Path, *, plant: str | None = None,
             reference = np.asarray(references[boundary][index])[..., :nlev]
             active = np.asarray(masks[face], dtype=bool)
             planted = plant == boundary and face == "u"
+            unplanted = candidate.copy()
             if planted:
                 candidate = candidate.copy()
                 where = tuple(np.argwhere(active)[0])
@@ -163,6 +164,10 @@ def run(root: Path, *, plant: str | None = None,
                         "stprk3_stg cumulative Krhs immediately after dyn_ldf"),
                 }[boundary],
                 planted=planted,
+                plant_movement_cells=int(np.count_nonzero(
+                    candidate != unplanted)),
+                plant_max_abs_movement=float(np.max(
+                    np.abs(candidate - unplanted))),
             )
             rows.append(row)
 
@@ -188,8 +193,11 @@ def run(root: Path, *, plant: str | None = None,
     }
     if plant:
         planted = [row for row in rows if row["planted"]]
-        require(len(planted) == 1 and planted[0]["cells_unequal"] > 0,
-                "the one-ULP stage-boundary plant did not fire")
+        require(len(planted) == 1
+                and planted[0]["plant_movement_cells"] == 1
+                and planted[0]["plant_max_abs_movement"] > 0.0,
+                "the one-ULP stage-boundary plant did not move exactly one "
+                "scored cell")
     return report
 
 
