@@ -66,6 +66,15 @@ def test_kernel_gradient_finite_at_branch_edges():
     assert float(g_cu[2]) > 0.0 and float(g_cu[0]) == 0.0
 
 
+def test_kernel_gradient_finite_fp32_at_horizontal_limit():
+    # codex r3 case: Cu_h at the 1.1 limit, tiny Cu_v inside the ramp
+    cu = jnp.asarray([9.5403195e-8], dtype=jnp.float32)
+    ch = jnp.asarray([1.0999999, 1.0999999], dtype=jnp.float32)
+    g = jax.grad(lambda c, h: jnp.sum(nemo_aimp_fraction(c, h, jnp.ones(1, jnp.float32))),
+                 argnums=(0, 1))(cu, ch)
+    assert all(np.all(np.isfinite(np.asarray(x))) for x in g)
+
+
 def test_partition_helper_gradient_finite_with_zero_w():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import nemo_aimp_implicit_w
     grid = SimpleNamespace(area_T=jnp.full((1, 2), 1.0e8),

@@ -128,7 +128,10 @@ def nemo_aimp_fraction(cu_v_int, cu_h, w_int):
     # Double-where: each branch sees a safe operand outside its own range, so
     # the unselected branch cannot put inf/NaN into the reverse pass.
     delta = jnp.where(in_mid, cu_v_int - cu_min, one)
-    mid = one / (one + 4.0 * cu_max * (cu_max - cu_min) / (delta * delta))
+    # NEMO's 1/(1+F/d^2) (sshwzv.F90:833-834) as d^2/(d^2+F): same value,
+    # no 1/d^2 overflow in the fp32 reverse pass when both d and F are tiny.
+    d2 = delta * delta
+    mid = d2 / (d2 + 4.0 * cu_max * (cu_max - cu_min))
     cu_hi = jnp.where(in_high & (cu_v_int > 0.0), cu_v_int, one)
     high = (cu_hi - cu_max) / cu_hi
     frac_int = jnp.where(in_mid, mid,
