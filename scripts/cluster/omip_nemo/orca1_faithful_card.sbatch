@@ -74,7 +74,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --visc-schedule "$VSCHED" \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
-  --barotropic-slow-forcing-depth-evaluation nemo_literal `# user 2026-10-05: implicit CN + NEMO reference-thickness average` \
+  --barotropic-slow-forcing-depth-evaluation min_rule_live `# user 2026-10-05: old method; NEMO average is ~99% inert under implicit CN (needs split-explicit + carried mode)` \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
