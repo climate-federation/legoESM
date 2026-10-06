@@ -417,6 +417,12 @@ class TKEOutput(NamedTuple):
     K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
     dissl: jnp.ndarray | None = None  # (...) carried post-tke_avn sqrt(en)/zmxld
     statement_trace: "TKEStatementTrace | None" = None
+    # Read-only budget terms at the interior interfaces [m2/s3], defined as
+    # NEMO's own diagnostics (zdfphy.F90:362-363, zdftke.F90:477): eshear =
+    # the shear production on the RHS (p_sh2), estrat = -K_H*N2 with the
+    # post-avn K_H (estrat_k), ediss = 0.5*c_eps*dissl_old*e_post_solve
+    # (ediss_k, before etau); bapplied = the buoyancy work the solve applied.
+    budget: "tuple | None" = None
 
 
 class TKEStatementTrace(NamedTuple):
@@ -3446,6 +3452,7 @@ def tke_vertical_mixing(
                 tke_curr, dt, taum, N2b, _depth_w, _surface_e3w, cfg,
                 ice_frac=ice_frac, bottom_level=bottom_level,
                 w_active=w_active)
+        _e_pre_solve, _l_eps_used, _K_H_used = tke_curr, l_eps, _K_H_pre
         _solve_result = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=_K_M_pre, K_H_old=_K_H_pre,
@@ -3487,6 +3494,7 @@ def tke_vertical_mixing(
         else:
             tke_curr = _solve_result
 
+    _e_post_solve = tke_curr
     if _etau_on:
         # NEMO step order: the etau injection closes tke_tke (AFTER the
         # implicit solve), then tke_avn derives K_M/K_H from the updated
@@ -3537,9 +3545,30 @@ def tke_vertical_mixing(
             rhs_shear=_statement_shear,
             rhs_intermediate=_statement_rhs_intermediate,
         )
+    _veros_pos = getattr(cfg, "positivity", "floor") == "veros_surface_correction"
+    if _matrix_eval == "nemo_literal":
+        _dissl_used = jnp.asarray(preclosure_dissl, dtype=tke_curr.dtype)
+    else:   # the solve's own linearisation point (mirrors _solve_tke_backward_euler)
+        if _veros_pos:   # AD-safe double-where, as the solver's debt branch
+            _e_sq = jnp.where(_e_pre_solve > 0.0, jnp.sqrt(jnp.where(
+                _e_pre_solve > 0.0, _e_pre_solve, 1.0)), 0.0)
+        else:
+            _e_sq = jnp.sqrt(jnp.maximum(_e_pre_solve, cfg.tke_background))
+        _dissl_used = _e_sq / jnp.maximum(_l_eps_used, _mixing_length_floor(cfg))
+    if _veros_pos or getattr(cfg, "tke_buoyancy_sink",
+                             "implicit_linearized") == "nemo_explicit":
+        _b_applied = -_K_H_used * N2
+    else:
+        _b_applied = (-_K_H_used * jnp.maximum(N2, 0.0)
+                      / jnp.maximum(_e_pre_solve, cfg.tke_background) * _e_post_solve
+                      - _K_H_used * jnp.minimum(N2, 0.0))
+    _budget = (P_s_curr, -K_H * N2,
+               0.5 * cfg.c_eps * _dissl_used * _e_post_solve,  # coeff-ok: NEMO zfact3 = 0.5*rn_ediss (zdftke.F90:242)
+               _b_applied)
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,
-                     dissl=dissl_new, statement_trace=_statement_trace)
+                     dissl=dissl_new, statement_trace=_statement_trace,
+                     budget=_budget)
 
 
 # ---------------------------------------------------------------------------

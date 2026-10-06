@@ -151,7 +151,13 @@ def test_column_callback_emits_the_returned_post_solve_state():
     ref = jax.jit(lambda s: f(s, None)[0])(st)
     np.testing.assert_array_equal(np.asarray(out.T.data), np.asarray(ref.T.data))
     assert len(got) == 1
-    T, S, u, v, K, A, e = got[0]
+    T, S, u, v, K, A, e, eshear, estrat, ediss, bapplied = got[0]
+    # TKE budget terms: wired (finite, not the NaN placeholder), right shape,
+    # and signed as NEMO's diagnostics (production >= 0, dissipation >= 0)
+    for x in (eshear, estrat, ediss, bapplied):
+        assert x.shape == K.shape and np.all(np.isfinite(x))
+    assert eshear.min() >= 0.0 and ediss.min() >= 0.0 and ediss.max() > 0.0
+    assert np.abs(estrat).max() > 0.0 and np.abs(bapplied).max() > 0.0
     # e is the returned prognostic TKE, and it moved from the seed
     np.testing.assert_array_equal(e, np.asarray(tke_out))
     assert e.shape == K.shape and np.abs(e - np.asarray(tke0)).max() > 1e-8
@@ -171,10 +177,14 @@ def test_accumulator_columns_keep_selected_cells_every_step():
     acc.set_columns(mask)
     T = np.arange(3 * 4 * 32, dtype=float).reshape(3, 4, 32); K = T[..., :31]
     for i in range(3):
-        acc(T, K); acc.col(T + i, T, T, T, K + i, K, K + 2 * i)
+        acc(T, K); acc.col(T + i, T, T, T, K + i, K, K + 2 * i, K + 3 * i, K, K, K - i)
     out = acc.drain(_DT)
     assert out["col_T"].shape == (3, 2, 30) and out["col_K"].shape == (3, 2, 29)
     assert out["col_e"].shape == (3, 2, 29)
+    for k in ("col_eshear", "col_estrat", "col_ediss", "col_bapplied"):
+        assert out[k].shape == (3, 2, 29)
+    np.testing.assert_array_equal(out["col_eshear"][2, 1], (K[2, 3, :29] + 6).astype(np.float32))
+    np.testing.assert_array_equal(out["col_bapplied"][2, 0], (K[0, 1, :29] - 2).astype(np.float32))
     np.testing.assert_array_equal(out["col_e"][2, 1], (K[2, 3, :29] + 4).astype(np.float32))
     np.testing.assert_array_equal(out["col_T"][2, 1], (T[2, 3, :30] + 2).astype(np.float32))
     np.testing.assert_array_equal(out["col_K"][1, 0], (K[0, 1, :29] + 1).astype(np.float32))

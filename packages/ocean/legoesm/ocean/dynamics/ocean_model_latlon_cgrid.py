@@ -11742,6 +11742,7 @@ class LatLonCGridOceanModel:
                 "momentum-only call (return_tke must be False).")
         tke_new = None
         _tke_coeff_new = None
+        _tke_budget_box = [] if col_callback is not None else None
         _tke_entry_used = None
         _tke_statement_trace_used = None
         _tke_shear_face_metrics_used = None
@@ -11980,6 +11981,7 @@ class LatLonCGridOceanModel:
                     tke_rhs_intermediate=(
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
                     seos_cfg=_cfg_b.eos_nemo_seos,
+                    tke_budget_out=_tke_budget_box,
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
@@ -12840,8 +12842,11 @@ class LatLonCGridOceanModel:
                           else tke_new)
                 if _e_col is None:
                     _e_col = jnp.full_like(A_v_cell, jnp.nan)
+                _bud = _tke_budget_box[0] if _tke_budget_box else None
+                if _bud is None:
+                    _bud = (jnp.full_like(A_v_cell, jnp.nan),) * 4
                 io_callback(col_callback, None, T_new, S_new, u_new, v_new,
-                            _K_trd, A_v_cell, _e_col, ordered=True)
+                            _K_trd, A_v_cell, _e_col, *_bud, ordered=True)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros

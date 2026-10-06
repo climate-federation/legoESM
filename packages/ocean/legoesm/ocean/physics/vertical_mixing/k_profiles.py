@@ -139,6 +139,7 @@ def compute_vertical_K_profiles(
     return_tke_statement_trace: bool = False,
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
+    tke_budget_out: list | None = None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -337,7 +338,8 @@ def compute_vertical_K_profiles(
             tke_n2_bundle=tke_n2_bundle,
             return_tke_statement_trace=return_tke_statement_trace,
             tke_rhs_materialization=tke_rhs_materialization,
-            tke_rhs_intermediate=tke_rhs_intermediate)
+            tke_rhs_intermediate=tke_rhs_intermediate,
+            tke_budget_out=tke_budget_out)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -582,7 +584,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      tke_n2_bundle=None,
                      return_tke_statement_trace: bool = False,
                      tke_rhs_materialization: str = "",
-                     tke_rhs_intermediate: str = ""):
+                     tke_rhs_intermediate: str = "",
+                     tke_budget_out: list | None = None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -1057,7 +1060,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
                     dissl=tke_out.dissl,
                     statement_trace=tke_out.statement_trace)
+                if tke_budget_out is not None:
+                    tke_budget_out.append(tke_out.budget)
                 return tke_out.K_H, tke_out.K_M, _carry
+            if tke_budget_out is not None:
+                # Read-only diagnostic side channel: the caller consumes these
+                # tracers inside the same trace (the --trd-columns dump).
+                tke_budget_out.append(tke_out.budget)
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
         # background and 3 iterations of the same backward-Euler step bring TKE

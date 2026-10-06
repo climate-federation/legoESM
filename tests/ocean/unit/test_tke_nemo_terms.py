@@ -1652,3 +1652,70 @@ class TestNemoBottomTkeVelocityConvention:
             u=state.u.replace(data=u_cc), v=state.v.replace(data=v_cc))
         with pytest.raises(ValueError, match="RAW face-staggered"):
             model._tke_bottom_dirichlet(collapsed)
+
+
+@pytest.mark.parametrize("sink", ["implicit_linearized", "nemo_explicit"])
+def test_budget_terms_close_the_step_without_tke_diffusion(sink):
+    """With the e-diffusion off (alpha_tke=0) and no surface sources, every
+    interior interface obeys the solved step exactly:
+    (e_new-e_old)/dt = eshear + bapplied - c_eps*dissl*(1.5 e_new - 0.5 e_old),
+    with c_eps*dissl = 2*ediss/e_new (NEMO's ediss_k = 0.5*rn_ediss*dissl*en).
+    A wrong shear, buoyancy or dissipation term breaks the identity."""
+    u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+    cfg = TKEConfig(alpha_tke=0.0, dissipation_discretization="nemo_1p5_split",
+                    tke_buoyancy_sink=sink, tke_background=1.0e-10)
+    e_old = jnp.full(dz_half.shape, 1.0e-4)
+    out = tke_vertical_mixing(u, v, T, S, rho, dz_half, e_old, tx, ty,
+                              dt=150.0, cfg=cfg, rho_0=_RHO0, n_iterations=1,
+                              z_interface=z_int)
+    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget)
+    e_new = np.asarray(out.tke_new)
+    eo = np.asarray(e_old)
+    lhs = (e_new - eo) / 150.0
+    rhs = eshear + bapplied - ediss * (3.0 - eo / e_new)
+    inner = (slice(None), slice(None), slice(1, -1))    # off the pinned rows
+    assert np.abs(eshear[inner]).max() > 1e-8 and np.abs(bapplied[inner]).max() > 1e-9
+    np.testing.assert_allclose(lhs[inner], rhs[inner], rtol=1e-9, atol=1e-14)
+    assert np.all(estrat <= 0.0)   # stable test column: -K_H*N2 is a sink
+
+
+
+def _veros_budget(e_mod=None):
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "_veros_dz_slots_fixture", Path(__file__).with_name("test_tke_veros_dz_slots.py"))
+    _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+    _column_inputs = _mod._column_inputs
+    cfg, kw = _column_inputs()
+    cfg = cfg._replace(positivity="veros_surface_correction", alpha_tke=0.0,
+                       dissipation_discretization="nemo_1p5_split")
+    if e_mod is not None:
+        kw["tke_old"] = e_mod(kw["tke_old"])
+    return cfg, kw
+
+
+def test_budget_terms_close_the_step_on_the_veros_branch():
+    """Same identity on positivity='veros_surface_correction' (explicit
+    buoyancy, sqrt(max(e,0)) linearisation), including a carried debt row."""
+    cfg, kw = _veros_budget(lambda e: e.at[..., 1].set(-3.0e-4))
+    out = tke_vertical_mixing(cfg=cfg, **kw)
+    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget)
+    e_new, eo = np.asarray(out.tke_new), np.asarray(kw["tke_old"])
+    lhs = (e_new - eo) / kw["dt"]
+    rhs = eshear + bapplied - ediss * (3.0 - eo / e_new)
+    inner = (Ellipsis, slice(1, -1))
+    # the debt row dissipates nothing (sqrt(max(e,0)) = 0), buoyancy still acts
+    assert np.abs(bapplied[inner]).max() > 0.0 and np.all(ediss[..., 1] == 0.0)
+    np.testing.assert_allclose(lhs[inner], rhs[inner], rtol=1e-9, atol=1e-14)
+
+
+def test_budget_gradient_is_finite_at_zero_tke_on_the_veros_branch():
+    cfg, kw = _veros_budget()
+    e0 = kw.pop("tke_old")
+
+    def f(e):
+        out = tke_vertical_mixing(cfg=cfg, tke_old=e, **kw)
+        return sum(jnp.sum(x) for x in out.budget)
+
+    e0 = e0.at[..., 1].set(0.0).at[..., 2].set(-1.0e-6)
+    assert np.all(np.isfinite(np.asarray(jax.grad(f)(e0))))

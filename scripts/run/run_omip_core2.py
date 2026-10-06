@@ -6667,15 +6667,21 @@ class _ZdfTrendAccumulator:
         """(ny, nx) bool: also keep every step's post-solve column at these cells."""
         self._cj, self._ci = np.nonzero(mask)
         self._col = {k: [] for k in ("col_T", "col_S", "col_u", "col_v", "col_K", "col_A",
-                                     "col_e")}
+                                     "col_e", "col_eshear", "col_estrat", "col_ediss",
+                                     "col_bapplied")}
 
-    def col(self, T, S, u, v, K, A, e):
+    def col(self, T, S, u, v, K, A, e, eshear, estrat, ediss, bapplied):
         """K/A: assembled solve coefficients (closure + IWM + backgrounds);
-        e: the updated TKE at the same interior interfaces (NEMO en(k+1))."""
+        e: the updated TKE at the same interior interfaces (NEMO en(k+1));
+        eshear/estrat/ediss: TKE budget terms as NEMO's eshear_k/estrat_k/
+        ediss_k; bapplied: the buoyancy work the solve applied (NaN where the
+        lane does not return them)."""
         n = self._NSER   # float32: storage; profiles only need ~1e-7 relative
         for key, x, m in (("col_T", T, n), ("col_S", S, n), ("col_u", u, n),
                           ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1),
-                          ("col_e", e, n - 1)):
+                          ("col_e", e, n - 1), ("col_eshear", eshear, n - 1),
+                          ("col_estrat", estrat, n - 1), ("col_ediss", ediss, n - 1),
+                          ("col_bapplied", bapplied, n - 1)):
             self._col[key].append(np.asarray(x)[self._cj, self._ci, :m].astype(np.float32))
 
     def drain(self, dt=None):
