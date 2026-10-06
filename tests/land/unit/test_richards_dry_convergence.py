@@ -139,3 +139,23 @@ def test_float32_gradient_finite_through_converged_frozen_columns():
     g = jax.grad(loss)(jnp.zeros(3, dtype=jnp.float32))
     assert g.dtype == jnp.float32
     assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_float32_gradient_finite_with_no_room_below_saturation():
+    """Clapp-Hornberger layers on their saturated plateau (psi < 0, theta =
+    theta_sat) leave the post-solve give-back no room; its fraction must not
+    divide by a tiny floor (float32 VJP -num/den^2 overflows to NaN)."""
+    hc = SoilHydraulicsConfig(retention_curve="clapp_hornberger")
+    grid = jax.tree.map(lambda x: x.astype(jnp.float32) if hasattr(x, "astype") else x,
+                        make_soil_grid(SoilGridConfig(n_layers=8)))
+    theta = jnp.full((2, 8), hc.theta_sat, dtype=jnp.float32)
+    psi = jnp.full((2, 8), 0.5 * float(np.max(hc.psi_sat)), dtype=jnp.float32)
+    sink = jnp.zeros((2, 8), dtype=jnp.float32)
+    rc = MultiLayerLandConfig().richards
+
+    def loss(flux_top):
+        out = solve_richards(psi, theta, grid, hc, rc, flux_top, sink, _DT)
+        return jnp.sum(out.theta_new) + 1e-6 * jnp.sum(out.psi_new)
+
+    g = jax.grad(loss)(jnp.zeros(2, dtype=jnp.float32))
+    assert bool(jnp.all(jnp.isfinite(g)))

@@ -692,10 +692,15 @@ def solve_richards(
         unsat, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
     unsat_room = jnp.where(
         unsat, jnp.maximum((hydro_config.theta_sat - theta_final) * dz[None, :], 0.0), 0.0)
-    take_frac = jnp.minimum(
-        excess / jnp.maximum(jnp.sum(unsat_avail, axis=1), 1e-30), 1.0)
-    give_frac = jnp.minimum(
-        deficit / jnp.maximum(jnp.sum(unsat_room, axis=1), 1e-30), 1.0)
+    # Masked denominators: a 1e-30 floor's VJP (-num/den^2) overflows in float32
+    # and NaNs the gradient of a column with no room / no available water.
+    def _frac(num, cap):
+        tot = jnp.sum(cap, axis=1)
+        ok = tot > 0.0
+        return jnp.where(ok, jnp.minimum(num / jnp.where(ok, tot, 1.0), 1.0), 0.0)
+
+    take_frac = _frac(excess, unsat_avail)
+    give_frac = _frac(deficit, unsat_room)
     # Signed per-layer change [m], + = water added to the layer (z down, so
     # this is storage, not a flux): returned deficit minus taken-back excess.
     adjust = unsat_room * give_frac[:, None] - unsat_avail * take_frac[:, None]
