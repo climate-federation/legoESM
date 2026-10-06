@@ -100,7 +100,9 @@ def test_unconverged_column_is_flagged_without_a_spike():
     assert not bool(out.converged[0])
     assert float(out.theta_new[0, 0]) <= 0.39
     assert float(out.psi_new[0, 0]) < 0.0
-    assert abs(residual) < 1e-4  # m; measured 3.4e-5, former solver 7.4e-3
+    # The unconverged iterate lost 3.4e-5 m; the post-solve correction returns it.
+    assert abs(residual) < 1e-12  # m
+    assert abs(float(out.water_created[0])) < 1e-12
 
 
 def test_former_undamped_ten_iterations_spike_on_these_columns():

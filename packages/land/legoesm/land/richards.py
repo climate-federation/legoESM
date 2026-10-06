@@ -664,7 +664,10 @@ def solve_richards(
     #    wet column).  That water went INTO the soil, so it is taken back out of
     #    it, down to the dry floor, with psi recomputed so the next solve starts
     #    consistent.  Whatever the column cannot give back stays in water_created
-    #    (signed diagnostic; a negative residual is left alone).
+    #    (signed diagnostic).
+    #  * < 0: water an unconverged (damped) last iterate lost, e.g. drizzle on a
+    #    dry column (-0.17 kg/m2/day measured).  The solve debited it from the
+    #    soil, so it is returned to the soil, the mirror of the take-back.
     def _budget(theta_end):
         return (jnp.sum((theta_end - theta_n) * dz[None, :], axis=1)
                 + (surface_water_new - h_s0)
@@ -678,21 +681,33 @@ def solve_richards(
             + jnp.sum(jnp.maximum(sink, 0.0) * dz[None, :] * pinned, axis=1)) * dt
     refill = jnp.clip(created, 0.0, draw)
     excess = jnp.maximum(created - refill, 0.0)
+    deficit = jnp.maximum(-created, 0.0)    # refill = 0 whenever created < 0
     # Unsaturated layers only (psi < 0): psi_from_theta has no inverse for the
-    # elastic storage above saturation, so a saturated layer is never debited.
+    # elastic storage above saturation, so a saturated layer is never touched.
+    # Excess comes out of each layer's water above the dry floor; a deficit goes
+    # into each layer's room below saturation; both in proportion, capped so no
+    # layer leaves [theta_floor, theta_sat].
+    unsat = psi_final < 0.0
     unsat_avail = jnp.where(
-        psi_final < 0.0, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
+        unsat, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
+    unsat_room = jnp.where(
+        unsat, jnp.maximum((hydro_config.theta_sat - theta_final) * dz[None, :], 0.0), 0.0)
     take_frac = jnp.minimum(
         excess / jnp.maximum(jnp.sum(unsat_avail, axis=1), 1e-30), 1.0)
-    take = unsat_avail * take_frac[:, None]                            # [m] per layer
-    theta_final = theta_final - take / dz[None, :]
+    give_frac = jnp.minimum(
+        deficit / jnp.maximum(jnp.sum(unsat_room, axis=1), 1e-30), 1.0)
+    # Signed per-layer change [m], + = water added to the layer (z down, so
+    # this is storage, not a flux): returned deficit minus taken-back excess.
+    adjust = unsat_room * give_frac[:, None] - unsat_avail * take_frac[:, None]
+    theta_final = theta_final + adjust / dz[None, :]
     # Masked-out layers get a mid-curve theta so the unused psi_from_theta branch
     # stays finite (no NaN cotangent from saturated layers under reverse mode).
-    theta_safe = jnp.where(take > 0.0, theta_final,
+    touched = adjust != 0.0
+    theta_safe = jnp.where(touched, theta_final,
                            0.5 * (theta_floor + hydro_config.theta_sat))
-    psi_final = jnp.where(take > 0.0, psi_from_theta(theta_safe, hydro_config),
+    psi_final = jnp.where(touched, psi_from_theta(theta_safe, hydro_config),
                           psi_final)
-    # theta keeps the exact debit (water conserved on every curve).  PDI / Lu
+    # theta keeps the exact adjustment (water conserved on every curve).  PDI / Lu
     # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
     # the debited layer's psi carries that pre-existing inverse error; resetting
     # theta from psi instead destroyed ~0.3 kg/m2 per step on a dry column.
