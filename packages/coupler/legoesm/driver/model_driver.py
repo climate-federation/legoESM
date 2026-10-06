@@ -11449,18 +11449,19 @@ class ModelDriver:
                     else jnp.zeros((), jnp.int32))
                 # Unsolved canopy columns ACCEPTED with energy-closed fallback
                 # fluxes, and those the fallback guards reverted instead (the
-                # latter are already inside the held count). Land columns only.
+                # latter are already inside the held count). Same land mask as
+                # the held count (any land fraction), so the two are comparable.
                 _fb_mask = getattr(_sfc, "fallback", None)
                 _n_fb_land = (
                     jnp.sum((jnp.asarray(_fb_mask).reshape(-1)
-                             & (jnp.asarray(_f_land_cols_p) > 0.5))
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
                             .astype(jnp.int32))
                     if _fb_mask is not None
                     else jnp.zeros((), jnp.int32))
                 _fb_rej_mask = getattr(_sfc, "fallback_rejected", None)
                 _n_fb_rej = (
                     jnp.sum((jnp.asarray(_fb_rej_mask).reshape(-1)
-                             & (jnp.asarray(_f_land_cols_p) > 0.5))
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
                             .astype(jnp.int32))
                     if _fb_rej_mask is not None
                     else (_sfc.n_fallback_rejected
