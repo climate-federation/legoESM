@@ -5983,6 +5983,16 @@ CITATION_MAP = {
         ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp", 2),
         19,
     ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:854-856': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN', 2),
+        ('pvv_b  (:,:,Kaa) = pvv_b  (:,:,Kaa) + za1 * va_e', 1),
+        3,
+    ],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:924-937': [
+        ('IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av ) THEN', 1),
+        ("CALL lbc_lnk( 'dynspg_ts', puu_b, 'U', -1._wp, pvv_b, 'V', -1._wp )", 1),
+        14,
+    ],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
         ('END DO   ;   END DO', 5), 45],

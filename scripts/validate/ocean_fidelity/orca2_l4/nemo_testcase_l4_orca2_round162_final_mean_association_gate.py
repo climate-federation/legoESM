@@ -183,10 +183,10 @@ def classify(boundary: dict, production: dict, substep: dict, pair: dict,
     elif plant == "boundary-bit":
         boundary["movement_against_production"]["final_only"]["uu_b"][
             "differing_cells"] = 0
-    elif plant == "source-scope":
-        boundary["nemo_final_association_branch_executes"] = True
         boundary["movement_against_production"]["final_only"]["vv_b"][
             "differing_cells"] = 0
+    elif plant == "source-scope":
+        boundary["nemo_final_association_branch_executes"] = True
     elif plant == "salinity":
         for row in pair["rows"]:
             if (row["kt"], row["checkpoint"], row["field"]) == (10, "stage3", "S"):
