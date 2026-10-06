@@ -7961,6 +7961,239 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
+    _ENERGY_SERIES_KEYS = ("energy_toa_net", "energy_dE_dt",
+                           "energy_residual", "sw_net_sfc", "lw_net_sfc",
+                           "hfss", "hfls", "evspsbl")
+
+    def _mpas_energy_sample(self, p_s_data, elapsed_day: float) -> dict:
+        """One energy-budget tracker sample on the MPAS lane (#1354/#1515).
+
+        Returns ``{series_key: value}`` for the run's timeseries.  A sample
+        that cannot be taken returns NaN for every key in
+        ``_ENERGY_SERIES_KEYS`` and omits ``energy_flux_interval_mean``
+        (NaN, never 0: a zero reads as "the budget closes").
+        """
+        # Under the multi-rank cell partition the tracker's plain area mean
+        # would be rank-local and count halo cells twice, so that lane takes
+        # ``_mpas_energy_partitioned`` (owned cells + allreduce) instead.
+        _ebd = getattr(self.diagnostics, "energy_tracker", None)
+        _sd = getattr(self.model, "_sfc_diag", None)
+        # GATE (codex review): `has_samples()` alone is not enough. A
+        # window can be SHORT -- the first interval after a
+        # feed-off->feed-on restart, or a checkpoint written before
+        # slots 0/1 existed -- and its mean is then over the wrong
+        # number of steps, or missing the surface-radiation pair
+        # entirely. Either way it would be stamped "interval mean" and
+        # sail past the probe, which is worse than the snapshot it
+        # replaced because it looks trustworthy. Require a COMPLETE
+        # window AND every slot the energy budget reads.
+        _facc_e = getattr(self, "_mpas_sfc_accum", None)
+        _use_accum = (_facc_e is not None
+                      and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+        if (_facc_e is not None and _facc_e.is_complete()
+                and not _use_accum):
+            print("  energy tracker: complete window but energy "
+                  "slots have unequal sample counts -- this sample "
+                  "falls back to SNAPSHOT fluxes (stamped 0)")
+        _qv_e = (self.state.tracers["q_v"].data
+                 if (self.state.tracers is not None
+                     and "q_v" in self.state.tracers) else None)
+        # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
+        # (#1354/#1515): without the -L_f*q_frozen term, deposition and
+        # freezing read as a spurious source.  Sum whatever frozen
+        # species this microphysics carries (None -> vapor-only MSE).
+        _qfrz_e = None
+        if self.state.tracers is not None:
+            for _fk in ("q_i", "q_s", "q_g"):
+                if _fk in self.state.tracers:
+                    _fd = self.state.tracers[_fk].data
+                    _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
+
+        def _slot(i):
+            # Interval mean first (the APPLIED quantity); the
+            # end-of-interval snapshot only when no accumulator ran.
+            # `mean()` returns a host array, so this round-trips
+            # device->host->device. That is 7 small transfers per
+            # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+            # not per model step, so it is not on the hot path
+            # (codex review, accepted rather than restructured --
+            # `mean()` is shared with the CMOR feed).
+            if _use_accum:   # window_ready() => every slot has a mean
+                return jnp.asarray(_facc_e.mean(i))
+            return (_sd[i].data if (_sd is not None and len(_sd) > i
+                                    and _sd[i] is not None) else None)
+        _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
+        _sw_ns, _lw_ns = _slot(0), _slot(1)
+        _shf, _lhf = _slot(6), _slot(7)
+        _evp = _slot(_evap_sfc_slot())
+        _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
+        if _is_mpas_cell_partitioned(self):
+            return self._mpas_energy_partitioned(
+                _ebd, _qv_e, _qfrz_e, _rad, (_shf, _lhf, _evp), _use_accum,
+                p_s_data, elapsed_day)
+        if _ebd is None or _qv_e is None or None in _rad:
+            return {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
+        from legoesm.diagnostics.energy_budget import (
+            area_weighted_mean as _awm,
+        )
+        _awt = self.diagnostics._area_w
+        # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
+        # needs cell-centred east/north winds (codex P0).  Perot
+        # reconstruction, the same the turbulence/coupler paths use.
+        _uc, _vc = _cell_winds(self.state, self.grid)
+        _eb = _ebd.update(
+            self.state.T.data, _qv_e, _uc, _vc,
+            self.state.phis.data, p_s_data,
+            self.diagnostics.dsigma, self.diagnostics.sigma_full,
+            _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
+            elapsed_seconds=elapsed_day * 86400.0,
+            area_weights=_awt,
+            dp=self.diagnostics._dp(p_s_data),
+            p_full=self.diagnostics._p_full(p_s_data),
+            q_frozen=_qfrz_e,
+        )
+        return {
+            "energy_toa_net": float(_eb.toa_net),
+            "energy_dE_dt": float(_eb.dE_dt),
+            "energy_residual": float(_eb.residual),
+            "sw_net_sfc": float(_eb.sfc_sw_net),
+            "lw_net_sfc": float(_eb.sfc_lw_net),
+            # Which flux timing produced this sample.  The closure
+            # probe refuses to report a leak from snapshots, because a
+            # contaminated leak is plausible rather than obviously
+            # broken (#1354).
+            "energy_flux_interval_mean": 1.0 if _use_accum else 0.0,
+            "hfss": (float(_awm(_shf, _awt))
+                     if _shf is not None else float("nan")),
+            "hfls": (float(_awm(_lhf, _awt))
+                     if _lhf is not None else float("nan")),
+            "evspsbl": (float(_awm(_evp, _awt))
+                        if _evp is not None else float("nan")),
+        }
+
+    def _mpas_energy_partitioned(self, tracker, q_v, q_frozen, rad, opt,
+                                 use_accum, p_s_data,
+                                 elapsed_day: float) -> dict:
+        """The energy sample under a MULTI-rank cell partition.
+
+        Every per-cell array here is this rank's owned+halo slice, so the
+        global means are formed from OWNED cells only (halo cells would be
+        counted twice) and allreduced: ``sum(w*f) / sum(w)`` with
+        ``w = areaCell * owned``, which equals the serial area-weighted mean.
+
+        Collective protocol (every rank calls this at the same diagnostic
+        step, as it does ``_mpas_global_diag``):
+
+        A. MIN-agree that every rank can sample (tracker, q_v and the five
+           radiation fluxes present); otherwise all return NaN together.
+        B. Refresh the edge halo (the CMOR feed's exchange): the cell winds
+           of owned boundary cells read halo edges, which are stale at this
+           point.  A failure inside the exchange aborts the job, because
+           peers are blocked in it and cannot be released.
+        C. Local sums with no collectives; any error is a flag, not a raise.
+        D. One SUM allreduce of the sums and a MIN/MAX of the flags.  The
+           sample is NaN unless no rank failed AND the flux timing
+           (interval mean vs snapshot) is the same on every rank; an
+           optional flux (hfss/hfls/evspsbl) is NaN unless every rank has it.
+           A mixed sample would be a plausible number, the dangerous kind.
+        """
+        from mpi4py import MPI as _MPI
+
+        from legoesm.diagnostics.energy_budget import (
+            column_moist_static_energy,
+        )
+        comm = _MPI.COMM_WORLD
+        root = comm.Get_rank() == 0
+        nan_out = {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
+        vl = self._voronoi_layout
+
+        # --- A: unanimous entry.
+        _ok = np.array([1.0 if (tracker is not None and q_v is not None
+                                and None not in rad) else 0.0])
+        comm.Allreduce(_MPI.IN_PLACE, _ok, op=_MPI.MIN)
+        if _ok[0] < 0.5:
+            return nan_out
+
+        # --- B: edge halo refresh (collective).
+        try:
+            u_ex = vl.halo_exchange.exchange_edge_field(self.state.u.data)
+        except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
+            logger.critical(
+                "  energy tracker: the edge halo exchange FAILED on rank %d "
+                "(%s: %s). Peers are blocked inside that collective, so the "
+                "job is aborted rather than left to hang.",
+                comm.Get_rank(), type(exc).__name__, exc)
+            comm.Abort(1)
+            raise
+
+        # --- C: local sums, no collectives.
+        # flags = [no_error, interval_mean, has_hfss, has_hfls, has_evspsbl]
+        flags = np.zeros(5)
+        sums = np.zeros(10)   # E, 5 radiation, 3 optional, sum(w)
+        try:
+            owned = vl.owned_mask_cells
+            n_loc = int(owned.shape[0])
+            uc, vc = _cell_winds(self.state, self.grid, u_override=u_ex)
+            E = column_moist_static_energy(
+                self.state.T.data, q_v, uc, vc, self.state.phis.data,
+                p_s_data, self.diagnostics.dsigma,
+                self.diagnostics.sigma_full,
+                dp=self.diagnostics._dp(p_s_data),
+                p_full=self.diagnostics._p_full(p_s_data),
+                q_frozen=q_frozen)
+            area = self.diagnostics._area_w
+            w = jnp.where(owned, 1.0 if area is None else area, 0.0)
+            fields = [E, *rad] + [jnp.zeros_like(E) if f is None else f
+                                  for f in opt]
+            for f in fields:
+                if tuple(jnp.shape(f)) != (n_loc,):
+                    raise ValueError(
+                        f"energy tracker field has shape {jnp.shape(f)}, "
+                        f"not this rank's ({n_loc},) owned+halo cells")
+            # where() on the PRODUCT so a non-finite halo value cannot leak
+            # through 0*NaN.
+            sums = np.array(jnp.stack(
+                [jnp.sum(jnp.where(owned, f * w, 0.0)) for f in fields]
+                + [jnp.sum(w)]), dtype=np.float64)
+            flags = np.array([1.0, 1.0 if use_accum else 0.0]
+                             + [0.0 if f is None else 1.0 for f in opt])
+        except Exception as exc:  # noqa: BLE001 - agreed on in D
+            logger.error("  energy tracker: local sums failed on rank %d "
+                         "(%s: %s); this sample is NaN on every rank.",
+                         comm.Get_rank(), type(exc).__name__, exc)
+            flags = np.zeros(5)
+            sums = np.zeros(10)
+
+        # --- D: every rank, unconditionally.
+        comm.Allreduce(_MPI.IN_PLACE, sums, op=_MPI.SUM)
+        fmin, fmax = flags.copy(), flags.copy()
+        comm.Allreduce(_MPI.IN_PLACE, fmin, op=_MPI.MIN)
+        comm.Allreduce(_MPI.IN_PLACE, fmax, op=_MPI.MAX)
+        if fmin[0] < 0.5:
+            return nan_out
+        if fmin[1] != fmax[1]:
+            if root:
+                logger.warning(
+                    "  energy tracker: flux timing differs across ranks "
+                    "(interval mean on some, snapshot on others); this "
+                    "sample is NaN rather than a mixture.")
+            return nan_out
+        means = sums[:9] / sums[9]
+        eb = tracker.record(*(float(m) for m in means[:6]),
+                            elapsed_seconds=elapsed_day * 86400.0)
+        out = {
+            "energy_toa_net": float(eb.toa_net),
+            "energy_dE_dt": float(eb.dE_dt),
+            "energy_residual": float(eb.residual),
+            "sw_net_sfc": float(eb.sfc_sw_net),
+            "lw_net_sfc": float(eb.sfc_lw_net),
+            "energy_flux_interval_mean": float(fmin[1]),
+        }
+        for j, key in enumerate(("hfss", "hfls", "evspsbl")):
+            out[key] = (float(means[6 + j]) if fmin[2 + j] > 0.5
+                        else float("nan"))
+        return out
+
     def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field):
         """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
 
@@ -12933,105 +13166,11 @@ class ModelDriver:
                 # feed off the tracker falls back to snapshots and stamps
                 # energy_flux_interval_mean = 0; the closure probe then REFUSES
                 # to report a leak rather than quoting a contaminated one.
-                # MPI-partitioned MPAS is skipped: the tracker uses local area
-                # weights + local state with no owned-cell mask or allreduce
-                # (halo double-count), exactly as the moisture tracker is
-                # skipped on that lane (codex review).  Single-GPU / serial
-                # only, which is the #1354 L5 lane.
-                _ebd = getattr(self.diagnostics, "energy_tracker", None)
-                _sd = getattr(self.model, "_sfc_diag", None)
-                # GATE (codex review): `has_samples()` alone is not enough. A
-                # window can be SHORT -- the first interval after a
-                # feed-off->feed-on restart, or a checkpoint written before
-                # slots 0/1 existed -- and its mean is then over the wrong
-                # number of steps, or missing the surface-radiation pair
-                # entirely. Either way it would be stamped "interval mean" and
-                # sail past the probe, which is worse than the snapshot it
-                # replaced because it looks trustworthy. Require a COMPLETE
-                # window AND every slot the energy budget reads.
-                _facc_e = getattr(self, "_mpas_sfc_accum", None)
-                _use_accum = (_facc_e is not None
-                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
-                if (_facc_e is not None and _facc_e.is_complete()
-                        and not _use_accum):
-                    print("  energy tracker: complete window but energy "
-                          "slots have unequal sample counts -- this sample "
-                          "falls back to SNAPSHOT fluxes (stamped 0)")
-                _qv_e = (self.state.tracers["q_v"].data
-                         if (self.state.tracers is not None
-                             and "q_v" in self.state.tracers) else None)
-                # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
-                # (#1354/#1515): without the -L_f*q_frozen term, deposition and
-                # freezing read as a spurious source.  Sum whatever frozen
-                # species this microphysics carries (None -> vapor-only MSE).
-                _qfrz_e = None
-                if self.state.tracers is not None:
-                    for _fk in ("q_i", "q_s", "q_g"):
-                        if _fk in self.state.tracers:
-                            _fd = self.state.tracers[_fk].data
-                            _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
-
-                def _slot(i):
-                    # Interval mean first (the APPLIED quantity); the
-                    # end-of-interval snapshot only when no accumulator ran.
-                    # `mean()` returns a host array, so this round-trips
-                    # device->host->device. That is 7 small transfers per
-                    # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
-                    # not per model step, so it is not on the hot path
-                    # (codex review, accepted rather than restructured --
-                    # `mean()` is shared with the CMOR feed).
-                    if _use_accum:   # window_ready() => every slot has a mean
-                        return jnp.asarray(_facc_e.mean(i))
-                    return (_sd[i].data if (_sd is not None and len(_sd) > i
-                                            and _sd[i] is not None) else None)
-                _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
-                _sw_ns, _lw_ns = _slot(0), _slot(1)
-                _shf, _lhf = _slot(6), _slot(7)
-                _evp = _slot(_evap_sfc_slot())
-                if (_ebd is not None and _qv_e is not None
-                        and not _is_mpas_cell_partitioned(self)
-                        and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
-                    from legoesm.diagnostics.energy_budget import (
-                        area_weighted_mean as _awm,
-                    )
-                    _awt = self.diagnostics._area_w
-                    # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
-                    # needs cell-centred east/north winds (codex P0).  Perot
-                    # reconstruction, the same the turbulence/coupler paths use.
-                    _uc, _vc = _cell_winds(self.state, self.grid)
-                    _eb = _ebd.update(
-                        self.state.T.data, _qv_e, _uc, _vc,
-                        self.state.phis.data, p_s_data,
-                        self.diagnostics.dsigma, self.diagnostics.sigma_full,
-                        _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
-                        elapsed_seconds=elapsed_day * 86400.0,
-                        area_weights=_awt,
-                        dp=self.diagnostics._dp(p_s_data),
-                        p_full=self.diagnostics._p_full(p_s_data),
-                        q_frozen=_qfrz_e,
-                    )
-                    _ts["energy_toa_net"].append(float(_eb.toa_net))
-                    _ts["energy_dE_dt"].append(float(_eb.dE_dt))
-                    _ts["energy_residual"].append(float(_eb.residual))
-                    _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
-                    _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
-                    # Which flux timing produced this sample.  The closure
-                    # probe refuses to report a leak from snapshots, because a
-                    # contaminated leak is plausible rather than obviously
-                    # broken (#1354).
-                    _ts["energy_flux_interval_mean"].append(
-                        1.0 if _use_accum else 0.0)
-                    _ts["hfss"].append(float(_awm(_shf, _awt))
-                                       if _shf is not None else float("nan"))
-                    _ts["hfls"].append(float(_awm(_lhf, _awt))
-                                       if _lhf is not None else float("nan"))
-                    _ts["evspsbl"].append(float(_awm(_evp, _awt))
-                                          if _evp is not None else float("nan"))
-                else:
-                    for _ek in ("energy_toa_net", "energy_dE_dt",
-                                "energy_residual", "sw_net_sfc", "lw_net_sfc",
-                                "hfss", "hfls", "evspsbl"):
-                        _ts[_ek].append(float("nan"))
+                # Energy tracker sample; under the multi-rank cell partition
+                # the global means come from owned cells + allreduce.
+                for _ek, _ev in self._mpas_energy_sample(
+                        p_s_data, elapsed_day).items():
+                    _ts[_ek].append(_ev)
                 # Latest closure the CMOR feed recorded, or NaN before the
                 # first complete diagnostic window.  NaN, never 0: a zero here
                 # reads as "the budget closes", which is the one answer this

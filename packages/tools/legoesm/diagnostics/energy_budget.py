@@ -499,12 +499,27 @@ class EnergyBudgetTracker:
             area_weighted_mean(sw_net_sfc, area_weights),
             area_weighted_mean(lw_net_sfc, area_weights),
         ]))
-        mean_E = float(_h[0])
-        mean_sw_down_toa = float(_h[1])
-        mean_sw_up_toa = float(_h[2])
-        mean_lw_up_toa = float(_h[3])
-        mean_sw_sfc = float(_h[4])
-        mean_lw_sfc = float(_h[5])
+        return self.record(float(_h[0]), float(_h[1]), float(_h[2]),
+                           float(_h[3]), float(_h[4]), float(_h[5]),
+                           elapsed_seconds)
+
+    def record(
+        self,
+        mean_E: float,
+        mean_sw_down_toa: float,
+        mean_sw_up_toa: float,
+        mean_lw_up_toa: float,
+        mean_sw_sfc: float,
+        mean_lw_sfc: float,
+        elapsed_seconds: float,
+    ) -> EnergyBudget:
+        """Record one sample from already-reduced GLOBAL means.
+
+        :meth:`update` reduces its own arrays and calls this; a caller whose
+        fields are partitioned across ranks reduces them globally itself
+        (owned cells, allreduce) and records the result here, so the
+        ``dE/dt`` bookkeeping is shared rather than duplicated.
+        """
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
         mean_sfc_net = mean_sw_sfc + mean_lw_sfc
 
