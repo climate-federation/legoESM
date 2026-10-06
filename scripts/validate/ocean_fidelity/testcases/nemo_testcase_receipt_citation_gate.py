@@ -1286,6 +1286,17 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
     "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    # Round 237 freezes SMT-4 from ORCA2 rung 0 and reads the executable
+    # momentum-LDF branch from the already-compiled pristine SMT-3 base. The
+    # new SMT-4 target is intentionally absent until the operator acquisition.
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
     # Round 228 binds the walk and its instrument retraction to the exact
     # compiled R15 branch that produced the admitted payload.
     "VORTEX_SMT3_VEC_R15_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
@@ -5618,6 +5629,29 @@ CITATION_MAP = {
         ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
         ('SELECT CASE ( nldf_tra )', 2), ('END SELECT', 2), 18],
+    # --- round 237: SMT-4 deck provenance and compiled momentum-LDF branch ---
+    'orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:388-392': [
+        '&namdyn_ldf', 'nn_ahm_ijk_t  = -30', 5],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1135': [
+        '&namdyn_ldf', 'rn_ahm_b      = 0.0', 32],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-185': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        'IF(lwm) WRITE ( numond, namdyn_ldf )', 9],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:221-276': [
+        'nldf_dyn = np_ERROR',
+        'IF( nldf_dyn == np_lap_i )   l_ldfslp = .TRUE.', 56],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:311-346': [
+        'IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv',
+        "CALL ldf_c2d( 'DYN', zUfac      , inn        , ahmt, ahmf )", 36],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90:81-90': [
+        'SELECT CASE ( nldf_dyn )',
+        'CALL dynldf_lev_blp( kt, Kbb, Kmm, puu, pvv, Krhs )', 10],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
+        'DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)',
+        '&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 20],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:387-405': [
+        'CASE ( 3 )        !==  Stage 3  ==!',
+        'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )', 19],
     # --- round 226: admitted SMT-3 compiled branch and magnitude boundary ---
     'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:231-233': [
         'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
