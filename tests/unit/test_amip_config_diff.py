@@ -34,3 +34,11 @@ def test_an_unexpected_or_one_sided_field_fails(tmp_path):
     assert acd.main(["--against", a, "--run", c, "--expect", "land_snow_scheme"]) == 1
     assert acd.main(["--against", a, "--run", c,
                      "--expect", "land_snow_scheme,land_snow_insulation"]) == 0
+
+
+def test_run_vs_run_compares_input_paths_but_not_output_dirs(tmp_path):
+    a = _run(tmp_path, "ctl", {"land_snow_scheme": "bulk", "output_dir": "x",
+                               "land_ic_path": "/ic/a.npz"})
+    b = _run(tmp_path, "arm", {"land_snow_scheme": "layered", "output_dir": "y",
+                               "land_ic_path": "/ic/b.npz"})
+    assert acd.main(["--against", a, "--run", b, "--expect", "land_snow_scheme"]) == 1

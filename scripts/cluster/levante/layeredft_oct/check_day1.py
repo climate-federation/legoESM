@@ -7,7 +7,9 @@ Pass (exit 0) needs, at checkpoint day restart+1:
   snow scheme with soil freeze/thaw on;
 - layered arms: the four snow-layer fields present, the layers' water equal to
   the snow water (rtol 1e-5, float32 storage), and the run log carrying the
-  "pack built from its snow water" warning (the bulk restart was seeded).
+  "pack built from its snow water" warning (the bulk restart was seeded);
+- every arm: the summed snow water at day 1 at least half the restart's (a
+  pack that seeding or the first day erased cannot pass).
 Held land column-steps (budgets not closed) are printed, not gated.
 """
 from __future__ import annotations
@@ -31,6 +33,14 @@ def day1_problems(run_dir, restart_day, scheme, log_text):
     z = np.load(ck, allow_pickle=False)
     out = [f"non-finite {k}" for k in z.files
            if z[k].dtype.kind in "fc" and not np.all(np.isfinite(z[k]))]
+    rst = run_dir / f"checkpoint_day_{restart_day:04d}.npz"
+    if rst.exists():
+        s0 = float(np.sum(np.load(rst, allow_pickle=False)["land_ml_snow_depth"], dtype=np.float64))
+        s1 = float(np.sum(z["land_ml_snow_depth"], dtype=np.float64))
+        if s1 < 0.5 * s0:
+            out.append(f"snow water {s1:.4g} after day 1 vs {s0:.4g} at restart")
+    else:
+        out.append(f"no restart {rst.name}")
     cfg = json.loads((run_dir / "experiment_config.json").read_text())
     if cfg.get("land_snow_scheme") != scheme:
         out.append(f"resolved land_snow_scheme {cfg.get('land_snow_scheme')!r}, want {scheme!r}")

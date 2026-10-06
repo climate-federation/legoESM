@@ -21,6 +21,7 @@ def _run(tmp_path, scheme="layered", ft=True, **over):
            "land_ml_snow_depth": ice.sum(-1), "T": np.ones(4)}
     arr.update(over)
     np.savez(tmp_path / "checkpoint_day_0276.npz", **arr)
+    np.savez(tmp_path / "checkpoint_day_0275.npz", land_ml_snow_depth=np.full(3, 10.0))
     (tmp_path / "experiment_config.json").write_text(json.dumps(
         {"land_snow_scheme": scheme, "land_soil_freeze_thaw": ft}))
     return tmp_path
@@ -37,5 +38,9 @@ def test_each_failure_is_reported(tmp_path):
     assert cd1.day1_problems(_run(tmp_path), 275, "layered", "no warning")
     assert cd1.day1_problems(_run(tmp_path, land_ml_snow_depth=np.zeros(3)), 275, "layered", _LOG)
     assert cd1.day1_problems(_run(tmp_path), 280, "layered", _LOG)        # wrong day
+    wiped = _run(tmp_path, land_ml_snow_ice_layers=np.zeros((3, 5), np.float32),
+                 land_ml_snow_depth=np.zeros(3))
+    assert cd1.day1_problems(wiped, 275, "layered", _LOG) == [
+        "snow water 0 after day 1 vs 30 at restart"]
     # a bulk control needs neither layers nor the warning
     assert cd1.day1_problems(_run(tmp_path, scheme="bulk"), 275, "bulk", "") == []

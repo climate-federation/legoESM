@@ -45,9 +45,19 @@ _SKIP_EXACT = frozenset({
 })
 
 
-def _skip(key: str) -> bool:
+# Run-vs-run (--run) compares two runs meant to share every input, so input
+# paths (forcing, land IC, surface data, orography...) ARE compared there; only
+# where each run writes, which copy it restarts from, and the repo-relative
+# deck/params paths (their resolved values are compared) are skipped.
+_SKIP_RUN_VS_RUN = frozenset({
+    "output_dir", "run_name", "restart_from", "config", "params",
+    "max_wallclock_seconds",
+})
+
+
+def _skip(key: str, run_vs_run: bool = False) -> bool:
     """True for fields that say where a run writes, not what it computes."""
-    return key.split(".")[-1] in _SKIP_EXACT
+    return key.split(".")[-1] in (_SKIP_RUN_VS_RUN if run_vs_run else _SKIP_EXACT)
 
 
 def _as_plain(v):
@@ -143,7 +153,7 @@ def main(argv=None) -> int:
     expected = {e.strip() for e in args.expect.split(",") if e.strip()}
     intended, unintended = [], []
     for key in sorted(set(ref) | set(new)):
-        if _skip(key):
+        if _skip(key, run_vs_run=args.run is not None):
             continue
         a, b = ref.get(key, "<absent>"), new.get(key, "<absent>")
         if str(a) == str(b):

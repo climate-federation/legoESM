@@ -19,7 +19,9 @@
 # (valid only after its 1-day gate passes, and PREREG's resolved-config diff)
 # or lf_ctl_a/b:
 #   sbatch --nodes=2 --job-name=layeredft --export=ALL,ARMS="lf_on_a lf_on_b" bundle.sbatch
-# RESUME (an arm stopped by its wall clock exits 75 and queues nothing):
+# RESUME: under MPI the run's own wall-clock exit is off, so a job that hits
+# the 12 h limit is killed by SLURM (90 days take ~2.5 h: E0' ran 45 d in
+# 70 min).  Checkpoints are daily; resubmit the same arms with the gate off:
 #   sbatch --nodes=<n> --job-name=layeredft --export=ALL,ARMS="<the same arms>",DAY1_GATE=0 bundle.sbatch
 # Each arm restarts from its own newest checkpoint on its own node.
 set -uo pipefail
@@ -79,6 +81,11 @@ for a in "${arms[@]}"; do
   IFS=$'\t' read -r _n _t _r _c _e < "${ROOT}/${a}/arm.tsv"
   START[${a}]=$(newest_day "${ROOT}/${a}")
   TGT[${a}]=${_t}
+  [[ -n "${START[${a}]}" ]] || { echo "REFUSING: ${a} has no checkpoint" >&2; exit 64; }
+  # The gated first launch must start from the hashed restart copy itself.
+  rday=$(awk '{print $2}' "${ROOT}/${a}/restart.sha256" | sed -E 's/.*checkpoint_day_0*([0-9]+)\.npz/\1/')
+  (( ! DAY1_GATE || START[${a}] == rday )) \
+    || { echo "REFUSING: ${a} already holds day ${START[${a}]} past its restart ${rday}; resume with DAY1_GATE=0" >&2; exit 64; }
 done
 if (( DAY1_GATE )); then
   for a in "${arms[@]}"; do TGT[${a}]=$(( START[${a}] + 1 )); done
