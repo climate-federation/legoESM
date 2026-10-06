@@ -116,7 +116,7 @@ def _get(o, dotted):
     return o
 
 
-def load_resolved_config(manifest_path: Path):
+def load_resolved_config(manifest_path: Path, allow_z0_direct: bool = False):
     """Deserialise the arm's resolved TKEConfig + eos/rho_0/g from the manifest.
 
     The manifest stores the FULLY RESOLVED runtime config (not just the command
@@ -144,7 +144,12 @@ def load_resolved_config(manifest_path: Path):
         unsupported.append(f"tke_shear_production={cfg.tke_shear_production}")
     if getattr(cfg, "tke_shear_avm_weighting", "tpoint") != "tpoint":
         unsupported.append(f"tke_shear_avm_weighting={cfg.tke_shear_avm_weighting}")
-    if getattr(cfg, "tke_surface_bc_level", "interior_pinned") == "nemo_z0":
+    # nemo_z0 only adds the virtual z=0 row to the en SOLVE (tke.py
+    # tke_vertical_mixing, surface_bc_level block); the direct pair
+    # compute_mixing_lengths/compute_K_from_tke never reads it, so the
+    # strip mode (direct K from a GIVEN en, no solve) may accept it.
+    if (getattr(cfg, "tke_surface_bc_level", "interior_pinned") == "nemo_z0"
+            and not allow_z0_direct):
         unsupported.append("tke_surface_bc_level=nemo_z0")
     if bool(getattr(cfg, "bottom_tke_bc", False)):
         unsupported.append("bottom_tke_bc=True")
@@ -321,7 +326,7 @@ def load_sbc_taum(sbc_path, rec, twins):
 # the DIRECT closure-K read (instant-in, K-out; no solve)
 # ===========================================================================
 def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
-             cfg, eos_name, rho0, g):
+             cfg, eos_name, rho0, g, n2_scale=1.0, quiet=False):
     """(avm, avt) at interior interfaces from a GIVEN en — no en advance.
 
     Replicates the pre-loop inputs of ``tke_vertical_mixing`` (tke.py:2018-2231)
@@ -373,6 +378,8 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
         n2_mode=cfg.n2_mode, n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
         adiabatic_over_dz_half=False, t_depth=t_depth, w_depth=w_depth,
         e3w_int=e3w_int)
+    # n2_scale: layering probe only (uniform N2 scaling, en/shear held fixed)
+    N2 = N2 * n2_scale
     signed_n2 = cfg.n2_mode in ("adiabatic", "nemo_bn2")
     # squared_centered shear (the only supported discretization here; tke.py:2105)
     shear_sq = vertical_shear_squared(uj, vj, dz_half)
@@ -396,7 +403,7 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
     _en = np.asarray(enj)[0]; _n2 = np.asarray(N2)[0]
     _s2 = np.asarray(shear_sq)[0]; _lk = np.asarray(l_k)[0]
     _bk = (zk >= ENTRAINMENT_LO) & (zk <= ENTRAINMENT_HI)
-    if _bk.any():
+    if _bk.any() and not quiet:
         def _bm(a):
             v = a[:, _bk]; v = v[np.isfinite(v)]
             return float(np.median(v)) if v.size else float("nan")
@@ -652,6 +659,166 @@ def run_nemo(args, oracle, twins):
     return 0 if ok_all else 5
 
 
+def load_hourly_taum(path, hour_index):
+    """Hourly-mean |tau| (NEMO trd1h_T ``taum``) at record ``hour_index``, with
+    the file's own nav_lat/nav_lon (output grid). No clamp on the record."""
+    import netCDF4 as nc
+    d = nc.Dataset(path)
+    nt = d["taum"].shape[0]
+    if not (0 <= hour_index < nt):
+        raise SystemExit(f"taum record {hour_index} out of range [0,{nt})")
+    a = np.asarray(d["taum"][hour_index], dtype=np.float64)
+    lat = np.asarray(d["nav_lat_grid_T"][:], dtype=np.float64)
+    lon = np.asarray(d["nav_lon_grid_T"][:], dtype=np.float64) % 360.0
+    d.close()
+    return np.where(np.abs(a) > 1e10, np.nan, a), lat, lon
+
+
+def ratio_class(r, tol=1.2, out=2.0):
+    """Symmetric pre-registered class of a ratio: within [1/tol, tol],
+    INCONCLUSIVE up to ``out``x, else OUTSIDE."""
+    a = max(r, 1.0 / r) if (np.isfinite(r) and r > 0) else float("inf")
+    return "within" if a <= tol else ("INCONCLUSIVE" if a < out else "OUTSIDE")
+
+
+def _med(x):
+    x = np.asarray(x, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    return float(np.median(x)) if x.size else float("nan")
+
+
+def run_strip(args, oracle, twins):
+    """Instant closure K, OURS (production config) vs NEMO avm_k/avt_k, on
+    NEMO's own restart columns in a strip, per interface (2-30 m).
+
+    Per-column ratios (median over columns) per interface; the 8-18 m band;
+    the top-decile |dN2/dk| subset (where staircases nucleate); rank
+    correlation of log(avt ratio) with N2; sign alternation of the log ratio
+    across adjacent interfaces; fixed-en layering slope dln(K_H N2)/dln N2 for
+    ours and for a NEMO-Prandtl variant (prandtl_mode=nemo_ri), the variant
+    first scored against NEMO avt_k on the same state. Numbers only.
+    """
+    cfg, eos, rho0, g = load_resolved_config(Path(args.manifest), allow_z0_direct=True)
+    _echo_cfg(cfg, eos, rho0, g)
+    R = reassemble_restart(
+        args.restart_glob, ("T", "S", "U", "V", "en", "avt_k", "avm_k", "ssh"),
+        twins)
+    nav_lat, nav_lon = R["nav_lat"], R["nav_lon"]
+    wet = np.isfinite(R["T"][..., 0])
+    band = _box(nav_lat, nav_lon, args) & wet
+    ncol = int(band.sum())
+    if ncol < MIN_COLUMNS:
+        raise SystemExit(f"only {ncol} NEMO columns in strip (< {MIN_COLUMNS}) — FAIL")
+    dz_ref, t_depth_ref, w_interior = native_ladders_meshmask(args.nemo_meshmask, twins)
+    u_cell, v_cell = centre_uv_collocated(R["U"], R["V"])
+    taum, tlat, tlon = load_hourly_taum(args.taum_file, args.taum_hour)
+    tau_cols = sample_at_columns(taum, tlat, tlon, nav_lat[band], nav_lon[band], twins)
+    print(f"[strip] {ncol} columns; |tau| median {np.nanmedian(tau_cols):.4f} N/m^2 "
+          f"(hourly mean record {args.taum_hour}); dtype T {R['T'].dtype}")
+
+    def call(c, n2s=1.0, en_scale=1.0):
+        return direct_K(
+            T=R["T"][band][None], S=R["S"][band][None],
+            u_cell=u_cell[band][None], v_cell=v_cell[band][None],
+            en=R["en"][band][:, 1:][None] * en_scale, taum=tau_cols[None, :],
+            eta=R["ssh"][band][None, :], lat=nav_lat[band][None, :],
+            dz_ref=dz_ref, t_depth_ref=t_depth_ref, cfg=c, eos_name=eos,
+            rho0=rho0, g=g, n2_scale=n2s, quiet=True)
+
+    # NEMO floors avm_k/avt_k at avmb/avtb; with ln_zdfiwm=T those are 1.4e-6 /
+    # 1e-10 (zdfiwm init) = our kappaM_min / kappaH_min, so floors match.
+    avm, avt, zk, N2 = call(cfg, en_scale=args.perturb_en)
+    print(f"[strip] dtypes: avm {avm.dtype} N2 {N2.dtype} dz_ref {np.asarray(dz_ref).dtype}")
+    n_avm = R["avm_k"][band][:, 1:]
+    n_avt = R["avt_k"][band][:, 1:]
+    # index-mapping check only: cumsum(e3t_1d) and gdepw_1d differ by <1 cm
+    if not np.allclose(np.asarray(zk)[:20], np.asarray(w_interior)[:20], atol=0.05):
+        raise SystemExit("our interface ladder != NEMO gdepw interior (k mapping broken)")
+    kmax = int(np.searchsorted(np.asarray(zk), args.zmax))
+    mM = common_mask(avm, n_avm)
+    mH = common_mask(avt, n_avt)
+    rM = np.where(mM, avm / np.where(mM, n_avm, 1.0), np.nan)
+    rH = np.where(mH, avt / np.where(mH, n_avt, 1.0), np.nan)
+    print("\n   k    z_w | avm ours  avm_k NEMO  med(r) | avt ours  avt_k NEMO  med(r) |  N2 med")
+    for k in range(kmax):
+        print(f"  {k + 1:2d} {zk[k]:6.2f} | {_med(avm[:, k][mM[:, k]]):9.3e} {_med(n_avm[:, k][mM[:, k]]):10.3e} "
+              f"{_med(rM[:, k]):6.3f} | {_med(avt[:, k][mH[:, k]]):9.3e} {_med(n_avt[:, k][mH[:, k]]):10.3e} "
+              f"{_med(rH[:, k]):6.3f} | {_med(N2[:, k]):.2e}")
+    bk = (zk >= args.band_lo) & (zk <= args.band_hi)
+    def q(x):
+        x = np.asarray(x)[np.isfinite(x)]
+        return "nan" if not x.size else "/".join(f"{v:.3f}" for v in np.percentile(x, [25, 50, 75]))
+    mb_m, mb_t = _med(rM[:, bk]), _med(rH[:, bk])
+    print(f"\n[band {args.band_lo:g}-{args.band_hi:g} m] per-column ratio p25/p50/p75  avm {q(rM[:, bk])}  "
+          f"avt {q(rH[:, bk])}  (n={int(np.isfinite(rH[:, bk]).sum())})")
+    # per-COLUMN band summary (median over the column's band interfaces), then
+    # quartiles over columns (codex: pooled column-interface samples overweight)
+    colM, colH = np.nanmedian(rM[:, bk], axis=1), np.nanmedian(rH[:, bk], axis=1)
+    print(f"[band] per-column band medians, quartiles over {int(np.isfinite(colH).sum())} columns: "
+          f"avm {q(colM)}  avt {q(colH)}")
+    # floor occupancy + unfloored score (samples where both sides >= 10x floor)
+    fm, fh = float(cfg.kappaM_min), float(cfg.kappaH_min)
+    flM = (avm[:, bk] <= 1.0001 * fm) | (n_avm[:, bk] <= 1.0001 * fm)
+    flH = (avt[:, bk] <= 1.0001 * fh) | (n_avt[:, bk] <= 1.0001 * fh)
+    upM = (avm[:, bk] >= 10 * fm) & (n_avm[:, bk] >= 10 * fm)
+    upH = (avt[:, bk] >= 10 * fh) & (n_avt[:, bk] >= 10 * fh)
+    print(f"[band] floor-bound fraction avm {float(flM.mean()):.3f} avt {float(flH.mean()):.3f}; "
+          f"unfloored (both >=10x floor) avm {q(rM[:, bk][upM])}  avt {q(rH[:, bk][upH])}")
+    cM, cH = ratio_class(_med(colM)), ratio_class(_med(colH))
+    print(f"[band] pre-registered class (per-column median, [1/1.2,1.2]; INCONCLUSIVE <2x): avm {cM}  avt {cH}")
+    planted_ok = None
+    if args.perturb_en != 1.0:
+        planted_ok = (cM != "within") and (cH != "within")
+        print(f"[band] PLANTED en x{args.perturb_en}: gate rejects = {planted_ok} (must be True)")
+    # staircase nucleation sites: top-decile |N2(k) - mean(N2(k-1), N2(k+1))|
+    curv = np.full_like(N2, np.nan)
+    zz = np.asarray(zk, dtype=np.float64)
+    wgt = (zz[1:-1] - zz[:-2]) / (zz[2:] - zz[:-2])          # depth-linear interp weight
+    curv[:, 1:-1] = np.abs(N2[:, 1:-1] - ((1 - wgt) * N2[:, :-2] + wgt * N2[:, 2:]))
+    cb = np.where(bk[None, :] & np.isfinite(rH), curv, np.nan)
+    thr = np.nanpercentile(cb, 90)
+    top = cb >= thr
+    print(f"[band] top-decile |N2 curvature| interfaces: avm {_med(rM[top]):.3f}  avt {_med(rH[top]):.3f}  (n={int(top.sum())})")
+    lr = np.log(rH[:, bk]); n2b = N2[:, bk]
+    ok = np.isfinite(lr) & np.isfinite(n2b)
+    if ok.sum() > 10:
+        from scipy.stats import spearmanr                   # tie-aware ranks
+        print(f"[band] Spearman(log avt ratio, N2) = {spearmanr(lr[ok], n2b[ok]).statistic:+.3f}")
+    d = np.diff(np.sign(np.log(rH[:, bk])), axis=1)
+    alt = np.isfinite(d)
+    print(f"[band] adjacent-interface sign flips of log(avt ratio): {float((np.abs(d[alt]) > 1).mean()):.3f} "
+          "(0 = smooth, ~0.5 = random, 1 = alternating)")
+    # Prandtl branch occupancy in the band (ours: Pr = clip(c*N2/S2, 1, 10))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        prr = np.where(avt[:, bk] > 1.0001 * fh, avm[:, bk] / avt[:, bk], np.nan)
+    fin = np.isfinite(prr)
+    print(f"[band] Prandtl branch occupancy: Pr~1 {float((prr[fin] < 1.01).mean()):.3f}  "
+          f"linear {float(((prr[fin] >= 1.01) & (prr[fin] <= 9.9)).mean()):.3f}  Pr~10 {float((prr[fin] > 9.9).mean()):.3f}")
+    # fixed-en LOCAL layering slope: perturb N2 at ONE interface k (x0.9/x1.1),
+    # read the buoyancy flux K_H*N2 at that same k (mixing-length sweeps couple
+    # neighbours, so a uniform scaling is not a local test). CAVEAT: en fixed.
+    # OURS only: NEMO's pdlr = ri_c/max(ri_c, zri) is the same law (zdftke.F90
+    # nn_pdl=1), so a 'NEMO variant' of our code is not independent evidence.
+    for eps in (0.1, 0.02):
+        sls = []
+        for k in np.where(bk)[0]:
+            fac = np.ones(N2.shape[1]); fac[k] = 1.0 - eps
+            _, a_lo, _, n_lo = call(cfg, fac[None, None, :])
+            fac[k] = 1.0 + eps
+            _, a_hi, _, n_hi = call(cfg, fac[None, None, :])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                sl = (np.log(a_hi[:, k] * n_hi[:, k]) - np.log(a_lo[:, k] * n_lo[:, k])) / (np.log(1 + eps) - np.log(1 - eps))
+            sls.append(np.where((n_lo[:, k] > 0) & (n_hi[:, k] > 0), sl, np.nan))
+        sl = np.stack(sls, axis=1)
+        print(f"[layering local fixed-en, ours, +/-{eps:g}] slope p25/p50/p75 {q(sl)}  frac<0 "
+              f"{float((sl[np.isfinite(sl)] < 0).mean()):.3f}")
+    print("\n[strip] instant closure map on NEMO's own state + en (restart T/S/u/v are one "
+          "RK3 step newer than NEMO's closure inputs); numbers only, no verdict.")
+    if planted_ok is False:
+        return 6
+    return 0
+
+
 # ===========================================================================
 # CLI
 # ===========================================================================
@@ -659,9 +826,10 @@ def build_arg_parser():
     p = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--mode", required=True, choices=("control", "nemo"))
+    p.add_argument("--mode", required=True, choices=("control", "nemo", "strip"))
     p.add_argument("--manifest", required=True, type=Path)
-    p.add_argument("--nemo-sbc", required=True, type=Path)
+    p.add_argument("--nemo-sbc", type=Path, default=None,
+                   help="control/nemo modes: 5-day SBC file (taum)")
     p.add_argument("--rec", type=int, default=5,
                    help="SBC record (fails if out of range; no clamp)")
     p.add_argument("--lat-halfwidth", type=float, default=DEFAULT_LAT_HALFWIDTH)
@@ -674,6 +842,13 @@ def build_arg_parser():
                         "(real gate)")
     p.add_argument("--control-tol", type=float, default=1.5)
     p.add_argument("--restart-glob", type=str, default=None)
+    p.add_argument("--taum-file", type=Path, default=None,
+                   help="strip mode: NEMO trd1h_T file carrying hourly taum")
+    p.add_argument("--taum-hour", type=int, default=None,
+                   help="strip mode: hourly record (0-based) for the restart's hour")
+    p.add_argument("--band-lo", type=float, default=8.0)
+    p.add_argument("--band-hi", type=float, default=18.0)
+    p.add_argument("--zmax", type=float, default=30.0)
     p.add_argument("--nemo-meshmask", type=Path, default=None,
                    help="an ORCA1 mesh_mask tile (native gdept_1d/gdepw_1d/e3t_1d)")
     return p
@@ -685,13 +860,24 @@ def main(argv=None):
     print(f"[prov] git {_git_sha()}")
     print(f"[prov] mode={args.mode} box |lat|<={args.lat_halfwidth} "
           f"{args.lon_west:.0f}-{args.lon_east:.0f}E")
+    if args.mode in ("control", "nemo") and args.nemo_sbc is None:
+        raise SystemExit(f"{args.mode} mode needs --nemo-sbc")
     if args.mode == "control":
         if args.snapshot is None:
             raise SystemExit("control mode needs --snapshot")
         print(f"[prov] snapshot {args.snapshot}")
         return run_control(args, oracle, twins)
     if args.restart_glob is None or args.nemo_meshmask is None:
-        raise SystemExit("nemo mode needs --restart-glob and --nemo-meshmask")
+        raise SystemExit("nemo/strip mode needs --restart-glob and --nemo-meshmask")
+    if args.mode == "strip":
+        # oracle-fidelity rule 1c: fp64 policy, not only JAX x64 (constructors
+        # cast geometry to the policy control dtype).
+        if args.taum_file is None or args.taum_hour is None:
+            raise SystemExit("strip mode needs --taum-file and --taum-hour")
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64())
+        print(f"[prov] restart {args.restart_glob}  taum {args.taum_file}[{args.taum_hour}]")
+        return run_strip(args, oracle, twins)
     print(f"[prov] restart {args.restart_glob}")
     print(f"[prov] meshmask {args.nemo_meshmask}")
     return run_nemo(args, oracle, twins)
