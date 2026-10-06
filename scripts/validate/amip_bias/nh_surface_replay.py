@@ -444,19 +444,32 @@ def capture(a):
     radin["rad_lwp"] = np.asarray(_cp.lwp, dtype=np.float64).sum(1)
     radin["rad_iwp"] = np.asarray(_cp.iwp, dtype=np.float64).sum(1)
     if a.snow_arms:
-        # CAM6 radiates falling snow (MG2 hands snow mass, its own size and a
-        # snow cloud fraction to RRTMG: micro_mg_cam.F90 cldfsnow, radiation.F90
-        # snow_cloud_get_rad_props_lw, cam_cesm2_1_rel).  This model's solver has
-        # no snow condensate, so the snow (and graupel) mass is ADDED TO THE
-        # CLOUD ICE handed to the backend, with the backend's own cloud cover:
-        # snow in layers with zero cover stays invisible (CAM gives such layers
-        # a 0.25 snow cover), so this is a LOWER bound on CAM6's treatment.
+        # CAM6 radiates falling snow with its OWN cover, path and size and snow
+        # optics (micro_mg_cam.F90 cldfsnow / icswp; rrtmg radiation.F90
+        # snow_cloud_get_rad_props_lw, cam_cesm2_1_rel).  The radiation here
+        # has no snow condensate (the prognostic snow tracer is never passed to
+        # it), so these arms ADD the snow (snow+graupel) mass to the cloud ice
+        # handed to the backend.  A SENSITIVITY, not a bound on CAM6: the added
+        # mass gets ice optics and, with fixed n_ice, a larger ice radius, and
+        # it may change the backend's ice cover (audited below); snow in
+        # zero-cover layers stays invisible where CAM gives it 0.25 cover.
+        # Graupel is beyond CAM6 MG2 (no graupel there): "snowg" is a mass
+        # sensitivity only.
         _tr = cap["state"].tracers
         _qs = jnp.asarray(_tr["q_s"].data if hasattr(_tr["q_s"], "data") else _tr["q_s"])
         _qg = jnp.asarray(_tr["q_g"].data if hasattr(_tr["q_g"], "data") else _tr["q_g"])
         _qi = jnp.asarray(ra["q_ice"])
         if _qs.shape != _qi.shape or _qg.shape != _qi.shape:
             raise SystemExit(f"FATAL: snow/graupel {_qs.shape}/{_qg.shape} vs ice {_qi.shape}")
+        # Same state, same level order: the cloud-ice tracer must match the
+        # ice the backend was handed (else the snow lands on the wrong levels).
+        if "q_i" in _tr:
+            _qit = np.asarray(_tr["q_i"].data if hasattr(_tr["q_i"], "data") else _tr["q_i"],
+                              dtype=np.float64)
+            _c = np.corrcoef(_qit.ravel(), np.asarray(_qi, dtype=np.float64).ravel())[0, 1]
+            print(f"snow arms: q_i tracer vs radiation q_ice correlation {_c:.4f}", flush=True)
+            if not _c > 0.99:
+                raise SystemExit("FATAL: cloud-ice tracer does not match the radiation's q_ice")
         _dpn = np.abs(np.diff(np.asarray(_ph, dtype=np.float64), axis=1))
         for _n, _q in (("snow", _qi + _qs.astype(_qi.dtype)),
                        ("snowg", _qi + (_qs + _qg).astype(_qi.dtype))):
@@ -472,6 +485,15 @@ def capture(a):
             radin[f"rad_iwp_{_n}"] = np.asarray(_cps.iwp, dtype=np.float64).sum(1)
             radin[f"rad_cf_total_maxrand_{_n}"] = np.asarray(
                 maximum_random_overlap(_cps.cloud_fraction))
+            radin[f"rad_cf_layer_change_{_n}"] = np.abs(
+                np.asarray(_cps.cloud_fraction, dtype=np.float64) - _cfr).max(1)
+            _w_ice = np.asarray(_cps.iwp, dtype=np.float64)
+            radin[f"rad_reff_ice_iwpw_{_n}"] = (
+                (np.asarray(_cps.r_eff_ice, dtype=np.float64) * _w_ice).sum(1)
+                / np.maximum(_w_ice.sum(1), 1e-30))
+        _w0 = np.asarray(_cp.iwp, dtype=np.float64)
+        radin["rad_reff_ice_iwpw"] = ((np.asarray(_cp.r_eff_ice, dtype=np.float64) * _w0).sum(1)
+                                      / np.maximum(_w0.sum(1), 1e-30))
         radin["radin_q_snow_path"] = (np.asarray(_qs, dtype=np.float64) * _dpn).sum(1) / constants.g
         radin["radin_q_graupel_path"] = (np.asarray(_qg, dtype=np.float64) * _dpn).sum(1) / constants.g
     out_arr = {}
@@ -479,6 +501,16 @@ def capture(a):
         for k, v in solve(**o).items():
             out_arr[f"rad_{n}_{k}"] = v
         print(f"radiation arm {n} ({time.time() - t0:.0f}s)", flush=True)
+    if a.snow_arms:
+        # CANARY: the arms must reach the solver (an ignored override would
+        # read as "snow does not matter").
+        for _n in ("snow", "snowg"):
+            _d = np.abs(out_arr[f"rad_inst_{_n}_lw_dn_sfc"] - out_arr["rad_inst_lw_dn_sfc"]).max()
+            _g = float((radin[f"rad_iwp_{_n}"] - radin["rad_iwp"]).sum())
+            print(f"snow arm {_n}: max |dDLW| {_d:.3f} W/m2, added radiative ice "
+                  f"{_g:.4g} kg/m2 summed over columns", flush=True)
+            if not (_d > 0.0 and _g > 0.0):
+                raise SystemExit(f"FATAL: snow arm {_n} did not reach the radiation")
     control_fail: list = []
     if a.era5_pl:
         # CONTROL GATE: the round-trip arms must reproduce clear-sky surface
