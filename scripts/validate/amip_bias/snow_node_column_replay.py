@@ -177,6 +177,9 @@ def replay(a):
     lat = np.asarray(k["lat"])
     lat_deg = np.rad2deg(lat) if np.max(np.abs(lat)) <= np.pi / 2 + 1e-9 else lat
     th = config.thermal
+    if abs(len(forcings) * dt - 86400.0) > 1e-6:
+        raise SystemExit(f"FATAL: the captured forcing spans {len(forcings) * dt} s, "
+                         "not one day; a replay day must be a real day")
     print(f"run {cap['run']} day {cap['day']}: {state0.T_soil.shape[0]} columns, "
           f"{len(forcings)} forcing calls, dt {dt} s, freeze/thaw "
           f"{th.enable_freeze_thaw}, scheme {type(config.surface_scheme).__name__}, "

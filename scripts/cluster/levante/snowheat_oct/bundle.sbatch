@@ -17,11 +17,15 @@
 #   2. python compare_gate.py $ROOT/sh2_gate_base/checkpoint_day_0276.npz $ROOT/sh2_gate_base2/checkpoint_day_0276.npz
 #      (base vs base: the run must be reproducible for the gate to mean anything), then
 #      python compare_gate.py $ROOT/sh2_gate_off/checkpoint_day_0276.npz $ROOT/sh2_gate_base/checkpoint_day_0276.npz
-#      -> both must print IDENTICAL (exit 0).
+#      -> both must print IDENTICAL (exit 0); append both outputs to $ROOT/sh2_gate.ok
+#      (this script refuses every non-gate arm until that file holds two IDENTICAL lines).
 #   3. sbatch --nodes=4 --job-name=snowheat2 --export=ALL,ARMS="sh2_on_a sh2_off_a sh2_on_b sh2_off_b" bundle.sbatch
-# Chain: nh-cold's node-pinned copy (the repo chain at 468cef302 does not pin
-# a bundled arm to its node, so concurrent arms would stack on one node).
+# Chain: ONE script for every arm (base arms too), the frozen run tree's
+# amip_mpas_gpu_chain.sbatch, which pins a bundled arm's step to its own node
+# (AMIP_STEP_NODE; the 468cef302 chain lacks it and would stack the arms).
 set -uo pipefail
+: "${CHAIN:=/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch}"
+[[ -f "${CHAIN}" ]] && grep -q AMIP_STEP_NODE "${CHAIN}" || { echo "REFUSING: ${CHAIN} cannot pin arms to nodes" >&2; exit 64; }
 : "${ROOT:=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs}"
 : "${PY:=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 : "${AMIP_SURFDATA:=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/data/legoesm_surfdata_c260716.nc}"
@@ -33,18 +37,28 @@ mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 [[ $(printf '%s\n' "${arms[@]}" | sort | uniq -d) ]] && { echo "REFUSING: duplicate arm names" >&2; exit 64; }
 for a in "${arms[@]}"; do
   [[ -s "${ROOT}/${a}/arm.tsv" ]] || { echo "REFUSING: ${ROOT}/${a}/arm.tsv missing" >&2; exit 64; }
-  IFS=$'\t' read -r _n _t _r _e < "${ROOT}/${a}/arm.tsv"
+  IFS=$'\t' read -r _n _t _r _c _e < "${ROOT}/${a}/arm.tsv"
   [[ "${_n}" == "${a}" && "${_t}" =~ ^[0-9]+$ && "${_r}" == /* && -e "${_r}/.git" ]] \
     || { echo "REFUSING: ${a}/arm.tsv names '${_n}' target '${_t}' repo '${_r}'" >&2; exit 64; }
+  # Frozen code: the repo must still be clean and at the commit setup recorded.
+  [[ "$(git -c safe.directory='*' -C "${_r}" rev-parse HEAD)" == "${_c}" && \
+     -z $(git -c safe.directory='*' -C "${_r}" status --porcelain --untracked-files=no) ]] \
+    || { echo "REFUSING: ${_r} moved or is dirty since setup (want ${_c})" >&2; exit 64; }
+  # Long arms only after the recorded 1-day gate: sh2_gate.ok holds the two
+  # compare_gate.py outputs (base vs base2, off vs base), both IDENTICAL.
+  if [[ "${a}" != sh2_gate_* ]]; then
+    [[ $(grep -c '^IDENTICAL$' "${ROOT}/sh2_gate.ok" 2>/dev/null) == 2 ]] \
+      || { echo "REFUSING: ${a} needs a passed gate in ${ROOT}/sh2_gate.ok" >&2; exit 64; }
+  fi
 done
 export ROOT PY AMIP_SURFDATA ERA5_IC AMIP_N_GPUS=4
 declare -A pid
 for i in "${!arms[@]}"; do
-  IFS=$'\t' read -r name target repo extra < "${ROOT}/${arms[i]}/arm.tsv"
+  IFS=$'\t' read -r name target repo commit extra < "${ROOT}/${arms[i]}/arm.tsv"
   echo "[bundle] ${name} node=${nodes[i]} repo=${repo} commit=$(git -c safe.directory='*' -C "${repo}" rev-parse HEAD) dirty=$(git -c safe.directory='*' -C "${repo}" status --porcelain --untracked-files=no | wc -l)"
   ( REPO="${repo}" NAME="${name}" TARGET_DAYS="${target}" EXTRA="${COMMON}${extra}" \
     MAX_WALLCLOCK_SECONDS="${ARM_WALLCLOCK_SECONDS:-39600}" AMIP_STEP_NODE="${nodes[i]}" \
-    bash /scratch/b/b381103/nhcold/e0p_chain_pinned.sbatch \
+    bash "${CHAIN}" \
     > "${ROOT}/slurm_logs/${name}-${SLURM_JOB_ID}.out" 2>&1 ) &
   pid[${name}]=$!
 done

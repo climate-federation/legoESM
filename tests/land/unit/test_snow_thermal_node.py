@@ -616,7 +616,8 @@ def _true_soil_dH(T0, T1, theta, th, n=4000):
 
 # Measured true-enthalpy residuals of the final solve [W/m2], sub-stepped /
 # one 1800 s step, node ON vs main's bulk path (node off) on the same column
-# and forcing (scratch probe ftprobe.py, 2026-10-06):
+# and forcing (2026-10-06; the node-off numbers are pinned by
+# test_freeze_thaw_bulk_path_is_not_better_than_the_node below):
 #   cold snowfall, soil Tf-0.3 K:   on 0.47 / 2.10    off 109.9 / 234.2
 #   rain on frozen soil Tf-4 K:     on 11.5 / 171.4   off  26.6 / 587.7
 #   near-freezing melt, Tf-0.2 K:   on 0.16 / 2.12    off   0.23 / 2.41
@@ -704,3 +705,45 @@ def test_snow_node_with_layered_snowpack_is_refused():
     with pytest.raises(ValueError, match="BULK snowpack"):
         step_multilayer_land(st, _forcing(1, 262.0, 0.0, 0.0), cfg, 1.0, 1800.0,
                              lat=jnp.full(1, 1.0))
+
+
+@pytest.mark.parametrize("case", sorted(_FT_CASES))
+def test_freeze_thaw_bulk_path_is_not_better_than_the_node(monkeypatch, case):
+    """The comparison behind the limits above: main's bulk path (node OFF) on
+    the same column and forcing has a true-enthalpy residual ABOVE the node-on
+    limit, so the limit is the soil scheme's linearisation error and the node
+    does not add to it."""
+    c = _FT_CASES[case]
+    from legoesm.land import multilayer_land
+    from legoesm.land.soil_thermal import liquid_water_content
+    th = SoilThermalConfig(enable_freeze_thaw=True)          # node off
+    cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=10, total_depth=3.0), thermal=th,
+        surface_scheme=TwoLeafCanopyConfig())
+    calls = []
+    real = multilayer_land.solve_soil_thermal
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((a, k, out))
+        return out
+
+    monkeypatch.setattr(multilayer_land, "solve_soil_thermal", spy)
+    st = init_multilayer_land_state(1, cfg, T_init=_TF + c["T0"],
+                                    theta_init=c["th"])
+    st = st._replace(snow_depth=jnp.array([c["swe"]]))
+    dt = 1800.0
+    step_multilayer_land(st, _forcing(1, c["Ta"], c["P"], c["Ps"]), cfg, 1.0, dt,
+                         lat=jnp.full(1, 1.0))
+    a, k, T1 = calls[-1]                               # the final solve
+    T0, th1, _, _, _, G, _ = a
+    assert k["n_substeps"] == multilayer_land.FINAL_THERMAL_SUBSTEPS
+
+    def ice(T, w):
+        return w - liquid_water_content(T, w, th)[0]
+
+    fusion = constants.rho_water * constants.L_f * jnp.sum(
+        _GRID.dz * (ice(T0, th1) - ice(T0, st.theta_soil)), axis=-1)
+    r = (_true_soil_dH(T0, T1, th1, th) - fusion
+         - (G + th.Q_geothermal) * dt) / dt
+    assert abs(float(r[0])) > c["limit"], float(r[0])

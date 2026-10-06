@@ -76,7 +76,7 @@ def test_replay_on_off_from_a_capture(tmp_path, capsys):
     td, stat, dyn, pos = rp.split_static(args, lambda v: isinstance(v, jax.Array))
     cap = {"run": "synthetic", "day": 330, "argv": [],
            "args": (td, stat, [np.asarray(v) for v in dyn], pos),
-           "forcing": [jax.tree_util.tree_map(np.asarray, f)] * 2,
+           "forcing": [jax.tree_util.tree_map(np.asarray, f)] * 48,  # one day
            "f_land_packed": np.ones(3)}
     p = tmp_path / "cap.pkl"
     p.write_bytes(pickle.dumps(cap))
@@ -88,3 +88,17 @@ def test_replay_on_off_from_a_capture(tmp_path, capsys):
     # Cold air over a frozen column: the insulated soil loses less heat.
     assert gain_on > gain_off
     assert "columns with on-arm skin > T_freeze under snow: 0" in out
+
+
+def test_replay_refuses_a_partial_day(tmp_path):
+    cfg, st, f = _setup()
+    td, stat, dyn, pos = rp.split_static((st, f, (cfg, 1.0, 1800.0), {"lat": jnp.zeros(3)}),
+                                         lambda v: isinstance(v, jax.Array))
+    cap = {"run": "synthetic", "day": 330, "argv": [],
+           "args": (td, stat, [np.asarray(v) for v in dyn], pos),
+           "forcing": [jax.tree_util.tree_map(np.asarray, f)] * 2,
+           "f_land_packed": np.ones(3)}
+    p = tmp_path / "cap.pkl"
+    p.write_bytes(pickle.dumps(cap))
+    with pytest.raises(SystemExit, match="not one day"):
+        rp.replay(argparse.Namespace(capture=str(p), days=1, lat_band=(45.0, 70.0)))
