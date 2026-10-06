@@ -226,6 +226,11 @@ class MPASOceanModel(IntegrationMixin):
         else:
             self._constants_config = _model_cc
 
+        # Barotropic PCG bundle per JAX backend, written back so the run's
+        # config records the solver it used.
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        self.config = resolve_barotropic_pcg_defaults(self.config)
+
         # Resolution-scaled biharmonic vorticity damping.  Resolved HERE --
         # the one place every driver, experiment and test hands a mesh and a
         # configuration to the same constructor -- so no mesh can silently
