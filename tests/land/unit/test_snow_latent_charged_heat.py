@@ -196,3 +196,32 @@ def test_clm_ml_snow_mass_is_its_charge(monkeypatch, T_air, L_charged):
                                E_snow * L_sT + 15.0, rtol=1e-9)
     if L_charged == constants.L_v:      # the former / L_s conversion: ~13 % less
         assert (25.0 / constants.L_v) / (25.0 / L_sT) - 1.0 > 0.10
+
+
+def test_bulk_capped_pack_splits_unmet_demand_to_sh_and_sublimation_cost_to_ground():
+    """(e) Thin bulk pack under the two-leaf canopy: the sublimation demand
+    exceeds the pack, so the excess X has BOTH parts.  The unmet demand
+    (demand - pack) * L_v leaves as sensible heat; the sublimation cost of the
+    ice that did leave, pack/dt * (L_v - L_s) < 0, stays in the ground."""
+    cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig())
+    s0 = init_multilayer_land_state(1, cfg, T_init=_T)
+    swe0 = 1.0e-4                                         # [kg m-2], cap binds
+    s0 = s0._replace(snow_depth=jnp.full(1, swe0))
+    lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
+    dt = 1800.0
+    s1, resp, _, sfc = jax.jit(lambda s: step_multilayer_land_with_diagnostics(
+        s, _forcing(1), cfg, 1.0, dt, lat=jnp.full(1, 0.9), land_params=lp))(s0)
+    T_s = s0.T_soil[0, 0]
+    L_v, L_s = float(latent_heat_vaporization(T_s)), float(latent_heat_sublimation(T_s))
+    assert float(s1.snow_depth[0]) < 1e-12                 # the whole pack left
+    cost = swe0 / dt * (L_v - L_s)                        # < 0: cools the ground
+    X = float(sfc.lhflx[0] - resp.lhflx[0])
+    unmet = X - cost
+    assert unmet > 1.0, (X, cost)                         # non-vacuity: cap binds
+    np.testing.assert_allclose(float(resp.shflx[0] - sfc.shflx[0]), unmet,
+                               rtol=0, atol=1e-9)
+    grid = make_soil_grid(cfg.soil_grid)
+    Cg = compute_heat_capacity(s1.theta_soil, cfg.hydraulics, cfg.thermal) * grid.dz
+    dE = jnp.sum(Cg * (s1.T_soil - s0.T_soil), -1)
+    np.testing.assert_allclose(
+        dE, dt * (sfc.G_soil + cost + cfg.thermal.Q_geothermal), rtol=1e-9, atol=1e-3)

@@ -11447,6 +11447,26 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # Unsolved canopy columns ACCEPTED with energy-closed fallback
+                # fluxes, and those the fallback guards reverted instead (the
+                # latter are already inside the held count). Same land mask as
+                # the held count (any land fraction), so the two are comparable.
+                _fb_mask = getattr(_sfc, "fallback", None)
+                _n_fb_land = (
+                    jnp.sum((jnp.asarray(_fb_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
+                            .astype(jnp.int32))
+                    if _fb_mask is not None
+                    else jnp.zeros((), jnp.int32))
+                _fb_rej_mask = getattr(_sfc, "fallback_rejected", None)
+                _n_fb_rej = (
+                    jnp.sum((jnp.asarray(_fb_rej_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
+                            .astype(jnp.int32))
+                    if _fb_rej_mask is not None
+                    else (_sfc.n_fallback_rejected
+                          if getattr(_sfc, "n_fallback_rejected", None)
+                          is not None else jnp.zeros((), jnp.int32)))
                 # The land's solved stress magnitude rho*u*^2 [Pa] (its canopy
                 # roughness and stability) and the held mask; consumed only
                 # under mpas_land_stress_from_land, where a held or non-finite
@@ -11473,11 +11493,12 @@ class ModelDriver:
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx, resp.surface_mass_flux,
                                     _taumag, _held_f))
-                            + (_n_held, _n_held_land))
+                            + (_n_held, _n_held_land, _n_fb_land,
+                               _n_fb_rej))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
                         _taumag, _held_f,
-                        _n_held, _n_held_land)
+                        _n_held, _n_held_land, _n_fb_land, _n_fb_rej)
               return _land_step
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -11528,6 +11549,10 @@ class ModelDriver:
             _land_n_held_accum = jnp.zeros((), jnp.int32)
             _land_n_held_land_accum = jnp.zeros((), jnp.int32)
             _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            _land_n_fb_accum = jnp.zeros((), jnp.int32)
+            _land_n_fb_rej_accum = jnp.zeros((), jnp.int32)
+            self._land_n_fallback_total = 0
+            self._land_n_fallback_rejected_total = 0
             self._land_n_held_total = 0
             self._land_n_held_steps = 0
 
@@ -12568,7 +12593,8 @@ class ModelDriver:
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_taumag_step, _land_held_step,
-                     _land_n_held_step, _land_n_held_land_step) = _land_fn(
+                     _land_n_held_step, _land_n_held_land_step,
+                     _land_n_fb_step, _land_n_fb_rej_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64),
                         # 0-based days since Jan 1 (the calibration's clock)
@@ -12595,6 +12621,9 @@ class ModelDriver:
                     _land_n_held_steps_accum = (
                         _land_n_held_steps_accum
                         + (_land_n_held_step > 0).astype(jnp.int32))
+                    _land_n_fb_accum = _land_n_fb_accum + _land_n_fb_step
+                    _land_n_fb_rej_accum = (
+                        _land_n_fb_rej_accum + _land_n_fb_rej_step)
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction
                     # the consumer refuses the key, and adding it mid-run
@@ -12630,6 +12659,28 @@ class ModelDriver:
                     _land_n_held_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_land_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                    _window_fb = int(_land_n_fb_accum)
+                    _window_fb_rej = int(_land_n_fb_rej_accum)
+                    _land_n_fb_accum = jnp.zeros((), jnp.int32)
+                    _land_n_fb_rej_accum = jnp.zeros((), jnp.int32)
+                    if _window_fb or _window_fb_rej:
+                        self._land_n_fallback_total += _window_fb
+                        self._land_n_fallback_rejected_total += _window_fb_rej
+                        # An unsolved canopy column is accepted with
+                        # energy-closed fallback fluxes; the guards revert it
+                        # when that would jump the top soil or the fluxes.
+                        logger.warning(
+                            "land: %d LAND column-steps accepted with an "
+                            "unsolved canopy (energy-closed fallback) and %d "
+                            "LAND column-steps rejected by the fallback "
+                            "guards (reverted; included in the hold count) "
+                            "in the "
+                            "last %d steps; %d accepted / %d rejected since "
+                            "the run began — at step %d",
+                            _window_fb, _window_fb_rej,
+                            _HARD_SAT_LOG_CADENCE_STEPS,
+                            self._land_n_fallback_total,
+                            self._land_n_fallback_rejected_total, step)
                     if _window_cols:
                         self._land_n_held_total += _window_cols
                         self._land_n_held_steps += _window_steps

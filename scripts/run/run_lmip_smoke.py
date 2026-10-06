@@ -49,7 +49,8 @@ from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_c
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
-from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
+from legoesm.land.multilayer_land import (
+    init_multilayer_land_state, step_multilayer_land_with_diagnostics)
 from legoesm.land.slab_land import step_land_with_diagnostics
 from legoesm.land.global_surface_data import interp_monthly
 from legoesm.land.soil_albedo import soil_albedo_broadband
@@ -188,7 +189,7 @@ def main() -> None:
             if args.surface_scheme == "two_leaf_canopy" else SimpleSEBConfig())
     if args.land_mode == "multilayer":
         base_cfg = MultiLayerLandConfig(surface_scheme=surf, soil_grid=SoilGridConfig())
-        step_fn = step_multilayer_land
+        step_fn = step_multilayer_land_with_diagnostics
     else:                                                  # slab
         base_cfg = LandConfig(surface_scheme=surf)
         step_fn = step_land_with_diagnostics
@@ -252,9 +253,14 @@ def main() -> None:
                                           land_params=land_params_t, doy=doy_t)
         diag = (resp.T_sfc, resp.shflx, resp.lhflx, lai_diag, resp.albedo, doy_t)
         if is_multilayer:
+            so = _rest[1]
+            _none = jnp.zeros(ncol, bool)
             diag = diag + (new_state.theta_soil[:, 0],
                            new_state.T_soil[:, 0],
-                           new_state.snow_depth)
+                           new_state.snow_depth,
+                           _none if so.held is None else so.held.reshape(-1),
+                           _none if so.fallback is None
+                           else so.fallback.reshape(-1))
         else:
             # The slab lane does not hold a failed canopy root solve (the
             # multilayer lane does), so count those columns here.
@@ -271,7 +277,7 @@ def main() -> None:
     # Unpack scan outputs (each element has leading axis = n_steps).
     if is_multilayer:
         (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr,
-         theta_top_t, T_soil_top_t, snow_depth_t) = scan_out
+         theta_top_t, T_soil_top_t, snow_depth_t, held_t, fb_t) = scan_out
     else:
         (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr, unconv_t) = scan_out
 
@@ -353,7 +359,14 @@ def main() -> None:
     nan_land = int(np.isnan(fields["T_sfc"][0][land]).sum())
     status = "PASS" if nan_land == 0 else "FAIL"
     print(f"land cells: {n_land} | NaN T_sfc over land: {nan_land} -> {status}")
-    if not is_multilayer:
+    if is_multilayer:
+        _cs = max(n_land * args.n_steps, 1)
+        n_held = int(np.asarray(held_t)[:, land].sum())
+        n_fb = int(np.asarray(fb_t)[:, land].sum())
+        print(f"unsolved canopy columns over land: {n_fb} column-step(s) accepted "
+              f"with energy-closed fallback fluxes ({100 * n_fb / _cs:.3f}%), "
+              f"{n_held} reverted/held ({100 * n_held / _cs:.3f}%)")
+    else:
         n_unconv = int(np.asarray(unconv_t)[:, land].sum())
         print(f"unconverged canopy root solves over land: {n_unconv} column-step(s) "
               f"({100 * n_unconv / max(n_land * args.n_steps, 1):.3f}%), fluxes used "
