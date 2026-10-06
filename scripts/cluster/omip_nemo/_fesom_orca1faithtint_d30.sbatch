@@ -68,8 +68,9 @@ ROOT=${ROOT:-/burg-archive/glab/users/pg2328/_omip_run3}; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/fesom_jax_repo log --oneline -1)"
-export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/fesom_jax_repo:$ROOT:$ROOT/scripts/validate"
+# fesom_jax = local branch legoesm/nemo-vmom (main + NEMO vertical momentum option, efebc73); never pushed upstream
+echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/_wt_fesomjax_vmom log --oneline -1)"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/_wt_fesomjax_vmom:$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/fesom_orca1faithtint_d30}
@@ -99,6 +100,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --vertical-momentum-scheme nemo_advective `# user 2026-10-06: NEMO vertical momentum advection (dynzad.F90), as tripole and MPAS` \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-scheme nemo_ustar \
   --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
