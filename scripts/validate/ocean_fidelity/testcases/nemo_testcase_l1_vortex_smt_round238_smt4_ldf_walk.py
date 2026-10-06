@@ -43,7 +43,7 @@ BOUNDARIES = ("hpg", "vor", "adv", "pre_ldf", "post_ldf")
 
 
 def run(root: Path, *, plant: str | None = None,
-        allow_dirty: bool = False) -> dict:
+        allow_dirty: bool = False, source_order: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -104,6 +104,7 @@ def run(root: Path, *, plant: str | None = None,
         hook_args = dict(
             stage_barotropic_output_override=external,
             stage_entry_override=stage3_entry,
+            nemo_stage_rhs_accumulation_order_arm=source_order,
         )
         if boundary in ("pre_ldf", "post_ldf"):
             hook_args["expose_stage3_momentum_rhs"] = boundary
@@ -186,6 +187,7 @@ def run(root: Path, *, plant: str | None = None,
         "precision_policy": "fp64/libm",
         "jax_backend": jax.default_backend(),
         "execution_regime": "production_step_jit",
+        "source_order_arm": source_order,
         "plant": plant,
         "rows": rows,
         "first_non_bit_boundary": owner,
@@ -207,10 +209,13 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=BOUNDARIES)
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--source-order", action="store_true",
+                        help="one-variable NEMO accumulator-order arm")
     args = parser.parse_args(argv)
     try:
         report = run(args.oracle_root, plant=args.plant,
-                     allow_dirty=args.allow_dirty)
+                     allow_dirty=args.allow_dirty,
+                     source_order=args.source_order)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2
