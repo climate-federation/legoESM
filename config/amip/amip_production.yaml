@@ -178,6 +178,11 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # reference: bias within sampling noise,
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
+rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 16 is
+                                     # for GPU). Measured 2026-10-06, res6 16 ranks x 8
+                                     # cores: radiation step 13.8 s at 16, 7.9 s at 0
+                                     # (~139 s per simulated day); fluxes differ only by
+                                     # summation order (<= 6.1e-4 W/m2).
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
