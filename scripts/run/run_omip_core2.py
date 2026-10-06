@@ -1904,7 +1904,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   nemo_een_coriolis=False,
                   vertical_momentum_scheme=None,
                   lateral_side_bc=None, barotropic_coriolis=None,
-                  adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
+                  adaptive_implicit_vertadv=None, aimp_partition=None,
+                  bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
@@ -2022,6 +2023,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("lateral_viscosity_e3_weighting",
                                "nemo_e3" if nemo_ldf_file else None),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ("aimp_partition", aimp_partition),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
                               ("barotropic_implicit_pcg_variant",
@@ -2466,7 +2468,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                        ke_gradient_scheme=None, partial_cell=False,
-                       adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
+                       adaptive_implicit_vertadv=None, aimp_partition=None,
+                  bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
@@ -2524,6 +2527,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ("aimp_partition", aimp_partition),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
                               ("barotropic_implicit_pcg_variant",
@@ -6654,6 +6658,35 @@ class _SurfaceFluxAccumulator:
         return out
 
 
+class _AimpCensusAccumulator:
+    """Host-side census of the two adaptive-implicit trigger rules.
+
+    Per step the model hands active-interface counts ``[legacy_T, legacy_u,
+    legacy_v, nemo_T, wet_T]`` (same ``w`` for both rules) and the per-column
+    maximum implicit fraction of each rule, plus NEMO's column-maximum
+    vertical Courant (``Aimp_Cmx_v``).  The snapshot writes the per-step count
+    series and the WINDOW-MAXIMUM maps.  Read-only."""
+
+    _KEYS = ("aimp_max_legacy", "aimp_max_nemo", "aimp_cmx_v")
+
+    def __init__(self):
+        self._counts, self._max = [], {}
+
+    def __call__(self, counts, *maps):
+        self._counts.append(np.asarray(counts))
+        for k, m in zip(self._KEYS, maps):
+            m = np.asarray(m)
+            self._max[k] = m if k not in self._max else np.maximum(self._max[k], m)
+
+    def drain(self, dt=None):
+        jax.effects_barrier()
+        if not self._counts:
+            return {}
+        out = {"aimp_counts": np.asarray(self._counts), **self._max}
+        self._counts, self._max = [], {}
+        return out
+
+
 class _ZdfTrendAccumulator:
     """Host-side running mean of the implicit vertical-diffusion T tendency.
 
@@ -6772,6 +6805,8 @@ def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):
         extra.update(flux_acc.drain(dt))
     if getattr(model, "_trd_callback", None) is not None:
         extra.update(model._trd_callback.drain(dt))
+    if getattr(model, "_aimp_census_callback", None) is not None:
+        extra.update(model._aimp_census_callback.drain(dt))
     return extra or None
 
 
@@ -7379,6 +7414,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
                         "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
                         "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--aimp-partition", default=None,
+                   choices=("shchepetkin_vertical", "nemo_rk3_t"),
+                   help="With --adaptive-implicit-vertadv: which trigger rule. "
+                        "shchepetkin_vertical (config default) = Courant "
+                        "0.15/0.30 on the vertical-only cell Courant, momentum "
+                        "only. nemo_rk3_t = NEMO wAimp_RK3_t (sshwzv.F90): "
+                        "0.8/1.1 scaled by the horizontal outflow Courant, "
+                        "tracers AND momentum. Tripole only.")
+    p.add_argument("--aimp-census", action="store_true",
+                   help="Store per-step active-interface counts of BOTH "
+                        "adaptive-implicit rules on the same w, and the "
+                        "window-maximum implicit fraction maps (aimp_* in each "
+                        "snapshot). Read-only diagnostic; tripole only.")
     p.add_argument("--slope-foot-alpha", type=float, default=None,
                    help="MOM6 slope-foot viscosity enhancement at topographic slopes "
                         "(WBCs hug slopes -- the built-in WBC-enhanced-viscosity, NEMO-like). "
@@ -9045,6 +9093,15 @@ def main() -> int:
             f"{' and '.join(_tripole_only)} is wired for --grid tripole only "
             f"(the Redi coefficient lives in build_tripole); got --grid "
             f"{args.grid!r}. It would have been silently discarded.")
+    if args.aimp_partition is not None and not args.adaptive_implicit_vertadv:
+        raise SystemExit("--aimp-partition needs --adaptive-implicit-vertadv")
+    _aimp_tripole_only = [n for n, v in (("--aimp-partition", args.aimp_partition),
+                                         ("--aimp-census", args.aimp_census or None))
+                          if v is not None]
+    if _aimp_tripole_only and args.grid != "tripole":
+        raise SystemExit(f"{' and '.join(_aimp_tripole_only)} is wired on --grid "
+                         f"tripole only (got {args.grid!r}); it would be "
+                         "silently ignored.")
     _not_on_mpas = [n for n, v in (("--momentum-rk3", args.momentum_rk3 or None),
                                    ("--adaptive-implicit-vertadv",
                                     args.adaptive_implicit_vertadv or None),
@@ -9241,6 +9298,7 @@ def main() -> int:
             tke_kappah_min=args.tke_kappah_min,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            aimp_partition=args.aimp_partition,
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
@@ -9481,6 +9539,7 @@ def main() -> int:
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            aimp_partition=args.aimp_partition,
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
@@ -10380,7 +10439,7 @@ def main() -> int:
         # forcing it is handed, so enabling it must not make a parent leg's
         # restart un-resumable.
         "flux_accumulate", "mld_accumulate", "state_accumulate",
-        "trd_accumulate", "trd_columns",
+        "trd_accumulate", "trd_columns", "aimp_census",
         "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -11342,6 +11401,8 @@ def main() -> int:
                 raise SystemExit("--trd-columns selects no ocean cell")
             model._trd_callback.set_columns(_cm)
             model._col_callback = model._trd_callback.col
+    if args.aimp_census:
+        model._aimp_census_callback = _AimpCensusAccumulator()
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
@@ -11370,12 +11431,14 @@ def main() -> int:
                     _lv_new = renormalise_ah_profile(
                         _lv_now, _ah)._replace(C_smag_lap=_cs)
                     _trd_keep = getattr(model, "_trd_callback", None)
+                    _aimp_keep = getattr(model, "_aimp_census_callback", None)
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
                         model.config._replace(lateral_viscosity=_lv_new),
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
                     model._trd_callback = _trd_keep
+                    model._aimp_census_callback = _aimp_keep
                     if _trd_keep is not None and getattr(_trd_keep, "_col", None) is not None:
                         model._col_callback = _trd_keep.col
                     # Free the previous segment's compiled step before the new

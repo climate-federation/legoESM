@@ -106,6 +106,36 @@ class NemoAdaptiveImplicitPartition(NamedTuple):
     courant_vertical: jnp.ndarray
 
 
+def nemo_aimp_fraction(cu_v_int, cu_h, w_int):
+    """NEMO ``wAimp_RK3_t`` implicit fraction on INTERIOR interfaces (any mesh).
+
+    ``cu_v_int`` = dt*|w|/e3w on the nlev-1 interior interfaces, ``cu_h`` =
+    the horizontal OUTFLOW Courant number of each T cell (nlev levels; NEMO
+    ``Cu_adv``, sshwzv.F90:779-797), ``w_int`` = interior w (sign picks the
+    upstream cell: w>0 takes the lower cell, sshwzv.F90:816-820).  Thresholds
+    0.8/1.1 scaled by ``1 - cu_h/1.1`` and the Shchepetkin ramp
+    (sshwzv.F90:744-748, 826-836).  Shared by the C-grid and Voronoi lanes;
+    each lane builds its own ``cu_h``.
+    """
+    dtype = cu_v_int.dtype
+    cu_h_int = jnp.where(w_int > 0.0, cu_h[..., 1:], cu_h[..., :-1])
+    one = jnp.asarray(1.0, dtype=dtype)
+    cu_min = jnp.asarray(0.8, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_max = jnp.asarray(1.1, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_cut = 2.0 * cu_max - cu_min
+    in_mid = (cu_v_int > cu_min) & (cu_v_int < cu_cut)
+    in_high = (cu_v_int > cu_min) & (cu_v_int >= cu_cut)
+    # Double-where: each branch sees a safe operand outside its own range, so
+    # the unselected branch cannot put inf/NaN into the reverse pass.
+    delta = jnp.where(in_mid, cu_v_int - cu_min, one)
+    mid = one / (one + 4.0 * cu_max * (cu_max - cu_min) / (delta * delta))
+    cu_hi = jnp.where(in_high & (cu_v_int > 0.0), cu_v_int, one)
+    high = (cu_hi - cu_max) / cu_hi
+    frac_int = jnp.where(in_mid, mid,
+                         jnp.where(in_high, high, jnp.zeros_like(cu_v_int)))
+    return jnp.clip(frac_int, 0.0, 1.0)
+
+
 def nemo_wicker_aimp_partition_transport(
     mass_flux_u: jnp.ndarray,
     mass_flux_v: jnp.ndarray,
@@ -136,13 +166,15 @@ def nemo_wicker_aimp_partition_transport(
     area = jnp.asarray(area_t, dtype=dtype)
     hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
     hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
-    inflow = (
+    # OUTflow: positive east/north faces minus negative west/south faces
+    # (sshwzv.F90:793-797).
+    outflow = (
         jnp.maximum(hu_transport[:, 1:, :], 0.0)
         - jnp.minimum(hu_transport[:, :-1, :], 0.0)
         + jnp.maximum(hv_transport[1:, :, :], 0.0)
         - jnp.minimum(hv_transport[:-1, :, :], 0.0)
     )
-    cu_h = dt_a * inflow / jnp.maximum(
+    cu_h = dt_a * outflow / jnp.maximum(
         area[..., None] * h_t_kmm, jnp.asarray(_H_FLOOR, dtype=dtype))
 
     nlev = h_t_kmm.shape[-1]
@@ -151,26 +183,7 @@ def nemo_wicker_aimp_partition_transport(
     w_int = w[..., 1:nlev]
     cu_v_int = dt_a * jnp.abs(w_int) / jnp.maximum(
         e3w_kmm[..., 1:nlev], jnp.asarray(_H_FLOOR, dtype=dtype))
-    # Positive (upward) w takes the horizontal Courant number from the lower
-    # T cell; non-positive w takes it from the upper cell (sshwzv:816--820).
-    cu_h_int = jnp.where(w_int > 0.0, cu_h[..., 1:], cu_h[..., :-1])
-    one = jnp.asarray(1.0, dtype=dtype)
-    cu_min = jnp.asarray(0.8, dtype=dtype) * (one - cu_h_int / 1.1)
-    cu_max = jnp.asarray(1.1, dtype=dtype) * (one - cu_h_int / 1.1)
-    cu_cut = 2.0 * cu_max - cu_min
-    delta = cu_v_int - cu_min
-    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
-    mid = one / (
-        one + 4.0 * cu_max * (cu_max - cu_min)
-        / jnp.maximum(delta * delta, tiny))
-    high = (cu_v_int - cu_max) / jnp.maximum(
-        cu_v_int, tiny)
-    frac_int = jnp.where(
-        cu_v_int <= cu_min,
-        jnp.zeros_like(cu_v_int),
-        jnp.where(cu_v_int < cu_cut, mid, high),
-    )
-    frac_int = jnp.clip(frac_int, 0.0, 1.0)
+    frac_int = nemo_aimp_fraction(cu_v_int, cu_h, w_int)
     pad = ((0, 0),) * (frac_int.ndim - 1) + ((1, 1),)
     fraction = jnp.pad(frac_int, pad)
     cu_v = jnp.pad(cu_v_int, pad)
@@ -2688,6 +2701,57 @@ def implicit_vertical_advection_ocean(
     return thomas_solve(a, b, c, field)
 
 
+def implicit_vertical_advection_ocean_advective(
+    field: jnp.ndarray,
+    w_imp_half: jnp.ndarray,
+    h: jnp.ndarray,
+    dt: float,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Backward-Euler upwind vertical advection in ADVECTIVE form (one solve).
+
+    Transcribes the ``ln_zad_Aimp`` vector-invariant block of NEMO
+    ``dynzdf.F90`` (~:235-250): with ``W_k = dt*(w[k]+w[k+1])/2`` (the cell
+    mean of the implicit interface velocity, already area-averaged onto the
+    momentum point by the caller) the row is
+
+        field_new[k] + min(W_k,0)*(field_new[k-1]-field_new[k])/e3w[k]
+                     + max(W_k,0)*(field_new[k]-field_new[k+1])/e3w[k+1]
+        = field[k]
+
+    with ``e3w[k] = (h[k-1]+h[k])/2`` the interface spacing (surface row: no
+    ``k-1`` term).  Row sums of the added terms are zero, so a uniform field
+    is invariant wherever the upstream neighbour is wet.  As in NEMO
+    (dynzdf.F90:237-243, loop to jpkm1 against the masked level below), an
+    upward ``W`` in the deepest wet cell couples to ZERO below it, so that
+    level relaxes toward 0.  Deviation: the bottom row's ``e3w[k+1]`` is
+    ``h[k]/2`` (NEMO: ``e3uw`` of the masked w-level).  Inactive rows return
+    ``field`` unchanged.
+    """
+    nlev = field.shape[-1]
+    if nlev < 2:
+        return field
+    act = (jnp.ones_like(h) if face_active is None
+           else jnp.broadcast_to(face_active, h.shape).astype(h.dtype))
+    hw = h * act
+    w = w_imp_half
+    W = dt * 0.5 * (w[..., :-1] + w[..., 1:]) * act          # (..., nlev)
+    e3w_top = jnp.concatenate(
+        [jnp.ones_like(hw[..., :1]), 0.5 * (hw[..., :-1] + hw[..., 1:])], axis=-1)
+    e3w_bot = jnp.concatenate(
+        [0.5 * (hw[..., :-1] + hw[..., 1:]), 0.5 * hw[..., -1:]], axis=-1)
+    e3w_top = jnp.maximum(e3w_top, _H_FLOOR)
+    e3w_bot = jnp.maximum(e3w_bot, _H_FLOOR)
+    wn = jnp.minimum(W, 0.0) / e3w_top
+    wn = wn.at[..., 0].set(0.0)                     # no k-1 above the surface
+    wp = jnp.maximum(W, 0.0) / e3w_bot
+    a = wn
+    c = -wp
+    b = 1.0 - wn + wp
+    x = thomas_solve(a, b, c, field * act)
+    return jnp.where(act > 0.0, x, field)
+
+
 def adaptive_implicit_vertical_momentum_advection(
     u: jnp.ndarray,
     w_half: jnp.ndarray,
@@ -2701,8 +2765,18 @@ def adaptive_implicit_vertical_momentum_advection(
     w_area_half: jnp.ndarray | None = None,
     face_area: jnp.ndarray | None = None,
     bottom_face_mask_mode: str = "min_rule",
+    w_imp_half: jnp.ndarray | None = None,
+    w_imp_area_half: jnp.ndarray | None = None,
+    implicit_form: str = "flux",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
+
+    ``w_imp_half`` (with ``w_imp_area_half`` for the ``nemo_advective``
+    explicit arm) supplies a PRECOMPUTED implicit share (NEMO
+    ``wAimp_RK3_t``, area-averaged to the face) instead of the
+    vertical-only Shchepetkin 0.15/0.30 fraction; ``implicit_form`` picks
+    the implicit solve: ``"flux"`` (legacy) or ``"advective"`` (NEMO
+    dynzdf vector form, :func:`implicit_vertical_advection_ocean_advective`).
 
     Returns the velocity field ``u`` after one step of vertical advection
     ``-w du/dz``, split into a Courant-capped explicit part and an
@@ -2752,12 +2826,23 @@ def adaptive_implicit_vertical_momentum_advection(
     # (interior interfaces 1..nlev-1); pad the surface/bottom interfaces
     # with zero (w_half is zero there anyway).
     cu_iface = jnp.maximum(cu_cell[..., :-1], cu_cell[..., 1:])  # (..., nlev-1)
-    zcff_int = shchepetkin_implicit_fraction(cu_iface, cu_min, cu_max)
-    pad_axes = ((0, 0),) * (zcff_int.ndim - 1)
-    zcff = jnp.pad(zcff_int, (*pad_axes, (1, 1)))                # (..., nlev+1)
-
-    w_imp = zcff * w_half
-    w_exp = (1.0 - zcff) * w_half
+    if implicit_form not in ("flux", "advective"):
+        raise ValueError(
+            f"implicit_form must be 'flux' or 'advective', got {implicit_form!r}")
+    if w_imp_half is None:
+        zcff_int = shchepetkin_implicit_fraction(cu_iface, cu_min, cu_max)
+        pad_axes = ((0, 0),) * (zcff_int.ndim - 1)
+        zcff = jnp.pad(zcff_int, (*pad_axes, (1, 1)))            # (..., nlev+1)
+        w_imp = zcff * w_half
+        w_exp = (1.0 - zcff) * w_half
+        w_area_exp = None if w_area_half is None else (1.0 - zcff) * w_area_half
+    else:
+        if explicit_scheme == "nemo_advective" and w_imp_area_half is None:
+            raise ValueError("w_imp_half with nemo_advective needs w_imp_area_half")
+        w_imp = w_imp_half
+        w_exp = w_half - w_imp_half
+        w_area_exp = (None if w_area_half is None
+                      else w_area_half - w_imp_area_half)
 
     # Explicit (Courant-capped) part.  ``nemo_up3`` selects the live
     # ln_dynadv_up3 vertical flux; the default is unchanged.
@@ -2777,7 +2862,7 @@ def adaptive_implicit_vertical_momentum_advection(
             raise ValueError(
                 "explicit_scheme='nemo_advective' needs w_area_half and face_area")
         tend_exp = nemo_advective_vertical_momentum_advection(
-            u, (1.0 - zcff) * w_area_half, h, face_area, face_active=face_active,
+            u, w_area_exp, h, face_area, face_active=face_active,
             bottom_face_mask_mode=bottom_face_mask_mode,
         )
     else:
@@ -2787,6 +2872,9 @@ def adaptive_implicit_vertical_momentum_advection(
     u_exp = u + dt * tend_exp
 
     # Implicit part: unconditionally-stable backward-Euler upwind solve.
+    if implicit_form == "advective":
+        return implicit_vertical_advection_ocean_advective(
+            u_exp, w_imp, h, dt, face_active=face_active)
     return implicit_vertical_advection_ocean(
         u_exp, w_imp, h, dt, face_active=face_active,
     )

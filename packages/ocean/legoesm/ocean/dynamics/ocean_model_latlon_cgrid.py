@@ -148,6 +148,69 @@ MASS_FLUX_W_DIMS = ("lat", "lon", "level_interface")
 MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
 
 
+def nemo_aimp_implicit_w(mass_flux_u, mass_flux_v, w, h_k_old, h_k_new,
+                         active_3d, grid, dt, return_cu_v=False):
+    """NEMO ``wAimp_RK3_t`` implicit share of ``w`` (T interfaces, nlev+1).
+
+    Geometry at the step midpoint (NEMO's stage-3 Kmm is nominally N+1/2,
+    stprk3_stg.F90:218-221); ``e3w`` = mean of the adjacent T thicknesses.
+    Interior interfaces are zeroed unless both adjacent cells are active, so
+    no implicit transport crosses a partial seafloor.
+    """
+    h_mid = 0.5 * (h_k_old + h_k_new)
+    e3w_int = 0.5 * (h_mid[..., :-1] + h_mid[..., 1:])
+    e3w = jnp.concatenate(
+        [0.5 * h_mid[..., :1], e3w_int, 0.5 * h_mid[..., -1:]], axis=-1)
+    split = nemo_wicker_aimp_partition_transport(
+        mass_flux_u, mass_flux_v, w, h_mid, e3w,
+        grid.area_T, grid.dy_u, grid.dx_v, dt)
+    act = jnp.broadcast_to(active_3d, h_mid.shape).astype(w.dtype)
+    gate_int = act[..., :-1] * act[..., 1:]
+    pad = ((0, 0),) * (gate_int.ndim - 1) + ((1, 1),)
+    gate = jnp.pad(gate_int, pad)
+    if return_cu_v:
+        return split.w_implicit * gate, split.courant_vertical * gate
+    return split.w_implicit * gate
+
+
+def aimp_census_arrays(mass_flux_u, mass_flux_v, w_baro, h_k_old, h_k_new,
+                       h_u_old, h_v_old, active_3d, u_act, v_act, grid, dt):
+    """Diagnostic: which interfaces each adaptive-implicit rule makes implicit.
+
+    Same ``w_baro`` for both rules.  Legacy = Shchepetkin 0.15/0.30 on the
+    cell VERTICAL-only Courant (max of the two adjacent cells), evaluated at
+    T columns AND at the u/v faces exactly as the momentum stage does.  NEMO
+    = ``wAimp_RK3_t``.  Returns counts of active wet interior interfaces
+    ``[legacy_T, legacy_u, legacy_v, nemo_T, wet_T]`` and the per-column
+    maximum fraction (legacy_T, nemo_T) plus NEMO's ``Aimp_Cmx_v`` (column
+    maximum of dt|w|/e3w, sshwzv.F90:812-860)."""
+    from legoesm.ocean.vertical import shchepetkin_implicit_fraction
+
+    def _legacy(w_half, h, act):
+        inv_h = 1.0 / jnp.maximum(h, 1.0e-10)
+        cu = dt * (jnp.maximum(w_half[..., :-1], 0.0)
+                   - jnp.minimum(w_half[..., 1:], 0.0)) * inv_h
+        f = shchepetkin_implicit_fraction(
+            jnp.maximum(cu[..., :-1], cu[..., 1:]))
+        a = jnp.broadcast_to(act, h.shape).astype(f.dtype)
+        return f * a[..., :-1] * a[..., 1:]
+
+    actT = jnp.broadcast_to(active_3d, h_k_old.shape).astype(w_baro.dtype)
+    wetT = actT[..., :-1] * actT[..., 1:]
+    fA = _legacy(w_baro, h_k_old, active_3d)
+    fAu = _legacy(interp_cell_to_uface(w_baro), h_u_old, u_act)
+    fAv = _legacy(interp_cell_to_vface(w_baro, grid), h_v_old, v_act)
+    wi, cu_v = nemo_aimp_implicit_w(mass_flux_u, mass_flux_v, w_baro, h_k_old,
+                                    h_k_new, active_3d, grid, dt, return_cu_v=True)
+    fB = jnp.where(jnp.abs(w_baro[..., 1:-1]) > 0.0,
+                   wi[..., 1:-1] / jnp.where(w_baro[..., 1:-1] == 0.0, 1.0,
+                                             w_baro[..., 1:-1]), 0.0) * wetT
+    counts = jnp.stack([jnp.sum(fA > 0), jnp.sum(fAu > 0), jnp.sum(fAv > 0),
+                        jnp.sum(fB > 0), jnp.sum(wetT > 0)]).astype(jnp.int64)
+    return (counts, jnp.max(fA, axis=-1), jnp.max(fB, axis=-1),
+            jnp.max(cu_v, axis=-1))
+
+
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -4023,6 +4086,47 @@ class LatLonCGridOceanModel:
                 "adaptive_implicit_vertadv=True is not threaded through the "
                 "implicit_unsplit step (it skips the adaptive stage), so dynzad "
                 "would never be applied. Use barotropic_solver='implicit_cn'.")
+        _aimp_part = getattr(config, "aimp_partition", "shchepetkin_vertical")
+        if _aimp_part not in {"shchepetkin_vertical", "nemo_rk3_t"}:
+            raise ValueError(
+                "aimp_partition must be one of ['nemo_rk3_t', "
+                f"'shchepetkin_vertical'], got {_aimp_part!r}")
+        if _aimp_part == "nemo_rk3_t" and not getattr(
+                config, "adaptive_implicit_vertadv", False):
+            raise ValueError(
+                "aimp_partition='nemo_rk3_t' needs adaptive_implicit_vertadv=True")
+        if (_aimp_part == "nemo_rk3_t" and getattr(
+                config, "momentum_time_integrator", "euler") == "rk3_ws"):
+            raise ValueError(
+                "aimp_partition='nemo_rk3_t' is the rk3/euler-lane option; "
+                "the rk3_ws lane already runs the literal stage partition")
+        if _aimp_part == "nemo_rk3_t":
+            # The tracer share is constancy-tested only where ONE backward-
+            # Euler vertical solve follows ONE explicit flux-form pass.
+            _aimp_lane = {
+                "implicit_vertical_mixing": (
+                    getattr(config, "implicit_vertical_mixing", False), {True}),
+                "outer_integrator": (
+                    getattr(config, "outer_integrator", "forward_euler"),
+                    {"forward_euler"}),
+                "tracer_time_integrator": (
+                    getattr(config, "tracer_time_integrator", "euler"), {"euler"}),
+                "tracer_advection": (
+                    getattr(config, "tracer_advection", "tvd"),
+                    {"upwind", "centered", "tvd", "superbee"}),
+            }
+            for _k, (_v, _ok) in _aimp_lane.items():
+                if _v not in _ok:
+                    raise ValueError(
+                        f"aimp_partition='nemo_rk3_t' is not wired for {_k}="
+                        f"{_v!r} (supported: {sorted(map(str, _ok))})")
+        if (_aimp_part == "nemo_rk3_t" and _vert_mom_scheme
+                not in {"upwind_perturbation", "nemo_advective"}):
+            raise ValueError(
+                "aimp_partition='nemo_rk3_t' is wired for "
+                "vertical_momentum_scheme 'upwind_perturbation' (flux-form "
+                "share) or 'nemo_advective' (dynzdf vector-form share), got "
+                f"{_vert_mom_scheme!r}")
         if (_vert_mom_scheme == "centered_full"
                 and getattr(config, "adaptive_implicit_vertadv", False)):
             raise ValueError(
@@ -8710,6 +8814,14 @@ class LatLonCGridOceanModel:
         # mass fluxes (which keep using mass_flux_u/v and w_baro).
         mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
             mass_flux_u, mass_flux_v, w_baro)
+        if getattr(self, "_aimp_census_callback", None) is not None:
+            from jax.experimental import io_callback
+            _census = jax.lax.stop_gradient(aimp_census_arrays(
+                mass_flux_u, mass_flux_v, w_baro, h_k_old, h_k_new,
+                h_u_old, h_v_old, active_3d, u_mask_3d_tracer,
+                v_mask_3d_tracer, _grid, dt))
+            io_callback(self._aimp_census_callback, None, *_census,
+                        ordered=True)
 
         # 7b. Adaptive-implicit vertical momentum advection
         #     (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  The explicit
@@ -8748,6 +8860,13 @@ class LatLonCGridOceanModel:
             v_face_active = jnp.broadcast_to(v_mask_3d_tracer, v_3d.shape)
             _vertical_scheme = getattr(
                 _cfg_b, "vertical_momentum_scheme", "upwind_perturbation")
+            # NEMO wAimp_RK3_t on the momentum transports (np_velocity call,
+            # stprk3_stg.F90:292), replacing the vertical-only 0.15/0.30 rule.
+            _wi_T = (nemo_aimp_implicit_w(
+                mass_flux_u, mass_flux_v, w_baro, h_k_old, h_k_new,
+                active_3d, _grid, dt)
+                if getattr(_cfg_b, "aimp_partition", "shchepetkin_vertical")
+                == "nemo_rk3_t" else None)
             if _vertical_scheme == "nemo_up3":
                 # NEMO dynadv_up3 advects full uu/vv.  Its adaptive split
                 # partitions only the vertical transport (stprk3_stg.F90:
@@ -8765,18 +8884,35 @@ class LatLonCGridOceanModel:
                 # branch); Courant split from the plain face w.
                 _area_w = _grid.area_T[..., jnp.newaxis] * w_baro
                 _zad_mask = getattr(_cfg_b, "zad_bottom_face_mask", "min_rule")
+                _imp_kw_u, _imp_kw_v = {}, {}
+                if _wi_T is not None:
+                    # dynzdf.F90:235-250 area-averages wi to the face and
+                    # solves it in vector (advective) form.
+                    _area_wi = _grid.area_T[..., jnp.newaxis] * _wi_T
+                    _au = (_grid.dx_u * _grid.dy_u)[..., jnp.newaxis]
+                    _av = (_grid.dx_v * _grid.dy_v)[..., jnp.newaxis]
+                    _wia_u = interp_cell_to_uface(_area_wi)
+                    _wia_v = interp_cell_to_vface(_area_wi, _grid)
+                    _imp_kw_u = dict(w_imp_area_half=_wia_u,
+                                     w_imp_half=_wia_u / jnp.maximum(_au, 1.0e-30),
+                                     implicit_form="advective")
+                    _imp_kw_v = dict(w_imp_area_half=_wia_v,
+                                     w_imp_half=_wia_v / jnp.maximum(_av, 1.0e-30),
+                                     implicit_form="advective")
                 u_adv = adaptive_implicit_vertical_momentum_advection(
                     u_3d, w_u_half, h_u_old, dt,
                     face_active=u_face_active, explicit_scheme="nemo_advective",
                     bottom_face_mask_mode=_zad_mask,
                     w_area_half=interp_cell_to_uface(_area_w),
-                    face_area=(_grid.dx_u * _grid.dy_u)[..., jnp.newaxis])
+                    face_area=(_grid.dx_u * _grid.dy_u)[..., jnp.newaxis],
+                    **_imp_kw_u)
                 v_adv = adaptive_implicit_vertical_momentum_advection(
                     v_3d, w_v_half, h_v_old, dt,
                     face_active=v_face_active, explicit_scheme="nemo_advective",
                     bottom_face_mask_mode=_zad_mask,
                     w_area_half=interp_cell_to_vface(_area_w, _grid),
-                    face_area=(_grid.dx_v * _grid.dy_v)[..., jnp.newaxis])
+                    face_area=(_grid.dx_v * _grid.dy_v)[..., jnp.newaxis],
+                    **_imp_kw_v)
                 # The advective form has a non-zero column integral, and this
                 # stage runs AFTER the barotropic solve (NEMO feeds dynzad's
                 # depth mean to dynspg_ts). Remove the stage's depth-mean
@@ -8789,13 +8925,19 @@ class LatLonCGridOceanModel:
                 u_adv = _keep_depth_mean(u_adv, u_3d, h_u_old, u_face_active)
                 v_adv = _keep_depth_mean(v_adv, v_3d, h_v_old, v_face_active)
             else:
+                # Flux-form explicit scheme -> flux-form implicit share, with
+                # wi interpolated to the face exactly as w_u/v_half above.
+                _imp_kw_u = ({} if _wi_T is None else dict(
+                    w_imp_half=interp_cell_to_uface(_wi_T)))
+                _imp_kw_v = ({} if _wi_T is None else dict(
+                    w_imp_half=interp_cell_to_vface(_wi_T, _grid)))
                 u_adv = adaptive_implicit_vertical_momentum_advection(
                     u_3d - U_bar, w_u_half, h_u_old, dt,
-                    face_active=u_face_active,
+                    face_active=u_face_active, **_imp_kw_u,
                 ) + U_bar
                 v_adv = adaptive_implicit_vertical_momentum_advection(
                     v_3d - V_bar, w_v_half, h_v_old, dt,
-                    face_active=v_face_active,
+                    face_active=v_face_active, **_imp_kw_v,
                 ) + V_bar
             # Re-apply the 2D wet mask + periodic wrap column (matches the
             # tendency path's post-update masking at u[:, -1] = u[:, 0]).
@@ -9250,6 +9392,19 @@ class LatLonCGridOceanModel:
             # source's ONE-STEP-LAGGED recycling (only the 3-D path produces it).
             if eke_diss_new is not None:
                 state_new = state_new._replace(eke_diss=eke_diss_new)
+
+        # NEMO ln_zad_Aimp on the rk3/euler lane (traadv.F90:224 repartitions
+        # the eddy-augmented transports): the tracer schemes advect the
+        # explicit share; the implicit share joins the vertical-diffusion
+        # matrix (trazdf.F90:207-215) via ``nemo_aimp_tracer_w``.
+        _w_baro_tr_full = None
+        if (getattr(_cfg_b, "aimp_partition", "shchepetkin_vertical")
+                == "nemo_rk3_t"):
+            _nemo_ws_aimp_tracer_w = nemo_aimp_implicit_w(
+                mass_flux_u_tr, mass_flux_v_tr, w_baro_tr, h_k_old, h_k_new,
+                active_3d, _grid, dt)
+            _w_baro_tr_full = w_baro_tr
+            w_baro_tr = w_baro_tr - _nemo_ws_aimp_tracer_w
 
         if _cfg_b.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
@@ -9724,6 +9879,8 @@ class LatLonCGridOceanModel:
         # Metadata comes from the SHARED ``mass_flux_fields`` constructor that
         # ``seed_mass_flux_carry`` also uses, so the scan carry's treedef
         # (Field name/dims/units are pytree AUX data) matches this exactly.
+        if _w_baro_tr_full is not None:
+            w_baro_tr = _w_baro_tr_full   # stored triple = the full transport
         if _cfg_b.store_mass_flux:
             _mfu_field, _mfv_field, _mfw_field = mass_flux_fields(
                 state.u, state.v, state.w,
@@ -12673,6 +12830,15 @@ class LatLonCGridOceanModel:
             _tracer_e3t = (dz_cell
                            if _tracer_e3t_test_override is None
                            else _tracer_e3t_test_override)
+        # Shared-Thomas tracer matrix takes the implicit share ONLY under the
+        # rk3/euler-lane NEMO partition (other lanes keep their prior path).
+        _shared_aimp_w = (nemo_aimp_tracer_w if getattr(
+            _cfg_b, "aimp_partition", "shchepetkin_vertical") == "nemo_rk3_t"
+            else None)
+        if _vmix_batched and _shared_aimp_w is not None:
+            raise ValueError(
+                "LEGOESM_VMIX_BATCHED has no adaptive-implicit tracer share; "
+                "unset it with aimp_partition='nemo_rk3_t'")
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -12751,6 +12917,7 @@ class LatLonCGridOceanModel:
                     T_new, S_new = implicit_vertical_diffusion_ocean_pair(
                         T_solve_in, S_solve_in,
                         K_v_cell, dz_cell, dz_half_cell, dt,
+                        implicit_w=_shared_aimp_w,
                     )
                 else:
                     # Separate T (K_v_cell) and S (K_s_cell) solves — required
@@ -12758,9 +12925,11 @@ class LatLonCGridOceanModel:
                     # to the pair when dK_ddm_salt is None (K_s_cell is K_v_cell).
                     T_new = implicit_vertical_diffusion_ocean(
                         T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                        implicit_w=_shared_aimp_w,
                     )
                     S_new = implicit_vertical_diffusion_ocean(
                         S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt,
+                        implicit_w=_shared_aimp_w,
                     )
             if do_momentum:
                 if _zdf_literal:

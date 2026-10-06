@@ -138,6 +138,7 @@ def implicit_vertical_diffusion_ocean(
     dt: float,
     *,
     extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
 ) -> jax.Array:
     """Backward-Euler implicit vertical diffusion for a column field.
 
@@ -199,7 +200,8 @@ def implicit_vertical_diffusion_ocean(
         return field
 
     a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
-                                          extra_diag=extra_diag)
+                                          extra_diag=extra_diag,
+                                          implicit_w=implicit_w)
     if _vmix_f32_solve_enabled(field.dtype):
         f32 = jnp.float32
         x = thomas_solve(a.astype(f32), b.astype(f32), c.astype(f32),
@@ -215,8 +217,13 @@ def implicit_vertical_diffusion_ocean_pair(
     dz: jax.Array,
     dz_half: jax.Array,
     dt: float,
+    *,
+    implicit_w: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Backward-Euler vertical diffusion of TWO fields sharing ONE matrix.
+
+    ``implicit_w`` (optional, ``nlev+1`` interfaces) folds NEMO's adaptive-
+    implicit vertical advection share into the same matrix (trazdf.F90).
 
     ``field_1`` and ``field_2`` (same shape, e.g. T and S) diffuse
     against the IDENTICAL tridiagonal system — same ``K``, ``dz``,
@@ -246,7 +253,8 @@ def implicit_vertical_diffusion_ocean_pair(
     if nlev < 2:
         return field_1, field_2
 
-    a, b, c, d1 = _build_implicit_tridiag(field_1, K, dz, dz_half, dt)
+    a, b, c, d1 = _build_implicit_tridiag(field_1, K, dz, dz_half, dt,
+                                          implicit_w=implicit_w)
     # BOTH fields must be f64 (codex finding 1): keying only off field_1 would
     # force a f32 field_2 through the f32-work path, violating the helper's
     # "no-op if state already f32" contract + the shared-solver mixed-dtype
@@ -674,6 +682,7 @@ def _build_implicit_tridiag(
     dt: float,
     *,
     extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Assemble the backward-Euler tridiagonal ``(a, b, c, d)`` for one field.
 
@@ -747,6 +756,17 @@ def _build_implicit_tridiag(
     a = -alpha
     b = 1.0 + alpha + beta + extra_diag
     c = -beta
+    if implicit_w is not None:
+        # NEMO ln_zad_Aimp tracer share (trazdf.F90:207-215), divided by the
+        # cell thickness: flux-form upwind, zero at surface/bottom interfaces,
+        # so the dz-weighted column integral stays exact.
+        if implicit_w.shape[-1] != nlev + 1:
+            raise ValueError("implicit_w must contain nlev+1 interfaces")
+        w_top = implicit_w[..., :-1]
+        w_bot = implicit_w[..., 1:]
+        a = a + dt * jnp.minimum(w_top, 0.0) * inv_dz
+        c = c - dt * jnp.maximum(w_bot, 0.0) * inv_dz
+        b = b + dt * (jnp.maximum(w_top, 0.0) - jnp.minimum(w_bot, 0.0)) * inv_dz
     d = field
     return a, b, c, d
 

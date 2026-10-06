@@ -2581,6 +2581,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Disabled by default (False) to preserve bit-exact regression on
     # legacy lat-lon configs; real eORCA/OMIP production runs enable it.
     adaptive_implicit_vertadv: bool = False
+    # Which partition rule splits w into explicit/implicit shares when
+    # adaptive_implicit_vertadv is on (rk3/euler lanes):
+    # "shchepetkin_vertical" (legacy, momentum only, cell vertical Courant,
+    # thresholds 0.15/0.30); "nemo_rk3_t" = NEMO wAimp_RK3_t (0.8/1.1 scaled
+    # by the horizontal outflow Courant, sshwzv.F90:744-836), applied to the
+    # tracer matrix (trazdf) AND momentum in dynzdf vector form.
+    aimp_partition: str = "shchepetkin_vertical"
 
     # --- Outer baroclinic momentum time integrator ---
     # "euler" (default): single-step forward-Euler of the momentum
