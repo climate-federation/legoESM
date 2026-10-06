@@ -495,3 +495,20 @@ def test_snow_node_restart_into_a_run_without_it_is_refused():
     st = _fake_state(seed=6)._replace(T_snow=jnp.full(_NCOL, 260.0))
     with pytest.raises(ValueError, match="T_snow"):
         merge_land_restart_into_template(st, _fake_state(seed=7))
+
+
+def test_restart_without_snow_node_into_a_node_run_starts_from_restored_soil():
+    """A restart that lacks T_snow, merged into a node-enabled template whose
+    soil differs, starts the node from the RESTORED top soil (capped at
+    freezing under snow), not from the template's cold-start value."""
+    from legoesm import constants
+    from legoesm.land.restart import merge_land_restart_into_template
+    old = _fake_state(seed=8)
+    old = old._replace(
+        T_soil=old.T_soil.at[:, 0].set(jnp.asarray([260.0, 280.0, 265.0, 290.0, 270.0])),
+        snow_depth=jnp.asarray([5.0, 5.0, 0.0, 0.0, 1.0]))
+    tmpl = _fake_state(seed=9)._replace(T_snow=jnp.full(_NCOL, 300.0))
+    merged = merge_land_restart_into_template(old, tmpl)
+    tf = constants.T_freeze
+    np.testing.assert_array_equal(np.asarray(merged.T_snow),
+                                  np.asarray([260.0, tf, 265.0, 290.0, 270.0]))

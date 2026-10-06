@@ -1,0 +1,16 @@
+# name	restart_day	target_day	repo	extra
+# Snow thermal node A/B on the land-stress baseline (user 2026-10-06). Restart:
+# COPY of mv3y_vl checkpoint_day_<restart> only (day 275 = 2001-10-03 00Z,
+# 280 = 2001-10-08 00Z). ON and OFF arms run the SAME frozen tree
+# (wt_snowheat2_run = 468cef302 + this change) and differ only in the switch.
+# Each ON arm is scored ONLY against the OFF arm with the same restart day.
+sh2_on_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run	 --land-snow-insulation
+sh2_off_a	275	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run	 --no-land-snow-insulation
+sh2_on_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run	 --land-snow-insulation
+sh2_off_b	280	365	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run	 --no-land-snow-insulation
+# 1-day bit-identity gate: switch OFF on this tree vs plain 468cef302, same
+# restart (the OFF arms then equal the 468cef302 bulk control, shareable).
+sh2_gate_off	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_run	 --no-land-snow-insulation
+sh2_gate_base	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_base	
+# base twice: proves the gate can say IDENTICAL at all (run-to-run determinism)
+sh2_gate_base2	275	276	/work/bd1083/b309178/diffESM/legoesm_pg/wt_snowheat2_base	

@@ -59,12 +59,21 @@ def test_jordan_conductivity_is_clm5():
     assert 0.22 < clm5 < 0.23
 
 
-def test_snow_free_columns_bit_identical_to_soil_solve():
-    T, theta = _column()
-    G = jnp.array([-30.0, 5.0, 40.0])
-    ref = solve_soil_thermal(T, theta, _GRID, _HYD, _TH, G, 1800.0)
-    Ts, Tn = solve_snow_node_soil_thermal(T[:, 0] + 3.0, jnp.zeros(3), T, theta,
-                                     _GRID, _HYD, _TH, G, 1800.0)
+@pytest.mark.parametrize("ft,n_sub", [(False, 1), (True, 6)])
+def test_snow_free_columns_bit_identical_to_soil_solve(ft, n_sub):
+    """Bit-identical, not just equal to rounding: the zero-capacity node of the
+    stacked system reproduces the soil solve only to ~1e-12 K in most columns
+    (measured on 2000 random columns), so 200 random columns catch a lost
+    snow-free selection."""
+    rng = np.random.default_rng(0)
+    T = jnp.asarray(265.0 + 15.0 * rng.random((200, 10)))
+    theta = jnp.asarray(0.05 + 0.4 * rng.random((200, 10)))
+    G = jnp.asarray(-80.0 + 160.0 * rng.random(200))
+    th = _TH._replace(enable_freeze_thaw=ft)
+    ref = solve_soil_thermal(T, theta, _GRID, _HYD, th, G, 1800.0, n_substeps=n_sub)
+    Ts, Tn = solve_snow_node_soil_thermal(T[:, 0] + 3.0, jnp.zeros(200), T, theta,
+                                          _GRID, _HYD, th, G, 1800.0,
+                                          n_substeps=n_sub)
     np.testing.assert_array_equal(np.asarray(Tn), np.asarray(ref))
     np.testing.assert_array_equal(np.asarray(Ts), np.asarray(ref[:, 0]))
 
@@ -605,13 +614,33 @@ def _true_soil_dH(T0, T1, theta, th, n=4000):
     return jnp.sum(jnp.mean(Cq, -1) * (T1 - T0) * _GRID.dz, axis=-1)
 
 
-def test_freeze_thaw_final_solve_with_snow_node(monkeypatch):
-    """PRODUCTION combination (soil freeze/thaw ON) with the snow node on a
-    frozen-soil winter column.  The final solve receives the moisture fusion
-    source and the freeze/thaw sub-steps, its result is the step's state, and
-    the column's TRUE enthalpy (curtain-integrated soil + snow node) closes
-    against the boundary heat to the sub-stepped scheme's accuracy -- better
-    than the same solve as one 1800 s step."""
+# Measured true-enthalpy residuals of the final solve [W/m2], sub-stepped /
+# one 1800 s step, node ON vs main's bulk path (node off) on the same column
+# and forcing (scratch probe ftprobe.py, 2026-10-06):
+#   cold snowfall, soil Tf-0.3 K:   on 0.47 / 2.10    off 109.9 / 234.2
+#   rain on frozen soil Tf-4 K:     on 11.5 / 171.4   off  26.6 / 587.7
+#   near-freezing melt, Tf-0.2 K:   on 0.16 / 2.12    off   0.23 / 2.41
+# The residual is the apparent-heat-capacity linearisation of main's soil
+# scheme (main's own rain-on-frozen test measures 44 W/m2); the node does not
+# add to it.  Limits below sit just above the measured node-on values.
+_FT_CASES = {
+    "cold_snowfall": dict(T0=-0.3, th=0.30, swe=15.0, Ts=262.0, Ta=258.0,
+                          P=1.0e-5, Ps=1.0e-5, limit=1.0, fusion=False),
+    "rain_on_frozen": dict(T0=-4.0, th=0.20, swe=5.0, Ts=None, Ta=276.0,
+                           P=2.0e-4, Ps=0.0, limit=15.0, fusion=True),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FT_CASES))
+def test_freeze_thaw_final_solve_with_snow_node(monkeypatch, case):
+    """PRODUCTION combination (soil freeze/thaw ON) with the snow node.  The
+    final solve receives the moisture fusion source and the freeze/thaw
+    sub-steps, its result is the step's state, and the column's TRUE enthalpy
+    (curtain-integrated soil + snow node, minus the fusion heat of the water
+    Richards moved) closes against the boundary heat within the stated limit
+    and better than the same solve as one 1800 s step.  ``rain_on_frozen`` is
+    the thaw/infiltration case (water freezing into the soil under a pack)."""
+    c = _FT_CASES[case]
     from legoesm.land import multilayer_land
     from legoesm.land.soil_thermal import (liquid_water_content,
                                            moisture_fusion_heat_source)
@@ -628,9 +657,11 @@ def test_freeze_thaw_final_solve_with_snow_node(monkeypatch):
         return out
 
     monkeypatch.setattr(multilayer_land, "solve_snow_node_soil_thermal", spy)
-    st = init_multilayer_land_state(1, cfg, T_init=_TF - 0.3, theta_init=0.30)
-    st = st._replace(snow_depth=jnp.array([15.0]), T_snow=jnp.array([262.0]))
-    f = _forcing(1, 258.0, 1.0e-5, 1.0e-5)
+    st = init_multilayer_land_state(1, cfg, T_init=_TF + c["T0"],
+                                    theta_init=c["th"])
+    st = st._replace(snow_depth=jnp.array([c["swe"]]),
+                     T_snow=jnp.array([_TF if c["Ts"] is None else c["Ts"]]))
+    f = _forcing(1, c["Ta"], c["P"], c["Ps"])
     dt = 1800.0
     new, _, _ = step_multilayer_land(st, f, cfg, 1.0, dt, lat=jnp.full(1, 1.0))
     a, k, (Ts1, T1) = calls[-1]                       # the final solve
@@ -655,11 +686,12 @@ def test_freeze_thaw_final_solve_with_snow_node(monkeypatch):
                 + constants.c_pi * swe1 * (Ts - T_s0)
                 - (G + th.Q_geothermal) * dt)
 
+    assert (abs(float(fusion[0])) / dt > 10.0) == c["fusion"], fusion / dt
     r6 = float(resid(Ts1, T1)[0])
     Ts_one, T_one = real(*a, **{**k, "n_substeps": 1})
     r1 = float(resid(Ts_one, T_one)[0])
     assert abs(r6) < 0.5 * abs(r1), (r6, r1)
-    assert abs(r6) / dt < 1.0, r6 / dt                 # W/m2
+    assert abs(r6) / dt < c["limit"], r6 / dt          # W/m2
 
 
 def test_snow_node_with_layered_snowpack_is_refused():

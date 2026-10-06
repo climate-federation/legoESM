@@ -12,13 +12,15 @@
 # Several 4-GPU AMIP runs in ONE allocation, one per node, each with its OWN
 # absolute repo (arm.tsv column 3; extra flags last) so arms (branch) and controls (base commit)
 # share a job.  Same as campaign_amip_bias_0929/bundle.sbatch otherwise.
-# ORDER (the shared base-commit controls are valid only if step 2 passes):
-#   1. sbatch --nodes=3 --job-name=sh_gate --export=ALL,ARMS="sh_gate_off sh_gate_base sh_gate_base2" bundle.sbatch
-#   2. python compare_gate.py $ROOT/sh_gate_base/checkpoint_day_0246.npz $ROOT/sh_gate_base2/checkpoint_day_0246.npz
+# ORDER (the OFF arms are the shared 468cef302 control only if step 2 passes):
+#   1. sbatch --nodes=3 --job-name=sh2_gate --export=ALL,ARMS="sh2_gate_off sh2_gate_base sh2_gate_base2" bundle.sbatch
+#   2. python compare_gate.py $ROOT/sh2_gate_base/checkpoint_day_0276.npz $ROOT/sh2_gate_base2/checkpoint_day_0276.npz
 #      (base vs base: the run must be reproducible for the gate to mean anything), then
-#      python compare_gate.py $ROOT/sh_gate_off/checkpoint_day_0246.npz $ROOT/sh_gate_base/checkpoint_day_0246.npz
-#      -> both must print IDENTICAL (exit 0); otherwise each arm runs its own control.
-#   3. sbatch --nodes=4 --job-name=snowheat --export=ALL,ARMS="sh_on_a sh_on_b sh_ctl_a sh_ctl_b" bundle.sbatch
+#      python compare_gate.py $ROOT/sh2_gate_off/checkpoint_day_0276.npz $ROOT/sh2_gate_base/checkpoint_day_0276.npz
+#      -> both must print IDENTICAL (exit 0).
+#   3. sbatch --nodes=4 --job-name=snowheat2 --export=ALL,ARMS="sh2_on_a sh2_off_a sh2_on_b sh2_off_b" bundle.sbatch
+# Chain: nh-cold's node-pinned copy (the repo chain at 468cef302 does not pin
+# a bundled arm to its node, so concurrent arms would stack on one node).
 set -uo pipefail
 : "${ROOT:=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs}"
 : "${PY:=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
@@ -42,7 +44,7 @@ for i in "${!arms[@]}"; do
   echo "[bundle] ${name} node=${nodes[i]} repo=${repo} commit=$(git -c safe.directory='*' -C "${repo}" rev-parse HEAD) dirty=$(git -c safe.directory='*' -C "${repo}" status --porcelain --untracked-files=no | wc -l)"
   ( REPO="${repo}" NAME="${name}" TARGET_DAYS="${target}" EXTRA="${COMMON}${extra}" \
     MAX_WALLCLOCK_SECONDS="${ARM_WALLCLOCK_SECONDS:-39600}" AMIP_STEP_NODE="${nodes[i]}" \
-    bash "${repo}/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch" \
+    bash /scratch/b/b381103/nhcold/e0p_chain_pinned.sbatch \
     > "${ROOT}/slurm_logs/${name}-${SLURM_JOB_ID}.out" 2>&1 ) &
   pid[${name}]=$!
 done

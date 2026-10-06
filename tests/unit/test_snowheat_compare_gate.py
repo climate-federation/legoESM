@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 _SCRIPT = (Path(__file__).resolve().parents[2] / "scripts" / "cluster" / "levante"
-           / "snowheat_1003" / "compare_gate.py")
+           / "snowheat_oct" / "compare_gate.py")
 
 
 def _mod():
