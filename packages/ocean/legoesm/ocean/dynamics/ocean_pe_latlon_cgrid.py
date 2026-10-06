@@ -255,6 +255,11 @@ VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 # vertical coordinate by the card (ldfdyn.f90:348-353).
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
     {"nemo_ldf_c2d", "nemo_ahm_3d_file"})
+# Coastal closure of the "nemo_ahm_3d_file" coefficient
+# (config.lateral_viscosity_file_coastal): "four_cell" (default) or
+# "nemo_fmask" (ahmf carries NEMO's rn_shlat fmask; per-level face masks and
+# NEMO e3f_0 at coastal F points).
+VALID_LATERAL_VISCOSITY_FILE_COASTAL = frozenset({"four_cell", "nemo_fmask"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -3493,6 +3498,23 @@ def _bc_horizontal_viscosity(
             f"operator's ahmt/ahmf come from); got "
             f"lateral_viscosity_operator={_visc_op!r}"
         )
+    _file_coastal = getattr(config, "lateral_viscosity_file_coastal", "four_cell")
+    if _file_coastal not in VALID_LATERAL_VISCOSITY_FILE_COASTAL:
+        raise ValueError(
+            "lateral_viscosity_file_coastal must be one of "
+            f"{sorted(VALID_LATERAL_VISCOSITY_FILE_COASTAL)}, got {_file_coastal!r}")
+    if _file_coastal != "four_cell" and _ahm_source != "nemo_ahm_3d_file":
+        raise ValueError(
+            "lateral_viscosity_file_coastal != 'four_cell' requires "
+            "lateral_viscosity_coefficient_source='nemo_ahm_3d_file'; got "
+            f"{_ahm_source!r}")
+    _file_nemo_fmask = _file_coastal == "nemo_fmask"
+    if (getattr(z_coord, "nemo_ldf_ahmt", None) is not None
+            and _ahm_source != "nemo_ahm_3d_file"):
+        raise ValueError(
+            "the coordinate carries NEMO's read eddy_viscosity_3D coefficient "
+            "(z_coord.nemo_ldf_ahmt) but lateral_viscosity_coefficient_source="
+            f"{_ahm_source!r} would ignore it; select 'nemo_ahm_3d_file'.")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
@@ -3512,20 +3534,16 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    # NEMO nn_ahm_ijk_t=-30: ahmt/ahmf read from eddy_viscosity_3D.nc and
-    # attached to the coordinate by the driver (fmask/rn_shlat already folded
-    # into ahmf).  The file IS the Laplacian magnitude, so A_h must be 0.
-    _nemo_ahmt3 = getattr(z_coord, "nemo_ahmt_3d", None)
-    _nemo_ahmf3 = getattr(z_coord, "nemo_ahmf_3d", None)
-    _nemo_ldf_file = _nemo_ahmt3 is not None
-    if _nemo_ldf_file and (config.lateral_viscosity.A_h != 0.0
-                           or not _use_nemo_div_curl):
+    # lateral_viscosity_file_coastal="nemo_fmask": the read coefficient IS the
+    # Laplacian magnitude with the boundary condition in its fmask, so A_h
+    # must be 0 (it would otherwise also drive the scalar no-slip side drag).
+    if _file_nemo_fmask and config.lateral_viscosity.A_h != 0.0:
         raise ValueError(
-            "the coordinate carries NEMO eddy_viscosity_3D coefficients; they "
-            "set the Laplacian magnitude, so lateral_viscosity.A_h must be 0 "
-            "and lateral_viscosity_operator must be 'nemo_div_curl' (got "
-            f"A_h={config.lateral_viscosity.A_h!r}, operator={_visc_op!r}).")
-    if _use_nemo_div_curl and (_nemo_ldf_file
+            "lateral_viscosity_file_coastal='nemo_fmask' takes the Laplacian "
+            "magnitude and wall condition from the read ahmt/ahmf, so "
+            "lateral_viscosity.A_h must be 0 (got "
+            f"A_h={config.lateral_viscosity.A_h!r}).")
+    if _use_nemo_div_curl and (_file_nemo_fmask
                                or config.lateral_viscosity.A_h > 0):
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
@@ -3550,16 +3568,6 @@ def _bc_horizontal_viscosity(
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
                 "wired for this operator (DINO uses Laplacian only)."
             )
-        if _nemo_ldf_file and _ahm_source == "nemo_ahm_3d_file":
-            raise ValueError(
-                "two NEMO eddy_viscosity_3D coefficient sources are selected "
-                "(z_coord.nemo_ahmt_3d from the OMIP driver AND "
-                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file'); "
-                "pick one.")
-        if _nemo_ldf_file and _want_kdiss_flux:
-            raise ValueError(
-                "kdiss_h_flux_form is not wired for the NEMO "
-                "eddy_viscosity_3D coefficients (3-D ahmt/ahmf).")
         if _ahm_source == "nemo_ahm_3d_file" and _want_kdiss_flux:
             raise ValueError(
                 "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
@@ -3567,7 +3575,7 @@ def _bc_horizontal_viscosity(
                 "K_diss_h diagnostic consumes a LATITUDE profile and would "
                 "silently broadcast it. Not wired."
             )
-        if (_ahm_source == "nemo_ahm_3d_file"
+        if (_ahm_source == "nemo_ahm_3d_file" and not _file_nemo_fmask
                 and getattr(config, "lateral_side_bc", "free_slip") != "free_slip"):
             raise ValueError(
                 "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
@@ -3576,9 +3584,7 @@ def _bc_horizontal_viscosity(
                 "source does not define (NEMO carries its lateral momentum "
                 "boundary condition inside the read coefficient's fmask)."
             )
-        if _nemo_ldf_file:
-            _ahmt, _ahmf = _nemo_ahmt3, _nemo_ahmf3
-        elif _ahm_source == "nemo_ahm_3d_file":
+        if _ahm_source == "nemo_ahm_3d_file":
             # NEMO nn_ahm_ijk_t=-30 (ldfdyn.f90:348-353): no coefficient is
             # computed.  ahmt/ahmf are READ from eddy_viscosity_3D.nc, lateral-
             # boundary-exchanged by the read path and then masked, and the card
@@ -3637,7 +3643,7 @@ def _bc_horizontal_viscosity(
         # BIT-IDENTICAL; "nemo_e3" restores NEMO's e3u/e3v/e3f weighting,
         # dynldf_lev_rot_scheme.h90:22-29,41,51).
         _nl_umask, _nl_vmask, _nl_hvtx = u_mask, v_mask, None
-        if _nemo_ldf_file:
+        if _file_nemo_fmask:
             # NEMO: ahmf already * fmask (0 land / 1 wet / rn_shlat coast), so
             # the vertex mask must not zero the coastal F points; per-level
             # face masks stand in for umask/vmask(jk) inside div/curl.
@@ -3652,7 +3658,7 @@ def _bc_horizontal_viscosity(
                     "cell-centre layer thickness h_k to be passed to "
                     "_bc_horizontal_viscosity."
                 )
-            if _nemo_ldf_file:
+            if _file_nemo_fmask:
                 # interior F: min-rule (== e3f_0 at all 3660598 wet F points of
                 # domain_cfg); coastal F: NEMO's static e3f_0. ponytail: the
                 # coastal value skips the z-star stretch (|eta|/H <~ 1e-3).
@@ -3669,8 +3675,10 @@ def _bc_horizontal_viscosity(
                 vertex_mask=_visc_vmask, h_vtx=_nl_hvtx,
                 thickness_operands=ldf_thickness_operands,
                 metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+                # nemo_fmask keeps the where-style zeta*(ahmf>0) mask
+                # (vertex mask set above), exactly as the OMIP path ran.
                 coefficient_fmask_already_applied=(
-                    _ahm_source == "nemo_ahm_3d_file"))
+                    _ahm_source == "nemo_ahm_3d_file" and not _file_nemo_fmask))
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
