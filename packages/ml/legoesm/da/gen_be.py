@@ -59,6 +59,9 @@ _MPAS_HELMHOLTZ_RELAX = 0.70
 _MATERN_ORDER = 2
 # Relative error of the fixed-count Chebyshev solve of (I - sL) y = b.
 _MATERN_CHEB_RTOL = 1.0e-13
+# Numerics cap on that count (~15 sqrt(1 + 2 s max_diag), i.e. ~L/dx): 197 at
+# 1000 km on 40962 cells.  Exceeding it is an error, never a truncated solve.
+_MATERN_CHEB_MAX = 2048
 _HORIZONTAL_SCHEMES = ("explicit", "implicit_matern")
 
 
@@ -852,12 +855,34 @@ class GenBETransform:
             self._cheb_theta = 0.5 * (lam_hi + 1.0)
             # floor: a zero length scale gives A = I and a 0/0 in the recurrence
             self._cheb_delta = jnp.maximum(0.5 * (lam_hi - 1.0), 1.0e-30)
-            sqrt_k = float(jnp.sqrt(jnp.max(lam_hi)))
+            try:
+                sqrt_k = float(jnp.sqrt(jnp.max(lam_hi)))
+            except (jax.errors.ConcretizationTypeError,
+                    jax.errors.TracerArrayConversionError) as err:
+                raise ValueError(
+                    "GenBETransform: horizontal_scheme='implicit_matern' needs concrete "
+                    "len_scale values (the Chebyshev count is static), so it cannot be "
+                    "built under jax.grad/jit with respect to the length scale; the "
+                    "explicit scheme can."
+                ) from err
+            if not np.isfinite(sqrt_k):
+                raise ValueError(
+                    f"GenBETransform: implicit_matern spectral bound is {sqrt_k**2}; "
+                    "len_scale must be finite"
+                )
             rate = (sqrt_k - 1.0) / (sqrt_k + 1.0)
-            self._n_cheb = (
-                1 if rate <= 0.0
-                else int(np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate)))
-            )
+            with np.errstate(divide="ignore"):
+                n_cheb = (
+                    1.0 if rate <= 0.0
+                    else np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate))
+                )
+            if not n_cheb <= _MATERN_CHEB_MAX:
+                raise ValueError(
+                    f"GenBETransform: implicit_matern needs {n_cheb} Chebyshev "
+                    f"iterations per solve (cap {_MATERN_CHEB_MAX}); the largest "
+                    "len_scale is too long for this mesh spacing"
+                )
+            self._n_cheb = int(n_cheb)
             logger.info("GenBE implicit_matern: %d Chebyshev iterations per solve",
                         self._n_cheb)
 

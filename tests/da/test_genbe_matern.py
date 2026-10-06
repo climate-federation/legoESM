@@ -142,3 +142,23 @@ def test_per_channel_length_scales(production):
         Bj, _ = _transform(grid, len_scale=jnp.full((n_ch,), scales[j]))
         ref = Bj._horiz_smooth(b)[:, j]
         assert float(jnp.linalg.norm(mixed[:, j] - ref) / jnp.linalg.norm(ref)) < INVERSE_RTOL
+
+
+@pytest.mark.parametrize("bad, match", [(jnp.nan, "must be finite"),
+                                        (1.0e8, "Chebyshev iterations per solve")])
+def test_bad_length_scale_raises(production, bad, match):
+    grid, B0, _ = production
+    with pytest.raises(ValueError, match=match):
+        _transform(grid, len_scale=jnp.full((B0._n_total_ch,), LEN_SCALE_M).at[2].set(bad))
+
+
+def test_building_under_grad_wrt_length_scale_refuses(production):
+    grid, B0, spec = production
+    v = _white(spec, 7)
+
+    def f(L):
+        B, _ = _transform(grid, len_scale=jnp.full((B0._n_total_ch,), L))
+        return jnp.sum(B.sqrt_multiply(v))
+
+    with pytest.raises(ValueError, match="needs concrete len_scale"):
+        jax.grad(f)(LEN_SCALE_M)
