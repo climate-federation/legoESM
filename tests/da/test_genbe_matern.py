@@ -138,7 +138,7 @@ def test_per_channel_length_scales(production):
     B, _ = _transform(grid, len_scale=scales)
     b = jax.random.normal(jax.random.PRNGKey(6), (B._ncol, n_ch))
     mixed = B._horiz_smooth(b)
-    for j in (0, n_ch - 1):
+    for j in range(n_ch):
         Bj, _ = _transform(grid, len_scale=jnp.full((n_ch,), scales[j]))
         ref = Bj._horiz_smooth(b)[:, j]
         assert float(jnp.linalg.norm(mixed[:, j] - ref) / jnp.linalg.norm(ref)) < INVERSE_RTOL

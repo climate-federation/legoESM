@@ -738,8 +738,11 @@ class GenBETransform:
     horizontal_scheme : {"explicit", "implicit_matern"}
         MPAS meshes only.  "explicit" (default): ``n_diffusion_iter`` steps of
         x + sLx, which has no usable inverse (#1819).  "implicit_matern":
-        U_h = (I - sL)^{-2} with s = L^2 / 4, so B_h = (I - sL)^{-4} (Matern,
-        nu = 3 in 2-D) and U_h^{-1} = (I - sL)^2 is exact (``n_diffusion_iter``
+        U_h = (I - sL)^{-2} with s = L^2 / 4, so B_h = U_h U_h^T, which is
+        (I - sL)^{-4} (Matern, nu = 3 in 2-D) only where cell areas are equal
+        (L is symmetric in the area-weighted inner product, not the plain one;
+        the explicit kernel has the same property), and U_h^{-1} = (I - sL)^2
+        is exact (``n_diffusion_iter``
         is unused).  ``inv_multiply`` then works with ``wind_transform=
         "identity"``; the psi/chi transform still refuses (constant psi/chi are
         null modes).  B^-1 B x reproduces x to ~1e-11 in float64, ~1e-5 in
@@ -855,6 +858,8 @@ class GenBETransform:
                 1 if rate <= 0.0
                 else int(np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate)))
             )
+            logger.info("GenBE implicit_matern: %d Chebyshev iterations per solve",
+                        self._n_cheb)
 
         self._use_mpas_helmholtz = (
             getattr(params, "wind_transform", "mpas_helmholtz") == "mpas_helmholtz"
