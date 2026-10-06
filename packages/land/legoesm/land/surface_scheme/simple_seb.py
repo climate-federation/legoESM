@@ -201,7 +201,7 @@ def compute_simple_seb_fluxes(
 
     def _bulk(T_s, q_s, L):
         if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
-            tx, ty, sh, lh, _ = compute_most_fluxes(
+            tx, ty, sh, lh, ustar = compute_most_fluxes(
                 forcing.u_lowest, forcing.v_lowest,
                 T_ref, forcing.q_lowest,
                 T_s, q_s, rho,
@@ -213,6 +213,7 @@ def compute_simple_seb_fluxes(
                 max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
             )
         else:
+            ustar = None   # constant-coefficient law: no friction velocity
             tx, ty, sh, lh = simple_bulk_fluxes(
                 forcing.u_lowest, forcing.v_lowest,
                 forcing.T_lowest, forcing.q_lowest,
@@ -228,7 +229,7 @@ def compute_simple_seb_fluxes(
         lh_raw = lh
         if LAND_CONDENSATION_FLOOR_W is not None:
             lh = jnp.maximum(lh, LAND_CONDENSATION_FLOOR_W)
-        return tx, ty, sh, lh, lh_raw
+        return tx, ty, sh, lh, lh_raw, ustar
 
     def _layered_q(T_s):
         # Layered pack (fractional cover f): the snow is an ice-saturated, freely
@@ -242,7 +243,8 @@ def compute_simple_seb_fluxes(
     LE_snow = None
     vapour_conductance = None
     if snow_cover is None:
-        tau_x, tau_y, shflx, lhflx, _ = _bulk(T_surface, q_sfc, L_eff)
+        tau_x, tau_y, shflx, lhflx, _, _ustar = _bulk(T_surface, q_sfc, L_eff)
+        tau_mag = None if _ustar is None else rho * _ustar ** 2
     else:
         # Snow and soil exchange computed SEPARATELY, then area-weighted by f and
         # 1-f.  One blended surface (f-weighted q_sat, beta and L) put about f of
@@ -258,6 +260,9 @@ def compute_simple_seb_fluxes(
         tau_x, tau_y, shflx, lhflx = (
             f * a + (1.0 - f) * b for a, b in zip(_snow[:4], _soil[:4]))
         LE_snow = f * _snow[3]
+        # Solved stress magnitude rho*u*^2, area-weighted like (tau_x, tau_y).
+        tau_mag = (None if _snow[5] is None
+                   else rho * (f * _snow[5] ** 2 + (1.0 - f) * _soil[5] ** 2))
         q_sfc = f * q_sfc_snow + (1.0 - f) * q_sfc_soil
         # Cell vapour conductance [kg m-2 s-1 per kg/kg], > 0: the exchange
         # coefficient AT THE SOLVED HUMIDITY (and stability) of each component,
@@ -332,7 +337,7 @@ def compute_simple_seb_fluxes(
         _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
         q_sfc_lin = beta_limited_surface_humidity(
             _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
-        _, _, shflx_lin, lhflx_lin, _ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
+        _, _, shflx_lin, lhflx_lin, *_ = _bulk(T_sfc_lin, q_sfc_lin, L_eff)
     else:
         # Same per-component exchange as the flux above (latent heats held at
         # T_surface, as L_eff is on the binary path).
@@ -363,5 +368,6 @@ def compute_simple_seb_fluxes(
         surface_conductance=surface_conductance,
         LE_snow=LE_snow,
         vapour_conductance=vapour_conductance,
+        tau_mag=tau_mag,
         # Canopy-specific diagnostics left as None
     )

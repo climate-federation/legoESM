@@ -939,6 +939,20 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     assert cfg_off.mpas_land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
+def test_mpas_land_stress_from_land_flag_flows_to_config():
+    """--mpas-land-stress-from-land round-trip; unset = AUTO (None), resolved
+    from the run's eligibility; --no-... is an explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_stress_from_land is None
+    for flag, want in (("--mpas-land-stress-from-land", True),
+                       ("--no-mpas-land-stress-from-land", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.mpas_land_stress_from_land is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -4784,6 +4798,35 @@ def test_mpas_land_params_refresh_flag_flows_to_config():
     cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
         "--dataset", "analytical"]), parser2))
     assert cfg_pin.mpas_land_params_refresh is False
+
+
+def test_land_canopy_snow_masking_round_trip_and_refusal():
+    """Off by default; the flag reaches ExperimentConfig both ways; the
+    production deck does not set it (A/B arm only, user 2026-10-03); on a lane
+    where it would be inert, validation refuses it."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--snow-albedo-feedback"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_snow_masking is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-canopy-snow-masking"]), parser))
+    assert cfg1.land_canopy_snow_masking is True
+    # the production deck does not set it, and with the switch on it validates
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert "land_canopy_snow_masking" not in rows
+    p.set_defaults(**rows)
+    prod_on = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS + ["--land-canopy-snow-masking"]), p))
+    assert prod_on.land_canopy_snow_masking is True
+    prod_on.validate_strict()
+    bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-canopy-snow-masking"]), parser))
+    with pytest.raises(ValueError, match="land_canopy_snow_masking"):
+        bad.validate_strict()
 
 
 def test_land_canopy_smoothing_widths_round_trip_and_validate():

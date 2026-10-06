@@ -1000,6 +1000,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "store, throughfall, wet-leaf evaporation). "
                              "Default off. Requires --use-multilayer-land "
                              "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-snow-masking",
+                        dest="land_canopy_snow_masking",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_masking,
+                        help="Trees hide ground snow in the land albedo (CLM5 "
+                             "two-stream over buried leaf + stem area, snow "
+                             "increment only, no canopy snow). Default off. "
+                             "Requires the two-leaf multilayer land with snow "
+                             "albedo feedback.")
     parser.add_argument("--land-canopy-rh-cap-smoothing-width",
                         dest="land_canopy_rh_cap_smoothing_width", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
@@ -1748,6 +1757,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-stress-from-land",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="mpas_land_stress_from_land",
+                        help="MPAS lane: surface stress over the land fraction "
+                             "from the land model (its roughness / canopy drag, "
+                             "rho u*^2) instead of the atmosphere's bulk "
+                             "(ocean-roughness) call; heat fluxes unchanged. "
+                             "Unset = AUTO (on wherever it applies: MPAS, "
+                             "multilayer land with --mpas-land-beta-soil, a "
+                             "turbulence scheme taking injected fluxes, "
+                             "two_leaf/simple_seb); --no-... = old bulk stress.")
     parser.add_argument("--mpas-land-params-refresh",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_land_params_refresh",
@@ -2568,6 +2588,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
+        land_canopy_snow_masking=args.land_canopy_snow_masking,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2623,6 +2644,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_stress_from_land=args.mpas_land_stress_from_land,
         mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s

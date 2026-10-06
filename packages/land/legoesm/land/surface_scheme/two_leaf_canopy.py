@@ -171,6 +171,17 @@ def advance_TgC_ema(
     return TgC_old + alpha * (T_air_C - TgC_old)
 
 
+def static_canopy_roughness(lp, ncol):
+    """(z0m, d) from the PRESCRIBED canopy geometry with exactly the defaults
+    and the aerodynamics function of the canopy solve below."""
+    _lp_lai = _get(lp, "LAI", None)
+    LAI = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
+    return compute_aerodynamics(
+        _get(lp, "hc", jnp.full(ncol, _DEFAULT_HC)), LAI,
+        _get(lp, "rz0m", jnp.full(ncol, _DEFAULT_RZ0M)),
+        _get(lp, "rd", jnp.full(ncol, _DEFAULT_RD)))
+
+
 def _get(lp, name: str, fallback):
     """Read from per-column params if available; else return fallback.
 
@@ -697,4 +708,5 @@ def compute_two_leaf_canopy_fluxes(
         Rn_ext=Rn_ext_d,
         residual_ext=residual_ext_d,
         stomatal_ratio=jnp.ones_like(T_soil_top),
+        tau_mag=tau_mag,
     )

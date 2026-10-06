@@ -88,12 +88,17 @@ def _wres(A_op, x, rhs, w):
 
 class TestValidation:
     def test_unknown_precond_raises_at_entry(self):
-        cfg = MPASOceanConfig(barotropic_implicit_pcg_precond="chebyshev")
+        # full bundle pinned, so the SOLVER's literal check is what fires
+        cfg = MPASOceanConfig(barotropic_implicit_pcg_precond="chebyshev",
+                              barotropic_implicit_pcg_variant="standard",
+                              barotropic_implicit_pcg_fixed_iters=20)
         with pytest.raises(ValueError, match="barotropic_implicit_pcg_precond"):
             barotropic_implicit_mpas(None, None, None, cfg, 1.0)
 
     def test_zero_sweeps_raises_at_entry(self):
         cfg = MPASOceanConfig(barotropic_implicit_pcg_precond="poly",
+                              barotropic_implicit_pcg_variant="standard",
+                              barotropic_implicit_pcg_fixed_iters=20,
                               barotropic_implicit_pcg_poly_sweeps=0)
         with pytest.raises(ValueError, match="poly_sweeps"):
             barotropic_implicit_mpas(None, None, None, cfg, 1.0)
@@ -107,14 +112,17 @@ class TestValidation:
         with pytest.raises(ValueError, match="select 'poly' there"):
             barotropic_implicit_mpas(
                 None, None, None,
-                MPASOceanConfig(barotropic_implicit_pcg_precond="gpoly"), 1.0)
+                MPASOceanConfig(barotropic_implicit_pcg_precond="gpoly",
+                                barotropic_implicit_pcg_variant="standard",
+                                barotropic_implicit_pcg_fixed_iters=15), 1.0)
 
     def test_defaults(self):
         cfg = MPASOceanConfig()
-        assert cfg.barotropic_implicit_pcg_precond == "gpoly"
+        # resolved per backend (owner decision 2026-10-04)
+        assert cfg.barotropic_implicit_pcg_precond is None
+        assert cfg.barotropic_implicit_pcg_fixed_iters is None
+        assert cfg.barotropic_implicit_pcg_variant is None
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
-        assert cfg.barotropic_implicit_pcg_variant == "standard"
 
 
 class TestPolynomial:

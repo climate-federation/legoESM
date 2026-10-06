@@ -170,6 +170,10 @@ class MultiLayerLandConfig(NamedTuple):
     # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
     # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
     elev_bands: ElevationSnowBandConfig | None = None
+    # Canopy hides ground snow in the column albedo (CLM5 two-stream over the
+    # snow-buried leaf + stem area; snow-free albedo unchanged).  Two-leaf canopy
+    # only.  Off = the unmasked snow blend.
+    canopy_snow_masking: bool = False
     # Snowpack model: "bulk" (one SWE reservoir, energy-limited melt at the soil
     # skin) or "layered" (``legoesm.land.snow_column``: an equal-mass multi-layer
     # pack solved implicitly together with the soil column, with phase change,

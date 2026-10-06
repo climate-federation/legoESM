@@ -90,11 +90,16 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
-from legoesm.land.canopy.radiative_transfer import broadband_albedo
+from legoesm.land.canopy.radiative_transfer import (
+    broadband_albedo,
+    canopy_masked_snow_albedo,
+    split_sw_components,
+)
 from legoesm.land.soil_albedo import rewet_soil_bands
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
+    static_canopy_roughness,
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
@@ -132,6 +137,46 @@ def _get(lp, name: str, fallback):
         return fallback
     v = getattr(lp, name, fallback)
     return fallback if v is None else v
+
+
+def solved_stress_magnitude(surface_out, response):
+    """The land's solved surface stress magnitude [Pa] per column.
+
+    The scheme's own ``rho*u*^2`` (``surface_out.tau_mag``) when it reports
+    one -- the ``(tau_x, tau_y)`` vector can be shortened by a wind-speed
+    floor in light wind -- else the vector length.  Non-finite stays NaN, so a
+    failed solve cannot pass as a calm one.  sqrt guarded so a zero vector
+    has a finite derivative.
+    """
+    mag = getattr(surface_out, "tau_mag", None)
+    if mag is not None:
+        return jnp.asarray(mag).reshape(response.tau_x.shape)
+    t2 = response.tau_x ** 2 + response.tau_y ** 2
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)),
+                     jnp.where(jnp.isfinite(t2), 0.0, jnp.nan))
+
+
+def static_land_roughness(land_params, config, ncol):
+    """Momentum roughness z0m and displacement height d [m] of each column from
+    its STATIC parameters, through the same function and defaults its surface
+    scheme uses (two-leaf: ``canopy.stability.compute_aerodynamics`` on the
+    prescribed LAI / hc / rz0m / rd; SimpleSEB: its per-column z0, d = 0).
+
+    Used where no solved land state may be trusted (the first host step after a
+    start or restart, before any land step has succeeded for a column): it never
+    depends on a solve.  The prognostic LAI of a carbon-coupled canopy is NOT
+    used here, only the prescribed one.
+    """
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        return static_canopy_roughness(land_params, ncol)
+    if isinstance(config.surface_scheme, SimpleSEBConfig):
+        z0 = jnp.broadcast_to(
+            jnp.asarray(_get(land_params, "z0", config.z0_land), dtype=float),
+            (ncol,))
+        return z0, jnp.zeros((ncol,), dtype=z0.dtype)
+    raise ValueError(
+        f"static_land_roughness: no static roughness for surface scheme "
+        f"{type(config.surface_scheme).__name__}")
 
 
 def resolve_plant_wilting_point(land_params, config):
@@ -408,6 +453,34 @@ def _partition_latent_root_top(soil_evap, has_snow, f_veg, le_canopy, le_soil):
     return evap_bare, evap_transp
 
 
+def _canopy_masked_band(snowy_fn, lp, LAI_override, swe, config, band, forcing):
+    """``a -> column albedo`` of one band with the canopy hiding the snow
+    (``config.canopy_snow_masking``): wraps the unmasked ``snowy_fn`` (soil band
+    -> snowy ground albedo) in :func:`canopy_masked_snow_albedo`, with the LAI the
+    canopy fluxes use.  The burial uses the PHYSICAL snow cover (CTSM frac_sno):
+    the calibrated per-PFT ``snow_cover_scale`` is a brightness correction and
+    stays in ``snowy_fn`` only (user 2026-10-03)."""
+    if lp.SAI_dom is None or lp.hbot_dom is None or lp.pft_dom is None:
+        raise ValueError(
+            "canopy_snow_masking needs per-column SAI_dom, hbot_dom and pft_dom in the "
+            "canopy parameters (build_canopy_params / the per-step updater set "
+            "them); these parameters carry none")
+    f_snow = snow_cover_fraction(swe, config.land_albedo)
+    lai = lp.LAI if LAI_override is None else LAI_override
+    # Snow depth [m] for the CLM5 burial of short plants: SWE over a bulk density.
+    depth = swe / constants.rho_snow_land
+    # This step's diffuse share of the band, from the SAME Erbs split the canopy
+    # RT absorbs with; no light (night) -> diffuse albedo.
+    par_dir, par_dif, nir_dir, nir_dif, _ = split_sw_components(
+        forcing.sw_down, forcing.cos_zenith)
+    s_dir, s_dif = (par_dir, par_dif) if band == 0 else (nir_dir, nir_dif)
+    tot = s_dir + s_dif
+    f_dif = jnp.where(tot > 0.0, s_dif / jnp.where(tot > 0.0, tot, 1.0), 1.0)
+    return lambda a: canopy_masked_snow_albedo(
+        a, snowy_fn(a), band, jnp.broadcast_to(lai, swe.shape), lp.SAI_dom, lp.hc,
+        lp.hbot_dom, lp.pft_dom, f_snow, depth, forcing.cos_zenith, f_dif)
+
+
 def _step_multilayer_land_impl(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -487,6 +560,23 @@ def _step_multilayer_land_impl(
     # area-weighted band aggregates; ``band_net_radiation`` (below) replaces the
     # cell-mean radiation in ``G_surface`` with the banded per-band balance.
     bands = config.elev_bands
+    if config.canopy_snow_masking and (
+            bands is not None
+            or not isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+            or not config.snow_albedo_feedback or lat is None
+            or land_params is None):
+        raise ValueError(
+            "canopy_snow_masking is implemented only for the two-leaf canopy with "
+            "snow_albedo_feedback on, a latitude field, canopy land_params and no "
+            "elevation bands; anywhere else it would be silently inert")
+    if config.canopy_snow_masking and config.snow_scheme == "layered":
+        # Majority review decision 2026-10-05 (codex + Claude; GLM dissent):
+        # the masking reads the start-of-step bulk SWE and buries with a fixed
+        # bulk density, while the layered pack carries its own SWE, density and
+        # cover; until the masking reads the pack, refuse the combination.
+        raise ValueError(
+            "canopy_snow_masking is not supported with snow_scheme='layered' yet: "
+            "the masking's snow cover and burial depth would not match the pack's")
     if bands is not None:
         if isinstance(config.surface_scheme,
                       (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
@@ -735,7 +825,12 @@ def _step_multilayer_land_impl(
             _band = lambda a: compute_land_albedo(
                 lat, snow, snow_age, config.land_albedo,
                 base_albedo=jnp.broadcast_to(a, T_surface.shape))
-            lp = lp._replace(ALB_VIS=_band(lp.ALB_VIS), ALB_NIR=_band(lp.ALB_NIR))
+            _vis, _nir = _band, _band
+            if config.canopy_snow_masking:
+                _vis, _nir = (_canopy_masked_band(_band, lp, LAI_override, snow,
+                                                  config, ib, forcing)
+                              for ib in (0, 1))
+            lp = lp._replace(ALB_VIS=_vis(lp.ALB_VIS), ALB_NIR=_nir(lp.ALB_NIR))
             _alpha_applied = broadband_albedo(lp.ALB_VIS, lp.ALB_NIR)
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
@@ -1554,8 +1649,14 @@ def _step_multilayer_land_impl(
             _band_new = lambda a: compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
                 base_albedo=jnp.broadcast_to(a, T_surface_new.shape))
-            alpha_new = broadband_albedo(_band_new(_lp_new.ALB_VIS),
-                                         _band_new(_lp_new.ALB_NIR))
+            _vis_new, _nir_new = _band_new, _band_new
+            if config.canopy_snow_masking:
+                _vis_new, _nir_new = (
+                    _canopy_masked_band(_band_new, _lp_new, LAI_override,
+                                        snow_new, config, ib, forcing)
+                    for ib in (0, 1))
+            alpha_new = broadband_albedo(_vis_new(_lp_new.ALB_VIS),
+                                         _nir_new(_lp_new.ALB_NIR))
         elif getattr(_lp_soil, "ALB_VIS_DRY", None) is not None:
             # Two-leaf without snow layering: the soil bands at the post-step
             # water, i.e. what the next step absorbs with (same hand-off as

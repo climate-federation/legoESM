@@ -325,6 +325,10 @@ land_canopy_zeta_cap_smoothing_width: 0.05
 # 5 left unstable columns up to 11% off in aerodynamic resistance).
 land_canopy_most_n_iters: 10
 mpas_land_beta_soil: true
+# Surface drag over land from the land model's own roughness / canopy drag, not
+# the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
+# the boundary layer received 0.04 Pa vs land model 0.23 vs ERA5 0.26).
+mpas_land_stress_from_land: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user

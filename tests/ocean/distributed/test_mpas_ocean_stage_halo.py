@@ -107,6 +107,8 @@ def _all_frontier_config(base, barotropic_solver):
         barotropic_solver=barotropic_solver,
         # The MPI Voronoi lane refuses the default "gpoly" (no deep halo).
         barotropic_implicit_pcg_precond="poly",
+        barotropic_implicit_pcg_variant="standard",
+        barotropic_implicit_pcg_fixed_iters=20,
         A_h=1.0e3, B_h=1.0e9, C_smag=0.05, C_leith=1.0, K_bih=1.0e9,
         K_h=100.0,
         K_zeta_bih=1.0e9,          # T3 vertex-channel site (codex r1 #2)

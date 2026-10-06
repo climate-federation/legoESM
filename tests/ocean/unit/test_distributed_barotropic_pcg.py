@@ -818,12 +818,16 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        # standard + gpoly x 15 (owner decision 2026-10-02: the recurrence
-        # gpoly x 15 was measured with; deep-halo Jacobi is opt-in).
-        assert cfg.barotropic_implicit_pcg_variant == "standard"
-        # gpoly at 20 since 2026-10-05 (owner decision; A/B in mpas_config).
-        assert cfg.barotropic_implicit_pcg_fixed_iters == 20
-        assert cfg.barotropic_implicit_pcg_precond == "gpoly"
+        # Resolved per JAX backend since 2026-10-04 (owner decision; table
+        # MPAS_BAROTROPIC_PCG_DEFAULTS in mpas_config).
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        assert cfg.barotropic_implicit_pcg_variant is None
+        cpu = resolve_barotropic_pcg_defaults(cfg, "cpu")
+        gpu = resolve_barotropic_pcg_defaults(cfg, "gpu")
+        assert (cpu.barotropic_implicit_pcg_variant, cpu.barotropic_implicit_pcg_precond,
+                cpu.barotropic_implicit_pcg_fixed_iters) == ("single_reduce_deep", "jacobi", 30)
+        assert (gpu.barotropic_implicit_pcg_variant, gpu.barotropic_implicit_pcg_precond,
+                gpu.barotropic_implicit_pcg_fixed_iters) == ("standard", "gpoly", 20)
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4
         assert cfg.barotropic_implicit_pcg_residual_tol == 1.0e-10
         assert cfg.barotropic_implicit_pcg_tol == 1.0e-10
