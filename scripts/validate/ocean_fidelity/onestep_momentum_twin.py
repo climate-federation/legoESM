@@ -104,6 +104,8 @@ def main(argv=None) -> int:
     p.add_argument("--kmax", type=int, default=30)
     p.add_argument("--min-levels", type=int, default=45)
     p.add_argument("--tol", type=float, default=1e-8)
+    p.add_argument("--tol-shear", type=float, default=1e-7,
+                   help="GATE1 shear tolerance (float32 storage floor of uoce)")
     p.add_argument("--plant", type=float, default=0.10)
     p.add_argument("--plant-k", type=int, default=9, help="w-level of the interior plant (9 = 12.8 m)")
     p.add_argument("--with-spg", action="store_true", help="add utrd_spg to rhs3 (closure arm)")
@@ -275,18 +277,27 @@ def main(argv=None) -> int:
           f"max {np.abs(tz).max():.3e}; NEMO |utrd_zdf| median {np.median(np.abs(trd_zdf[:a.kmax])):.3e}")
     # plants: our output must move beyond tol when avm is perturbed
     rc = 0
-    for lab, kk in (("interior avm", a.plant_k), ("top-interface avm", 1), ("deep avm", 35), ("surface stress", None)):
+    if np.abs(err_ours).max() > a.tol or max(raw_ours) > a.tol:
+        print("[FAIL] GATE2"); rc = 3
+    if np.abs(shear).max() > a.tol_shear:
+        print("[FAIL] GATE1-shear"); rc = 3
+    for lab, kk in (("interior avm", a.plant_k), ("top-interface avm", 1), ("deep avm", 35),
+                    ("surface stress", None), ("e3uw", -a.plant_k)):
         moved = []
         for (j, i) in cols:
             n, x, av = build(j, i)
-            if kk is None:
+            e3w_p = e3uw_m[:n, j, i].copy()
+            if kk is not None and kk < 0:
+                e3w_p[-kk] *= 1.0 + a.plant
+                _, xp, avp = n, x, av
+            elif kk is None:
                 _, xp, avp = build(j, i, tau_scale=1.0 + a.plant)
             else:
                 _, xp, avp = build(j, i, avm_scale=(kk, 1.0 + a.plant))
             y0 = implicit_vertical_diffusion_ocean(jnp.asarray(x), jnp.asarray(av[1:]),
                                                    jnp.asarray(e3u_a[:n, j, i]), jnp.asarray(e3uw_m[1:n, j, i]), STEP_DT)
             y1 = implicit_vertical_diffusion_ocean(jnp.asarray(xp), jnp.asarray(avp[1:]),
-                                                   jnp.asarray(e3u_a[:n, j, i]), jnp.asarray(e3uw_m[1:n, j, i]), STEP_DT)
+                                                   jnp.asarray(e3u_a[:n, j, i]), jnp.asarray(e3w_p[1:]), STEP_DT)
             moved.append(float(np.max(np.abs(finish(j, i, n, np.asarray(y1)) - finish(j, i, n, np.asarray(y0))))))
         frac = float(np.mean(np.array(moved) > a.tol))
         print(f"[plant {lab} (w-level {kk}) x{1 + a.plant:g}] fraction of columns moved > tol: {frac:.3f}; "

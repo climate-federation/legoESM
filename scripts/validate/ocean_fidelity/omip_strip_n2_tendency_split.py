@@ -102,6 +102,9 @@ def main(argv=None):
     dif_n = g * (ALPHA * jump(hf("ttrd_zdf")) - BETA * jump(hf("strd_zdf"))) * 3600.0
     res_n = g * (ALPHA * sum(jump(hf(v)) for v in ("ttrd_totad", "ttrd_ldf", "ttrd_qsr", "ttrd_bbl"))
                  - BETA * sum(jump(hf(v)) for v in ("strd_totad", "strd_ldf", "strd_bbl"))) * 3600.0
+    bj = lambda tv, sv: g * (ALPHA * jump(hf(tv)) - (BETA * jump(hf(sv)) if sv else 0.0)) * 3600.0
+    res_parts = {"totad": bj("ttrd_totad", "strd_totad"), "qsr": bj("ttrd_qsr", None),
+                 "ldf+bbl": bj("ttrd_ldf", "strd_ldf") + bj("ttrd_bbl", "strd_bbl")}
     spd = int(round(3600.0 / a.dt))
     dbo, dbn = (bo[..., k] - bo[..., k + 1])[:, wet], (bn[..., k] - bn[..., k + 1])[:, wet]
     print("hourly change of the buoyancy jump db (m/s2), median over wet columns; ours / NEMO / paired diff")
@@ -136,6 +139,15 @@ def main(argv=None):
         clo = (dbn[r1] - dbn[r0]) - (Dn_c + Rn_c)
         print(f"    NEMO per-column cumulative closure: median |1ts change - trd1h sum| / |1ts change| "
               f"{np.median(np.abs(clo) / np.maximum(np.abs(dbn[r1] - dbn[r0]), 1e-12)):.3f}")
+        # Shortwave absorption matches NEMO at 0-25 m (ratio 0.99-1.00), so the RESIDUAL gap is the
+        # gap in advection (NEMO totad = horizontal + vertical) + ldf + bbl.
+        print("    NEMO RESIDUAL parts (mean, rms over cols): " + " | ".join(
+            f"{nm} {np.mean(v[h0:h1, wet].sum(0)):+.2e} rms {np.sqrt(np.mean(v[h0:h1, wet].sum(0) ** 2)):.2e}"
+            for nm, v in res_parts.items()))
+        print(f"    advective gap (ours RES - NEMO qsr) - NEMO totad: mean "
+              f"{np.mean(Ro_c - res_parts['qsr'][h0:h1, wet].sum(0) - res_parts['totad'][h0:h1, wet].sum(0)):+.2e}"
+              f" rms {np.sqrt(np.mean((Ro_c - res_parts['qsr'][h0:h1, wet].sum(0) - res_parts['totad'][h0:h1, wet].sum(0)) ** 2)):.2e}"
+              f" vs rms total gap {np.sqrt(np.mean(gap ** 2)):.2e}")
         print(f"    components: ours DIFF {np.mean(Do_c):+.2e} RES {np.mean(Ro_c):+.2e} | NEMO DIFF {np.mean(Dn_c):+.2e} "
               f"RES {np.mean(Rn_c):+.2e}")
 
