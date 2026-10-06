@@ -200,6 +200,10 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         # at all, on any rank count, and nothing noticed because nothing runs
         # it in CI.
         land_surface_scheme=land_surface_scheme,
+        # Named for the same reason: the per-step surfdata refresh exists only
+        # for the two-leaf canopy (production keeps it on there) and the
+        # driver refuses it for any other scheme.
+        mpas_land_params_refresh=(land_surface_scheme == "two_leaf"),
         land_ic_path=land_ic,
         distributed=distributed,
     )
@@ -418,11 +422,15 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact(scheme):
 
     def advance(driver, state, forc, n=4):
         lat = jnp.asarray(driver.physics.land_ml_lat)
+        # Compiled, as on the production lane: run eagerly, the two-leaf
+        # canopy compiles one executable per op and exhausts the process's
+        # memory-mapping budget ("LLVM compilation error: Cannot allocate
+        # memory").  Both sides take the same path.
+        step = jax.jit(lambda s, f_: step_multilayer_land(
+            s, f_, driver.physics.land_ml_cfg, 1.0, 600.0,
+            lat=lat, doy=0.0, land_params=driver.physics.land_ml_params)[0])
         for _ in range(n):
-            state, _r, _c = step_multilayer_land(
-                state, forc, driver.physics.land_ml_cfg, 1.0, 600.0,
-                lat=lat, doy=0.0,
-                land_params=driver.physics.land_ml_params)
+            state = step(state, forc)
         return state
 
     ref = advance(ref_d, start_serial, forcing_global)
@@ -518,7 +526,7 @@ def test_mpas_multilayer_land_checkpoint_round_trip_under_mpi():
         f"round trip changed which land leaves exist: "
         f"lost {set(before) - set(after)}, gained {set(after) - set(before)}")
     bad = {k: float(np.max(np.abs(after[k] - before[k])))
-           for k in before if not np.array_equal(after[k], before[k])}
+           for k in before if not _bitwise_equal(after[k], before[k])}
     assert not bad, (
         f"land leaves changed across the MPI checkpoint round trip: {bad}")
     if MPI.COMM_WORLD.Get_rank() == 0:

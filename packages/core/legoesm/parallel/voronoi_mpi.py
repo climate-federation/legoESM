@@ -1262,10 +1262,8 @@ def make_voronoi_mpi_step(
             _owned = layout.owned_mask_cells[:, None]
 
             def _mpi_owned_sum(x, _o=_owned):
-                # BROADCAST-allreduce, NOT identity-VJP global_sum_mpi: the
-                # summed scalar broadcasts into every rank's rescale factor, so
-                # the correct transpose is allreduce(SUM) of the cotangent (the
-                # #811 flux-form scale lesson; codex 2026-07-28 round 2).
+                # The summed scalar feeds every rank's rescale factor, so the
+                # backward pass must allreduce the cotangent (#811, #1814).
                 return broadcast_allreduce_sum(
                     jnp.sum(jnp.where(_o, x, 0.0)))
 

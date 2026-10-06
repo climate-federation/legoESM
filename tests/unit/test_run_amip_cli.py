@@ -953,6 +953,19 @@ def test_mpas_land_stress_from_land_flag_flows_to_config():
         assert cfg.mpas_land_stress_from_land is want
 
 
+def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
+    """--mpas-ocean-flux-on-ocean-surface round-trip; default off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_ocean_flux_on_ocean_surface is False
+    for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
+                       ("--no-mpas-ocean-flux-on-ocean-surface", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.mpas_ocean_flux_on_ocean_surface is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""

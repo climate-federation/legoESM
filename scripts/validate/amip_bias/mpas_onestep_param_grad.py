@@ -57,7 +57,9 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
     line = None
     for lg in reversed(logs):
         for ln in open(lg, errors="replace"):
-            if "[chain] launching:" in ln and "run_amip.py" in ln:
+            # single-GPU chains write "[chain] launching:", multi-GPU ones
+            # "[chain] launching on N GPU(s):"
+            if "[chain] launching" in ln and "run_amip.py" in ln:
                 line = ln
                 break
         if line:
@@ -73,6 +75,9 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
     for f in ("--output", "--restart-from", "--days", "--max-wallclock-seconds",
               "--checkpoint-days"):
         drop(f)
+    # The relaunch is one process on a gathered (global) checkpoint, so a
+    # multi-GPU run's MPI flag must not carry over.
+    drop("--distributed", 1)
     ckpt = ROOT / run / f"checkpoint_day_{day:04d}.npz"
     if not ckpt.exists():
         raise SystemExit(f"missing {ckpt}")

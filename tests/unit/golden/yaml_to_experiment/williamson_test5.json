@@ -193,6 +193,7 @@
   "mpas_land_beta": 1.0,
   "mpas_land_beta_soil": false,
   "mpas_land_lapse_K_per_km": 0.0,
+  "mpas_ocean_flux_on_ocean_surface": false,
   "mpas_qv_smooth_del2_m2s": 0.0,
   "mpas_qv_smooth_del4_m4s": 0.0,
   "multilayer_n_layers": 10,
