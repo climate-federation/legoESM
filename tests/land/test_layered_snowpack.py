@@ -310,11 +310,12 @@ _LAYERED_MAX_SKIN_JUMP_K = 5.51
 def test_melt_out_and_reaccumulation_stay_finite_and_continuous():
     """A thin pack melts out, the column runs bare, then snow re-accumulates: no
     NaN, and the layered pack's skin temperature handed to the atmosphere never
-    jumps more than ``_LAYERED_MAX_SKIN_JUMP_K`` between steps.  Measured
-    2026-10-06: worst step change 5.41 K for layered, at the forcing switch
-    itself (1.3 K while melting out); bulk 5.11 K since unmet evaporation energy
-    leaves as sensible heat (7.71 K before, when the old relative test passed).
-    The bound is absolute because the bulk pack is no longer a fixed reference."""
+    jumps more than ``_LAYERED_MAX_SKIN_JUMP_K`` between consecutive steps WITHIN
+    a forcing segment (the step across the forcing switch is not measured).
+    Measured 2026-10-06: worst within-segment step change 5.41 K for layered;
+    bulk 5.11 K since unmet evaporation energy leaves as sensible heat (7.71 K
+    before, when the old bulk-relative test passed).  The bound is absolute
+    because the bulk pack is no longer a fixed reference."""
     # 72 melt steps: under partial cover only f*G reaches a thin pack, so a trace
     # pack decays exponentially (f ~ SWE/snow_depth_crit at small SWE; measured
     # 1.9e-4 kg/m2 left after 72 steps) and "bare" means f < 1e-3 (SWE < 0.01).
