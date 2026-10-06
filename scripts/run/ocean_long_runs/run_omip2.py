@@ -119,17 +119,24 @@ def external_surface_forcing_physics():
 
 
 def step_with_omip2_forcing(model, state, *, forcing, idx_t, grid,
-                            grid_type, dt):
+                            grid_type, dt, pre_step=None):
     """One ocean step with the CORE-II / JRA55-do bulk forcing integrated
     inside the timestep (the faithful path; issue #1820).
 
     Momentum and heat only: the surface freshwater flux (P - E,
     ``compute_omip2_freshwater_forcing`` -> ``model.step(freshwater=...)``) is
     NOT applied, as the deleted operator-split applicator never applied it.
+
+    The flux is computed from the BEGINNING-of-step state (the production
+    run_omip_core2 / FESOM / NEMO "now"-field convention); ``pre_step``
+    (optional) then applies operator-split edits such as runoff, ice-shelf
+    melt or SSS restoring before the ocean step.
     """
     from legoesm.ocean.coupler import compute_omip2_surface_forcing
     sf = compute_omip2_surface_forcing(
         state, forcing=forcing, idx_t=idx_t, grid=grid, grid_type=grid_type)
+    if pre_step is not None:
+        state = pre_step(state)
     return model.step(state, dt, surface_forcing=sf)
 
 

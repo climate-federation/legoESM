@@ -220,3 +220,32 @@ def test_driver_loops_step_through_the_forcing(script, argv, tmp_path,
                            else ["--allow-synthetic"]))
     assert driver.main() == 0
     assert len(calls) >= 1
+
+
+def test_forcing_is_computed_before_the_pre_step_edits():
+    """The bulk flux reads the BEGINNING-of-step SST (production / NEMO "now"
+    convention); ``pre_step`` edits land on the state that is then stepped.
+    A pre-step that warms the surface by 5 K must not change the flux."""
+    m = _omip2()
+    from legoesm.core.field import Field
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    state, grid, z, model = m._build_state("latlon", "18x36", nlev=6,
+                                           scripts_dir=_MATRIX)
+    forcing = _east_wind()
+
+    def warm(s):
+        T = np.asarray(s.T.data).copy()
+        T[..., 0] += 5.0
+        return s._replace(T=Field(T, name=s.T.name, dims=s.T.dims,
+                                  units=s.T.units))
+
+    got = m.step_with_omip2_forcing(model, state, forcing=forcing, idx_t=0,
+                                    grid=grid, grid_type="latlon", dt=_DT,
+                                    pre_step=warm)
+    sf0 = compute_omip2_surface_forcing(state, forcing=forcing, idx_t=0,
+                                        grid=grid, grid_type="latlon")
+    want = model.step(warm(state), _DT, surface_forcing=sf0)
+    np.testing.assert_array_equal(np.asarray(got.T.data), np.asarray(want.T.data))
+    late = compute_omip2_surface_forcing(warm(state), forcing=forcing,
+                                         idx_t=0, grid=grid, grid_type="latlon")
+    assert float(np.abs(np.asarray(late.q_net) - np.asarray(sf0.q_net)).max()) > 1.0

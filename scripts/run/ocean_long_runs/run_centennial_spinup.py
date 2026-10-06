@@ -555,85 +555,89 @@ def main() -> int:
         K_tidal_year_steps = 0
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // steps_per_year
-            # Dai-Trenberth runoff (when enabled). Grid-dispatched like the
-            # SSS / ice-shelf steps: the mpas apply shares the same virtual-salt
-            # + eta-rise convention. Both R fields carry the (spatial,) shape
-            # their projector produced -- (n_lat, n_lon) or (nCells,).
-            if runoff_on_grid is not None:
-                if args.grid == "mpas":
-                    state = apply_runoff_step_mpas(
-                        state,
-                        R_kg_m2_s=runoff_on_grid,
-                        z_coord=z_coord,
-                        dt=dt,
-                    )
-                else:
-                    state = apply_runoff_step(
-                        state,
-                        R_kg_m2_s=runoff_on_grid,
-                        z_coord=z_coord,
-                        dt=dt,
-                    )
+            def _pre_step(state):
+                # Dai-Trenberth runoff (when enabled). Grid-dispatched like the
+                # SSS / ice-shelf steps: the mpas apply shares the same virtual-salt
+                # + eta-rise convention. Both R fields carry the (spatial,) shape
+                # their projector produced -- (n_lat, n_lon) or (nCells,).
+                if runoff_on_grid is not None:
+                    if args.grid == "mpas":
+                        state = apply_runoff_step_mpas(
+                            state,
+                            R_kg_m2_s=runoff_on_grid,
+                            z_coord=z_coord,
+                            dt=dt,
+                        )
+                    else:
+                        state = apply_runoff_step(
+                            state,
+                            R_kg_m2_s=runoff_on_grid,
+                            z_coord=z_coord,
+                            dt=dt,
+                        )
 
-            # Ice-shelf basal melt (when enabled). Grid-dispatched exactly like
-            # the SSS-restoring / runoff steps above: the lat-lon and MPAS apply
-            # functions share the same three-equation basal-melt convention and
-            # both are unit-tested. The MPAS variant was implemented and tested
-            # but previously unreachable -- the driver warned "not supported on
-            # grid=mpas" for a step it already had.
-            if (ice_shelf_config is not None
-                    and ice_shelf_mask_arr is not None
-                    and ice_draft_arr is not None):
-                if args.grid == "mpas":
-                    state, _ = apply_ice_shelf_basal_step_mpas(
-                        state,
-                        ice_shelf_mask=ice_shelf_mask_arr,
-                        ice_draft_m=ice_draft_arr,
-                        z_coord=z_coord,
-                        dt=dt,
-                        config=ice_shelf_config,
-                    )
-                else:
-                    state, _ = apply_ice_shelf_basal_step(
-                        state,
-                        ice_shelf_mask=ice_shelf_mask_arr,
-                        ice_draft_m=ice_draft_arr,
-                        z_coord=z_coord,
-                        dt=dt,
-                        config=ice_shelf_config,
-                    )
+                # Ice-shelf basal melt (when enabled). Grid-dispatched exactly like
+                # the SSS-restoring / runoff steps above: the lat-lon and MPAS apply
+                # functions share the same three-equation basal-melt convention and
+                # both are unit-tested. The MPAS variant was implemented and tested
+                # but previously unreachable -- the driver warned "not supported on
+                # grid=mpas" for a step it already had.
+                if (ice_shelf_config is not None
+                        and ice_shelf_mask_arr is not None
+                        and ice_draft_arr is not None):
+                    if args.grid == "mpas":
+                        state, _ = apply_ice_shelf_basal_step_mpas(
+                            state,
+                            ice_shelf_mask=ice_shelf_mask_arr,
+                            ice_draft_m=ice_draft_arr,
+                            z_coord=z_coord,
+                            dt=dt,
+                            config=ice_shelf_config,
+                        )
+                    else:
+                        state, _ = apply_ice_shelf_basal_step(
+                            state,
+                            ice_shelf_mask=ice_shelf_mask_arr,
+                            ice_draft_m=ice_draft_arr,
+                            z_coord=z_coord,
+                            dt=dt,
+                            config=ice_shelf_config,
+                        )
 
-            # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
-            # passes explicit zero ice-fraction; coupled-ice driver
-            # should plumb the live ``ice_state.concentration`` so
-            # restoring is suppressed under ice and the brine flux
-            # (TileResponse.salt_flux) drives the budget there.
-            if sss_config is not None and S_target_on_grid is not None:
-                ice_open = np.zeros_like(S_target_on_grid)
-                if args.grid == "latlon":
-                    state = apply_sss_restoring_step(
-                        state,
-                        S_target=S_target_on_grid,
-                        ice_concentration=ice_open,
-                        config=sss_config,
-                        grid=grid,
-                        z_coord=z_coord,
-                        dt=dt,
-                    )
-                elif args.grid == "mpas":
-                    state = apply_sss_restoring_step_mpas(
-                        state,
-                        S_target=S_target_on_grid,
-                        ice_concentration=ice_open,
-                        config=sss_config,
-                        mesh=grid,
-                        dt=dt,
-                    )
-            # CORE-II / JRA55-do bulk forcing integrated inside the step,
-            # after the pre-step runoff / ice-shelf / SSS edits (issue #1820).
+                # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
+                # passes explicit zero ice-fraction; coupled-ice driver
+                # should plumb the live ``ice_state.concentration`` so
+                # restoring is suppressed under ice and the brine flux
+                # (TileResponse.salt_flux) drives the budget there.
+                if sss_config is not None and S_target_on_grid is not None:
+                    ice_open = np.zeros_like(S_target_on_grid)
+                    if args.grid == "latlon":
+                        state = apply_sss_restoring_step(
+                            state,
+                            S_target=S_target_on_grid,
+                            ice_concentration=ice_open,
+                            config=sss_config,
+                            grid=grid,
+                            z_coord=z_coord,
+                            dt=dt,
+                        )
+                    elif args.grid == "mpas":
+                        state = apply_sss_restoring_step_mpas(
+                            state,
+                            S_target=S_target_on_grid,
+                            ice_concentration=ice_open,
+                            config=sss_config,
+                            mesh=grid,
+                            dt=dt,
+                        )
+                return state
+
+            # CORE-II / JRA55-do bulk forcing from the beginning-of-step state,
+            # then the runoff / ice-shelf / SSS edits, then the step with the
+            # forcing integrated in-step (issue #1820; production order).
             state = step_with_omip2_forcing(
                 model, state, forcing=forcing, idx_t=idx_t, grid=grid,
-                grid_type=args.grid, dt=dt,
+                grid_type=args.grid, dt=dt, pre_step=_pre_step,
             )
 
             # Jayne-StLaurent tidal vertical mixing — applied AFTER
