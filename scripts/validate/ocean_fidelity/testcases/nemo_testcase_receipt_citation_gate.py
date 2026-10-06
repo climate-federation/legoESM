@@ -5944,7 +5944,7 @@ CITATION_MAP = {
         ('3. Do east and west MPI_Isend if needed', 2),
         ('CALL MPI_ISEND( buffsnd_dp(ishtS(jn)+1)', 1), 19],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2060-2073': [
-        ('IF( ibufszR(jn) > 0 ) THEN', 1),
+        ('IF( ibufszR(jn) > 0 ) THEN', 3),
         ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = buffrcv_dp(idxr)', 1), 14],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90:2105-2113': [
         ('6. north fold treatment', 2),
@@ -5956,8 +5956,8 @@ CITATION_MAP = {
         ('ALLOCATE(ipjfld(kfld))', 2),
         ('CALL MPI_Isend(', 2), 41],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1712-1739': [
-        ('Apply the North pole folding', 1),
-        ('ptab(jf)%pt4d(ji,ij1,jk,jl) = psgn(jf) * zbufr(ii2,ij2,inei)', 1), 28],
+        ('Apply the North pole folding', 2),
+        ('ptab(jf)%pt4d(ji,ij1,jk,jl) = psgn(jf) * zbufr(ii2,ij2,inei)', 3), 28],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90:1747-1766': [
         ('IF( lnfd_same(ii1,iig) )', 2),
         ('ptab(jf)%pt4d(ji,ij1,jk,jl) = psgn(jf)', 4), 20],
