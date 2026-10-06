@@ -956,6 +956,7 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row, when="")
 
     n = len(plot_fields)
     fig, ax = plt.subplots(2, n, figsize=(5.5 * n, 8), squeeze=False)
+    zonal_out = {"lat": np.asarray(tgt_lat)}
     for j, (name, (Tg, Mg, Ng, unit, ok)) in enumerate(plot_fields.items()):
         # ONE row mask for all three curves, with a minimum count: a row where
         # only one grid resolves a couple of cells must not be drawn next to a
@@ -976,6 +977,7 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row, when="")
             z[good] = (np.where(rowok, f, 0.0).sum(axis=1)[good] / cnt[good])
             return z
         zT, zM, zN = zm(Tg), zm(Mg), zm(Ng)
+        zonal_out.update({f"{name}_a": zT, f"{name}_b": zM, f"{name}_nemo": zN})
         a0 = ax[0][j]
         a0.plot(zT, tgt_lat, label=lab_t, lw=1.4)
         a0.plot(zM, tgt_lat, label=lab_m, lw=1.4, ls="--")
@@ -997,6 +999,9 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row, when="")
     fig.savefig(out / "zonal_3way.png", dpi=110)
     plt.close(fig)
     print(f"[map] {out / 'zonal_3way.png'}")
+    # The plotted curves, same rows and gates, for numeric comparison of runs.
+    np.savez(out / "zonal_means.npz", **zonal_out)
+    print(f"[zonal] {out / 'zonal_means.npz'}")
 
 
 if __name__ == "__main__":
