@@ -95,11 +95,16 @@ def era5_columns(e5dir, date, lat_deg, lon_deg):
     q, la2, lo2, plev2 = _era5_field(f"{e5dir}/e5pl_133_{date}.nc", "Q", date)
     if not (np.array_equal(plev, plev2) and np.array_equal(la, la2) and np.array_equal(lo, lo2)):
         raise SystemExit("FATAL: ERA5 T and Q files are on different grids")
-    if not (np.all(np.diff(plev) > 0) and 9.0e4 <= plev.max() <= 1.1e5 and plev.min() < 1.0e3):
+    if not (np.all(np.diff(plev) > 0) and plev.min() > 0.0
+            and 9.0e4 <= plev.max() <= 1.1e5 and plev.min() < 1.0e3):
         raise SystemExit(f"FATAL: ERA5 plev not ascending Pa 1..1000 hPa: {plev[[0, -1]]}")
-    sp, *_ = _era5_field(f"{e5dir}/e5sf_134_{date}.nc", "SP", date)
-    t2, *_ = _era5_field(f"{e5dir}/e5sf_167_{date}.nc", "T2M", date)
-    d2, *_ = _era5_field(f"{e5dir}/e5sf_168_{date}.nc", "D2M", date)
+    sfc = {}
+    for code, name in ((134, "SP"), (167, "T2M"), (168, "D2M")):
+        v, la3, lo3, _ = _era5_field(f"{e5dir}/e5sf_{code}_{date}.nc", name, date)
+        if not (np.array_equal(la3, la) and np.array_equal(lo3, lo)):
+            raise SystemExit(f"FATAL: ERA5 {name} is not on the profile grid")
+        sfc[name] = v
+    sp, t2, d2 = sfc["SP"], sfc["T2M"], sfc["D2M"]
     i = np.abs(la[:, None] - lat_deg[None, :]).argmin(0)
     dlon = np.abs(((lo[:, None] - (lon_deg[None, :] % 360.0)) + 180.0) % 360.0 - 180.0)
     j = dlon.argmin(0)
@@ -372,7 +377,7 @@ def capture(a):
         lat_d = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
         lon_d = np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64))
         pf = np.asarray(ra["p_full"], dtype=np.float64)
-        if not (np.isfinite(pf).all() and np.all(np.diff(pf, axis=1) > 0)
+        if not (np.isfinite(pf).all() and (pf > 0.0).all() and np.all(np.diff(pf, axis=1) > 0)
                 and 5.0e4 < pf[:, -1].min() and pf[:, -1].max() < 1.1e5):
             raise SystemExit("FATAL: p_full is not finite, top-to-bottom, in Pa")
         T_m = np.asarray(ra["T"], dtype=np.float64)
@@ -452,10 +457,13 @@ def capture(a):
         _w = np.asarray(mesh.areaCell, dtype=np.float64) * ((_lat >= 45) & (_lat <= 70) & (_fl > 0.5))
         _base = out_arr["rad_inst_clr_lw_dn_sfc"]
         for _arm in ("clr_selfT", "clr_selfq"):
-            _d = float(((out_arr[f"rad_{_arm}_lw_dn_sfc"] - _base) * _w).sum() / _w.sum())
-            print(f"control {_arm}: 45-70N land clear-sky DLW change {_d:+.3f} W/m2", flush=True)
-            if abs(_d) > 1.0:
-                raise SystemExit(f"FATAL: control {_arm} moved DLW by {_d:+.2f} W/m2 (> 1)")
+            _dd = out_arr[f"rad_{_arm}_lw_dn_sfc"] - _base
+            _d = float((_dd * _w).sum() / _w.sum())
+            _ad = float((np.abs(_dd) * _w).sum() / _w.sum())     # no cancellation
+            print(f"control {_arm}: 45-70N land clear-sky DLW change mean {_d:+.3f}, "
+                  f"mean |.| {_ad:.3f} W/m2", flush=True)
+            if _ad > 1.0:
+                raise SystemExit(f"FATAL: control {_arm} moved DLW by mean |.| {_ad:.2f} W/m2 (> 1)")
     out_arr["rad_sfc_albedo"] = np.broadcast_to(
         np.asarray(ra["sfc_albedo_override"]), out_arr["rad_inst_olr"].shape).copy()
     out_arr["rad_cos_sza"] = np.asarray(ra["cos_sza"])
