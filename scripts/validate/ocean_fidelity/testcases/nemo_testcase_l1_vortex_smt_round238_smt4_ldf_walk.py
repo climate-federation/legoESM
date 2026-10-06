@@ -2,12 +2,12 @@
 """Locate SMT-4's first stage-3 momentum-LDF boundary under production JIT.
 
 The admitted round-237 record writes NEMO's cumulative stage-3 momentum RHS
-immediately before and after ``CALL dyn_ldf``.  This gate drives legoESM's
-production-jitted step from NEMO's recorded stage-3 entry and publishes the
-same two boundaries through the existing write-only stage-3 RHS seam.  Thus a
-non-bit pre-LDF row is inherited; an exact pre-LDF row followed by a non-bit
-post-LDF row is owned by ``dyn_ldf``.  Exactness is literal cell equality, not
-the trajectory bar.
+after HPG, vorticity, vector advection, and lateral diffusion.  This gate
+drives legoESM's production-jitted step from NEMO's recorded stage-3 entry and
+publishes those same boundaries through existing write-only seams.  The first
+non-bit boundary therefore prevents a downstream operator from being blamed
+for inherited input.  Exactness is literal cell equality, not the trajectory
+bar.
 
 The record is self-described and parsed by its admission checker (note BD).
 The plant changes one scored wet cell and deliberately exits nonzero.
@@ -39,7 +39,7 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
     "oracle_vortex_smt4/kt1_10"
 )
-BOUNDARIES = ("pre_ldf", "post_ldf")
+BOUNDARIES = ("hpg", "vor", "adv", "pre_ldf", "post_ldf")
 
 
 def run(root: Path, *, plant: str | None = None,
@@ -101,17 +101,31 @@ def run(root: Path, *, plant: str | None = None,
     )
 
     def production(boundary: str):
-        hooks = _NEMOWSRK3TestHooks(
+        hook_args = dict(
             stage_barotropic_output_override=external,
             stage_entry_override=stage3_entry,
-            expose_stage3_momentum_rhs=boundary,
         )
+        if boundary in ("pre_ldf", "post_ldf"):
+            hook_args["expose_stage3_momentum_rhs"] = boundary
+        else:
+            hook_args.update(
+                expose_momentum_operator={
+                    "hpg": "after_hpg",
+                    "vor": "after_vor",
+                    "adv": "after_zad",
+                }[boundary],
+                expose_momentum_operator_stage=3,
+            )
+        hooks = _NEMOWSRK3TestHooks(**hook_args)
         model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=hooks)
         return lego_fields(model.step(seed, dt=card.dt_s))
 
     references = {
+        "hpg": (groups["hpg_u"], groups["hpg_v"]),
+        "vor": (groups["vor_u"], groups["vor_v"]),
+        "adv": (groups["adv_u"], groups["adv_v"]),
         "pre_ldf": (groups["adv_u"], groups["adv_v"]),
         "post_ldf": (groups["ldf_u"], groups["ldf_v"]),
     }
@@ -139,22 +153,26 @@ def run(root: Path, *, plant: str | None = None,
                 bit_exact=bool(np.array_equal(
                     candidate[active], reference[active])),
                 execution_regime="production_step_jit",
-                nemo_boundary=(
-                    "stprk3_stg cumulative Krhs immediately before dyn_ldf"
-                    if boundary == "pre_ldf" else
-                    "stprk3_stg cumulative Krhs immediately after dyn_ldf"),
+                nemo_boundary={
+                    "hpg": "stprk3_stg cumulative Krhs after dyn_hpg",
+                    "vor": "stprk3_stg cumulative Krhs after dyn_vor",
+                    "adv": "stprk3_stg cumulative Krhs after dyn_adv",
+                    "pre_ldf": (
+                        "stprk3_stg cumulative Krhs immediately before dyn_ldf"),
+                    "post_ldf": (
+                        "stprk3_stg cumulative Krhs immediately after dyn_ldf"),
+                }[boundary],
                 planted=planted,
             )
             rows.append(row)
 
-    pre = [row for row in rows if ".pre_ldf." in row["name"]]
-    post = [row for row in rows if ".post_ldf." in row["name"]]
-    if any(not row["bit_exact"] for row in pre):
-        owner = "inherited_before_dyn_ldf"
-    elif any(not row["bit_exact"] for row in post):
-        owner = "dyn_ldf"
-    else:
-        owner = None
+    owner = None
+    for boundary in BOUNDARIES:
+        selected = [row for row in rows
+                    if f".stage3.{boundary}." in row["name"]]
+        if any(not row["bit_exact"] for row in selected):
+            owner = boundary
+            break
     report = {
         "format": "nemo-testcase-l1-vortex-smt-round238-ldf-walk-v1",
         "case": CASE,
