@@ -216,7 +216,7 @@ class PHydroConfig(NamedTuple):
     alpha_cost: float = 0.1        # [-] cost per unit Jmax
     gamma_cost: float = 0.0        # [umol/m2/s/MPa^2] hydraulic risk cost
     # --- non-stomatal limitation of Jmax ---
-    psi50_jmax_mpa: float = -1.5   # [MPa] leaf potential at 50% Jmax loss
+    psi50_jmax_mpa: float = -3.0   # [MPa] leaf potential at 50% Jmax loss
     ck_jmax: float = 1.0           # [-] Weibull shape of the Jmax curve
 
 
