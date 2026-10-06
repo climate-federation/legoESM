@@ -146,7 +146,10 @@ def test_per_channel_length_scales(production):
 
 @pytest.mark.parametrize("bad, match", [(jnp.nan, "must be finite"),
                                         (-5.0e5, "must be finite and >= 0"),
-                                        (1.0e8, "Chebyshev iterations per solve")])
+                                        (1.0e8, "Chebyshev iterations per solve"),
+                                        # convergence rate rounds to 1; bound overflows
+                                        (1.0e21, "Chebyshev iterations per solve"),
+                                        (1.0e200, "Chebyshev iterations per solve")])
 def test_bad_length_scale_raises(production, bad, match):
     grid, B0, _ = production
     with pytest.raises(ValueError, match=match):
@@ -163,3 +166,12 @@ def test_building_under_grad_wrt_length_scale_refuses(production):
 
     with pytest.raises(ValueError, match="needs concrete len_scale"):
         jax.grad(f)(LEN_SCALE_M)
+
+
+def test_ill_conditioned_inverse_refuses(production):
+    """B^-1 B x error grows ~kappa^4 eps (measured 2.4e-7 at 2000 km, 1.3e-3 at
+    6000 km); past the bound inv_multiply must refuse, not return it."""
+    grid, B0, spec = production
+    B, _ = _transform(grid, len_scale=jnp.full((B0._n_total_ch,), 2.0e6))
+    with pytest.raises(ValueError, match="condition number"):
+        B.inv_multiply(_white(spec, 8))

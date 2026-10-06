@@ -62,6 +62,10 @@ _MATERN_CHEB_RTOL = 1.0e-13
 # Numerics cap on that count (~15 sqrt(1 + 2 s max_diag), i.e. ~L/dx): 197 at
 # 1000 km on 40962 cells.  Exceeding it is an error, never a truncated solve.
 _MATERN_CHEB_MAX = 2048
+# B^-1 under the implicit kernel has condition number ~kappa^4 (kappa = 1 +
+# 2 s max_diag); refuse inv_multiply when kappa^4 * eps(dtype) exceeds this
+# (measured B^-1 B x error is ~1e-2 of that bound on 40962 cells).
+_MATERN_INV_BOUND_MAX = 1.0e-6
 _HORIZONTAL_SCHEMES = ("explicit", "implicit_matern")
 
 
@@ -877,13 +881,14 @@ class GenBETransform:
                     1.0 if rate <= 0.0
                     else np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate))
                 )
-            if not n_cheb <= _MATERN_CHEB_MAX:
+            if not 1.0 <= n_cheb <= _MATERN_CHEB_MAX:  # also NaN, +-inf
                 raise ValueError(
                     f"GenBETransform: implicit_matern needs {n_cheb} Chebyshev "
                     f"iterations per solve (cap {_MATERN_CHEB_MAX}); the largest "
                     "len_scale is too long for this mesh spacing"
                 )
             self._n_cheb = int(n_cheb)
+            self._matern_kappa = sqrt_k**2
             logger.info("GenBE implicit_matern: %d Chebyshev iterations per solve",
                         self._n_cheb)
 
@@ -1362,6 +1367,16 @@ class GenBETransform:
         whose J_b term calls this method; only a cost written directly in v
         (J_b = 0.5 |v|^2, as the MPAS 3D/4D-Var drivers do) avoids it.
         """
+        if self.horizontal_scheme == "implicit_matern":
+            bound = self._matern_kappa**4 * float(jnp.finfo(x.dtype).eps)
+            if bound > _MATERN_INV_BOUND_MAX:
+                raise ValueError(
+                    "GenBETransform.inv_multiply: the implicit_matern B^-1 has "
+                    f"condition number ~kappa^4 = {self._matern_kappa**4:.3g}, so "
+                    f"{x.dtype} cannot invert it accurately (kappa^4 * eps = "
+                    f"{bound:.2e} > {_MATERN_INV_BOUND_MAX:g}). Shorten len_scale, "
+                    "use float64, or minimise in v (J_b = 0.5 |v|^2)."
+                )
         y = self._inverse(x)  # U^{-1} x
         _, vjp_fn = jax.vjp(self._inverse, x)
         return vjp_fn(y)[0]  # U^{-T} y  (exact for linear U^{-1})
