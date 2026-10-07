@@ -225,7 +225,7 @@ def build_mpas_ocean_spmd_layout(
     sharding = dev.face_sharding
 
     def _put(x):
-        return multiprocess_safe_device_put(jnp.asarray(x), sharding)
+        return multiprocess_safe_device_put(x, sharding)
 
     stacked_dev = jax.tree.map(_put, stacked)
 
@@ -538,7 +538,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     def _localize_by_index(x, idx):
         loc = np.asarray(x)[idx]                              # (n_dev, max_l*, ...)
-        return multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+        return multiprocess_safe_device_put(loc, layout.cell_sharding)
 
     # The vertical coordinate may carry PER-CELL statics (partial cells:
     # h_partial, bottom_level, is_active, t_depth_ref; NEMO EEN operands).
@@ -641,7 +641,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         # Concrete even when called from inside a jit trace (the block scan):
         # the localised static is a per-device CONSTANT, not a traced operand.
         with jax.ensure_compile_time_eval():
-            loc = multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+            loc = multiprocess_safe_device_put(loc, layout.cell_sharding)
         _local_cache[key] = (x, loc)
         return loc
 
