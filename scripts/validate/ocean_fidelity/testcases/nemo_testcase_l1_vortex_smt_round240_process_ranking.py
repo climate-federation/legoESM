@@ -238,7 +238,7 @@ def run(root: Path, *, allow_dirty: bool = False,
         print(f"  day100 T_rms={arm_rows['100']['T_rms']:.16e}", flush=True)
 
     baseline = rows["baseline"]["100"]["T_rms"]
-    require(baseline == 2.552708052055443e-04,
+    require(baseline == 2.5527080520554426e-04,
             f"baseline day100 T RMS {baseline!r} does not reproduce certified value")
     ranking = rank_rows(rows)
     hpg = next(row for row in ranking if row["arm"] == "hpg_source_order")

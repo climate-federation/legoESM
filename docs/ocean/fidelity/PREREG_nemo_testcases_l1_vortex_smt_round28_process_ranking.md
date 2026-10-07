@@ -116,3 +116,10 @@ measurement commit `19a38791ee878118c4952ce4d0cb922fc58130c3`; their
 snapshot digests and measurement commit
 are written into the JSON, and the failed arm is rerun under the corrected
 emitter. No arm definition or frozen prediction changed in this correction.
+
+The first corrected compose attempt captured that refusal, then itself
+refused because P1's receipt-style decimal `2.552708052055443e-04` rounds to
+a different binary float than the score artifact's exact Python
+representation `2.5527080520554426e-04`. The equality guard now pins the
+artifact's exact representable value. This is a decimal-spelling correction,
+not a tolerance or a changed baseline.

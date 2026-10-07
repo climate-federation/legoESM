@@ -14,7 +14,7 @@ sys.path.insert(0, str(TOOLS))
 import nemo_testcase_l1_vortex_smt_round240_process_ranking as probe  # noqa: E402
 
 
-def _rows(value=2.552708052055443e-4):
+def _rows(value=2.5527080520554426e-4):
     return {name: {"100": {"T_rms": value}} for name in probe.ARM_NAMES}
 
 
