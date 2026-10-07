@@ -36,12 +36,12 @@ def _load(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def _validate_visuals(root: Path) -> dict:
+def validate_visuals(root: Path, tag: str = "smt1") -> dict:
     from PIL import Image
 
-    mp4 = root / "vortex_smt1_100d.mp4"
-    gif = root / "vortex_smt1_100d.gif"
-    montage = root / "vortex_smt1_frames.png"
+    mp4 = root / f"vortex_{tag}_100d.mp4"
+    gif = root / f"vortex_{tag}_100d.gif"
+    montage = root / f"vortex_{tag}_frames.png"
     for path in (mp4, gif, montage):
         require(path.is_file(), f"missing visual artifact: {path}")
         require(path.stat().st_size > 1000, f"empty visual artifact: {path}")
@@ -122,7 +122,7 @@ def validate(score: dict, smt0: dict, *, root: Path = ROOT,
             },
         }
 
-    visuals = _validate_visuals(root)
+    visuals = validate_visuals(root)
     return {
         "format": "nemo-testcase-l1-vortex-smt-round242-gate-v1",
         "measurement_commit": MEASUREMENT_COMMIT,
