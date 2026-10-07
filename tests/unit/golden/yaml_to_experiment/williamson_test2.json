@@ -94,7 +94,7 @@
     "mpas_vert_advection_scheme": "upwind",
     "polar_filter_cutoff_deg": 60.0,
     "polar_filter_max_wave_speed": 300.0,
-    "sb81_omega_conversion": false,
+    "sb81_omega_conversion": true,
     "sponge_coeff": 0.0,
     "sponge_scale_height_m": 7500.0,
     "sponge_shape": "sin2",

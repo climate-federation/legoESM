@@ -995,13 +995,12 @@ def build_parser():
                              "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
                              "being clamped to ~5s. Without it a 2deg lat-lon "
                              "run is ~80x more steps and infeasible.")
-    parser.add_argument("--sb81-omega-conversion", action="store_true",
-                        default=False,
+    parser.add_argument("--sb81-omega-conversion",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="SB81 α-weighted κT·ω/p energy conversion on the "
                              "hybrid lat-lon C-grid lane (#1029; no effect on "
-                             "other grids/coordinates). Default OFF — unmasks "
-                             "the #1029(b) lid-wave instability sooner; opt-in "
-                             "until the lid treatment lands.")
+                             "other grids/coordinates). Default ON; "
+                             "--no-sb81-omega-conversion = legacy form.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,

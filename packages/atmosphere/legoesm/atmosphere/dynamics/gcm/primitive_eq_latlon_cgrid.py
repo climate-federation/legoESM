@@ -202,14 +202,12 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # α-weighted form (sb81_omega_over_p_dyn) built from the SAME half-level
     # construction as the geopotential and the momentum/thermo ln p^SB
     # gradients — the discretization-consistent closure of the #1029 PGF
-    # chain.  False (default): the legacy arithmetic ω_full/p_full form.
-    # Default OFF: the consistent form removes the arithmetic form's
-    # accidental damping of the lid-amplified orographic-wave mode
-    # (#1029(b)) — measured held_suarez_topo latlon blowup day ~49 -> ~12
-    # (A/B job 9130802, byte-fixed protocol) — so it stays opt-in until the
-    # lid treatment lands.  Static Python bool (feature-gating exception):
-    # each value compiles its own branch, no jnp.where double-trace.
-    sb81_omega_conversion: bool = False
+    # chain (default).  False: the legacy arithmetic ω_full/p_full form,
+    # kept only for A/B against older runs.  The old opt-in rationale (the
+    # arithmetic form accidentally damped the #1029(b) lid-amplified
+    # orographic-wave mode) predates the #836 top sponge.  Static Python
+    # bool (feature-gating exception): each value compiles its own branch.
+    sb81_omega_conversion: bool = True
     # Biharmonic (del-4) hyperdiffusion [m^4/s] on u, v and T, the same
     # scheme as the lat-lon shallow-water lane: scale-selective (k^4), with
     # the per-latitude-row pole stability cap ``nu_del4_row_profiles``.
