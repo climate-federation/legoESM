@@ -1004,7 +1004,7 @@ class PhysicsPipeline:
         ad = self.adapter
         _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         beta_col = land_tile_beta_soil(
-            land_ml.theta_soil, self.land_ml_cfg, _lmp)
+            land_ml.theta_soil, land_ml.T_soil, self.land_ml_cfg, _lmp)
         q_sat_land_col = ad.flatten_2d(
             saturation_specific_humidity(T_land, p_s))
         return ad.unflatten_2d(beta_col * q_sat_land_col)

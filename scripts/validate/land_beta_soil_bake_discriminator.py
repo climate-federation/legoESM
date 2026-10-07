@@ -40,6 +40,7 @@ import argparse
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import land_tile_beta_soil
 from legoesm.land.soil_grid import SoilGridConfig
@@ -81,7 +82,9 @@ def _beta(theta, wp, fc, root, n_layers, total_depth, growth):
         Vc_max25=jnp.full(n, 60.0), LCMA=jnp.full(n, 60.0), g1=jnp.full(n, 9.0))
     theta_col = jnp.broadcast_to(
         jnp.asarray(theta, dtype=jnp.float64)[:, None], (n, n_layers))
-    return np.asarray(land_tile_beta_soil(theta_col, cfg, params))
+    # Default config: soil freeze/thaw off, so the soil temperature is unused.
+    return np.asarray(land_tile_beta_soil(
+        theta_col, jnp.full_like(theta_col, constants.T_freeze + 15.0), cfg, params))
 
 
 def _beta_profile(theta_prof, wp, fc, root, n_layers, total_depth, growth):
@@ -101,8 +104,10 @@ def _beta_profile(theta_prof, wp, fc, root, n_layers, total_depth, growth):
         root_depth=jnp.full(1, root),
         theta_wp=jnp.full(1, wp), theta_fc=jnp.full(1, fc),
         Vc_max25=jnp.full(1, 60.0), LCMA=jnp.full(1, 60.0), g1=jnp.full(1, 9.0))
+    theta_col = jnp.asarray(theta_prof, dtype=jnp.float64)[None, :]
     return float(land_tile_beta_soil(
-        jnp.asarray(theta_prof, dtype=jnp.float64)[None, :], cfg, params)[0])
+        theta_col, jnp.full_like(theta_col, constants.T_freeze + 15.0), cfg,
+        params)[0])
 
 
 def main() -> int:

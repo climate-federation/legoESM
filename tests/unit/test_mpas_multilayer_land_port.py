@@ -156,7 +156,8 @@ def test_traced_beta_soil_reaches_turbulence(monkeypatch, tmp_path):
     # (strictly below 1 somewhere: the soil is between wp and fc).
     from legoesm.land.multilayer_land import land_tile_beta_soil
     beta = np.asarray(land_tile_beta_soil(
-        d_on._land_ml_state.theta_soil, d_on.physics.land_ml_cfg,
+        d_on._land_ml_state.theta_soil, d_on._land_ml_state.T_soil,
+        d_on.physics.land_ml_cfg,
         d_on.physics.land_ml_params))
     ncell = int(np.asarray(d_on.grid.latCell).size)
     assert beta.shape == (ncell,)

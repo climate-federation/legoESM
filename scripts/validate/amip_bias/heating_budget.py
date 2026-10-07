@@ -87,208 +87,6 @@ def band_mean(field, lat_deg, area):
     return out
 
 
-# Cloud-optics lever arms (#1521).  Each arm multiplies named inputs of the
-# production radiation backend's ALL-SKY call (the clear-sky companion call has
-# no condensate and is left alone); everything else is the production call.
-#   liq xk   : q_cloud and n_cloud x k -> liquid water x k at ~fixed radius
-#   ice x2   : q_ice and n_ice x 2 (CAM6 ice cover depends on q_ice: combined)
-#   Nc xk    : n_cloud x k -> radius x ~k^(-1/3) at fixed water
-#   cover xk : CLUBB cloud_fraction_override x k (clipped to 1) with q_cloud,
-#              q_ice, n_cloud, n_ice x k -> more cover at ~fixed in-cloud water
-LEVER_ARMS = (("ctl", {}), ("liq x1.0", {"q_cloud": 1.0, "n_cloud": 1.0}),
-              ("liq x0.5", {"q_cloud": 0.5, "n_cloud": 0.5}),
-              ("liq x1.76", {"q_cloud": 1.76, "n_cloud": 1.76}),
-              ("liq x2.27", {"q_cloud": 2.27, "n_cloud": 2.27}),
-              ("ice x2", {"q_ice": 2.0, "n_ice": 2.0}),
-              ("Nc x0.5", {"n_cloud": 0.5}), ("Nc x2", {"n_cloud": 2.0}),
-              ("cover x1.07", {"cloud_fraction_override": 1.07, "q_cloud": 1.07,
-                               "q_ice": 1.07, "n_cloud": 1.07, "n_ice": 1.07}))
-BANDS_LEVER = {"global": (-90.0, 90.0), "30S-30N": (-30.0, 30.0)}
-
-
-def scale_inputs(bound: dict, factors: dict) -> dict:
-    """Copy of the backend arguments with the named inputs multiplied; the
-    cloud-fraction override is clipped to [0, 1] after scaling."""
-    out = dict(bound)
-    for name, k in factors.items():
-        if out.get(name) is None:
-            raise SystemExit(f"lever input {name!r} is None in the captured call")
-        v = out[name] * k
-        if name == "cloud_fraction_override":
-            v = v.clip(0.0, 1.0)
-        out[name] = v
-    return out
-
-
-def gate(cond: bool, msg: str) -> None:
-    if not cond:
-        raise SystemExit(f"GATE FAILED: {msg}")
-    print(f"gate ok: {msg}")
-
-
-def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
-                 n_times):
-    """Diurnal-mean TOA rsut/rlut per lever arm on the captured state.
-
-    The sun is moved by the MODEL's own radiation function: ``forcing``
-    'seconds_of_day' is set to each quadrature hour and the production
-    radiation physics_fn is called, so declination, orbit, distance factor and
-    hour angle are the model's (no astronomy here).  The backend is wrapped to
-    scale the arm's inputs on the all-sky call and record its outputs.
-    """
-    import inspect
-    import jax
-    if forcing is None or forcing.get("seconds_of_day") is None:
-        raise SystemExit("captured forcing has no seconds_of_day: cannot move the sun")
-    fn = fns["radiation"]
-    area = np.asarray(mesh.areaCell, dtype=np.float64)
-    lat = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
-    w = {b: np.where((lat >= lo) & (lat <= hi), area, 0.0) for b, (lo, hi) in BANDS_LEVER.items()}
-    w = {b: v / v.sum() for b, v in w.items()}
-    sig_bound = inspect.signature(real_backend)
-    orig_ccp = rad_int.compute_cloud_properties
-    rec = {}
-
-    def ccp(*a, **kw):
-        out = orig_ccp(*a, **kw)
-        rec.setdefault("props", []).append(out)
-        return out
-
-    def run(factors, sod):
-        rec.clear()
-
-        def backend(*a, **kw):
-            b = sig_bound.bind(*a, **kw).arguments
-            if isinstance(b.get("T"), jax.core.Tracer):
-                raise SystemExit("cloud_levers reached a traced radiation call; "
-                                 "the arms must run eagerly")
-            allsky = b.get("q_cloud") is not None
-            if allsky:
-                b = scale_inputs(b, factors)
-                rec.setdefault("props", [])
-            out = real_backend(**b)
-            if allsky:
-                rec["allsky"] = out
-                rec["cf_in"] = b.get("cloud_fraction_override")
-            return out
-        rad_int._call_radiation_backend, rad_int.compute_cloud_properties = backend, ccp
-        try:
-            f = dict(forcing)
-            if sod is not None:
-                f["seconds_of_day"] = np.asarray(sod, dtype=np.asarray(forcing["seconds_of_day"]).dtype)
-            kw = {"forcing": f} if getattr(fn, "_wants_forcing", False) else {}
-            if getattr(fn, "_wants_phys_state_ro", False):
-                kw["phys_state"] = phys_state
-            fn(state, mesh, sig, **kw)
-        finally:
-            rad_int._call_radiation_backend, rad_int.compute_cloud_properties = real_backend, orig_ccp
-        if "allsky" not in rec or len(rec["props"]) != 1:
-            raise SystemExit(f"expected one all-sky solve with one cloud-property call, "
-                             f"got {len(rec.get('props', []))}")
-        o, p = rec["allsky"], rec["props"][0]
-        lwp = np.asarray(p.lwp, dtype=np.float64)
-        col = lwp.sum(1)
-        rl = np.asarray(p.r_eff_liq, dtype=np.float64)
-        return {
-            "rsut": np.asarray(o.sw_flux_up[:, 0], dtype=np.float64),
-            "rlut": np.asarray(o.lw_flux_up[:, 0], dtype=np.float64),
-            "rsdt": np.asarray(o.sw_flux_down[:, 0], dtype=np.float64),
-            "lwp": float((col * w["global"]).sum()),
-            "iwp": float((np.asarray(p.iwp, dtype=np.float64).sum(1) * w["global"]).sum()),
-            "reff": float(((lwp * rl).sum(1) * w["global"]).sum() / max((col * w["global"]).sum(), 1e-30)),
-            "cf": np.asarray(p.cloud_fraction, dtype=np.float64),
-        }
-
-    # I1: the wrapper with no scaling at the captured time is the production call.
-    real_out = {}
-
-    def spy(*a, **kw):
-        out = real_backend(*a, **kw)
-        b = sig_bound.bind(*a, **kw).arguments
-        if isinstance(b.get("T"), jax.core.Tracer):
-            raise SystemExit("cloud_levers reached a traced radiation call; "
-                             "the arms must run eagerly")
-        if b.get("q_cloud") is not None:
-            real_out["o"] = out
-        return out
-    rad_int._call_radiation_backend = spy
-    kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
-    if getattr(fn, "_wants_phys_state_ro", False):
-        kw["phys_state"] = phys_state
-    fn(state, mesh, sig, **kw)
-    rad_int._call_radiation_backend = real_backend
-    r0 = run({}, None)
-    d_sw = float(np.abs(r0["rsut"] - np.asarray(real_out["o"].sw_flux_up[:, 0])).max())
-    d_lw = float(np.abs(r0["rlut"] - np.asarray(real_out["o"].lw_flux_up[:, 0])).max())
-    gate(d_sw < 1e-6 and d_lw < 1e-6,
-         f"I1 replay = production call (max|d rsut| {d_sw:.1e}, max|d rlut| {d_lw:.1e} W/m2)")
-
-    def diurnal(factors, n):
-        """Mean over n evenly spaced UTC hours (every column sees n local
-        times); cloud properties do not depend on the sun, so the first
-        hour's are kept and asserted identical at every hour."""
-        acc = None
-        for h in (np.arange(n) + 0.5) * 24.0 / n:
-            r = run(factors, h * 3600.0)
-            if acc is None:
-                acc = dict(r)
-                for k in ("rsut", "rlut", "rsdt"):
-                    acc[k] = r[k] / n
-            else:
-                if not np.array_equal(acc["cf"], r["cf"]):
-                    raise SystemExit("cloud fraction changed with the hour of day")
-                for k in ("rsut", "rlut", "rsdt"):
-                    acc[k] = acc[k] + r[k] / n
-        return acc
-
-    # Quadrature check: n vs 2n on ctl, and global daily-mean rsdt printed.
-    a_n = diurnal({}, n_times)
-    a_half = diurnal({}, n_times // 2)
-    g = lambda acc, k, b="global": float((acc[k] * w[b]).sum())
-    drift = abs(g(a_n, "rsut") - g(a_half, "rsut"))
-    print(f"quadrature: rsdt {g(a_n, 'rsdt'):.2f} ({n_times} pts) vs {g(a_half, 'rsdt'):.2f} ({n_times // 2} pts) W/m2")
-    gate(drift < 1.0, f"ctl rsut {n_times} vs {n_times // 2} points differs by {drift:.3f} W/m2 (< 1.0)")
-
-    print(f"\n{n_times}-point diurnal mean, frozen captured state; only differences between arms are the measurement")
-    hdr = (f"{'arm':>12s} {'rsut':>8s} {'d rsut':>7s} {'d 30S-30N':>9s} {'rlut':>8s} {'d rlut':>7s} "
-           f"{'r_eff um':>8s} {'LWP g/m2':>8s} {'IWP g/m2':>8s} {'d cf mean':>9s}")
-    print(hdr)
-    base = None
-    rows = {}
-    for name, fac in LEVER_ARMS:
-        acc = a_n if name == "ctl" else diurnal(fac, n_times)
-        row = {"rsut": g(acc, "rsut"), "rsut_t": g(acc, "rsut", "30S-30N"), "rlut": g(acc, "rlut"),
-               "reff": acc["reff"], "lwp": acc["lwp"], "iwp": acc["iwp"], "cf": acc["cf"]}
-        rows[name] = row
-        if base is None:
-            base = row
-        dcf = float(((row["cf"] - base["cf"]).mean(1) * w["global"]).sum())
-        print(f"{name:>12s} {row['rsut']:8.3f} {row['rsut'] - base['rsut']:+7.3f} "
-              f"{row['rsut_t'] - base['rsut_t']:+9.3f} {row['rlut']:8.3f} {row['rlut'] - base['rlut']:+7.3f} "
-              f"{row['reff'] * 1e6:8.2f} {row['lwp'] * 1e3:8.2f} {row['iwp'] * 1e3:8.2f} {dcf:+9.5f}")
-    # Hard gates on what each arm is allowed to change.
-    ident = rows["liq x1.0"]
-    gate(abs(ident["rsut"] - base["rsut"]) < 1e-9 and abs(ident["rlut"] - base["rlut"]) < 1e-9,
-         "identity arm liq x1.0 equals ctl")
-    for name, fac in LEVER_ARMS:
-        r = rows[name]
-        if name.startswith("liq") and name != "liq x1.0":
-            k = fac["q_cloud"]
-            gate(abs(r["lwp"] / base["lwp"] - k) < 0.01 * k, f"{name}: LWP ratio {r['lwp'] / base['lwp']:.4f} = {k} +-1%")
-            gate(abs(r["reff"] / base["reff"] - 1.0) < 0.05, f"{name}: r_eff ratio {r['reff'] / base['reff']:.4f} within 5%")
-        if name.startswith(("liq", "Nc")):
-            gate(np.array_equal(r["cf"], base["cf"]), f"{name}: cloud fraction unchanged")
-        if name.startswith("Nc"):
-            gate(abs(r["lwp"] / base["lwp"] - 1.0) < 1e-9, f"{name}: LWP unchanged")
-        if name.startswith("ice"):
-            k = fac["q_ice"]
-            gate(abs(r["iwp"] / base["iwp"] - k) < 0.01 * k, f"{name}: IWP ratio {r['iwp'] / base['iwp']:.4f} = {k} +-1%")
-    ln_r = np.log(rows["Nc x0.5"]["reff"] / rows["Nc x2"]["reff"])
-    print(f"\nd rsut / d ln r_eff (Nc x0.5 vs x2): "
-          f"{(rows['Nc x0.5']['rsut'] - rows['Nc x2']['rsut']) / ln_r:+.2f} W/m2 per ln unit "
-          f"(radius moved {rows['Nc x2']['reff'] * 1e6:.2f} -> {rows['Nc x0.5']['reff'] * 1e6:.2f} um)")
-    return 0
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="dd_ctl")
@@ -311,11 +109,6 @@ def main(argv=None):
     ap.add_argument("--gwd-only", action="store_true",
                     help="only the gravity-wave-drag momentum tendency: deposition per layer, "
                          "global shares and the 5-degree-band profiles (saved to npz)")
-    ap.add_argument("--cloud-levers", action="store_true",
-                    help="#1521: re-solve the captured production radiation call with "
-                         "liquid water, ice water or droplet number scaled (LEVER_ARMS), "
-                         "diurnally averaged; prints rsut/rlut per arm")
-    ap.add_argument("--n-times", type=int, default=8)
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -343,8 +136,7 @@ def main(argv=None):
             def wrapped(*fa, **fkw):
                 res = fn(*fa, **fkw)
                 t = res if hasattr(res, "dT_dt") else res[0]   # tendencies are NamedTuples
-                if not isinstance(t.dT_dt.data, jax.core.Tracer):   # setup traces under jit
-                    rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
+                rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
                 return res
             fns[name] = wrapped
             return wrapped
@@ -357,8 +149,6 @@ def main(argv=None):
 
     def spy_backend(*a, **kw):
         out = real_backend(*a, **kw)
-        if isinstance(out.lw_heating_rate, jax.core.Tracer):          # setup traces under jit
-            return out
         rad_calls.append((np.asarray(out.lw_heating_rate, dtype=np.float64),
                           np.asarray(out.sw_heating_rate, dtype=np.float64),
                           np.asarray(out.lw_flux_up[:, 0], dtype=np.float64),
@@ -398,9 +188,6 @@ def main(argv=None):
 
     pf_full = real_make_physics(phys_cfg, *pargs, **pkw)
     T0 = np.asarray(state.T.data, dtype=np.float64)
-    if args.cloud_levers:
-        return cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int,
-                            real_backend, n_times=args.n_times)
     if args.gwd_only:
         from legoesm import constants
         fn = fns["gwd"]
