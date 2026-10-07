@@ -169,8 +169,9 @@ violation named here fires.
   reproduce four pre-existing reds: SI3 `MY_SRC` scalar-math provenance, the
   moved certified-year-harness spread record, the allow-dirty scope ratchet,
   and the worktree-stamp ratchet. The fifth refusal is the year-owner
-  acquisition's clean-tree guard seeing this uncommitted receipt; it is
-  rerun after the receipt commit below. No focused round-163 test fails.
+  acquisition's clean-tree guard seeing this uncommitted receipt; after the
+  receipt commit its isolated rerun passes 1/1. No focused round-163 test
+  fails.
 - Independent review: **independent review unavailable in-sandbox**. The
   required separate `codex exec --sandbox read-only` attempt failed before
   reading the diff because its in-process app-server client could not create
