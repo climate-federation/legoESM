@@ -125,6 +125,18 @@ CERTIFIED_LADDER["smt1"] = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/inert/"
     "VORTEX_SMT1_VEC-zps.json")
 
+# Round 243 / mini-ladder SMT-2 deferred 100-day comparison.  The NEMO
+# trajectory is acquired into this round's evidence root by the existing
+# hash-checked ``smt2vec100d`` driver arm.  Round 237's inert-card census is
+# the latest SMT-2 registry; rounds 238-242 changed no production model code.
+CARDS["smt2"] = (
+    "VORTEX_SMT2_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round243/"
+         "oracle_vortex_smt2/day100"),
+)
+CERTIFIED_LADDER["smt2"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/inert/"
+    "VORTEX_SMT2_VEC-zps.json")
 
 class ComparisonError(RuntimeError):
     pass
@@ -268,7 +280,7 @@ def main() -> int:
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
                      help=("comma-separated tags: flux, vec, smtflux, smtvec, "
-                           "smt1, smt3, smt4"))
+                           "smt1, smt2, smt3, smt4"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     ap.add_argument(
