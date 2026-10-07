@@ -77,6 +77,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import functools
 import hashlib
 
 import numpy as np
@@ -1436,6 +1437,28 @@ def _round_profile(sched, device, n_dev):
     return out
 
 
+def _on_host_cpu(fn):
+    """Run ``fn`` with jnp arrays created on the host CPU device.
+
+    The partition infra builds one padded mesh per device and stacks them,
+    so its arrays grow with the device count. Built on the default GPU they
+    exhaust it before the per-shard placement runs (ico10 float64 at 64 and
+    128 GPUs). Values are identical; only the device holding them changes.
+    Without a CPU backend (JAX_PLATFORMS excludes cpu) the default device
+    is used, as before.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            cpu = jax.local_devices(backend="cpu")[0]
+        except RuntimeError:
+            return fn(*args, **kwargs)
+        with jax.default_device(cpu):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_on_host_cpu
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
