@@ -18,10 +18,13 @@ unchanged.
 The candidate promoted the four already-measured statements as one program.
 The admitted oracle reads raw face depth at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:519-545`, stores the
-unmasked completed V transport at `dynspg_ts.f90:568-570`, consumes it in the
-separate continuity loop at `dynspg_ts.f90:584-591`, and associates all seven
-external-mode fields at `dynspg_ts.f90:761-779`. No public selector or
-card/deck field was added.
+unmasked completed V transport at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:568-570`, consumes it
+in the separate continuity loop at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:584-591`, and
+associates all seven external-mode fields at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779`. No public
+selector or card/deck field was added.
 
 The production-JIT CPU/fp64/x64/libm rung-0 ladder completed every stage
 through kt=7 and exposed kt=8 stages 1-2. Before kt=8 stage 3 could return, the
