@@ -68,11 +68,20 @@ closed classifier set and exits nonzero with `PLANT-FIRED`; the unmodified
 report passes as `PASS_ROUND165_VERTICAL_BOUNDARY`. The measurement artifacts
 and controls are hashed in `SHA256SUMS`.
 
-The new gate's focused unit coverage passes 7/7, including direct CLI import,
-terminal passivity, the finite-entry requirement, and the retained unmatched
-falsifier. The cumulative and round-receipt citation gates pass with zero
-unmapped spans; shifting the stage-1 citation by two lines makes the planted
-citation gate fail.
+Final focused coverage passes 29/29 across the new gate, its extended rung-103
+ladder seam and the citation gate. It includes direct CLI import, terminal
+passivity, the finite-entry requirement and the retained unmatched falsifier.
+The cumulative and round-receipt citation gates pass with zero unmapped spans;
+shifting the stage-1 citation by two lines makes the planted citation gate
+fail.
+
+The one required `tests/ocean/fidelity -n 12` invocation reached 99% and the
+registered quiescent xdist tail before its 600-second guard expired. Its
+visible outcomes are 2,671 passed, 7 skipped and 4 failed. The four failures
+are the same registered pre-existing reds as round 164: the moved GYRE
+certified-year spread record, unscoped allow-dirty drivers, unstamped report
+emitters and SI3 scalar-math provenance. No round-165 test failed; the log is
+retained rather than starting a second full battery.
 
 The separate `codex exec --sandbox read-only` attempt returned **independent
 review unavailable in-sandbox** before reading the diff: `failed to initialize
