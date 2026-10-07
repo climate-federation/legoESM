@@ -122,13 +122,18 @@ def test_run_steps_land_and_stays_finite(monkeypatch, tmp_path):
 
 
 def test_tendencies_carry_downwelling_fields():
-    """HydrostaticTendencies grew sw_down_sfc/lw_down_sfc (None defaults,
-    appended last): the land-forcing export contract.  A field rename or
-    reorder breaks the MPAS marshal silently — this pins it."""
-    from legoesm.core.state import HydrostaticTendencies
+    """HydrostaticTendencies carries sw_down_sfc/lw_down_sfc (None defaults),
+    and the MPAS surface-diagnostic tuple exports them at slots 8/9, which is
+    where the land marshal reads them.  The tuple is built by NAME from
+    MPAS_SFC_DIAG_EXTRA_KEYS after the 3 fixed slots (sw_net, lw_net, precip),
+    so a rename or a reorder of those keys breaks the land forcing — this pins
+    it.  The fields' position inside the NamedTuple is not the contract."""
+    from legoesm.core.state import (
+        HydrostaticTendencies, MPAS_SFC_DIAG_EXTRA_KEYS)
     fields = HydrostaticTendencies._fields
-    assert fields.index("sw_down_sfc") == len(fields) - 2
-    assert fields.index("lw_down_sfc") == len(fields) - 1
+    assert "sw_down_sfc" in fields and "lw_down_sfc" in fields
+    assert 3 + MPAS_SFC_DIAG_EXTRA_KEYS.index("sw_down_sfc") == 8
+    assert 3 + MPAS_SFC_DIAG_EXTRA_KEYS.index("lw_down_sfc") == 9
     # Defaults are None so every positional constructor stays valid.
     assert HydrostaticTendencies._field_defaults["sw_down_sfc"] is None
     assert HydrostaticTendencies._field_defaults["lw_down_sfc"] is None

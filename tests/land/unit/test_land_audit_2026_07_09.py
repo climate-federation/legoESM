@@ -115,7 +115,7 @@ class TestRadiativeTransferUV(unittest.TestCase):
         return canopy_shortwave_rt(
             PAR_dir=a(PAR_dir), PAR_diff=a(PAR_diff), NIR_dir=a(PAR_dir), NIR_diff=a(PAR_diff),
             UV=a(20.0), SZA=a(30.0), LAI=a(3.0), CI=a(0.8), ALB_VIS=a(0.1), ALB_NIR=a(0.3),
-            Vcmax25_C3_leaf=a(60.0), Vcmax25_C4_leaf=a(0.0), kn=a(0.3), FNonVeg=a(0.1),
+            Vcmax25_C3_leaf=a(60.0), Vcmax25_C4_leaf=a(0.0), kn=a(0.3),
         )
 
     def test_leaves_absorb_uv_under_pure_beam(self):
