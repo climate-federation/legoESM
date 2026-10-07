@@ -117,8 +117,8 @@ does not license the conditional dynldf acquisition.
 Both controls are non-vacuous. Removing `bottom_drag_off` from the registry
 prints `STATUS PLANT-FIRED` and exits 1. Adding `1e-8 K` to the HPG endpoint
 crosses the floor control, prints `STATUS PLANT-FIRED`, and exits 1. The final
-focused probe suite reports `6 passed`; the combined round-239/240 focused
-suite reports `7 passed` (final command recorded below after completion).
+combined round-239, round-240, and citation-gate suite reports `24 passed in
+13.68s`.
 
 Only validation scripts, tests, preregistration, citation mappings, and this
 receipt change. No file under `packages/` or `src/` changes, no held physics
@@ -130,9 +130,34 @@ families, but this round names no statement for ORCA2 to fold in.
 
 ## 4. Independent review and citation gates
 
-REVIEW_PLACEHOLDER
+The required separate Codex review was attempted against the committed diff
+from `ca822f33d` through the receipt commit. It exited before inspecting the
+diff, so no SHIP verdict is inferred. Its output is quoted verbatim:
 
-CITATION_AND_TEST_PLACEHOLDER
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** The HELD disposition follows
+from the mechanical no-winner ranking, not from an inferred review verdict.
+
+The first citation run correctly refused two ambiguous/shifted anchors and one
+combined unmapped range. The anchors were corrected by occurrence and symbol,
+and the momentum-LDF and ZDF spans were split; none was weakened or deleted.
+The final round citation gate reports **PASS: 6 citations, 0 failures, 0
+unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting the drag-loop range by two lines reports
+`SYMBOL-NOT-AT-LINE` and exits 1.
+
+The final CPU-only command covered the round-239 control, all six round-240
+unit controls, and the complete citation-gate module:
+
+> `24 passed in 13.68s`
+
+No full physics tree or DINO month integration was run because the committed
+diff contains no model-code (`packages/` or `src/`) change. The measurement
+itself ran the production JIT path on CPU with fp64/libm and the certified
+SMT-4 kt=1..10 calibration.
 
 ### OPEN — next round
 
