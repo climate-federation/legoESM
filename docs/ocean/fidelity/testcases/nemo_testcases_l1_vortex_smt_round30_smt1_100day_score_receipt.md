@@ -93,8 +93,16 @@ is quoted verbatim:
 **Independent review unavailable in-sandbox.** This is measurement only; no
 physics or accepted trajectory depends on an inferred review verdict.
 
-The focused round-242 controls report `4 passed`. The final citation and
-focused-suite summaries are recorded in the final validation commit.
+The final CPU-only focused suite covers the round-241 acquisition controls,
+all round-242 controls, and the complete citation-gate unit module:
+
+> `24 passed in 3.56s`
+
+The round receipt citation gate reports **PASS: 2 citations, 0 failures, 0
+unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting the five-line restart-field citation by two
+lines reports `SYMBOL-NOT-AT-LINE` and exits 1.
+
 No full physics tree or DINO month integration is required because no file
 under `packages/` or `src/` changes. R29-P6 is **CONFIRMED**.
 
