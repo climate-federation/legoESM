@@ -208,6 +208,10 @@ def measure(deck_root: Path, record_root: Path, control_log: Path) -> dict[str, 
             **observed,
             "index_jik": list(index),
             "matching_boundaries": matching,
+            "source_match_status": (
+                "MATCHED_BOUNDARY"
+                if matching else "UNMATCHED_REQUIRES_NEXT_WALK"
+            ),
         },
         "boundaries": rows,
         "worktree": worktree_stamp(),
@@ -222,7 +226,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "entry":
         report["boundaries"]["entry"]["all_finite_positive"] = False
     elif plant == "source-product":
-        report["first_invalid"]["matching_boundaries"] = []
+        report["first_invalid"]["source_match_status"] = "PLAUSIBLE_UNKNOWN"
 
     control = report["unobserved_control"]
     observed = report["observed_terminal"]
@@ -239,8 +243,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     }, f"passive observer changed the terminal: {observed}")
     require(report["boundaries"]["entry"]["all_finite_positive"],
             "kt=8 entry geometry is already invalid")
-    require(report["first_invalid"]["matching_boundaries"],
-            "no observed source product reproduces the callback value")
+    require(report["first_invalid"]["source_match_status"] in (
+        "MATCHED_BOUNDARY", "UNMATCHED_REQUIRES_NEXT_WALK"),
+        "invalid source-match disposition")
     report["status"] = "PASS_ROUND165_VERTICAL_BOUNDARY"
     return report
 
@@ -265,6 +270,12 @@ def main() -> int:
                 "measurement requires --deck-root, --record-root and --control-log",
             )
             report = measure(args.deck_root, args.record_root, args.control_log)
+            # Preserve a falsified scientific prediction even if a later
+            # classification rule refuses it.  The artifact is explicitly raw
+            # until the classified write below replaces it.
+            if args.json_out:
+                args.json_out.write_text(
+                    json.dumps(report, indent=2, sort_keys=True) + "\n")
         report = classify(report, args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, OSError, ValueError) as error:

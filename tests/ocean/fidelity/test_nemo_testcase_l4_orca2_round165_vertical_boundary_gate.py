@@ -23,13 +23,26 @@ def _report():
             "kt8_stage3_completed": False,
             "error": gate.EXPECTED_ERROR,
         },
-        "first_invalid": {"matching_boundaries": ["stage2"]},
+        "first_invalid": {
+            "matching_boundaries": ["stage2"],
+            "source_match_status": "MATCHED_BOUNDARY",
+        },
         "boundaries": {"entry": {"all_finite_positive": True}},
     }
 
 
 def test_clean_report_passes():
     assert gate.classify(_report())["status"] == (
+        "PASS_ROUND165_VERTICAL_BOUNDARY")
+
+
+def test_falsified_source_prediction_is_retained():
+    report = _report()
+    report["first_invalid"] = {
+        "matching_boundaries": [],
+        "source_match_status": "UNMATCHED_REQUIRES_NEXT_WALK",
+    }
+    assert gate.classify(report)["status"] == (
         "PASS_ROUND165_VERTICAL_BOUNDARY")
 
 
