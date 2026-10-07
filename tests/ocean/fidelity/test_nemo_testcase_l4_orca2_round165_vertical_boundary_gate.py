@@ -1,4 +1,7 @@
 import copy
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -41,3 +44,17 @@ def test_stage_observer_is_host_side_before_final_model():
     host_observer = source.index("stage_observer(kt, state, stage_states)")
     final_call = source.index("state_after = jax.device_get(final_model.step(")
     assert host_observer < final_call
+
+
+def test_gate_imports_under_campaign_pythonpath():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = ":".join((
+        "packages/core", "packages/ocean", "packages/atmosphere",
+        "packages/coupler", "packages/ice", "packages/land", "packages/ml",
+        "packages/tools", "src",
+    ))
+    result = subprocess.run(
+        [sys.executable, str(gate.Path(gate.__file__)), "--help"],
+        cwd=gate.REPO_ROOT, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
