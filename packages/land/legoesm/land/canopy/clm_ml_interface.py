@@ -1580,6 +1580,12 @@ def _extract_surface_fluxes(
     # L_v-soil routing (which would drain soil water for ground evaporation that
     # should sublimate from the snowpack).
     LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
+    # The latent heat that ground flux was charged [J/kg] (#1875), so the driver
+    # inverts the ground vapour mass with the solve's own value.
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import mmh2o
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSoilFluxesMod import (
+        soil_latent_heat)
+    L_soil = jnp.stack([soil_latent_heat(mlcanopy, i + 1) for i in range(ncol)]) / mmh2o
     LE_canopy = lhflx - LE_soil
 
     return SurfaceFluxOutput(
@@ -1604,6 +1610,7 @@ def _extract_surface_fluxes(
         stflx_veg=stflx_veg,
         LE_canopy=LE_canopy,
         LE_soil=LE_soil,
+        L_soil=L_soil,
     )
 
 
@@ -1701,6 +1708,8 @@ def compute_clm_ml_canopy_fluxes(
     g1_medlyn_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
     pft_per_col: "np.ndarray | None" = None,
+    ground_snow_weight: jnp.ndarray | None = None,
+    ground_sublimation_heat: jnp.ndarray | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1760,6 +1769,13 @@ def compute_clm_ml_canopy_fluxes(
         (concrete) warm-start state via :func:`extract_clm_ml_grid_info` and pass
         the same object each step.  ``None`` (single warm step whose state is a
         captured constant) reads the ints off the concrete template.
+    ground_snow_weight, ground_sublimation_heat:
+        Per-column snow weight [0-1] of the ground latent flux and the latent
+        heat of sublimation [J/kg] charged to it inside the ground solve -- a
+        documented legoESM deviation from CLM-ML, which charges its ground at
+        LatVap(tref) (#1875; ``MLSoilFluxesMod.soil_latent_heat``).  ``None``
+        weight = 0, the original CLM-ML charge.  The charge actually used is
+        returned as ``SurfaceFluxOutput.L_soil``.
 
     Returns
     -------
@@ -2210,6 +2226,20 @@ def compute_clm_ml_canopy_fluxes(
         if forcing.z_lowest is not None:
             mlcanopy = refresh_reference_height(
                 mlcanopy, stubs["frictionvel"].forc_hgt_u_patch)
+    # Ground latent heat over snow (patch i + 1 = column i), set every step so a
+    # carried state never keeps a stale weight.
+    if (ground_snow_weight is None) != (ground_sublimation_heat is None):
+        raise ValueError(
+            "compute_clm_ml_canopy_fluxes: ground_snow_weight and "
+            "ground_sublimation_heat must be given together")
+    _w_snow = (jnp.zeros(ncol, mlcanopy.snowfrac_soil.dtype) if ground_snow_weight is None
+               else jnp.asarray(ground_snow_weight, mlcanopy.snowfrac_soil.dtype))
+    mlcanopy = mlcanopy._replace(
+        snowfrac_soil=mlcanopy.snowfrac_soil.at[1:ncol + 1].set(_w_snow))
+    if ground_snow_weight is not None:
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import mmh2o
+        mlcanopy = mlcanopy._replace(lsub_soil=mlcanopy.lsub_soil.at[1:ncol + 1].set(
+            jnp.asarray(ground_sublimation_heat, mlcanopy.lsub_soil.dtype) * mmh2o))
 
     # ---- Decomposition bounds ----
     bounds = bounds_type(begg=1, endg=ncol, begl=1, endl=ncol,

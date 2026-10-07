@@ -206,6 +206,10 @@ class CanopyForcingBundle(NamedTuple):
     # so LE rises with wetness (interception loss).  0.0 = dry (no interception,
     # the default so every existing bundle construction is unchanged).
     fwet: jax.Array = 0.0
+    # Latent heat [J kg-1] charged to the SOIL latent flux; None = ``lam``.  Over
+    # snow the driver passes the snow-weighted (1-w) L_v + w L_s (#1875); leaves
+    # keep ``lam``.
+    lam_soil: jax.Array | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +316,7 @@ def _canopy_residual(
     # PM and BT coincide at the soil level (Ts prescribed), so one helper serves both.
     _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
         Ts, Tc, q_s, q_c,
-        b.lam, b.rhoa, b.Cp,
+        b.lam if b.lam_soil is None else b.lam_soil, b.rhoa, b.Cp,
         rah_below, raw_soil_evap, b.fStress_soil,
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
@@ -502,7 +506,7 @@ def canopy_forward(
     q_s = saturation_specific_humidity(Ts, b.Ps)
     Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
         Ts, Tc, q_s, q_c,
-        b.lam, b.rhoa, b.Cp,
+        b.lam if b.lam_soil is None else b.lam_soil, b.rhoa, b.Cp,
         rah_below, raw_soil_evap, b.fStress_soil,
         b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
