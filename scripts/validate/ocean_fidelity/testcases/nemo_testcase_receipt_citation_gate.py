@@ -1359,6 +1359,31 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
     "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    # Round 237 freezes SMT-4 from ORCA2 rung 0 and reads the executable
+    # momentum-LDF branch from the already-compiled pristine SMT-3 base. The
+    # new SMT-4 target is intentionally absent until the operator acquisition.
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90"),
+    "VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    # Round 238 binds the admitted SMT-4 card and stage walk to the exact
+    # compiled P3 target that produced their record.
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     # Round 228 binds the walk and its instrument retraction to the exact
     # compiled R15 branch that produced the admitted payload.
     "VORTEX_SMT3_VEC_R15_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
@@ -1944,12 +1969,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:2958':
+    'nemo_testcase_recipe.py:2990':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5370': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5388': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:2961':
+    'nemo_testcase_recipe.py:2993':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -5262,7 +5287,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:370,625,2942': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:370,625,2974': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -6147,6 +6172,29 @@ CITATION_MAP = {
         ("CALL ldf_c2d( 'TRA', zUfac      , inn        , ahtu, ahtv )", 1), 37],
     'VORTEX_SMT2_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/traldf.f90:105-122': [
         ('SELECT CASE ( nldf_tra )', 2), ('END SELECT', 2), 18],
+    # --- round 237: SMT-4 deck provenance and compiled momentum-LDF branch ---
+    'orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2/namelist_cfg:388-392': [
+        '&namdyn_ldf', 'nn_ahm_ijk_t  = -30', 5],
+    'cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_ref:1104-1134': [
+        '&namdyn_ldf', 'rn_ahm_b      = 0.0', 31],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-185': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        'IF(lwm) WRITE ( numond, namdyn_ldf )', 9],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:221-276': [
+        'nldf_dyn = np_ERROR',
+        'IF( nldf_dyn == np_lap_i )   l_ldfslp = .TRUE.', 56],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:311-346': [
+        'IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv',
+        ("CALL ldf_c2d( 'DYN', zUfac      , inn        , ahmt, ahmf )", 1), 36],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf.f90:81-90': [
+        'SELECT CASE ( nldf_dyn )',
+        'CALL dynldf_lev_blp( kt, Kbb, Kmm, puu, pvv, Krhs )', 10],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
+        ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 20],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:387-405': [
+        ('CASE ( 3 )        !==  Stage 3  ==!', 1),
+        'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )', 19],
     # --- round 226: admitted SMT-3 compiled branch and magnitude boundary ---
     'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldftra.f90:231-233': [
         'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf ")',
@@ -6234,6 +6282,35 @@ CITATION_MAP = {
         "CALL write3( unit, 'rhs_before', r227_rhs_before )",
         "CALL write3( unit, 'rhs_increment', pt(:,:,:,jp_tem,Krhs) - r227_rhs_before )",
         3],
+    # --- round 238: admitted SMT-4 selection, operator and stage order ---
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90:177-185': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        'IF(lwm) WRITE ( numond, namdyn_ldf )', 9],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90:221-278': [
+        'nldf_dyn = np_ERROR',
+        ('ENDIF', 11), 58],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90:311-346': [
+        'IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv',
+        ("CALL ldf_c2d( 'DYN', zUfac", 1), 36],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90:81-90': [
+        'SELECT CASE ( nldf_dyn )',
+        'CALL dynldf_lev_blp( kt, Kbb, Kmm, puu, pvv, Krhs )', 10],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
+        ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 20],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:328-344': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        ("CALL vortex_r16_stage_rhs( 'adv', Krhs, uu, vv )", 2), 17],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:398-404': [
+        'CASE ( 3 )        !==  Stage 3  ==!   add left over RHS terms + time stepping',
+        "CALL vortex_r16_stage_rhs( 'ldf', Krhs, uu, vv )", 7],
+    # --- round 239: locally exact but trajectory-refused source order ---
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:314-335': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 1),
+        ('END DO   ;   END DO   ;   END DO', 1), 22],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
+        'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
 }
 
 

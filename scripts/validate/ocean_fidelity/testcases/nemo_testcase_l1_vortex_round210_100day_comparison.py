@@ -102,16 +102,32 @@ CERTIFIED_LADDER["smt3"] = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round226/"
     "smt3_ladder.json")
 
+CARDS["smt4"] = (
+    "VORTEX_SMT4_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
+         "oracle_vortex_smt4/day100"),
+)
+CERTIFIED_LADDER["smt4"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round238/"
+    "smt4_ladder.json")
+
 
 class ComparisonError(RuntimeError):
     pass
 
 
-def sanity_check_kt1_10(tag: str, case: str, nemo_dir: Path) -> dict:
+def sanity_check_kt1_10(
+    tag: str,
+    case: str,
+    nemo_dir: Path,
+    *,
+    ladder_reference: Path | None = None,
+) -> dict:
     """This round's own first 10 steps must equal the certified ladder."""
     report = trajectory_run(case, nemo_dir, max_step=10,
                              continue_after_first=True)
-    certified = json.loads(CERTIFIED_LADDER[tag].read_text())
+    reference = CERTIFIED_LADDER[tag] if ladder_reference is None else ladder_reference
+    certified = json.loads(reference.read_text())
     mismatches = []
     for new_step, old_step in zip(report["steps"], certified["steps"]):
         require(new_step["kt"] == old_step["kt"], "kt sequence misaligned")
@@ -125,6 +141,7 @@ def sanity_check_kt1_10(tag: str, case: str, nemo_dir: Path) -> dict:
         "status": "REPRODUCED" if not mismatches else "MISMATCH",
         "kt10_is_day_0_33": TABLE_DAYS[0] * STEPS_PER_DAY // STEPS_PER_DAY,
         "mismatches": mismatches,
+        "ladder_reference": str(reference),
         "certified_first_over_bar": certified["first_over_bar"],
         "this_round_first_over_bar": report["first_over_bar"],
     }
@@ -228,9 +245,15 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
-                     help="comma-separated tags: flux, vec, smtflux, smtvec, smt3")
+                     help=("comma-separated tags: flux, vec, smtflux, smtvec, "
+                           "smt3, smt4"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
+    ap.add_argument(
+        "--ladder-reference", type=Path,
+        help=("one-card measurement arm: bind the ten-step sanity check and "
+              "kt=10 cross-check to this just-produced candidate ladder "
+              "instead of the immutable certified ladder"))
     args = ap.parse_args()
 
     report = {"format": "nemo-testcase-l1-vortex-round210-100day-v1",
@@ -242,10 +265,13 @@ def main() -> int:
     if unknown:
         raise ComparisonError(f"unknown card tag(s) {unknown}; "
                               f"expected from {sorted(CARDS)}")
+    if args.ladder_reference is not None and len(selected) != 1:
+        raise ComparisonError("--ladder-reference requires exactly one card")
     for tag in selected:
         case, nemo_dir = CARDS[tag]
         print(f"\n################ {tag} ({case})")
-        sanity = sanity_check_kt1_10(tag, case, nemo_dir)
+        sanity = sanity_check_kt1_10(
+            tag, case, nemo_dir, ladder_reference=args.ladder_reference)
         print(f"  kt1-10 sanity vs certified ladder: {sanity['status']}")
         require(sanity["status"] == "REPRODUCED",
                 f"{tag}: this round's first 10 steps diverge from the "
@@ -270,7 +296,9 @@ def main() -> int:
         # certified ladder's kt=10 row scored (same precision, same build).
         kt10_check = None
         if day9_T is not None:
-            certified = json.loads(CERTIFIED_LADDER[tag].read_text())
+            reference = (CERTIFIED_LADDER[tag] if args.ladder_reference is None
+                         else args.ladder_reference)
+            certified = json.loads(reference.read_text())
             kt10_row = next(r for r in certified["steps"][9]["rows"]
                              if r["name"].endswith(".T"))
             require(certified["steps"][9]["kt"] == 10,
