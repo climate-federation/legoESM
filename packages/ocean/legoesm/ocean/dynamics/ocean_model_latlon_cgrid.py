@@ -12092,8 +12092,29 @@ class LatLonCGridOceanModel:
             _xj, _xi = _k_xplant.j, _k_xplant.i
             if _k_xplant.heat:
                 _own = K_v_cell[_xj, _xi, :]
+                _new = _xr[0]
+                if _k_xplant.combine != "replace":
+                    # our IWM exactly as compute_vertical_K_profiles adds it:
+                    # sub-seafloor T/S extrapolation, then iwm_K_profile
+                    _vm = physics_config.vertical_mixing
+                    _kiwm = 0.0
+                    if _vm.iwm is not None and _vm.iwm.enabled:
+                        from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                            iwm_K_profile)
+                        _s_iwm, _wet = cc_state, 1.0
+                        if getattr(_zc, "is_active", None) is not None:
+                            from legoesm.ocean.vertical import extrapolate_below_seafloor
+                            _s_iwm = cc_state._replace(
+                                T=cc_state.T.replace(data=extrapolate_below_seafloor(cc_state.T.data, _zc)),
+                                S=cc_state.S.replace(data=extrapolate_below_seafloor(cc_state.S.data, _zc)))
+                            _wet = _zc.is_active.astype(K_v_cell.dtype)[..., 1:]
+                        _kiwm = (iwm_K_profile(
+                            _s_iwm, _zc, physics_config, _vm.iwm,
+                            eos_fn=_vmix_eos_fn, iwm_fields=_iwm) * _wet)[_xj, _xi, :]
+                    _new = (_new + _kiwm if _k_xplant.combine == "plus_our_iwm"
+                            else _own - _kiwm + _new)
                 K_v_cell = K_v_cell.at[_xj, _xi, :].set(
-                    jnp.where(jnp.isnan(_xr[0]), _own, _xr[0]))
+                    jnp.where(jnp.isnan(_xr[0]), _own, _new))
             if _k_xplant.momentum:
                 _own = A_v_cell[_xj, _xi, :]
                 A_v_cell = A_v_cell.at[_xj, _xi, :].set(

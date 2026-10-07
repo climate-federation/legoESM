@@ -6676,17 +6676,26 @@ class _KTransplant:
     """PROBE ONLY: an oracle's per-step interface diffusivity/viscosity at fixed
     T columns, served one step at a time to the model's vertical solve.
 
-    ``avt``/``avm``: (n_steps, n_cols, n_iface) float64, NaN where the oracle
-    has no value (the model keeps its own there).  ``mode`` picks which
-    coefficients the model applies: "both", "avt" or "avm"."""
+    ``avt``/``avm``/``avt_k``: (n_steps, n_cols, n_iface) float64, NaN where
+    the oracle has no value (the model keeps its own there).  ``mode``:
+    "both"/"avt"/"avm" replace the applied coefficient(s); "avt_k" applies
+    oracle closure + OUR IWM; "noncl" applies OUR closure + oracle (avt -
+    avt_k).  The last two are heat only."""
 
-    def __init__(self, j, i, avt, avm, mode):
-        if mode not in ("both", "avt", "avm"):
+    MODES = ("both", "avt", "avm", "avt_k", "noncl")
+
+    def __init__(self, j, i, avt, avm, mode, avt_k=None):
+        if mode not in self.MODES:
             raise ValueError(f"unknown --probe-k-transplant mode {mode!r}")
+        if mode in ("avt_k", "noncl") and avt_k is None:
+            raise ValueError(f"--probe-k-transplant {mode} needs the oracle avt_k")
+        heat = {"avt_k": avt_k, "noncl": None if avt_k is None else np.asarray(avt) - np.asarray(avt_k)}
         self.j, self.i = np.asarray(j), np.asarray(i)
-        self._rows = np.stack([np.asarray(avt), np.asarray(avm)], axis=1)
+        self._rows = np.stack([np.asarray(heat.get(mode, avt)), np.asarray(avm)], axis=1)
         self.shape = self._rows.shape[2:]
-        self.heat, self.momentum = mode in ("both", "avt"), mode in ("both", "avm")
+        self.heat = mode != "avm"
+        self.momentum = mode in ("both", "avm")
+        self.combine = {"avt_k": "plus_our_iwm", "noncl": "plus_our_closure"}.get(mode, "replace")
         self.step = 0
 
     def fetch(self):
@@ -6709,13 +6718,13 @@ def load_nemo_strip_transplant(path, lat2d, lon2d, land_mask, n_iface,
                                j0=180, i0=153):
     """NEMO every-step strip avt/avm (eqs1ts_W) -> (j, i, avt, avm) on OUR
     T columns.  Ours (j, i) = strip (j - j0, i - i0); ours interface k =
-    NEMO w-level k + 1; NEMO fill (>1e15) -> NaN."""
+    NEMO w-level k + 1; NEMO fill (>1e15) -> NaN.  Returns (j, i, avt, avm,
+    avt_k)."""
     import netCDF4 as nc
     d = nc.Dataset(path)
-    avt = np.asarray(d["avt"][:], dtype=np.float64)
-    avm = np.asarray(d["avm"][:], dtype=np.float64)
-    avt[np.abs(avt) > 1e15] = np.nan
-    avm[np.abs(avm) > 1e15] = np.nan
+    avt, avm, avt_k = (np.asarray(d[v][:], dtype=np.float64) for v in ("avt", "avm", "avt_k"))
+    for x in (avt, avm, avt_k):
+        x[np.abs(x) > 1e15] = np.nan
     nt, nk, nj, ni = avt.shape
     lonc = np.asarray(lon2d) % 360.0
     sel = ((np.asarray(land_mask) > 0.5) & (np.abs(np.asarray(lat2d)) <= halflat)
@@ -6730,7 +6739,7 @@ def load_nemo_strip_transplant(path, lat2d, lon2d, land_mask, n_iface,
         raise SystemExit(f"--probe-k-transplant: model has {n_iface} interfaces, "
                          f"oracle file {nk} w-levels")
     take = lambda x: x[:, 1:n_iface + 1][:, :, sj, si].transpose(0, 2, 1)
-    return jj, ii, take(avt), take(avm)
+    return jj, ii, take(avt), take(avm), take(avt_k)
 
 
 class _ZdfTrendAccumulator:
@@ -8149,7 +8158,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="PROBE ONLY: replace the applied vertical diffusivity "
                         "(MODE avt), viscosity (avm) or both at every step in the "
                         "equatorial strip columns (2S-2N 225-256E) with NEMO's "
-                        "every-step avt/avm from an eqs1ts_W file. Tripole only.")
+                        "every-step avt/avm from an eqs1ts_W file; avt_k = NEMO "
+                        "closure + our IWM, noncl = our closure + NEMO avt-avt_k "
+                        "(heat only). Tripole only.")
     p.add_argument("--trd-columns", type=float, nargs=3, default=None,
                    metavar=("LON0", "LON1", "HALFLAT"),
                    help="With --trd-accumulate: also store EVERY step's post-"
@@ -8699,8 +8710,9 @@ def main() -> int:
     if args.probe_k_transplant is not None:
         if args.grid != "tripole":
             raise SystemExit("--probe-k-transplant is wired on --grid tripole only")
-        if args.probe_k_transplant[1] not in ("both", "avt", "avm"):
-            raise SystemExit("--probe-k-transplant MODE must be both, avt or avm")
+        if args.probe_k_transplant[1] not in _KTransplant.MODES:
+            raise SystemExit("--probe-k-transplant MODE must be one of "
+                             + ", ".join(_KTransplant.MODES))
         if int(args.scan_block) > 0 or args.restart_from:
             # the oracle rows are indexed from step 1 of a fresh run, and the
             # scan path returns before the hook is attached
@@ -11443,9 +11455,9 @@ def main() -> int:
             model._col_callback = model._trd_callback.col
     if args.probe_k_transplant is not None:
         _xp, _xm = args.probe_k_transplant
-        _xj, _xi, _xt, _xa = load_nemo_strip_transplant(
+        _xj, _xi, _xt, _xa, _xk = load_nemo_strip_transplant(
             _xp, lat2d, lon2d, state.land_mask.data, args.nlev - 1)
-        model._k_transplant = _KTransplant(_xj, _xi, _xt, _xa, _xm)
+        model._k_transplant = _KTransplant(_xj, _xi, _xt, _xa, _xm, avt_k=_xk)
         print(f"[probe] --probe-k-transplant {_xm}: {_xj.size} columns, "
               f"{_xt.shape[0]} steps from {_xp}")
     # Device-resident bathymetry for the per-step thickness (codex: the

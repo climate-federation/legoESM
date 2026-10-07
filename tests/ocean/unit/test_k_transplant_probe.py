@@ -87,17 +87,22 @@ def test_loader_maps_columns_levels_and_fill(tmp_path):
         d.createDimension(n, s)
     a = np.arange(2 * 5 * 3 * 4, dtype=np.float32).reshape(2, 5, 3, 4)
     a[:, 4, 1, 2] = 1e20
-    for v, sc in (("avt", 1.0), ("avm", 2.0)):
+    for v, sc in (("avt", 1.0), ("avm", 2.0), ("avt_k", 0.5)):
         d.createVariable(v, "f4", ("t", "z", "y", "x"))[:] = a * sc
     d.close()
     lat = np.zeros((6, 8)); lon = np.full((6, 8), 230.0); lm = np.ones((6, 8))
-    jj, ii, avt, avm = _core2().load_nemo_strip_transplant(
+    jj, ii, avt, avm, avt_k = _core2().load_nemo_strip_transplant(
         str(p), lat, lon, lm, n_iface=4, j0=2, i0=3)
     assert len(jj) == 3 * 4 and avt.shape == (2, 12, 4)
     c = int(np.nonzero((jj == 3) & (ii == 5))[0][0])        # strip (1, 2)
     np.testing.assert_array_equal(avt[:, c, :3], a[:, 1:4, 1, 2])   # ours k = w-level k+1
     assert np.isnan(avt[:, c, 3]).all()                          # fill -> NaN
     np.testing.assert_array_equal(avm[:, c, :3], 2 * a[:, 1:4, 1, 2])
+    np.testing.assert_array_equal(avt_k[:, c, :3], 0.5 * a[:, 1:4, 1, 2])
+    x = _core2()._KTransplant(jj, ii, avt, avm, "noncl", avt_k=avt_k)
+    np.testing.assert_array_equal(x.fetch()[0], avt[0] - avt_k[0])
+    with pytest.raises(ValueError, match="needs the oracle avt_k"):
+        _core2()._KTransplant(jj, ii, avt, avm, "avt_k")
 
 
 def test_non_tripole_grid_is_refused(monkeypatch):
@@ -121,3 +126,42 @@ def test_scan_block_and_resume_are_refused(monkeypatch, extra):
                                       "--probe-k-transplant", "x.nc", "both"] + extra)
     with pytest.raises(SystemExit, match="fresh run"):
         _core2().main()
+
+
+def _iwm_model(partial, iwm_on):
+    """The trd fixture's model with IWM forcing, on z* or on partial cells
+    with shallow columns (so the sub-seafloor extrapolation matters)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig, uniform_iwm_forcing)
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+    m, st, tke0, src, *_ = _setup()
+    iwm = IWMConfig(enabled=iwm_on, power_nsq_wm2=1.0e-3, power_bot_wm2=1.0e-3)
+    phys = m.config.physics._replace(vertical_mixing=m.config.physics.vertical_mixing._replace(iwm=iwm))
+    z = m.z_coord
+    if partial:
+        H = np.full(st.H_bathy.data.shape, 600.0); H[:, ::3] = 350.0
+        st = st._replace(H_bathy=st.H_bathy.replace(data=jnp.asarray(H)))
+        z = create_partial_cell_coordinate(z, jnp.asarray(H))
+    m2 = LatLonCGridOceanModel(m.grid, z, m.config._replace(physics=phys),
+                               iwm_forcing=uniform_iwm_forcing(iwm, st.T.data.shape[:2]) if iwm_on else None)
+    m2._ensure_rigid_lid_data(st)
+    return m2, st, tke0, src
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_split_modes_recover_our_closure_and_our_iwm_exactly(partial):
+    m_on, st, tke0, src = _iwm_model(partial, True)
+    m_off, *_ = _iwm_model(partial, False)
+    _, K_on, _ = _run(m_on, st, tke0, src)
+    _, K_off, _ = _run(m_off, st, tke0, src)
+    j, i = np.array([3, 4, 5]), np.array([0, 9, 3])          # incl. shallow columns
+    nk = K_on.shape[-1]
+    assert np.abs(K_on[j, i] - K_off[j, i]).max() > 1e-6     # IWM is not a no-op here
+    zero = np.zeros((1, 3, nk))
+    m_on._k_transplant = _core2()._KTransplant(j, i, zero, zero, "noncl", avt_k=zero)
+    _, K_cl, _ = _run(m_on, st, tke0, src)                   # our closure + 0
+    np.testing.assert_allclose(K_cl[j, i], K_off[j, i], rtol=0, atol=1e-15)
+    m_on._k_transplant = _core2()._KTransplant(j, i, zero, zero, "avt_k", avt_k=zero)
+    _, K_iw, _ = _run(m_on, st, tke0, src)                   # 0 + our IWM
+    np.testing.assert_allclose(K_iw[j, i], K_on[j, i] - K_off[j, i], rtol=0, atol=1e-15)
