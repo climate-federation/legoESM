@@ -6003,6 +6003,13 @@ CITATION_MAP = {
         ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 1),
         10,
     ],
+    # ORCA2 round 163: this deck's nn_bt_flt=3 disables the weighted
+    # external-mode accumulator before the vector-invariant arm below.
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:220-223': [
+        ('ll_bt_av    = .TRUE.', 1),
+        ('ll_init     = ll_bt_av', 1),
+        4,
+    ],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-779': [
         ('IF( .NOT.lk_linssh ) THEN !* Update ocean depth', 1),
         ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp", 2),
