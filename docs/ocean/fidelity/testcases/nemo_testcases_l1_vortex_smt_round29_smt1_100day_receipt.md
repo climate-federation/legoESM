@@ -96,7 +96,7 @@ unmapped**. Shifting the five-line restart-field citation by two lines reports
 The final CPU-only focused suite covers the three round-241 controls and the
 complete citation-gate unit module:
 
-> `20 passed in 7.52s`
+> `20 passed in 7.13s`
 
 ### OPEN — next round
 
