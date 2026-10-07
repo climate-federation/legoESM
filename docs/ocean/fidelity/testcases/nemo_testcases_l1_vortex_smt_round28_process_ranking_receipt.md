@@ -118,7 +118,7 @@ Both controls are non-vacuous. Removing `bottom_drag_off` from the registry
 prints `STATUS PLANT-FIRED` and exits 1. Adding `1e-8 K` to the HPG endpoint
 crosses the floor control, prints `STATUS PLANT-FIRED`, and exits 1. The final
 combined round-239, round-240, and citation-gate suite reports `24 passed in
-13.68s`.
+13.58s`.
 
 Only validation scripts, tests, preregistration, citation mappings, and this
 receipt change. No file under `packages/` or `src/` changes, no held physics
@@ -152,7 +152,7 @@ failures, 0 unmapped**. Shifting the drag-loop range by two lines reports
 The final CPU-only command covered the round-239 control, all six round-240
 unit controls, and the complete citation-gate module:
 
-> `24 passed in 13.68s`
+> `24 passed in 13.58s`
 
 No full physics tree or DINO month integration was run because the committed
 diff contains no model-code (`packages/` or `src/`) change. The measurement
