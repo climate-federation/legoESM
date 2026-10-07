@@ -88,7 +88,17 @@ unchanged.
 
 ## 4. Independent review and citation gate
 
-Independent review: **PENDING**.
+The required separate read-only Codex review was attempted against the
+complete committed round diff. It exited before reading the diff, so no SHIP
+verdict is inferred. Its output is quoted verbatim:
+
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** This is a measurement-only
+round; no production or certified trajectory change depends on an inferred
+review.
 
 Citation gate: **PENDING**.
 
