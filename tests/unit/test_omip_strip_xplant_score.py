@@ -28,3 +28,9 @@ def test_n2_sign():
     zt = np.array([0.5, 1.5, 2.5])
     T = np.array([[20.0, 19.0, 18.0]]); S = np.full((1, 3), 35.0)
     assert xs.n2(T, S, 0, zt)[0] > 0
+
+
+def test_fire_overlap():
+    n = np.array([1, 1, 0, 0, 1], bool); o = np.array([1, 0, 1, 0, 0], bool)
+    assert xs.fire_overlap(n, o) == (0.25, 0.5, 0.25)
+    assert xs.fire_overlap(np.zeros(3, bool), np.zeros(3, bool)) == (0.0, 0.0, 0.0)

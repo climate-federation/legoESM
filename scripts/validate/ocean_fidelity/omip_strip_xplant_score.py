@@ -5,6 +5,9 @@ transplanted interior columns and every step (must sit at the float32 storage fl
 that coefficient); (2) at hours 4/9/12/24/36/48: ratio of column-median proxy N2 ours/NEMO at 5.8/12.8 m,
 staircase max-jump share (1.6-14 m) ours and NEMO, top-5-level mean T bias ours-NEMO. Interior columns only:
 BUF strip cells dropped at every strip edge (transplanted columns border untransplanted ones there).
+(3) EVD firing, face by step on the top interfaces: NEMO = EVD increment (avt - avt_k) - (avm - avm_k) > 50
+(nn_evdm=0, so avm - avm_k is exactly NEMO's IWM); ours = applied K > 50; hourly occupancy and the overlap
+(both / NEMO only / ours only, as fractions of the faces either side fires).
 Usage: omip_strip_xplant_score.py RUN_DIR [RUN_DIR ...]   (env BUF, default 3)."""
 import os
 import sys
@@ -32,6 +35,15 @@ def share(Tc):                                 # median max-jump share of the po
     tot = d.sum(1)
     g = tot > 0.05
     return float(np.median((d.max(1) / np.maximum(tot, 1e-9))[g])) if g.any() else np.nan
+
+
+def fire_overlap(nemo_fired, ours_fired):
+    """(both, nemo_only, ours_only) as fractions of the union of fired faces."""
+    u = np.sum(nemo_fired | ours_fired)
+    if u == 0:
+        return 0.0, 0.0, 0.0
+    return (float(np.sum(nemo_fired & ours_fired)) / u, float(np.sum(nemo_fired & ~ours_fired)) / u,
+            float(np.sum(~nemo_fired & ours_fired)) / u)
 
 
 def rel_err(ours, oracle):
@@ -66,14 +78,22 @@ def main(runs, buf):
         aA = rel_err(O['col_A'][:ns, ok][:, wet], nemo(W, 'avm', nk + 1)[:, wet, 1:])
         print(f'{os.path.basename(R.rstrip("/"))}: steps {ns} | interior wet cols {wet.sum()} (BUF {buf}) | '
               f'align max rel |K-avt| {aK:.1e} |A-avm| {aA:.1e}')
-        print('  hr | N2 O/N 5.8 12.8 | share O N | dT top5')
+        NW = {v: nemo(W, v, nk + 1)[:, wet, 1:] for v in ('avt', 'avt_k', 'avm', 'avm_k')}
+        nf = ((NW['avt'] - NW['avt_k']) - (NW['avm'] - NW['avm_k'])) > 50.0
+        of = O['col_K'][:ns, ok][:, wet] > 50.0
+        b, n_only, o_only = fire_overlap(nf, of)
+        print(f'  EVD faces (top {nk} interfaces): NEMO {nf.mean():.4f} ours {of.mean():.4f} | of union: both {b:.2f} '
+              f'NEMO-only {n_only:.2f} ours-only {o_only:.2f} | max applied K {np.nanmax(O["col_K"][:ns, ok][:, wet]):.3g}')
+        print('  hr | N2 O/N 5.8 12.8 | share O N | dT top5 | EVD frac NEMO ours')
         for h in HOURS:
             st = h * 24 - 1
             if st >= ns:
                 break
             r = [np.median(n2(OT[st], OS[st], k, zt)[wet]) / np.median(n2(NT[st], NS[st], k, zt)[wet]) for k in KI]
             dT = float(np.mean((OT[st, :, :5] - NT[st, :, :5])[wet]))
-            print(f'  h{h:02d} | {r[0]:5.2f} {r[1]:5.2f} | {share(OT[st][wet]):.2f} {share(NT[st][wet]):.2f} | {dT:+.3f}')
+            hs = slice(st - 23, st + 1)
+            print(f'  h{h:02d} | {r[0]:5.2f} {r[1]:5.2f} | {share(OT[st][wet]):.2f} {share(NT[st][wet]):.2f} | {dT:+.3f}'
+                  f' | {nf[hs].mean():.4f} {of[hs].mean():.4f}')
 
 
 if __name__ == '__main__':
