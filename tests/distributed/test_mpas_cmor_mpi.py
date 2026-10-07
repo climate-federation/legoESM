@@ -194,6 +194,12 @@ def _fake_driver(dc, lay, local, *, raise_on_rank=None, drop_on_rank=None):
         _mpas_cmip_native_kwargs=_kwargs,
     )
     ns.seen_u_override = seen_u_override
+    # Spy on the rank-0 moisture-budget hand-off (#1321): record what each rank
+    # passes, without needing a tracker or a flux accumulator here.
+    ns.moisture_calls = []
+    ns._feed_mpas_moisture_budget = (
+        lambda day, diag, kw, *, global_fields=False:
+        ns.moisture_calls.append((lay.rank, dict(kw), global_fields)))
     # SimpleNamespace cannot inherit ModelDriver methods; bind the one the
     # feed dispatches to.
     ns._feed_mpas_cmip_multirank = functools.partial(
@@ -246,6 +252,33 @@ def test_multirank_cmor_matches_serial_exactly(mesh, layout):
                 np.asarray(got[k]), np.asarray(ref[k]),
                 err_msg=f"multi-rank CMOR field {k} != serial")
     comm.Barrier()
+
+
+def test_moisture_budget_gets_the_gathered_global_fields_on_rank0_only(
+        mesh, layout):
+    """#1321: the water-budget closure is fed ONCE, on rank 0, with the
+    GATHERED global q_v / p_s / precip -- equal to the serial fields, halo
+    poison absent -- and never by another rank."""
+    if layout.n_ranks < 2:
+        pytest.skip("single rank takes the SERIAL branch")
+    gf = _global_fields(mesh)
+    dc = _collector()
+    dc.set_cmip_grid_info(grid_type="mpas", grid=mesh, start_year=1979)
+    fake = _fake_driver(dc, layout, _local_with_poisoned_halo(gf, layout.partition))
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=DAY)
+
+    # Judged collectively: a one-rank assertion would strand the others.
+    calls = fake.moisture_calls
+    if layout.rank != 0:
+        err = None if calls == [] else f"rank {layout.rank} fed the closure"
+    elif len(calls) != 1 or calls[0][2] is not True:
+        err = f"rank 0 calls: {[(r, g) for r, _, g in calls]}"
+    else:
+        bad = [k for k in ("q_v", "p_s", "precip")
+               if not np.array_equal(np.asarray(calls[0][1][k]), gf[k])]
+        err = f"gathered fields differ from global: {bad}" if bad else None
+    errors = [e for e in MPI.COMM_WORLD.allgather(err) if e is not None]
+    assert not errors, errors
 
 
 def test_multirank_zonal_matches_serial_exactly(mesh, layout):

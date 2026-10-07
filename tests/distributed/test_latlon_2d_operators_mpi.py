@@ -190,7 +190,8 @@ def test_2d_gradient_x_grad_finite():
         # global_sum_mpi(sum**2) so neighbour cotangents flow back through the
         # lon-ring VJP into this rank's owned cells (else grad collapses to a
         # local form — same construction as the pad-wall AD test).
-        return global_sum_mpi(jnp.sum(gradient_x_cgrid(fb, gblk) ** 2), comm)
+        return global_sum_mpi(jnp.sum(gradient_x_cgrid(fb, gblk) ** 2), comm,
+                              final_loss=True)
 
     set_halo_backend("mpi", L)            # armed for the whole grad trace+run
     try:

@@ -36,6 +36,7 @@ from legoesm.thermo import (
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    surface_reference_state,
     nemo_si3_constant_fluxes,
     validate_bulk_scheme,
 )
@@ -922,11 +923,14 @@ def _bulk_flux_dispatch(
         shflx, lhflx = raw[6], raw[7]
     elif config.bulk_scheme in ("most", "coare3", "large_yeager"):
         q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+        # Model-level forcing: surface-referenced T at its own height (#1818).
+        T_air, z_air = surface_reference_state(
+            forcing.T_lowest, config.z_ref, forcing.z_lowest)
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             T_ice, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=z_air,
             z0_init=config.z0_ice,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,

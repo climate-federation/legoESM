@@ -589,10 +589,13 @@ def main() -> int:
     # The MPI Voronoi lane cannot run the global "gpoly" preconditioner (no
     # deep SPMD halo; the solver refuses it), so this bench keeps the solve
     # that preceded the 2026-10-02 default move: block-local poly at 20
-    # iterations (the recurrence follows --pcg-variant / the config default,
-    # stamped in the receipt). Rows are therefore NOT the production solver.
+    # iterations. The recurrence follows --pcg-variant, else "standard" (its
+    # default before the per-backend bundle); it is stamped in the receipt.
+    # Rows are therefore NOT the production solver.
     config = config._replace(barotropic_implicit_pcg_precond="poly",
-                             barotropic_implicit_pcg_fixed_iters=20)
+                             barotropic_implicit_pcg_fixed_iters=20,
+                             barotropic_implicit_pcg_variant=(
+                                 config.barotropic_implicit_pcg_variant or "standard"))
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI

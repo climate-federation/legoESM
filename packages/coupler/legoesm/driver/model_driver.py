@@ -1160,6 +1160,9 @@ _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
 # MultiLayerLandState fields that are numerical CACHES, not prognostic state:
 # never written to a checkpoint and never required by one, so a checkpoint
 # written before the field existed still restarts (the cache cold-starts).
+# MPAS checkpoint keys of the land surface stress handed to the boundary
+# layer (last valid magnitude, valid mask, value-from-latest-solve mask).
+_LAND_STRESS_CKPT_KEYS = ("land_taumag", "land_taumag_valid", "land_taumag_fresh")
 _LAND_ML_CACHE_FIELDS = ("canopy_x",)
 
 
@@ -1568,6 +1571,27 @@ class ModelDriver:
                 assert is_borrow_eligible_tracer(k), k
                 self.tracers[k] = self._conserving_floor(
                     self.tracers[k] + dt * tend, dp=_dp)
+
+    def _land_stress_for_checkpoint(self):
+        """``(land_taumag, land_taumag_valid, land_taumag_fresh)`` to persist,
+        or ``None`` (``fresh``: the column's value came from the latest land
+        solve, so the reused-drag counter resumes exactly).
+
+        Gated on THIS run's resolved land-stress switch (a feature-off run never
+        writes it).  Before any run has adopted a loaded checkpoint (load ->
+        save with no step) the staged pair is forwarded, so a no-step re-save
+        cannot strip it.  Rank-local under MPI; the caller gathers.
+        """
+        from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        if not resolve_mpas_land_stress_from_land(self.config):
+            return None
+        mag = getattr(self, "_land_taumag", None)
+        if mag is not None:
+            return mag, self._land_taumag_valid, self._land_taumag_fresh
+        ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        if "land_taumag" in ck:
+            return tuple(ck[k] for k in _LAND_STRESS_CKPT_KEYS)
+        return None
 
     def _checkpoint_carry_aux(self) -> dict | None:
         """``self._carry_aux`` augmented with the evolved double-moment tracers
@@ -3544,6 +3568,10 @@ class ModelDriver:
         _ft = bool(self.config.land_soil_freeze_thaw)
         cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=_ft))
         logger.info("  land soil freeze/thaw: %s", "ON" if _ft else "off")
+        _csm = bool(self.config.land_canopy_snow_masking)
+        cfg = cfg._replace(canopy_snow_masking=_csm)
+        logger.info("  land canopy snow masking (trees hide snow): %s",
+                    "ON" if _csm else "off")
         # Snowpack scheme + snow emissivity, same placement (after the bake).
         cfg = cfg._replace(
             snow_scheme=str(self.config.land_snow_scheme),
@@ -6418,9 +6446,16 @@ class ModelDriver:
                     if _skin_local is not None:
                         _skin_save = gather_voronoi_field(
                             jnp.asarray(_skin_local).reshape(-1), part, "cell")
+                _ls_save = self._land_stress_for_checkpoint()
+                if _ls_save is not None:
+                    _ls_save = tuple(
+                        gather_voronoi_field(jnp.asarray(_a).reshape(-1),
+                                             part, "cell")
+                        for _a in _ls_save)
                 if self._mpi_rank != 0:
                     return
             else:
+                _ls_save = self._land_stress_for_checkpoint()
                 u_d, T_d, ps_d, phis_d = (
                     s.u.data, s.T.data, s.p_s.data, s.phis.data)
                 trc_d = (None if s.tracers is None
@@ -6539,6 +6574,14 @@ class ModelDriver:
                     _skin = _skin_save
                 if _skin is not None:
                     _save["ice_T_skin"] = np.asarray(_skin)
+            # Land surface stress handed to the boundary layer (last valid
+            # solve per column + whether one exists): persisted so a restart
+            # hands the atmosphere the same drag an unbroken run would,
+            # instead of re-seeding the neutral drag for one land step.
+            if _ls_save is not None:
+                _save["land_taumag"] = np.asarray(_ls_save[0])
+                _save["land_taumag_valid"] = np.asarray(_ls_save[1], dtype=bool)
+                _save["land_taumag_fresh"] = np.asarray(_ls_save[2], dtype=bool)
             # #1353 (codex-2 finding 2): within-interval CMOR flux sums —
             # so a mid-interval (wallclock / off-cadence) restart resumes
             # the interval mean instead of dropping the pre-checkpoint
@@ -7066,6 +7109,22 @@ class ModelDriver:
 
         return jax.tree_util.tree_map(_leaf, tree)
 
+    def _flush_land_stress_counts(self, seed_win, reused_win, step) -> None:
+        """Read one window of the land-drag diagnostics (device scalars) into
+        the host run totals and log it: column-steps on the neutral seed (no
+        valid land solve yet: start or restart) and reusing the last valid
+        land drag (latest solve held or non-finite).  Warning when any reuse."""
+        ds, dr = int(seed_win), int(reused_win)
+        self._land_stress_seed_total += ds
+        self._land_stress_reused_total += dr
+        if ds or dr:
+            (logger.warning if dr else logger.info)(
+                "land drag: %d land column-steps on the neutral seed of the "
+                "static roughness (no valid land solve yet: start or restart) "
+                "and %d reusing the last valid land drag (latest solve held or "
+                "non-finite) up to step %d; run totals %d / %d", ds, dr, step,
+                self._land_stress_seed_total, self._land_stress_reused_total)
+
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
 
@@ -7262,6 +7321,36 @@ class ModelDriver:
                     _skin_ck = scatter_to_local(
                         jnp.asarray(_skin_ck), part, "cell")
                 self._carry_aux["ice_T_skin"] = np.asarray(_skin_ck)
+            # Land surface stress: same stale-persistence rule.  A checkpoint
+            # without it (written before it was persisted, or by a run with the
+            # land stress off) is recorded so _run_mpas re-seeds LOUDLY.
+            for _k in _LAND_STRESS_CKPT_KEYS:
+                self._carry_aux.pop(_k, None)
+            self._land_taumag = None
+            self._land_taumag_valid = self._land_taumag_fresh = None
+            # A partial payload (any of the three missing) re-seeds too.
+            self._land_stress_ckpt_missing = not all(
+                _k in d.files for _k in _LAND_STRESS_CKPT_KEYS)
+            if not self._land_stress_ckpt_missing:
+                for _k in _LAND_STRESS_CKPT_KEYS:
+                    _a = np.asarray(d[_k])
+                    if _a.ndim != 1 or (_k != "land_taumag"
+                                        and _a.dtype != np.bool_):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_k}: expected a "
+                            f"1-D {'float' if _k == 'land_taumag' else 'bool'}"
+                            f" cell field, got shape {_a.shape} dtype "
+                            f"{_a.dtype}.")
+                    if _mpi:
+                        if _a.shape[0] != part.nCells_global:
+                            raise ValueError(
+                                f"MPAS checkpoint {path.name} {_k} length "
+                                f"{_a.shape[0]} != global mesh "
+                                f"({part.nCells_global},); rebuild with the "
+                                "same --resolution.")
+                        _a = np.asarray(scatter_to_local(
+                            jnp.asarray(_a), part, "cell"))
+                    self._carry_aux[_k] = _a
             # #1353 partial-interval CMOR flux sums: same stale-persistence
             # rule — drop prior staging, then stage this checkpoint's
             # payload for the _run_mpas accumulator restore.  WHITELISTED
@@ -7872,7 +7961,256 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
-    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field):
+    _ENERGY_SERIES_KEYS = ("energy_toa_net", "energy_dE_dt",
+                           "energy_residual", "sw_net_sfc", "lw_net_sfc",
+                           "hfss", "hfls", "evspsbl")
+
+    def _mpas_energy_sample(self, p_s_data, elapsed_day: float) -> dict:
+        """One energy-budget tracker sample on the MPAS lane (#1354/#1515).
+
+        Returns ``{series_key: value}`` for the run's timeseries.  A sample
+        that cannot be taken returns NaN for every key in
+        ``_ENERGY_SERIES_KEYS`` and omits ``energy_flux_interval_mean``
+        (NaN, never 0: a zero reads as "the budget closes").
+        """
+        # Under the multi-rank cell partition the tracker's plain area mean
+        # would be rank-local and count halo cells twice, so that lane takes
+        # ``_mpas_energy_partitioned`` (owned cells + allreduce) instead.
+        _ebd = getattr(self.diagnostics, "energy_tracker", None)
+        _sd = getattr(self.model, "_sfc_diag", None)
+        # GATE (codex review): `has_samples()` alone is not enough. A
+        # window can be SHORT -- the first interval after a
+        # feed-off->feed-on restart, or a checkpoint written before
+        # slots 0/1 existed -- and its mean is then over the wrong
+        # number of steps, or missing the surface-radiation pair
+        # entirely. Either way it would be stamped "interval mean" and
+        # sail past the probe, which is worse than the snapshot it
+        # replaced because it looks trustworthy. Require a COMPLETE
+        # window AND every slot the energy budget reads.
+        _partitioned = _is_mpas_cell_partitioned(self)
+        try:
+            _facc_e = getattr(self, "_mpas_sfc_accum", None)
+            _use_accum = (_facc_e is not None
+                          and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+            if (_facc_e is not None and _facc_e.is_complete()
+                    and not _use_accum):
+                print("  energy tracker: complete window but energy "
+                      "slots have unequal sample counts -- this sample "
+                      "falls back to SNAPSHOT fluxes (stamped 0)")
+            _qv_e = (self.state.tracers["q_v"].data
+                     if (self.state.tracers is not None
+                         and "q_v" in self.state.tracers) else None)
+            # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
+            # (#1354/#1515): without the -L_f*q_frozen term, deposition and
+            # freezing read as a spurious source.  Sum whatever frozen
+            # species this microphysics carries (None -> vapor-only MSE).
+            _qfrz_e = None
+            if self.state.tracers is not None:
+                for _fk in ("q_i", "q_s", "q_g"):
+                    if _fk in self.state.tracers:
+                        _fd = self.state.tracers[_fk].data
+                        _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
+
+            def _slot(i):
+                # Interval mean first (the APPLIED quantity); the
+                # end-of-interval snapshot only when no accumulator ran.
+                # `mean()` returns a host array, so this round-trips
+                # device->host->device. That is 7 small transfers per
+                # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+                # not per model step, so it is not on the hot path
+                # (codex review, accepted rather than restructured --
+                # `mean()` is shared with the CMOR feed).
+                if _use_accum:   # every ENERGY slot has a mean; evap may not
+                    _m = _facc_e.mean(i)
+                    return None if _m is None else jnp.asarray(_m)
+                return (_sd[i].data if (_sd is not None and len(_sd) > i
+                                        and _sd[i] is not None) else None)
+            _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
+            _sw_ns, _lw_ns = _slot(0), _slot(1)
+            _shf, _lhf = _slot(6), _slot(7)
+            _evp = _slot(_evap_sfc_slot())
+            _rad = (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)
+        except Exception as exc:  # noqa: BLE001
+            if not _partitioned:
+                raise
+            # A rank that fails here must still enter every collective of
+            # the partitioned sample, or its peers hang: vote "cannot".
+            logger.error("  energy tracker: input preparation failed on "
+                         "rank %d (%s: %s); this sample is NaN on every "
+                         "rank.", getattr(self, "_mpi_rank", -1),
+                         type(exc).__name__, exc)
+            return self._mpas_energy_partitioned(
+                None, None, None, (None,) * 5, (None,) * 3, False,
+                p_s_data, elapsed_day)
+        if _partitioned:
+            return self._mpas_energy_partitioned(
+                _ebd, _qv_e, _qfrz_e, _rad, (_shf, _lhf, _evp), _use_accum,
+                p_s_data, elapsed_day)
+        if _ebd is None or _qv_e is None or None in _rad:
+            return {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
+        from legoesm.diagnostics.energy_budget import (
+            area_weighted_mean as _awm,
+        )
+        _awt = self.diagnostics._area_w
+        # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
+        # needs cell-centred east/north winds (codex P0).  Perot
+        # reconstruction, the same the turbulence/coupler paths use.
+        _uc, _vc = _cell_winds(self.state, self.grid)
+        _eb = _ebd.update(
+            self.state.T.data, _qv_e, _uc, _vc,
+            self.state.phis.data, p_s_data,
+            self.diagnostics.dsigma, self.diagnostics.sigma_full,
+            _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
+            elapsed_seconds=elapsed_day * 86400.0,
+            area_weights=_awt,
+            dp=self.diagnostics._dp(p_s_data),
+            p_full=self.diagnostics._p_full(p_s_data),
+            q_frozen=_qfrz_e,
+        )
+        return {
+            "energy_toa_net": float(_eb.toa_net),
+            "energy_dE_dt": float(_eb.dE_dt),
+            "energy_residual": float(_eb.residual),
+            "sw_net_sfc": float(_eb.sfc_sw_net),
+            "lw_net_sfc": float(_eb.sfc_lw_net),
+            # Which flux timing produced this sample.  The closure
+            # probe refuses to report a leak from snapshots, because a
+            # contaminated leak is plausible rather than obviously
+            # broken (#1354).
+            "energy_flux_interval_mean": 1.0 if _use_accum else 0.0,
+            "hfss": (float(_awm(_shf, _awt))
+                     if _shf is not None else float("nan")),
+            "hfls": (float(_awm(_lhf, _awt))
+                     if _lhf is not None else float("nan")),
+            "evspsbl": (float(_awm(_evp, _awt))
+                        if _evp is not None else float("nan")),
+        }
+
+    def _mpas_energy_partitioned(self, tracker, q_v, q_frozen, rad, opt,
+                                 use_accum, p_s_data,
+                                 elapsed_day: float) -> dict:
+        """The energy sample under a MULTI-rank cell partition.
+
+        Every per-cell array here is this rank's owned+halo slice, so the
+        global means are formed from OWNED cells only (halo cells would be
+        counted twice) and allreduced: ``sum(w*f) / sum(w)`` with
+        ``w = areaCell * owned``, which equals the serial area-weighted mean.
+
+        Collective protocol (every rank calls this at the same diagnostic
+        step, as it does ``_mpas_global_diag``):
+
+        A. MIN-agree that every rank can sample (tracker, q_v and the five
+           radiation fluxes present); otherwise all return NaN together.
+        B. Refresh the edge halo (the CMOR feed's exchange): the cell winds
+           of owned boundary cells read halo edges, which are stale at this
+           point.  A failure inside the exchange aborts the job, because
+           peers are blocked in it and cannot be released.
+        C. Local sums with no collectives; any error is a flag, not a raise.
+        D. One SUM allreduce of the sums and a MIN/MAX of the flags.  The
+           sample is NaN unless no rank failed AND the flux timing
+           (interval mean vs snapshot) is the same on every rank; an
+           optional flux (hfss/hfls/evspsbl) is NaN unless every rank has it.
+           A mixed sample would be a plausible number, the dangerous kind.
+        """
+        from mpi4py import MPI as _MPI
+
+        from legoesm.diagnostics.energy_budget import (
+            column_moist_static_energy,
+        )
+        comm = _MPI.COMM_WORLD
+        root = comm.Get_rank() == 0
+        nan_out = {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
+        vl = self._voronoi_layout
+
+        # --- A: unanimous entry.
+        _ok = np.array([1.0 if (tracker is not None and q_v is not None
+                                and None not in rad) else 0.0])
+        comm.Allreduce(_MPI.IN_PLACE, _ok, op=_MPI.MIN)
+        if _ok[0] < 0.5:
+            return nan_out
+
+        # --- B: edge halo refresh (collective).
+        try:
+            u_ex = vl.halo_exchange.exchange_edge_field(self.state.u.data)
+        except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
+            logger.critical(
+                "  energy tracker: the edge halo exchange FAILED on rank %d "
+                "(%s: %s). Peers are blocked inside that collective, so the "
+                "job is aborted rather than left to hang.",
+                comm.Get_rank(), type(exc).__name__, exc)
+            comm.Abort(1)
+            raise
+
+        # --- C: local sums, no collectives.
+        # flags = [no_error, interval_mean, has_hfss, has_hfls, has_evspsbl]
+        flags = np.zeros(5)
+        sums = np.zeros(10)   # E, 5 radiation, 3 optional, sum(w)
+        try:
+            owned = vl.owned_mask_cells
+            n_loc = int(owned.shape[0])
+            uc, vc = _cell_winds(self.state, self.grid, u_override=u_ex)
+            E = column_moist_static_energy(
+                self.state.T.data, q_v, uc, vc, self.state.phis.data,
+                p_s_data, self.diagnostics.dsigma,
+                self.diagnostics.sigma_full,
+                dp=self.diagnostics._dp(p_s_data),
+                p_full=self.diagnostics._p_full(p_s_data),
+                q_frozen=q_frozen)
+            area = self.diagnostics._area_w
+            w = jnp.where(owned, 1.0 if area is None else area, 0.0)
+            fields = [E, *rad] + [jnp.zeros_like(E) if f is None else f
+                                  for f in opt]
+            for f in fields:
+                if tuple(jnp.shape(f)) != (n_loc,):
+                    raise ValueError(
+                        f"energy tracker field has shape {jnp.shape(f)}, "
+                        f"not this rank's ({n_loc},) owned+halo cells")
+            # where() on the PRODUCT so a non-finite halo value cannot leak
+            # through 0*NaN.
+            sums = np.array(jnp.stack(
+                [jnp.sum(jnp.where(owned, f * w, 0.0)) for f in fields]
+                + [jnp.sum(w)]), dtype=np.float64)
+            flags = np.array([1.0, 1.0 if use_accum else 0.0]
+                             + [0.0 if f is None else 1.0 for f in opt])
+        except Exception as exc:  # noqa: BLE001 - agreed on in D
+            logger.error("  energy tracker: local sums failed on rank %d "
+                         "(%s: %s); this sample is NaN on every rank.",
+                         comm.Get_rank(), type(exc).__name__, exc)
+            flags = np.zeros(5)
+            sums = np.zeros(10)
+
+        # --- D: every rank, unconditionally.
+        comm.Allreduce(_MPI.IN_PLACE, sums, op=_MPI.SUM)
+        fmin, fmax = flags.copy(), flags.copy()
+        comm.Allreduce(_MPI.IN_PLACE, fmin, op=_MPI.MIN)
+        comm.Allreduce(_MPI.IN_PLACE, fmax, op=_MPI.MAX)
+        if fmin[0] < 0.5:
+            return nan_out
+        if fmin[1] != fmax[1]:
+            if root:
+                logger.warning(
+                    "  energy tracker: flux timing differs across ranks "
+                    "(interval mean on some, snapshot on others); this "
+                    "sample is NaN rather than a mixture.")
+            return nan_out
+        means = sums[:9] / sums[9]
+        eb = tracker.record(*(float(m) for m in means[:6]),
+                            elapsed_seconds=elapsed_day * 86400.0)
+        out = {
+            "energy_toa_net": float(eb.toa_net),
+            "energy_dE_dt": float(eb.dE_dt),
+            "energy_residual": float(eb.residual),
+            "sw_net_sfc": float(eb.sfc_sw_net),
+            "lw_net_sfc": float(eb.sfc_lw_net),
+            "energy_flux_interval_mean": float(fmin[1]),
+        }
+        for j, key in enumerate(("hfss", "hfls", "evspsbl")):
+            out[key] = (float(means[6 + j]) if fmin[2 + j] > 0.5
+                        else float("nan"))
+        return out
+
+    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field,
+                          ni_field=None):
         """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
 
         Reduces over this rank's OWNED cells / edges (halo entities masked
@@ -7881,8 +8219,11 @@ class ModelDriver:
         halo-double-counted values a plain ``jnp.mean(T_data)`` would give.
         Mirrors the owned-mask + allreduce convention of the mass fixer.
 
-        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
-        host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv,
+        ni_max)`` as host floats / bool.  ``cwv`` / ``ni_max`` are NaN when
+        their field is None.  ``ni_max`` rides the existing MAX batch (always
+        present, so every rank sends the same buffer shape); a NaN in an owned
+        N_i cell is reported as +inf so a runaway stays visible.
         ``mean_T`` is PRESSURE-WEIGHTED (sum T*dp / sum dp; equal cell
         weight — areaCell weighting is a deferred refinement on the
         quasi-uniform SCVT).
@@ -7899,6 +8240,11 @@ class ModelDriver:
         finite_l = jnp.all(jnp.isfinite(T_owned))
         cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
                      if cwv_field is not None else jnp.asarray(0.0))
+        if ni_field is not None:
+            _ni_l = jnp.max(jnp.where(om_c[:, None], ni_field, -jnp.inf))
+            ni_max_l = jnp.where(jnp.isnan(_ni_l), jnp.inf, _ni_l)
+        else:
+            ni_max_l = jnp.asarray(-jnp.inf)
         # Pressure-weighted mean T (sum T*dp / sum dp; equal cell weight —
         # the quasi-uniform SCVT makes areaCell weighting a negligible
         # refinement, and the pre-fix convention was equal-cell too), owned
@@ -7917,6 +8263,7 @@ class ModelDriver:
             Tdp_sum_l, jnp.sum(ps_owned), jnp.max(absu_owned),
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
             cwv_sum_l.astype(T_data.dtype), dp_sum_l,
+            ni_max_l.astype(T_data.dtype),
         ]))
         comm = _MPI.COMM_WORLD
         # THREE batched buffer allreduces instead of eight scalar pickle
@@ -7926,13 +8273,13 @@ class ModelDriver:
         # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
         _sums = np.array([_loc[0], _loc[1], _loc[6], _loc[7]],
                          dtype=np.float64)
-        _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
+        _maxs = np.array([_loc[2], _loc[4], _loc[8]], dtype=np.float64)
         _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
         comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
         comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
         comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
         g_sum_Tdp, g_sum_ps, g_sum_cwv, g_sum_dp = (float(v) for v in _sums)
-        g_max_u, g_T_max = (float(v) for v in _maxs)
+        g_max_u, g_T_max, g_ni_max = (float(v) for v in _maxs)
         g_T_min, g_finite_min = (float(v) for v in _mins)
         g_finite = bool(g_finite_min > 0.5)
         # Owned-cell count is partition-static: allreduce ONCE and cache.
@@ -7943,7 +8290,8 @@ class ModelDriver:
         mean_T = g_sum_Tdp / max(g_sum_dp, 1e-30)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
-        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
+        ni_max = g_ni_max if ni_field is not None else float("nan")
+        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv, ni_max
 
     def _mpas_cmip_feed_enabled(self, diag) -> tuple[bool, bool]:
         """Decide whether the per-interval MPAS CMOR accumulator feed runs.
@@ -8140,7 +8488,8 @@ class ModelDriver:
             if _acc is not None and not state_only:
                 _acc.reset(window_start_day=day)
 
-    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
+    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict, *,
+                                   global_fields: bool = False) -> None:
         """Record the atmospheric water-budget closure E - P - dW/dt.
 
         The model has always carried this tracker, and this lane has never fed
@@ -8156,20 +8505,14 @@ class ModelDriver:
         rather than against a second, privately-averaged pair that could differ
         for reasons nobody could trace.
 
-        SERIAL ONLY, deliberately. The tracker takes a plain area-weighted mean,
-        which under a cell partition would be rank-local and count halo cells
-        twice -- a confidently wrong global number, which is worse than none.
-        The multi-rank path needs the owned-mask-and-allreduce treatment
-        ``_mpas_global_diag`` already does, and says so once rather than
-        publishing rubbish.
+        Under a multi-rank cell partition the tracker's plain area-weighted
+        mean would be rank-local and count halo cells twice, so it is fed ONLY
+        on rank 0 from the owned-cell gather of the CMOR feed
+        (``global_fields=True``: ``kw`` then holds GLOBAL ``q_v`` / ``p_s`` /
+        ``precip`` / ``evspsbl`` and the weights are the global ``areaCell``).
+        A rank-local call under the partition still returns without recording.
         """
-        if self._voronoi_layout is not None:
-            if not getattr(self, "_logged_moisture_budget_mpi", False):
-                logger.info(
-                    "  moisture-budget closure NOT recorded under the cell "
-                    "partition (the tracker's area mean is rank-local); serial "
-                    "runs publish it.")
-                self._logged_moisture_budget_mpi = True
+        if _is_mpas_cell_partitioned(self) and not global_fields:
             return
         # The CMOR slot getter falls back to an INSTANTANEOUS diagnostic when a
         # slot has no accumulated samples.  Mixing a mean rainfall with an
@@ -8180,8 +8523,16 @@ class ModelDriver:
             return
         precip = kw.get("precip")
         evspsbl = kw.get("evspsbl")
-        tracers = self.state.tracers
-        if precip is None or tracers is None or "q_v" not in tracers:
+        if global_fields:
+            q_v, _p_s = kw.get("q_v"), kw.get("p_s")
+            area = getattr(self._grid_global, "areaCell", None)
+        else:
+            tracers = self.state.tracers
+            q_v = (tracers["q_v"].data
+                   if tracers is not None and "q_v" in tracers else None)
+            _p_s = self.state.p_s.data
+            area = getattr(self.grid, "areaCell", None)
+        if precip is None or q_v is None or _p_s is None:
             return          # dry run, or a window whose fluxes were withheld
         if evspsbl is None:
             # Heat without water: the closure will NOT rebuild E as hfls / L_v
@@ -8193,11 +8544,10 @@ class ModelDriver:
                 "but no evspsbl (turbulence evap_sfc slot); the closure refuses "
                 "to derive water from latent heat.", stacklevel=2)
             return
-        area = getattr(self.grid, "areaCell", None)
-        _p_s = self.state.p_s.data
+        _p_s = jnp.asarray(_p_s)
         _p_half = self.sigma.pressure_at_half(_p_s)
         diag.moisture_tracker.update(
-            tracers["q_v"].data, _p_s, self.sigma.dsigma,
+            jnp.asarray(q_v), _p_s, self.sigma.dsigma,
             precip, evap=evspsbl,
             elapsed_seconds=float(day) * 86400.0,
             area_weights=(None if area is None
@@ -8729,6 +9079,9 @@ class ModelDriver:
                 diag.feed_cmip_accumulators_native(
                     day, flux_interval_days=flux_days,
                     include_state=not flux_only, **gathered)
+                # Root-only, strictly after the last collective.
+                self._feed_mpas_moisture_budget(
+                    day, diag, gathered, global_fields=True)
 
     def _finalize_mpas_cmip(self, final_day: float | None = None) -> None:
         """Write the CMOR NetCDF (``Amon`` / ``day`` / ``fx``) from the fed
@@ -10932,6 +11285,20 @@ class ModelDriver:
                 _lapse_z = (jnp.asarray(self.state.phis.data).reshape(-1)
                             / constants.g)
 
+            def _ocean_ice_T_sfc(_sst, _sic):
+                # The non-land surface alone: SST/SIC blend with the ice
+                # component, no land lapse correction (which only ever applies
+                # to the land fraction) -- the ocean-surface anchor the
+                # turbulence uses for the non-land fraction when
+                # mpas_ocean_flux_on_ocean_surface is on (#1320).  The ice
+                # component is the constant T_ice or the per-cell prognostic
+                # skin READ AT CALL TIME.
+                _sst = jnp.asarray(_sst).reshape(-1)
+                _sic = jnp.asarray(_sic).reshape(-1)
+                return blend_surface_temperature(
+                    _sst, _sic,
+                    self._ice_T_skin if _ice_skin_on else _T_ice).reshape(-1)
+
             def _blend_T_sfc(_sst, _sic):
                 # Blend prescribed SST with the ice component (constant T_ice,
                 # or the per-cell prognostic skin READ AT CALL TIME) and apply
@@ -10947,13 +11314,8 @@ class ModelDriver:
                 # source broadcasts ELEMENTWISE against the (nCells,) skin
                 # rather than to (nCells,nCells) — the scalar-T_ice blend
                 # tolerated (nCells,1) via a trailing reshape; the array skin
-                # must not (codex-4).
-                _sst = jnp.asarray(_sst).reshape(-1)
-                _sic = jnp.asarray(_sic).reshape(-1)
-                _ice_component = (
-                    self._ice_T_skin if _ice_skin_on else _T_ice)
-                _ts = blend_surface_temperature(
-                    _sst, _sic, _ice_component).reshape(-1)
+                # must not (codex-4) -- done in _ocean_ice_T_sfc.
+                _ts = _ocean_ice_T_sfc(_sst, _sic)
                 if _lapse_z is not None:
                     # Cast the storage-dtype (possibly f32) statics to the
                     # anchor dtype so the correction is formed at anchor
@@ -10965,6 +11327,14 @@ class ModelDriver:
                         _ts, _f_land_cells.astype(_ts.dtype),
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
+
+            def _write_sfc_anchors(_dst, _sst, _sic):
+                # The ONE place both surface anchors are written, so the
+                # ocean/ice anchor can never go stale against T_sfc (daily
+                # write and the per-step ice-skin re-anchor both come here).
+                _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
+                if _ocean_sfc_on:
+                    _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -11151,6 +11521,31 @@ class ModelDriver:
         _land_shflx_cells = None       # (nCells,) land's own sensible flux
         _land_lhflx_cells = None       # (nCells,) land's own latent flux
         _land_evap_cells = None        # (nCells,) land's own water flux [kg/m2/s]
+        _land_taumag_cells = None      # (nCells,) land's last valid |stress| [Pa]
+        _land_taumag_valid = None      # (nCells,) a land step has succeeded
+        _land_taumag_fresh = None      # (nCells,) value from the LAST land step
+        _land_stress_landcell = None   # (nCells,) f_land > 0
+        _ls_seed_win = None            # device: seeded land column-steps, window
+        _ls_reused_win = None          # device: reused land column-steps, window
+        _land_z0m_cells = None         # (nCells,) static land roughness [m]
+        _land_d_cells = None           # (nCells,) static displacement [m]
+        from legoesm.driver.config import resolve_mpas_land_stress_from_land
+        from legoesm.land.multilayer_land import solved_stress_magnitude
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            hold_last_valid_land_stress,
+        )
+        _land_stress_on = resolve_mpas_land_stress_from_land(cfg)
+        # Validated (validate_strict) to imply the land-flux handoff, so the
+        # turbulence always receives T_sfc_ocean together with shflx_land.
+        _ocean_sfc_on = bool(cfg.mpas_ocean_flux_on_ocean_surface)
+        print(f"  Non-land surface fluxes evaluated on: "
+              f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
+              f" (mpas_ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+        print(f"  Land surface stress to the boundary layer: "
+              f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
+              f"(mpas_land_stress_from_land="
+              f"{getattr(cfg, 'mpas_land_stress_from_land', None)!r}"
+              f"{' -> auto' if getattr(cfg, 'mpas_land_stress_from_land', None) is None else ''})")
         _land_a2s_sum = None           # cadence: running forcing sum
         _land_a2s_n = 0                # cadence: steps accumulated
         if _land_ml_on:
@@ -11343,14 +11738,46 @@ class ModelDriver:
                 # holds separately, so the log can tell a frozen continent
                 # from noise on discarded columns (codex, 2026-08-23: the
                 # undivided counter read as half the mesh held when the
-                # physically-meaningful share was unknown).
+                # physically-meaningful share was unknown).  Any land
+                # fraction counts: a coastal column's land fluxes and stress
+                # are blended in by its fraction, so its hold is not discarded.
                 _held_mask = getattr(_sfc, "held", None)
                 _n_held_land = (
                     jnp.sum((jnp.asarray(_held_mask).reshape(-1)
-                             & (jnp.asarray(_f_land_cols_p) > 0.5))
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # Unsolved canopy columns ACCEPTED with energy-closed fallback
+                # fluxes, and those the fallback guards reverted instead (the
+                # latter are already inside the held count). Same land mask as
+                # the held count (any land fraction), so the two are comparable.
+                _fb_mask = getattr(_sfc, "fallback", None)
+                _n_fb_land = (
+                    jnp.sum((jnp.asarray(_fb_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
+                            .astype(jnp.int32))
+                    if _fb_mask is not None
+                    else jnp.zeros((), jnp.int32))
+                _fb_rej_mask = getattr(_sfc, "fallback_rejected", None)
+                _n_fb_rej = (
+                    jnp.sum((jnp.asarray(_fb_rej_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols_p) > 0.0))
+                            .astype(jnp.int32))
+                    if _fb_rej_mask is not None
+                    else (_sfc.n_fallback_rejected
+                          if getattr(_sfc, "n_fallback_rejected", None)
+                          is not None else jnp.zeros((), jnp.int32)))
+                # The land's solved stress magnitude rho*u*^2 [Pa] (its canopy
+                # roughness and stability) and the held mask; consumed only
+                # under mpas_land_stress_from_land, where a held or non-finite
+                # column keeps its last valid value (driver loop below).
+                # (sqrt guarded so a zeroed column has a finite derivative.)
+                _taumag = solved_stress_magnitude(_sfc, resp)
+                _held_f = (jnp.asarray(_held_mask).reshape(-1)
+                           .astype(_taumag.dtype)
+                           if _held_mask is not None
+                           else jnp.zeros_like(_taumag))
                 # Owned columns with any land whose soil-water solve kept an
                 # unconverged iterate (any water it left is in water_created).
                 _unconv_mask = getattr(_sfc, "soil_unconverged", None)
@@ -11375,11 +11802,15 @@ class ModelDriver:
                                 o, _land_pack_idx, _land_ncol_full)
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
-                                    resp.shflx, resp.lhflx, resp.surface_mass_flux))
-                            + (_n_held, _n_held_land, _n_unconv_land))
+                                    resp.shflx, resp.lhflx, resp.surface_mass_flux,
+                                    _taumag, _held_f))
+                            + (_n_held, _n_held_land, _n_fb_land,
+                               _n_fb_rej, _n_unconv_land))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                        _n_held, _n_held_land, _n_unconv_land)
+                        _taumag, _held_f,
+                        _n_held, _n_held_land, _n_fb_land, _n_fb_rej,
+                        _n_unconv_land)
               return _land_step
 
             _land_step_fn = _make_land_step(DT_LAND)
@@ -11401,7 +11832,8 @@ class ModelDriver:
                 def _land_beta_fn(land_state):
                     return jnp.clip(
                         land_tile_beta_soil(
-                            land_state.theta_soil, _lml_cfg, _lml_params),
+                            land_state.theta_soil, land_state.T_soil,
+                            _lml_cfg, _lml_params),
                         0.0, 1.0)
 
                 # The land's SOLVED surface humidity is handed to the
@@ -11430,6 +11862,10 @@ class ModelDriver:
             _land_n_held_accum = jnp.zeros((), jnp.int32)
             _land_n_held_land_accum = jnp.zeros((), jnp.int32)
             _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            _land_n_fb_accum = jnp.zeros((), jnp.int32)
+            _land_n_fb_rej_accum = jnp.zeros((), jnp.int32)
+            self._land_n_fallback_total = 0
+            self._land_n_fallback_rejected_total = 0
             _land_n_unconv_accum = jnp.zeros((), jnp.int32)
             self._land_n_unconv_total = 0
             self._land_n_held_total = 0
@@ -11961,6 +12397,69 @@ class ModelDriver:
                 _land_shflx_cells = jnp.zeros_like(_q_air0)
                 _land_lhflx_cells = jnp.zeros_like(_q_air0)
                 _land_evap_cells = jnp.zeros_like(_q_air0)
+                if _land_stress_on:
+                    # No solved land stress yet (start / restart): the first
+                    # host step uses the neutral drag of the static roughness.
+                    from legoesm.land.multilayer_land import (
+                        static_land_roughness,
+                    )
+                    _land_taumag_cells = jnp.zeros_like(_q_air0)
+                    _land_taumag_valid = jnp.zeros(_q_air0.shape, dtype=bool)
+                    _land_taumag_fresh = _land_taumag_valid
+                    _ls_ck = (self._carry_aux
+                              if isinstance(self._carry_aux, dict) else {})
+                    if "land_taumag" in _ls_ck:
+                        _m = jnp.asarray(_ls_ck.pop("land_taumag"),
+                                         dtype=_q_air0.dtype).reshape(-1)
+                        _v = jnp.asarray(_ls_ck.pop("land_taumag_valid"),
+                                         dtype=bool).reshape(-1)
+                        _fr = jnp.asarray(_ls_ck.pop("land_taumag_fresh"),
+                                          dtype=bool).reshape(-1)
+                        if not (_m.shape == _v.shape == _fr.shape
+                                == _q_air0.shape):
+                            raise ValueError(
+                                f"checkpoint land_taumag shape {_m.shape} / "
+                                f"valid {_v.shape} != (nCells={_q_air0.size},)"
+                                " — mesh mismatch.")
+                        if not bool(jnp.all(jnp.isfinite(_m))):
+                            raise ValueError(
+                                "checkpoint land_taumag has non-finite values "
+                                "— refusing to resume from a corrupt stress.")
+                        _land_taumag_cells, _land_taumag_valid = _m, _v
+                        _land_taumag_fresh = _fr
+                        logger.info(
+                            "  MPAS land stress: resumed from checkpoint "
+                            "(%d columns with a solved value)",
+                            int(jnp.sum(_v)))
+                    elif getattr(self, "_land_stress_ckpt_missing", False):
+                        logger.warning(
+                            "  MPAS land stress: the checkpoint carries no "
+                            "land surface stress (written before it was "
+                            "persisted, or with the land stress off); "
+                            "RE-SEEDING every land column with the neutral "
+                            "drag of its static roughness for the first land "
+                            "step. This restart is not bit-identical to an "
+                            "unbroken run.")
+                    self._land_stress_ckpt_missing = False
+                    self._land_taumag = _land_taumag_cells
+                    self._land_taumag_valid = _land_taumag_valid
+                    self._land_taumag_fresh = _land_taumag_fresh
+                    _land_stress_landcell = (
+                        jnp.asarray(_f_land_cols).reshape(-1) > 0.0)
+                    # Diagnostics: land column-steps whose drag was the
+                    # neutral seed (no valid land solve yet) and that reused
+                    # an older valid land drag (latest solve held or
+                    # non-finite).  Device counters per log window (int32 is
+                    # ample for one window), run totals on the host (Python
+                    # ints: a year of column-steps overflows int32).
+                    _ls_seed_win = jnp.zeros((), jnp.int32)
+                    _ls_reused_win = jnp.zeros((), jnp.int32)
+                    self._land_stress_seed_total = 0
+                    self._land_stress_reused_total = 0
+                    _land_z0m_cells, _land_d_cells = (
+                        jnp.asarray(a, dtype=_q_air0.dtype).reshape(-1)
+                        for a in static_land_roughness(
+                            _lml_params, _lml_cfg, int(_q_air0.size)))
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -12007,6 +12506,11 @@ class ModelDriver:
                            or os.environ.get("PMI_RANK", "0"))
             _trace_win = (_t0, _t0 + _tn,
                           os.path.join(_tdir, "rank" + _trace_rank))
+        if _land_stress_on and _land_taumag_cells is None:
+            raise RuntimeError(
+                "mpas_land_stress_from_land resolved ON but the land stress "
+                "was never seeded (no interactive land flux handoff on this "
+                "run); the boundary layer would silently keep the bulk stress.")
         for step in range(n_steps_total):
             if _trace_win is not None and step in _trace_win[:2]:
                 jax.block_until_ready(self.state)
@@ -12121,8 +12625,7 @@ class ModelDriver:
                         if _ice_skin_on:
                             _ice_sst_cur = _sst_day
                             _ice_sic_cur = _sic_day
-                        _forcing_daily["T_sfc"] = _blend_T_sfc(
-                            _sst_day, _sic_day)
+                        _write_sfc_anchors(_forcing_daily, _sst_day, _sic_day)
                         # Tile-blended surface shortwave albedo.  ONE formula
                         # (forcing.surface_utils.blended_surface_albedo) shared
                         # with the FV lane's blend; ocean/ice first, then the
@@ -12245,6 +12748,21 @@ class ModelDriver:
                     _forcing["shflx_land"] = _land_shflx_cells
                     _forcing["lhflx_land"] = _land_lhflx_cells
                     _forcing["evap_land"] = _land_evap_cells
+                if _land_taumag_cells is not None:
+                    # Land-model stress over the land fraction: last valid
+                    # solved value, else the neutral drag of the column's
+                    # static land roughness (never the ocean bulk law).
+                    _forcing["taumag_land"] = _land_taumag_cells
+                    _forcing["taumag_land_valid"] = _land_taumag_valid
+                    _forcing["z0m_land"] = _land_z0m_cells
+                    _forcing["d_land"] = _land_d_cells
+                    self._land_stress_last = _land_taumag_cells
+                    _ls_seed_win = _ls_seed_win + jnp.sum(
+                        _land_stress_landcell & ~_land_taumag_valid,
+                        dtype=jnp.int32)
+                    _ls_reused_win = _ls_reused_win + jnp.sum(
+                        _land_stress_landcell & _land_taumag_valid
+                        & ~_land_taumag_fresh, dtype=jnp.int32)
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -12329,8 +12847,7 @@ class ModelDriver:
                 # every step the feature is active (even one that skipped
                 # the advance for missing fluxes) so T_sfc stays consistent
                 # with self._ice_T_skin.
-                _forcing_daily["T_sfc"] = _blend_T_sfc(
-                    _ice_sst_cur, _ice_sic_cur)
+                _write_sfc_anchors(_forcing_daily, _ice_sst_cur, _ice_sic_cur)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and
@@ -12388,7 +12905,9 @@ class ModelDriver:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
+                     _land_taumag_step, _land_held_step,
                      _land_n_held_step, _land_n_held_land_step,
+                     _land_n_fb_step, _land_n_fb_rej_step,
                      _land_n_unconv_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64),
@@ -12417,6 +12936,9 @@ class ModelDriver:
                     _land_n_held_steps_accum = (
                         _land_n_held_steps_accum
                         + (_land_n_held_step > 0).astype(jnp.int32))
+                    _land_n_fb_accum = _land_n_fb_accum + _land_n_fb_step
+                    _land_n_fb_rej_accum = (
+                        _land_n_fb_rej_accum + _land_n_fb_rej_step)
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction
                     # the consumer refuses the key, and adding it mid-run
@@ -12426,17 +12948,54 @@ class ModelDriver:
                         _land_shflx_cells = _land_shflx_step
                         _land_lhflx_cells = _land_lhflx_step
                         _land_evap_cells = _land_evap_step
+                        if _land_stress_on:
+                            # Last valid land stress per column: a held or
+                            # non-finite solve keeps the previous value.
+                            (_land_taumag_cells, _land_taumag_valid,
+                             _land_taumag_fresh) = hold_last_valid_land_stress(
+                                _land_taumag_cells, _land_taumag_valid,
+                                _land_taumag_step, _land_held_step)
+                            self._land_taumag = _land_taumag_cells
+                            self._land_taumag_valid = _land_taumag_valid
+                            self._land_taumag_fresh = _land_taumag_fresh
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).
                         _land_beta_cells = _land_beta_fn(self._land_ml_state)
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                    if _ls_seed_win is not None:
+                        self._flush_land_stress_counts(
+                            _ls_seed_win, _ls_reused_win, step)
+                        _ls_seed_win = jnp.zeros((), jnp.int32)
+                        _ls_reused_win = jnp.zeros((), jnp.int32)
                     _window_cols = int(_land_n_held_accum)
                     _window_land = int(_land_n_held_land_accum)
                     _window_steps = int(_land_n_held_steps_accum)
                     _land_n_held_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_land_accum = jnp.zeros((), jnp.int32)
                     _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                    _window_fb = int(_land_n_fb_accum)
+                    _window_fb_rej = int(_land_n_fb_rej_accum)
+                    _land_n_fb_accum = jnp.zeros((), jnp.int32)
+                    _land_n_fb_rej_accum = jnp.zeros((), jnp.int32)
+                    if _window_fb or _window_fb_rej:
+                        self._land_n_fallback_total += _window_fb
+                        self._land_n_fallback_rejected_total += _window_fb_rej
+                        # An unsolved canopy column is accepted with
+                        # energy-closed fallback fluxes; the guards revert it
+                        # when that would jump the top soil or the fluxes.
+                        logger.warning(
+                            "land: %d LAND column-steps accepted with an "
+                            "unsolved canopy (energy-closed fallback) and %d "
+                            "LAND column-steps rejected by the fallback "
+                            "guards (reverted; included in the hold count) "
+                            "in the "
+                            "last %d steps; %d accepted / %d rejected since "
+                            "the run began — at step %d",
+                            _window_fb, _window_fb_rej,
+                            _HARD_SAT_LOG_CADENCE_STEPS,
+                            self._land_n_fallback_total,
+                            self._land_n_fallback_rejected_total, step)
                     _window_unconv = int(_land_n_unconv_accum)
                     _land_n_unconv_accum = jnp.zeros((), jnp.int32)
                     if _window_unconv:
@@ -12460,7 +13019,7 @@ class ModelDriver:
                         # held as well, and the worst single step.
                         logger.warning(
                             "land: %d column-steps held in the last %d "
-                            "steps (%d of them on LAND columns — the "
+                            "steps (%d of them on columns with any land — the "
                             "physically meaningful share; the rest are "
                             "ocean columns whose land output is "
                             "discarded), on %d of those steps (a held "
@@ -12623,6 +13182,7 @@ class ModelDriver:
                         self.sigma.dsigma,
                         dp=self.sigma.layer_thickness_dp(p_s_data))
 
+                _ni_max_mpi = float("nan")
                 if self._voronoi_layout is not None:
                     # MPAS cell-partition MPI: the state spans owned+halo
                     # cells, and each rank holds only its band — so a plain
@@ -12630,9 +13190,13 @@ class ModelDriver:
                     # cells AND be rank-local.  Reduce over OWNED cells only
                     # and allreduce to a true global diagnostic (mirrors the
                     # owned-mask + allreduce mass fixer).
-                    mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv = \
-                        self._mpas_global_diag(
-                            T_data, p_s_data, u_data, _cwv_field)
+                    _ni_fld = (self.state.tracers["N_i"].data
+                               if (self.state.tracers is not None
+                                   and "N_i" in self.state.tracers) else None)
+                    (mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv,
+                     _ni_max_mpi) = self._mpas_global_diag(
+                        T_data, p_s_data, u_data, _cwv_field,
+                        ni_field=_ni_fld)
                 else:
                     # Serial / single-rank: fuse the reductions into one
                     # device→host transfer (each ``float()`` is a GPU stall).
@@ -12701,105 +13265,11 @@ class ModelDriver:
                 # feed off the tracker falls back to snapshots and stamps
                 # energy_flux_interval_mean = 0; the closure probe then REFUSES
                 # to report a leak rather than quoting a contaminated one.
-                # MPI-partitioned MPAS is skipped: the tracker uses local area
-                # weights + local state with no owned-cell mask or allreduce
-                # (halo double-count), exactly as the moisture tracker is
-                # skipped on that lane (codex review).  Single-GPU / serial
-                # only, which is the #1354 L5 lane.
-                _ebd = getattr(self.diagnostics, "energy_tracker", None)
-                _sd = getattr(self.model, "_sfc_diag", None)
-                # GATE (codex review): `has_samples()` alone is not enough. A
-                # window can be SHORT -- the first interval after a
-                # feed-off->feed-on restart, or a checkpoint written before
-                # slots 0/1 existed -- and its mean is then over the wrong
-                # number of steps, or missing the surface-radiation pair
-                # entirely. Either way it would be stamped "interval mean" and
-                # sail past the probe, which is worse than the snapshot it
-                # replaced because it looks trustworthy. Require a COMPLETE
-                # window AND every slot the energy budget reads.
-                _facc_e = getattr(self, "_mpas_sfc_accum", None)
-                _use_accum = (_facc_e is not None
-                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
-                if (_facc_e is not None and _facc_e.is_complete()
-                        and not _use_accum):
-                    print("  energy tracker: complete window but energy "
-                          "slots have unequal sample counts -- this sample "
-                          "falls back to SNAPSHOT fluxes (stamped 0)")
-                _qv_e = (self.state.tracers["q_v"].data
-                         if (self.state.tracers is not None
-                             and "q_v" in self.state.tracers) else None)
-                # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
-                # (#1354/#1515): without the -L_f*q_frozen term, deposition and
-                # freezing read as a spurious source.  Sum whatever frozen
-                # species this microphysics carries (None -> vapor-only MSE).
-                _qfrz_e = None
-                if self.state.tracers is not None:
-                    for _fk in ("q_i", "q_s", "q_g"):
-                        if _fk in self.state.tracers:
-                            _fd = self.state.tracers[_fk].data
-                            _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
-
-                def _slot(i):
-                    # Interval mean first (the APPLIED quantity); the
-                    # end-of-interval snapshot only when no accumulator ran.
-                    # `mean()` returns a host array, so this round-trips
-                    # device->host->device. That is 7 small transfers per
-                    # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
-                    # not per model step, so it is not on the hot path
-                    # (codex review, accepted rather than restructured --
-                    # `mean()` is shared with the CMOR feed).
-                    if _use_accum:   # window_ready() => every slot has a mean
-                        return jnp.asarray(_facc_e.mean(i))
-                    return (_sd[i].data if (_sd is not None and len(_sd) > i
-                                            and _sd[i] is not None) else None)
-                _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
-                _sw_ns, _lw_ns = _slot(0), _slot(1)
-                _shf, _lhf = _slot(6), _slot(7)
-                _evp = _slot(_evap_sfc_slot())
-                if (_ebd is not None and _qv_e is not None
-                        and not _is_mpas_cell_partitioned(self)
-                        and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
-                    from legoesm.diagnostics.energy_budget import (
-                        area_weighted_mean as _awm,
-                    )
-                    _awt = self.diagnostics._area_w
-                    # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
-                    # needs cell-centred east/north winds (codex P0).  Perot
-                    # reconstruction, the same the turbulence/coupler paths use.
-                    _uc, _vc = _cell_winds(self.state, self.grid)
-                    _eb = _ebd.update(
-                        self.state.T.data, _qv_e, _uc, _vc,
-                        self.state.phis.data, p_s_data,
-                        self.diagnostics.dsigma, self.diagnostics.sigma_full,
-                        _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
-                        elapsed_seconds=elapsed_day * 86400.0,
-                        area_weights=_awt,
-                        dp=self.diagnostics._dp(p_s_data),
-                        p_full=self.diagnostics._p_full(p_s_data),
-                        q_frozen=_qfrz_e,
-                    )
-                    _ts["energy_toa_net"].append(float(_eb.toa_net))
-                    _ts["energy_dE_dt"].append(float(_eb.dE_dt))
-                    _ts["energy_residual"].append(float(_eb.residual))
-                    _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
-                    _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
-                    # Which flux timing produced this sample.  The closure
-                    # probe refuses to report a leak from snapshots, because a
-                    # contaminated leak is plausible rather than obviously
-                    # broken (#1354).
-                    _ts["energy_flux_interval_mean"].append(
-                        1.0 if _use_accum else 0.0)
-                    _ts["hfss"].append(float(_awm(_shf, _awt))
-                                       if _shf is not None else float("nan"))
-                    _ts["hfls"].append(float(_awm(_lhf, _awt))
-                                       if _lhf is not None else float("nan"))
-                    _ts["evspsbl"].append(float(_awm(_evp, _awt))
-                                          if _evp is not None else float("nan"))
-                else:
-                    for _ek in ("energy_toa_net", "energy_dE_dt",
-                                "energy_residual", "sw_net_sfc", "lw_net_sfc",
-                                "hfss", "hfls", "evspsbl"):
-                        _ts[_ek].append(float("nan"))
+                # Energy tracker sample; under the multi-rank cell partition
+                # the global means come from owned cells + allreduce.
+                for _ek, _ev in self._mpas_energy_sample(
+                        p_s_data, elapsed_day).items():
+                    _ts[_ek].append(_ev)
                 # Latest closure the CMOR feed recorded, or NaN before the
                 # first complete diagnostic window.  NaN, never 0: a zero here
                 # reads as "the budget closes", which is the one answer this
@@ -12815,10 +13285,9 @@ class ModelDriver:
                 # diagnostic nominal, because PSD clamps mask absurd N in all
                 # rates — only the raw field overflowing was visible.  A
                 # daily max makes any number runaway visible in the log
-                # months before overflow.  Serial/single-rank only (the MPI
-                # lane's fused global diag would need an allreduce-MAX
-                # extension; rank-local would mislead).
-                _ni_max = float("nan")
+                # months before overflow.  On the MPI lane it comes from the
+                # owned-cell MAX batch of ``_mpas_global_diag`` above.
+                _ni_max = _ni_max_mpi
                 if (self._voronoi_layout is None
                         and self.state.tracers is not None
                         and "N_i" in self.state.tracers):
@@ -13033,6 +13502,11 @@ class ModelDriver:
         if _trace_on:
             jax.block_until_ready(self.state)
             jax.profiler.stop_trace()
+        # Last (partial) window of the land-drag counters: a short run never
+        # reaches the log cadence.
+        if _ls_seed_win is not None:
+            self._flush_land_stress_counts(_ls_seed_win, _ls_reused_win,
+                                           n_steps_total)
         # Flush the partial sedimentation window: an overflow in the last
         # steps before the run ends must still be reported.
         if _sed_req_window is not None:
@@ -13056,7 +13530,10 @@ class ModelDriver:
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
-        self._save_lightweight_timeseries(_ts, run_status, t_start)
+        # One writer: ranks must not race on the shared timeseries.npz /
+        # results.txt.  The published series are rank 0's.
+        if getattr(self, "_mpi_rank", None) in (None, 0):
+            self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
     # ==================================================================

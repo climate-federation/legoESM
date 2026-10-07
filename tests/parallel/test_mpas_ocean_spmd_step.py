@@ -452,7 +452,8 @@ def test_poly_unchanged_by_deeper_halo():
     _need_devices(N_DEV)
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
     kw = dict(_CASES["implicit_superbee_del4"], barotropic_implicit_pcg_precond="poly",
-              barotropic_implicit_pcg_variant="single_reduce")
+              barotropic_implicit_pcg_variant="single_reduce",
+              barotropic_implicit_pcg_fixed_iters=20)
     mesh, n_real, model, state, forcing = _build(kw)
     ref = _run_serial(model, state, forcing, 300.0, 3)
     try:

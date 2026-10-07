@@ -1240,6 +1240,12 @@ class ExperimentConfig(NamedTuple):
     # InterceptionConfig()): a prognostic canopy water store, throughfall and
     # wet-leaf evaporation. Default off; decks set it explicitly.
     land_canopy_interception: bool = False
+    # Trees hide ground snow in the land column albedo: CLM5 two-stream over the
+    # snow-buried leaf + stem area of the dominant plant type, applied to the
+    # snow increment only (snow-free albedo unchanged), no canopy snow (a
+    # bare-branch bound). Two-leaf canopy on the multilayer land only. Off by
+    # default pending the A/B (user 2026-10-03).
+    land_canopy_snow_masking: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1561,6 +1567,21 @@ class ExperimentConfig(NamedTuple):
     # measured to deliver about a tenth of the solved flux.  With it off the mesh
     # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
+    # MPAS lane: the surface STRESS over the land fraction comes from the land
+    # model (its own roughness / canopy drag and stability, rho u*^2) instead of
+    # the atmosphere's bulk call, which on the non-tiled surface uses the bulk
+    # scheme's OCEAN roughness over land too.  Heat and moisture fluxes are the
+    # land's already.  Tri-state (user decision 2026-10-03, "a major default"):
+    # None = AUTO, on exactly where it applies (see
+    # ``resolve_mpas_land_stress_from_land``); True = required (refused where it
+    # cannot apply); False = explicit off, the old bulk stress (comparison runs).
+    mpas_land_stress_from_land: bool | None = None
+    # MPAS lane, land-flux handoff on (#1320 stage 1): the NON-LAND fraction's
+    # bulk surface fluxes (heat, water, stress) are evaluated on the ocean/ice
+    # surface -- the SST/SIC blend, without the land skin and without the land
+    # lapse correction -- instead of on the land-blended surface temperature
+    # and humidity.  The land fraction keeps the land model's own fluxes.
+    mpas_ocean_flux_on_ocean_surface: bool = False
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -1789,7 +1810,7 @@ class ExperimentConfig(NamedTuple):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
     #       constant-C_H/C_E no-stability bulk fluxes while the atmosphere's
     #       turbulence scheme debits stability-dependent surface-layer fluxes
-    #       (compute_surface_fluxes, config.surface) from the SAME interface —
+    #       (surface_fluxes_at_lowest_level, config.surface) from the SAME interface —
     #       two different flux laws, measured same-state mismatch
     #       +75..+152 W/m^2 (a spurious skin heat source; energy is NOT
     #       conserved at the interface).  Kept as the default only for
@@ -2272,6 +2293,17 @@ class ExperimentConfig(NamedTuple):
                 "require use_multilayer_land with land_surface_scheme="
                 "'two_leaf': only the two-leaf canopy reads them — the knob "
                 "would be silently inert.")
+        if self.land_canopy_snow_masking and not (
+                self.use_multilayer_land and self.snow_albedo_feedback
+                and self.land_surface_scheme == "two_leaf"):
+            errors.append(
+                "land_canopy_snow_masking requires use_multilayer_land, "
+                "snow_albedo_feedback and land_surface_scheme='two_leaf': it is "
+                "implemented only there and would be silently inert elsewhere.")
+        if self.land_canopy_snow_masking and self.land_snow_scheme == "layered":
+            errors.append(
+                "land_canopy_snow_masking is not supported with land_snow_scheme="
+                "'layered' yet (the masking would not read the pack's snow).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -4188,6 +4220,34 @@ class ExperimentConfig(NamedTuple):
                     "See docs/user-guide/climateeval_evaluation.md."
                 )
 
+        if self.mpas_ocean_flux_on_ocean_surface:
+            _ok, _why = mpas_land_flux_handoff_eligibility(self)
+            if _ok and self.radiation == "none":
+                _ok, _why = False, ("radiation='none' builds no SST anchor "
+                                    "(the ocean surface it needs)")
+            if not _ok:
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True separates the "
+                    "non-land fraction's surface fluxes from the land's, but "
+                    f"{_why}; it would be silently inert.")
+            elif not resolve_mpas_land_stress_from_land(self):
+                # The bulk stress covers the whole cell unless the land's own
+                # stress replaces it over land; evaluated on the OCEAN surface
+                # it would then misstate the land share's stability.
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True needs the land "
+                    "model's stress over the land fraction "
+                    "(mpas_land_stress_from_land unset or true, eligible); "
+                    "otherwise the ocean-surface stress covers the land too.")
+
+        if self.mpas_land_stress_from_land is True:
+            _ok, _why = mpas_land_stress_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "mpas_land_stress_from_land=True hands the land model's "
+                    f"surface stress to the boundary layer, but {_why}; it "
+                    "would be silently inert. Leave it unset (auto) or false.")
+
         # Seasonal insolation alignment (radiation-only; see the field doc).
         if self.insolation_start_doy is not None:
             _doy = self.insolation_start_doy
@@ -4850,3 +4910,59 @@ def load_experiment_config(path: Path | str, *,
     """
     with open(path) as f:
         return experiment_config_from_dict(json.load(f), strict=strict)
+
+
+# Land schemes whose exported stress is the land's own roughness-controlled drag
+# on the MPAS lane (both run the coupled land with a fixed-roughness MOST law;
+# clm_ml is refused on this lane by run_amip).
+_LAND_STRESS_SCHEMES = ("two_leaf", "simple_seb")
+
+
+def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
+    """Does ``cfg`` hand the land model's own surface fluxes to the MPAS
+    boundary layer?  ``(eligible, reason_if_not)``; every predicate is static:
+    the MPAS lane, the interactive multilayer land, its flux handoff
+    (``mpas_land_beta_soil`` publishes the land's fluxes) and a turbulence
+    kernel that accepts an injected surface flux.
+    """
+    # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
+    # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
+    if (cfg.dycore.discretization == "fv3_duo"
+            or cfg.grid.grid_type != "mpas"):
+        return False, "this is not the MPAS lane"
+    if not cfg.use_multilayer_land:
+        return False, "use_multilayer_land is off (no land model)"
+    if not cfg.mpas_land_beta_soil:
+        return False, ("mpas_land_beta_soil is off (the land's fluxes are not "
+                       "handed to the atmosphere)")
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        schemes_accepting_surface_flux,
+    )
+    if cfg.turbulence not in schemes_accepting_surface_flux():
+        return False, (f"turbulence={cfg.turbulence!r} takes no injected "
+                       "surface flux")
+    return True, ""
+
+
+def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
+    """Can the land model's surface stress reach the boundary layer in ``cfg``?
+
+    Returns ``(eligible, reason_if_not)``: the land-flux handoff
+    (:func:`mpas_land_flux_handoff_eligibility`) plus a land scheme whose
+    stress is roughness-controlled.
+    """
+    _ok, _why = mpas_land_flux_handoff_eligibility(cfg)
+    if not _ok:
+        return _ok, _why
+    if cfg.land_surface_scheme not in _LAND_STRESS_SCHEMES:
+        return False, (f"land_surface_scheme={cfg.land_surface_scheme!r} is not "
+                       f"one of {_LAND_STRESS_SCHEMES} on this lane")
+    return True, ""
+
+
+def resolve_mpas_land_stress_from_land(cfg) -> bool:
+    """The resolved value of the tri-state ``mpas_land_stress_from_land``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.mpas_land_stress_from_land is None:
+        return mpas_land_stress_eligibility(cfg)[0]
+    return bool(cfg.mpas_land_stress_from_land)

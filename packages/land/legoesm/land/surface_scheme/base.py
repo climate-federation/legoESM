@@ -95,8 +95,8 @@ class SurfaceFluxOutput(NamedTuple):
     # means the accompanying fluxes come from a stopped iterate (iteration cap
     # hit, or a singular Jacobian whose step had to be discarded) and are NOT a
     # solution of the surface energy balance.  ``None`` for schemes that do not
-    # iterate.  Consumers must treat a False column as "no solution this step"
-    # rather than spending its fluxes — see ``multilayer_land`` containment.
+    # iterate.  Consumers must not spend a False column's fluxes as they are:
+    # ``multilayer_land`` closes their energy and accepts or reverts the column.
     f_veg: jax.Array | None = None         # vegetation cover fraction [0-1]
     fSun: jax.Array | None = None          # sunlit canopy fraction [0-1]
     # Ts_solve: converged soil skin T from the canopy Picard loop (for
@@ -183,6 +183,16 @@ class SurfaceFluxOutput(NamedTuple):
     # ignore.
     held: jax.Array | None = None
     n_held: jax.Array | None = None
+    # Unsolved-but-finite columns ACCEPTED with energy-closed fallback fluxes
+    # (``fallback`` mask, ``n_fallback`` count), and unsolved finite columns the
+    # fallback guards rejected and reverted instead (``fallback_rejected`` mask,
+    # ``n_fallback_rejected`` count; already included in ``held``/``n_held``).
+    # Filled in by the land step.
+    fallback: jax.Array | None = None
+    n_fallback: jax.Array | None = None
+    fallback_rejected: jax.Array | None = None
+    n_fallback_rejected: jax.Array | None = None
+
     # Layered snowpack only (``snow_scheme == "layered"``): excess of the pack-top
     # temperature over T_freeze after the implicit solve and BEFORE the enthalpy
     # re-equilibration [K], (ncol,).  The solve carries sensible heat only, so this
@@ -199,8 +209,18 @@ class SurfaceFluxOutput(NamedTuple):
     # convention as rain infiltration), so the drainage enthalpy leaves the column.
     snow_advected_heat: jax.Array | None = None
     snow_ground_heat_applied: jax.Array | None = None
+    # The scheme's solved surface stress MAGNITUDE rho*u*^2 [Pa] (appended
+    # last, same positional reason).  ``tau_x``/``tau_y`` lay it along a
+    # wind-speed-floored direction, so their length is smaller in light wind;
+    # a consumer handing the land's stress to the atmosphere reads this.
+    # ``None`` for schemes that solve no friction velocity.
+    tau_mag: jax.Array | None = None
+    # Latent heat [J/kg] the canopy scheme charged its GROUND latent flux
+    # ``LE_soil`` at, so ground vapour mass = LE_soil / L_soil exactly (appended
+    # last, same positional reason).  Over snow it carries the sublimation share
+    # (#1875).  ``None`` for SimpleSEB.
+    L_soil: jax.Array | None = None
     # Columns whose soil-water (Richards) solve kept an unconverged last
     # iterate this step (any water left over is in RichardsOutput.water_created).
-    # Filled in by the land step.
+    # Filled in by the land step (appended last, same positional reason).
     soil_unconverged: jax.Array | None = None
-

@@ -1174,6 +1174,35 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
                    "flipped": (False, True, True)}
 
 
+def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
+    """mpas_land_stress_from_land on the production pairing: the TWO-LEAF
+    canopy's solved stress handed to CLUBB on the mesh lane.  The run must
+    complete finite and its winds must differ from the same run with the bulk
+    stress (the canopy's tau reaches the boundary layer).  Unset (AUTO) on
+    this eligible pairing must be bit-identical to explicit on."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        days=2401.0 / 86400.0,               # 4 steps
+        mpas_land_beta_soil=True, turbulence="clubb",
+        land_surface_scheme="two_leaf", snow_albedo_feedback=True,
+        mpas_land_params_refresh=False)   # the fixture has no LAI climatology
+    runs = {}
+    for name, on in (("off", False), ("on", True), ("auto", None)):
+        cfg = base._replace(mpas_land_stress_from_land=on)
+        cfg.validate_strict()
+        d = ModelDriver(cfg, output_dir=tmp_path / name)
+        d.setup()
+        assert d.run() == "COMPLETED"
+        runs[name] = np.asarray(d.state.u.data)
+    assert np.isfinite(runs["on"]).all()
+    assert np.max(np.abs(runs["on"] - runs["off"])) > 0.0, (
+        "two-leaf land stress did not reach the CLUBB winds")
+    np.testing.assert_array_equal(runs["auto"], runs["on"])
+
+
 def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
     """The calibration replaces surface_scheme with a fresh two-leaf config, so
     deck widths set before it would be discarded; they must reach the solve."""

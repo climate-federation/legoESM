@@ -275,6 +275,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # above covers both canopy configs) and the applier itself.
         ("packages/land/legoesm/land/canopy/clm_ml_interface.py",
          "_apply_turbulence_scheme"),
+        # GenBE horizontal_scheme ("explicit" | "implicit_matern", #1819).
+        ("packages/ml/legoesm/da/gen_be.py", "__init__"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
