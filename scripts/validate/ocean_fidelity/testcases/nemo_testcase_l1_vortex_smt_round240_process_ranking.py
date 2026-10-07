@@ -9,6 +9,7 @@ an ablation response source-exact ownership.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -121,6 +122,16 @@ def rank_rows(rows: dict[str, dict]) -> list[dict]:
     baseline = float(rows["baseline"]["100"]["T_rms"])
     ranked = []
     for name in ARM_NAMES[1:]:
+        if rows[name].get("status") == "UNBOUNDED":
+            ranked.append({
+                "arm": name,
+                "day100_T_rms": None,
+                "removed_T_rms": None,
+                "fraction_removed": None,
+                "finite": False,
+                "disposition": "UNBOUNDED",
+            })
+            continue
         value = float(rows[name]["100"]["T_rms"])
         ranked.append({
             "arm": name,
@@ -128,8 +139,14 @@ def rank_rows(rows: dict[str, dict]) -> list[dict]:
             "removed_T_rms": baseline - value,
             "fraction_removed": (baseline - value) / baseline,
             "finite": bool(np.isfinite(value)),
+            "disposition": "FINITE" if np.isfinite(value) else "UNBOUNDED",
         })
-    return sorted(ranked, key=lambda row: row["removed_T_rms"], reverse=True)
+    return sorted(
+        ranked,
+        key=lambda row: (-np.inf if row["removed_T_rms"] is None
+                         else row["removed_T_rms"]),
+        reverse=True,
+    )
 
 
 def _plant(reference: Path, kind: str) -> dict:
@@ -148,7 +165,21 @@ def _plant(reference: Path, kind: str) -> dict:
     raise GateError(f"{kind} plant did not fire")
 
 
-def run(root: Path, *, allow_dirty: bool = False) -> dict:
+def _complete_arm_outputs(arm_dir: Path) -> bool:
+    return all((arm_dir / f"day{day:03d}.npz").is_file() for day in TABLE_DAYS)
+
+
+def _arm_output_digest(arm_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for day in TABLE_DAYS:
+        path = arm_dir / f"day{day:03d}.npz"
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def run(root: Path, *, allow_dirty: bool = False,
+        reuse_completed_sha: str | None = None) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
@@ -168,19 +199,42 @@ def run(root: Path, *, allow_dirty: bool = False) -> dict:
     base_card = build_nemo_testcase_card(CASE)
     masks = expected_masks(base_card)
     nlev = int(base_card.recipe.z_coord.n_levels)
-    rows, diffs = {}, {}
+    rows, diffs, measurements = {}, {}, {}
     for arm in ARM_NAMES:
         print(f"ARM {arm}", flush=True)
         card, hooks, diff = build_arm(base_card, arm)
         diffs[arm] = diff
         arm_dir = root / f"lego_{arm}"
-        run_lego_card(card, arm_dir, model_hooks=hooks,
-                      snapshot_days=TABLE_DAYS)
+        reused = reuse_completed_sha is not None and _complete_arm_outputs(arm_dir)
+        try:
+            if reused:
+                print(f"  REUSE completed snapshots from {reuse_completed_sha}",
+                      flush=True)
+            else:
+                run_lego_card(card, arm_dir, model_hooks=hooks,
+                              snapshot_days=TABLE_DAYS)
+        except (FloatingPointError, ValueError) as error:
+            rows[arm] = {
+                "status": "UNBOUNDED",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+            measurements[arm] = {
+                "reused": False,
+                "measurement_git_sha": sha,
+            }
+            print(f"  UNBOUNDED: {type(error).__name__}: {error}", flush=True)
+            continue
         arm_rows = {}
         for day in TABLE_DAYS:
             arm_rows[str(day)] = score_day(
                 load_lego(arm_dir, day), load_nemo(CARDS[TAG][1], day, nlev), masks)
         rows[arm] = arm_rows
+        measurements[arm] = {
+            "reused": reused,
+            "measurement_git_sha": reuse_completed_sha if reused else sha,
+            "snapshot_digest": _arm_output_digest(arm_dir),
+        }
         print(f"  day100 T_rms={arm_rows['100']['T_rms']:.16e}", flush=True)
 
     baseline = rows["baseline"]["100"]["T_rms"]
@@ -190,7 +244,10 @@ def run(root: Path, *, allow_dirty: bool = False) -> dict:
     hpg = next(row for row in ranking if row["arm"] == "hpg_source_order")
     require(abs(hpg["removed_T_rms"]) < 2.0e-10,
             f"HPG arm moved {hpg['removed_T_rms']} K beyond the floor")
-    require(all(row["finite"] for row in ranking), "one or more arms is non-finite")
+    finite_ranked = [row for row in ranking if row["finite"]]
+    winner = (finite_ranked[0]["arm"]
+              if finite_ranked and finite_ranked[0]["removed_T_rms"] > 0
+              else None)
     return {
         "format": "nemo-testcase-l1-vortex-smt-round240-process-ranking-v1",
         "case": CASE,
@@ -201,12 +258,15 @@ def run(root: Path, *, allow_dirty: bool = False) -> dict:
         "table_days": list(TABLE_DAYS),
         "certified_ladder_sanity": sanity,
         "config_diffs": diffs,
+        "measurements": measurements,
         "arms": rows,
         "ranking": ranking,
-        "winner": ranking[0]["arm"] if ranking[0]["removed_T_rms"] > 0 else None,
+        "winner": winner,
+        "all_arms_finite": all(row["finite"] for row in ranking),
         "prediction_tracer_ldf_wins_and_removes_half": bool(
-            ranking[0]["arm"] == "tracer_ldf_off"
-            and ranking[0]["fraction_removed"] >= 0.5),
+            finite_ranked
+            and finite_ranked[0]["arm"] == "tracer_ldf_off"
+            and finite_ranked[0]["fraction_removed"] >= 0.5),
     }
 
 
@@ -215,6 +275,8 @@ def main(argv=None) -> int:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--reuse-completed-sha",
+                        help="explicit clean commit that produced existing complete arms")
     parser.add_argument("--plant", choices=("registry", "effect"))
     parser.add_argument("--reference", type=Path)
     args = parser.parse_args(argv)
@@ -223,7 +285,8 @@ def main(argv=None) -> int:
             require(args.reference is not None, "--plant requires --reference")
             report = _plant(args.reference, args.plant)
         else:
-            report = run(args.root, allow_dirty=args.allow_dirty)
+            report = run(args.root, allow_dirty=args.allow_dirty,
+                         reuse_completed_sha=args.reuse_completed_sha)
     except GateError as error:
         if args.plant:
             print(f"STATUS PLANT-FIRED: {error}", file=sys.stderr)

@@ -104,3 +104,15 @@ the same preregistered vertical-mixing-plus-EVD family without constructing an
 invalid replacement configuration. R28-P1 through R28-P6, including the
 frozen tracer-LDF prediction and all falsifiers, are unchanged. A regression
 test proves that the rejected zero-replacement spelling still fails closed.
+
+The corrected full execution then reached the last arm,
+`barotropic_replacement_off`, where the production geometry guard reported a
+non-positive `e3w_int`. This is the exact `UNBOUNDED` outcome already specified
+by R28-P4, so it refutes R28-P4 but does not change the protocol. The first
+emitter stopped instead of serialising that outcome. Before composing the
+final report, its fail-closed path was corrected to retain the error and rank
+the arm last. The six complete arms are reused only with the explicit clean
+measurement commit `19a38791ee878118c4952ce4d0cb922fc58130c3`; their
+snapshot digests and measurement commit
+are written into the JSON, and the failed arm is rerun under the corrected
+emitter. No arm definition or frozen prediction changed in this correction.

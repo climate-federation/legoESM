@@ -32,6 +32,18 @@ def test_effect_plant_crosses_the_hpg_floor(tmp_path: Path):
         probe._plant(path, "effect")
 
 
+def test_unbounded_family_is_registered_and_sorted_last():
+    rows = _rows()
+    rows["barotropic_replacement_off"] = {
+        "status": "UNBOUNDED",
+        "error": "raw-mesh e3w_int must contain only finite values > 0",
+    }
+    ranked = probe.rank_rows(rows)
+    assert ranked[-1]["arm"] == "barotropic_replacement_off"
+    assert ranked[-1]["day100_T_rms"] is None
+    assert ranked[-1]["disposition"] == "UNBOUNDED"
+
+
 def test_all_arm_config_diffs_are_exactly_registered():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 
