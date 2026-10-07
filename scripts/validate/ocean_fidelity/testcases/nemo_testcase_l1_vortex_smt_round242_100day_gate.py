@@ -13,8 +13,8 @@ ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round242")
 ORACLE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round241/"
     "oracle_vortex_smt1/day100")
-FLAT_REFERENCE = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210/"
+SMT0_REFERENCE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round6/"
     "round210_scores.json")
 CHECKPOINTS = (1, 2, 5, 10, 20, 30, 60, 100)
 FIELDS = ("T", "u", "v", "ssh")
@@ -64,7 +64,7 @@ def _validate_visuals(root: Path) -> dict:
     }
 
 
-def validate(score: dict, flat: dict, *, root: Path = ROOT,
+def validate(score: dict, smt0: dict, *, root: Path = ROOT,
              oracle: Path = ORACLE) -> dict:
     require(score.get("format") == "nemo-testcase-l1-vortex-round210-100day-v1",
             "unexpected score format")
@@ -106,18 +106,18 @@ def validate(score: dict, flat: dict, *, root: Path = ROOT,
     require(rows["100"]["ssh_max"] > 0.0,
             "fixed day-100 SSH-difference scale is zero")
 
-    require("vec" in flat.get("cards", {}),
-            "flat-vector reference is missing")
-    flat_rows = flat["cards"]["vec"]["rows"]
+    require("smtvec" in smt0.get("cards", {}),
+            "SMT-0 vector reference is missing")
+    smt0_rows = smt0["cards"]["smtvec"]["rows"]
     table = {}
     for day in CHECKPOINTS:
         smt = rows[str(day)]
-        vec = flat_rows[str(day)]
+        baseline = smt0_rows[str(day)]
         table[str(day)] = {
             "smt1": smt,
-            "flat_vector": vec,
-            "ratio_smt1_to_flat_vector": {
-                name: float(smt[name]) / float(vec[name])
+            "smt0_vector": baseline,
+            "ratio_smt1_to_smt0_vector": {
+                name: float(smt[name]) / float(baseline[name])
                 for name in smt
             },
         }
@@ -138,7 +138,7 @@ def validate(score: dict, flat: dict, *, root: Path = ROOT,
     }
 
 
-def plant(score: dict, flat: dict, kind: str, *, root: Path = ROOT,
+def plant(score: dict, smt0: dict, kind: str, *, root: Path = ROOT,
           oracle: Path = ORACLE) -> None:
     if kind == "checkpoint":
         del score["cards"]["smt1"]["rows"]["60"]
@@ -146,7 +146,7 @@ def plant(score: dict, flat: dict, kind: str, *, root: Path = ROOT,
         score["cards"]["smt1"]["rows"]["100"]["T_rms"] = DAY100_T_BOUND_K
     else:  # pragma: no cover - argparse owns this branch
         raise GateError(f"unknown plant {kind}")
-    validate(score, flat, root=root, oracle=oracle)
+    validate(score, smt0, root=root, oracle=oracle)
     raise GateError(f"{kind} plant did not fire")
 
 
@@ -154,7 +154,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--oracle", type=Path, default=ORACLE)
-    parser.add_argument("--flat-reference", type=Path, default=FLAT_REFERENCE)
+    parser.add_argument("--smt0-reference", type=Path, default=SMT0_REFERENCE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=("checkpoint", "bound"))
     args = parser.parse_args(argv)
@@ -166,10 +166,10 @@ def main(argv=None) -> int:
         except RuntimeError as error:
             raise GateError(str(error)) from error
         score = _load(args.root / "round210_scores.json")
-        flat = _load(args.flat_reference)
+        smt0 = _load(args.smt0_reference)
         if args.plant:
-            plant(score, flat, args.plant, root=args.root, oracle=args.oracle)
-        report = validate(score, flat, root=args.root, oracle=args.oracle)
+            plant(score, smt0, args.plant, root=args.root, oracle=args.oracle)
+        report = validate(score, smt0, root=args.root, oracle=args.oracle)
         report["gate_worktree"] = stamp
     except GateError as error:
         prefix = "STATUS PLANT-FIRED" if args.plant else "REFUSE"
