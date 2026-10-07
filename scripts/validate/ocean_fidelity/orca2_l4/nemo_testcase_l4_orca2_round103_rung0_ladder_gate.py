@@ -100,6 +100,7 @@ def run(
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
+    stage_observer=None,
 ) -> dict[str, object]:
     import jax
 
@@ -181,6 +182,12 @@ def run(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
         )) for model in stage_models)
         print(f"PROGRESS kt={kt} exposed stages 1-2", file=sys.stderr, flush=True)
+        if stage_observer is not None:
+            # Host-only fidelity observer.  The two states above are already
+            # device_get'ed completed outputs from separately compiled models;
+            # publishing them here cannot enter or perturb the final model's
+            # JAX graph.  The default remains None for every existing caller.
+            stage_observer(kt, state, stage_states)
         state_after = jax.device_get(final_model.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         print(f"PROGRESS kt={kt} completed stage 3", file=sys.stderr, flush=True)
