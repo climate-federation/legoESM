@@ -281,7 +281,7 @@ def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=True):
     config = CGridLatLonPrimitiveEquationConfig(
         A_h=A_h,
         fix_mass=True,
-        # #1029 omega-side SB81 conversion (hybrid lane only; default OFF).
+        # #1029 omega-side SB81 conversion (hybrid lane only; default ON).
         sb81_omega_conversion=sb81_omega_conversion)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
 

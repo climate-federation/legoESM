@@ -2433,7 +2433,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
-        # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
+        # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,

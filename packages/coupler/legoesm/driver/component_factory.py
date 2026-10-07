@@ -1361,8 +1361,8 @@ def create_atmosphere_dycore(
             sponge_width_m=dc.sponge_width_m,
             sponge_shape=dc.sponge_shape,
             sponge_scale_height_m=dc.sponge_scale_height_m,
-            # #1029 ω-side SB81 conversion (opt-in, default OFF —
-            # bit-identical legacy arithmetic form when False).
+            # #1029 ω-side SB81 conversion (default ON; False = the
+            # bit-identical legacy arithmetic form).
             sb81_omega_conversion=dc.sb81_omega_conversion,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
