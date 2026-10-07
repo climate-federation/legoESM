@@ -44,7 +44,7 @@ _spec.loader.exec_module(runner)
 
 
 def build(h0: float, seed: int, dt_scale: float = 1.0, nlev: int = 40,
-          a_h_override: float | None = None):
+          a_h_override: float | None = None, nu4: float = 0.0):
     grid = create_latlon_grid(72, 144)
     sigma = runner._create_vertical(nlev, "hybrid")
     dx_pole = float(grid.radius) * grid.dlon * math.cos(math.pi / 2 - grid.dlat / 2)
@@ -58,14 +58,14 @@ def build(h0: float, seed: int, dt_scale: float = 1.0, nlev: int = 40,
         A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
         use_polar_filter=runner._latlon_polar_filter_on("held_suarez_topo"),
         sponge_coeff=sponge, sponge_width_m=10000.0,
-        sponge_scale_height_m=7500.0, sponge_shape="sin2")
+        sponge_scale_height_m=7500.0, sponge_shape="sin2", nu_del4=nu4)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
     st = hydrostatic_to_cgrid(
         held_suarez_topo_init_latlon(grid, sigma, h_0=h0, seed=seed), grid)
     return grid, sigma, model, st, dt, ah
 
 
-def make_diag(grid, sigma):
+def make_diag(grid, sigma, model=None):
     lat = np.degrees(np.asarray(grid.lat))
     lon = np.degrees(np.asarray(grid.lon))
     kappa = constants.R_d / constants.c_pd
@@ -80,7 +80,20 @@ def make_diag(grid, sigma):
         dp = ph[..., 1:] - ph[..., :-1]
         th = s.T * (constants.p_ref / p) ** kappa
         dth = th[..., :-1] - th[..., 1:]          # >0 stable (k=0 is top)
-        return dict(umax=jnp.max(jnp.abs(s.u)), spd=jnp.max(spd),
+        leak = jnp.zeros(())
+        if model is not None and model.config.nu_del4 > 0.0:
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+                cgrid_latlon_hydrostatic_tendencies)
+            off = model.config._replace(nu_del4=0.0)
+            dT_on = cgrid_latlon_hydrostatic_tendencies(
+                s, grid, sigma, model.config, dt=model.dt)[2]
+            dT_off = cgrid_latlon_hydrostatic_tendencies(s, grid, sigma, off)[2]
+            col = jnp.sum(constants.c_pd * (dT_on - dT_off) * dp, axis=-1) / constants.g
+            leak = jnp.sum(col * grid.area) / jnp.sum(grid.area)
+        ul = s.u[:, :-1, 30:]
+        u2dx = jnp.max(jnp.abs(ul - 0.5 * (jnp.roll(ul, 1, 1) + jnp.roll(ul, -1, 1))))
+        return dict(umax=jnp.max(jnp.abs(s.u)), spd=jnp.max(spd), heat_leak_Wm2=leak,
+                    u2dx_low=u2dx,
                     i_spd=jnp.argmax(spd), dth_min=jnp.min(dth),
                     i_dth=jnp.argmin(dth), n_unst=jnp.sum(dth < 0),
                     n_unst_low=jnp.sum(dth[..., 20:] < 0),
@@ -113,8 +126,13 @@ def main():
     ap.add_argument("--save-at", type=int, nargs="*", default=[])
     ap.add_argument("--zeta-frac", type=float, default=None)
     ap.add_argument("--a-h", type=float, default=None)
+    ap.add_argument("--nu4", type=float, default=0.0)
+    ap.add_argument("--nu4-matrix", action="store_true",
+                    help="use the matrix runner's lat-lon del-4 coefficient")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    if a.nu4_matrix:
+        a.nu4 = runner._biharmonic_visc_latlon(72)
     if a.zeta_frac is not None:
         import functools
         import legoesm.atmosphere.idealized.held_suarez_topo as hst
@@ -122,9 +140,10 @@ def main():
             hst.dcmip_2_0_0_mountain, zeta_frac=a.zeta_frac)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    grid, sigma, model, st, dt, ah = build(a.h0, a.seed, a.dt_scale, a_h_override=a.a_h)
-    host = make_diag(grid, sigma)
-    meta = dict(h0=a.h0, seed=a.seed, dt=dt, A_h=ah,
+    grid, sigma, model, st, dt, ah = build(a.h0, a.seed, a.dt_scale, a_h_override=a.a_h,
+                                      nu4=a.nu4)
+    host = make_diag(grid, sigma, model)
+    meta = dict(h0=a.h0, seed=a.seed, dt=dt, A_h=ah, nu_del4=a.nu4,
                 sponge=float(model.config.sponge_coeff))
     print(json.dumps(meta), flush=True)
     log = open(out / "diag.jsonl", "w")
@@ -144,6 +163,7 @@ def main():
                 print(f"{step} d={d['day']:.2f} umax={d['umax']:.1f} "
                       f"spd@{d['spd_at']} nunst={d['n_unst']:.0f} "
                       f"dthmin={d['dth_min']:.2f}@{d['dth_at']} "
+                      f"leak={d['heat_leak_Wm2']:.3e}W/m2 u2dx={d['u2dx_low']:.2f} "
                       f"dpmin={d['dp_min']:.0f} ps=[{d['ps_min']:.0f},"
                       f"{d['ps_max']:.0f}] T=[{d['T_min']:.1f},{d['T_max']:.1f}] "
                       f"{time.time()-t0:.0f}s", flush=True)
