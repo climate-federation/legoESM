@@ -165,10 +165,11 @@ violation named here fires.
   trajectory gate, citation gate, GM/Redi unit coverage, and SMT card).
 - `tests/ocean/fidelity -n 12`: the one required invocation collected 2,684
   tests and was interrupted after five minutes with no progress at 99%:
-  2,654 passed, 7 skipped, 5 failed, and 18 were unfinished. Isolated reruns
-  reproduce four pre-existing reds: SI3 `MY_SRC` scalar-math provenance, the
-  moved certified-year-harness spread record, the allow-dirty scope ratchet,
-  and the worktree-stamp ratchet. The fifth refusal is the year-owner
+  2,654 passed, 7 skipped, 5 failed, and 18 were unfinished. An isolated
+  four-ID rerun on the frozen base `86b84f6f3` reproduces all four
+  pre-existing reds: SI3 `MY_SRC` scalar-math provenance, the moved
+  certified-year-harness spread record, the allow-dirty scope ratchet, and
+  the worktree-stamp ratchet. The fifth refusal is the year-owner
   acquisition's clean-tree guard seeing this uncommitted receipt; after the
   receipt commit its isolated rerun passes 1/1. No focused round-163 test
   fails.
