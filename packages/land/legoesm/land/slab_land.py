@@ -48,6 +48,7 @@ from legoesm.land.surface_scheme import (
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
+    sunlit_leaf_apar,
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
@@ -67,18 +68,23 @@ def _get(lp, name: str, fallback):
     return getattr(lp, name, fallback)
 
 
-def _advance_slab_pmodel(state, forcing, config, dt):
+def _advance_slab_pmodel(state, forcing, config, dt, land_params=None):
     """Advance the optional P-model acclimation state (both slab arms).
 
-    Same drivers as the multilayer lane: top-of-canopy PPFD from the shared
-    SW split, VPD from the shared met helper; elementwise, so it works on the
-    slab's native (ncol,) or (6, n, n) shapes.  ``None`` stays ``None``.
+    Same drivers as the multilayer lane: under the two-leaf scheme the PAR a
+    sunlit leaf absorbs (``sunlit_leaf_apar``), otherwise the incident
+    top-of-canopy PPFD from the shared SW split; VPD from the shared met
+    helper.  Elementwise, so it works on the slab's native (ncol,) or
+    (6, n, n) shapes.  ``None`` stays ``None``.
     """
     if state.pmodel_acclim is None:
         return None
-    par_dir, par_diff, _, _, _ = split_sw_components(
-        forcing.sw_down, forcing.cos_zenith)
-    ppfd_toc = (par_dir + par_diff) * PAR_W_TO_UMOL
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        ppfd_toc = sunlit_leaf_apar(forcing, land_params)
+    else:
+        par_dir, par_diff, _, _, _ = split_sw_components(
+            forcing.sw_down, forcing.cos_zenith)
+        ppfd_toc = (par_dir + par_diff) * PAR_W_TO_UMOL
     _, _, vpd_pa, _, _, _, _ = canopy_met_variables(
         forcing.p_surface, forcing.T_lowest, forcing.q_lowest)
     return advance_pmodel_acclim(
@@ -617,7 +623,8 @@ def _step_land_canopy(
         snow_age=state.snow_age.replace(data=snow_age_new),
         runoff=runoff,
         TgC=TgC_new,
-        pmodel_acclim=_advance_slab_pmodel(state, forcing, config, dt),
+        pmodel_acclim=_advance_slab_pmodel(
+            state, forcing, config, dt, land_params=land_params),
     )
 
     # Post-step coupler-facing surface state (re-uses canopy-derived

@@ -138,6 +138,8 @@ def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
     """
     return -jnp.expm1(-_KB_BEAM * CI * LAI)
 
+_SUNLIT_LAI_FLOOR = 1.0e-6   # [m2/m2] guards APAR_Sun / (fSun*LAI) at night / bare ground
+
 # --- Night ramp for the sunlit fraction (numerics; see canopy_shortwave_rt) ---
 _NIGHT_RAMP_CENTER_WM2    = 30.0   # tanh centre in direct-beam SW [W m-2]
 _NIGHT_RAMP_HALFWIDTH_WM2 = 20.0   # tanh half-width [W m-2]
@@ -159,6 +161,7 @@ class CanopySWOutput(NamedTuple):
     Vcmax25_C3Sh: jax.Array   # Canopy-integrated C3 Vcmax25, shaded
     Vcmax25_C4Sun: jax.Array  # Canopy-integrated C4 Vcmax25, sunlit
     Vcmax25_C4Sh: jax.Array   # Canopy-integrated C4 Vcmax25, shaded
+    APAR_SunLeaf: jax.Array   # Absorbed PAR per unit SUNLIT leaf area [μmol m-2 leaf s-1]
 
 
 class CanopyLWOutput(NamedTuple):
@@ -443,6 +446,14 @@ def canopy_shortwave_rt(
     # step, so a narrow transition would still produce a kink at the
     # first night step.  By the time sw_dir > 60 the day_weight is ~1
     # and the sunlit fraction is fully active.
+    # ---- Absorbed PAR per unit sunlit leaf area ----
+    # APAR_Sun is canopy-integrated over the sunlit leaves (per ground area);
+    # dividing by the sunlit leaf area fSun*LAI gives the light an average
+    # sunlit leaf absorbs.  Uses the GEOMETRIC fSun (before the dusk ramp
+    # below, which APAR_Sun does not carry) so the ratio stays a leaf-level
+    # flux under diffuse-only and low-sun light.
+    APAR_SunLeaf = APAR_Sun / jnp.maximum(fSun * LAI, _SUNLIT_LAI_FLOOR)
+
     sw_dir_total = PAR_dir + NIR_dir
     day_weight = 0.5 * (1.0 + jnp.tanh(
         (sw_dir_total - _NIGHT_RAMP_CENTER_WM2) / _NIGHT_RAMP_HALFWIDTH_WM2))
@@ -459,6 +470,7 @@ def canopy_shortwave_rt(
         Vcmax25_C3Sh=Vcmax25_C3Sh,
         Vcmax25_C4Sun=Vcmax25_C4Sun,
         Vcmax25_C4Sh=Vcmax25_C4Sh,
+        APAR_SunLeaf=APAR_SunLeaf,
     )
 
 

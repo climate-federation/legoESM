@@ -147,3 +147,54 @@ def test_g1_nonmedlyn_requires_phydro_at_the_step():
     _, resp, _ = step_multilayer_land(st2, _forcing(2), cfg_ok, U_min=1.0,
                                       dt=1800.0)
     assert np.all(np.isfinite(np.asarray(resp.lhflx)))
+
+
+def _incident_ppfd(forcing):
+    from legoesm.land.canopy.radiative_transfer import (
+        PAR_W_TO_UMOL, split_sw_components)
+    par_dir, par_diff, _, _, _ = split_sw_components(
+        forcing.sw_down, forcing.cos_zenith)
+    return (par_dir + par_diff) * PAR_W_TO_UMOL
+
+
+def test_sunlit_leaf_apar_is_leaf_level_absorbed_light():
+    """APAR_Sun / (fSun * LAI): below the incident flux under high sun, zero at
+    night, finite and bounded under diffuse-only light (where the dusk ramp on
+    fSun would otherwise blow the ratio up), and only weakly dependent on LAI
+    (a per-leaf-area quantity, not a canopy total)."""
+    from legoesm.land.surface_scheme.two_leaf_canopy import sunlit_leaf_apar
+    f = _forcing(4)._replace(
+        sw_down=jnp.asarray([800.0, 0.0, 25.0, 800.0]),
+        cos_zenith=jnp.asarray([0.8, 0.0, 0.3, 0.8]))
+    lai = jnp.asarray([2.0, 2.0, 2.0, 4.0])
+    leaf = np.asarray(sunlit_leaf_apar(f, None, LAI_override=lai))
+    inc = np.asarray(_incident_ppfd(f))
+    assert np.all(np.isfinite(leaf))
+    assert 0.25 * inc[0] < leaf[0] < 0.9 * inc[0]      # clear midday
+    assert leaf[1] == 0.0                              # night
+    assert 0.0 < leaf[2] < 2.0 * inc[2]                # dim diffuse light
+    assert abs(leaf[3] / leaf[0] - 1.0) < 0.25         # LAI 2 -> 4
+
+
+def test_two_leaf_acclimation_light_is_sunlit_leaf_apar():
+    """The P-model acclimation mean under the two-leaf scheme advances with
+    the PAR a sunlit leaf absorbs — not the incident top-of-canopy PPFD."""
+    from legoesm.land.canopy.energy_balance import canopy_met_variables
+    from legoesm.land.p_model import advance_pmodel_acclim
+    from legoesm.land.surface_scheme.two_leaf_canopy import sunlit_leaf_apar
+    cfg = _cfg()
+    st = init_multilayer_land_state(2, cfg)
+    f = _forcing(2)
+    new, _, _ = step_multilayer_land(st, f, cfg, U_min=1.0, dt=1800.0)
+
+    def expected(ppfd):
+        vpd = canopy_met_variables(f.p_surface, f.T_lowest, f.q_lowest)[2]
+        return advance_pmodel_acclim(
+            st.pmodel_acclim, T_K=f.T_lowest, ppfd=ppfd, vpd_pa=vpd,
+            co2_ppm=f.co2_ppmv, ps_pa=f.p_surface, cfg=cfg.p_model,
+            dt=1800.0).iabs_mean
+
+    got = np.asarray(new.pmodel_acclim.iabs_mean)
+    np.testing.assert_allclose(
+        got, np.asarray(expected(sunlit_leaf_apar(f, None))), rtol=1e-5)
+    assert not np.allclose(got, np.asarray(expected(_incident_ppfd(f))), rtol=1e-3)

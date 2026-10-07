@@ -175,6 +175,36 @@ def advance_TgC_ema(
     return TgC_old + alpha * (T_air_C - TgC_old)
 
 
+def sunlit_leaf_apar(forcing, canopy_params=None, LAI_override=None):
+    """Absorbed PAR per unit sunlit leaf area [umol m-2 leaf s-1].
+
+    ``APAR_Sun / (fSun * LAI)`` from the scheme's own shortwave radiative
+    transfer, with the same LAI / clumping / albedo resolution as
+    :func:`compute_two_leaf_canopy_fluxes`.  This is the light the P model
+    sizes leaf-top capacities for (``land/p_model.py``): the light a sunlit
+    leaf actually absorbs, not the incident flux on a horizontal plane.
+    Element-wise in the forcing shape.
+    """
+    lp = canopy_params
+    like = jnp.zeros_like(forcing.sw_down)
+    if LAI_override is not None:
+        LAI = LAI_override
+    else:
+        _lp_lai = _get(lp, "LAI", None)
+        LAI = like + _DEFAULT_LAI if _lp_lai is None else _lp_lai
+    cos_zenith = forcing.cos_zenith
+    SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0 - 1e-7)))
+    PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
+        forcing.sw_down, cos_zenith)
+    sw_rt = canopy_shortwave_rt(
+        PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI,
+        _get(lp, "CI", like + _DEFAULT_CI),
+        _get(lp, "ALB_VIS", like + _DEFAULT_ALB_VIS),
+        _get(lp, "ALB_NIR", like + _DEFAULT_ALB_NIR),
+        like, like, like + _DEFAULT_KN)  # Vcmax25 / kn do not enter APAR
+    return sw_rt.APAR_SunLeaf
+
+
 def _get(lp, name: str, fallback):
     """Read from per-column params if available; else return fallback.
 

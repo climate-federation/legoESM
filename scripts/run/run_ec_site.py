@@ -1012,13 +1012,14 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         _pm_traj = None
         if canopy == "two_leaf" and (_pm_cap or _pm_g1):
             from legoesm.land.canopy.energy_balance import canopy_met_variables
-            from legoesm.land.canopy.radiative_transfer import (
-                PAR_W_TO_UMOL, split_sw_components)
             from legoesm.land.p_model import (
                 acclim_trajectory, init_pmodel_acclim)
+            from legoesm.land.surface_scheme.two_leaf_canopy import (
+                sunlit_leaf_apar)
             fz = d.forcing
-            _pd, _pf, _, _, _ = split_sw_components(fz.sw_down, fz.cos_zenith)
-            _ppfd = (_pd + _pf) * PAR_W_TO_UMOL
+            # Same acclimation light as the prognostic lane: the PAR a sunlit
+            # leaf absorbs, from the two-leaf radiative transfer.
+            _ppfd = sunlit_leaf_apar(fz, d.canopy_params)
             _, _, _vpd, _, _, _, _ = canopy_met_variables(
                 fz.p_surface, fz.T_lowest, fz.q_lowest)
             _init = init_pmodel_acclim(

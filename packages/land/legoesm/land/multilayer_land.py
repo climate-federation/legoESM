@@ -59,6 +59,7 @@ from legoesm.land.surface_scheme import (
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
+    sunlit_leaf_apar,
 )
 from legoesm.land.canopy.energy_balance import canopy_met_variables
 from legoesm.land.canopy.radiative_transfer import (
@@ -1169,11 +1170,17 @@ def _step_multilayer_land_impl(
 
     # --- Advance the P-model acclimation state (only when state carries it) ---
     if state.pmodel_acclim is not None:
-        # Drivers from the same forcing the canopy saw this step: top-of-canopy
-        # PPFD from the shared SW split, VPD [Pa] from the shared met helper.
-        _par_dir, _par_diff, _, _, _ = split_sw_components(
-            forcing.sw_down, forcing.cos_zenith)
-        _ppfd_toc = (_par_dir + _par_diff) * PAR_W_TO_UMOL
+        # Drivers from the same forcing the canopy saw this step.  Light: the
+        # two-leaf scheme sizes capacities for the PAR a sunlit leaf ABSORBS
+        # (its own radiative transfer, APAR_Sun / (fSun * LAI)); the schemes
+        # without that sunlit/shaded transfer (CLM-ML, simple SEB) still use
+        # the incident top-of-canopy PPFD from the shared SW split.
+        if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+            _ppfd_toc = sunlit_leaf_apar(forcing, lp, LAI_override=LAI_override)
+        else:
+            _par_dir, _par_diff, _, _, _ = split_sw_components(
+                forcing.sw_down, forcing.cos_zenith)
+            _ppfd_toc = (_par_dir + _par_diff) * PAR_W_TO_UMOL
         _, _, _vpd_pa, _, _, _, _ = canopy_met_variables(
             forcing.p_surface, forcing.T_lowest, forcing.q_lowest)
         pmodel_acclim_new = advance_pmodel_acclim(

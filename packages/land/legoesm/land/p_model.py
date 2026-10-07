@@ -33,12 +33,15 @@ DELIBERATE DEPARTURES from rpmodel, for internal consistency with the host
 kernel (each documented where it happens):
 
 1. **Leaf-level area basis.** rpmodel returns capacities per unit GROUND area
-   using ``Iabs = fAPAR * PPFD``; here ``Iabs`` is the daytime-mean incident
-   PPFD per unit LEAF area at canopy top and the output is the LEAF-TOP
-   Vcmax25 the existing kn nitrogen-profile integral
-   (``canopy/radiative_transfer.py``) expects.  Leaf absorptance is absorbed
-   into ``kphio`` (rpmodel's own simple-setup convention) and is NOT applied
-   to Iabs — counted exactly once.
+   using ``Iabs = fAPAR * PPFD``; here the output is the LEAF-TOP Vcmax25 the
+   existing kn nitrogen-profile integral (``canopy/radiative_transfer.py``)
+   expects, so ``Iabs`` is light per unit LEAF area.  Under the two-leaf
+   scheme the caller passes the PAR a sunlit leaf ABSORBS,
+   ``APAR_Sun / (fSun * LAI)`` from the scheme's own radiative transfer
+   (``two_leaf_canopy.sunlit_leaf_apar``) — the same absorbed light the host
+   kernel later runs the capacities with.  Lanes without that sunlit/shaded
+   transfer (CLM-ML, simple SEB) still pass the incident top-of-canopy PPFD,
+   which over-sizes the capacities by roughly the incident-to-absorbed ratio.
 2. **Kinetics from the shared repo constants.** Kc/Ko/Gamma* mole fractions
    from ``leaf_biophysics`` (Bernacchi 2001, umol/mol), converted to Pa with
    the acclimated-mean surface pressure — not rpmodel's Pa-basis literals
@@ -226,7 +229,7 @@ class PModelConfig(NamedTuple):
 
     # --- optimality (Stocker et al. 2020 GMD) ---
     beta_cost: float = 146.0     # [-] carboxylation:transpiration cost ratio
-    kphio: float = 0.081785      # [mol/mol] apparent quantum yield (absorptance folded in)
+    kphio: float = 0.081785      # [mol/mol] apparent quantum yield (rpmodel default)
     kphio_temp: bool = True      # Bernacchi 2003 phi0(T) quadratic on (compile-time)
     # --- C4 optimality (rpmodel c4; Cai & Prentice 2020) ---
     beta_cost_c4: float = 146.0 / 9.0  # [-] C4 cost ratio (rpmodel: beta/9)
