@@ -74,11 +74,20 @@ missing-operand refusal, JIT arithmetic and finite-gradient coverage. The
 restored rung-0 control passes and matches all 200 round-163 rows. The failed
 candidate log and restored artifacts are hashed in `SHA256SUMS`.
 
-The citation gate and its planted shift are run after this receipt is mapped.
-The required separate read-only Codex review is attempted after the receipt
-commit; its result is appended without changing the scientific verdict. The
-full fidelity battery is not run past a terminal candidate refusal and an
-empty final package diff; no downstream landing claim is made.
+The cumulative citation gate and this receipt's four-citation gate pass with
+zero unmapped spans; shifting the compiled `519-545` span by two lines makes
+the receipt gate fail. The separate `codex exec --sandbox read-only` attempt
+returned **independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
+
+Focused unit/fidelity coverage passes 46/46. The one required
+`tests/ocean/fidelity -n 12` invocation collected 2,684 tests and reached 99%
+before the registered quiescent xdist tail stall: 2,662 passed, 7 skipped, 4
+failed and 11 were unfinished. The four failures reproduce in isolation and
+are the registered pre-existing reds: SI3 `MY_SRC` scalar-math provenance,
+the moved certified-year-harness spread record, 13 unscoped allow-dirty
+drivers, and 13 unstamped report emitters. No round-164 or changed production
+path remains in the final tree, and no downstream landing claim is made.
 
 ASKED choices: the atomic round-163 OPEN item and Decision-96 predicate.
 UNASKED choices: empty. No configuration, forcing, carried-state policy,
