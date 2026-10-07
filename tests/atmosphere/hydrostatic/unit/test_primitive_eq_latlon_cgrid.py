@@ -1266,11 +1266,19 @@ class TestHyperdiffusion:
         coord = standard_hybrid_levels(10) if hybrid else sigma
         st = self._terrain_state(grid, coord)
         dp = (dp_from_hybrid(coord, st.p_s) if hybrid
-              else st.p_s[..., None] * coord.dsigma)
+              else st.p_s[..., None] * coord.dsigma.astype(st.p_s.dtype))
         for nu in (self.NU4, 1.0e20):
             dT = self._del4_part(st, grid, coord, nu=nu)[2]
             heat = jnp.sum(dp * dT * grid.area[..., None])
             scale = jnp.sum(jnp.abs(dp * dT) * grid.area[..., None])
             assert float(jnp.abs(heat) / scale) < 1e-12
-            var = jnp.sum(dp * (st.T - 250.0) * dT * grid.area[..., None])
-            assert float(var) < 0.0
+            # Exact discrete identity: sum(dp T dT A) = -sum(dp nu L(T)^2 A).
+            from legoesm.grids.operators_latlon_cgrid import laplacian_cgrid
+            from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+                nu_del4_row_profiles)
+            nu_c = nu_del4_row_profiles(grid, nu, 0.25, self.DT)[0][..., None]
+            var = jnp.sum(dp * st.T * dT * grid.area[..., None])
+            want = -jnp.sum(dp * nu_c * laplacian_cgrid(st.T, grid) ** 2
+                            * grid.area[..., None])
+            assert float(want) < 0.0
+            assert float(var) == pytest.approx(float(want), rel=1e-8)
