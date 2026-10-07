@@ -6672,6 +6672,67 @@ class _SurfaceFluxAccumulator:
         return out
 
 
+class _KTransplant:
+    """PROBE ONLY: an oracle's per-step interface diffusivity/viscosity at fixed
+    T columns, served one step at a time to the model's vertical solve.
+
+    ``avt``/``avm``: (n_steps, n_cols, n_iface) float64, NaN where the oracle
+    has no value (the model keeps its own there).  ``mode`` picks which
+    coefficients the model applies: "both", "avt" or "avm"."""
+
+    def __init__(self, j, i, avt, avm, mode):
+        if mode not in ("both", "avt", "avm"):
+            raise ValueError(f"unknown --probe-k-transplant mode {mode!r}")
+        self.j, self.i = np.asarray(j), np.asarray(i)
+        self._rows = np.stack([np.asarray(avt), np.asarray(avm)], axis=1)
+        self.shape = self._rows.shape[2:]
+        self.heat, self.momentum = mode in ("both", "avt"), mode in ("both", "avm")
+        self.step = 0
+
+    def fetch(self):
+        if self.step >= self._rows.shape[0]:
+            raise RuntimeError(
+                f"--probe-k-transplant: oracle has {self._rows.shape[0]} steps, "
+                f"run asked for step {self.step + 1}")
+        out = self._rows[self.step]
+        self.step += 1
+        return out
+
+    def check_consumed(self, n_steps):
+        if self.step != n_steps:
+            raise RuntimeError(f"--probe-k-transplant served {self.step} "
+                               f"oracle rows for {n_steps} model steps")
+
+
+def load_nemo_strip_transplant(path, lat2d, lon2d, land_mask, n_iface,
+                               lon0=225.0, lon1=256.0, halflat=2.0,
+                               j0=180, i0=153):
+    """NEMO every-step strip avt/avm (eqs1ts_W) -> (j, i, avt, avm) on OUR
+    T columns.  Ours (j, i) = strip (j - j0, i - i0); ours interface k =
+    NEMO w-level k + 1; NEMO fill (>1e15) -> NaN."""
+    import netCDF4 as nc
+    d = nc.Dataset(path)
+    avt = np.asarray(d["avt"][:], dtype=np.float64)
+    avm = np.asarray(d["avm"][:], dtype=np.float64)
+    avt[np.abs(avt) > 1e15] = np.nan
+    avm[np.abs(avm) > 1e15] = np.nan
+    nt, nk, nj, ni = avt.shape
+    lonc = np.asarray(lon2d) % 360.0
+    sel = ((np.asarray(land_mask) > 0.5) & (np.abs(np.asarray(lat2d)) <= halflat)
+           & (lonc >= lon0) & (lonc <= lon1))
+    jj, ii = np.nonzero(sel)
+    sj, si = jj - j0, ii - i0
+    ok = (sj >= 0) & (sj < nj) & (si >= 0) & (si < ni)
+    jj, ii, sj, si = jj[ok], ii[ok], sj[ok], si[ok]
+    if jj.size == 0:
+        raise SystemExit("--probe-k-transplant selects no ocean column")
+    if n_iface + 1 > nk:
+        raise SystemExit(f"--probe-k-transplant: model has {n_iface} interfaces, "
+                         f"oracle file {nk} w-levels")
+    take = lambda x: x[:, 1:n_iface + 1][:, :, sj, si].transpose(0, 2, 1)
+    return jj, ii, take(avt), take(avm)
+
+
 class _ZdfTrendAccumulator:
     """Host-side running mean of the implicit vertical-diffusion T tendency.
 
@@ -8083,6 +8144,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "area-mean profile (top 30 levels) of the trend and "
                         "diffusivity over the box LON0..LON1 (degE), |lat| <= "
                         "HALFLAT, as ttrd_series / K_series in each snapshot.")
+    p.add_argument("--probe-k-transplant", nargs=2, default=None,
+                   metavar=("NEMO_EQS1TS_W", "MODE"),
+                   help="PROBE ONLY: replace the applied vertical diffusivity "
+                        "(MODE avt), viscosity (avm) or both at every step in the "
+                        "equatorial strip columns (2S-2N 225-256E) with NEMO's "
+                        "every-step avt/avm from an eqs1ts_W file. Tripole only.")
     p.add_argument("--trd-columns", type=float, nargs=3, default=None,
                    metavar=("LON0", "LON1", "HALFLAT"),
                    help="With --trd-accumulate: also store EVERY step's post-"
@@ -8629,6 +8696,16 @@ def main() -> int:
                          "silently ignored")
     if args.trd_columns is not None and not args.trd_accumulate:
         raise SystemExit("--trd-columns needs --trd-accumulate")
+    if args.probe_k_transplant is not None:
+        if args.grid != "tripole":
+            raise SystemExit("--probe-k-transplant is wired on --grid tripole only")
+        if args.probe_k_transplant[1] not in ("both", "avt", "avm"):
+            raise SystemExit("--probe-k-transplant MODE must be both, avt or avm")
+        if int(args.scan_block) > 0 or args.restart_from:
+            # the oracle rows are indexed from step 1 of a fresh run, and the
+            # scan path returns before the hook is attached
+            raise SystemExit("--probe-k-transplant needs a fresh run without "
+                             "--scan-block / --restart-from")
     if args.trd_accumulate and args.grid != "tripole":
         raise SystemExit("--trd-accumulate is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -11364,6 +11441,13 @@ def main() -> int:
                 raise SystemExit("--trd-columns selects no ocean cell")
             model._trd_callback.set_columns(_cm)
             model._col_callback = model._trd_callback.col
+    if args.probe_k_transplant is not None:
+        _xp, _xm = args.probe_k_transplant
+        _xj, _xi, _xt, _xa = load_nemo_strip_transplant(
+            _xp, lat2d, lon2d, state.land_mask.data, args.nlev - 1)
+        model._k_transplant = _KTransplant(_xj, _xi, _xt, _xa, _xm)
+        print(f"[probe] --probe-k-transplant {_xm}: {_xj.size} columns, "
+              f"{_xt.shape[0]} steps from {_xp}")
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
@@ -11392,12 +11476,15 @@ def main() -> int:
                     _lv_new = renormalise_ah_profile(
                         _lv_now, _ah)._replace(C_smag_lap=_cs)
                     _trd_keep = getattr(model, "_trd_callback", None)
+                    _xplant_keep = getattr(model, "_k_transplant", None)
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
                         model.config._replace(lateral_viscosity=_lv_new),
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
                     model._trd_callback = _trd_keep
+                    if _xplant_keep is not None:
+                        model._k_transplant = _xplant_keep
                     if _trd_keep is not None and getattr(_trd_keep, "_col", None) is not None:
                         model._col_callback = _trd_keep.col
                     # Free the previous segment's compiled step before the new
@@ -12327,6 +12414,12 @@ def main() -> int:
               f"gathers={_pers_res.leaf_full_gathers} "
               f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
               f"drag while active + diag-cadence u,v).", flush=True)
+    _xp_end = getattr(model, "_k_transplant", None)
+    if _xp_end is not None:
+        jax.effects_barrier()
+        _xp_end.check_consumed(n_steps)
+        print(f"[probe] --probe-k-transplant served {_xp_end.step} rows "
+              f"for {n_steps} steps", flush=True)
     print(f"[done] {n_steps - start_step} steps this leg (absolute step "
           f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d, edge_latlon=_edge_ll)}")
     if args.smoke:

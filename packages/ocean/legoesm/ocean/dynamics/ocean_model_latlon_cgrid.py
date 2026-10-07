@@ -12074,6 +12074,31 @@ class LatLonCGridOceanModel:
             if len(effective_K_test_override) == 6:
                 _tracer_content_t_test_override = effective_K_test_override[5]
 
+        # PROBE ONLY (--probe-k-transplant): replace the APPLIED interface
+        # coefficients at fixed columns with an oracle's per-step values (NaN
+        # rows keep ours).  One host fetch per step, so it is only legal on the
+        # call that also solves tracers.
+        _k_xplant = getattr(self, "_k_transplant", None)
+        if _k_xplant is not None and not return_K_profiles:
+            if not (do_tracers and do_momentum):
+                raise NotImplementedError(
+                    "--probe-k-transplant needs one combined tracer+momentum "
+                    "vertical solve per step")
+            from jax.experimental import io_callback
+            _xr = io_callback(
+                _k_xplant.fetch,
+                jax.ShapeDtypeStruct((2,) + tuple(_k_xplant.shape), K_v_cell.dtype),
+                ordered=True)
+            _xj, _xi = _k_xplant.j, _k_xplant.i
+            if _k_xplant.heat:
+                _own = K_v_cell[_xj, _xi, :]
+                K_v_cell = K_v_cell.at[_xj, _xi, :].set(
+                    jnp.where(jnp.isnan(_xr[0]), _own, _xr[0]))
+            if _k_xplant.momentum:
+                _own = A_v_cell[_xj, _xi, :]
+                A_v_cell = A_v_cell.at[_xj, _xi, :].set(
+                    jnp.where(jnp.isnan(_xr[1]), _own, _xr[1]))
+
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
         # exactly the point the tracer/momentum solves consume them — AFTER the
