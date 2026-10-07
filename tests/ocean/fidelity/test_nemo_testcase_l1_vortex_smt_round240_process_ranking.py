@@ -43,6 +43,27 @@ def test_all_arm_config_diffs_are_exactly_registered():
         assert len(rows) == expected
 
 
+def test_vertical_family_arm_disables_evd_instead_of_ambiguous_zero_replacement():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    card = build_nemo_testcase_card(probe.CASE)
+    cfg = card.recipe.model_config
+    convection = cfg.physics.convection
+    ambiguous = convection._replace(
+        enhanced_diffusion=convection.enhanced_diffusion._replace(K_conv=0.0))
+    invalid = cfg._replace(
+        A_v=0.0,
+        K_v=0.0,
+        physics=cfg.physics._replace(convection=ambiguous),
+    )
+    with pytest.raises(ValueError, match="requires K_bg < K_conv"):
+        LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, invalid)
+
+    selected, _, _ = probe.build_arm(card, "vertical_mixing_evd_off")
+    assert selected.recipe.model_config.physics.convection.scheme == "none"
+
+
 def test_round210_card_runner_is_reused_not_copied():
     source = Path(probe.__file__).read_text()
     assert "from nemo_testcase_l1_vortex_round210_100day_comparison import" in source

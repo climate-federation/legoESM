@@ -89,3 +89,18 @@ production card, default, coefficient, timestep, run length, threshold,
 stabiliser, carried state, NEMO source, or accepted trajectory changes. The
 family ablations exist only in the diagnostic probe. Any additional scientific
 choice stops with `DECISION_NEEDED`.
+
+## Pre-measurement protocol amendment after a fail-closed refusal
+
+The first execution reached the `vertical_mixing_evd_off` constructor only
+after baseline, HPG, momentum-LDF, tracer-LDF, and bottom-drag arms had run.
+It refused before taking a vertical-arm step: setting `K_conv=K_bg=0` under
+`evd_composition="nemo_replace"` makes the fired-set readback ambiguous. That
+attempt and its traceback remain evidence; none of its partial arm results is
+the final ranking. Before re-running the ranking from its committed baseline,
+the arm is expressed by the existing resolved family selector
+`physics.convection.scheme="none"`, together with `A_v=K_v=0`. This disables
+the same preregistered vertical-mixing-plus-EVD family without constructing an
+invalid replacement configuration. R28-P1 through R28-P6, including the
+frozen tracer-LDF prediction and all falsifiers, are unchanged. A regression
+test proves that the rejected zero-replacement spelling still fails closed.

@@ -43,7 +43,7 @@ EXPECTED_CONFIG_DIFFS = {
     "tracer_ldf_off": ("gm_redi",),
     "bottom_drag_off": ("bottom_drag.bottom_drag_cd0",),
     "vertical_mixing_evd_off": (
-        "A_v", "K_v", "physics.convection.enhanced_diffusion.K_conv"),
+        "A_v", "K_v", "physics.convection.scheme"),
     "barotropic_replacement_off": (),
 }
 DEFAULT_ROOT = Path(
@@ -60,12 +60,11 @@ def _replace_config(card, arm: str):
         cfg = cfg._replace(bottom_drag=cfg.bottom_drag._replace(bottom_drag_cd0=0.0))
     elif arm == "vertical_mixing_evd_off":
         convection = cfg.physics.convection
-        enhanced = convection.enhanced_diffusion._replace(K_conv=0.0)
         cfg = cfg._replace(
             A_v=0.0,
             K_v=0.0,
-            physics=cfg.physics._replace(convection=convection._replace(
-                enhanced_diffusion=enhanced)),
+            physics=cfg.physics._replace(
+                convection=convection._replace(scheme="none")),
         )
     return card._replace(recipe=card.recipe._replace(model_config=cfg))
 
