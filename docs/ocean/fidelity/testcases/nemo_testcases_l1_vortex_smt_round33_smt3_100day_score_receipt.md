@@ -81,9 +81,28 @@ walk.
 
 ## 4. Independent review, citations, and tests
 
-The separate read-only Codex review, citation gates, shifted-citation plant,
-and final focused test summaries are recorded here after their committed-diff
-passes.
+The required separate read-only Codex review was attempted against the clean,
+committed round diff. It exited before reading the diff, so no shipping verdict
+is inferred. Its output is quoted verbatim:
+
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** This is a measurement-only
+round; no production or certified trajectory change depends on an inferred
+review.
+
+The round receipt citation gate reports **PASS: 2 citations, 0 failures, 0
+unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting the five-line restart-field citation by two
+lines reports `SYMBOL-NOT-AT-LINE` and exits 1.
+
+The final CPU-only focused suite covers the round-241/243 acquisition controls,
+the round-242/244/245 score controls, and the complete citation-gate unit
+module:
+
+> `37 passed in 8.01s`
 
 ## 5. Choices and OPEN
 
