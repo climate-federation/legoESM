@@ -123,23 +123,23 @@ def dcmip_2_0_0_mountain(
     *,
     h_0: float = 2000.0,
     lon_c: float = 3.0 * jnp.pi / 2.0,
-    lat_c: float = jnp.pi / 6.0,
-    R_m_frac: float = 3.0 / 4.0,
-    zeta_frac: float = 1.0 / 16.0,
+    lat_c: float = 0.0,
+    R_m_frac: float = 3.0 * jnp.pi / 4.0,
+    zeta_frac: float = jnp.pi / 16.0,
 ) -> jnp.ndarray:
     """DCMIP 2012 §2-0-0 ridged cosine-bell mountain (Ullrich et al. 2012).
 
     z_s(λ, φ) = h_0/2 · (1 + cos(π r/R_m)) · cos²(π r/ζ)   for r ≤ R_m
               = 0                                            otherwise
 
-    where r is the great-circle distance from (λ_c, φ_c).  R_m and ζ
-    default to ``3π/4 R`` and ``π/16 R`` respectively.
+    where r is the great-circle distance from (λ_c, φ_c).  As published,
+    R_m = 3π/4 and ζ = π/16 in radians of arc on the unit sphere, centred
+    at (3π/2, 0); here they are ``R_m_frac * radius`` and
+    ``zeta_frac * radius`` metres, so the fractions carry the π.
 
-    The resulting surface has a broad envelope (≈3π/4 radians wide,
-    ~7000 km) modulated by a sharp ridged structure (~1300 km
-    wavelength).  This combination is what makes the test stress
-    pressure-gradient-force consistency on terrain-following
-    coordinates.
+    The resulting surface has a broad envelope (radius 3π/4 rad, ~15000 km)
+    modulated by ridges of period ζ ≈ 1250 km; dropping the π gives 398 km
+    ridges, below the 2Δx limit of a 2.5° grid.
 
     Returns
     -------
