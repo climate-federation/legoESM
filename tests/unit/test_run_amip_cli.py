@@ -2842,17 +2842,17 @@ def test_top_sponge_flags_flow_to_dycore_config():
 
 def test_sb81_omega_conversion_flag_flows_to_dycore_config():
     """#1029 ω-side: --sb81-omega-conversion round-trips into DycoreConfig;
-    default OFF (the SB81 conversion is opt-in until the #1029(b) lid
-    treatment lands)."""
+    default ON (energy-consistent SB81 conversion); --no-... selects the
+    legacy arithmetic form."""
     parser = build_arg_parser()
-    cfg_off = build_config_from_args(_postprocess_args(
+    cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_off.dycore.sb81_omega_conversion is False   # default OFF
+    assert cfg_default.dycore.sb81_omega_conversion is True   # default ON
 
-    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--sb81-omega-conversion",
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sb81-omega-conversion",
     ]), parser))
-    assert cfg_on.dycore.sb81_omega_conversion is True
+    assert cfg_off.dycore.sb81_omega_conversion is False
 
 
 def test_budget_ledger_flag_flows_to_output_config():

@@ -303,7 +303,7 @@ def test_hybrid_rest_over_topo_fp32_policy():
 
 
 def test_sb81_omega_conversion_rest_balanced_and_gate_live():
-    """#1029 ω-side opt-in flag: (a) with sb81_omega_conversion=True the
+    """#1029 ω-side flag (default ON): (a) with sb81_omega_conversion=True the
     rest-over-topo state STAYS at rest (at exact rest the flux-form mass
     divergence is exactly zero, so both conversion forms vanish — the SB81
     swap cannot disturb a balanced column); (b) the gate is LIVE: from a

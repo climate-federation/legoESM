@@ -4634,6 +4634,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
             # del-4 on u, v, T (lat-lon shallow-water lane's law and per-row
             # pole cap); set explicitly for both lat-lon HS cases.
             nu_del4=_biharmonic_visc_latlon(n_lat),
@@ -5215,6 +5216,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -5832,6 +5834,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)

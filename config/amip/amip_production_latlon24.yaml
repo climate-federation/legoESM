@@ -26,6 +26,9 @@ mpas_vert_advection_scheme: upwind
 resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
+# #1029: SB81 energy-consistent omega/p conversion, named explicitly (RULE 3).
+# Active only with hybrid levels; this deck inherits sigma, so it is inert here.
+sb81_omega_conversion: true
 dt: 600.0
 
 # Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
