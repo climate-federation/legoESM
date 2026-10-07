@@ -5787,10 +5787,10 @@ CITATION_MAP = {
         'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16],
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:193-200': [
         '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
-        'END DO   ;   END DO', 8],
-    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:259-267': [
+        ('END DO   ;   END DO', 4), 8],
+    'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:260-267': [
         'Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
-        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa ) ! time-splitting', 9],
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa ) ! time-splitting', 8],
     # --- round 239: locally exact but trajectory-refused source order ---
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:314-335': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 1),

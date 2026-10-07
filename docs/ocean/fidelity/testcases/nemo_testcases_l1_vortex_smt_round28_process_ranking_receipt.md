@@ -25,14 +25,16 @@ protective in this intervention and cannot be called the source owner.
 The compiled SMT-4 stage program calls HPG, VOR, and vector advection in that
 order at
 `VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:328-344`,
-then calls lateral momentum diffusion before implicit momentum ZDF at
-`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:398-417`.
+then calls lateral momentum diffusion at
+`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:398-404`
+before implicit momentum ZDF at
+`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:415-417`.
 The tracer stage calls lateral diffusion before implicit vertical diffusion at
 `VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:539-554`.
 The step-entry program forms bottom drag at
 `VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:193-200` and then
 calls the split-explicit barotropic solve at
-`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:259-267`.
+`VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:260-267`.
 These citations establish which compiled processes execute and their order;
 they do not turn an ablation response into source ownership.
 
