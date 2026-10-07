@@ -1,7 +1,9 @@
 """Multilayer (Richards) land tile on the MPAS lane (tasks/mpas_land_port.md).
 
-Covers the port seams end-to-end, offline + portable (loaders monkeypatched,
-no NetCDF/network):
+Covers the port seams end-to-end, offline (loaders monkeypatched, no
+network).  Tests on the default two-leaf canopy also need the harmonized
+surfdata NetCDF for its per-PFT parameters and FAIL, never skip, without it
+(``tests/_land_surfdata.py``; override with LEGOESM_TEST_SURFDATA):
 
 1. ``_setup_multilayer_land`` builds per-cell land columns from
    ``VoronoiMesh.latCell/lonCell`` (the old crash: no ``lat/lat2d``).
