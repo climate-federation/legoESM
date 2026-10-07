@@ -212,6 +212,10 @@ FILES = {
         _ORCA2_R143EARLY_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R144INITIAL_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R144INITIAL_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/sshwzv.f90": (
+        _ORCA2_R144INITIAL_COMPILED / "sshwzv.f90"),
     "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R144INITIAL_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/lbclnk.f90": (
@@ -1421,6 +1425,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 165: kt=8 vertical-coordinate boundary ------------
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/stprk3_stg.f90:132-179': [
+        'ssha(:,:) = ssh (:,:,Kaa)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 48],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/stprk3_stg.f90:185-226': [
+        'CASE ( 2 )',
+        'END SELECT', 42],
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/sshwzv.f90:736-767': [
+        'z2d(:,:) = 0._wp',
+        'pww(ji,jj,jk) = ( 1._wp - zcff ) * pww(ji,jj,jk)', 32],
     # --- ORCA2 round 139: passive FCT bound-input walk ------------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:171': [
         'CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt,',
