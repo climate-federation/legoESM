@@ -102,7 +102,7 @@ The final CPU-only focused suite covers the round-241/243 acquisition controls,
 the round-242/244/245 score controls, and the complete citation-gate unit
 module:
 
-> `37 passed in 8.01s`
+> `37 passed in 7.39s`
 
 ## 5. Choices and OPEN
 
