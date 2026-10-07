@@ -58,7 +58,7 @@ Rounds 238 through 240 contain no production model change, so this is the
 current short-run reference. The movie renderer imports the scorer's card
 registry directly; it therefore gains SMT-1 without a second dispatch table.
 
-The focused suite reports:
+The initial focused suite reports:
 
 > `3 passed in 0.64s`
 
@@ -76,13 +76,27 @@ citation mappings, and this receipt. No file under `packages/` or `src/`
 changes; no model, card, option, coefficient, carried state, or certified row
 moves.
 
-The separate read-only Codex review is run against the final committed diff
-before handoff. Its exact verdict is appended below. A `DO NOT SHIP` verdict
-would block this acquisition request and change the round status to `FAILED`.
+The required separate read-only Codex review was attempted against the
+committed round diff. It exited before reading the diff, so no SHIP verdict is
+inferred. Its output is quoted verbatim:
 
-The final citation gate must map both compiled-source spans above; its shifted
-citation plant must exit nonzero. Focused tests are rerun after the receipt and
-citation map are committed.
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** The stopped-for-record verdict
+does not depend on an inferred review: the required NEMO daily files are
+absent and no scientific score is emitted.
+
+The round citation gate reports **PASS: 2 citations, 0 failures, 0 unmapped**.
+The cumulative default receipt reports **PASS: 274 citations, 0 failures, 0
+unmapped**. Shifting the five-line restart-field citation by two lines reports
+`SYMBOL-NOT-AT-LINE` and exits 1.
+
+The final CPU-only focused suite covers the three round-241 controls and the
+complete citation-gate unit module:
+
+> `20 passed in 7.52s`
 
 ### OPEN — next round
 
