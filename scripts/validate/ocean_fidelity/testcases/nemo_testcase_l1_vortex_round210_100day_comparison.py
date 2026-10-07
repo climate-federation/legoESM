@@ -99,8 +99,8 @@ CARDS["smt3"] = (
          "oracle_vortex_smt3/day100"),
 )
 CERTIFIED_LADDER["smt3"] = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round226/"
-    "smt3_ladder.json")
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
+    "landing_smt3.json")
 
 CARDS["smt4"] = (
     "VORTEX_SMT4_VEC-zps",
