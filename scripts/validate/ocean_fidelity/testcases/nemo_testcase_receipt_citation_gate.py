@@ -1233,6 +1233,10 @@ FILES = {
     # exact admitted instrumented build whose binary the driver reuses.
     "VORTEX_SMT2_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90": (
         NEMO / "tests/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90"),
+    # Round 245 scores the admitted SMT-3 daily trajectory from this exact
+    # instrumented build; the trajectory was not reconstructed or interpolated.
+    "VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "tests/VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90"),
     "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3.f90"),
     "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stp2d.f90": (
@@ -5811,6 +5815,13 @@ CITATION_MAP = {
         'IF( .NOT. ln_rst_list .AND. nn_stock == -1 )   RETURN',
         'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 16],
     'VORTEX_SMT2_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:176-180': [
+        "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
+        "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )", 5],
+    # --- round 245: deferred SMT-3 daily score from its admitted record ---
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:104-119': [
+        'IF( .NOT. ln_rst_list .AND. nn_stock == -1 )   RETURN',
+        'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 16],
+    'VORTEX_SMT3_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:176-180': [
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )", 5],
     # --- round 239: locally exact but trajectory-refused source order ---
