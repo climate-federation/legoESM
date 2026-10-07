@@ -82,10 +82,31 @@ day-100 T RMS remains predicted within 2x of SMT-1's
 `4.3321114781972461e-05 K`, and NEMO's day-100 maximum absolute U remains
 predicted below SMT-1's. Both are still unmeasured for SMT-2.
 
-The separate read-only Codex review and final citation/focused gates are
-recorded in the final section after the complete round diff is committed.
+## 4. Review and gates
 
-## 4. OPEN — next round
+The required separate read-only Codex review was attempted against the
+complete committed round diff. It exited before reading the diff, so no SHIP
+verdict is inferred. Its output is quoted verbatim:
+
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** The stopped-for-record verdict
+does not depend on an inferred review: the required NEMO daily files are absent
+and no scientific score is emitted.
+
+The round citation gate reports **PASS: 2 citations, 0 failures, 0 unmapped**.
+The cumulative default receipt reports **PASS: 274 citations, 0 failures, 0
+unmapped**. Shifting the five-line restart-field citation by two lines reports
+`SYMBOL-NOT-AT-LINE` and exits 1.
+
+The final CPU-only focused suite covers the three round-241 acquisition
+controls, four round-242 score controls, three round-243 controls, and the
+complete citation-gate unit module. Its summary is recorded after the final
+documentation commit.
+
+## 5. OPEN — next round
 
 Run the committed acquisition wrapper. Round 244 then verifies the common
 driver's admission report and exact count of 100 daily restarts, requires the
