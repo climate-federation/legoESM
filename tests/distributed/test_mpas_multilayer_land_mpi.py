@@ -48,7 +48,6 @@ Run under MPI::
 from __future__ import annotations
 
 import os
-import pathlib
 import tempfile
 
 import jax
@@ -77,9 +76,7 @@ N_SOIL = 6
 #
 # The path is resolved against THIS checkout's data directory, not one
 # developer's absolute path, with an environment override for a shared copy.
-SURFDATA = os.environ.get("LEGOESM_TEST_SURFDATA") or str(
-    pathlib.Path(__file__).resolve().parents[2]
-    / "data" / "legoesm_surfdata_c260716.nc")
+from tests._land_surfdata import SURFDATA  # noqa: E402
 # A module-level skip would turn these three tests from LOUDLY FAILING into
 # SILENTLY GREEN wherever the file is absent, which is how a gate rots (GLM
 # raised exactly this). So the absence is a FAILURE with an actionable message,

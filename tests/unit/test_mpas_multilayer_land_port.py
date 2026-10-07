@@ -29,6 +29,7 @@ from legoesm.driver.config import (
     ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
 )
 from legoesm.driver.model_driver import ModelDriver
+from tests._land_surfdata import require_surfdata
 
 MPAS_RES, MPAS_NLEV, DT = 3, 8, 300.0   # icosahedral level 3 = 642 cells
 FOUR_STEPS_DAYS = 1201.0 / 86400.0      # int(1201/300) = 4 steps
@@ -68,6 +69,10 @@ def _patch_land_loaders(monkeypatch):
 def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
                   beta_soil: bool = False,
                   use_multilayer: bool = True, **extra) -> ModelDriver:
+    # The default land scheme is the two-leaf canopy; it needs the real
+    # per-PFT surfdata (soil hydraulics still come from the synthetic map).
+    if use_multilayer and "land_surface_scheme" not in extra:
+        extra["surfdata_path"] = require_surfdata()
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
                         nlev=MPAS_NLEV, vertical_coord="hybrid"),
@@ -94,6 +99,8 @@ def test_setup_builds_land_columns_on_voronoi(monkeypatch, tmp_path):
     _patch_land_loaders(monkeypatch)
     d = _build_driver(str(tmp_path), FOUR_STEPS_DAYS)
 
+    from legoesm.land.canopy import CanopyConfig
+    assert isinstance(d.physics.land_ml_cfg.surface_scheme, CanopyConfig)
     ncell = int(np.asarray(d.grid.latCell).size)
     st = d._land_ml_state
     assert isinstance(st, MultiLayerLandState)
