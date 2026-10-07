@@ -7,6 +7,8 @@
 #
 # Usage (conda env legoesm-pmodel):
 #   Rscript scripts/validate/optimality_reference.R tests/land/unit/data/optimality_reference.csv
+#   Rscript scripts/validate/optimality_reference.R OUT.csv dense   # figure-only: two fine
+#     slices (VPD at wet soil; soil psi at VPD 1 kPa) at 20 degC, PPFD 1000, psi50 -2
 #
 # Units out: gs = stomatal conductance to CO2 [mol m-2 s-1]; a [umol m-2 s-1];
 # e [mol H2O m-2 s-1]; psi/dpsi [MPa]; vcmax/jmax at tc [umol m-2 s-1].
@@ -15,6 +17,7 @@ suppressPackageStartupMessages({library(rpmodel); library(rphydro)})
 
 out_path <- commandArgs(trailingOnly = TRUE)[1]
 stopifnot(!is.na(out_path))
+dense <- identical(commandArgs(trailingOnly = TRUE)[2], "dense")
 
 kphio <- 0.081785; co2 <- 400; patm <- 101325; elv <- 0; fapar <- 1; rdark <- 0
 par_cost <- list(alpha = 0.1, gamma = 1)
@@ -31,6 +34,9 @@ grid <- expand.grid(
   psi_soil = c(0, -0.25, -0.5, -1, -1.5, -2, -3),
   psi50 = c(-1, -2, -4, -1000),  # -1000: P(psi) ~ 1, the no-vulnerability limit
   KEEP.OUT.ATTRS = FALSE)
+if (dense) grid <- unique(rbind(
+  data.frame(tc = 20, ppfd = 1000, vpd = seq(300, 4000, by = 50), psi_soil = 0, psi50 = -2),
+  data.frame(tc = 20, ppfd = 1000, vpd = 1000, psi_soil = seq(0, -3, by = -0.05), psi50 = -2)))
 
 rows <- lapply(seq_len(nrow(grid)), function(i) {
   g <- grid[i, ]

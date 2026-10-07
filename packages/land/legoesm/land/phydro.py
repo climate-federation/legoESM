@@ -151,8 +151,10 @@ __param_spec__ = {
                 "reference": "Joshi et al. 2022 (Weibull shape b)",
                 "shape": None,
             },
+            # Lower bound -1000 MPa is the "no non-stomatal limitation" setting
+            # (f ~ 1); a calibration should search a narrower range.
             "psi50_jmax_mpa": {
-                "units": "MPa", "bounds": (-8.0, -0.3), "tunable_tier": 2,
+                "units": "MPa", "bounds": (-1000.0, -0.3), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "hydraulics",
                 "reference": "non-stomatal limitation of Jmax (this module)",
                 "shape": None,
