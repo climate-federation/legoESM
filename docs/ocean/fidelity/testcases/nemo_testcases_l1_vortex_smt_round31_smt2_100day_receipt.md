@@ -103,8 +103,9 @@ unmapped**. Shifting the five-line restart-field citation by two lines reports
 
 The final CPU-only focused suite covers the three round-241 acquisition
 controls, four round-242 score controls, three round-243 controls, and the
-complete citation-gate unit module. Its summary is recorded after the final
-documentation commit.
+complete citation-gate unit module:
+
+> `27 passed in 3.63s`
 
 ## 5. OPEN — next round
 
@@ -118,3 +119,6 @@ prediction. If complete, the following round advances to SMT-3; no causal
 owner is inferred from the SMT-2 curve.
 
 **DECISION_NEEDED: NONE.**
+
+**ACQUISITION_NEEDED:**
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/autopilot-work-293491792/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex_smt_round31_smt2_100day/run.sh`
