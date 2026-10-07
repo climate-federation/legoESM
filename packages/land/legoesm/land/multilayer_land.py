@@ -48,6 +48,7 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
+from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.land.soil_thermal import (
     compute_heat_capacity,
     liquid_water_content,
@@ -249,7 +250,18 @@ def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
     return beta_soil, root_frac, beta_root, w_frac_rz
 
 
-def land_tile_beta_soil(theta_soil, config, land_params=None):
+def liquid_soil_water(theta, T_soil, config):
+    """Soil water that evaporation, root uptake and the land-tile humidity can
+    draw on: the unfrozen liquid share when soil freeze/thaw is on, else all of
+    it.  Static Python branch on the config, so a run without freeze/thaw is
+    bit-identical.  Ice stays in ``theta`` for Richards and the heat budget."""
+    if not config.thermal.enable_freeze_thaw:
+        return theta
+    theta_liq, _ = liquid_water_content(T_soil, theta, config.thermal)
+    return theta_liq
+
+
+def land_tile_beta_soil(theta_soil, T_soil, config, land_params=None):
     """Root-zone ``beta_soil`` for the coupler's atmospheric land tile, resolved
     from the SAME ``config`` / ``land_params`` thresholds the land SEB uses.
 
@@ -257,8 +269,9 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
     ``simple_seb`` ``q_sfc = beta_effective * q_sat_sfc``) so the atmospheric
     land latent flux is throttled by soil moisture instead of running at the
-    saturated-surface potential rate.  ``theta_soil`` is the ``(ncol, n_layers)``
-    soil-moisture field from the carried multilayer land state.
+    saturated-surface potential rate.  ``theta_soil`` / ``T_soil`` are the
+    ``(ncol, n_layers)`` fields of the carried multilayer land state; frozen
+    water is excluded via :func:`liquid_soil_water`.
     """
     grid = make_soil_grid(config.soil_grid)
     root_depth = _get(land_params, "root_depth", config.root_depth)
@@ -267,7 +280,8 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     theta_wp   = resolve_plant_wilting_point(land_params, config)
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
-        theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
+        liquid_soil_water(theta_soil, T_soil, config),
+        config.beta_min, root_depth, theta_wp, theta_fc,
         grid.z_node, theta_soil.shape[0])
     return beta_soil
 
@@ -520,6 +534,13 @@ def _step_multilayer_land_impl(
     T_soil = state.T_soil        # (ncol, n_layers)
     psi = state.psi_soil         # (ncol, n_layers)
     theta = state.theta_soil     # (ncol, n_layers)
+    # Water that evaporation and root uptake can draw on (#1815): liquid only
+    # when soil freeze/thaw is on.  Richards, infiltration and the heat budget
+    # keep total water (ice fills pores; its conductivity impedance is in
+    # Richards).  psi_avail is the suction of that liquid on the same curve.
+    theta_avail = liquid_soil_water(theta, T_soil, config)
+    psi_avail = (psi_from_theta(theta_avail, config.hydraulics)
+                 if config.thermal.enable_freeze_thaw else psi)
     snow = state.snow_depth      # (ncol,)
     snow_age = state.snow_age    # (ncol,)
 
@@ -722,7 +743,7 @@ def _step_multilayer_land_impl(
     # tile via land_tile_beta_soil — because the soil-C-spin-up + carbon audit
     # downstream reuse the inline root_frac / theta_wp_c / theta_fc_c / w_frac_rz.)
     beta_soil, beta_root = root_zone_beta_soil(
-        theta, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
+        theta_avail, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
         spatial=True,
     )
     # Root-zone-integrated wetness (vegetation-cover proxy), reused downstream
@@ -741,7 +762,7 @@ def _step_multilayer_land_impl(
     # bare-soil-evap throttle does not silently promote the step output to float64
     # (the scan carry requires input/output dtypes to match).
     _S_top = jnp.clip(
-        (theta - theta_r)
+        (theta_avail - theta_r)
         / jnp.maximum(config.hydraulics.theta_sat - theta_r, 1e-6),
         1e-6, 1.0)[:, 0].astype(theta.dtype)
 
@@ -793,13 +814,13 @@ def _step_multilayer_land_impl(
         # thermodynamic vapour-pressure lowering of the drying surface (bites only
         # near residual water).  Shape (ncol,), in state precision.
         _h_r_top = jnp.exp(jnp.minimum(
-            psi[:, 0] * constants.g
+            psi_avail[:, 0] * constants.g
             / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)).astype(theta.dtype)
         # Top-layer RELATIVE saturation W_1 = theta_1/theta_sat for the Sellers-1992
         # surface resistance (computed in layer space then sliced, same broadcast-safe
         # pattern as _S_top above).
         _W1_top = jnp.clip(
-            theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
+            theta_avail / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
             1e-6, 1.0)[:, 0].astype(theta.dtype)
 
         # Wetted leaf fraction from the START-of-step canopy-water store, driving
@@ -952,8 +973,8 @@ def _step_multilayer_land_impl(
             canopy_state=state.canopy_state,
             dt=dt,
             T_soil=T_soil,
-            psi_soil=psi,
-            theta_soil=theta,
+            psi_soil=psi_avail,
+            theta_soil=theta_avail,
             lat=lat,
             doy=doy,
             lai_override=LAI_override,
@@ -1256,7 +1277,7 @@ def _step_multilayer_land_impl(
 
     dz = grid.dz
     extractable_water = jnp.sum(
-        jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1) * rho_w
+        jnp.maximum(theta_avail - theta_r, 0.0) * dz[None, :], axis=-1) * rho_w
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
@@ -1330,7 +1351,7 @@ def _step_multilayer_land_impl(
         #     definition above so d(S_top**exp)/dS_top stays finite at the residual-water
         #     boundary for a trainable exp < 1; AD-safe, negligible fwd).
         _h_r = jnp.exp(jnp.minimum(
-            psi[:, 0] * constants.g
+            psi_avail[:, 0] * constants.g
             / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
         _beta_surf = (_h_r * _S_top ** config.soil_evap_resistance_exp).astype(
             soil_evap_demand.dtype)
@@ -1727,7 +1748,7 @@ def _step_multilayer_land_impl(
     # theta_fc_c are already (ncol,), so use the spatial path.
     theta_new = richards_out.theta_new
     beta_soil_new, _ = root_zone_beta_soil(
-        theta_new, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
+        liquid_soil_water(theta_new, T_soil_new, config), root_frac, theta_wp_c, theta_fc_c, config.beta_min,
         spatial=True,
     )
     # SimpleSEB: stomatal_ratio carries the stomatal limitation through
@@ -2178,7 +2199,6 @@ def init_multilayer_land_state(
     -------
     MultiLayerLandState
     """
-    from legoesm.land.soil_hydraulics import psi_from_theta
 
     grid = make_soil_grid(config.soil_grid)
     nlayers = grid.n_layers

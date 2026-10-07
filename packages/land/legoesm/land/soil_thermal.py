@@ -30,8 +30,9 @@ final thermal solve as an explicit per-layer source
 and are tracked follow-ups: (a) ice-aware thermal CONDUCTIVITY (frozen soil
 conducts better, k_ice ~ 2.0 vs k_water ~ 0.57) — the conductivity still uses
 total ``theta``; (b) hydraulic IMMOBILISATION of the ice fraction in Richards
-(frozen water should not drain) — the hydraulics still see total ``theta``.
-Both are secondary to the latent zero-curtain and are noted at their sites.
+— Richards keeps total ``theta`` and slows flow through ice with the CLM5 ice
+impedance on conductivity.  Evaporation, root water stress and the land-tile
+humidity see only the liquid share (``multilayer_land.liquid_soil_water``).
 
 References
 ----------

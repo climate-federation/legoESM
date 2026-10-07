@@ -11807,7 +11807,8 @@ class ModelDriver:
                 def _land_beta_fn(land_state):
                     return jnp.clip(
                         land_tile_beta_soil(
-                            land_state.theta_soil, _lml_cfg, _lml_params),
+                            land_state.theta_soil, land_state.T_soil,
+                            _lml_cfg, _lml_params),
                         0.0, 1.0)
 
                 # The land's SOLVED surface humidity is handed to the
