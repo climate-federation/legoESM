@@ -1163,3 +1163,86 @@ class TestTopSponge:
         assert jnp.all(jnp.isfinite(g))                 # no NaN-grad trap
         assert float(jnp.max(jnp.abs(g[..., 0]))) > 0.0   # lid: sponge drives grad
         assert float(jnp.max(jnp.abs(g[..., -1]))) == 0.0  # surface: sponge absent
+
+
+# ==============================================================================
+# Biharmonic (del-4) hyperdiffusion
+# ==============================================================================
+
+class TestHyperdiffusion:
+    """``nu_del4`` damps grid-scale u, v, T with the shallow-water lane's
+    per-row pole cap; 0.0 is OFF."""
+
+    NU4 = 2.9e15
+    DT = 200.0
+
+    def _checkerboard_state(self, grid, sigma, amp_u=1.0, amp_T=1.0):
+        st = _make_rest_state(grid, sigma)
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        sgn_c = jnp.where(jnp.arange(n_lon) % 2 == 0, 1.0, -1.0)
+        sgn_u = jnp.where(jnp.arange(n_lon + 1) % 2 == 0, 1.0, -1.0)
+        u = st.u + amp_u * sgn_u[None, :, None]
+        T = st.T + amp_T * sgn_c[None, :, None]
+        return st._replace(u=u, T=T)
+
+    def _del4_part(self, state, grid, sigma, nu=None):
+        on = CGridLatLonPrimitiveEquationConfig(nu_del4=nu or self.NU4)
+        off = CGridLatLonPrimitiveEquationConfig()
+        t_on = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, on, dt=self.DT)
+        t_off = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, off)
+        return [a - b for a, b in zip(t_on[:4], t_off[:4])]
+
+    def test_off_is_byte_identical(self, grid, sigma):
+        state = self._checkerboard_state(grid, sigma)
+        a = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, CGridLatLonPrimitiveEquationConfig(nu_del4=0.0),
+            dt=self.DT)
+        b = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        for x, y in zip(a[:4], b[:4]):
+            assert jnp.array_equal(x, y)
+
+    def test_requires_dt(self, grid, sigma):
+        state = _make_rest_state(grid, sigma)
+        cfg = CGridLatLonPrimitiveEquationConfig(nu_del4=self.NU4)
+        with pytest.raises(ValueError, match="requires"):
+            cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, cfg)
+
+    def test_damps_zonal_checkerboard_at_the_del4_rate(self, grid, sigma):
+        """A lon-alternating u and T decay at nu*(4/dx^2)^2 on an equatorial
+        row, and the del-4 part opposes the perturbation everywhere."""
+        state = self._checkerboard_state(grid, sigma)
+        du, dv, dT, dps = self._del4_part(state, grid, sigma)
+        j = grid.n_lat // 2
+        dx = float(grid.radius * grid.dlon * grid.cos_lat[j])
+        rate = self.NU4 * (4.0 / dx**2) ** 2
+        pert_T = state.T - 300.0
+        assert float(jnp.max(dT * pert_T)) <= 0.0
+        assert float(jnp.max(du * state.u)) <= 0.0
+        got = -float(jnp.mean(dT[j] / pert_T[j]))
+        assert got == pytest.approx(rate, rel=0.05)
+        assert float(jnp.max(jnp.abs(dps))) == 0.0
+
+    def test_dissipates_random_noise(self, grid, sigma):
+        """Sign check on an arbitrary state: the del-4 part removes variance
+        from u, v and T (a sign flip would add it)."""
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+        st = _make_rest_state(grid, sigma)
+        st = st._replace(
+            u=jax.random.normal(k1, st.u.shape),
+            v=jax.random.normal(k2, st.v.shape).at[0].set(0.0).at[-1].set(0.0),
+            T=st.T + jax.random.normal(k3, st.T.shape))
+        du, dv, dT, _ = self._del4_part(st, grid, sigma)
+        assert float(jnp.sum(du * st.u)) < 0.0
+        assert float(jnp.sum(dv * st.v)) < 0.0
+        assert float(jnp.sum(dT * (st.T - 300.0))) < 0.0
+
+    def test_pole_rows_are_capped(self, grid, sigma):
+        """A coefficient far above every row's stability cap still yields a
+        finite tendency bounded by cfl_frac/dt on the checkerboard."""
+        state = self._checkerboard_state(grid, sigma)
+        du, dv, dT, _ = self._del4_part(state, grid, sigma, nu=1.0e20)
+        assert bool(jnp.all(jnp.isfinite(dT)))
+        cfg = CGridLatLonPrimitiveEquationConfig()
+        # nu*lam^2 <= cfl_frac/dt and |lap^2 checkerboard| <= lam^2 * amp
+        assert float(jnp.max(jnp.abs(dT))) <= cfg.nu_del4_cfl_frac / self.DT * 1.0001
