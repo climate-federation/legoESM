@@ -1246,3 +1246,31 @@ class TestHyperdiffusion:
         cfg = CGridLatLonPrimitiveEquationConfig()
         # nu*lam^2 <= cfl_frac/dt and |lap^2 checkerboard| <= lam^2 * amp
         assert float(jnp.max(jnp.abs(dT))) <= cfg.nu_del4_cfl_frac / self.DT * 1.0001
+
+    def _terrain_state(self, grid, coord):
+        k1, k2 = jax.random.split(jax.random.PRNGKey(1))
+        nlev = coord.n_levels
+        st = _make_rest_state(grid, coord)
+        lat = grid.lat[:, None]
+        p_s = 1.0e5 - 2.0e4 * jnp.exp(-((lat - 0.3) / 0.3) ** 2) * jnp.cos(
+            3.0 * grid.lon[None, :]) ** 2
+        return st._replace(
+            T=250.0 + 5.0 * jax.random.normal(k1, (grid.n_lat, grid.n_lon, nlev)),
+            u=jax.random.normal(k2, st.u.shape), p_s=p_s)
+
+    @pytest.mark.parametrize("hybrid", [True, False])
+    def test_T_term_conserves_layer_mass_weighted_heat(self, grid, sigma, hybrid):
+        """sum(dp * dT_del4 * area) vanishes to roundoff over varying terrain,
+        including the per-row pole cap (a huge nu engages it on every row)."""
+        from legoesm.grids.vertical import standard_hybrid_levels, dp_from_hybrid
+        coord = standard_hybrid_levels(10) if hybrid else sigma
+        st = self._terrain_state(grid, coord)
+        dp = (dp_from_hybrid(coord, st.p_s) if hybrid
+              else st.p_s[..., None] * coord.dsigma)
+        for nu in (self.NU4, 1.0e20):
+            dT = self._del4_part(st, grid, coord, nu=nu)[2]
+            heat = jnp.sum(dp * dT * grid.area[..., None])
+            scale = jnp.sum(jnp.abs(dp * dT) * grid.area[..., None])
+            assert float(jnp.abs(heat) / scale) < 1e-12
+            var = jnp.sum(dp * (st.T - 250.0) * dT * grid.area[..., None])
+            assert float(var) < 0.0

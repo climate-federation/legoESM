@@ -835,6 +835,9 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # --- 13a. Biharmonic hyperdiffusion (optional) ---
     # SIGN: lap(lap) of a Fourier mode is +k^4, so -nu*lap(lap(f)) decays it.
+    # T uses the layer-mass-weighted form -(1/dp) lap(dp * nu * lap(T)):
+    # sum(dp * dT * area) telescopes to zero (global heat conserved) and
+    # sum(dp * T * dT * area) = -sum(dp * nu * lap(T)^2 * area) <= 0.
     if config.nu_del4 > 0.0:
         if dt is None:
             raise ValueError(
@@ -846,8 +849,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
         du_dt = du_dt - nu_u[..., None] * lap2_u
         dv_dt = dv_dt - nu_v[..., None] * lap2_v
-        lap2_T = laplacian_cgrid(laplacian_cgrid(T, grid), grid)
-        dT_dt = dT_dt - nu_u[..., None] * lap2_T
+        dp_T = dp_from_hybrid(sigma_coord, p_s) if _hybrid else (
+            p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype))
+        flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
+        dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
