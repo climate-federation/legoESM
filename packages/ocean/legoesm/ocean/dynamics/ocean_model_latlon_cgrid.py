@@ -11996,6 +11996,8 @@ class LatLonCGridOceanModel:
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
                     seos_cfg=_cfg_b.eos_nemo_seos,
                     tke_budget_out=_tke_budget_box,
+                    tke_probe=(getattr(self, "_tke_transplant", None)
+                               if (do_tracers and not return_K_profiles) else None),
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")

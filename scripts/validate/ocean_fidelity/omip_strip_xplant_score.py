@@ -8,7 +8,8 @@ BUF strip cells dropped at every strip edge (transplanted columns border untrans
 (3) EVD firing, face by step on the top interfaces: NEMO = EVD increment (avt - avt_k) - (avm - avm_k) > 50
 (nn_evdm=0, so avm - avm_k is exactly NEMO's IWM); ours = applied K > 50; hourly occupancy and the overlap
 (both / NEMO only / ours only, as fractions of the faces either side fires).
-Usage: omip_strip_xplant_score.py RUN_DIR [RUN_DIR ...]   (env BUF, default 3)."""
+Usage: omip_strip_xplant_score.py RUN_DIR [RUN_DIR ...]   (env BUF, default 3).
+       omip_strip_xplant_score.py --gate EN_W_FILE   (ORCA1EN rerun: reproduces 1TS avt; avm_k = max(0.1*en/dissl, avmb))."""
 import os
 import sys
 
@@ -44,6 +45,29 @@ def fire_overlap(nemo_fired, ours_fired):
         return 0.0, 0.0, 0.0
     return (float(np.sum(nemo_fired & ours_fired)) / u, float(np.sum(nemo_fired & ~ours_fired)) / u,
             float(np.sum(~nemo_fired & ours_fired)) / u)
+
+
+def en_closure_residual(avm_k, en, dissl, avmb, rn_ediff=0.1):
+    """max |avm_k - max(rn_ediff*en/dissl, avmb)| / avm_k over faces with finite, positive dissl
+    (nn_mxl=2: l = sqrt(en)/dissl, avm_k = max(rn_ediff*l*sqrt(en), avmb))."""
+    ok = np.isfinite(avm_k) & np.isfinite(en) & np.isfinite(dissl) & (dissl > 0) & (avm_k > 0)
+    pred = np.maximum(rn_ediff * en[ok] / dissl[ok], avmb)
+    return float(np.max(np.abs(avm_k[ok] - pred) / avm_k[ok]))
+
+
+def gate(en_path, ref_path=NEMO + 'W.nc', avmb=1.2e-4):
+    import netCDF4 as nc
+    f = lambda v: np.where(np.abs(v) < 1e15, v, np.nan)
+    E, R = nc.Dataset(en_path), nc.Dataset(ref_path)
+    g = lambda d, v: f(np.asarray(d[v][:, 1:30], dtype=np.float64))
+    a_en, a_ref = g(E, 'avt'), g(R, 'avt')
+    rep = rel_err(a_en, a_ref)
+    avm_k, en, dl = g(E, 'avm_k'), g(E, 'en_k'), g(E, 'dissl_k')
+    res = en_closure_residual(avm_k, en, dl, avmb)
+    planted = en_closure_residual(avm_k[1:], en[:-1], dl[:-1], avmb)
+    print(f'gate: EN vs 1TS avt max rel {rep:.2e} | avm_k closure residual {res:.2e} | '
+          f'planted 1-step shift {planted:.2e} | steps {a_en.shape[0]} | dissl<=0 faces {int(np.sum(dl <= 0))}')
+    return rep, res, planted
 
 
 def rel_err(ours, oracle):
@@ -97,4 +121,7 @@ def main(runs, buf):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:], int(os.environ.get('BUF', 3)))
+    if sys.argv[1:2] == ['--gate']:
+        gate(sys.argv[2])
+    else:
+        main(sys.argv[1:], int(os.environ.get('BUF', 3)))

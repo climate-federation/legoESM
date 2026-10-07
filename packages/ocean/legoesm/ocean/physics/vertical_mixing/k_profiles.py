@@ -140,6 +140,7 @@ def compute_vertical_K_profiles(
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
     tke_budget_out: list | None = None,
+    tke_probe=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -339,7 +340,8 @@ def compute_vertical_K_profiles(
             return_tke_statement_trace=return_tke_statement_trace,
             tke_rhs_materialization=tke_rhs_materialization,
             tke_rhs_intermediate=tke_rhs_intermediate,
-            tke_budget_out=tke_budget_out)
+            tke_budget_out=tke_budget_out,
+            tke_probe=tke_probe)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -585,7 +587,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      return_tke_statement_trace: bool = False,
                      tke_rhs_materialization: str = "",
                      tke_rhs_intermediate: str = "",
-                     tke_budget_out: list | None = None):
+                     tke_budget_out: list | None = None,
+                     tke_probe=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -974,6 +977,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     leading + (z_coord.n_levels - 1,),
                     tke_cfg.tke_background, dtype=T_data.dtype,
                 )
+            if tke_probe is not None and (
+                    getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
+                    == "post_mixing_veros"):
+                raise NotImplementedError(
+                    "--probe-tke-transplant is wired on the pre-mixing "
+                    "prognostic TKE step only")
             if (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
                     == "post_mixing_veros"):
                 # POST-MIXING Veros step order (buoyancy_timing=
@@ -1048,6 +1057,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 return_statement_trace=return_tke_statement_trace,
                 rhs_materialization=tke_rhs_materialization,
                 rhs_intermediate=tke_rhs_intermediate,
+                probe=tke_probe,
             )
             if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                         "current_subiteration") == "carried_previous_step"):
@@ -1068,6 +1078,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 # tracers inside the same trace (the --trd-columns dump).
                 tke_budget_out.append(tke_out.budget)
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
+        if tke_probe is not None:
+            raise NotImplementedError(
+                "--probe-tke-transplant needs the prognostic TKE step")
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
         # background and 3 iterations of the same backward-Euler step bring TKE
         # to within ~few % of the prognostic equilibrium for typical ocean

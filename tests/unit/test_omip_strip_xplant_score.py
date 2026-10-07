@@ -34,3 +34,11 @@ def test_fire_overlap():
     n = np.array([1, 1, 0, 0, 1], bool); o = np.array([1, 0, 1, 0, 0], bool)
     assert xs.fire_overlap(n, o) == (0.25, 0.5, 0.25)
     assert xs.fire_overlap(np.zeros(3, bool), np.zeros(3, bool)) == (0.0, 0.0, 0.0)
+
+
+def test_en_closure_residual_detects_a_shift():
+    rng = np.random.default_rng(0)
+    en = rng.uniform(1e-6, 1e-3, (5, 4)); l = rng.uniform(0.1, 10.0, (5, 4))
+    avm = np.maximum(0.1 * l * np.sqrt(en), 1.2e-4); dissl = np.sqrt(en) / l
+    assert xs.en_closure_residual(avm, en, dissl, 1.2e-4) < 1e-12
+    assert xs.en_closure_residual(avm[1:], en[:-1], dissl[:-1], 1.2e-4) > 0.1

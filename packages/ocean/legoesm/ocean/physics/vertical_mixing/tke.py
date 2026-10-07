@@ -2786,6 +2786,7 @@ def tke_vertical_mixing(
     return_statement_trace: bool = False,
     rhs_materialization: str = "",
     rhs_intermediate: str = "",
+    probe=None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -3468,11 +3469,37 @@ def tke_vertical_mixing(
             raise ValueError(
                 "preclosure_K_M_surface must match the horizontal TKE shape; "
                 f"got {preclosure_K_M_surface.shape} vs {tke_old.shape[:-1]}.")
+    # PROBE ONLY (--probe-tke-transplant): an oracle's per-step rows
+    # (e_post(kt), l(kt), l(kt-1)) replace OUR e after etau (modes "e",
+    # "el"), OUR step-entry mixing lengths (l(kt-1); "l", "el") and/or OUR
+    # final mixing lengths (l(kt); "l", "lf", "el") at fixed columns; NaN
+    # keeps ours.  One ordered host fetch per call.
+    _probe_rows = None
+    if probe is not None:
+        if int(n_iterations) != 1:
+            raise NotImplementedError(
+                "--probe-tke-transplant needs the prognostic single-solve step")
+        if _matrix_eval == "nemo_literal" or _carried_coeffs:
+            # those solves read carried dissl / avm operands, not l_eps / l_k
+            raise NotImplementedError(
+                "--probe-tke-transplant is wired on the factored, "
+                "current-subiteration TKE step only")
+        from jax.experimental import io_callback
+        _probe_rows = io_callback(
+            probe.fetch, jax.ShapeDtypeStruct((3,) + tuple(probe.shape), tke_curr.dtype),
+            ordered=True)
+
+    def _probe_put(x, row):
+        own = x[probe.j, probe.i, :]
+        return x.at[probe.j, probe.i, :].set(jnp.where(jnp.isnan(row), own, row))
+
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
             dz_cell=dz_cell_mxl, boundary_cap=boundary_cap,
             l_surface_anchor=_l_anchor)
+        if _probe_rows is not None and probe.mode in ("l", "el"):
+            l_k, l_eps = _probe_put(l_k, _probe_rows[2]), _probe_put(l_eps, _probe_rows[2])
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
             z_interface=z_interface, N2_prandtl=N2b,
@@ -3552,11 +3579,16 @@ def tke_vertical_mixing(
             tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg,
             ice_frac=ice_frac)
 
+    if _probe_rows is not None and probe.mode in ("e", "el"):
+        tke_curr = _probe_put(tke_curr, _probe_rows[0])
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
         tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
         dz_cell=dz_cell_mxl, boundary_cap=boundary_cap,
         l_surface_anchor=_l_anchor)
+    if _probe_rows is not None and probe.mode in ("l", "lf", "el"):
+        l_k_final = _probe_put(l_k_final, _probe_rows[1])
+        l_eps_final = _probe_put(l_eps_final, _probe_rows[1])
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
         z_interface=z_interface, N2_prandtl=N2b,

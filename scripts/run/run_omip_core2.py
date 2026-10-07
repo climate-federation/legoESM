@@ -6713,19 +6713,42 @@ class _KTransplant:
                                f"oracle rows for {n_steps} model steps")
 
 
+class _TKETransplant(_KTransplant):
+    """PROBE ONLY: an oracle's per-step TKE ``en`` and mixing length ``l``
+    (from ``dissl = sqrt(en)/l``, nn_mxl=2) at fixed T columns.  Each fetch
+    returns (en(kt), l(kt), l(kt-1)); mode "e" replaces our post-solve TKE,
+    "l" our step-entry (l(kt-1)) and final (l(kt)) mixing lengths, "lf" the
+    final length only, "el" energy and both lengths (joint control)."""
+
+    MODES = ("e", "l", "lf", "el")
+
+    def __init__(self, j, i, en, dissl, mode):
+        if mode not in self.MODES:
+            raise ValueError(f"unknown --probe-tke-transplant mode {mode!r}")
+        en, dissl = np.asarray(en, dtype=np.float64), np.asarray(dissl, dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            l = np.where(dissl > 0.0, np.sqrt(np.maximum(en, 0.0)) / dissl, np.nan)
+        l_prev = np.concatenate([np.full_like(l[:1], np.nan), l[:-1]])
+        self.j, self.i = np.asarray(j), np.asarray(i)
+        self._rows = np.stack([en, l, l_prev], axis=1)
+        self.shape = self._rows.shape[2:]
+        self.mode = mode
+        self.step = 0
+
+
 def load_nemo_strip_transplant(path, lat2d, lon2d, land_mask, n_iface,
                                lon0=225.0, lon1=256.0, halflat=2.0,
-                               j0=180, i0=153):
+                               j0=180, i0=153, names=("avt", "avm", "avt_k")):
     """NEMO every-step strip avt/avm (eqs1ts_W) -> (j, i, avt, avm) on OUR
     T columns.  Ours (j, i) = strip (j - j0, i - i0); ours interface k =
-    NEMO w-level k + 1; NEMO fill (>1e15) -> NaN.  Returns (j, i, avt, avm,
-    avt_k)."""
+    NEMO w-level k + 1; NEMO fill (>1e15) -> NaN.  Returns (j, i, *fields in
+    ``names`` order)."""
     import netCDF4 as nc
     d = nc.Dataset(path)
-    avt, avm, avt_k = (np.asarray(d[v][:], dtype=np.float64) for v in ("avt", "avm", "avt_k"))
-    for x in (avt, avm, avt_k):
+    fields = [np.asarray(d[v][:], dtype=np.float64) for v in names]
+    for x in fields:
         x[np.abs(x) > 1e15] = np.nan
-    nt, nk, nj, ni = avt.shape
+    nt, nk, nj, ni = fields[0].shape
     lonc = np.asarray(lon2d) % 360.0
     sel = ((np.asarray(land_mask) > 0.5) & (np.abs(np.asarray(lat2d)) <= halflat)
            & (lonc >= lon0) & (lonc <= lon1))
@@ -6739,7 +6762,7 @@ def load_nemo_strip_transplant(path, lat2d, lon2d, land_mask, n_iface,
         raise SystemExit(f"--probe-k-transplant: model has {n_iface} interfaces, "
                          f"oracle file {nk} w-levels")
     take = lambda x: x[:, 1:n_iface + 1][:, :, sj, si].transpose(0, 2, 1)
-    return jj, ii, take(avt), take(avm), take(avt_k)
+    return (jj, ii) + tuple(take(x) for x in fields)
 
 
 class _ZdfTrendAccumulator:
@@ -8161,6 +8184,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "every-step avt/avm from an eqs1ts_W file; avt_k = NEMO "
                         "closure + our IWM, noncl = our closure + NEMO avt-avt_k "
                         "(heat only). Tripole only.")
+    p.add_argument("--probe-tke-transplant", nargs=2, default=None,
+                   metavar=("NEMO_EN_W", "MODE"),
+                   help="PROBE ONLY: in the equatorial strip columns (2S-2N "
+                        "225-256E) replace our post-solve TKE (MODE e), our "
+                        "step-entry + final mixing lengths (l), the final length "
+                        "only (lf) or all three (el) every step with NEMO's en_k / "
+                        "sqrt(en_k)/dissl_k from an ORCA1EN eqs1ts_W file. "
+                        "Tripole, prognostic TKE only.")
     p.add_argument("--trd-columns", type=float, nargs=3, default=None,
                    metavar=("LON0", "LON1", "HALFLAT"),
                    help="With --trd-accumulate: also store EVERY step's post-"
@@ -8718,6 +8749,16 @@ def main() -> int:
             # scan path returns before the hook is attached
             raise SystemExit("--probe-k-transplant needs a fresh run without "
                              "--scan-block / --restart-from")
+    if args.probe_tke_transplant is not None:
+        if args.grid != "tripole" or args.tripole_vmix != "tke" or not args.tke_prognostic:
+            raise SystemExit("--probe-tke-transplant needs --grid tripole "
+                             "--tripole-vmix tke --tke-prognostic")
+        if args.probe_tke_transplant[1] not in _TKETransplant.MODES:
+            raise SystemExit("--probe-tke-transplant MODE must be one of "
+                             + ", ".join(_TKETransplant.MODES))
+        if int(args.scan_block) > 0 or args.restart_from or args.probe_k_transplant:
+            raise SystemExit("--probe-tke-transplant needs a fresh run without "
+                             "--scan-block / --restart-from / --probe-k-transplant")
     if args.trd_accumulate and args.grid != "tripole":
         raise SystemExit("--trd-accumulate is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")
@@ -11460,6 +11501,14 @@ def main() -> int:
         model._k_transplant = _KTransplant(_xj, _xi, _xt, _xa, _xm, avt_k=_xk)
         print(f"[probe] --probe-k-transplant {_xm}: {_xj.size} columns, "
               f"{_xt.shape[0]} steps from {_xp}")
+    if args.probe_tke_transplant is not None:
+        _ep, _em = args.probe_tke_transplant
+        _ej, _ei, _een, _edl = load_nemo_strip_transplant(
+            _ep, lat2d, lon2d, state.land_mask.data, args.nlev - 1,
+            names=("en_k", "dissl_k"))
+        model._tke_transplant = _TKETransplant(_ej, _ei, _een, _edl, _em)
+        print(f"[probe] --probe-tke-transplant {_em}: {_ej.size} columns, "
+              f"{_een.shape[0]} steps from {_ep}")
     # Device-resident bathymetry for the per-step thickness (codex: the
     # tripole builder returns NumPy; converting it every step is an upload).
     _Hb_dev = jnp.asarray(H_bathy) if args.state_accumulate else None
@@ -11489,6 +11538,7 @@ def main() -> int:
                         _lv_now, _ah)._replace(C_smag_lap=_cs)
                     _trd_keep = getattr(model, "_trd_callback", None)
                     _xplant_keep = getattr(model, "_k_transplant", None)
+                    _tplant_keep = getattr(model, "_tke_transplant", None)
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
                         model.config._replace(lateral_viscosity=_lv_new),
@@ -11497,6 +11547,8 @@ def main() -> int:
                     model._trd_callback = _trd_keep
                     if _xplant_keep is not None:
                         model._k_transplant = _xplant_keep
+                    if _tplant_keep is not None:
+                        model._tke_transplant = _tplant_keep
                     if _trd_keep is not None and getattr(_trd_keep, "_col", None) is not None:
                         model._col_callback = _trd_keep.col
                     # Free the previous segment's compiled step before the new
@@ -12426,11 +12478,11 @@ def main() -> int:
               f"gathers={_pers_res.leaf_full_gathers} "
               f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
               f"drag while active + diag-cadence u,v).", flush=True)
-    _xp_end = getattr(model, "_k_transplant", None)
+    _xp_end = getattr(model, "_k_transplant", None) or getattr(model, "_tke_transplant", None)
     if _xp_end is not None:
         jax.effects_barrier()
         _xp_end.check_consumed(n_steps)
-        print(f"[probe] --probe-k-transplant served {_xp_end.step} rows "
+        print(f"[probe] transplant served {_xp_end.step} rows "
               f"for {n_steps} steps", flush=True)
     print(f"[done] {n_steps - start_step} steps this leg (absolute step "
           f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d, edge_latlon=_edge_ll)}")
