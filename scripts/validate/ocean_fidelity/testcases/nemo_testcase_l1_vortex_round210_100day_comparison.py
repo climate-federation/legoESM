@@ -147,26 +147,25 @@ def sanity_check_kt1_10(
     }
 
 
-def run_lego(case: str, lego_dir: Path) -> dict:
-    """Step the certified card 3000 times; snapshot every 30th (daily)."""
+def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
+                  snapshot_days=range(1, N_DAYS + 1)) -> dict:
+    """Step one resolved card for 100 days through the production closure."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
-    )
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_nemo_testcase_card,
     )
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    card = build_nemo_testcase_card(case)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        **({} if model_hooks is None else {"_nemo_ws_test_hooks": model_hooks}))
     state = card.recipe.initial_state
     lego_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_days = frozenset(int(day) for day in snapshot_days)
     day9_T = None
     for step in range(1, N_DAYS * STEPS_PER_DAY + 1):
         state = model.step(state, dt=card.dt_s)
@@ -174,13 +173,22 @@ def run_lego(case: str, lego_dir: Path) -> dict:
             # The kt=10 "before" entry in the ladder is the state after 9
             # completed steps; keep it for the sanity cross-check.
             day9_T = np.asarray(state.T.data, dtype=np.float64).copy()
-        if step % STEPS_PER_DAY == 0:
+        if step % STEPS_PER_DAY == 0 and step // STEPS_PER_DAY in snapshot_days:
             day = step // STEPS_PER_DAY
             fields = lego_fields(state)
             np.savez(lego_dir / f"day{day:03d}.npz",
                      **{k: np.asarray(v, dtype=np.float64)
                         for k, v in fields.items()})
     return {"card": card, "day9_T": day9_T}
+
+
+def run_lego(case: str, lego_dir: Path) -> dict:
+    """Step the certified named card 3000 times; snapshot every day."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    return run_lego_card(build_nemo_testcase_card(case), lego_dir)
 
 
 def load_nemo(nemo_dir: Path, day: int, nlev: int) -> dict:
