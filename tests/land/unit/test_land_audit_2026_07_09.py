@@ -109,12 +109,12 @@ class TestSoilHydraulicsGrad(unittest.TestCase):
 class TestRadiativeTransferUV(unittest.TestCase):
     """F6: absorbed-UV beam/diffuse partition + energy conservation."""
 
-    def _rt(self, PAR_dir, PAR_diff):
+    def _rt(self, PAR_dir, PAR_diff, UV=20.0):
         from legoesm.land.canopy.radiative_transfer import canopy_shortwave_rt
         a = jnp.array
         return canopy_shortwave_rt(
             PAR_dir=a(PAR_dir), PAR_diff=a(PAR_diff), NIR_dir=a(PAR_dir), NIR_diff=a(PAR_diff),
-            UV=a(20.0), SZA=a(30.0), LAI=a(3.0), CI=a(0.8), ALB_VIS=a(0.1), ALB_NIR=a(0.3),
+            UV=a(UV), SZA=a(30.0), LAI=a(3.0), CI=a(0.8), ALB_VIS=a(0.1), ALB_NIR=a(0.3),
             Vcmax25_C3_leaf=a(60.0), Vcmax25_C4_leaf=a(0.0), kn=a(0.3),
         )
 
@@ -127,6 +127,10 @@ class TestRadiativeTransferUV(unittest.TestCase):
         total_abs = float(out_beam.ASW_Sun + out_beam.ASW_Sh + out_beam.ASW_Soil)
         self.assertGreater(total_abs, 0.0)
         self.assertTrue(np.isfinite(total_abs))
+        no_uv = self._rt(200.0, 0.0, UV=0.0)
+        leaf_uv = float(out_beam.ASW_Sun + out_beam.ASW_Sh
+                        - no_uv.ASW_Sun - no_uv.ASW_Sh)
+        self.assertGreater(leaf_uv, 1.0)
 
     def test_uv_partition_responds_to_beam_fraction(self):
         # All-beam vs all-diffuse (same total): leaf+soil UV split must differ,
