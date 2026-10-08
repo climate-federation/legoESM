@@ -4044,11 +4044,11 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
+    fold = getattr(grid, "fold", None)
     if _north_fold_density:
-        fold = getattr(grid, "fold", None)
-        if fold is None or not bool(getattr(fold, "is_active", False)):
-            raise ValueError(
-                "north-fold HPG density association requires an active fold")
+        # dynhpg.f90:414-416,445-453 reads jj+1 at V points.  At NEMO's
+        # northern fold that neighbour is the T-point fold ghost supplied by
+        # lbc_lnk, not a cyclic roll of the final owned row.
         source = fold_ghost_source_T(rhd, fold)[0]
         folded = source[fold.perm_T]
         nmask = north_fold_mask(grid)
@@ -4178,19 +4178,25 @@ def nemo_hpg_sco_literal_cgrid(
     *,
     return_components: bool = False,
     _source_round: bool = True,
-    _north_fold_density: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
-    if isinstance(rhd, jax.core.Tracer):
+    fold = getattr(grid, "fold", None)
+    north_fold_density = (
+        fold is not None and bool(getattr(fold, "is_active", False)))
+    # A FoldDescriptor carries array permutations and Python layout flags.
+    # Passing it through this helper's inner JIT would trace those flags as
+    # data.  Active-fold calls therefore use the implementation directly;
+    # the production model's outer JIT still compiles the whole operator.
+    if north_fold_density or isinstance(rhd, jax.core.Tracer):
         return _nemo_hpg_sco_literal_cgrid_impl(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
-            _north_fold_density=_north_fold_density)
+            _north_fold_density=north_fold_density)
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
-            _north_fold_density=_north_fold_density)
+            _north_fold_density=north_fold_density)
 
 
 def partial_cell_pgf_correction_x(

@@ -12,10 +12,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[4]
 BASE = next((a for a in sys.argv[1:] if not a.startswith("-")), "HEAD~1")
 APPLY = "--apply" in sys.argv
+WORKTREE = "--worktree" in sys.argv
 
-FILES = subprocess.run(["git", "-C", str(REPO), "diff", "--name-only",
-                        BASE, "HEAD"], capture_output=True, text=True,
-                       check=True).stdout.split()
+diff_range = [BASE] if WORKTREE else [BASE, "HEAD"]
+FILES = subprocess.run(
+    ["git", "-C", str(REPO), "diff", "--name-only", *diff_range],
+    capture_output=True, text=True, check=True,
+).stdout.split()
 FILES = [f for f in FILES if f.endswith(".py")
          and subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
                              f"{BASE}:{f}"], capture_output=True).returncode == 0]

@@ -24,7 +24,11 @@ from legoesm.ocean.eos import (
     nemo_teos10_density_anomaly_ratio,
 )
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.grids.latlon import create_beta_plane_cgrid_geometry, create_latlon_grid
+from legoesm.grids.latlon import (
+    FoldDescriptor,
+    create_beta_plane_cgrid_geometry,
+    create_latlon_grid,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_lock_exchange_zco_card
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
@@ -374,6 +378,46 @@ def test_nemo_hpg_literal_component_exposure_is_the_production_sum():
         np.asarray(value) for value in values)
     np.testing.assert_array_equal(sum_u, zhpi_u + zuap_u)
     np.testing.assert_array_equal(sum_v, zhpj_v + zvap_v)
+
+
+def test_nemo_hpg_literal_uses_t_fold_ghost_for_north_density():
+    """The active-fold production path reads NEMO's T-fold north neighbour."""
+    set_policy(PrecisionPolicy.fp64())
+    base = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=7.0, dy_m=11.0, f0=0.0, beta=0.0,
+        cartesian_pseudo_lat=True)
+    perm = jnp.asarray([3, 2, 1, 0], dtype=jnp.int32)
+    fold = FoldDescriptor(
+        is_active=True, fold_j=2, cap_j=2, perm_T=perm, perm_v=perm,
+        vector_sign_u=-1.0, vector_sign_v=-1.0,
+        pivot_row_stored=True,
+    )
+    grid = base._replace(fold=fold)
+    rhd = jnp.asarray(
+        np.arange(24, dtype=np.float64).reshape(3, 4, 2) / 19.0)
+    e3w = jnp.ones_like(rhd)
+    gdept = jnp.broadcast_to(
+        jnp.asarray([1.0, 2.0], dtype=jnp.float64), rhd.shape)
+
+    folded = nemo_hpg_sco_literal_cgrid(
+        rhd, e3w, gdept, grid, 8.0, return_components=True)
+    compiled_folded = jax.jit(
+        lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+            r, e, d, grid, 8.0, return_components=True)
+    )(rhd, e3w, gdept)
+    control_rhd = rhd.at[0].set(rhd[-2][perm])
+    control = nemo_hpg_sco_literal_cgrid(
+        control_rhd, e3w, gdept, base, 8.0, return_components=True)
+    pre_fix = nemo_hpg_sco_literal_cgrid(
+        rhd, e3w, gdept, base, 8.0, return_components=True)
+
+    # Redundant V layout: index -1 is the northmost native V row.
+    np.testing.assert_array_equal(
+        np.asarray(folded[3][-1]), np.asarray(control[3][-1]))
+    np.testing.assert_array_equal(
+        np.asarray(compiled_folded[3][-1]), np.asarray(folded[3][-1]))
+    assert not np.array_equal(
+        np.asarray(folded[3][-1]), np.asarray(pre_fix[3][-1]))
 
 
 def test_nemo_hpg_consumer_keeps_direct_acceleration_bits():

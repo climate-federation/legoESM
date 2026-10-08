@@ -19,7 +19,13 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 )
 
 
-PLANTS = ("none", "operand-closure", "exact-row-loss", "false-majority")
+PLANTS = (
+    "none",
+    "operand-closure",
+    "exact-row-loss",
+    "false-majority",
+    "score-equal-vote",
+)
 
 
 class GateError(RuntimeError):
@@ -50,6 +56,15 @@ def _row(document: dict, target: tuple[int, str, str]) -> dict:
 def _metric_direction(before: dict, after: dict, metric: str) -> str:
     delta = float(after[metric]) - float(before[metric])
     return "toward" if delta < 0.0 else "away" if delta > 0.0 else "equal"
+
+
+def _strict_score_moved_majority(
+    rms: dict[str, int], *, include_equal: bool = False,
+) -> bool:
+    denominator = rms["toward"] + rms["away"]
+    if include_equal:
+        denominator += rms["equal"]
+    return rms["toward"] * 2 > denominator
 
 
 def classify(
@@ -134,8 +149,19 @@ def classify(
             ssh_target,
         )
         unchanged = comparison["moved_row_count"] == 0
-        strict_majority = (
-            rms["toward"] * 2 > comparison["moved_row_count"])
+        rms_moved = rms["toward"] + rms["away"]
+        require(
+            rms_moved + rms["equal"] == comparison["moved_row_count"],
+            f"{name} RMS score-moved census is incomplete",
+        )
+        # Decision 96 counts rows whose score moved.  A row whose bits moved
+        # but whose RMS is unchanged is registered, but is not a vote.
+        strict_majority = _strict_score_moved_majority(
+            rms,
+            include_equal=(
+                plant == "score-equal-vote"
+                and name == "rung0_independent"),
+        )
         ladder_eligible = (
             (unchanged or strict_majority)
             and first_direction in ("toward", "equal")
@@ -154,9 +180,12 @@ def classify(
                 "direction": _metric_direction(before_ssh, after_ssh, "max_abs"),
             },
             "byte_unchanged": unchanged,
+            "rms_score_moved_row_count": rms_moved,
             "strict_majority_toward": strict_majority,
             "decision96_eligible": ladder_eligible,
         }
+
+    require(eligible, "atomic unit is not Decision-96 eligible")
 
     result = {
         "format": "nemo-testcase-l4-orca2-round184-atomic-hpg-unit-v1",
@@ -178,8 +207,6 @@ def classify(
             "LANDED_ATOMIC_HPG_UNIT" if eligible
             else "HELD_ATOMIC_HPG_UNIT_NOT_NET_IMPROVEMENT"),
     }
-    if plant != "none":
-        require(False, f"{plant} plant stayed green")
     return result
 
 
