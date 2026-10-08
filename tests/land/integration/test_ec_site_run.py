@@ -660,3 +660,21 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
                         chunk=96, vcmax_profile="coordination")
     assert np.isfinite(m_co["GPP"]["rmse"])
     assert m_co["GPP"]["bias"] != m_kn["GPP"]["bias"]
+
+
+def test_run_site_vcmax25_source(tmp_path, capsys):
+    """--vcmax25-source replaces the driver's C3 leaf Vcmax25 with a constant
+    (whole-record mean or PFT/climate lookup) and refuses unknown values."""
+    import numpy as np
+    import pytest
+    driver_nc = str(tmp_path / "SYN-Test_driver_v2.nc")
+    _make_driver(driver_nc)
+    mod = _load_driver_module()
+    with pytest.raises(ValueError, match="vcmax25_source"):
+        mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o0"), chunk=96,
+                     vcmax25_source="calibrated")
+    for src in ("mean", "lookup"):
+        m = mod.run_site(driver_nc, "diagnostic", str(tmp_path / src),
+                         chunk=96, vcmax25_source=src)
+        assert np.isfinite(m["GPP"]["rmse"])
+        assert f"vcmax25-source={src}" in capsys.readouterr().out

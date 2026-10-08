@@ -10,8 +10,8 @@ compute fluxes itself:
 - a predicted Medlyn slope ``g1 = xi`` for ``stomata.medlyn_gs``.
 
 The instantaneous ("fast") temperature response stays in the FvCB kernel; this
-module handles only the slow (acclimated) optimum, evaluated at running daytime
-means of the drivers (PPFD-gain-weighted means, see
+module handles only the slow (acclimated) optimum, evaluated at whole-day
+running means of the drivers (plain exponential moving averages, see
 :func:`advance_pmodel_acclim`).  Everything is closed form — no ci iteration —
 and smooth, so the whole path is differentiable.
 
@@ -96,7 +96,7 @@ __physics_contract__ = {
         "least-cost chi = Gamma*/ca + (1-Gamma*/ca)*xi/(xi+sqrt(D)) with "
         "xi = sqrt(beta*(K+Gamma*)/(1.6*eta*)), Wang-2017 Jmax limitation, "
         "and coordination Vcmax = phi0(T)*Iabs*mj'/mc — evaluated at "
-        "PPFD-gain-weighted running daytime means of the drivers and "
+        "whole-day running means (plain EMA) of the drivers and "
         "normalised to 25 degC with the host kernel's Kattge & Knorr "
         "response. Supplies leaf-top Vcmax25, rjv25 = Jmax25/Vcmax25 and a "
         "predicted Medlyn slope g1 = xi to the existing FvCB/Medlyn path."
@@ -126,8 +126,9 @@ __physics_contract__ = {
         "tests/land/unit/test_p_model.py: chi in (0,1) and decreasing in "
         "VPD; g1 ~ 2-6 kPa^0.5 at 25 degC / 1 kPa / 400 ppm / sea level; "
         "capacities -> 0 smoothly as Iabs -> 0 with finite rjv25 and finite "
-        "gradients; rjv25 independent of kphio and Iabs; gain-weighted "
-        "means hold through polar night. tests/land/unit/"
+        "gradients; rjv25 independent of kphio and Iabs; the running means "
+        "converge to the 24-hour average and stay finite through polar "
+        "night. tests/land/unit/"
         "test_p_model_faithful.py: rel-1e-9 scalar-oracle pin."
     ),
 }
@@ -139,7 +140,6 @@ __param_spec__ = {
             "vpd_min_pa": "numerics: smooth floor under sqrt(VPD)",
             "mj_floor_eps": "numerics: softplus floor offset above c*",
             "mj_floor_width": "numerics: softplus floor width (AD safety)",
-            "ppfd_ref_floor": "numerics: gain-denominator floor",
             "init_ppfd": "initialisation constant, not a physical closure",
             "init_vpd_pa": "initialisation constant, not a physical closure",
             "init_co2_ppm": "initialisation constant, not a physical closure",
@@ -240,10 +240,9 @@ class PModelConfig(NamedTuple):
     vpd_min_pa: float = 50.0     # [Pa] smooth floor under sqrt(D)
     mj_floor_eps: float = 0.01   # [-] mj kept above C_STAR + eps
     mj_floor_width: float = 0.01  # [-] softplus width of that floor
-    ppfd_ref_floor: float = 1.0  # [umol/m^2/s] gain-denominator floor
     # --- initialisation constants (recorded here, no hidden choice) ---
-    init_ppfd: float = 400.0     # [umol/m^2/s] daytime PPFD cold-start
-    init_vpd_pa: float = 800.0   # [Pa] daytime VPD cold-start
+    init_ppfd: float = 400.0     # [umol/m^2/s] light-mean cold-start
+    init_vpd_pa: float = 800.0   # [Pa] VPD-mean cold-start
     init_co2_ppm: float = 400.0  # [umol/mol] CO2 cold-start (driver may override)
 
 
@@ -254,17 +253,13 @@ VALID_G1_SOURCES = ("table", "p_model")
 
 
 class PModelAcclimState(NamedTuple):
-    """Running daytime-mean acclimation drivers, all shape ``(ncol,)``.
+    """Whole-day running-mean acclimation drivers, all shape ``(ncol,)``.
 
-    ``iabs_mean``/``t_mean_K``/``vpd_mean_pa``/``co2_mean_ppm`` are
-    PPFD-gain-weighted means (update gain ~ instantaneous PPFD over the HELD
-    daytime-mean PPFD, so night steps leave them held rather than decayed — a
-    daytime-mean proxy); ``ps_ema`` is a plain EMA (pressure barely varies
-    diurnally).  The gain reference is ``iabs_mean`` itself: because it is
-    held (not decayed) through darkness, the first sunlit step after a polar
-    night sees gain ~ dt/tau — a plain-EMA-rate resumption — instead of the
-    near-1 jump a decaying reference would give (which would erase the
-    acclimated memory in one step).
+    Every field is a plain exponential moving average over day AND night
+    with e-folding time ``PModelConfig.tau_acclim_s``
+    (:func:`advance_pmodel_acclim`); ``iabs_mean`` is the mean of the light
+    the caller passes (sunlit-leaf absorbed PAR under the two-leaf scheme),
+    night zeros included.
     """
 
     iabs_mean: jax.Array
@@ -605,27 +600,21 @@ def advance_pmodel_acclim(
     cfg: PModelConfig,
     dt: float,
 ) -> PModelAcclimState:
-    """One acclimation step: PPFD-gain-weighted running daytime means.
+    """One acclimation step: whole-day running means of every driver.
 
-    The per-step gain is ``1 - exp(-dt*w / (tau*w_ref))`` with ``w`` the
-    instantaneous PPFD and ``w_ref`` the HELD daytime-mean PPFD
-    (``iabs_mean``) — smooth, in [0, 1), ~the plain EMA gain dt/tau in steady
-    daylight (w ~ w_ref), and exactly 0 at night so dark periods HOLD the
-    last daytime mean instead of decaying it (polar night stays finite; no
-    ``max`` subgradient anywhere).  Using the held mean as the reference —
-    not a plain PPFD EMA, which decays through the night — keeps the
-    first-sunlight gain after a long dark spell at ~dt/tau instead of ~1, so
-    a polar sunrise re-acclimates on the tau timescale rather than in one
-    step.  Pressure keeps a plain EMA.
+    A plain exponential moving average with e-folding time ``tau_acclim_s``
+    — every timestep, day and night, carries the same weight, so the means
+    are the 24-hour (multi-day) averages the optimality literature sizes
+    capacities for (daily / weekly / monthly means; Stocker et al. 2020).
+    The light mean therefore includes the zero night values and decays
+    toward zero through a polar night (capacities -> 0, finite).
     """
-    alpha = dt / cfg.tau_acclim_s
-    w_ref = acclim.iabs_mean + cfg.ppfd_ref_floor
-    gain = 1.0 - jnp.exp(-alpha * ppfd / w_ref)
+    gain = 1.0 - jnp.exp(-dt / cfg.tau_acclim_s)
     step = lambda mean, x: mean + gain * (x - mean)  # noqa: E731
     return PModelAcclimState(
         iabs_mean=step(acclim.iabs_mean, ppfd),
         t_mean_K=step(acclim.t_mean_K, T_K),
         vpd_mean_pa=step(acclim.vpd_mean_pa, vpd_pa),
         co2_mean_ppm=step(acclim.co2_mean_ppm, co2_ppm),
-        ps_ema=acclim.ps_ema + alpha * (ps_pa - acclim.ps_ema),
+        ps_ema=step(acclim.ps_ema, ps_pa),
     )

@@ -434,10 +434,11 @@ def compute_two_leaf_canopy_fluxes(
                 rjv25 = _caps.rjv25
             Vc4_leaf = _caps4.vcmax25_c4_leaf
         if cc.g1_source == "p_model":
-            # Predicted slopes replace the tabulated C3 AND C4 slopes; the
-            # soil-moisture stress below multiplies them exactly as it does
-            # the tabulated ones (deliberate: one consistent stress path) —
-            # except under phydro, where that stress is replaced entirely.
+            # Predicted slopes replace the tabulated C3 AND C4 slopes.  They
+            # are NOT multiplied by the empirical soil-moisture stress below
+            # (rpmodel structure: the stress scales the capacities, hence A
+            # and with it gs, at unchanged chi); under phydro that stress is
+            # replaced entirely.
             if _phydro_on:
                 from legoesm.land.p_model import optimal_chi as _ochi
                 _, _, _, _gs_pa, _ = _ochi(
@@ -472,7 +473,11 @@ def compute_two_leaf_canopy_fluxes(
 
     Vc3_leaf_stressed = Vc3_leaf * fStress_vcmax
     Vc4_leaf_stressed = Vc4_leaf * fStress_vcmax
-    m_eff  = m_C3  * fStress_vcmax
+    # Stomatal-slope stress: the tabulated slopes are stressed like Vcmax;
+    # P-model-predicted slopes are not (see the g1_source dispatch above).
+    _slope_stress = (jnp.ones_like(w_frac_rz) if cc.g1_source == "p_model"
+                     else fStress_vcmax)
+    m_eff  = m_C3  * _slope_stress
     # The Ball-Berry INTERCEPT b0 is the cuticular / residual minimum conductance.
     # ``cc.stress_b0`` (static Python bool) controls whether soil-moisture stress
     # down-regulates it too: True = legacy (b0 also stressed); False keeps the
@@ -482,7 +487,7 @@ def compute_two_leaf_canopy_fluxes(
     # traced select.
     _b0_stress = fStress_vcmax if cc.stress_b0 else 1.0
     b0_eff = b0_C3 * _b0_stress
-    m_mix  = (1.0 - fC4) * m_eff  + fC4 * m_C4  * fStress_vcmax
+    m_mix  = (1.0 - fC4) * m_eff  + fC4 * m_C4  * _slope_stress
     b0_mix = (1.0 - fC4) * b0_eff + fC4 * b0_C4 * _b0_stress
 
     # ---- Aerodynamics ----

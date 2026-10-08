@@ -221,8 +221,9 @@ def test_non_vacuity_perturbed_oracle_fails():
 
 
 def test_ema_recurrence_exact():
-    # The acclimation update is the documented linear recurrence: one daylight
-    # step from a known state reproduces the closed-form convex combination.
+    # The acclimation update is the documented plain EMA: one step from a
+    # known state reproduces the closed-form convex combination, with the
+    # same gain 1 - exp(-dt/tau) for every driver (no light weighting).
     cfg = pm.PModelConfig()
     s = _mk_state(293.15, 900.0, 400.0, _O_PATM, iabs=300.0)
     dt = 1800.0
@@ -230,8 +231,7 @@ def test_ema_recurrence_exact():
         s, T_K=jnp.full((1,), 300.0), ppfd=jnp.full((1,), 600.0),
         vpd_pa=jnp.full((1,), 1200.0), co2_ppm=jnp.full((1,), 410.0),
         ps_pa=jnp.full((1,), _O_PATM), cfg=cfg, dt=dt)
-    alpha = dt / cfg.tau_acclim_s
-    gain = 1.0 - math.exp(-alpha * 600.0 / (300.0 + cfg.ppfd_ref_floor))
+    gain = 1.0 - math.exp(-dt / cfg.tau_acclim_s)
     assert float(s2.iabs_mean[0]) == pytest.approx(
         300.0 + gain * (600.0 - 300.0), rel=1e-12)
     assert float(s2.t_mean_K[0]) == pytest.approx(

@@ -2,7 +2,7 @@
 
 Covers the closed-form optimum (chi regime + monotonicity, predicted Medlyn
 slope in the observed range, capacity positivity and smooth low-light decay,
-the phi0/Iabs-invariance of rjv25), the PPFD-gain-weighted acclimation state
+the phi0/Iabs-invariance of rjv25), the whole-day-mean acclimation state
 (night hold, polar-night finiteness), differentiability including the mj -> c*
 floor neighborhood, and the fail-early no-state error.
 """
@@ -101,7 +101,10 @@ def test_kphio_temp_off_is_constant_phi0():
     assert float(caps_ref.vcmax25_leaf[0]) > 0.0
 
 
-def test_night_steps_hold_daytime_means():
+def test_polar_night_decays_light_mean_and_stays_finite():
+    """Whole-day means: three months of darkness pull every mean to the dark
+    values (the light mean to ~0) with finite capacities, and one bright step
+    afterwards moves the means only at the EMA rate dt/tau."""
     cfg = pm.PModelConfig()
     s = _state(t_c=20.0, vpd=900.0)
     dark = dict(T_K=jnp.full((1,), constants.T_freeze - 30.0),
@@ -109,26 +112,23 @@ def test_night_steps_hold_daytime_means():
                 vpd_pa=jnp.full((1,), 5.0),
                 co2_ppm=jnp.full((1,), 400.0),
                 ps_pa=jnp.full((1,), constants.p_atm_std))
-    # Three months of polar night, daily steps.
-    for _ in range(90):
+    for _ in range(90):  # daily steps, tau = 15 days
         s = pm.advance_pmodel_acclim(s, cfg=cfg, dt=86400.0, **dark)
-    assert float(s.t_mean_K[0]) == pytest.approx(constants.T_freeze + 20.0)
-    assert float(s.vpd_mean_pa[0]) == pytest.approx(900.0)
-    assert float(s.co2_mean_ppm[0]) == pytest.approx(400.0)
+    assert float(s.iabs_mean[0]) < 2.0
+    assert abs(float(s.t_mean_K[0]) - (constants.T_freeze - 30.0)) < 0.5
     caps = pm.acclimated_capacities(s, cfg)
     assert np.isfinite(float(caps.vcmax25_leaf[0]))
+    assert np.isfinite(float(caps.rjv25[0]))
     assert np.isfinite(float(caps.g1_kpa[0]))
-    # Polar SUNRISE: the first bright step after months of darkness moves the
-    # held mean at ~the EMA rate (gain ~ dt*w/(tau*w_ref)), not in one jump —
-    # the gain reference is the HELD daytime-mean PPFD, which did not decay.
     bright = {**dark, "T_K": jnp.full((1,), constants.T_freeze + 5.0),
               "ppfd": jnp.full((1,), 1200.0)}
     s2 = pm.advance_pmodel_acclim(s, cfg=cfg, dt=1800.0, **bright)
-    moved = abs(float(s2.t_mean_K[0]) - float(s.t_mean_K[0]))
-    assert moved < 0.5  # a near-1 gain would move ~15 K toward the +5 C air
+    assert abs(float(s2.t_mean_K[0]) - float(s.t_mean_K[0])) < 0.5
 
 
-def test_daytime_means_track_daytime_not_diurnal_average():
+def test_means_track_the_whole_day_average():
+    """Day and night steps carry equal weight: the means converge to the
+    24-hour average of every driver, light included (night zeros count)."""
     cfg = pm.PModelConfig(tau_acclim_s=5.0 * 86400.0)
     s = _state(t_c=10.0, vpd=500.0)
     day = dict(T_K=jnp.full((1,), constants.T_freeze + 25.0),
@@ -142,9 +142,10 @@ def test_daytime_means_track_daytime_not_diurnal_average():
     for _ in range(60):
         for forc in (day, day, night, night):
             s = pm.advance_pmodel_acclim(s, cfg=cfg, dt=21600.0, **forc)
-    # Converges to the DAYTIME values, not the 24 h average (15 degC, 775 Pa).
-    assert abs(float(s.t_mean_K[0]) - (constants.T_freeze + 25.0)) < 1.0
-    assert abs(float(s.vpd_mean_pa[0]) - 1500.0) < 100.0
+    # 24 h averages: 15 degC, 775 Pa, 400 umol (NOT the daytime 25 / 1500 / 800).
+    assert abs(float(s.t_mean_K[0]) - (constants.T_freeze + 15.0)) < 1.5
+    assert abs(float(s.vpd_mean_pa[0]) - 775.0) < 110.0
+    assert abs(float(s.iabs_mean[0]) - 400.0) < 60.0
 
 
 def test_gradients_finite_including_mj_floor_neighborhood():

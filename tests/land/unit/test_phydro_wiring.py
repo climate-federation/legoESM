@@ -198,3 +198,65 @@ def test_two_leaf_acclimation_light_is_sunlit_leaf_apar():
     np.testing.assert_allclose(
         got, np.asarray(expected(sunlit_leaf_apar(f, None))), rtol=1e-5)
     assert not np.allclose(got, np.asarray(expected(_incident_ppfd(f))), rtol=1e-3)
+
+
+def _two_leaf_fluxes(cc, w_frac_rz, *, transpiration_stress="beta_theta",
+                     canopy_params=None):
+    """Direct two-leaf flux call at one sunny column (no soil model)."""
+    from legoesm.land.p_model import PModelConfig, init_pmodel_acclim
+    from legoesm.land.phydro import PhydroSupply
+    from legoesm.land.surface_scheme.two_leaf_canopy import (
+        compute_two_leaf_canopy_fluxes)
+    one = jnp.ones(1)
+    f = _forcing(1)._replace(sw_down=700.0 * one, cos_zenith=0.9 * one)
+    acclim = init_pmodel_acclim(
+        1, t_init_K=292.0, ps_init_pa=1.013e5, cfg=PModelConfig())
+    out = compute_two_leaf_canopy_fluxes(
+        T_soil_top=293.0 * one, forcing=f, canopy_config=cc,
+        land_config=MultiLayerLandConfig(
+            surface_scheme=cc, transpiration_stress=transpiration_stress),
+        canopy_params=canopy_params, w_frac_rz=w_frac_rz * one,
+        wind_speed=3.0 * one, wind_dir_x=one, wind_dir_y=0.0 * one,
+        soil_thermal_fn=lambda G, dt_: 293.0 * one, dt=1800.0,
+        w_frac_soil_evap=0.5 * one, pmodel_acclim=acclim,
+        phydro_supply=PhydroSupply(rsoil_leaf=20.0 * one, psi_s_mpa=-0.4 * one))
+    return np.asarray([out.gpp[0], out.lhflx[0], out.shflx[0]], dtype=float)
+
+
+def test_phydro_two_leaf_applies_no_empirical_stress():
+    """Under phydro the root-zone factor reaches NEITHER Vcmax25 nor the
+    stomatal slope/intercept: with the hydraulic supply and the soil-evaporation
+    stress held fixed, the solved GPP / LE / H are identical for a wet and a
+    dry root-zone factor.  The same change moves the beta_theta fluxes."""
+    cc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
+                      g1_source="p_model").validate()
+    wet = _two_leaf_fluxes(cc, 1.0, transpiration_stress="phydro")
+    dry = _two_leaf_fluxes(cc, 0.2, transpiration_stress="phydro")
+    assert np.all(np.isfinite(wet)) and wet[0] > 0.0
+    np.testing.assert_allclose(dry, wet, rtol=1e-9, atol=1e-9)
+    bt_wet, bt_dry = _two_leaf_fluxes(cc, 1.0), _two_leaf_fluxes(cc, 0.2)
+    assert bt_dry[0] < 0.6 * bt_wet[0]
+
+
+def test_least_cost_slope_is_not_stressed():
+    """rpmodel structure: the empirical stress scales the capacities only.
+    With prescribed capacities, a P-model slope under stress w gives exactly
+    the fluxes of a TABULATED slope g1/w under the same stress (whose stressed
+    product is g1) — i.e. the predicted slope itself was left unstressed."""
+    from types import SimpleNamespace
+    from legoesm.land.p_model import (
+        PModelConfig, acclimated_capacities, init_pmodel_acclim)
+    w = 0.5
+    g1 = acclimated_capacities(
+        init_pmodel_acclim(1, t_init_K=292.0, ps_init_pa=1.013e5,
+                           cfg=PModelConfig()), PModelConfig()).g1_kpa
+    pm_slope = _two_leaf_fluxes(
+        CanopyConfig(stomatal_model="medlyn", g1_source="p_model").validate(), w)
+    table = _two_leaf_fluxes(
+        CanopyConfig(stomatal_model="medlyn").validate(), w,
+        canopy_params=SimpleNamespace(m_C3=g1 / w))
+    np.testing.assert_allclose(pm_slope, table, rtol=1e-7)
+    stressed = _two_leaf_fluxes(
+        CanopyConfig(stomatal_model="medlyn").validate(), w,
+        canopy_params=SimpleNamespace(m_C3=g1))
+    assert not np.allclose(pm_slope, stressed, rtol=1e-3)

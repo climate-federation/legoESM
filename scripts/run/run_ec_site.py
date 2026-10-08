@@ -54,6 +54,7 @@ from legoesm.land.surface_scheme.patch_mosaic import (
     savanna_two_patch,
 )
 from legoesm.land.canopy.config import (
+    lookup_vcmax25,
     CLMMLCanopyConfig,
     VALID_CLM_ML_STOMATAL_MODELS,
     VALID_CLM_ML_TURBULENCE_SCHEMES,
@@ -239,6 +240,7 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
 
 
 _DEFAULT_TEXTURE_CSV = "scripts/cluster/ec_site/ec_site_soil_texture.csv"
+_VCMAX25_SOURCES = ("driver", "mean", "lookup")
 
 
 def _texture_lookup(site: str, csv_path: str) -> tuple[float, float] | None:
@@ -789,6 +791,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              canopy: str = "two_leaf", clm_pft: int | None = None,
              clmml_sai: float = _CLMML_SAI, u_min: float = _U_MIN,
              stomatal_m_scale: float = 1.0, vcmax_scale: float = 1.0,
+             vcmax25_source: str = "driver",
              clmml_turbulence: str = "rsl_bonan", spinup_steps: int = 0,
              interception: bool = False, clmml_stomatal: str = "ball_berry",
              clmml_vcmax25: float | None = None,
@@ -865,6 +868,23 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # mutates CLM module globals per step and cannot be vmapped.
         raise ValueError("--canopy clmml requires --mode prognostic")
     d = read_ec_site_driver(driver_nc)
+    # C3 leaf Vcmax25 fed to the PRESCRIBED-capacity lane.  The driver value is
+    # time-varying where the site file carries it; ``mean`` / ``lookup`` replace
+    # it with a constant so the baseline has no site-specific seasonal input.
+    # Applied AFTER the read, so the ``valid`` scoring mask is identical for
+    # every choice.
+    if vcmax25_source not in _VCMAX25_SOURCES:
+        raise ValueError(
+            f"unknown vcmax25_source {vcmax25_source!r}; must be one of "
+            f"{_VCMAX25_SOURCES}")
+    if vcmax25_source != "driver":
+        _vc = d.canopy_params.Vcmax25_C3_leaf
+        _const = (float(jnp.mean(_vc)) if vcmax25_source == "mean"
+                  else float(lookup_vcmax25(d.pft, d.climate, c4=False)))
+        d = d._replace(canopy_params=d.canopy_params._replace(
+            Vcmax25_C3_leaf=jnp.full_like(_vc, _const)))
+        print(f"  vcmax25-source={vcmax25_source}: C3 leaf Vcmax25 = {_const:.2f} "
+              f"(constant; driver series mean {float(jnp.mean(_vc)):.2f})")
     # Site-level physics from the consolidated table (tower height, phreatophyte
     # root/column depth).  An explicit non-None argument (CLI override) wins; a
     # None falls back to the per-site table value for reproducibility.
@@ -1233,6 +1253,12 @@ def main() -> int:
     ap.add_argument("--stomatal-m-scale", type=float, default=1.0,
                     help="scale the two-leaf Ball-Berry slope m (transpiration "
                          "per assimilation); >1 => more LE, less H at fixed GPP")
+    ap.add_argument("--vcmax25-source", default="driver",
+                    choices=list(_VCMAX25_SOURCES), dest="vcmax25_source",
+                    help="C3 leaf Vcmax25 for the prescribed-capacity lane: "
+                         "'driver' = the site file's (possibly time-varying) "
+                         "value; 'mean' = its whole-record time mean; "
+                         "'lookup' = the PFT/climate table value")
     ap.add_argument("--vcmax-scale", type=float, default=1.0,
                     help="scale the two-leaf Vcmax25 (photosynthetic capacity); "
                          ">1 => more GPP. The GPP knob, tuned separately from gs")
@@ -1350,6 +1376,7 @@ def main() -> int:
                  clmml_sai=args.clmml_sai, u_min=args.u_min,
                  stomatal_m_scale=args.stomatal_m_scale,
                  vcmax_scale=args.vcmax_scale,
+                 vcmax25_source=args.vcmax25_source,
                  vcmax_c3_scale=args.vcmax_c3_scale,
                  vcmax_c4_scale=args.vcmax_c4_scale,
                  stomatal_m_c3_scale=args.stomatal_m_c3_scale,
