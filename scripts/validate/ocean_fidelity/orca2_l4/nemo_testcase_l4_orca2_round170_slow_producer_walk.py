@@ -35,7 +35,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round169_sl
 SOURCE_ORDER = (
     "e3_u", "rhs_u", "mask_u", "r1_h0_u", "depth_u",
     "e3_v", "rhs_v", "mask_v", "r1_h0_v", "depth_v",
-    "drag_u", "drag_v", "wind_u", "wind_v", "final_u", "final_v",
+    "drag_u", "drag_v", "wind_u", "wind_v",
 )
 PLANTS = (
     "none", "rank-placement", "literal-replay", "rhs-arm",
@@ -314,14 +314,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     rows = []
     for name in SOURCE_ORDER:
         face = name[-1]
-        if name.startswith("final_"):
-            value = reference[f"wind_{face}"]
-            mask = active2[face]
-        else:
-            value = candidate[name]
-            mask = (np.ones_like(reference[name], dtype=bool)
-                    if name.startswith("mask_") else
-                    (active3[face] if reference[name].ndim == 3 else active2[face]))
+        value = candidate[name]
+        mask = (np.ones_like(reference[name], dtype=bool)
+                if name.startswith("mask_") else
+                (active3[face] if reference[name].ndim == 3 else active2[face]))
         require(np.shape(value) == np.shape(reference[name]) == np.shape(mask),
                 f"{name} score shape mismatch: candidate={np.shape(value)} "
                 f"oracle={np.shape(reference[name])} mask={np.shape(mask)}")
