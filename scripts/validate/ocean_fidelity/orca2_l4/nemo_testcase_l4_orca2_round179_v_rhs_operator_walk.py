@@ -211,8 +211,8 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
         _nemo_qco_gdept_z0,
         compute_frozen_geom_density,
     )
+    from legoesm.ocean.eos import nemo_r3t_stretch
     from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
-    from legoesm.ocean.vertical import nemo_r3t_stretch
 
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
