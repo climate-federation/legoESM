@@ -52,7 +52,7 @@ readonly TEST_CASE=TSUNAMI
 readonly REF_NAME=TSUNAMI_OMIP_L1
 readonly RUN_NAME=TSUNAMI_OMIP_L1_P3
 readonly STEPS=100
-readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/tsunami_rounds/round1}
+readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/tsunami_rounds/round1/oracle_tsunami_r1}
 readonly SHIPPED_KEYS='key_qco key_xios key_vco_1d'
 
 do_run=0

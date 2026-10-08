@@ -2875,7 +2875,7 @@ def build_vortex_smt_zps_card(
 class TsunamiResolvedNamelist(NamedTuple):
     """The resolved TSUNAMI switch set, every one stated (none defaulted)."""
 
-    # &namusr_def, namelist_cfg:19-29
+    # &namusr_def, namelist_cfg:19-29 (read at usrdef_nam.F90:74)
     rn_domszx_km: float = 2000.0
     rn_domszy_km: float = 2000.0
     rn_domszz_m: float = 100.0
@@ -2931,7 +2931,7 @@ class TsunamiResolvedNamelist(NamedTuple):
 
 TSUNAMI_NAMELIST = TsunamiResolvedNamelist()
 
-_TSUNAMI_NLEV = 1                    # jpkm1 (usrdef_nam.F90:117 kpk = 2)
+_TSUNAMI_NLEV = 1                    # jpkm1 (usrdef_nam.F90:98 kpk = 2)
 _TSUNAMI_H_M = TSUNAMI_NAMELIST.rn_domszz_m
 
 # nameos: namelist_cfg:121 selects ln_seos and sets NO coefficient, so every
@@ -2958,36 +2958,36 @@ TSUNAMI_UNMEASURED: tuple[str, ...] = (
     # has a closed ring, so the NEMO-literal barotropic arms have never run
     # across an open periodic seam.
     "B4:i_periodic_nemo_literal_barotropic",
-    # usrdef_nam.F90:117 kpk = 2: ONE wet level.  The coordinate builds only
+    # usrdef_nam.F90:98 kpk = 2: ONE wet level.  The coordinate builds only
     # under allow_single_level=True; no model step has run on one level.
     "B5:single_wet_level_column",
 )
 
 
 def tsunami_horizontal_coordinates() -> dict[str, np.ndarray]:
-    """Transcribe ``tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:84-127``.
+    """Transcribe ``tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:79-122``.
 
     Positions in KILOMETRES, as the source writes them.  ``mig(ji,0)`` is the
     1-based global interior index, so the 0-based ``i`` gives
     ``zti = (i + 1) - ii0``.
     """
     nl = TSUNAMI_NAMELIST
-    ni = _vortex_nint(nl.rn_domszx_km / nl.rn_dx_km) + 1   # usrdef_nam.F90:113
-    nj = _vortex_nint(nl.rn_domszy_km / nl.rn_dy_km) + 1   # usrdef_nam.F90:114
-    ii0 = _vortex_nint(float(ni) * nl.rn_0xratio)          # usrdef_hgr.F90:84
-    ij0 = _vortex_nint(float(nj) * nl.rn_0yratio)          # usrdef_hgr.F90:85
-    zti = np.arange(1, ni + 1, dtype=np.float64) - ii0     # :94
-    ztj = np.arange(1, nj + 1, dtype=np.float64) - ij0     # :95
-    lam_t = nl.rn_dx_km * zti                              # :97
-    lam_u = nl.rn_dx_km * (zti + 0.5)                      # :98
-    phi_t = nl.rn_dy_km * ztj                              # :102
-    phi_v = nl.rn_dy_km * (ztj + 0.5)                      # :103
+    ni = _vortex_nint(nl.rn_domszx_km / nl.rn_dx_km) + 1   # usrdef_nam.F90:92
+    nj = _vortex_nint(nl.rn_domszy_km / nl.rn_dy_km) + 1   # usrdef_nam.F90:93
+    ii0 = _vortex_nint(float(ni) * nl.rn_0xratio)          # usrdef_hgr.F90:79
+    ij0 = _vortex_nint(float(nj) * nl.rn_0yratio)          # usrdef_hgr.F90:80
+    zti = np.arange(1, ni + 1, dtype=np.float64) - ii0     # :90
+    ztj = np.arange(1, nj + 1, dtype=np.float64) - ij0     # :91
+    lam_t = nl.rn_dx_km * zti                              # :93
+    lam_u = nl.rn_dx_km * (zti + 0.5)                      # :94
+    phi_t = nl.rn_dy_km * ztj                              # :98
+    phi_v = nl.rn_dy_km * (ztj + 0.5)                      # :99
     shape = (nj, ni)
     glamt = np.broadcast_to(lam_t[None, :], shape).copy()
     glamu = np.broadcast_to(lam_u[None, :], shape).copy()
     gphit = np.broadcast_to(phi_t[:, None], shape).copy()
     gphiv = np.broadcast_to(phi_v[:, None], shape).copy()
-    # :127-131, nn_fcase = 0: an f-plane, f0 = 2*omega*SIN(rad*rn_ppgphi0).
+    # :120-123, nn_fcase = 0: an f-plane, f0 = 2*omega*SIN(rad*rn_ppgphi0).
     if nl.nn_fcase != 0:
         raise ValueError("TSUNAMI card transcribes nn_fcase = 0 only")
     rad = math.pi / 180.0                                  # phycst.F90 rad
@@ -3030,7 +3030,7 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
     nl = TSUNAMI_NAMELIST
     src = tsunami_horizontal_coordinates()
     ni, nj = src["ni"], src["nj"]
-    dx_m, dy_m = nl.rn_dx_km * 1.e3, nl.rn_dy_km * 1.e3     # usrdef_hgr.F90:107-110
+    dx_m, dy_m = nl.rn_dx_km * 1.e3, nl.rn_dy_km * 1.e3     # usrdef_hgr.F90:106-109
     grid = create_beta_plane_cgrid_geometry(
         nj, ni, dx_m=dx_m, dy_m=dy_m, f0=src["f0"], beta=0.0,
         x_origin_m=float(src["glamt"][0, 0]) * 1.e3 - 0.5 * dx_m,
@@ -3085,7 +3085,7 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
         nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
         nemo_e2u_m=metric_y, nemo_e1v_m=metric_x,
         nemo_een_barotropic_m=operands,
-        allow_single_level=True,   # jpkm1 = 1 (usrdef_nam.F90:117)
+        allow_single_level=True,   # jpkm1 = 1 (usrdef_nam.F90:98)
     )
     z_coord = create_full_step_coordinate(
         z_ref, jnp.full((nj, ni), _TSUNAMI_NLEV - 1))
