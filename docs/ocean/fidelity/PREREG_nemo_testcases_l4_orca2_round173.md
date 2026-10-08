@@ -87,3 +87,18 @@ with an operand exposure from the already-admitted standalone component graph
 and require the exposed and unexposed HPG U/V outputs to be array-identical
 before reading any operand. The frozen walk order, predictions, thresholds and
 terminal rule above do not change.
+
+The diagnostic rerun quantified the refusal: the separately compiled literal
+moved 17 active U cells and 13 active V cells, with maxima
+`8.470329472543003e-22` and `1.376428539288238e-21 m s-2`; the `~1e51`
+maxima were unchanged. This is a graph-association failure, not permission to
+relax the bit gate.
+
+The corrected instrument wraps the already-admitted standalone component
+evaluation only long enough to publish its actual `rhd`, `e3w` and `gdept_z0`
+arguments. It runs the same evaluation without the exposure and requires HPG
+U/V array identity before reading the captured values. Metrics remain the
+literal helper's explicit source-rounded operands. Candidate statement rows
+are selectable only if all five input rows are exact and the separate literal
+also reproduces the unexposed HPG bits; otherwise the first non-bit input ends
+the walk before those unadmitted statement rows.

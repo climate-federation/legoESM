@@ -128,11 +128,51 @@ def _explosive(row: dict[str, object]) -> bool:
     )
 
 
-def _first_nonbit(rows: dict[str, dict[str, object]]) -> dict[str, object] | None:
-    for name in WALK_ORDER:
+def _first_nonbit(rows: dict[str, dict[str, object]],
+                  order=WALK_ORDER) -> dict[str, object] | None:
+    for name in order:
         if not rows[name]["bit_exact"]:
             return {"boundary": name, **rows[name]}
     return None
+
+
+def _capture_component_inputs(model, state, surface, dt):
+    """Expose HPG inputs from an offline component graph with an exact control."""
+
+    import jax
+
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    baseline_call = jax.jit(lambda source_state, forcing: r172._stage1_tendency(
+        model, source_state, forcing, dt, components=True))
+    baseline = jax.device_get(baseline_call(state, surface))
+    original = pe.nemo_hpg_sco_literal_cgrid
+    captures: list[dict[str, np.ndarray]] = []
+
+    def sink(rhd, e3w, gdept_z0):
+        captures.append({
+            "rhd": np.asarray(rhd),
+            "e3w": np.asarray(e3w),
+            "gdept_z0": np.asarray(gdept_z0),
+        })
+
+    def wrapped(rhd, e3w, gdept_z0, grid, g, **kwargs):
+        result = original(rhd, e3w, gdept_z0, grid, g, **kwargs)
+        jax.debug.callback(sink, rhd, e3w, gdept_z0, ordered=True)
+        return result
+
+    pe.nemo_hpg_sco_literal_cgrid = wrapped
+    try:
+        exposed_call = jax.jit(
+            lambda source_state, forcing: r172._stage1_tendency(
+                model, source_state, forcing, dt, components=True))
+        exposed = jax.device_get(exposed_call(state, surface))
+        jax.effects_barrier()
+    finally:
+        pe.nemo_hpg_sco_literal_cgrid = original
+    require(len(captures) == 1,
+            f"HPG input exposure fired {len(captures)} times")
+    return baseline, exposed, captures[0]
 
 
 def classify(report: dict[str, object], plant: str = "none") -> dict[str, object]:
@@ -159,17 +199,24 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "rank-complete HPG record admission moved")
     require(all(row["bit_exact"] for row in report["recorded_self_replay"].values()),
             "recorded operands do not reproduce the recorded HPG statements")
-    require(report["candidate_literal_matches_live_hpg"]["u"]["bit_exact"]
-            and report["candidate_literal_matches_live_hpg"]["v"]["bit_exact"],
-            "candidate operand graph does not reproduce the live HPG boundary: "
-            f"{report['candidate_literal_matches_live_hpg']}")
+    require(report["operand_capture_matches_unexposed_hpg"]["u"]["bit_exact"]
+            and report["operand_capture_matches_unexposed_hpg"]["v"]["bit_exact"],
+            "operand exposure changed the standalone HPG result: "
+            f"{report['operand_capture_matches_unexposed_hpg']}")
     require(report["one_ulp_control"]["differing_cells"] == 1
             and not report["one_ulp_control"]["bit_exact"],
             "one-ULP known-answer control did not fire")
     for name in WALK_ORDER:
         require(report["rows"][name]["explosive"] == _explosive(report["rows"][name]),
                 f"{name} explosive classification moved")
-    first = _first_nonbit(report["rows"])
+    first_input = _first_nonbit(report["rows"], INPUT_ORDER)
+    if first_input is None:
+        require(report["candidate_literal_matches_live_hpg"]["u"]["bit_exact"]
+                and report["candidate_literal_matches_live_hpg"]["v"]["bit_exact"],
+                "statement walk reached an unadmitted candidate literal graph")
+        first = _first_nonbit(report["rows"])
+    else:
+        first = first_input
     require(first == report["first_nonbit"], "first non-bit selector moved")
 
     first_name = None if first is None else first["boundary"]
@@ -204,7 +251,6 @@ def _factor(before: float, after: float) -> float:
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
             baseline_root: Path, expect_commit: str) -> dict[str, object]:
     import jax
-    import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -235,12 +281,15 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         print(f"PROGRESS round173 complete kt={kt}", file=sys.stderr, flush=True)
 
-    candidate_inputs = r42._candidate_inputs(offline, state)
+    reconstructed_inputs = r42._candidate_inputs(offline, state)
+    baseline_component, exposed_component, captured_inputs = _capture_component_inputs(
+        offline, state, surface, card.dt_s)
+    candidate_inputs = dict(reconstructed_inputs)
+    candidate_inputs.update(captured_inputs)
     candidate_literal = r42._literal_from_inputs(
         candidate_inputs, offline.config.g, grid=offline.grid)
-    component_call = jax.jit(lambda source_state, forcing: r172._stage1_tendency(
-        offline, source_state, forcing, card.dt_s, components=True))
-    _total, _diagnostics, live_parts = jax.device_get(component_call(state, surface))
+    _baseline_total, _baseline_diagnostics, baseline_parts = baseline_component
+    _exposed_total, _exposed_diagnostics, exposed_parts = exposed_component
 
     masks = phase3_gate.expected_masks(card)
     tmask = np.asarray(masks["T"], dtype=bool)
@@ -260,10 +309,15 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             face_masks[face])
 
     live_identity = {}
+    capture_identity = {}
     for face in ("u", "v"):
         live_identity[face] = r93.score(
             _native(candidate_literal[f"sum_{face}"], face),
-            _native(np.asarray(live_parts[f"hpg_{face}"].data), face),
+            _native(np.asarray(baseline_parts[f"hpg_{face}"].data), face),
+            face_masks[face])
+        capture_identity[face] = r93.score(
+            _native(np.asarray(exposed_parts[f"hpg_{face}"].data), face),
+            _native(np.asarray(baseline_parts[f"hpg_{face}"].data), face),
             face_masks[face])
 
     rows: dict[str, dict[str, object]] = {}
@@ -314,6 +368,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "kt": 8,
         "walk_order": list(WALK_ORDER),
         "recorded_self_replay": self_replay,
+        "operand_capture_matches_unexposed_hpg": capture_identity,
         "candidate_literal_matches_live_hpg": live_identity,
         "rows": rows,
         "first_nonbit": _first_nonbit(rows),

@@ -31,6 +31,7 @@ def _report():
     return {
         "admission": {"rank_coverage": "exactly-once", "records": [{}, {}]},
         "recorded_self_replay": {name: _score() for name in gate.STATEMENT_ORDER},
+        "operand_capture_matches_unexposed_hpg": {"u": _score(), "v": _score()},
         "candidate_literal_matches_live_hpg": {"u": _score(), "v": _score()},
         "one_ulp_control": {"differing_cells": 1, "bit_exact": False},
         "rows": rows,
@@ -71,4 +72,11 @@ def test_self_replay_is_mandatory():
     report = _report()
     report["recorded_self_replay"]["zuap_v"]["bit_exact"] = False
     with pytest.raises(gate.GateError, match="recorded operands"):
+        gate.classify(report)
+
+
+def test_operand_capture_must_be_passive():
+    report = _report()
+    report["operand_capture_matches_unexposed_hpg"]["u"]["bit_exact"] = False
+    with pytest.raises(gate.GateError, match="operand exposure"):
         gate.classify(report)
