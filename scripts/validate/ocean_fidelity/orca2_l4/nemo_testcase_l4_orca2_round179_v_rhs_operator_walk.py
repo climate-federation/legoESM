@@ -239,7 +239,7 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     traced_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_barotropic_substeps=True))
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True))
     traced = jax.device_get(traced_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     passivity = r172._state_rows(traced.state_after, ordinary)
@@ -277,7 +277,11 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
             _with_jpk_zero(r83.native_v(accumulated[f"{boundary}_v"])),
             candidate_e3v, candidate_vmask, candidate_r1)
 
-    candidate_final = r83.native_v(traced.slow_forcing[2])
+    # Read only the completed 2-D product.  The live-state wrapper was
+    # certified passive in round 172; its operator intermediates remain
+    # deliberately unread because materialising them was non-passive in
+    # rounds 171/173.
+    candidate_final = r83.native_v(traced.slow_forcing_producer["depth_v"])
     oracle_final = np.asarray(oracle_spg["i000_zv_frc"])
     target = np.abs(candidate_final - oracle_final) > FLOOR
     target_locations = np.argwhere(target)
