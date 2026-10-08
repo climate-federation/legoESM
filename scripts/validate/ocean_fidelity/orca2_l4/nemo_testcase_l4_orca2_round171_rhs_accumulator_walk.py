@@ -264,6 +264,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                 prefix_rows[f"{component}:completed_rhs_{face}"] = bool(
                     np.array_equal(observed_rhs, plain_rhs))
         passivity[str(kt)] = prefix_rows
+        require(all(prefix_rows.values()),
+                "single-component trace moved kt="
+                f"{kt}: {sorted(name for name, exact in prefix_rows.items() if not exact)}")
         state = next_state
         print(f"PROGRESS round171 complete kt={kt}", file=sys.stderr, flush=True)
 
