@@ -18,9 +18,6 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round129_substep2_walk as r129,
-)
-from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round166_external_substep_gate as r166,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -194,6 +191,17 @@ def classify(report: dict, plant: str = "none") -> dict:
     require(tuple(report["upstream_order"]) == UPSTREAM_ORDER,
             "upstream source order moved")
     registered = report["registered_rows"]
+    # The raw operand has no direct field in this recorder.  Preserve its
+    # measured nonzero range as an observation, but never present the original
+    # candidate-vs-itself diagnostic as an equality claim.  P1 is decided by
+    # the independent candidate-raw + recorded-face-SSH sum replay below.
+    raw_observation = registered.pop("candidate_raw_depth", None)
+    if raw_observation is not None:
+        report["raw_depth_observation"] = {
+            "count": raw_observation["count"],
+            "minimum": raw_observation["candidate_min"],
+            "maximum": raw_observation["candidate_max"],
+        }
     require(all(row["count"] == report["registered_count"]
                 for row in registered.values()),
             "registered replay coverage moved")

@@ -57,6 +57,18 @@ def test_failed_prediction_is_retained_not_refused():
     assert result["status"] == "PASS_ROUND168_EXIT_DEPTH_OPERAND_WALK"
 
 
+def test_candidate_self_comparison_is_not_retained_as_evidence():
+    report = _report()
+    report["registered_rows"]["candidate_raw_depth"] = {
+        **_row(), "candidate_min": 36.0, "candidate_max": 5392.0,
+    }
+    result = gate.classify(report)
+    assert "candidate_raw_depth" not in result["registered_rows"]
+    assert result["raw_depth_observation"] == {
+        "count": 41, "minimum": 36.0, "maximum": 5392.0,
+    }
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_all_plants_fire(plant: str):
     with pytest.raises(gate.GateError):
