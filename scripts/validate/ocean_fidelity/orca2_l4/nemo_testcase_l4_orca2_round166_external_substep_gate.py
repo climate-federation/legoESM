@@ -103,7 +103,8 @@ def _first_nonfinite(frame: dict[str, object]) -> dict[str, object] | None:
                     "trace_name": trace_name,
                     "invalid_count": int(counts[row, substep]),
                     "flat_index": int(flats[row, substep]),
-                    "index": list(np.unravel_index(int(flats[row, substep]), shape)),
+                    "index": [int(value) for value in np.unravel_index(
+                        int(flats[row, substep]), shape)],
                     "value": float(values[row, substep]),
                 }
     return None

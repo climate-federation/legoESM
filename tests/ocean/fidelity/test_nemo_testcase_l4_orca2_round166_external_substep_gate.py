@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -65,6 +66,7 @@ def test_first_nonfinite_is_substep_then_source_order():
     assert first["substep"] == 1
     assert first["boundary"] == "after_ssh"
     assert first["index"] == [1, 0]
+    json.dumps(first)
 
 
 def test_trace_wrapper_returns_ordinary_solver_outputs():
