@@ -85,10 +85,15 @@ def _score(candidate, oracle, active, *, complete_domain: bool = False) -> dict[
         row["full_domain_absolute_max"] if complete_domain
         else row["absolute_max"]
     )
+    comparison_bit_exact = (
+        bool(np.array_equal(candidate, oracle)) if complete_domain
+        else bool(row["bit_exact"])
+    )
     row["comparison_domain"] = "complete-recorded" if complete_domain else "active"
+    row["comparison_bit_exact"] = comparison_bit_exact
     row["at_floor"] = bool(comparison_max <= FLOOR)
     row["verdict"] = (
-        "AT_BAR_BIT_EXACT" if row["bit_exact"] else
+        "AT_BAR_BIT_EXACT" if comparison_bit_exact else
         ("AT_BAR_NOT_EXACT" if row["at_floor"] else "DEBT")
     )
     return row

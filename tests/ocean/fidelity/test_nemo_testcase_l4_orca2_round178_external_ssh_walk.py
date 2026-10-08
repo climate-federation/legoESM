@@ -72,5 +72,7 @@ def test_source_score_includes_masked_values_that_feed_active_stencils() -> None
 
     assert active_row["at_floor"]
     assert not source_row["at_floor"]
+    assert source_row["verdict"] == "DEBT"
+    assert not source_row["comparison_bit_exact"]
     assert source_row["full_domain_argmax_jik"] == [0, 1]
     assert source_row["comparison_domain"] == "complete-recorded"
