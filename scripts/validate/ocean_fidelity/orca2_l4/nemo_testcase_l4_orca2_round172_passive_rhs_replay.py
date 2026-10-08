@@ -161,7 +161,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "trace-passivity":
         report["trace_passivity"]["1"]["state"]["T"] = False
     elif plant == "completed-rhs":
-        report["offline_closure"]["plain_to_passive_u"] = False
+        report["offline_closure"]["after_ldf_to_total_u"] = False
     elif plant == "first-boundary":
         first = report["first_nonbit_accumulator"]
         require(first is not None, "first-boundary plant has no live selector")
@@ -180,8 +180,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(len(report["trace_passivity"]) == 7, "trace passivity census moved")
     require(all(
         all(row["state"].values())
-        and row["completed_rhs_u"]
-        and row["completed_rhs_v"]
+        and row["same_graph_closure_u"]
+        and row["same_graph_closure_v"]
+        and all(row["offline_bridge"].values())
         for row in report["trace_passivity"].values()
     ), "live-operand trace moved the complete arm")
     require(all(report["offline_closure"].values()),
@@ -207,8 +208,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "first explosive U selector moved")
     report["prediction_dispositions"] = {
         "R172-P1": "CONFIRMED",
-        "R172-P2": "CONFIRMED",
-        "R172-P3": "CONFIRMED",
+        "R172-P2": "REFUTED",
+        "R172-P3": "REFUTED",
+        "R172-P2a": "CONFIRMED",
+        "R172-P3a": "CONFIRMED",
         "R172-P4": (
             "CONFIRMED" if first_u is not None
             and first_u["boundary"] == "after_vor" else "REFUTED"
@@ -246,6 +249,14 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     live = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks._replace(expose_live_stage_operands=True))
+    offline = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks)
+    offline.prime_step_caches(state)
+
+    offline_components = jax.jit(
+        lambda source_state, forcing: _stage1_tendency(
+            offline, source_state, forcing, card.dt_s, components=True))
 
     passivity: dict[str, dict[str, object]] = {}
     for kt in range(1, 8):
@@ -253,43 +264,45 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         trace = jax.device_get(live.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        baro = r170._trace_at_kt8(card, state, freshwater, surface, hooks)
+        direct_total, _direct_diagnostics, direct_parts = jax.device_get(
+            offline_components(state, surface))
         trace_rhs = trace.slow_forcing_producer
-        baro_rhs = baro.slow_forcing_operands
+        trace_parts = trace.operator_operands[0]
+        bridge = {}
+        for name in ("hpg", "ldf", "vorticity", "keg", "zad"):
+            for face in FACES:
+                bridge[f"{name}_{face}"] = _bits_equal(
+                    direct_parts[f"{name}_{face}"].data,
+                    trace_parts[f"{name}_{face}"].data)
+        for face in FACES:
+            bridge[f"after_ldf_{face}"] = _bits_equal(
+                direct_parts[f"after_ldf_{face}"].data,
+                trace_parts[f"after_ldf_{face}"].data)
+            bridge[f"completed_rhs_{face}"] = _bits_equal(
+                getattr(direct_total, f"d{face}_dt").data,
+                trace_rhs[f"rhs_{face}"])
         row = {
             "state": _state_rows(trace.state_after, ordinary_next),
-            "completed_rhs_u": _bits_equal(trace_rhs["rhs_u"], baro_rhs["du_dt"]),
-            "completed_rhs_v": _bits_equal(trace_rhs["rhs_v"], baro_rhs["dv_dt"]),
+            "same_graph_closure_u": _bits_equal(
+                trace_parts["after_ldf_u"].data, trace_rhs["rhs_u"]),
+            "same_graph_closure_v": _bits_equal(
+                trace_parts["after_ldf_v"].data, trace_rhs["rhs_v"]),
+            "offline_bridge": bridge,
         }
-        require(all(row["state"].values()) and row["completed_rhs_u"]
-                and row["completed_rhs_v"],
+        require(all(row["state"].values()) and row["same_graph_closure_u"]
+                and row["same_graph_closure_v"] and all(bridge.values()),
                 f"live trace moved kt={kt}: {row}")
         passivity[str(kt)] = row
         state = ordinary_next
         print(f"PROGRESS round172 complete kt={kt}", file=sys.stderr, flush=True)
 
-    passive = r170._trace_at_kt8(card, state, freshwater, surface, hooks)
-    passive_rhs = passive.slow_forcing_operands
-    offline = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks)
-    offline.prime_step_caches(state)
-    plain = jax.device_get(jax.jit(
-        lambda source_state, forcing: _stage1_tendency(
-            offline, source_state, forcing, card.dt_s, components=False)
-    )(state, surface))
-    with_components = jax.device_get(jax.jit(
-        lambda source_state, forcing: _stage1_tendency(
-            offline, source_state, forcing, card.dt_s, components=True)
-    )(state, surface))
+    with_components = jax.device_get(offline_components(state, surface))
     component_total, _diagnostics, parts = with_components
     closure = {
-        "plain_to_passive_u": _bits_equal(plain.du_dt.data, passive_rhs["du_dt"]),
-        "plain_to_passive_v": _bits_equal(plain.dv_dt.data, passive_rhs["dv_dt"]),
-        "components_to_plain_u": _bits_equal(component_total.du_dt.data, plain.du_dt.data),
-        "components_to_plain_v": _bits_equal(component_total.dv_dt.data, plain.dv_dt.data),
-        "production_association_u": _bits_equal(parts["after_ldf_u"].data, plain.du_dt.data),
-        "production_association_v": _bits_equal(parts["after_ldf_v"].data, plain.dv_dt.data),
+        "after_ldf_to_total_u": _bits_equal(
+            parts["after_ldf_u"].data, component_total.du_dt.data),
+        "after_ldf_to_total_v": _bits_equal(
+            parts["after_ldf_v"].data, component_total.dv_dt.data),
     }
     require(all(closure.values()), f"offline component closure moved: {closure}")
 
@@ -339,6 +352,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "completed_kt": 7,
         "kt": 8,
         "source_order": list(BOUNDARIES),
+        "retained_first_run_refusal": {
+            "completed_kt": 1,
+            "refused_kt": 2,
+            "state_bit_exact": True,
+            "cross_graph_completed_rhs_u": False,
+            "cross_graph_completed_rhs_v": False,
+        },
         "trace_passivity": passivity,
         "offline_closure": closure,
         "rows": rows,

@@ -41,18 +41,15 @@ def _report():
         "trace_passivity": {
             str(kt): {
                 "state": {name: True for name in ("T", "S", "u", "v", "ssh")},
-                "completed_rhs_u": True,
-                "completed_rhs_v": True,
+                "same_graph_closure_u": True,
+                "same_graph_closure_v": True,
+                "offline_bridge": {"all": True},
             }
             for kt in range(1, 8)
         },
         "offline_closure": {
-            "plain_to_passive_u": True,
-            "plain_to_passive_v": True,
-            "components_to_plain_u": True,
-            "components_to_plain_v": True,
-            "production_association_u": True,
-            "production_association_v": True,
+            "after_ldf_to_total_u": True,
+            "after_ldf_to_total_v": True,
         },
         "rows": rows,
         "first_nonbit_accumulator": gate._first_nonbit(rows),
@@ -66,6 +63,8 @@ def test_clean_report_keeps_finite_first_nonbit_and_explosive_vor_apart():
     assert result["first_nonbit_accumulator"]["boundary"] == "after_hpg"
     assert result["first_explosive_u"]["boundary"] == "after_vor"
     assert result["prediction_dispositions"]["R172-P4"] == "CONFIRMED"
+    assert result["prediction_dispositions"]["R172-P2"] == "REFUTED"
+    assert result["prediction_dispositions"]["R172-P2a"] == "CONFIRMED"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

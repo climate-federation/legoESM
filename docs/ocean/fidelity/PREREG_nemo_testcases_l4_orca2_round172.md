@@ -65,3 +65,34 @@ partial halo-unit landing is permitted.
 
 ASKED choices: continue round 171's independent rung-0 compiled-source walk.
 UNASKED choices: empty.
+
+## Instrument correction after the first refused run
+
+The first committed run completed kt=1, then refused at kt=2. The existing
+live-operand trace returned a state array-identical to the ordinary complete
+arm in all five prognostic fields, but its completed U/V RHS was not
+array-identical to the separately compiled early-return barotropic trace.
+Thus R172-P2's extra cross-graph RHS clause is **REFUTED**. No accumulator was
+scored. This reproduces round 171's failure mode: changing a compiled return
+graph moves an internal boundary even when the traced full-step state remains
+bit-identical.
+
+The user-specified passivity predicate in B57 addendum 2 is kt=1..7 traced
+versus untraced **state** identity. The corrected bridge therefore keeps that
+predicate and adds only same-graph closure: in each live trace its own
+`after_ldf` boundary must equal its own published completed RHS bit-for-bit.
+A separate offline component call must match every raw term and the completed
+boundary of that same live trace at kt=1..7. Only after those two checks pass
+may the identical offline call be evaluated on the kt=8 entry and accumulated
+in NEMO source order. This never compares an internal array across two return
+graphs.
+
+The corrected predictions are additive; the failed originals remain above:
+
+| ID | Prediction | CONFIRM | REFUTE |
+|---|---|---|---|
+| R172-P2a | The existing live-operand trace is passive under B57's stated predicate and closes internally. | At kt=1..7 every returned state field equals the ordinary arm bit-for-bit, and the trace's own `after_ldf` U/V equals its own completed RHS. | Any state or same-graph closure bit moves. |
+| R172-P3a | A standalone component evaluation is a bit-exact offline bridge to the existing trace. | At kt=1..7 all five raw U/V terms, `after_ldf` U/V and completed U/V equal the live trace's values; at kt=8 its own `after_ldf` equals its own completed total. | Any bridge or internal-closure bit moves; no scientific accumulator is scored. |
+
+R172-P4, both explosive thresholds, source order, first-non-bit selection and
+all terminal rules are unchanged.
