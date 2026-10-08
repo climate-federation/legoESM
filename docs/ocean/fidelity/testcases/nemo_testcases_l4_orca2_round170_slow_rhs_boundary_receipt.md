@@ -113,7 +113,28 @@ zero-wind identity.
 
 ## Review and validation
 
-Validation and review results are recorded in the final follow-up commit.
+Focused round-170 and citation coverage passes 26/26. The round receipt's five
+citations pass with zero failures or unmapped spans; shifting the literal
+vertical-reduction span by two lines makes the citation plant fail. The
+cumulative receipt gate also passes with zero failures and zero unmapped
+spans. The acquisition preflight and its layout plant pass as recorded above.
+
+The one required `tests/ocean/fidelity -n 12` invocation collected 2,735
+tests and reached 99%, then stopped emitting with no pytest process remaining
+to poll; it was not run a second time. Its retained log contains 2,724
+terminal outcomes: 2,713 passed, 7 skipped and 4 failed. The four failures are
+the registered pre-existing reds from rounds 166-168: the moved GYRE spread
+record, unscoped allow-dirty drivers, unstamped report emitters and SI3
+scalar-math provenance. No round-170 test failed; the log contains no symbol-
+materialisation error, `MemoryError`, worker crash or pytest error.
+
+The separate `codex exec --sandbox read-only` review attempt returned
+**independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
+
+Because this round changes no model or configuration file, no ORCA2 ladder,
+GYRE trajectory/year, DINO or tank trajectory can move; their rerun predicates
+are therefore not invoked for this measurement-only stop.
 
 ASKED choices: continue the compiled-source independent rung-0 walk. UNASKED
 choices: empty. No configuration decision is requested.
