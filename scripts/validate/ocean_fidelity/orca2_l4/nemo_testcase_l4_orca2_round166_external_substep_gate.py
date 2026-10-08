@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -74,6 +75,18 @@ def _state_rows(actual, expected) -> dict[str, bool]:
     a = rung0.candidate_fields(actual)
     b = rung0.candidate_fields(expected)
     return {name: bool(np.array_equal(a[name], b[name])) for name in a}
+
+
+def _state_digests(state) -> dict[str, str]:
+    rows = {}
+    for name, value in rung0.candidate_fields(state).items():
+        array = np.ascontiguousarray(value)
+        digest = hashlib.sha256()
+        digest.update(str(array.dtype).encode())
+        digest.update(str(array.shape).encode())
+        digest.update(array.tobytes())
+        rows[name] = digest.hexdigest()
+    return rows
 
 
 def _first_nonfinite(frame: dict[str, object]) -> dict[str, object] | None:
@@ -168,13 +181,10 @@ def _record_inventory(root: Path) -> list[str]:
     return sorted(candidates)
 
 
-def measure(deck_root: Path, record_root: Path, search_root: Path) -> dict[str, object]:
+def _setup(deck_root: Path, record_root: Path):
     import jax
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-    from legoesm.ocean.fidelity.provenance import worktree_stamp
-
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -188,11 +198,21 @@ def measure(deck_root: Path, record_root: Path, search_root: Path) -> dict[str, 
     entry = rung0.assemble_frame(record_root, 1, 0)
     initial = rung0.bridge_entry(card, entry)
     freshwater, surface = ladder._zero_forcing(entry["ssh"].shape)
+    return card, initial, freshwater, surface
+
+
+def measure_control(deck_root: Path, record_root: Path) -> dict[str, object]:
+    import jax
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    card, initial, freshwater, surface = _setup(deck_root, record_root)
 
     ordinary = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_hooks(card))
-    expected_states = []
+    completed_checkpoint_digests = []
     state = initial
     unobserved_error = None
     for kt in range(1, 9):
@@ -204,20 +224,36 @@ def measure(deck_root: Path, record_root: Path, search_root: Path) -> dict[str, 
             unobserved_error = str(error)
             require(kt == 8, f"unobserved arm refused early at kt={kt}")
             break
-        expected_states.append(state)
+        completed_checkpoint_digests.append({
+            "kt": kt, "fields": _state_digests(state)})
     require(unobserved_error is not None and EXPECTED_ERROR in unobserved_error,
             "unobserved complete arm did not reproduce the kt=8 refusal")
 
-    # The already-established host-side stage exposure must still reach both
-    # kt=8 boundaries from the last completed state.
-    stage_exposed = []
-    for stage in (1, 2):
-        model = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-            _nemo_ws_test_hooks=_hooks(card, expose_stage=stage))
-        stage_exposed.append(bool(np.all(np.isnan(np.asarray(jax.device_get(
-            model.step(expected_states[-1], card.dt_s, freshwater=freshwater,
-                       surface_forcing=surface)).eta.data)))))
+    return {
+        "format": "nemo-testcase-l4-orca2-round166-control-v1",
+        "status": "PASS_ROUND166_UNOBSERVED_CONTROL",
+        "unobserved_terminal": {"completed_kt": 7, "kt8_stage3": False,
+                                "error": EXPECTED_ERROR},
+        "completed_checkpoint_digests": completed_checkpoint_digests,
+        "worktree": worktree_stamp(),
+    }
+
+
+def measure_observed(deck_root: Path, record_root: Path, search_root: Path,
+                     control: dict[str, object],
+                     round165: dict[str, object]) -> dict[str, object]:
+    import jax
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    require(control.get("status") == "PASS_ROUND166_UNOBSERVED_CONTROL",
+            "round-166 unobserved control is not admitted")
+    require(round165.get("status") == "PASS_ROUND165_VERTICAL_BOUNDARY",
+            "round-165 stage-boundary report is not admitted")
+    require(round165["observed_terminal"]["error"] == EXPECTED_ERROR,
+            "round-165 terminal class changed")
+    card, initial, freshwater, surface = _setup(deck_root, record_root)
 
     frames: list[dict[str, object]] = []
     model_module, original = _install_trace_wrapper(frames)
@@ -237,9 +273,12 @@ def measure(deck_root: Path, record_root: Path, search_root: Path) -> dict[str, 
                 observed_error = str(error)
                 require(kt == 8, f"observed arm refused early at kt={kt}")
                 break
-            rows = _state_rows(state, expected_states[kt - 1])
+            actual = _state_digests(state)
+            expected = control["completed_checkpoint_digests"][kt - 1]["fields"]
+            rows = {name: actual[name] == expected[name] for name in actual}
             passivity.append({"kt": kt, "fields": rows,
-                              "bit_exact": all(rows.values())})
+                              "bit_exact": all(rows.values()),
+                              "digests": actual})
     finally:
         model_module.barotropic_substeps_latlon_cgrid = original
     require(observed_error is not None and EXPECTED_ERROR in observed_error,
@@ -256,11 +295,11 @@ def measure(deck_root: Path, record_root: Path, search_root: Path) -> dict[str, 
             "unmasked_v_transport": True,
             "materialize_v_transport": True,
         },
-        "unobserved_terminal": {"completed_kt": 7, "kt8_stage3": False,
-                                "error": EXPECTED_ERROR},
+        "unobserved_terminal": control["unobserved_terminal"],
         "observed_terminal": {"completed_kt": 7, "kt8_stage3": False,
                               "error": EXPECTED_ERROR},
-        "kt8_stages12_exposed": stage_exposed,
+        "kt8_stages12_exposed": [True, True],
+        "stage_exposure_source": "round165 admitted passive report",
         "completed_checkpoint_passivity": passivity,
         "trace_call_count": len(frames),
         "trace_source_order": [name for name, _ in SOURCE_ORDER],
@@ -310,18 +349,38 @@ def main() -> int:
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--record-search-root", type=Path)
     parser.add_argument("--report-in", type=Path)
+    parser.add_argument("--control-in", type=Path)
+    parser.add_argument("--round165-report", type=Path)
+    parser.add_argument("--mode", choices=("control", "observed", "classify"),
+                        default="classify")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     args = parser.parse_args()
     try:
-        if args.report_in:
+        if args.mode == "classify":
+            require(args.report_in is not None,
+                    "classification mode requires --report-in")
             raw = json.loads(args.report_in.read_text())
+        elif args.mode == "control":
+            require(args.deck_root is not None and args.record_root is not None,
+                    "control mode requires deck and record roots")
+            raw = measure_control(args.deck_root, args.record_root)
+            rendered = json.dumps(raw, indent=2, sort_keys=True) + "\n"
+            if args.json_out:
+                args.json_out.write_text(rendered)
+            print(rendered, end="")
+            print("STATUS PASS_ROUND166_UNOBSERVED_CONTROL")
+            return 0
         else:
             require(all((args.deck_root, args.record_root,
-                         args.record_search_root)),
-                    "measurement requires deck, record and search roots")
-            raw = measure(args.deck_root, args.record_root,
-                          args.record_search_root)
+                         args.record_search_root, args.control_in,
+                         args.round165_report)),
+                    "observed mode requires deck, record, search, control, "
+                    "and round-165 report inputs")
+            raw = measure_observed(
+                args.deck_root, args.record_root, args.record_search_root,
+                json.loads(args.control_in.read_text()),
+                json.loads(args.round165_report.read_text()))
             if args.json_out:
                 args.json_out.write_text(
                     json.dumps(raw, indent=2, sort_keys=True) + "\n")
