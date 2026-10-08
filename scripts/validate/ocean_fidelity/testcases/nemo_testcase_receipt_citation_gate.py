@@ -226,6 +226,8 @@ FILES = {
         _ORCA2_R144INITIAL_COMPILED / "mppini.f90"),
     "ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R166SPG8_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R166SPG8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1429,6 +1431,37 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 169: kt=8 substep-one and slow forcing -------
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:680-702': [
+        ('! Add bottom stresses:', 1),
+        ("CALL r95_spg_w2('trd_v', zv_trd)", 1),
+        23,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:715-728': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form', 1),
+        ('END DO   ;   END DO', 20),
+        14,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:761-767': [
+        ('IF( .NOT.lk_linssh ) THEN !* Update ocean depth', 1),
+        ('END DO   ;   END DO', 22),
+        7,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:207-218': [
+        ('SELECT CASE( n_dynadv )', 2),
+        ('END SELECT', 2),
+        12,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:231-247': [
+        ('!* baroclinic drag forcing *!', 1),
+        ("CALL r93_slow_put_pair( kt, 'wind', Ue_rhs, Ve_rhs )", 1),
+        17,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:254-285': [
+        ('!* atmospheric pressure forcing *!', 1),
+        ("CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )", 1),
+        32,
+    ],
     # --- ORCA2 round 168: exit-depth operand split -----------------
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:585-595': [
         ('zhdiv = (   ( zhU(ji,jj) - zhU(ji-1,jj) ) + ( zhV(ji,jj) - zhV(ji,jj-1) )  ) * r1_e1e2t(ji,jj)', 1),
