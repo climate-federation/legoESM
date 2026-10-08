@@ -197,13 +197,17 @@ def _hooks(card, *, expose_stage: int = 0):
     )
 
 
-def _record_inventory(root: Path) -> list[str]:
-    candidates = []
-    for path in root.rglob("*kt00000008*.bin"):
-        lowered = path.name.lower()
-        if any(token in lowered for token in ("spg", "substep", "btstep")):
-            candidates.append(str(path))
-    return sorted(candidates)
+def _record_inventory(root: Path) -> dict[str, object]:
+    candidates = sorted(root.rglob("*kt00000008*.bin"))
+    ranked = [path for path in candidates
+              if "spg_rank" in path.name.lower()]
+    root_only = [path for path in candidates if "bt_frames" in path.name.lower()
+                 or "bt_substeps" in path.name.lower()]
+    return {
+        "ranked_substep_records": [str(path) for path in ranked],
+        "root_only_legacy_records": [str(path) for path in root_only],
+        "admissible_rank_complete": len(ranked) == 2,
+    }
 
 
 def _setup(deck_root: Path, record_root: Path):
@@ -341,7 +345,7 @@ def measure_observed(deck_root: Path, record_root: Path, search_root: Path,
         "trace_call_count": len(frames),
         "trace_source_order": [name for name, _ in SOURCE_ORDER],
         "kt8_first_nonfinite": first,
-        "kt8_record_candidates": _record_inventory(search_root),
+        "kt8_record_inventory": _record_inventory(search_root),
         "worktree": worktree_stamp(),
     }
 
@@ -357,7 +361,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["trace_source_order"][0], report["trace_source_order"][1] = (
             report["trace_source_order"][1], report["trace_source_order"][0])
     elif plant == "record-support":
-        report["kt8_record_candidates"] = ["planted.bin"]
+        report["kt8_record_inventory"]["admissible_rank_complete"] = True
 
     terminal = {"completed_kt": 7, "kt8_stage3": False,
                 "error": EXPECTED_ERROR}
@@ -374,7 +378,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         name for name, _ in SOURCE_ORDER), "source order changed")
     require(report["kt8_first_nonfinite"] is not None,
             "kt=8 trace has no non-finite boundary")
-    require(not report["kt8_record_candidates"],
+    require(not report["kt8_record_inventory"]["admissible_rank_complete"],
             "an existing kt=8 external-substep record requires admission")
     report["status"] = "PASS_ROUND166_EXTERNAL_SUBSTEP_BOUNDARY"
     return report
@@ -398,6 +402,11 @@ def main() -> int:
             require(args.report_in is not None,
                     "classification mode requires --report-in")
             raw = json.loads(args.report_in.read_text())
+            if "kt8_record_inventory" not in raw:
+                require(args.record_search_root is not None,
+                        "legacy raw report requires --record-search-root")
+                raw["kt8_record_inventory"] = _record_inventory(
+                    args.record_search_root)
         elif args.mode == "control":
             require(args.deck_root is not None and args.record_root is not None,
                     "control mode requires deck and record roots")

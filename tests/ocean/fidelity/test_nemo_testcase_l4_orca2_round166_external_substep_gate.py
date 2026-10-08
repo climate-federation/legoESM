@@ -28,7 +28,11 @@ def _report():
         "kt8_first_nonfinite": {
             "substep": 8, "boundary": "after_ssh",
         },
-        "kt8_record_candidates": [],
+        "kt8_record_inventory": {
+            "ranked_substep_records": [],
+            "root_only_legacy_records": ["root-only.bin"],
+            "admissible_rank_complete": False,
+        },
     }
 
 
@@ -73,3 +77,14 @@ def test_trace_wrapper_returns_ordinary_solver_outputs():
     source = gate.Path(gate.__file__).read_text()
     assert "state_after, averages, trace = original" in source
     assert "return state_after, averages" in source
+
+
+def test_acquisition_is_kt8_ranked_and_fail_closed():
+    root = gate.REPO_ROOT / "scripts/validate/ocean_fidelity/orca2_l4"
+    launcher = (root / "nemo_testcase_l4_orca2_round166_spg8_acquisition/run.sh").read_text()
+    writer = (root / "nemo_testcase_l4_orca2_round166_spg8_acquisition/l4_r95_spgts_frames.F90").read_text()
+    assert "IF(kt /= nit000 + 7) RETURN" in writer
+    assert "oracle_r166_spg_rank" in writer
+    assert "--expected-kt 8 --prefix oracle_r166_spg" in launcher
+    assert "REFUSE: expected exactly two rank kt=8 SPG records" in launcher
+    assert "/usr/bin/time" not in launcher

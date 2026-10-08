@@ -49,7 +49,8 @@ def required_names(icycle: int) -> set[str]:
     return names
 
 
-def read_record(path: Path, plant: str = "none") -> dict:
+def read_record(path: Path, plant: str = "none", *, expected_kt: int = 1,
+                expected_magic: str = MAGIC) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-1]
@@ -57,14 +58,14 @@ def read_record(path: Path, plant: str = "none") -> dict:
     magic = raw[:16].decode("ascii", "replace").rstrip(" \x00")
     if plant == "header":
         magic = "X" + magic[1:]
-    require(magic == MAGIC, f"{path.name}: bad magic {magic!r}")
+    require(magic == expected_magic, f"{path.name}: bad magic {magic!r}")
     header = list(struct.unpack_from("=18i", raw, 16))
     (version, kt, kbb, kmm, kaa, krhs, rank, nx, ny, nz, icycle,
      nimpp, njmpp, ntsi, ntsj, ntei, ntej, bits) = header
     if plant == "swapped-rank":
         rank = 1 - rank
     require(version == 1, f"{path.name}: unsupported version {version}")
-    require(kt == 1, f"{path.name}: unexpected timestep {kt}")
+    require(kt == expected_kt, f"{path.name}: unexpected timestep {kt}")
     require(bits == 64, f"{path.name}: precision is not fp64")
     require(nx > 0 and ny > 0 and nz > 0 and icycle > 0,
             f"{path.name}: non-positive header extent")
@@ -120,13 +121,17 @@ def read_record(path: Path, plant: str = "none") -> dict:
     }
 
 
-def run(root: Path, baseline: Path, plant: str) -> dict:
+def run(root: Path, baseline: Path, plant: str, *, expected_kt: int = 1,
+        prefix: str = "oracle_r95_spg", expected_magic: str = MAGIC) -> dict:
     coverage = np.zeros((148, 180), dtype=np.int8)
     records = []
     for expected_rank in (0, 1):
-        path = root / f"oracle_r95_spg_rank{expected_rank:04d}_kt00000001.bin"
+        path = root / (
+            f"{prefix}_rank{expected_rank:04d}_kt{expected_kt:08d}.bin")
         applied = plant if expected_rank == 0 and plant not in ("restart-byte", "none") else "none"
-        record = read_record(path, applied)
+        record = read_record(
+            path, applied, expected_kt=expected_kt,
+            expected_magic=expected_magic)
         require(record["rank"] == expected_rank, f"{path.name}: rank mismatch")
         nimpp, njmpp = record["origin"]
         ntsi, ntsj, ntei, ntej = record["owned"]
@@ -163,9 +168,15 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--expected-kt", type=int, default=1)
+    parser.add_argument("--prefix", default="oracle_r95_spg")
+    parser.add_argument("--magic", default=MAGIC)
     args = parser.parse_args()
     try:
-        result = run(args.root, args.baseline, args.plant)
+        result = run(
+            args.root, args.baseline, args.plant,
+            expected_kt=args.expected_kt, prefix=args.prefix,
+            expected_magic=args.magic)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, UnicodeDecodeError, ValueError, Refusal) as error:
         if args.plant != "none":
