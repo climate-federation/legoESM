@@ -59,3 +59,22 @@ choice or partial halo-unit landing is permitted.
 
 ASKED choices: continue round 170's compiled-source independent rung-0 walk.
 UNASKED choices: empty.
+
+## Instrument correction after the first refused run
+
+The first committed invocation completed kt=1..7, then refused because the
+source-ordered reconstruction of the candidate after-ZAD RHS was not
+bit-identical to the ordinary candidate RHS. No accumulator score was emitted.
+This does **not** by itself show observer perturbation: round 41 already proved
+that the same ten raw terms can remain bit-identical while changing only their
+addition association. R171-P2 therefore remains frozen and will be recorded
+as **REFUTED** if this mismatch reproduces.
+
+The corrected classifier separates the two claims mechanically. The observer
+is admissible only if its completed kt=1..7 states, kt=8 barotropic boundary,
+and kt=8 completed RHS are all array-identical to the unobserved program. The
+source-ordered reconstruction versus that exact ordinary RHS is reported as a
+scientific association row; it is no longer mislabeled as observer passivity.
+If actual observer passivity moves one bit, the gate still refuses and no
+accumulator number is citable. The thresholds and all five predictions above
+are unchanged.

@@ -31,7 +31,7 @@ def _report():
     return {
         "admission": {"rank_coverage": "exactly-once", "records": [{}, {}]},
         "source_order": list(gate.BOUNDARIES), "rows": rows,
-        "observer_closure": {"u": {"bit_exact": True}, "v": {"bit_exact": True}},
+        "source_order_closure": {"u": {"bit_exact": True}, "v": {"bit_exact": True}},
         "observer_passivity": {
             "kt1_to_7": {str(k): {"T": True} for k in range(1, 8)},
             "kt8_barotropic": {"T": True, "completed_rhs_u": True,
@@ -62,3 +62,11 @@ def test_wrong_prediction_is_retained_as_refuted():
     result = gate.classify(report)
     assert result["first_explosive_u"]["boundary"] == "after_keg"
     assert result["prediction_dispositions"]["R171-P3"] == "REFUTED"
+
+
+def test_source_order_closure_failure_is_retained_not_called_observer_movement():
+    report = _report()
+    report["source_order_closure"]["u"]["bit_exact"] = False
+    result = gate.classify(report)
+    assert result["prediction_dispositions"]["R171-P2"] == "REFUTED"
+    assert all(result["observer_passivity"]["kt8_barotropic"].values())

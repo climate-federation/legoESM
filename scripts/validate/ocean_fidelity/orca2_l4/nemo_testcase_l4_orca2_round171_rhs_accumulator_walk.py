@@ -159,7 +159,8 @@ def classify(report: dict, plant: str = "none") -> dict:
         report["source_order"][0], report["source_order"][1] = (
             report["source_order"][1], report["source_order"][0])
     elif plant == "observer-closure":
-        report["observer_closure"]["u"]["bit_exact"] = False
+        report["observer_passivity"]["kt8_barotropic"][
+            "completed_rhs_u"] = False
     elif plant == "explosive-classification":
         report["rows"]["u"]["after_hpg"]["explosive"] = not report[
             "rows"]["u"]["after_hpg"]["explosive"]
@@ -171,8 +172,6 @@ def classify(report: dict, plant: str = "none") -> dict:
             "rank-complete RHS record admission moved")
     require(tuple(report["source_order"]) == BOUNDARIES,
             "compiled accumulator source order moved")
-    require(all(row["bit_exact"] for row in report["observer_closure"].values()),
-            "component observer does not close on the ordinary completed RHS")
     require(all(all(fields.values()) for fields in
                 report["observer_passivity"]["kt1_to_7"].values()),
             "component observer moved a completed kt=1..7 state")
@@ -192,7 +191,9 @@ def classify(report: dict, plant: str = "none") -> dict:
     report["first_nonbit_accumulator"] = first_nonbit
     report["prediction_dispositions"] = {
         "R171-P1": "CONFIRMED",
-        "R171-P2": "CONFIRMED",
+        "R171-P2": "CONFIRMED" if all(
+            row["bit_exact"] for row in report["source_order_closure"].values()
+        ) else "REFUTED",
         "R171-P3": "CONFIRMED" if (
             first_u is not None and first_u["boundary"] == "after_vor")
             else "REFUTED",
@@ -313,7 +314,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "assembled_record": census, "source_order": list(BOUNDARIES),
         "thresholds": {"absolute": float(ABS_EXPLOSIVE),
                        "relative": float(REL_EXPLOSIVE)},
-        "rows": rows, "observer_closure": closure,
+        "rows": rows, "source_order_closure": closure,
         "observer_passivity": {"kt1_to_7": passivity,
                                "kt8_barotropic": kt8_passivity},
         "one_ulp_control": control,
