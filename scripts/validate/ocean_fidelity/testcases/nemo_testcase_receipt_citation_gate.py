@@ -1435,12 +1435,12 @@ CITATION_MAP = {
         ("CALL r95_spg_w2('ssha_e', ssha_e)", 1),
         11,
     ],
-    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:633-636': [
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:633-634': [
         ('zsshu_a(ji,jj) = r1_2 * r1_e1e2u(ji,jj)', 1),
-        ('zsshv_a(ji,jj) = r1_2 * r1_e1e2v(ji,jj)', 1),
-        4,
+        ('&                                      + e1e2t(ji+1,jj  ) * ssha_e(ji+1,jj  ) ) * ssumask(ji,jj)', 1),
+        2,
     ],
-    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:837-845': [
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:836-844': [
         ('!* Swap', 1),
         ('vn_e   (:,:) = va_e  (:,:)', 1),
         9,

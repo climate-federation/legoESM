@@ -20,12 +20,12 @@ The admitted executable forms the transport divergence and advances
 `ssha_e` at
 `ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:585-595`, constructs
 the area-weighted U-face sea surface `zsshu_a` at
-`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:633-636`, and forms the
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:633-634`, and forms the
 exit depth and masked reciprocal at
 `ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:763-766`. After the
 seven-array exchange, NEMO carries substep 1's completed `ua_e` into
 substep 2's `un_e` at
-`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:837-845`.
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:836-844`.
 
 The round-166 record re-admits with two rank slabs, exactly-once coverage, 65
 external substeps, 2,106 self-described groups per rank and 20 terminal
@@ -108,6 +108,6 @@ configuration, package implementation or sea-ice feature changed.
    no acquisition is currently needed.
 2. Separately localise the 1/41 recorded-after-SSH face-average replay residual
    to its native face and decide whether it is pre/post-association timing or
-   arithmetic before clearing `dynspg_ts.f90:633-636`.
+   arithmetic before clearing the cited U-face average.
 3. Keep the complete V-transport/halo unit private and HELD until its upstream
    compensating statement is exact and the Decision-96 shared gates pass.
