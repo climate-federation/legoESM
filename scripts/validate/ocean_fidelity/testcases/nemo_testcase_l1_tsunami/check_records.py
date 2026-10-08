@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admit (or refuse) a TSUNAMI lane-round-1 acquisition.
+"""Admit (or refuse) a TSUNAMI acquisition: round 1 (stp_MLF) or round 2 (RK3).
 
 Every record is parsed from its OWN header; no size is predicted.  Refuses on:
 a missing or extra record, a wrong magic/version, a filename/header step
@@ -47,7 +47,23 @@ SPGTS_SUB = ["ua_ext", "va_ext", "sshp2_mid", "htp2_e", "hup2_e", "hvp2_e",
              "cor_v", "trd_u", "trd_v", "ua_new", "va_new", "hu_e", "hv_e",
              "hur_e", "hvr_e", "uub_sum", "vvb_sum", "ssh_sum", "sum_coef"]
 SPGTS_EXIT = ["un_adv", "vn_adv", "uu_b_aa", "vv_b_aa", "ssh_aa"]
-OUTPUT_FIELDS = ("sossheig", "souubaro", "somebaro")
+# tests/TSUNAMI/MY_SRC/diawri.F90:625-631 histdef, :653-655 histwrite
+OUTPUT_FIELDS = ("sossheig", "souubaro", "sovvbaro")
+# Round 2, stprk3_rk3_step_record.patch on the case's MY_SRC/stprk3.F90:
+# 'e' step entry, 'b' after stp_2D, '1'..'3' after each stp_RK3_stg (the
+# stage's Naa before the swap), 'f' after the closing swap + extrapolation.
+RK3_FINAL = [f"f_{v}" for v in ("ssh_bb", "uu_b_bb", "vv_b_bb", "uu_k1_bb",
+                                "vv_k1_bb", "ssh_aa")]
+RK3_FULL = (
+    [f"e_{v}" for v in ("ssh_bb", "ssh_nn", "ssh_aa", "uu_b_bb", "vv_b_bb",
+                        "r3t_bb", "r3u_bb", "r3v_bb", "r3f", "uu_k1_bb",
+                        "vv_k1_bb", "tn_k1_bb", "sn_k1_bb")]
+    + [f"b_{v}" for v in ("ssh_aa", "uu_b_aa", "vv_b_aa", "r3t_aa", "un_adv",
+                          "vn_adv", "uu_rhs_k1", "vv_rhs_k1")]
+    + [f"{s}_{v}" for s in "123"
+       for v in ("ssh_aa", "uu_b_aa", "vv_b_aa", "uu_k1_aa", "vv_k1_aa",
+                 "tn_k1_aa", "sn_k1_aa", "r3t_aa", "r3u_aa", "r3v_aa", "r3f")]
+    + RK3_FINAL)
 
 
 def spgts_groups(icycle: int) -> set[str]:
@@ -103,8 +119,10 @@ def step_of(path: Path) -> int:
     return int(path.stem.rsplit("kt", 1)[1])
 
 
-def check(evidence: Path, reference: Path, steps: int) -> dict:
-    out: dict = {"records": {}}
+def check(evidence: Path, reference: Path, steps: int, program: str) -> dict:
+    if program not in ("mlf", "rk3"):
+        raise ValueError(f"program must be 'mlf' or 'rk3', got {program!r}")
+    out: dict = {"records": {}, "program": program}
     stepfiles = sorted(evidence.glob("oracle_tsustep_kt*.bin"))
     if [step_of(p) for p in stepfiles] != list(range(1, steps + 1)):
         raise Refusal(f"step records are {[step_of(p) for p in stepfiles]}")
@@ -113,10 +131,16 @@ def check(evidence: Path, reference: Path, steps: int) -> dict:
         head, groups = parse(p, STEP_MAGIC, STEP_NINT, STEP_BOUNDS_AT)
         if head[1] != step_of(p):
             raise Refusal(f"{p.name}: header step {head[1]}")
-        need = FULL if head[1] <= FULL_STEPS else AFTER
-        missing = [g for g in need if g not in groups]
-        if missing:
-            raise Refusal(f"{p.name}: missing groups {missing}")
+        if program == "rk3":
+            want = set(RK3_FULL if head[1] <= FULL_STEPS else RK3_FINAL)
+            if set(groups) != want:
+                raise Refusal(f"{p.name}: missing {sorted(want - set(groups))} "
+                              f"extra {sorted(set(groups) - want)}")
+        else:
+            need = FULL if head[1] <= FULL_STEPS else AFTER
+            missing = [g for g in need if g not in groups]
+            if missing:
+                raise Refusal(f"{p.name}: missing groups {missing}")
         shapes = {a.shape for a in groups.values()}
         if len(shapes) != 1 or (shape is not None and shapes != {shape}):
             raise Refusal(f"{p.name}: inconsistent shapes {shapes}")
@@ -174,9 +198,10 @@ def main(argv=None) -> int:
     ap.add_argument("--reference", type=Path, required=True)
     ap.add_argument("--steps", type=int, default=100)
     ap.add_argument("--json", type=Path, required=True)
+    ap.add_argument("--program", choices=("mlf", "rk3"), required=True)
     args = ap.parse_args(argv)
     try:
-        result = check(args.evidence, args.reference, args.steps)
+        result = check(args.evidence, args.reference, args.steps, args.program)
     except Refusal as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 1
