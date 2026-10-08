@@ -972,6 +972,7 @@ def candidate_trajectory(
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
+    hpg_fold_depth_average_unit: bool = False,
 ) -> dict[str, object]:
     """Run production ORCA2 with either its own or Decision-52 entry SSH."""
 
@@ -1041,7 +1042,8 @@ def candidate_trajectory(
                 build_reference_depth_override(card)
                 if raw_reference_depth else None),
             barotropic_unmasked_v_transport=unmasked_v_transport,
-            barotropic_materialize_v_transport=materialize_v_transport),
+            barotropic_materialize_v_transport=materialize_v_transport,
+            hpg_fold_depth_average_unit=hpg_fold_depth_average_unit),
     )
     checkpoints: list[dict[str, object]] = []
     first_non_bit: dict[str, object] | None = None
@@ -1136,6 +1138,7 @@ def candidate_trajectory(
             "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
+            "hpg_fold_depth_average_unit": hpg_fold_depth_average_unit,
         },
         "initial_mode": (
             "decision52_ssh_bridge" if bridge_ssh else "card_own_state"
@@ -1190,6 +1193,7 @@ def run_gate(
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
+    hpg_fold_depth_average_unit: bool = False,
 ) -> dict[str, object]:
     stamp = provenance_stamp()
     source = validate_compiled_source(compiled_source)
@@ -1257,6 +1261,7 @@ def run_gate(
             raw_reference_depth=raw_reference_depth,
             unmasked_v_transport=unmasked_v_transport,
             materialize_v_transport=materialize_v_transport,
+            hpg_fold_depth_average_unit=hpg_fold_depth_average_unit,
         )
         status = trajectory.get("execution_blocker", {}).get(
             "status",
@@ -1319,6 +1324,7 @@ def main() -> int:
     parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
+    parser.add_argument("--hpg-fold-depth-average-unit", action="store_true")
     parser.add_argument(
         "--plant", choices=("kt1_T", "surface_hash", "eos80_coeff"))
     args = parser.parse_args()
@@ -1336,6 +1342,7 @@ def main() -> int:
             raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,
+            hpg_fold_depth_average_unit=args.hpg_fold_depth_average_unit,
         )
     except (GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)

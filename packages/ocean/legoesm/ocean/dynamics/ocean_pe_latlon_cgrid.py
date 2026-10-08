@@ -1865,6 +1865,7 @@ def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask, legacy_hpg_algebraic=False,
     nemo_hpg_rhd=None,
+    nemo_hpg_north_fold_density=False,
 ):
     """Stages 6 / 6-7 / 6b: kinetic-energy gradient (centered, Hollingsworth,
     or WENO), baroclinic pressure gradient (batched with KE), and the
@@ -2201,7 +2202,8 @@ def _bc_ke_and_pressure_gradients(
                         "domain geometry is forbidden")
                 e3w_live = jnp.asarray(e3w0) * stretch
                 hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
-                    rhd, e3w_live, gdept_z0, grid, g_val)
+                    rhd, e3w_live, gdept_z0, grid, g_val,
+                    _north_fold_density=nemo_hpg_north_fold_density)
                 direct_hpg_u, direct_hpg_v = hpg_u, hpg_v
                 # This arm has no pressure-gradient intermediate in NEMO:
                 # dynhpg writes acceleration straight into Krhs.  A synthetic
@@ -5097,6 +5099,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_operands=None,
     nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
+    nemo_hpg_north_fold_density=False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5281,6 +5284,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         eta_safe, H_bathy, g_val, mask,
         legacy_hpg_algebraic=legacy_hpg_algebraic,
         nemo_hpg_rhd=nemo_hpg_rhd,
+        nemo_hpg_north_fold_density=nemo_hpg_north_fold_density,
     )
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
     # advection -div(transport(x)u), which already includes the kinetic-energy

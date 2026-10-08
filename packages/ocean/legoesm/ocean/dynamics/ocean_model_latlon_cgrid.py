@@ -1185,6 +1185,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # completed boundary and then applies the already-computed wind once.
     # Both preserve unowned faces and are absent from the public config.
     slow_forcing_depth_override: object = None
+    # Private round-184 atomic arm.  One switch applies NEMO's north-fold HPG
+    # density neighbour together with the recorded reference e3v/vmask/hv_0
+    # operands of the written V depth average.  The four statements are a
+    # measured cancelling unit and cannot be selected separately.
+    hpg_fold_depth_average_unit: bool = False
     slow_forcing_drag_override: object = None
     # Private round-144 discriminator for the compiled wind statement.  Each
     # tuple member independently replaces density reciprocal, face stresses,
@@ -5579,7 +5584,8 @@ class LatLonCGridOceanModel:
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
-                   nemo_stage_zad_eta_after_override=None):
+                   nemo_stage_zad_eta_after_override=None,
+                   nemo_hpg_north_fold_density=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5642,6 +5648,7 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
+            nemo_hpg_north_fold_density=nemo_hpg_north_fold_density,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6033,6 +6040,9 @@ class LatLonCGridOceanModel:
                                    self._nemo_ws_test_hooks.stage1_zad_operand_observer),
                                nemo_stage_zad_eta_after_override=(
                                    _nemo_stage1_zad_eta_after_override),
+                               nemo_hpg_north_fold_density=(
+                                   self._nemo_ws_test_hooks
+                                   .hpg_fold_depth_average_unit),
                                return_nemo_operator_components=_want_rhs_components)
         if _want_rhs_components:
             tend, _mom_term_diagnostics, _live_operands = _tend_result
@@ -6236,6 +6246,24 @@ class LatLonCGridOceanModel:
                 _vm3 = jnp.asarray(v_mask_3d, dtype=du_dt.dtype)
             _ops0 = nemo_qco_card_mesh_operands(
                 _h_ref0, _um3, _vm3, _grid, du_dt.dtype)
+            _atomic_hpg_unit = (
+                self._nemo_ws_test_hooks.hpg_fold_depth_average_unit)
+            if _atomic_hpg_unit:
+                _raw0 = getattr(_zc, "nemo_een_barotropic", None)
+                if _raw0 is None:
+                    raise ValueError(
+                        "atomic HPG fold/depth-average arm requires the "
+                        "card's raw NEMO barotropic mesh operands")
+                _raw_e3v0 = jnp.asarray(
+                    _raw0.e3v_0, dtype=du_dt.dtype)[..., :du_dt.shape[-1]]
+                _raw_vmask0 = jnp.asarray(
+                    _raw0.vmask, dtype=du_dt.dtype)[..., :du_dt.shape[-1]]
+                _raw_hv0 = jnp.asarray(_raw0.hv_0, dtype=du_dt.dtype)
+                if (_raw_e3v0.shape != _ops0.e3v_0.shape
+                        or _raw_vmask0.shape != _ops0.vmask3.shape
+                        or _raw_hv0.shape != _ops0.hv_0.shape):
+                    raise ValueError(
+                        "atomic HPG fold/depth-average operand shapes moved")
             _one = jnp.asarray(1.0, dtype=du_dt.dtype)
             _wet_u0 = (_ops0.hu_0 > 0.0).astype(du_dt.dtype)
             _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
@@ -6247,10 +6275,35 @@ class LatLonCGridOceanModel:
             _slow_v_native = jnp.sum(
                 _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
                 axis=-1) * _r1_hv_0
+            if _atomic_hpg_unit:
+                # Round 183 registered one cancelling unit: the 68 north-
+                # fold faces that NEMO keeps wet and the compact card mask
+                # removes.  Keep every unregistered face on the production
+                # path so this arm cannot borrow improvement from unrelated
+                # raw-mesh substitutions.
+                _raw_wet_v0 = (_raw_hv0 > 0.0).astype(du_dt.dtype)
+                _fold_unit_v = (_raw_wet_v0 > 0.0) & (_wet_v0 == 0.0)
+                _raw_r1_hv_0 = (
+                    _raw_wet_v0
+                    / (_raw_hv0 + _one - _raw_wet_v0))
+                _raw_slow_v = jnp.sum(
+                    _raw_e3v0 * dv_dt[1:, :, :] * _raw_vmask0,
+                    axis=-1) * _raw_r1_hv_0
+                _slow_v_native = jnp.where(
+                    _fold_unit_v, _raw_slow_v, _slow_v_native)
             F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
                         * state.u_mask.data)
-            F_slow_v = (F_slow_v.at[1:, :].set(_slow_v_native)
-                        * state.v_mask.data)
+            F_slow_v = F_slow_v.at[1:, :].set(_slow_v_native)
+            F_slow_v_masked = F_slow_v * state.v_mask.data
+            if _atomic_hpg_unit:
+                F_slow_v = F_slow_v_masked.at[1:, :].set(
+                    jnp.where(
+                        _fold_unit_v,
+                        F_slow_v[1:, :],
+                        F_slow_v_masked[1:, :],
+                    ))
+            else:
+                F_slow_v = F_slow_v_masked
         _slow_depth_override = (
             self._nemo_ws_test_hooks.slow_forcing_depth_override)
         if _slow_depth_override is not None:
@@ -6754,6 +6807,9 @@ class LatLonCGridOceanModel:
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),
+                                     nemo_hpg_north_fold_density=(
+                                         self._nemo_ws_test_hooks
+                                         .hpg_fold_depth_average_unit),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:

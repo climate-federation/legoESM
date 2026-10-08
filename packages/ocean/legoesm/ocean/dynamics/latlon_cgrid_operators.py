@@ -42,6 +42,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
+    fold_ghost_source_T,
     pad_ns_vector_v,
     pad_lon_cgrid,
     interp_cell_to_uface,
@@ -4011,6 +4012,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     *,
     return_components: bool = False,
     _source_round: bool = True,
+    _north_fold_density: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
@@ -4042,6 +4044,22 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
+    if _north_fold_density:
+        fold = getattr(grid, "fold", None)
+        if fold is None or not bool(getattr(fold, "is_active", False)):
+            raise ValueError(
+                "north-fold HPG density association requires an active fold")
+        source = fold_ghost_source_T(rhd, fold)[0]
+        folded = source[fold.perm_T]
+        nmask = north_fold_mask(grid)
+        if fold_is_local(grid):
+            rhd_j1 = rhd_j1.at[-1].set(folded)
+        elif nmask is not None:
+            selector = nmask
+            while selector.ndim < folded.ndim:
+                selector = selector[..., None]
+            rhd_j1 = rhd_j1.at[-1].set(
+                jnp.where(selector, folded, rhd_j1[-1]))
     e3w_i1 = jnp.roll(e3w, -1, axis=1)
     e3w_j1 = jnp.roll(e3w, -1, axis=0)
     dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
@@ -4147,7 +4165,8 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
 _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
     _nemo_hpg_sco_literal_cgrid_impl,
-    static_argnames=("return_components", "_source_round"))
+    static_argnames=(
+        "return_components", "_source_round", "_north_fold_density"))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -4159,16 +4178,19 @@ def nemo_hpg_sco_literal_cgrid(
     *,
     return_components: bool = False,
     _source_round: bool = True,
+    _north_fold_density: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
     if isinstance(rhd, jax.core.Tracer):
         return _nemo_hpg_sco_literal_cgrid_impl(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components, _source_round=_source_round)
+            return_components=return_components, _source_round=_source_round,
+            _north_fold_density=_north_fold_density)
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components, _source_round=_source_round)
+            return_components=return_components, _source_round=_source_round,
+            _north_fold_density=_north_fold_density)
 
 
 def partial_cell_pgf_correction_x(
