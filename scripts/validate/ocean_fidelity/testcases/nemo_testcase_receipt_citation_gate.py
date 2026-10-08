@@ -1454,7 +1454,7 @@ CITATION_MAP = {
         5,
     ],
     'ORCA2_OMIP_L4_R172HPG8/BLD/ppsrc/nemo/dynhpg.f90:402-429': [
-        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 1),
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
         ('r172_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap', 1),
         28,
     ],
