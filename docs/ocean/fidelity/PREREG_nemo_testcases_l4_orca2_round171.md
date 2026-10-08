@@ -103,3 +103,12 @@ This is an instrument change only: the default hook remains false and no
 constructible configuration can select it.  If the enriched return changes
 one bit, the round stops without a scientific score.  Predictions, thresholds
 and terminal rules remain frozen.
+
+That all-component return also moved a post-barotropic bit and is rejected;
+its values are discarded and the failed selector will not remain callable.
+The last admissible attempt returns exactly one already-materialised U/V
+component pair per executable.  Five separately compiled static selectors
+(HPG, LDF, VOR, KEG and ZAD) must each reproduce the plain completed RHS and
+post-barotropic state bit-for-bit at every canonical kt=1..8 input.  Only if
+all five pass are their returned pairs assembled in the frozen source order.
+This changes neither the predictions nor either explosive threshold.
