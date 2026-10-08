@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _NEMOWSBarotropicRHSTrace,
+    _NEMOWSBarotropicRHSComponentTrace,
     _NEMOWSRK3TestHooks,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -13,9 +13,11 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 def test_return_only_rhs_trace_is_private_and_default_off():
     hooks = _NEMOWSRK3TestHooks()
-    assert hooks.expose_barotropic_rhs_components is False
-    assert hooks._replace(expose_barotropic_rhs_components=True).expose_barotropic_rhs_components
-    assert _NEMOWSBarotropicRHSTrace._fields[-1] == "operator_components"
+    assert hooks.expose_barotropic_rhs_component == ""
+    selected = hooks._replace(expose_barotropic_rhs_component="vorticity")
+    assert selected.expose_barotropic_rhs_component == "vorticity"
+    assert _NEMOWSBarotropicRHSComponentTrace._fields[-2:] == (
+        "operator_component_u", "operator_component_v")
 
 
 def _score(candidate, reference, *, exact=False):

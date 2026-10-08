@@ -42,6 +42,7 @@ from scripts.validate.ocean_fidelity.testcases import (
 
 
 BOUNDARIES = ("after_hpg", "after_ldf", "after_vor", "after_keg", "after_zad")
+COMPONENTS = ("hpg", "ldf", "vorticity", "keg", "zad")
 FACES = ("u", "v")
 ABS_EXPLOSIVE = np.float64(1.0e20)
 REL_EXPLOSIVE = np.float64(1.0e12)
@@ -225,10 +226,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     plain_baro = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks._replace(expose_barotropic_substeps=True))
-    observed_baro = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks._replace(
-            expose_barotropic_rhs_components=True))
+    observed_baro = {
+        component: LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=hooks._replace(
+                expose_barotropic_rhs_component=component))
+        for component in COMPONENTS
+    }
 
     passivity = {}
     for kt in range(1, 8):
@@ -236,32 +240,44 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         plain_prefix = jax.device_get(plain_baro.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        observed_prefix = jax.device_get(observed_baro.step(
-            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        prefix_rows = r166._state_rows(
-            observed_prefix.state_after_barotropic,
-            plain_prefix.state_after_barotropic)
-        for face in FACES:
-            prefix_rows[f"completed_rhs_{face}"] = bool(np.array_equal(
-                r83.native_u(observed_prefix.slow_forcing_operands["du_dt"])
-                if face == "u" else
-                r83.native_v(observed_prefix.slow_forcing_operands["dv_dt"]),
-                r83.native_u(plain_prefix.slow_forcing_operands["du_dt"])
-                if face == "u" else
-                r83.native_v(plain_prefix.slow_forcing_operands["dv_dt"])))
+        prefix_rows = {}
+        for component, model in observed_baro.items():
+            observed_prefix = jax.device_get(model.step(
+                state, card.dt_s, freshwater=freshwater,
+                surface_forcing=surface))
+            state_rows = r166._state_rows(
+                observed_prefix.state_after_barotropic,
+                plain_prefix.state_after_barotropic)
+            prefix_rows.update({
+                f"{component}:{name}": exact
+                for name, exact in state_rows.items()
+            })
+            for face in FACES:
+                observed_rhs = (
+                    r83.native_u(observed_prefix.slow_forcing_operands["du_dt"])
+                    if face == "u" else
+                    r83.native_v(observed_prefix.slow_forcing_operands["dv_dt"]))
+                plain_rhs = (
+                    r83.native_u(plain_prefix.slow_forcing_operands["du_dt"])
+                    if face == "u" else
+                    r83.native_v(plain_prefix.slow_forcing_operands["dv_dt"]))
+                prefix_rows[f"{component}:completed_rhs_{face}"] = bool(
+                    np.array_equal(observed_rhs, plain_rhs))
         passivity[str(kt)] = prefix_rows
         state = next_state
         print(f"PROGRESS round171 complete kt={kt}", file=sys.stderr, flush=True)
 
     plain_trace = jax.device_get(plain_baro.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    observed_trace = jax.device_get(observed_baro.step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    parts = observed_trace.operator_components
-
+    observed_traces = {
+        component: jax.device_get(model.step(
+            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+        for component, model in observed_baro.items()
+    }
     component = {
-        name: value.data if hasattr(value, "data") else value
-        for name, value in parts.items()
+        f"{name}_{face}": getattr(
+            observed_traces[name], f"operator_component_{face}")
+        for name in COMPONENTS for face in FACES
     }
     accumulated = jax.device_get(jax.jit(r84.source_order_accumulators)(
         component["hpg_u"], component["hpg_v"],
@@ -297,19 +313,25 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "u": r83.native_u(plain_trace.slow_forcing_operands["du_dt"]),
         "v": r83.native_v(plain_trace.slow_forcing_operands["dv_dt"]),
     }
-    observed_rhs = {
-        "u": r83.native_u(observed_trace.slow_forcing_operands["du_dt"]),
-        "v": r83.native_v(observed_trace.slow_forcing_operands["dv_dt"]),
-    }
     closure = {
         face: r93.score(live[face]["after_zad"], plain_rhs[face], active[face])
         for face in FACES
     }
-    kt8_passivity = r166._state_rows(
-        observed_trace.state_after_barotropic, plain_trace.state_after_barotropic)
-    for face in FACES:
-        kt8_passivity[f"completed_rhs_{face}"] = bool(np.array_equal(
-            observed_rhs[face], plain_rhs[face]))
+    kt8_passivity = {}
+    for name, observed_trace in observed_traces.items():
+        state_rows = r166._state_rows(
+            observed_trace.state_after_barotropic,
+            plain_trace.state_after_barotropic)
+        kt8_passivity.update({
+            f"{name}:{field}": exact for field, exact in state_rows.items()
+        })
+        for face in FACES:
+            observed_rhs = (
+                r83.native_u(observed_trace.slow_forcing_operands["du_dt"])
+                if face == "u" else
+                r83.native_v(observed_trace.slow_forcing_operands["dv_dt"]))
+            kt8_passivity[f"{name}:completed_rhs_{face}"] = bool(
+                np.array_equal(observed_rhs, plain_rhs[face]))
 
     synthetic = np.zeros((2, 2, 2), dtype=np.float64)
     planted = synthetic.copy()
