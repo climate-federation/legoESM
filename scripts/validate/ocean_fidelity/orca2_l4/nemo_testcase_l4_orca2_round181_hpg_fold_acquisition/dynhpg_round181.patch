@@ -1,0 +1,77 @@
+--- dynhpg.F90
++++ dynhpg.F90
+@@ -327,11 +327,15 @@
+       INTEGER  ::   ji, jj, jk, jii, jjj           ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios
+       INTEGER  ::   r180_unit, r180_ios
++      INTEGER  ::   r181_unit, r181_ios
+       CHARACTER(LEN=16) :: l2_magic
+       CHARACTER(LEN=16) :: r180_magic, r180_name
++      CHARACTER(LEN=16) :: r181_magic, r181_name
+       CHARACTER(LEN=256) :: r180_filename
++      CHARACTER(LEN=256) :: r181_filename
+       REAL(wp) ::   zcoef0, zuap, zvap, ztmp       ! local scalars
+       REAL(wp), DIMENSION(T2D(0))           ::   zhpi, zhpj
+       REAL(wp), DIMENSION(jpi,jpj,jpk) :: l2_zhpi_u, l2_zhpi_v, l2_zuap_u, l2_zuap_v, l2_sum_u, l2_sum_v
+       REAL(wp), DIMENSION(jpi,jpj,jpk) :: r180_e3w, r180_gdept, r180_zhpi_u, r180_zhpi_v, r180_zuap_u, r180_zuap_v, r180_sum_u, r180_sum_v
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r181_e3n, r181_rhdn, r181_e3c, r181_rhdc, r181_zhpj
+       !!----------------------------------------------------------------------
+@@ -361,4 +365,7 @@
+                r180_gdept(ji,jj,jk) = gdept_z0(ji,jj,jk,Kmm)
+             END_2D
+          END DO
++         r181_e3n = 0._wp ; r181_rhdn = 0._wp
++         r181_e3c = 0._wp ; r181_rhdc = 0._wp
++         r181_zhpj = 0._wp
+       ENDIF
+@@ -397,4 +404,9 @@
+             r180_zuap_u(ji,jj,1) = zuap         ; r180_zuap_v(ji,jj,1) = zvap
+             r180_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
+             r180_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
++            r181_e3n (ji,jj,1) = e3w(ji,jj+1,1,Kmm)
++            r181_rhdn(ji,jj,1) = rhd(ji,jj+1,1)
++            r181_e3c (ji,jj,1) = e3w(ji,jj,1,Kmm)
++            r181_rhdc(ji,jj,1) = rhd(ji,jj,1)
++            r181_zhpj(ji,jj,1) = zhpj(ji,jj)
+          ENDIF
+@@ -433,4 +445,9 @@
+                r180_zuap_u(ji,jj,jk) = zuap         ; r180_zuap_v(ji,jj,jk) = zvap
+                r180_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
+                r180_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
++               r181_e3n (ji,jj,jk) = e3w(ji,jj+1,jk,Kmm)
++               r181_rhdn(ji,jj,jk) = rhd(ji,jj+1,jk)
++               r181_e3c (ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++               r181_rhdc(ji,jj,jk) = rhd(ji,jj,jk)
++               r181_zhpj(ji,jj,jk) = zhpj(ji,jj)
+             ENDIF
+@@ -493,4 +510,30 @@
+          CLOSE(r180_unit)
+          WRITE(numout,*) 'ORCA2_R180_HPG1_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r180_filename)
+       ENDIF
++      IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++         WRITE(r181_filename,'("oracle_r181_hpgfold_rank",I4.4,"_kt",I8.8,".bin")') narea - 1, kt
++         OPEN( NEWUNIT=r181_unit, FILE=TRIM(r181_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r181_ios )
++         IF( r181_ios /= 0 ) CALL ctl_stop( 'hpg_sco: cannot open round-181 HPG fold record' )
++         r181_magic = 'NEMO_L4_R181HPF'
++         WRITE(r181_unit) r181_magic, 1, kt, Kmm, Krhs, narea - 1, jpi, jpj, jpk, &
++            & nimpp, njmpp, ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 5
++         r181_name = 'north_e3w'
++         WRITE(r181_unit) r181_name, narea - 1, 3, jpi, jpj, jpk
++         WRITE(r181_unit) r181_e3n
++         r181_name = 'north_rhd'
++         WRITE(r181_unit) r181_name, narea - 1, 3, jpi, jpj, jpk
++         WRITE(r181_unit) r181_rhdn
++         r181_name = 'current_e3w'
++         WRITE(r181_unit) r181_name, narea - 1, 3, jpi, jpj, jpk
++         WRITE(r181_unit) r181_e3c
++         r181_name = 'current_rhd'
++         WRITE(r181_unit) r181_name, narea - 1, 3, jpi, jpj, jpk
++         WRITE(r181_unit) r181_rhdc
++         r181_name = 'zhpj'
++         WRITE(r181_unit) r181_name, narea - 1, 3, jpi, jpj, jpk
++         WRITE(r181_unit) r181_zhpj
++         CLOSE(r181_unit)
++         WRITE(numout,*) 'ORCA2_R181_HPG_FOLD_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r181_filename)
++      ENDIF
+       !
