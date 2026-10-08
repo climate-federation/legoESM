@@ -99,6 +99,72 @@ def _first_nonbit(rows: list[dict]) -> dict | None:
     return next((row for row in rows if not row["bit_exact"]), None)
 
 
+def _score_upstream(trace, oracle: dict[str, np.ndarray], active: dict[str, np.ndarray],
+                    area: np.ndarray, index: int) -> list[dict]:
+    """Score the recorded prefix without rejecting the known later overflow."""
+
+    step = index + 1
+    prefix = f"j{step:03d}"
+    previous = f"j{index:03d}"
+    candidate = {
+        "entry_u": r97._native_u(trace["u_entry"][index]),
+        "entry_v": r97._native_v(trace["v_entry"][index]),
+        "entry_ssh": np.asarray(trace["eta_entry"][index]),
+        "entry_inverse_u": r97._native_u(trace["inverse_depth_u"][index]),
+        "entry_inverse_v": r97._native_v(trace["inverse_depth_v"][index]),
+        "mid_u": r97._native_u(trace["u_mid"][index]),
+        "mid_v": r97._native_v(trace["v_mid"][index]),
+        "mid_ssh": np.asarray(trace["eta_mid"][index]),
+        "mid_depth_u": r97._native_u(trace["transport_face_depth_u"][index]),
+        "mid_depth_v": r97._native_v(trace["transport_face_depth_v"][index]),
+        "transport_u": r97._native_u(trace["transport_metric_u"][index]),
+        "transport_v": r97._native_v(trace["transport_metric_v"][index]),
+        "continuity_du": np.asarray(trace["continuity_du"][index]),
+        "continuity_dv": np.asarray(trace["continuity_dv"][index]),
+        "continuity_divergence": np.asarray(trace["continuity_divergence"][index]),
+        "after_ssh": np.asarray(trace["eta_continuity"][index]),
+    }
+    oracle_du = oracle[f"{prefix}_zhU"] - np.roll(
+        oracle[f"{prefix}_zhU"], 1, axis=1)
+    oracle_v_south = np.concatenate([
+        np.zeros_like(oracle[f"{prefix}_zhV"][:1]),
+        oracle[f"{prefix}_zhV"][:-1]], axis=0)
+    oracle_dv = oracle[f"{prefix}_zhV"] - oracle_v_south
+    oracle_divergence = (oracle_du + oracle_dv) * (1.0 / area)
+    reference = {
+        "entry_u": oracle[f"{previous}_ua_new"],
+        "entry_v": oracle[f"{previous}_va_new"],
+        "entry_ssh": oracle[f"{previous}_ssha_e"],
+        "entry_inverse_u": oracle[f"{previous}_hur_e"],
+        "entry_inverse_v": oracle[f"{previous}_hvr_e"],
+        "mid_u": oracle[f"{prefix}_ua_ext"],
+        "mid_v": oracle[f"{prefix}_va_ext"],
+        "mid_ssh": oracle[f"{prefix}_sshp2_mid"],
+        "mid_depth_u": oracle[f"{prefix}_hup2_e"],
+        "mid_depth_v": oracle[f"{prefix}_hvp2_e"],
+        "transport_u": oracle[f"{prefix}_zhU"],
+        "transport_v": oracle[f"{prefix}_zhV"],
+        "continuity_du": oracle_du,
+        "continuity_dv": oracle_dv,
+        "continuity_divergence": oracle_divergence,
+        "after_ssh": oracle[f"{prefix}_ssha_e"],
+    }
+    faces = {
+        "entry_u": "u", "entry_v": "v", "entry_ssh": "t",
+        "entry_inverse_u": "u", "entry_inverse_v": "v",
+        "mid_u": "u", "mid_v": "v", "mid_ssh": "t",
+        "mid_depth_u": "u", "mid_depth_v": "v",
+        "transport_u": "u", "transport_v": "v",
+        "continuity_du": "t", "continuity_dv": "t",
+        "continuity_divergence": "t", "after_ssh": "t",
+    }
+    rows = []
+    for name in UPSTREAM_ORDER:
+        rows.append({"name": name, **_score(
+            candidate[name], reference[name], active[faces[name]])})
+    return rows
+
+
 def classify(report: dict, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = copy.deepcopy(report)
@@ -290,10 +356,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "exit_inverse_u": _score(
             candidate_inverse, oracle[f"{prefix}_hur_e"], active["u"]),
     }
-    upstream_rows = r129._score_substep(
-        trace, oracle, active, np.asarray(card.recipe.grid.area), index,
-        plant="none")
-    upstream_rows = [row for row in upstream_rows if row["name"] in UPSTREAM_ORDER]
+    upstream_rows = _score_upstream(
+        trace, oracle, active, np.asarray(card.recipe.grid.area), index)
     require(tuple(row["name"] for row in upstream_rows) == UPSTREAM_ORDER,
             "round-129 upstream row registry moved")
     first_upstream = _first_nonbit(upstream_rows)

@@ -70,3 +70,34 @@ def test_first_nonbit_preserves_source_order():
         {"name": "c", "bit_exact": False},
     ]
     assert gate._first_nonbit(rows)["name"] == "b"
+
+
+def test_upstream_score_retains_nonfinite_census(monkeypatch):
+    shape = (1, 1)
+    trace = {
+        name: np.zeros((2,) + shape)
+        for name in (
+            "u_entry", "v_entry", "eta_entry", "inverse_depth_u",
+            "inverse_depth_v", "u_mid", "v_mid", "eta_mid",
+            "transport_face_depth_u", "transport_face_depth_v",
+            "transport_metric_u", "transport_metric_v", "continuity_du",
+            "continuity_dv", "continuity_divergence", "eta_continuity",
+        )
+    }
+    trace["transport_metric_u"][1, 0, 0] = np.inf
+    oracle = {
+        f"{prefix}_{name}": np.zeros(shape)
+        for prefix in ("j001", "j002")
+        for name in (
+            "ua_new", "va_new", "ssha_e", "hur_e", "hvr_e", "ua_ext",
+            "va_ext", "sshp2_mid", "hup2_e", "hvp2_e", "zhU", "zhV",
+        )
+    }
+    monkeypatch.setattr(gate.r97, "_native_u", np.asarray)
+    monkeypatch.setattr(gate.r97, "_native_v", np.asarray)
+    rows = gate._score_upstream(
+        trace, oracle, {face: np.ones(shape, dtype=bool)
+                        for face in ("t", "u", "v")}, np.ones(shape), 1)
+    transport = next(row for row in rows if row["name"] == "transport_u")
+    assert transport["candidate_nonfinite"] == 1
+    assert not transport["bit_exact"]
