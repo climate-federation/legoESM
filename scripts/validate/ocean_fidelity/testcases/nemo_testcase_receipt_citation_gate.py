@@ -202,6 +202,8 @@ FILES = {
         _ORCA2_R90FRAMES_COMPILED / "istate.f90"),
     "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90": (
+        _ORCA2_R92RHS_COMPILED / "dynhpg.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90": (
@@ -2030,6 +2032,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90:386-427': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
+        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 42],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:227-230': [
         '!* baroclinic drag forcing *!   (also provide the barotropic drag coeff.)',
         "l4_canon_2d(Ve_rhs,'V'), l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')", 4],
