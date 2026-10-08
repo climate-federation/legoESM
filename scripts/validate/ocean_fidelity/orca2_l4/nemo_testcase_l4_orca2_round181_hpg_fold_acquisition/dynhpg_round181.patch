@@ -1,6 +1,6 @@
 --- dynhpg.F90
 +++ dynhpg.F90
-@@ -327,11 +327,15 @@
+@@ -327,13 +327,17 @@
        INTEGER  ::   ji, jj, jk, jii, jjj           ! dummy loop indices
        INTEGER  ::   l2_unit, l2_ios
        INTEGER  ::   r180_unit, r180_ios
@@ -16,7 +16,9 @@
        REAL(wp), DIMENSION(jpi,jpj,jpk) :: r180_e3w, r180_gdept, r180_zhpi_u, r180_zhpi_v, r180_zuap_u, r180_zuap_v, r180_sum_u, r180_sum_v
 +      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r181_e3n, r181_rhdn, r181_e3c, r181_rhdc, r181_zhpj
        !!----------------------------------------------------------------------
-@@ -361,4 +365,7 @@
+       !
+       IF( kt == nit000 ) THEN
+@@ -361,6 +365,9 @@
                 r180_gdept(ji,jj,jk) = gdept_z0(ji,jj,jk,Kmm)
              END_2D
           END DO
@@ -24,7 +26,9 @@
 +         r181_e3c = 0._wp ; r181_rhdc = 0._wp
 +         r181_zhpj = 0._wp
        ENDIF
-@@ -397,4 +404,9 @@
+       !
+       !
+@@ -397,6 +404,11 @@
              r180_zuap_u(ji,jj,1) = zuap         ; r180_zuap_v(ji,jj,1) = zvap
              r180_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
              r180_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
@@ -34,7 +38,9 @@
 +            r181_rhdc(ji,jj,1) = rhd(ji,jj,1)
 +            r181_zhpj(ji,jj,1) = zhpj(ji,jj)
           ENDIF
-@@ -433,4 +445,9 @@
+       END_2D
+       !
+@@ -433,6 +445,11 @@
                 r180_zuap_u(ji,jj,jk) = zuap         ; r180_zuap_v(ji,jj,jk) = zvap
                 r180_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
                 r180_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
@@ -44,7 +50,9 @@
 +               r181_rhdc(ji,jj,jk) = rhd(ji,jj,jk)
 +               r181_zhpj(ji,jj,jk) = zhpj(ji,jj)
              ENDIF
-@@ -493,4 +510,30 @@
+          END_2D
+       END DO
+@@ -493,6 +510,32 @@
           CLOSE(r180_unit)
           WRITE(numout,*) 'ORCA2_R180_HPG1_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r180_filename)
        ENDIF
@@ -75,3 +83,5 @@
 +         WRITE(numout,*) 'ORCA2_R181_HPG_FOLD_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r181_filename)
 +      ENDIF
        !
+       !
+    END SUBROUTINE hpg_sco
