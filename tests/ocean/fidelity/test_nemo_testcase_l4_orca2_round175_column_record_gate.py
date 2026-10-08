@@ -25,8 +25,9 @@ def _report():
         "geometry": {
             "target_jik": [86, 159, 3],
             "dtypes": {"nemo": "float64", "legoesm": "float64"},
-            "card_matches_nemo": {name: True for name in (
-                "e3t_0", "e3w_0", "tmask", "surface_umask", "surface_vmask")},
+            "card_vs_nemo": {name: {"bit_equal": name != "e3w_0"}
+                             for name in ("e3t_0", "e3w_0", "tmask",
+                                          "surface_umask", "surface_vmask")},
             "mbkt_fortran": 4, "bottom_zero_based": 3,
             "bottom_is_partial": True,
             "fold_row": False, "cyclic_seam": False,

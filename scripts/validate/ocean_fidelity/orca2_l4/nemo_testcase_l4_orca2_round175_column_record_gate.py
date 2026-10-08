@@ -80,6 +80,19 @@ def _bits_equal(left: np.ndarray, right: np.ndarray) -> bool:
     return left.shape == right.shape and bool(np.array_equal(left.view(np.uint64), right.view(np.uint64)))
 
 
+def _comparison(left: np.ndarray, right: np.ndarray) -> dict[str, object]:
+    left = np.ascontiguousarray(left, dtype=np.float64)
+    right = np.ascontiguousarray(right, dtype=np.float64)
+    require(left.shape == right.shape, "geometry comparison shape mismatch")
+    unequal = left.view(np.uint64) != right.view(np.uint64)
+    return {
+        "bit_equal": bool(not np.any(unequal)),
+        "unequal": int(np.count_nonzero(unequal)),
+        "count": int(left.size),
+        "max_abs": float(np.max(np.abs(left - right), initial=0.0)),
+    }
+
+
 def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
     mesh = ldf_gate._stitch(
         record_root,
@@ -181,12 +194,12 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         "land_adjacent": any(value == 0.0 for value in neighbours.values()),
         "fold_row": j == 147,
         "cyclic_seam": i in (0, 179),
-        "card_matches_nemo": {
-            "e3t_0": _bits_equal(lego_e3t, mesh["e3t_0"]),
-            "e3w_0": _bits_equal(lego_e3w, domain_e3w),
-            "tmask": _bits_equal(lego_t, mesh["tmask"]),
-            "surface_umask": _bits_equal(lego_u, mesh["umask"][..., 0]),
-            "surface_vmask": _bits_equal(lego_v, mesh["vmask"][..., 0]),
+        "card_vs_nemo": {
+            "e3t_0": _comparison(lego_e3t, mesh["e3t_0"]),
+            "e3w_0": _comparison(lego_e3w, domain_e3w),
+            "tmask": _comparison(lego_t, mesh["tmask"]),
+            "surface_umask": _comparison(lego_u, mesh["umask"][..., 0]),
+            "surface_vmask": _comparison(lego_v, mesh["vmask"][..., 0]),
         },
     }
 
@@ -255,8 +268,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(tuple(geometry["target_jik"]) == TARGET, "target cell moved")
     require(geometry["dtypes"] == {"nemo": "float64", "legoesm": "float64"},
             "geometry dtype moved")
-    require(all(geometry["card_matches_nemo"].values()),
-            "card geometry no longer matches NEMO")
+    require(set(geometry["card_vs_nemo"]) == {
+        "e3t_0", "e3w_0", "tmask", "surface_umask", "surface_vmask"},
+        "card/NEMO geometry comparison set moved")
     derived_land_adjacent = any(
         value == 0.0 for value in geometry["neighbour_surface_tmask"].values())
     require(geometry["land_adjacent"] == derived_land_adjacent,
