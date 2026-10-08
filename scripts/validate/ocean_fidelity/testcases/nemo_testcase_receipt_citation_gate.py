@@ -236,6 +236,8 @@ FILES = {
         _ORCA2_R169SLOW8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R170RHS8_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90": (
+        _ORCA2_R170RHS8_COMPILED / "dynhpg.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1439,6 +1441,17 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 172: kt=8 passive HPG owner ------------------
+    'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:386-402': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 1),
+        'pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap',
+        17,
+    ],
+    'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:411-435': [
+        'DO jk= 2, jpkm1',
+        ('END DO', 2),
+        25,
+    ],
     # --- ORCA2 round 171: kt=8 RHS observer hold ------------------
     'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/stp2d.f90:145-157': [
         ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
