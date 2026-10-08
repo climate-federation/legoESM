@@ -55,7 +55,7 @@ def en_closure_residual(avm_k, en, dissl, avmb, rn_ediff=0.1):
     return float(np.max(np.abs(avm_k[ok] - pred) / avm_k[ok]))
 
 
-def gate(en_path, ref_path=NEMO + 'W.nc', avmb=1.2e-4):
+def gate(en_path, ref_path=NEMO + 'W.nc', avmb=1.4e-6):  # ln_zdfiwm resets avmb to molecular rnu (zdfiwm.F90:377)
     import netCDF4 as nc
     f = lambda v: np.where(np.abs(v) < 1e15, v, np.nan)
     E, R = nc.Dataset(en_path), nc.Dataset(ref_path)
