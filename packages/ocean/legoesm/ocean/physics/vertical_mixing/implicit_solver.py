@@ -45,6 +45,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.timestepping.tridiagonal import (
+    diffusion_thomas_solve,
     thomas_solve,
     thomas_solve_batched,
     thomas_solve_shared,
@@ -198,14 +199,27 @@ def implicit_vertical_diffusion_ocean(
         # One-level columns have no vertical gradient ⇒ no-op.
         return field
 
-    a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
-                                          extra_diag=extra_diag)
     if _vmix_f32_solve_enabled(field.dtype):
+        a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
+                                              extra_diag=extra_diag)
         f32 = jnp.float32
         x = thomas_solve(a.astype(f32), b.astype(f32), c.astype(f32),
                          d.astype(f32)).astype(field.dtype)
         return _restore_column_mass(x, field, dz)
-    return thomas_solve(a, b, c, d)
+    # Levels-first solve with the bands built inside the sweep: the same bands
+    # as _build_implicit_tridiag, without materialising and transposing them.
+    flux, inv_dz = _diffusion_interface_coeffs(field, K, dz, dz_half)
+    dtf = dt * flux
+    extra = jnp.asarray(extra_diag)
+    work = jnp.result_type(dtf, inv_dz, extra, field)
+    lead = field.shape[:-1]
+    dtf = jnp.moveaxis(jnp.broadcast_to(dtf, lead + (nlev - 1,)), -1, 0)
+    inv_dz = jnp.moveaxis(jnp.broadcast_to(inv_dz, field.shape), -1, 0)
+    if extra.ndim:
+        extra = jnp.moveaxis(jnp.broadcast_to(extra, field.shape), -1, 0)
+    x = diffusion_thomas_solve(dtf, inv_dz, extra,
+                               jnp.moveaxis(field, -1, 0).astype(work))
+    return jnp.moveaxis(x, 0, -1).astype(field.dtype)
 
 
 def implicit_vertical_diffusion_ocean_pair(
@@ -693,6 +707,34 @@ def _build_implicit_tridiag(
     Caller guarantees ``field.shape[-1] = nlev >= 2`` (the ``nlev < 2`` no-op
     is handled by the public wrappers before this is invoked).
     """
+    flux_coeff, inv_dz = _diffusion_interface_coeffs(field, K, dz, dz_half)
+
+    # Pad top and bottom with zero (no-flux).  Two Pad HLO ops replace
+    # alloc-zeros + two concatenate-of-two.
+    pad_axes = ((0, 0),) * (flux_coeff.ndim - 1)
+    flux_top = jnp.pad(flux_coeff, (*pad_axes, (1, 0)))  # (..., nlev)
+    flux_bot = jnp.pad(flux_coeff, (*pad_axes, (0, 1)))  # (..., nlev)
+
+    alpha = dt * flux_top * inv_dz                    # (..., nlev)
+    beta = dt * flux_bot * inv_dz                     # (..., nlev)
+
+    # Tridiagonal coefficients:
+    #   a_k = -α_k   (sub-diagonal, a_0 = 0)
+    #   b_k = 1 + α_k + β_k + extra_diag_k
+    #   c_k = -β_k   (super-diagonal, c_{N-1} = 0)
+    #   d_k = φ^n_k
+    # extra_diag defaults to 0.0 -> b unchanged -> bit-identical.
+    a = -alpha
+    b = 1.0 + alpha + beta + extra_diag
+    c = -beta
+    d = field
+    return a, b, c, d
+
+
+def _diffusion_interface_coeffs(field, K, dz, dz_half):
+    """``K/dz_half`` at the interior interfaces (..., nlev-1) and ``1/dz``
+    (..., nlev), with K, dz, dz_half promoted to the field's leading shape.
+    The shared front end of both backward-Euler solve paths."""
     nlev = field.shape[-1]
 
     # --- Promote K, dz, dz_half to match the field's leading shape ---
@@ -718,37 +760,15 @@ def _build_implicit_tridiag(
             f"dz_half last dim {dzh_arr.shape[-1]} must equal nlev-1 = "
             f"{nlev - 1}")
 
-    # --- Build α and β at every cell (last axis = level) ---
-    # α_k uses the (k-1/2) interface, β_k the (k+1/2) interface.
-    # We pad K with an extra zero on each side so indexing is uniform;
-    # the zeros naturally encode the no-flux BCs.
+    # α_k uses the (k-1/2) interface, β_k the (k+1/2) interface; the missing
+    # interfaces above the top and below the bottom are the no-flux BCs.
     K_safe = jnp.maximum(K_arr, 0.0)
     dzh_safe = jnp.maximum(dzh_arr, _EPS)
 
     # K / dz_half at interfaces (nlev-1)
     flux_coeff = K_safe / dzh_safe                   # (..., nlev-1)
-
-    # Pad top and bottom with zero (no-flux).  Two Pad HLO ops replace
-    # alloc-zeros + two concatenate-of-two.
-    pad_axes = ((0, 0),) * (flux_coeff.ndim - 1)
-    flux_top = jnp.pad(flux_coeff, (*pad_axes, (1, 0)))  # (..., nlev)
-    flux_bot = jnp.pad(flux_coeff, (*pad_axes, (0, 1)))  # (..., nlev)
-
     inv_dz = 1.0 / jnp.maximum(dz_arr, _EPS)          # (..., nlev)
-    alpha = dt * flux_top * inv_dz                    # (..., nlev)
-    beta = dt * flux_bot * inv_dz                     # (..., nlev)
-
-    # Tridiagonal coefficients:
-    #   a_k = -α_k   (sub-diagonal, a_0 = 0)
-    #   b_k = 1 + α_k + β_k + extra_diag_k
-    #   c_k = -β_k   (super-diagonal, c_{N-1} = 0)
-    #   d_k = φ^n_k
-    # extra_diag defaults to 0.0 -> b unchanged -> bit-identical.
-    a = -alpha
-    b = 1.0 + alpha + beta + extra_diag
-    c = -beta
-    d = field
-    return a, b, c, d
+    return flux_coeff, inv_dz
 
 
 def implicit_vertical_diffusion_ocean_batched(
