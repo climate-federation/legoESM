@@ -141,8 +141,19 @@ app-server client: Read-only file system`; independent review is unavailable
 in-sandbox. Log:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round177/codex_review.log`.
 
-Citation controls and pytest results are recorded in the final verification
-commit and their logs under the round-177 evidence root.
+The cumulative citation gate and this receipt's citation gate both pass with
+no unmapped citation. Shifting the new compiled stage citation by two lines
+produces `SYMBOL-NOT-AT-LINE` and exit 1. Focused verification is 42 passed.
+
+The required single `tests/ocean/fidelity -n 12` battery reached 99% with
+2,776 passed, 7 skipped and five pre-existing reds before the known
+stage-sweep prediction control remained nonterminal for 15 minutes and was
+interrupted. The reds were the stamp-scope ratchet, two worktree-stamp
+ratchets, the SI3 scalar-math provenance gate and the round-129 GYRE
+record-backed harness pin. No round-177 focused test failed. The battery has
+no terminal pytest census because of that nonterminal control; its complete
+output is retained at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round177/ocean_fidelity_pytest.log`.
 
 ## OPEN
 
