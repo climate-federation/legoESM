@@ -105,8 +105,16 @@ system`; review log SHA-256
 
 Focused round-174/166/103 tests report 23 passed; log SHA-256
 `8c55f25f748ce9162af69782a345e0b969556458fd9a7107016a7f909f7be342`.
-The required full `tests/ocean/fidelity -n 12` battery is
-`PENDING_FINAL_BATTERY`.
+The required full `tests/ocean/fidelity -n 12` battery reports 2,751 passed,
+7 skipped and 21 failed in 2,508.74 s; log SHA-256
+`d24614eab6fbbd9fc28ab18b320b4d3c21f8a8cc4d71476ce70e7360a817cfde`.
+Seventeen failures were fail-closed dirty-tree refusals because the citation
+map was committed while those parallel workers were already running. All 17
+pass together on the clean committed tip in 30.28 s; isolation log SHA-256
+`18532e734a892e5530d66337642a0302592ff5b8c016133721aa5bdfaa23c64d`.
+The four residual failures are the registered pre-existing reds: the GYRE
+round-129 certified-year harness pin, allow-dirty scope ratchet, report
+worktree-stamp ratchet and SI3 scalar-math `MY_SRC` provenance gate.
 
 ## OPEN
 
