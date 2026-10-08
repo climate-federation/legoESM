@@ -1529,7 +1529,7 @@ CITATION_MAP = {
     # --- ORCA2 round 183: independent HPG fold-operand walk -------
     'ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90:409-416': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
-        '&           - (e3w_1d(1) *(1._wp+r3t(ji  ,jj  ,Kmm))) * rhd(ji  ,jj  ,1)  )',
+        ('&           - (e3w_1d(1) *(1._wp+r3t(ji  ,jj  ,Kmm))) * rhd(ji  ,jj  ,1)  )', 2),
         8,
     ],
     # --- ORCA2 round 172: kt=8 passive HPG owner ------------------
