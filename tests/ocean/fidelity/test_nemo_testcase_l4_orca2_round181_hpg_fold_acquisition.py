@@ -51,5 +51,6 @@ def test_round182_launcher_uses_fresh_target_and_zero_fuzz_patch():
     assert "PREREG_nemo_testcases_l4_orca2_round182.md" in text
     assert 'patch -s --fuzz=0 -p0 -d "$target_root/MY_SRC"' in text
     assert 'cmp -s "$scratch/dynhpg.F90" "$target_root/MY_SRC/dynhpg.F90"' in text
+    assert "PATCH_SYMLINK_PARENT_PROOF_PASS" in text
     assert 'git apply --unsafe-paths -p0 --directory="$target_root/MY_SRC"' not in text
     assert "ORCA2_OMIP_L4_R181HPGFOLD" not in text

@@ -45,6 +45,13 @@ scratch=$(mktemp -d "$work/orca2-r181-hpgfold.XXXXXX")
 cp "$source_root/MY_SRC/dynhpg.F90" "$scratch/dynhpg.F90"
 git apply --unsafe-paths -p0 --directory="$scratch" "$patch_file"
 layout "$scratch/dynhpg.F90" || refuse 'writer layout incomplete' 66
+symlink_probe=$(mktemp -d "$work/orca2-r182-symlink-probe.XXXXXX")
+mkdir "$symlink_probe/real"
+cp "$source_root/MY_SRC/dynhpg.F90" "$symlink_probe/real/dynhpg.F90"
+ln -s "$symlink_probe/real" "$symlink_probe/linked"
+patch -s --fuzz=0 -p0 -d "$symlink_probe/linked" <"$patch_file"
+cmp -s "$scratch/dynhpg.F90" "$symlink_probe/real/dynhpg.F90" || refuse 'symlink-parent patch proof differs from syntax-proved source' 66
+printf 'PATCH_SYMLINK_PARENT_PROOF_PASS dynhpg.F90\n'
 if [[ "$mode" == --plant-layout ]]; then
   sed -i "/r181_name = 'north_e3w'/d" "$scratch/dynhpg.F90"
   layout "$scratch/dynhpg.F90" && refuse 'layout plant stayed green' 69
