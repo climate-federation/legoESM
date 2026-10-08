@@ -116,8 +116,12 @@ unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
 failures, 0 unmapped**. Shifting the five-line restart-field citation by two
 lines reports `SYMBOL-NOT-AT-LINE` and exits 1.
 
-The initial direct score-gate suite reports `5 passed in 0.52s`. Final focused
-and citation-gate results are appended after this review record is committed.
+The initial direct score-gate suite reports `5 passed in 0.52s`. The final
+CPU-only focused battery covers the round-241/243 acquisition controls, all
+four round-242/244/245/246 score controls, and the complete citation-gate unit
+module:
+
+> `42 passed in 7.02s`
 
 **DECISION_NEEDED:** Proceed to PR preparation and retain SMT-4's non-unique
 day-100 owner as registered debt (**recommended**), or authorise a new
