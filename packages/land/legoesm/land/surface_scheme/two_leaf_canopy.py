@@ -88,6 +88,7 @@ _VIRT_T_COEF = (1.0 - constants.epsilon) / constants.epsilon
 # Initial intercellular-CO2 ratio Ci/Ca: chi = _CI_CA_C3 − _CI_CA_C3_MINUS_C4·fC4
 # → 0.7 for C3 (fC4=0), 0.4 for C4 (fC4=1).
 _CI_CA_C3 = 0.7
+_CI_CA_MIN, _CI_CA_MAX = 0.5, 0.9   # the kernel's Ci/Ca clip (energy_balance._compute_gs_and_ci)
 _CI_CA_C3_MINUS_C4 = 0.3
 
 # μmol CO2 → gC conversion (molar mass of carbon 12 g/mol × 1e-6 mol/μmol).
@@ -173,6 +174,22 @@ def advance_TgC_ema(
     T_air_C = T_air_K - constants.T_freeze
     alpha = dt / TGC_EMA_TAU_S
     return TgC_old + alpha * (T_air_C - TgC_old)
+
+
+def ci_seed(Ca, fC4, chi_opt=None):
+    """Starting intercellular CO2 for the canopy Newton solve [umol/mol].
+
+    ``Ca * chi``: the P model's own optimum ``chi_opt`` when one is available
+    (it is what the predicted slope steers the solve toward), else the fixed
+    C3/C4 ratios.  A starting point only — the converged state depends on it
+    only to the solver tolerance — so it is gradient-stopped and kept inside
+    the kernel's Ci/Ca clip range.
+    """
+    if chi_opt is not None:
+        chi = jax.lax.stop_gradient(jnp.clip(chi_opt, _CI_CA_MIN, _CI_CA_MAX))
+    else:
+        chi = _CI_CA_C3 - _CI_CA_C3_MINUS_C4 * fC4
+    return Ca * chi
 
 
 def sunlit_leaf_apar(forcing, canopy_params=None, LAI_override=None):
@@ -391,6 +408,7 @@ def compute_two_leaf_canopy_fluxes(
             f"unknown g1_source {cc.g1_source!r}; the Medlyn-slope scheme "
             f"must be one of {VALID_G1_SOURCES}")
     rjv25 = None
+    chi_opt = None  # P-model optimum ci/ca (C3/C4 blend), seeds the Newton Ci
     if cc.capacity_scheme == "p_model" or cc.g1_source == "p_model":
         # Raises with a clear message when this caller does not carry the
         # acclimation state (slab-land / patch-mosaic until wired): no silent
@@ -422,6 +440,8 @@ def compute_two_leaf_canopy_fluxes(
         else:
             _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
         _caps4 = acclimated_capacities_c4(pmodel_acclim, land_config.p_model)
+        chi_opt = ((1.0 - fC4) * (_hcaps.chi if _phydro_on else _caps.chi)
+                   + fC4 * _caps4.chi_c4)
         if cc.capacity_scheme == "p_model":
             # C3 leaf-top capacity + Jmax25/Vcmax25 ratio, and the C4 leaf-top
             # capacity (rpmodel c4 method: full-kinetics chi with beta/9,
@@ -538,8 +558,7 @@ def compute_two_leaf_canopy_fluxes(
     Ts_old   = T_soil_top
     q_s_init = sat_specific_humidity(Ts_old, Ps)
     q_c_init = 0.5 * (q_s_init + q_atm)
-    chi = _CI_CA_C3 - _CI_CA_C3_MINUS_C4 * fC4
-    Ci_init = Ca * chi
+    Ci_init = ci_seed(Ca, fC4, chi_opt)
 
     initial_state = jnp.stack(
         [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)

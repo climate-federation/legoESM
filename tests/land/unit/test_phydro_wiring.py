@@ -259,7 +259,9 @@ def test_least_cost_slope_is_not_stressed():
     table = _two_leaf_fluxes(
         CanopyConfig(stomatal_model="medlyn").validate(), w,
         canopy_params=SimpleNamespace(m_C3=g1 / w))
-    np.testing.assert_allclose(pm_slope, table, rtol=1e-7)
+    # rtol: the two runs start the Newton solve from different Ci seeds
+    # (chi* vs the fixed 0.7) and agree to the solver tolerance.
+    np.testing.assert_allclose(pm_slope, table, rtol=1e-4)
     stressed = _two_leaf_fluxes(
         CanopyConfig(stomatal_model="medlyn").validate(), w,
         canopy_params=SimpleNamespace(m_C3=g1))
@@ -291,7 +293,20 @@ def test_least_cost_slope_reproduces_the_full_least_cost_chi():
         CanopyConfig(stomatal_model="medlyn", g1_source="p_model").validate(), 1.0)
     np.testing.assert_allclose(
         got, _two_leaf_fluxes(medlyn, 1.0, canopy_params=SimpleNamespace(m_C3=g1)),
-        rtol=1e-7)
+        rtol=1e-4)  # different Ci seeds -> agreement to the solver tolerance
     assert not np.allclose(
         got, _two_leaf_fluxes(medlyn, 1.0, canopy_params=SimpleNamespace(m_C3=caps.g1_kpa)),
-        rtol=1e-4)
+        rtol=1e-3)
+
+
+def test_solver_ci_seed_uses_the_pmodel_optimum():
+    """Newton Ci seed: Ca * chi* when the P model supplies an optimum (clipped
+    to the kernel's Ci/Ca range, no gradient), else the fixed C3/C4 ratios."""
+    import jax
+    from legoesm.land.surface_scheme.two_leaf_canopy import ci_seed
+    ca, fc4 = jnp.asarray([400.0, 400.0, 400.0]), jnp.asarray([0.0, 1.0, 0.5])
+    np.testing.assert_allclose(np.asarray(ci_seed(ca, fc4)), [280.0, 160.0, 220.0])
+    chi = jnp.asarray([0.62, 0.30, 1.0])
+    np.testing.assert_allclose(np.asarray(ci_seed(ca, fc4, chi)), [248.0, 200.0, 360.0])
+    g = jax.grad(lambda c: jnp.sum(ci_seed(ca, fc4, c)))(chi)
+    assert np.all(np.asarray(g) == 0.0)
