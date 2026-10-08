@@ -286,7 +286,11 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
     # certified passive in round 172; its operator intermediates remain
     # deliberately unread because materialising them was non-passive in
     # rounds 171/173.
-    candidate_final = r83.native_v(traced.slow_forcing_producer["depth_v"])
+    # ``depth_v`` in this diagnostic bundle is the geometric column depth
+    # H_v.  The completed forcing boundary after the (zero on rung 0) wind
+    # statement is ``post_wind_v``.
+    candidate_final = r83.native_v(
+        traced.slow_forcing_producer["post_wind_v"])
     oracle_final = np.asarray(oracle_spg["i000_zv_frc"])
     target = np.abs(candidate_final - oracle_final) > FLOOR
     target_locations = np.argwhere(target)
