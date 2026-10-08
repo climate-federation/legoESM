@@ -245,11 +245,15 @@ def test_least_cost_slope_is_not_stressed():
     product is g1) — i.e. the predicted slope itself was left unstressed."""
     from types import SimpleNamespace
     from legoesm.land.p_model import (
-        PModelConfig, acclimated_capacities, init_pmodel_acclim)
+        PModelConfig, acclimated_capacities, init_pmodel_acclim, optimal_chi)
+    from legoesm.land.phydro import slope_for_model
     w = 0.5
-    g1 = acclimated_capacities(
-        init_pmodel_acclim(1, t_init_K=292.0, ps_init_pa=1.013e5,
-                           cfg=PModelConfig()), PModelConfig()).g1_kpa
+    acclim = init_pmodel_acclim(1, t_init_K=292.0, ps_init_pa=1.013e5,
+                                cfg=PModelConfig())
+    caps = acclimated_capacities(acclim, PModelConfig())
+    gamma_star = optimal_chi(acclim.t_mean_K, acclim.vpd_mean_pa,
+                             acclim.co2_mean_ppm, acclim.ps_ema, PModelConfig())[3]
+    g1 = slope_for_model("medlyn", caps.chi, acclim, gamma_star)
     pm_slope = _two_leaf_fluxes(
         CanopyConfig(stomatal_model="medlyn", g1_source="p_model").validate(), w)
     table = _two_leaf_fluxes(
@@ -260,3 +264,34 @@ def test_least_cost_slope_is_not_stressed():
         CanopyConfig(stomatal_model="medlyn").validate(), w,
         canopy_params=SimpleNamespace(m_C3=g1))
     assert not np.allclose(pm_slope, stressed, rtol=1e-3)
+
+
+def test_least_cost_slope_reproduces_the_full_least_cost_chi():
+    """The two-leaf scheme converts the least-cost chi with the same mapping
+    as P-hydro: Medlyn's ci/ca = g1/(g1 + sqrt(D)) then equals the FULL
+    least-cost chi at the mean VPD (the textbook g1 = xi drops the Gamma*/ca
+    term and gives a lower chi), and the fluxes are those of a tabulated
+    slope of that value — not of xi."""
+    from types import SimpleNamespace
+    from legoesm.land.p_model import (
+        PModelConfig, acclimated_capacities, init_pmodel_acclim, optimal_chi)
+    from legoesm.land.phydro import slope_for_model
+    pcfg = PModelConfig()
+    acclim = init_pmodel_acclim(1, t_init_K=292.0, ps_init_pa=1.013e5, cfg=pcfg)
+    caps = acclimated_capacities(acclim, pcfg)
+    gamma_star = optimal_chi(acclim.t_mean_K, acclim.vpd_mean_pa,
+                             acclim.co2_mean_ppm, acclim.ps_ema, pcfg)[3]
+    g1 = slope_for_model("medlyn", caps.chi, acclim, gamma_star)
+    sqrt_d = np.sqrt(float(acclim.vpd_mean_pa[0]) / 1000.0)
+    np.testing.assert_allclose(
+        float(g1[0]) / (float(g1[0]) + sqrt_d), float(caps.chi[0]), rtol=1e-6)
+    assert float(g1[0]) > 1.05 * float(caps.g1_kpa[0])   # exceeds xi
+    medlyn = CanopyConfig(stomatal_model="medlyn").validate()
+    got = _two_leaf_fluxes(
+        CanopyConfig(stomatal_model="medlyn", g1_source="p_model").validate(), 1.0)
+    np.testing.assert_allclose(
+        got, _two_leaf_fluxes(medlyn, 1.0, canopy_params=SimpleNamespace(m_C3=g1)),
+        rtol=1e-7)
+    assert not np.allclose(
+        got, _two_leaf_fluxes(medlyn, 1.0, canopy_params=SimpleNamespace(m_C3=caps.g1_kpa)),
+        rtol=1e-4)

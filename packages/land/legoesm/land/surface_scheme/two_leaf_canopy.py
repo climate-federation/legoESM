@@ -414,7 +414,7 @@ def compute_two_leaf_canopy_fluxes(
             # C3 capacities/slope from the PROFIT optimum on the SPA supply
             # (the empirical theta stress is replaced below); C4 columns keep
             # the rpmodel-c4 least-cost optimum (both optimality sources).
-            from legoesm.land.phydro import phydro_optimum, slope_for_model
+            from legoesm.land.phydro import phydro_optimum
             _hcaps = phydro_optimum(
                 pmodel_acclim, phydro_supply, land_config.phydro,
                 land_config.p_model)
@@ -439,18 +439,24 @@ def compute_two_leaf_canopy_fluxes(
             # (rpmodel structure: the stress scales the capacities, hence A
             # and with it gs, at unchanged chi); under phydro that stress is
             # replaced entirely.
-            if _phydro_on:
-                from legoesm.land.p_model import optimal_chi as _ochi
-                _, _, _, _gs_pa, _ = _ochi(
-                    pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
-                    pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
-                    land_config.p_model)
-                m_C3 = slope_for_model(
-                    cc.stomatal_model, _hcaps.chi, pmodel_acclim, _gs_pa,
-                    d0_leuning_kpa=cc.d0_leuning_kpa)
-            else:
-                m_C3 = _caps.g1_kpa
-            m_C4 = _caps4.g1_c4_kpa
+            # ONE chi -> slope mapping for every optimality source: the slope
+            # that makes the active stomatal model reproduce the optimum's chi
+            # at the acclimated means (``phydro.slope_for_model``).  For the
+            # least-cost chi this is g1 = (xi + g*sqrt(D))/(1 - g), g =
+            # Gamma*/ca — the exact inversion, of which the textbook g1 = xi
+            # is the Gamma*/ca -> 0 limit.
+            from legoesm.land.p_model import optimal_chi as _ochi
+            from legoesm.land.phydro import slope_for_model
+            _, _, _, _gs_pa, _ = _ochi(
+                pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
+                pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                land_config.p_model)
+            m_C3 = slope_for_model(
+                cc.stomatal_model, _hcaps.chi if _phydro_on else _caps.chi,
+                pmodel_acclim, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
+            m_C4 = slope_for_model(
+                cc.stomatal_model, _caps4.chi_c4, pmodel_acclim, _gs_pa,
+                d0_leuning_kpa=cc.d0_leuning_kpa)
 
     # ---- Soil moisture stress ----
     # Photosynthesis/transpiration down-regulation uses the ROOT-ZONE beta.
