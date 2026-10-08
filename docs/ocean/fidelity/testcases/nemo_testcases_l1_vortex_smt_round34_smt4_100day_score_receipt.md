@@ -99,8 +99,25 @@ integration is required. R34-P6 is **CONFIRMED**. **UNASKED list: EMPTY.**
 
 ## 5. Independent review, citations, tests, and decision
 
-Independent review and the final citation/focused-test results are appended
-after the complete round diff is committed.
+The required separate read-only Codex review was attempted against the clean,
+committed round diff. It exited before reading the diff, so no shipping verdict
+is inferred. Its output is quoted verbatim:
+
+> `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)`
+> `Reading additional input from stdin...`
+> `Error: failed to initialize in-process app-server client: Read-only file system (os error 30)`
+
+**Independent review unavailable in-sandbox.** This is a measurement-only
+round; no production or certified trajectory change depends on an inferred
+review.
+
+The round receipt citation gate reports **PASS: 4 citations, 0 failures, 0
+unmapped**. The cumulative default receipt reports **PASS: 274 citations, 0
+failures, 0 unmapped**. Shifting the five-line restart-field citation by two
+lines reports `SYMBOL-NOT-AT-LINE` and exits 1.
+
+The initial direct score-gate suite reports `5 passed in 0.52s`. Final focused
+and citation-gate results are appended after this review record is committed.
 
 **DECISION_NEEDED:** Proceed to PR preparation and retain SMT-4's non-unique
 day-100 owner as registered debt (**recommended**), or authorise a new
