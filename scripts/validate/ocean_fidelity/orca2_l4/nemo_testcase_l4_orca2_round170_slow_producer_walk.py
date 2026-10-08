@@ -320,6 +320,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             mask = (np.ones_like(reference[name], dtype=bool)
                     if name.startswith("mask_") else
                     (active3[face] if reference[name].ndim == 3 else active2[face]))
+        require(np.shape(value) == np.shape(reference[name]) == np.shape(mask),
+                f"{name} score shape mismatch: candidate={np.shape(value)} "
+                f"oracle={np.shape(reference[name])} mask={np.shape(mask)}")
         rows.append({"name": name, **_score(value, reference[name], mask)})
 
     recorded_replay = {}
