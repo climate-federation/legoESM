@@ -1257,6 +1257,15 @@ FILES = {
     "tests/VORTEX/MY_SRC/usrdef_nam.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_nam.F90",
     "tests/VORTEX/MY_SRC/usrdef_sbc.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_sbc.F90",
     "tests/VORTEX/MY_SRC/usrdef_zgr.F90": NEMO / "tests/VORTEX/MY_SRC/usrdef_zgr.F90",
+    "tests/TSUNAMI/MY_SRC/usrdef_nam.F90": NEMO / "tests/TSUNAMI/MY_SRC/usrdef_nam.F90",
+    "tests/TSUNAMI/MY_SRC/usrdef_hgr.F90": NEMO / "tests/TSUNAMI/MY_SRC/usrdef_hgr.F90",
+    "tests/TSUNAMI/MY_SRC/usrdef_zgr.F90": NEMO / "tests/TSUNAMI/MY_SRC/usrdef_zgr.F90",
+    "tests/TSUNAMI/MY_SRC/usrdef_istate.F90": NEMO / "tests/TSUNAMI/MY_SRC/usrdef_istate.F90",
+    "tests/TSUNAMI/MY_SRC/usrdef_sbc.F90": NEMO / "tests/TSUNAMI/MY_SRC/usrdef_sbc.F90",
+    "tests/TSUNAMI/MY_SRC/stpmlf.F90": NEMO / "tests/TSUNAMI/MY_SRC/stpmlf.F90",
+    # --- TSUNAMI lane round 1: shared sources not mapped before ---
+    "nemogcm.F90": _OCE / "nemogcm.F90",
+    "depth_e3.F90": _OCE / "DOM/depth_e3.F90",
     "vortex_round2/namelist_cfg": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex/round2/namelist_cfg"),
     # --- gating the DINO month-regression and PR-1802 review-fix receipts:
@@ -1366,6 +1375,48 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- TSUNAMI lane round 1 (survey + card + acquisition) ---
+    'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:92-93': [
+        'kpi = NINT( rn_domszx / rn_dx ) + 1',
+        'kpj = NINT( rn_domszy / rn_dy ) + 1', 2],
+    'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:98': 'kpk = 2',
+    'tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:79-80': [
+        'ii0 = NINT( REAL(Ni0glo, wp) * rn_0xratio )',
+        'ij0 = NINT( REAL(Nj0glo, wp) * rn_0yratio )', 2],
+    'tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:93-94': [
+        'plamt(ji,jj) = rn_dx *   zti',
+        'plamu(ji,jj) = rn_dx * ( zti + 0.5_wp )', 2],
+    'tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:121-122': [
+        'CASE(0)', ('zf0   = 2._wp * omega * SIN( rad * rn_ppgphi0 )', 1), 2],
+    'tests/TSUNAMI/MY_SRC/usrdef_zgr.F90:128': 'zd = rn_domszz/REAL(jpkm1,wp)',
+    'tests/TSUNAMI/MY_SRC/usrdef_zgr.F90:187-189': [
+        'k_bot(:,:) = jpkm1', 'k_top(:,:) = 1', 3],
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90:65-66': [
+        'pts(:,:,:,jp_tem) = 20._wp', 'pts(:,:,:,jp_sal) = 30._wp', 2],
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90:94-101': [
+        'zdist(ji,jj) = SQRT( glamt(ji,jj)**2 + gphit(ji,jj)**2 )',
+        'pssh(ji,jj) = 0.1 * COS( zdist(ji,jj) / zmax * rpi * 0.5_wp )', 8],
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90:96': 'zmax = MAXVAL( zdist ) / 20._wp',
+    'tests/TSUNAMI/MY_SRC/usrdef_sbc.F90:60-65': [
+        'utau(:,:) = 0._wp', 'emp (:,:) = 0._wp', 6],
+    'tests/TSUNAMI/MY_SRC/stpmlf.F90:111': 'CALL sbc     ( kstp, Nbb, Nnn )',
+    'tests/TSUNAMI/MY_SRC/stpmlf.F90:118': 'CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa)',
+    'tests/TSUNAMI/MY_SRC/stpmlf.F90:126': 'CALL dyn_spg( kstp, Nbb, Nnn, Nrhs, uu, vv, ssh, uu_b, vv_b, Naa )',
+    'tests/TSUNAMI/MY_SRC/stpmlf.F90:131-134': ['Nrhs = Nbb', 'Naa = Nrhs', 4],
+    'nemogcm.F90:186': 'CALL stp_MLF( istp )',
+    'dynspg_ts.F90:202': 'll_init     = ll_bt_av',
+    'dynspg_ts.F90:355': ('CALL dyn_cor_2D_init( Kmm )', 2),
+    'dynspg_ts.F90:486': 'sshn_e(:,:) =    pssh (:,:,Kmm)',
+    'dynspg_ts.F90:490': 'hu_e  (:,:) =    hu(:,:,Kmm)',
+    'dynspg_ts.F90:920': 'un_adv(ji,jj) = r1_2 * ( ub2_b(ji,jj) + zun_save - rn_atfp * un_bf(ji,jj) )',
+    'dynspg_ts.F90:1240': 'nn_e = CEILING( rn_Dt / rn_bt_cmax * zcmax)',
+    'domhgr.F90:114': "CALL lbc_lnk( 'dom_hgr', glamt, 'T'",
+    'depth_e3.F90:68': 'pe3w_1d( 1 ) = 2._wp * ( pdept_1d(1) - pdepw_1d(1) )',
+    'depth_e3.F90:73': 'pe3t_1d(jpk) = 2._wp * ( pdept_1d(jpk) - pdepw_1d(jpk) )',
+    'restart.F90:466': 'ssh(:,:,Kaa) = ssh(:,:,Kbb)           !*  set ssh at Kaa',
+    'restart.F90:481': 'ssh(:,:,Kmm) = ssh(:,:,Kbb)           !*  set now',
+    'domqco.F90:126': 'r3t(:,:,Kmm) = r3t(:,:,Kbb)',
+    'domqco.F90:99': 'r3t(:,:,Kaa) = r3t(:,:,Kmm)',
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
         ('IF( ln_read_cfg ) THEN', 1),
@@ -1670,12 +1721,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:2990':
+    'nemo_testcase_recipe.py:3319':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5370': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5388': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:2993':
+    'nemo_testcase_recipe.py:3322':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -4410,7 +4461,7 @@ CITATION_MAP = {
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )',
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
-    'vertical.py:1910': ('def compute_ocean_jacobian(', 1),
+    'vertical.py:1914': ('def compute_ocean_jacobian(', 1),
     'ocean_model_latlon_cgrid.py:6479-6483': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
     'ocean_model_latlon_cgrid.py:8164': ('_g2 = _nemo_ws_stage_transport(', 1),
@@ -4981,7 +5032,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:370,625,2974': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:370,625,3303': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
