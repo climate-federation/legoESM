@@ -79,6 +79,8 @@ _ORCA2_R166SPG8_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo")
 _ORCA2_R169SLOW8_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo")
+_ORCA2_R170RHS8_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -232,6 +234,8 @@ FILES = {
         _ORCA2_R166SPG8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R169SLOW8_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R170RHS8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1435,6 +1439,17 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 171: kt=8 RHS observer hold ------------------
+    'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/stp2d.f90:145-157': [
+        ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
+        ("CALL r92_rhs_put_pair( kt, 'vor'", 1),
+        13,
+    ],
+    'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/stp2d.f90:168-179': [
+        ('!*  KEG + ZAD  *!', 1),
+        ('CALL r92_rhs_finish( kt )', 1),
+        12,
+    ],
     # --- ORCA2 round 170: kt=8 slow-forcing producer walk ---------
     'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:145-179': [
         ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
