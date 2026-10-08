@@ -78,8 +78,22 @@ with `failed to initialize in-process app-server client: Read-only file
 system`; review log SHA-256
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-The focused round-173 controls report 8 passed. Citation and full fidelity
-battery results are recorded below after their terminal summaries are read.
+The focused round-173 controls report 8 passed. The combined focused gate,
+round-172 acquisition, and citation-gate battery reports 33 passed; log
+SHA-256 `6eb598d78a43fb498e92aeafc4de6966e301ecfc9365e2262b11d4e0d45029c0`.
+The round receipt citation gate passed all 3 citations, the cumulative default
+receipt passed all 274 citations, and the planted rigid shift refused with
+exit 1. Their log SHA-256 values are respectively
+`bb3b679b743f61a489cb9f600fde1df9246ab5aeced6db5511a65695b46a9c2f`,
+`4bc70e1f9b6b3288da8619e93b74dbef3b2088d8f3fd68c2401244a3c8a64af8`
+and `ef5465e180963c5ee38cc2e1d44bdc2d56ecc052738b7068f6df3480968542d5`.
+
+The one permitted full `tests/ocean/fidelity -n 12` battery reports 2,758
+passed, 7 skipped and exactly the four pre-existing reds carried by round 172:
+the GYRE round-129 certified-year harness pin, the allow-dirty scope ratchet,
+the report worktree-stamp ratchet, and SI3 scalar-math `MY_SRC` provenance.
+There is no new red. Its log SHA-256 is
+`bfd780aa26a81125c0ac82c94a98f33503dcd6ebf3490ba62b58a30a08ea1b43`.
 
 ## OPEN
 
