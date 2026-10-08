@@ -21,15 +21,16 @@ def _report() -> dict:
             "terminal_restart_comparisons": [{} for _ in range(20)],
         },
         "completed_kt": 7,
+        "compact_nonfinite_count": 42,
         "source_order": list(gate.SOURCE_ORDER),
         "registered_cells": {
-            "count": 42,
+            "count": 41,
             "candidate_depth_finite": True,
             "oracle_depth_finite": True,
             "oracle_inverse_finite": True,
-            "depth_differing_cells": 42,
+            "depth_differing_cells": 41,
             "depth_replay_nonfinite": 0,
-            "reciprocal_only_depth_differing_cells": 42,
+            "reciprocal_only_depth_differing_cells": 41,
         },
     }
 

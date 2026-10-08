@@ -117,7 +117,7 @@ def classify(report: dict, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = copy.deepcopy(report)
     if plant == "registered-count":
-        report["registered_cells"]["count"] -= 1
+        report["compact_nonfinite_count"] -= 1
     elif plant == "source-order":
         report["source_order"][0], report["source_order"][1] = (
             report["source_order"][1], report["source_order"][0])
@@ -136,8 +136,10 @@ def classify(report: dict, plant: str = "none") -> dict:
     require(tuple(report["source_order"]) == SOURCE_ORDER,
             "compiled source order moved")
     registered = report["registered_cells"]
-    require(registered["count"] == EXPECTED_NONFINITE,
-            "registered non-finite count moved")
+    require(report["compact_nonfinite_count"] == EXPECTED_NONFINITE,
+            "round-166 compact non-finite count moved")
+    require(registered["count"] > 0,
+            "native U record has no registered non-finite face")
     require(registered["oracle_inverse_finite"],
             "NEMO reciprocal is non-finite at a registered cell")
     require(registered["depth_replay_nonfinite"] == 0,
@@ -147,7 +149,7 @@ def classify(report: dict, plant: str = "none") -> dict:
 
     p2 = (registered["candidate_depth_finite"]
           and registered["oracle_depth_finite"]
-          and registered["depth_differing_cells"] == EXPECTED_NONFINITE)
+          and registered["depth_differing_cells"] == registered["count"])
     p3 = (registered["depth_replay_nonfinite"] == 0
           and registered["reciprocal_only_depth_differing_cells"] > 0)
     report["prediction_dispositions"] = {
@@ -259,6 +261,8 @@ def measure(
         candidate["exit_inverse_u_pre_association"],
         reference["exit_inverse_u_pre_association"],
         active.astype(np.float64))
+    compact_nonfinite_count = int(np.count_nonzero(
+        ~np.isfinite(np.asarray(trace["r1_face_depth_u_exit"][index]))))
     raw = {
         "format": "nemo-testcase-l4-orca2-round167-exit-depth-v1",
         "claim_label": "independent",
@@ -268,6 +272,7 @@ def measure(
         "completed_kt": 7,
         "kt": EXPECTED_KT,
         "substep": index + 1,
+        "compact_nonfinite_count": compact_nonfinite_count,
         "source_order": list(SOURCE_ORDER),
         "rows": rows,
         "registered_cells": registered,
