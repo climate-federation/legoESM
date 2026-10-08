@@ -42,5 +42,5 @@ evaluated fold operands, replays `zhpj` top-down, and then analyses raw HPG,
 `e3v`, `vmask`, and `r1_hv0` atomically. Failed predictions remain in the
 receipt.
 
-ASKED choices: exact mechanical repair of the failed acquisition under a fresh target.  
+ASKED choices: exact mechanical repair of the failed acquisition under a fresh target.
 UNASKED choices: empty.
