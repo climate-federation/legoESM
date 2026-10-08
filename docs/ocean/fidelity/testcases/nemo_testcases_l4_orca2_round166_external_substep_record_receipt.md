@@ -20,12 +20,16 @@ unchanged.
 The compiled rung-0 program extrapolates barotropic velocity and sea surface,
 then constructs the mid-step U/V face depth at
 `ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:507-545`. It forms
-the depth-weighted transports at `dynspg_ts.f90:566-569` and advances sea
-surface from their divergence at `dynspg_ts.f90:585-595`. After pressure,
+the depth-weighted transports at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:566-569` and advances
+sea surface from their divergence at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:585-595`. After pressure,
 Coriolis and drag, the velocity and implicit-drag updates are
-`dynspg_ts.f90:715-757`. NEMO then reconstructs the exit face depths and
-their masked reciprocals at `dynspg_ts.f90:763-766` and exchanges the seven
-arrays together at `dynspg_ts.f90:770-779`.
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:715-757`. NEMO then
+reconstructs the exit face depths and their masked reciprocals at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:763-766` and exchanges
+the seven arrays together at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:770-779`.
 
 The round reuses the admitted 65-substep trace registry and the same complete
 four-statement private arm as rounds 164-165: raw reference face depth,
@@ -49,7 +53,9 @@ Entry, midpoint, midpoint face depth, transports, divergence, after-SSH,
 pressure/trends, exit velocity and exit face depth are source-ordered before
 that row. Thus R166-P2 is **REFUTED**: after-SSH is not the first non-finite
 boundary. The first invalid quantity is the reciprocal corresponding to
-NEMO's masked division at `dynspg_ts.f90:763-766`; localization does not say
+NEMO's masked division at
+`ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:763-766`;
+localization does not say
 whether the face-depth operand, its boundary association, or a preceding
 substep value is the first non-bit statement relative to NEMO.
 
