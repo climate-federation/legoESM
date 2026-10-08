@@ -2014,6 +2014,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:214-217': [
         '! Stage 1 :',
         'CALL r84_dump_frame( kstp, 1, Naa )', 4],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:221-233': [
+        '! Stage 2 :',
+        'CALL r84_dump_frame( kstp, 3, Naa )', 13],
     # --- ORCA2 round 90: source-resolved OFF-runoff recorder fault ---
     'ORCA2_OMIP_L4_R88FRAMEDEBUG/BLD/ppsrc/nemo/traadv.f90:287':
         "&       l4_canon_2d(rnf,'T')",
