@@ -1439,12 +1439,12 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:715-728': [
         ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form', 1),
-        ('END DO   ;   END DO', 20),
+        ('END DO   ;   END DO', 17),
         14,
     ],
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:761-767': [
         ('IF( .NOT.lk_linssh ) THEN !* Update ocean depth', 1),
-        ('END DO   ;   END DO', 22),
+        ('END DO   ;   END DO', 20),
         7,
     ],
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:207-218': [

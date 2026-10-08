@@ -20,18 +20,24 @@ unchanged.
 ## Compiled source order
 
 The admitted `ORCA2_OMIP_L4_R166SPG8` executable adds explicit bottom drag at
-`BLD/ppsrc/nemo/dynspg_ts.f90:680-702`, evaluates the live vector-form update
-at `dynspg_ts.f90:715-728`, constructs exit depths at
-`dynspg_ts.f90:761-767`, and associates U/V, both depths, both reciprocals and
-SSH at `dynspg_ts.f90:770-779`. It then carries the associated velocity into
-the next external substep at `dynspg_ts.f90:836-844`.
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:680-702`, evaluates the
+live vector-form update at
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:715-728`, constructs exit
+depths at `ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:761-767`, and
+associates U/V, both depths, both reciprocals and SSH at
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:770-779`. It then carries
+the associated velocity into the next external substep at
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:836-844`.
 
 Upstream, the same compiled program makes the slow forcing by vertically
-reducing the three-dimensional momentum RHS at `BLD/ppsrc/nemo/stp2d.f90:207-218`,
-then applies drag and wind in order at `stp2d.f90:231-247`; atmospheric
+reducing the three-dimensional momentum RHS at
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:207-218`, then applies drag
+and wind in order at
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:231-247`; atmospheric
 pressure, embedded-ice load and wave-load branches follow at
-`stp2d.f90:254-285`. The new acquisition records the operands and output at
-each of these live boundaries without changing their evaluation order.
+`ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90:254-285`. The new acquisition
+records the operands and output at each live boundary without changing their
+evaluation order.
 
 ## Source-ordered measurement
 
