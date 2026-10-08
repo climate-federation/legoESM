@@ -130,8 +130,12 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         "south": float(mesh["tmask"][j - 1, i, 0]),
         "north": float(mesh["tmask"][j + 1, i, 0]),
     }
-    require(_bits_equal(mesh["mbathy"], domain_bottom),
-            "mesh_mask mbathy differs from domain_cfg bottom_level")
+    wet_surface = mesh["tmask"][..., 0] == 1.0
+    require(_bits_equal(mesh["mbathy"][wet_surface], domain_bottom[wet_surface]),
+            "mesh_mask mbathy differs from domain_cfg bottom_level at wet cells")
+    land_delta = mesh["mbathy"][~wet_surface] - domain_bottom[~wet_surface]
+    require(bool(np.all((land_delta == 0.0) | (land_delta == 1.0))),
+            "mesh_mask/domain_cfg land-bottom convention moved")
     bottom = int(mesh["mbathy"][j, i]) - 1
     return {
         "target_jik": [j, i, k],
@@ -150,6 +154,13 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         "mesh_mask_name": "mbathy",
         "domain_cfg_name": "bottom_level",
         "domain_cfg_sha256": sha256(domain_path),
+        "bottom_level_comparison": {
+            "wet_unequal": int(np.count_nonzero(
+                mesh["mbathy"][wet_surface] != domain_bottom[wet_surface])),
+            "land_unequal": int(np.count_nonzero(
+                mesh["mbathy"][~wet_surface] != domain_bottom[~wet_surface])),
+            "land_convention": "mesh_mask may encode dry columns as level 1; domain_cfg uses 0",
+        },
         "bottom_zero_based": bottom,
         "bottom_is_partial": bool(
             0 < bottom < mesh["e3t_0"].shape[-1]
