@@ -109,6 +109,30 @@ def _first_nonfinite(frame: dict[str, object]) -> dict[str, object] | None:
     return None
 
 
+def _summarize_host_trace(trace: dict[str, object]) -> dict[str, object]:
+    """Reduce an already-returned private trace without re-evaluating it."""
+    counts = []
+    flats = []
+    bad_values = []
+    shapes = {}
+    for _boundary, trace_name in SOURCE_ORDER:
+        values = np.asarray(trace[trace_name])
+        shapes[trace_name] = list(values.shape[1:])
+        flat = values.reshape((values.shape[0], -1))
+        invalid = ~np.isfinite(flat)
+        first = np.argmax(invalid, axis=1)
+        counts.append(np.count_nonzero(invalid, axis=1).tolist())
+        flats.append(first.tolist())
+        bad_values.append(np.take_along_axis(
+            flat, first[:, None], axis=1)[:, 0].tolist())
+    return {
+        "invalid_counts": counts,
+        "first_flat_indices": flats,
+        "first_invalid_values": bad_values,
+        "shapes": shapes,
+    }
+
+
 def _install_trace_wrapper(frames: list[dict[str, object]]):
     """Request the existing trace, publish scalars, return ordinary outputs."""
     import jax
@@ -283,7 +307,19 @@ def measure_observed(deck_root: Path, record_root: Path, search_root: Path,
         model_module.barotropic_substeps_latlon_cgrid = original
     require(observed_error is not None and EXPECTED_ERROR in observed_error,
             "observed complete arm did not reproduce the kt=8 refusal")
-    require(len(frames) == 8, f"expected 8 external traces, got {len(frames)}")
+    # The later e3w runtime refusal can cancel an effect-only callback from the
+    # same kt=8 graph.  Read that one frame through the established early-return
+    # trace hook from the identical kt=8 entry state; the complete wrapper above
+    # still owns the terminal/passivity proof.
+    require(len(frames) == 7,
+            f"expected 7 completed callback traces, got {len(frames)}")
+    trace_hooks = _hooks(card)._replace(expose_barotropic_substeps=True)
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=trace_hooks)
+    kt8_trace = jax.device_get(trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    frames.append(_summarize_host_trace(kt8_trace.substeps))
     first = _first_nonfinite(frames[-1])
     return {
         "format": "nemo-testcase-l4-orca2-round166-external-substep-v1",
