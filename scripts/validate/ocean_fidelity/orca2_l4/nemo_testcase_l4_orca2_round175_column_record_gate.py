@@ -84,17 +84,32 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
     mesh = ldf_gate._stitch(
         record_root,
         "mesh_mask_{rank:04d}.nc",
-        ("mbkt", "e3t_0", "e3w_0", "tmask", "umask", "vmask"),
+        ("mbathy", "e3t_0", "tmask", "umask", "vmask"),
     )
+    import netCDF4  # noqa: N813
+
+    domain_path = deck_root / "ORCA_R2_zps_domcfg.nc"
+    require(domain_path.is_file(), f"missing {domain_path}")
+    with netCDF4.Dataset(domain_path, "r") as dataset:
+        dataset.set_auto_maskandscale(False)
+        require("e3w_0" in dataset.variables
+                and "bottom_level" in dataset.variables,
+                "domain_cfg lacks e3w_0 or bottom_level")
+        domain_e3w = np.moveaxis(
+            np.asarray(dataset.variables["e3w_0"][:], dtype=np.float64), 0, -1
+        )[..., :30]
+        domain_bottom = np.asarray(
+            dataset.variables["bottom_level"][:], dtype=np.float64)
     card = rung0.build_rung0_card(deck_root)
     rung0.validate_rung0_card(card)
     z_coord = card.recipe.z_coord
     j, i, k = TARGET
 
-    for name, value in mesh.items():
+    for name, value in {**mesh, "domain_e3w": domain_e3w,
+                        "domain_bottom": domain_bottom}.items():
         require(np.asarray(value).dtype == np.float64,
                 f"NEMO geometry {name} is not float64")
-    require(mesh["e3t_0"].shape == mesh["e3w_0"].shape == (148, 180, 30),
+    require(mesh["e3t_0"].shape == domain_e3w.shape == (148, 180, 30),
             "NEMO thickness shape moved")
     require(mesh["tmask"].shape == mesh["umask"].shape == mesh["vmask"].shape
             == (148, 180, 30), "NEMO mask shape moved")
@@ -115,12 +130,14 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         "south": float(mesh["tmask"][j - 1, i, 0]),
         "north": float(mesh["tmask"][j + 1, i, 0]),
     }
-    bottom = int(mesh["mbkt"][j, i]) - 1
+    require(_bits_equal(mesh["mbathy"], domain_bottom),
+            "mesh_mask mbathy differs from domain_cfg bottom_level")
+    bottom = int(mesh["mbathy"][j, i]) - 1
     return {
         "target_jik": [j, i, k],
         "array_shapes": {
             "nemo_e3t_0": list(mesh["e3t_0"].shape),
-            "nemo_e3w_0": list(mesh["e3w_0"].shape),
+            "nemo_e3w_0": list(domain_e3w.shape),
             "nemo_tmask": list(mesh["tmask"].shape),
             "legoesm_e3t_0": list(lego_e3t.shape),
             "legoesm_e3w_0": list(lego_e3w.shape),
@@ -129,7 +146,10 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
             "nemo": str(mesh["e3t_0"].dtype),
             "legoesm": str(lego_e3t.dtype),
         },
-        "mbkt_fortran": int(mesh["mbkt"][j, i]),
+        "mbkt_fortran": int(mesh["mbathy"][j, i]),
+        "mesh_mask_name": "mbathy",
+        "domain_cfg_name": "bottom_level",
+        "domain_cfg_sha256": sha256(domain_path),
         "bottom_zero_based": bottom,
         "bottom_is_partial": bool(
             0 < bottom < mesh["e3t_0"].shape[-1]
@@ -138,7 +158,7 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         ),
         "levels_0_5": {
             "nemo_e3t_0_m": mesh["e3t_0"][j, i, :6].tolist(),
-            "nemo_e3w_0_m": mesh["e3w_0"][j, i, :6].tolist(),
+            "nemo_e3w_0_m": domain_e3w[j, i, :6].tolist(),
             "nemo_tmask": mesh["tmask"][j, i, :6].tolist(),
             "nemo_umask": mesh["umask"][j, i, :6].tolist(),
             "nemo_vmask": mesh["vmask"][j, i, :6].tolist(),
@@ -152,7 +172,7 @@ def _geometry(deck_root: Path, record_root: Path) -> dict[str, object]:
         "cyclic_seam": i in (0, 179),
         "card_matches_nemo": {
             "e3t_0": _bits_equal(lego_e3t, mesh["e3t_0"]),
-            "e3w_0": _bits_equal(lego_e3w, mesh["e3w_0"]),
+            "e3w_0": _bits_equal(lego_e3w, domain_e3w),
             "tmask": _bits_equal(lego_t, mesh["tmask"]),
             "surface_umask": _bits_equal(lego_u, mesh["umask"][..., 0]),
             "surface_vmask": _bits_equal(lego_v, mesh["vmask"][..., 0]),
