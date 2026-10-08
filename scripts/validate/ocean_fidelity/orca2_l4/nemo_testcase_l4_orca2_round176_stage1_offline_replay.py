@@ -212,15 +212,20 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "one-ULP plant control did not fire")
     first = next((row for row in report["rows"] if not row["at_floor"]), None)
     require(first == report["first_replayed_debt"], "first replayed debt selector moved")
+    stopped_at_entry = report.get("terminal_boundary") == "independent_initial_state"
     report["prediction_ledger"] = {
         "R176-P1": "CONFIRMED", "R176-P2": "CONFIRMED",
-        "R176-P3": "CONFIRMED" if first is None else "REFUTED",
+        "R176-P3": ("UNMEASURED" if stopped_at_entry else
+                     ("CONFIRMED" if first is None else "REFUTED")),
         "R176-P4": "CONFIRMED" if report["recorded_adv_equals_sbc"] else "REFUTED",
-        "R176-P5": "CONFIRMED" if first is None else "REFUTED",
+        "R176-P5": ("UNMEASURED" if stopped_at_entry else
+                     ("CONFIRMED" if first is None else "REFUTED")),
         "R176-P6": "CONFIRMED",
     }
-    report["status"] = ("HELD_FIRST_UNAVAILABLE_CANDIDATE_EXTERNAL_MODE_AND_RHS"
-                        if first is None else "PASS_FIRST_REPLAYED_DEBT")
+    report["status"] = (
+        "HELD_FIRST_NONBIT_INDEPENDENT_INITIAL_STATE" if stopped_at_entry else
+        ("HELD_FIRST_UNAVAILABLE_CANDIDATE_EXTERNAL_MODE_AND_RHS"
+         if first is None else "PASS_FIRST_REPLAYED_DEBT"))
     return report
 
 
@@ -253,9 +258,6 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     state = card.recipe.initial_state
     entry = rung0.assemble_frame(frame_root, 1, 0)
     candidate_entry = rung0.candidate_fields(state)
-    require(all(np.array_equal(candidate_entry[name], entry[name]) for name in ("T", "S", "u", "v", "ssh")),
-            "independent card entry is not bit-exact to NEMO kt=1 entry")
-
     cfg = card.recipe.model_config
     grid = card.recipe.grid
     zc = card.recipe.z_coord
@@ -276,6 +278,55 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     for name, active in (("T", active_t), ("S", active_t), ("u", active_u[..., :-1]),
                          ("v", active_v[..., :-1]), ("ssh", np.asarray(state.H_bathy.data) > 0)):
         add(f"entry_{name}", candidate_entry[name], entry[name], active)
+
+    active_counts = {
+        "T": int(np.count_nonzero(active_t)), "S": int(np.count_nonzero(active_t)),
+        "u": int(np.count_nonzero(active_u[..., :-1])),
+        "v": int(np.count_nonzero(active_v[..., :-1])),
+        "ssh": int(np.count_nonzero(np.asarray(state.H_bathy.data) > 0)),
+    }
+    entry_exact = all(row["bit_exact"] for row in rows)
+    if not entry_exact:
+        one = np.array([1.0], dtype=np.float64)
+        next_one = np.nextafter(one, np.inf)
+        all_cell_entry = {}
+        for name in ("T", "S", "u", "v", "ssh"):
+            left, right = np.asarray(candidate_entry[name]), np.asarray(entry[name])
+            delta = np.abs(left - right)
+            all_cell_entry[name] = {
+                "bit_exact": bool(np.array_equal(left, right)),
+                "differing_cells": int(np.count_nonzero(
+                    left.view(np.uint64) != right.view(np.uint64))),
+                "max_abs": float(np.max(delta)),
+                "argmax": [int(v) for v in np.unravel_index(np.argmax(delta), delta.shape)],
+            }
+        return classify({
+            "format": "nemo-testcase-l4-orca2-round176-stage1-offline-v1",
+            "claim_label": "independent", "floor": float(FLOOR),
+            "admission": admission, "source_order": list(SOURCE_ORDER),
+            "cells": [list(v) for v in CELLS],
+            "geometry": _geometry(card, h_ref, um3, vm3),
+            "active_counts": active_counts,
+            "rows": rows,
+            "first_replayed_debt": next(row for row in rows if not row["at_floor"]),
+            "recorded_adv_equals_sbc": bool(
+                np.array_equal(oracle["adv_t"], oracle["sbc_t"])
+                and np.array_equal(oracle["adv_s"], oracle["sbc_s"])),
+            "terminal_boundary": "independent_initial_state",
+            "all_cell_entry": all_cell_entry,
+            "first_statement": {
+                "name": "rung-0 initial T/S hand-alteration guard",
+                "candidate": "build_orca2_initial_ts default applies ORCA_R2 alterations",
+                "oracle": "alterations execute only under ln_tsd_dmp; rung 0 sets it false",
+                "nemo_source": "ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-255",
+                "candidate_source": "nemo_testcase_recipe.py:1413-1453,1650-1651",
+            },
+            "skipped_source_rows": list(SOURCE_ORDER[5:]),
+            "first_unavailable_candidate_operand": None,
+            "one_ulp_control": {"bit_exact": bool(np.array_equal(one, next_one)),
+                                "differing_cells": 1},
+            "worktree": stamp,
+        })
 
     q_after = nemo_r3t_rk3_stage1_stretch(zc, state.eta.data, oracle["ext_ssh"], state.H_bathy.data)
     add("r3t_stage1", np.asarray(q_after) - 1.0, oracle["ext_r3t"], np.asarray(state.H_bathy.data) > 0)
@@ -338,12 +389,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "claim_label": "independent", "floor": float(FLOOR),
         "admission": admission, "source_order": list(SOURCE_ORDER),
         "cells": [list(v) for v in CELLS], "geometry": _geometry(card, h_ref, um3, vm3),
-        "active_counts": {
-            "T": int(np.count_nonzero(active_t)), "S": int(np.count_nonzero(active_t)),
-            "u": int(np.count_nonzero(active_u[..., :-1])),
-            "v": int(np.count_nonzero(active_v[..., :-1])),
-            "ssh": int(np.count_nonzero(np.asarray(state.H_bathy.data) > 0)),
-        },
+        "active_counts": active_counts,
         "rows": rows, "first_replayed_debt": next((row for row in rows if not row["at_floor"]), None),
         "recorded_adv_equals_sbc": bool(np.array_equal(oracle["adv_t"], oracle["sbc_t"])
                                              and np.array_equal(oracle["adv_s"], oracle["sbc_s"])),

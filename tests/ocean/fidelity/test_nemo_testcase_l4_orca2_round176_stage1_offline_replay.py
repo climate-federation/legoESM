@@ -53,3 +53,14 @@ def test_first_real_replayed_debt_is_selected() -> None:
     result = gate.classify(report)
     assert result["status"] == "PASS_FIRST_REPLAYED_DEBT"
     assert result["prediction_ledger"]["R176-P3"] == "REFUTED"
+
+
+def test_independent_entry_debt_stops_before_operator_claim() -> None:
+    report = _report()
+    report["rows"][0]["at_floor"] = False
+    report["first_replayed_debt"] = copy.deepcopy(report["rows"][0])
+    report["terminal_boundary"] = "independent_initial_state"
+    result = gate.classify(report)
+    assert result["status"] == "HELD_FIRST_NONBIT_INDEPENDENT_INITIAL_STATE"
+    assert result["prediction_ledger"]["R176-P3"] == "UNMEASURED"
+    assert result["prediction_ledger"]["R176-P5"] == "UNMEASURED"
