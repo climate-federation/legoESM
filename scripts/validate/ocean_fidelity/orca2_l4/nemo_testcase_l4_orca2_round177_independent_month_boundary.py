@@ -68,10 +68,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "corrected independent entry is not bit-exact")
 
     boundary = report.get("first_nonfinite")
+    refusal = report.get("runtime_refusal")
     completed = int(report.get("steps_completed", -1))
-    if boundary is None:
+    require(not (boundary is not None and refusal is not None),
+            "month has two terminal boundaries")
+    if boundary is None and refusal is None:
         require(completed == STEPS, "finite run stopped before step 240")
-    else:
+    elif boundary is not None:
         require(1 <= int(boundary["step"]) <= STEPS,
                 "first non-finite step is outside the month")
         require(boundary["field"] in month.FIELDS,
@@ -80,6 +83,14 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
                 "first non-finite cell has the wrong rank")
         require(completed == int(boundary["step"]),
                 "completed-step count disagrees with first non-finite boundary")
+    else:
+        require(1 <= int(refusal["step"]) <= STEPS,
+                "runtime-refusal step is outside the month")
+        require(completed == int(refusal["step"]) - 1,
+                "completed-step count disagrees with runtime refusal")
+        require("raw-mesh e3w_int must contain only finite values > 0"
+                in str(refusal["message"]),
+                "runtime refusal is not the registered live-thickness guard")
 
     observed = None if boundary is None else {
         "step": int(boundary["step"]),
@@ -94,7 +105,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     report["predicted_first_nonfinite"] = EXPECTED_BOUNDARY
     report["status"] = (
         "MEASURED_R177_FIRST_NONFINITE" if boundary is not None
-        else "MEASURED_R177_MONTH_COMPLETE")
+        else ("MEASURED_R177_RUNTIME_REFUSAL" if refusal is not None
+              else "MEASURED_R177_MONTH_COMPLETE"))
     return report
 
 
@@ -143,11 +155,17 @@ def measure(deck_root: Path, frame_root: Path, expect_commit: str) -> dict[str, 
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     boundary = None
+    refusal = None
     started = time.time()
     completed = 0
     for step in range(1, STEPS + 1):
-        state = jax.device_get(model.step(
-            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+        try:
+            state = jax.device_get(model.step(
+                state, card.dt_s,
+                freshwater=freshwater, surface_forcing=surface))
+        except ValueError as error:
+            refusal = {"step": step, "message": str(error)}
+            break
         completed = step
         found = month.first_nonfinite(rung0.candidate_fields(state))
         if found is not None:
@@ -167,6 +185,7 @@ def measure(deck_root: Path, frame_root: Path, expect_commit: str) -> dict[str, 
         "initial_entry": initial,
         "steps_completed": completed,
         "first_nonfinite": boundary,
+        "runtime_refusal": refusal,
         "wall_seconds": time.time() - started,
         "worktree": stamp,
     })
