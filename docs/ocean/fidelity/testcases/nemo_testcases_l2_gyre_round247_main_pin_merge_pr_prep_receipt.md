@@ -136,8 +136,12 @@ generic NEMO-GYRE recipe and reports:
 `git diff --check` is clean. The PR-summary citation gate finds three mapped
 compiled-source citations, zero failures, zero unmapped citations, and zero
 map-audit failures. Its shifted first-endpoint plant exits 1 with
-`SYMBOL-NOT-AT-LINE`. The final default/receipt citation passes are recorded
-after the completed receipt is committed.
+`SYMBOL-NOT-AT-LINE`. On the completed committed receipt, the default gate
+passes 274 citations and the PR-summary gate passes three; both have zero
+unmapped citations, zero map-audit failures, and zero claim failures. This
+round's receipt has no new inline source-range claim (zero extracted
+citations) and passes. The default and PR-summary shifted-citation plants both
+exit 1 with one failure, as required.
 
 The required separate read-only Codex review was attempted on clean committed
 tree `a2afb805a`. Independent review is unavailable in-sandbox; the complete
