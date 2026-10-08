@@ -14,11 +14,12 @@
        !!----------------------------------------------------------------------
        !
        IF( kt == nit000 ) THEN
-@@ -346,6 +350,17 @@
+@@ -346,6 +350,18 @@
           l2_zuap_u = 0._wp ; l2_zuap_v = 0._wp
           l2_sum_u  = 0._wp ; l2_sum_v  = 0._wp
        ENDIF
 +      IF( kt == 8 .AND. Kmm == 3 .AND. Krhs == 1 ) THEN
++         r172_e3w = 0._wp ; r172_gdept = 0._wp
 +         r172_zhpi_u = 0._wp ; r172_zhpi_v = 0._wp
 +         r172_zuap_u = 0._wp ; r172_zuap_v = 0._wp
 +         r172_sum_u  = 0._wp ; r172_sum_v  = 0._wp
