@@ -72,6 +72,13 @@ round-181 gate/parser battery passes 15/15. The separate read-only Codex review
 was attempted and returned **independent review unavailable in-sandbox**:
 `failed to initialize in-process app-server client: Read-only file system`.
 
+The required single `tests/ocean/fidelity -n 12` invocation reached 96% and
+passed all 15 round-181 tests. It reproduced the four listed pre-existing
+failures (SI3 scalar-math provenance, round-35 stamp scope, worktree-stamp
+ratchet, and the round-129 GYRE record-backed pin), then reproduced the known
+nonterminal tail and was interrupted after the real pytest process had exited
+without a terminal summary.
+
 No `packages/` file changed, so no ORCA2, GYRE, DINO, tank, trajectory or
 month landing gate is eligible in this stopped acquisition round.
 
