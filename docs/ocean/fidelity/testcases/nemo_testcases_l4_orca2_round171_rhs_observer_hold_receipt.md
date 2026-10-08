@@ -62,7 +62,22 @@ upstream boundary, not an attributed statement.
 The round gate retains rank-placement, source-order, observer-closure,
 explosive-classification and passivity plants plus a one-ULP known-answer
 control. The retired measurement entry point has its own unit test and cannot
-silently print a result from any rejected observer. Focused tests pass.
+silently print a result from any rejected observer. Focused tests pass 9/9.
+The citation gate passes both cited spans with zero failures or unmapped
+citations; shifting the HPG/LDF/VOR span by two lines makes the plant fail.
+The cumulative citation gate also passes.
+
+The single required `tests/ocean/fidelity -n 12` invocation collected 2,744
+tests and reached 99%, then stopped emitting with no pytest process left to
+poll. Its retained log contains 2,723 terminal outcomes: 2,712 passed, seven
+skipped and four failed. The four failures are the registered pre-existing
+reds from rounds 166-170: the unscoped dirty-tree escape ratchet, unstamped
+report emitters, the moved GYRE spread record and SI3 scalar-math provenance.
+No round-171 test failed; the battery was not run a second time.
+
+The separate `codex exec --sandbox read-only` review attempt returned
+**independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
 
 Because the final tree has no model or configuration diff, the GYRE trajectory
 and year, both ORCA2 ladders, DINO and tank trajectories cannot move; their
