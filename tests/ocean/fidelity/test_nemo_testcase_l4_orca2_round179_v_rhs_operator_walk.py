@@ -47,10 +47,13 @@ def _report() -> dict[str, object]:
         "first_operand": "vmask",
         "operand_arms": {
             "oracle": {"bit_exact": True},
+            "candidate_raw_hpg": {"bit_exact": True},
             "candidate_e3v": {"bit_exact": True},
             "candidate_vmask": {"bit_exact": False},
             "candidate_r1_hv0": {"bit_exact": True},
         },
+        "first_operand_arm": "candidate_vmask",
+        "first_operand_arm_nonvacuous": True,
         "mask_only_reproduces_candidate_hpg": True,
         "endpoint_ulp_control": {"bit_exact": False, "differing_cells": 1},
     }
@@ -87,3 +90,13 @@ def test_signed_zero_cross_record_difference_refutes_prediction_but_closes():
     report["cross_record_closure"]["after_zad_to_depth_v"]["bit_exact"] = False
     result = gate.classify(report)
     assert result["prediction_ledger"]["R179-P1"] == "REFUTED"
+
+
+def test_earlier_geometry_operand_is_reported_as_prediction_refutation():
+    report = _report()
+    report["operand_rows"]["e3v"]["bit_exact"] = False
+    report["first_operand"] = "e3v"
+    report["operand_arms"]["candidate_e3v"]["bit_exact"] = False
+    report["first_operand_arm"] = "candidate_e3v"
+    result = gate.classify(report)
+    assert result["prediction_ledger"]["R179-P4"] == "REFUTED"

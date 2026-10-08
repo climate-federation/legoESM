@@ -48,7 +48,10 @@ from scripts.validate.ocean_fidelity.testcases import (
 FLOOR = np.float64(2.0e-10)
 BOUNDARIES = ("after_hpg", "after_ldf", "after_vor", "after_keg", "after_zad")
 OPERANDS = ("raw_hpg_rhs", "e3v", "vmask", "r1_hv0")
-ARMS = ("oracle", "candidate_e3v", "candidate_vmask", "candidate_r1_hv0")
+ARMS = (
+    "oracle", "candidate_raw_hpg", "candidate_e3v",
+    "candidate_vmask", "candidate_r1_hv0",
+)
 PLANTS = (
     "none", "rank-placement", "record-bit", "source-order",
     "cross-record", "target-mask", "mask-arm", "endpoint-ulp",
@@ -135,7 +138,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "target-mask":
         report["target"]["cells"] -= 1
     elif plant == "mask-arm":
-        report["mask_only_reproduces_candidate_hpg"] = False
+        report["first_operand_arm_nonvacuous"] = False
     elif plant == "endpoint-ulp":
         report["endpoint_ulp_control"]["bit_exact"] = True
 
@@ -172,16 +175,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "first operand selector moved")
     require(report["operand_arms"]["oracle"]["bit_exact"],
             "oracle HPG arm is not its own identity")
-    require(report["operand_arms"]["candidate_e3v"]["bit_exact"]
-            and report["operand_arms"]["candidate_r1_hv0"]["bit_exact"],
-            "geometry-only HPG arm moved")
-    require(not report["operand_arms"]["candidate_vmask"]["bit_exact"],
-            "candidate-mask arm is vacuous")
+    require(report["first_operand"] is not None,
+            "every registered HPG operand is bit-exact despite an HPG debt")
+    require(report["first_operand_arm_nonvacuous"],
+            "first non-bit operand's one-variable arm is vacuous")
     require(report["endpoint_ulp_control"] == {
         "bit_exact": False, "differing_cells": 1},
         "endpoint one-ULP control did not fire")
-    require(report["mask_only_reproduces_candidate_hpg"],
-            "candidate-mask one-variable arm does not reproduce HPG boundary")
     report["prediction_ledger"] = {
         "R179-P1": (
             "CONFIRMED" if all(row["bit_exact"] for row in
@@ -192,7 +192,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "CONFIRMED" if first is not None
             and first["boundary"] == "after_hpg" else "REFUTED"),
         "R179-P4": (
-            "CONFIRMED" if report["first_operand"] == "vmask" else "REFUTED"),
+            "CONFIRMED" if report["first_operand"] == "vmask"
+            and report["mask_only_reproduces_candidate_hpg"] else "REFUTED"),
         "R179-P5": "CONFIRMED",
     }
     report["status"] = "HELD_FIRST_V_RHS_OPERAND"
@@ -355,6 +356,8 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
 
     arms = {
         "oracle": oracle_depths["after_hpg"],
+        "candidate_raw_hpg": _depth(
+            raw_hpg, oracle_e3v, oracle_vmask, oracle_r1),
         "candidate_e3v": _depth(oracle_hpg, candidate_e3v, oracle_vmask, oracle_r1),
         "candidate_vmask": _depth(oracle_hpg, oracle_e3v, candidate_vmask, oracle_r1),
         "candidate_r1_hv0": _depth(oracle_hpg, oracle_e3v, oracle_vmask, candidate_r1),
@@ -366,6 +369,14 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
     mask_replay = _score(
         arms["candidate_vmask"], candidate_depths["after_hpg"], target)
     mask_reproduces = bool(mask_replay["bit_exact"])
+    first_arm = {
+        "raw_hpg_rhs": "candidate_raw_hpg",
+        "e3v": "candidate_e3v",
+        "vmask": "candidate_vmask",
+        "r1_hv0": "candidate_r1_hv0",
+    }.get(first_operand)
+    first_arm_nonvacuous = bool(
+        first_arm is not None and not arm_rows[first_arm]["bit_exact"])
 
     one = np.array([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
@@ -395,6 +406,8 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
         "operand_rows": operand_rows,
         "first_operand": first_operand,
         "operand_arms": arm_rows,
+        "first_operand_arm": first_arm,
+        "first_operand_arm_nonvacuous": first_arm_nonvacuous,
         "mask_arm_to_candidate_hpg": mask_replay,
         "mask_only_reproduces_candidate_hpg": mask_reproduces,
         "endpoint_ulp_control": {
