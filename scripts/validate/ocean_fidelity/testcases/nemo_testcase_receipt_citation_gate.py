@@ -6031,30 +6031,30 @@ CITATION_MAP = {
     ],
     # ORCA2 round 166: source-ordered external-substep localization.  Keep
     # each prose span narrow so the gate proves the stated program boundary.
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:502-559': [
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:507-545': [
         ('ua_e(ji,jj) = za1 * un_e(ji,jj) + za2 * ub_e(ji,jj) + za3 * ubb_e(ji,jj)', 1),
-        ("CALL r95_spg_w1('ext_coef', (/ za1, za2, za3 /))", 1),
-        58,
+        ('&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)', 1),
+        39,
     ],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-570': [
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:566-569': [
         ('zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)', 1),
         ('zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)', 1),
-        7,
+        4,
     ],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:580-595': [
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:585-595': [
         ('zhdiv = (   ( zhU(ji,jj) - zhU(ji-1,jj) )', 1),
         ("CALL r95_spg_w2('ssha_e', ssha_e)", 1),
-        16,
+        11,
     ],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:704-757': [
-        ('!* Vector form', 1),
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:715-757': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form', 1),
         ('va_e(ji,jj) =  va_e(ji,jj) / ( 1._wp - rDt_e * zCdU_v(ji,jj) * hvr_e(ji,jj) )', 1),
-        54,
+        43,
     ],
-    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:761-767': [
+    'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:763-766': [
         ('hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)', 1),
         ('hvr_e(ji,jj) = ssvmask(ji,jj) / (  hv_e(ji,jj) + 1._wp - ssvmask(ji,jj)  )', 1),
-        7,
+        4,
     ],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:770-779': [
         ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth', 1),
