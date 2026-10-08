@@ -242,6 +242,7 @@ def _operator_table(census: dict[str, object], round174: dict[str, object]) -> l
         "boundary": "completed_stage", "status": "DEBT",
         "target_available": True, "max_abs": final_row["max_abs"],
         "argmax": final_row["argmax"],
+        "scope": "global machine row; not a target-cell value",
     })
     return rows
 
@@ -293,7 +294,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     final = report["operator_table"][-1]
     require(final["status"] == "DEBT"
             and final["max_abs"] == 3.2847473521544472
-            and final["argmax"] == [86, 159, 3],
+            and final["argmax"] == [147, 49, 0],
             "round-174 completed-stage salinity row moved")
     report["predictions"] = {
         "R175-P1": ("CONFIRMED" if geometry["mbkt_fortran"] == 4
@@ -306,7 +307,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
                      and not geometry["fold_row"]
                      and not geometry["cyclic_seam"] else "REFUTED"),
         "R175-P2": "CONFIRMED",
-        "R175-P3": "CONFIRMED",
+        "R175-P3": ("CONFIRMED" if final["argmax"] == list(TARGET)
+                     else "REFUTED"),
         "R175-P4": "CONFIRMED",
         "R175-P5": "CONFIRMED",
     }
@@ -347,6 +349,12 @@ def measure(deck_root: Path, record_root: Path, round174_path: Path,
         "operator_table": _operator_table(census, round174),
         "first_unmeasured": "external_mode_qco",
         "round174": {"path": str(round174_path), "sha256": sha256(round174_path)},
+        "round174_argmax_discrepancy": {
+            "receipt_and_operator_note_claim": list(TARGET),
+            "machine_json_argmax": round174["boundaries"][0]["rows"]["S"]["argmax"],
+            "same": (round174["boundaries"][0]["rows"]["S"]["argmax"]
+                     == list(TARGET)),
+        },
         "frame_admission": {"status": admission["status"], "record_count": 80},
         "compiled_citations": {
             "external_and_transport": "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90:127-365",

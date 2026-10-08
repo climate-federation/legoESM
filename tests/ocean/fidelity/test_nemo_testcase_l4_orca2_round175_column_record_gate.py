@@ -20,7 +20,7 @@ def _report():
     rows.append({"boundary": "completed_stage", "status": "DEBT",
                  "target_available": True,
                  "max_abs": 3.2847473521544472,
-                 "argmax": [86, 159, 3]})
+                 "argmax": [147, 49, 0]})
     return {
         "geometry": {
             "target_jik": [86, 159, 3],
@@ -47,8 +47,11 @@ def _report():
 def test_classifier_accepts_frozen_missing_rank1_boundary():
     result = gate.classify(_report())
     assert result["status"] == "STOP_RECORD_R175_STAGE1_RANK_COMPLETE_NEEDED"
-    assert result["predictions"] == {f"R175-P{index}": "CONFIRMED"
-                                      for index in range(1, 6)}
+    assert result["predictions"] == {
+        "R175-P1": "CONFIRMED", "R175-P2": "CONFIRMED",
+        "R175-P3": "REFUTED", "R175-P4": "CONFIRMED",
+        "R175-P5": "CONFIRMED",
+    }
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
