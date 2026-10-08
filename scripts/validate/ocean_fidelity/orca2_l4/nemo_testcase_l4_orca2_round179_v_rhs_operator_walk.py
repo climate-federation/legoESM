@@ -155,9 +155,11 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
                 report["cross_record_closure"].values()),
             "admitted records no longer close within the registered floor")
     require(report["candidate_calibration"]["same_over_floor_set"],
-            "offline candidate replay does not reproduce production debt set")
+            "offline candidate replay does not reproduce production debt set: "
+            f"{report['candidate_calibration']}")
     require(report["candidate_calibration"]["all_faces_at_floor"],
-            "offline candidate replay is not calibrated to production")
+            "offline candidate replay is not calibrated to production: "
+            f"{report['candidate_calibration']}")
     require(report["target"] == {
         "cells": 68, "row": 147, "all_on_one_row": True},
         "registered 68-face target moved")
@@ -310,6 +312,10 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
         "all_faces_at_floor": bool(np.max(candidate_delta) <= FLOOR),
         "absolute_max": float(np.max(candidate_delta)),
         "same_over_floor_set": bool(np.array_equal(candidate_replay_target, target)),
+        "production_over_floor_cells": int(np.count_nonzero(target)),
+        "replay_over_floor_cells": int(np.count_nonzero(candidate_replay_target)),
+        "symmetric_difference_cells": int(np.count_nonzero(
+            candidate_replay_target != target)),
     }
     operator_rows = {
         boundary: _score(candidate_depths[boundary], oracle_depths[boundary], target)
