@@ -95,7 +95,7 @@ sea-ice selector or production model statement changed.
 Focused coverage passes 59/59, including the new record-layout, compact/native
 index, nonzero perturbation and report-plant controls. The cumulative citation
 gate and this receipt's gate both pass with zero unmapped spans; shifting the
-compiled `dynspg_ts.f90:763-766` citation makes the planted gate refuse.
+compiled exit-depth citation makes the planted gate refuse.
 
 The one required `tests/ocean/fidelity -n 12` invocation collected 2,708
 tests and reached 99% before its 900-second controller cap during
